@@ -507,10 +507,10 @@ fn collect_evidence(
     )?;
     let responses =
         rows::<InvestigationResponseMeta>(&database, id, "investigation_responses", 8, 4096)?;
-    checks.push(check(
-        "known_response_usage_charged_once",
-        response_usage_matches(&steps, &responses, &detail.usage),
-    ));
+    checks.push(MechanicalCheck {
+        name: "known_response_usage_charged_once".into(),
+        status: response_usage_status(&steps, &responses, &detail, &events),
+    });
     let sealed = sealed_checks(request, &steps, &ledgers, &observations)?;
     checks.push(check("actual_payloads_match_sealed_disclosures", sealed.0));
     checks.push(check(
@@ -827,17 +827,33 @@ fn finishing_checks(
 #[path = "execution_tests.rs"]
 mod tests;
 
-fn response_usage_matches(
+fn response_usage_status(
     steps: &[PendingInvestigationStep],
     responses: &[InvestigationResponseMeta],
-    usage: &InvestigationUsage,
-) -> bool {
+    detail: &InvestigationDetail,
+    events: &[InvestigationEvent],
+) -> CheckStatus {
+    let usage = &detail.usage;
+    let mut step_ids = std::collections::BTreeSet::new();
+    if steps.len() != usage.model_invocations as usize
+        || steps.iter().any(|step| !step_ids.insert(&step.step_id))
+    {
+        return CheckStatus::Failed;
+    }
+    if events
+        .iter()
+        .filter(|event| event.kind == InvestigationEventKind::ModelStarted)
+        .map(|event| event.step_id.as_deref())
+        .ne(steps.iter().map(|step| Some(step.step_id.as_str())))
+    {
+        return CheckStatus::Failed;
+    }
     let mut seen = std::collections::BTreeSet::new();
     if responses.iter().any(|response| {
         !seen.insert(&response.step_id)
             || !steps.iter().any(|step| step.step_id == response.step_id)
     }) {
-        return false;
+        return CheckStatus::Failed;
     }
     let mut input = None;
     let mut output = None;
@@ -847,7 +863,15 @@ fn response_usage_matches(
             .iter()
             .find(|response| response.step_id == step.step_id)
         else {
-            continue;
+            if ordinal + 1 != steps.len()
+                || usage.reported_input_tokens.is_some()
+                || usage.reported_output_tokens.is_some()
+                || usage.reported_cache_read_tokens.is_some()
+                || !authenticated_unadmitted_tail(step, detail, events)
+            {
+                return CheckStatus::Failed;
+            }
+            return CheckStatus::Unknown;
         };
         let add = |previous: Option<u64>, current: Option<u64>| -> Option<Option<u64>> {
             if ordinal == 0 {
@@ -860,21 +884,65 @@ fn response_usage_matches(
             }
         };
         let Some(next) = add(input, response.reported_input_tokens) else {
-            return false;
+            return CheckStatus::Failed;
         };
         input = next;
         let Some(next) = add(output, response.reported_output_tokens) else {
-            return false;
+            return CheckStatus::Failed;
         };
         output = next;
         let Some(next) = add(cache_read, response.reported_cache_read_tokens) else {
-            return false;
+            return CheckStatus::Failed;
         };
         cache_read = next;
     }
-    input == usage.reported_input_tokens
+    if input == usage.reported_input_tokens
         && output == usage.reported_output_tokens
         && cache_read == usage.reported_cache_read_tokens
+    {
+        CheckStatus::Passed
+    } else {
+        CheckStatus::Failed
+    }
+}
+
+fn authenticated_unadmitted_tail(
+    step: &PendingInvestigationStep,
+    detail: &InvestigationDetail,
+    events: &[InvestigationEvent],
+) -> bool {
+    let terminal = match detail.summary.status {
+        InvestigationStatus::Failed => InvestigationEventKind::Failed,
+        InvestigationStatus::Cancelled => InvestigationEventKind::Cancelled,
+        InvestigationStatus::OutcomeUnknown => InvestigationEventKind::OutcomeUnknown,
+        _ => return false,
+    };
+    let starts = events
+        .iter()
+        .filter(|event| {
+            event.kind == InvestigationEventKind::ModelStarted
+                && event.step_id.as_deref() == Some(&step.step_id)
+        })
+        .collect::<Vec<_>>();
+    !detail.summary.has_result
+        && !detail.summary.invocation_pending
+        && events
+            .iter()
+            .all(|event| event.investigation_id == detail.summary.investigation_id)
+        && events
+            .windows(2)
+            .all(|pair| pair[0].sequence.checked_add(1) == Some(pair[1].sequence))
+        && starts.len() == 1
+        && events.last().is_some_and(|event| {
+            event.kind == terminal
+                && event.sequence == detail.summary.last_event_sequence
+                && event.revision == detail.summary.revision
+                && event.sequence > starts[0].sequence
+        })
+        && !events.iter().any(|event| {
+            event.step_id.as_deref() == Some(&step.step_id)
+                && event.kind != InvestigationEventKind::ModelStarted
+        })
 }
 
 #[cfg(test)]
