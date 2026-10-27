@@ -799,7 +799,7 @@ pub(super) fn validate_inspection_result(
             admission_contract::validate_pairing(task)?;
         }
         if result.schema_version
-            != if task.detail.summary.specialist_id == SpecialistId::SpecWriterV2 {
+            != if task.detail.summary.specialist_id.uses_cited_narrative() {
                 8
             } else if task
                 .detail

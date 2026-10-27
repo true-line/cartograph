@@ -1,8 +1,9 @@
 /** Exact public family identities; saved generations never inherit catalog upgrades. */
-export const isCompletionSpecialist = (id: string) => /^(domain-analyst|evidence-auditor)@(7|8|9|10)$/.test(id) || id === 'spec-writer@1' || id === 'spec-writer@2' || id === 'gap-triager@1';
+export const isCompletionSpecialist = (id: string) => /^(domain-analyst|evidence-auditor)@(7|8|9|10)$/.test(id) || id === 'spec-writer@1' || id === 'spec-writer@2' || id === 'gap-triager@1' || id === 'gap-triager@2';
 export const isExpandedSpecialist = (id: string) => /^(domain-analyst|evidence-auditor)@(8|9|10)$/.test(id);
+export const usesCitedNarrative = (id: string) => id === 'spec-writer@2' || id === 'gap-triager@2';
 const families = {
-  4: { specialistIds: ['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1'], roleVersion: 7, requestVersion: 4, resultVersion: 5, expanded: false },
+  4: { specialistIds: ['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2'], roleVersion: 7, requestVersion: 4, resultVersion: 5, expanded: false },
   5: { specialistIds: ['domain-analyst@8', 'evidence-auditor@8'], roleVersion: 8, requestVersion: 5, resultVersion: 5, expanded: true },
   6: { specialistIds: ['domain-analyst@9', 'evidence-auditor@9'], roleVersion: 9, requestVersion: 6, resultVersion: 6, expanded: true },
   7: { specialistIds: ['domain-analyst@10', 'evidence-auditor@10'], roleVersion: 10, requestVersion: 7, resultVersion: 7, expanded: true },

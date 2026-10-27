@@ -16,10 +16,12 @@ fn export_wire(name: &str, detail: &InvestigationDetail, result: Option<&Investi
 pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value {
     let message = matches!(
         mode,
-        Mode::SpecWriterMessage | Mode::SpecWriterMessageInsufficient
+        Mode::SpecWriterMessage | Mode::SpecWriterMessageInsufficient | Mode::GapTriagerMessage
     );
     let mode = if matches!(mode, Mode::SpecWriterMessageInsufficient) {
         Mode::CompletionInventoryUnavailable
+    } else if matches!(mode, Mode::GapTriagerMessage) {
+        Mode::GapTriagerSupported
     } else if message {
         Mode::SpecWriterSupported
     } else {
@@ -133,6 +135,11 @@ pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value 
     if message {
         finish["schema_version"] = json!(2);
         finish["narrative"] = json!({"text":"Proposed specification: gate the bounded operation explicitly and test its rejected and accepted paths; broader policy remains unresolved.","finding_ids":["finding-1"]});
+        if matches!(mode, Mode::GapTriagerSupported) {
+            finish["narrative"]["text"] = json!(
+                "Proposed investigation: verify the uncertain boundary with focused tests before deciding how to reduce the recorded gap."
+            );
+        }
     }
     finish
 }
@@ -439,8 +446,39 @@ fn spec_writer_scripted_completion_reopens_with_bound_citations() {
 
 #[test]
 fn gap_triager_scripted_completion_queries_a_gap_and_reopens_its_cited_proposal() {
-    let provider = Arc::new(Scripted::new(Mode::GapTriagerSupported));
-    let fixture = CompletionFixture::new(&*provider, SpecialistId::GapTriagerV1, true, true, false);
+    gap_triager_worker(SpecialistId::GapTriagerV1, Mode::GapTriagerSupported);
+}
+
+// AC-0406: actual Gap discovery, admitted body, exact producer and restart.
+#[test]
+fn gap_triager_message_worker_reopens_its_cited_next_step() {
+    gap_triager_worker(SpecialistId::GapTriagerV2, Mode::GapTriagerMessage);
+}
+
+// AC-0406: real completed unavailable read admits an honest message-free result.
+#[test]
+fn gap_triager_message_insufficient_reopens_without_narrative() {
+    let provider = Arc::new(Scripted::new(Mode::SpecWriterMessageInsufficient));
+    let fixture =
+        CompletionFixture::new(&*provider, SpecialistId::GapTriagerV2, false, true, false);
+    fixture.run(provider.clone());
+    let reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+    assert_eq!(
+        reopened.investigation(&fixture.id).unwrap().summary.status,
+        InvestigationStatus::Completed
+    );
+    let result = reopened.investigation_result(&fixture.id).unwrap().unwrap();
+    assert_eq!(
+        result.completion.unwrap().outcome,
+        agents::investigation::staged_finish::CompletionOutcome::InsufficientEvidence
+    );
+    assert!(result.narrative.is_none() && result.findings.is_empty());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+fn gap_triager_worker(role: SpecialistId, mode: Mode) {
+    let provider = Arc::new(Scripted::new(mode));
+    let fixture = CompletionFixture::new(&*provider, role, true, true, false);
     fixture.run(provider.clone());
 
     let state = fixture.base.app.state::<AppState>();
@@ -448,10 +486,31 @@ fn gap_triager_scripted_completion_queries_a_gap_and_reopens_its_cited_proposal(
     let detail = jobs.investigation(&fixture.id).unwrap();
     assert_eq!(detail.summary.status, InvestigationStatus::Completed);
     assert_eq!(detail.summary.schema_version, 4);
-    assert_eq!(detail.summary.specialist_id, SpecialistId::GapTriagerV1);
-    assert_eq!(detail.specialist.version, 1);
+    assert_eq!(detail.summary.specialist_id, role);
+    assert_eq!(
+        detail.specialist.version,
+        if role.uses_cited_narrative() { 2 } else { 1 }
+    );
     let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
-    assert_eq!(result.schema_version, 5);
+    assert_eq!(
+        result.schema_version,
+        if role.uses_cited_narrative() { 8 } else { 5 }
+    );
+    if role.uses_cited_narrative() {
+        let message = result.narrative.as_ref().unwrap();
+        assert!(message.text.starts_with("Proposed investigation:"));
+        assert_eq!(message.finding_ids, [result.findings[0].finding_id.clone()]);
+        let chat = jobs.investigation_chat(&fixture.id).unwrap().unwrap();
+        assert_eq!(chat.producer.specialist_id, role);
+        assert_eq!(chat.producer.specialist_version, 2);
+    } else {
+        assert!(
+            serde_json::to_value(&result)
+                .unwrap()
+                .get("narrative")
+                .is_none()
+        );
+    }
     let finding = result
         .findings
         .first()
@@ -522,7 +581,27 @@ fn gap_triager_scripted_completion_queries_a_gap_and_reopens_its_cited_proposal(
     assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
     drop(jobs);
 
-    let reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+    let mut reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+    if role.uses_cited_narrative() {
+        let history = reopened
+            .investigation_next_parent_history(&fixture.id, &detail.summary.conversation_id)
+            .unwrap()
+            .into_history();
+        let parent: Value = serde_json::from_str(&history[0]).unwrap();
+        assert_eq!(
+            parent["saved_result"],
+            serde_json::to_value(&result).unwrap()
+        );
+        assert_eq!(
+            reopened
+                .start_completion_investigation(&fixture.request, Some(&detail.provider))
+                .unwrap()
+                .detail
+                .summary
+                .investigation_id,
+            fixture.id
+        );
+    }
     assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
     assert_eq!(
         reopened.investigation_result(&fixture.id).unwrap(),

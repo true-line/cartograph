@@ -1,4 +1,4 @@
-import { completionFamily, isCompletionDisclosure, isCompletionResultId } from './investigationFamilies';
+import { completionFamily, isCompletionDisclosure, isCompletionResultId, usesCitedNarrative } from './investigationFamilies';
 import type { InvestigationCompletionDetail, InvestigationCompletionResult, InvestigationDetail,
   InvestigationObligationObservation, InvestigationResult, InvestigationSummary, InvestigationPolicy } from './investigationTypes';
 import { validObligationEnvelope } from './investigationObligations';
@@ -67,7 +67,7 @@ export function validCompletionDetail(value: InvestigationCompletionDetail | und
   result: InvestigationResult | null): boolean {
   const family = completionFamily(detail.schema_version);
   if (!family) return false;
-  const resultVersion = detail.specialist_id === 'spec-writer@2' ? 8 : family.resultVersion;
+  const resultVersion = usesCitedNarrative(detail.specialist_id) ? 8 : family.resultVersion;
   const modern = family.expanded;
   const policy: InvestigationPolicy | undefined = modern ? { limits: detail.limits, request_schema_version: family.requestVersion, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2', max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536, specialist_ids: [detail.specialist_id] } : undefined;
   if (modern && detail.limits.profile !== 'investigation-v2' || !modern && detail.limits.profile !== 'investigation-v1') return false;

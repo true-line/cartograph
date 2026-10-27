@@ -3,7 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { investigationCatalog, investigationCitations, investigationDetail, investigationEvents, investigationResult } from '../investigationFixtures';
-import { specWriterV2Detail, specWriterV2Result } from '../completionFixtures';
+import { completionCatalog, specWriterV2Detail, specWriterV2Result } from '../completionFixtures';
 import { useInvestigationStore, type InvestigationState } from '../investigationStore';
 import type { InvestigationChat, InvestigationDetail } from '../investigationTypes';
 import { useAgentChatDockStore } from '../agentChatDockStore';
@@ -356,16 +356,18 @@ let savedAnswerCitationReads: string[];
 let releaseSavedAnswerCitation: (() => void) | undefined;
 
 // AC-0397/0404: validated saved answers stay with their task and cited proposal.
-export const SavedAnswersStayWithTheirPane: Story = {
-  beforeEach: () => {
+function savedAnswersFixture(gapTriager = false) {
     savedAnswerCitationReads = []; releaseSavedAnswerCitation = undefined;
     const details = [
       { ...specWriterV2Detail('answer-a'), question: 'Question for answer-a' },
       investigationDetail('answer-b', { question: 'Question for answer-b' }),
     ];
+    if (gapTriager) Object.assign(details[0], { specialist_id: 'gap-triager@2',
+      specialist: completionCatalog.specialists.find((role) => role.id === 'gap-triager@2')! });
     const results = details.map((detail, index) => {
       const result = index === 0 ? specWriterV2Result(detail.investigation_id) : investigationResult(detail.investigation_id);
       result.findings[0].statement = `Saved finding only for ${detail.investigation_id}`;
+      if (gapTriager && index === 0) result.narrative!.text = 'Proposed investigation: verify the unresolved boundary with focused evidence.';
       return result;
     });
     mockIPC((command, payload) => {
@@ -404,7 +406,10 @@ export const SavedAnswersStayWithTheirPane: Story = {
       pendingStart: { schema_version: 1, request_nonce: 'd'.repeat(36), specialist_id: 'domain-analyst@3',
         question: 'Keep pending request', scope: { type: 'all' }, provider_mode: 'local', limit_profile: 'investigation-v1' } }, true);
     return () => { releaseSavedAnswerCitation?.(); clearMocks(); };
-  },
+}
+
+export const SavedAnswersStayWithTheirPane: Story = {
+  beforeEach: () => savedAnswersFixture(),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const pending = useInvestigationStore.getState().pendingStart;
@@ -612,6 +617,27 @@ export const SavedNarrativeHistorySearch: Story = {
     const message = within(pane.getByRole('article', { name: 'Specialist final message' }));
     await expect(message.getByText(/Validate the caller limit/)).toBeVisible();
     await expect(pane.getByText(/Spec Writer final message · spec-writer@2/)).toBeVisible();
+    await userEvent.click(message.getByRole('button', { name: 'Inspect message citation C1' }));
+    await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
+    releaseSavedAnswerCitation?.();
+    await expect(await pane.findByText('Retained source for answer-a')).toBeVisible();
+    await expect(useInvestigationStore.getState().composer.question).toBe('Keep composer draft');
+    await expect(useInvestigationStore.getState().pendingStart).toEqual(pending);
+  },
+};
+
+// AC-0406: the real coordinator binds the new producer, result and citation.
+export const GapTriagerCitedFinalMessage: Story = {
+  beforeEach: () => savedAnswersFixture(true),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pending = useInvestigationStore.getState().pendingStart;
+    await userEvent.click(canvas.getByRole('button', { name: /Question for answer-a/ }));
+    const pane = within(await canvas.findByRole('region', { name: 'Saved chat answer-a' }));
+    const message = within(pane.getByRole('article', { name: 'Specialist final message' }));
+    await expect(message.getByText(/Gap Triager final message · gap-triager@2/)).toBeVisible();
+    await expect(message.getByText(/Proposed investigation: verify/)).toBeVisible();
+    await expect(message.getByText('Proposed design · T3 / InferredWeak · saved final output')).toBeVisible();
     await userEvent.click(message.getByRole('button', { name: 'Inspect message citation C1' }));
     await waitFor(() => expect(savedAnswerCitationReads).toEqual(['answer-a:C1']));
     releaseSavedAnswerCitation?.();

@@ -94,3 +94,5 @@ in any corner. The choice is stored locally; when local storage is unavailable,
 notices use the default top-right position.
 
 Spec Writer @2 can return a saved, cited final message with its proposed design. Its text is provider-authored and admitted with the result, labeled T3 / InferredWeak. Insufficient evidence has no invented message. This is final output, not token streaming; follow-ups still receive only the bounded selected-parent result.
+
+Gap Triager @2 can return a cited final next-step message grounded in recorded gaps and admitted evidence. Its saved proposed-design message is T3 / InferredWeak; insufficient evidence supplies no invented narrative. Gap Triager @1 history remains readable. Follow-ups retain the existing bounded selected-parent result, not the whole conversation.
