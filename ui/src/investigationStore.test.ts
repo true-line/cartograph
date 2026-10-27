@@ -776,6 +776,33 @@ describe('durable investigation observations (AC-0190)', () => {
     expect(useInvestigationStore.getState().pendingStart).toBeNull();
   });
 
+  it.each([
+    { label: 'quick retry opened from the ordinary investigation surface', startDeferred: true, retryDeferred: false, opens: 1 },
+    { label: 'ordinary retry opened from Quick Dispatch', startDeferred: false, retryDeferred: true, opens: 0 },
+  ])('lets the actual retry caller own landing when $label', async ({ startDeferred, retryDeferred, opens }) => {
+    const requests: StartInvestigationRequest[] = [];
+    const open = vi.fn(async () => {});
+    useInvestigationStore.setState({ open });
+    mockIPC((command, args) => {
+      if (command === 'start_investigation') {
+        requests.push((args as { request: StartInvestigationRequest }).request);
+        if (requests.length === 1) throw new Error('Transport lost after durable admission.');
+        return investigationDetail('caller-owned-landing');
+      }
+      return response(command, args);
+    });
+    const draft = { specialist_id: 'domain-analyst@3' as const, question: 'Keep the request unchanged.',
+      scope: { type: 'all' as const }, provider_mode: 'local' as const, limit_profile: 'investigation-v1' };
+
+    expect(await useInvestigationStore.getState().start(draft, { deferOpen: startDeferred })).toBeNull();
+    const acceptedId = await useInvestigationStore.getState().retryStart({ deferOpen: retryDeferred });
+
+    expect(acceptedId).toBe('caller-owned-landing');
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(open).toHaveBeenCalledTimes(opens);
+  });
+
   it('returns confirmed admission identity even when the subsequent detail read fails', async () => {
     mockIPC((command) => {
       if (command === 'start_investigation') return investigationDetail('accepted-but-unavailable');

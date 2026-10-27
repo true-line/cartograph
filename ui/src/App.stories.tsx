@@ -1,7 +1,7 @@
 import { admissionCatalog, completionChoices } from './completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { expect, userEvent, waitFor, within } from 'storybook/test';
+import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import App from './App';
 import { useAgentChatDockStore } from './agentChatDockStore';
 import { useInvestigationStore } from './investigationStore';
@@ -324,19 +324,21 @@ let evidenceRequests: Record<string, unknown>[] = [];
 let capturedDescriptionRequests: Record<string, unknown>[] = [];
 let repoRootLookups = 0;
 let investigationRequests: { command: string; args: unknown }[] = [];
+let releaseSavedNoticeChatRead: (() => void) | null = null;
 
-function savedNoticeChat(id: string, question: string): InvestigationChat {
+function savedNoticeChat(id: string, question: string, includeResult = true): InvestigationChat {
   const specialist = investigationCatalog.specialists[0];
+  const messages: InvestigationChat['messages'] = [
+    { id: `question:${id}`, ordinal: 0, author: 'user', message: { kind: 'user_question', question } },
+  ];
+  if (includeResult) messages.push({ id: `result:${id}`, ordinal: 1, author: 'specialist', message: { kind: 'result_reference',
+    task_id: id, result_id: `result:${id}`, result_hash: 'c'.repeat(64) } });
   return { chat_id: `saved-chat:${id}`, task_id: id,
     producer: { specialist_id: specialist.id, specialist_version: specialist.version,
       prompt_fingerprint: specialist.prompt_fingerprint, tier: specialist.tier,
       confidence_tier: specialist.confidence_tier, provider_mode: 'local', provider_id: 'ollama',
       model: 'fixture-local-model', protocol_version: null },
-    messages: [
-      { id: `question:${id}`, ordinal: 0, author: 'user', message: { kind: 'user_question', question } },
-      { id: `result:${id}`, ordinal: 1, author: 'specialist', message: { kind: 'result_reference',
-        task_id: id, result_id: `result:${id}`, result_hash: 'c'.repeat(64) } },
-    ] };
+    messages };
 }
 
 function installFakeCore(options: {
@@ -357,9 +359,11 @@ function installFakeCore(options: {
   rejectJobActionOnce?: boolean;
   legacyRunningJob?: boolean;
   investigationFlow?: boolean;
+  startUncertainOnce?: boolean;
   /** The first result read after completion races the commit and sees none. */
   straddleResultCommit?: boolean;
   savedNoticeChat?: InvestigationChat;
+  deferSavedNoticeChatRead?: boolean;
 } = {}) {
   let staged = [...(options.staged ?? [])];
   let rejectJobAction = options.rejectJobActionOnce ?? false;
@@ -370,12 +374,16 @@ function installFakeCore(options: {
   repoRootLookups = 0;
   investigationRequests = [];
   let investigation: InvestigationDetail | null = options.existingInvestigation ?? null;
+  let startUncertainOnce = options.startUncertainOnce ?? false;
   const investigationJournal: InvestigationEvent[] = [];
   if (options.existingInvestigationEvents) investigationJournal.push(...options.existingInvestigationEvents);
   let investigationStep = 1;
   let latestInspectionTarget: InvestigationInspectionTarget | null = null;
   let straddleResult = options.straddleResultCommit ?? false;
   let savedNoticeChatReads = 0;
+  releaseSavedNoticeChatRead = null;
+  const savedNoticeChatGate = options.deferSavedNoticeChatRead
+    ? new Promise<void>((resolve) => { releaseSavedNoticeChatRead = resolve; }) : null;
   const appendInvestigationEvent = (kind: InvestigationEvent['kind'], summary: string,
     tool: InvestigationEvent['tool'] = null) => {
     if (!investigation) throw new Error('Fixture task missing');
@@ -417,7 +425,7 @@ function installFakeCore(options: {
         : 'Local-only · 0 bytes egress',
     };
   };
-  mockIPC((cmd, args) => {
+  mockIPC(async (cmd, args) => {
     switch (cmd) {
       case 'investigation_specialists':
         return options.admissionSelection ? admissionCatalog : options.inspectionSelection ? inspectionCatalog : investigationCatalog;
@@ -427,6 +435,7 @@ function installFakeCore(options: {
         if (!options.investigationFlow) throw new Error('Investigation fixture disabled');
         investigationRequests.push({ command: cmd, args });
         const request = (args as { request: StartInvestigationRequest }).request;
+        if (startUncertainOnce) { startUncertainOnce = false; throw new Error('Fixture start outcome was not confirmed'); }
         if (investigation && request.parent_id !== investigation.investigation_id) return investigation;
         if (investigation) investigationJournal.length = 0;
         investigation = investigationDetail(request.parent_id ? 'inv-app-follow-up' : 'inv-app-script', { question: request.question, scope: request.scope,
@@ -468,6 +477,7 @@ function installFakeCore(options: {
         investigationRequests.push({ command: cmd, args });
         if (!options.savedNoticeChat) return null;
         savedNoticeChatReads += 1;
+        if (savedNoticeChatGate) await savedNoticeChatGate;
         return savedNoticeChatReads === 1
           ? { ...options.savedNoticeChat, messages: options.savedNoticeChat.messages.slice(0, 1) }
           : options.savedNoticeChat;
@@ -1378,6 +1388,78 @@ export const AgentChatsDestinationPreservesInvestigationDraft: Story = {
     await expect(useInvestigationStore.getState().composer).toEqual(composer);
     await expect(useInvestigationStore.getState().pendingStart).toEqual(pendingStart);
     await expect(investigationRequests).toHaveLength(0);
+  },
+};
+
+export const ConfirmedQuickDispatchOpensExactAgentChat: Story = {
+  // AC-0391: only the confirmed task identity is handed to the existing chat
+  // coordinator; the saved question and composer/unread state stay untouched.
+  beforeEach: () => installFakeCore({ investigationFlow: true, startUncertainOnce: true, deferSavedNoticeChatRead: true,
+    savedNoticeChat: savedNoticeChat('inv-app-script', 'Open the accepted saved task.', false) }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const initial = useInvestigationStore.getState();
+    const composer = { ...initial.composer, question: 'Keep the unrelated composer draft.' };
+    const existingUnread = [{ task_id: 'inv-other-unread', result_id: 'result-other-unread', question: 'Keep this unread notice.' }];
+    useInvestigationStore.setState({ composer });
+    useSavedResultNoticeStore.setState({ unread: existingUnread });
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+
+    fireEvent.keyDown(canvas.getByRole('button', { name: 'Agent Chats' }), { key: ' ', code: 'Space', metaKey: true, bubbles: true });
+    await userEvent.type(canvas.getByLabelText('Question'), 'Open the accepted saved task.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(canvas.getByText(/outcome is uncertain/)).toBeVisible();
+    await expect(useAppStore.getState().view).toBe('workspace');
+    await expect(useAgentChatDockStore.getState().pendingTask).toBeNull();
+    await expect(useAgentChatDockStore.getState().docks).toHaveLength(0);
+    await expect(investigationRequests.filter((request) => request.command === 'start_investigation')).toHaveLength(1);
+    await userEvent.click(canvas.getByRole('button', { name: 'Close quick investigation' }));
+    fireEvent.keyDown(canvas.getByRole('button', { name: 'Agent Chats' }), { key: ' ', code: 'Space', metaKey: true, bubbles: true });
+    await userEvent.click(canvas.getByRole('button', { name: 'Retry same request' }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
+    await waitFor(() => expect(investigationRequests.filter((request) => request.command === 'get_investigation_chat')).toHaveLength(1));
+    expect(useAgentChatDockStore.getState().docks).toHaveLength(0);
+    releaseSavedNoticeChatRead?.();
+    await waitFor(() => expect(useAgentChatDockStore.getState().docks.map((item) => item.chat.task_id)).toEqual(['inv-app-script']));
+
+    const pane = within(canvas.getByRole('region', { name: 'Saved chat inv-app-script' }));
+    await expect(pane.getByRole('listitem', { name: 'User question' })).toHaveTextContent('Open the accepted saved task.');
+    await expect(useInvestigationStore.getState().selectedId).toBe('inv-app-script');
+    await expect(useAgentChatDockStore.getState().docks[0].chat.chat_id).toBe('saved-chat:inv-app-script');
+    const starts = investigationRequests.filter((request) => request.command === 'start_investigation');
+    await expect(starts).toHaveLength(2);
+    expect(starts[0]).toEqual(starts[1]);
+    expect((starts[0].args as { request: StartInvestigationRequest }).request.request_nonce).toMatch(/^[0-9a-f-]{36}$/);
+    const chatReads = investigationRequests.filter((request) => request.command === 'get_investigation_chat');
+    expect(chatReads).toHaveLength(1);
+    expect(chatReads.every((request) => (request.args as { investigationId: string }).investigationId === 'inv-app-script')).toBe(true);
+    await expect(useInvestigationStore.getState().composer).toEqual(composer);
+    await expect(useInvestigationStore.getState().pendingStart).toBeNull();
+    await expect(useSavedResultNoticeStore.getState().unread).toEqual(existingUnread);
+    expect(investigationRequests.some((request) => ['cancel_investigation', 'delete_investigation'].includes(request.command))).toBe(false);
+  },
+};
+
+export const ConfirmedQuickDispatchOpensChatWhileDestinationIsConnected: Story = {
+  // The same handoff opens immediately when Agent Chats is already mounted.
+  beforeEach: () => installFakeCore({ investigationFlow: true,
+    savedNoticeChat: savedNoticeChat('inv-app-script', 'Open the accepted saved task.', false) }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('core v0.0.1')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Agent Chats' }));
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
+
+    fireEvent.keyDown(canvas.getByRole('button', { name: 'Agent Chats' }), { key: ' ', code: 'Space', metaKey: true, bubbles: true });
+    await userEvent.type(canvas.getByLabelText('Question'), 'Open the accepted saved task.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await waitFor(() => expect(useAgentChatDockStore.getState().docks.map((item) => item.chat.task_id)).toEqual(['inv-app-script']));
+    await expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible();
+    await expect(useAgentChatDockStore.getState().focusedTask).toBe('inv-app-script');
+    await expect(useInvestigationStore.getState().composer.question).toBe('');
+    expect(investigationRequests.some((request) => request.command === 'start_investigation')).toBe(true);
+    expect(investigationRequests.filter((request) => request.command === 'get_investigation_chat')
+      .every((request) => (request.args as { investigationId: string }).investigationId === 'inv-app-script')).toBe(true);
   },
 };
 

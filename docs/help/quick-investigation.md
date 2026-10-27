@@ -19,3 +19,7 @@ proposals. Quick dispatch keeps its evidence selections separate from the full
 composer draft. If a start outcome is uncertain, retry the same saved
 request to recover its identity; the dialog does not claim success until the
 host returns a durable investigation ID.
+
+After a confirmed start or retry, Quick Dispatch opens that exact saved task in
+Agent Chats. A refused or uncertain start stays in the dialog; use **Open
+Investigations** there to recover a different pending request.

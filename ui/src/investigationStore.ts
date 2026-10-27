@@ -23,6 +23,8 @@ export interface InvestigationDraft {
 /** UI-only start context. These values are validated/projected before IPC. */
 export interface InvestigationStartOptions {
   preserveComposer?: boolean;
+  /** Let the calling surface own navigation after a confirmed task start. */
+  deferOpen?: boolean;
   completionChoices?: InvestigationObligationChoices;
 }
 export interface InvestigationComposer {
@@ -320,7 +322,7 @@ export interface InvestigationState {
   selectHistoryActive: (activeOnly: boolean) => Promise<void>;
   searchHistory: (query: string) => Promise<void>;
   start: (draft: InvestigationDraft, options?: InvestigationStartOptions) => Promise<string | null>;
-  retryStart: () => Promise<string | null>;
+  retryStart: (options?: { deferOpen?: boolean }) => Promise<string | null>;
   openConversation: (conversationId: string) => Promise<void>;
   loadConversation: (more?: boolean) => Promise<void>;
   closeConversation: () => void;
@@ -458,7 +460,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     });
   };
 
-  const startRequest = async (request: StartInvestigationRequest, preserveComposer = pendingStartPreservesComposer): Promise<string | null> => {
+  const startRequest = async (request: StartInvestigationRequest, preserveComposer = pendingStartPreservesComposer,
+    deferOpen = false): Promise<string | null> => {
     if (get().starting) return null;
     pendingStartPreservesComposer = preserveComposer;
     set({ starting: true, pendingStart: request, startError: null, startRejection: null });
@@ -492,17 +495,19 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         draftObligations: [], obligationChoices: null, obligationChoicesLoading: false, obligationDraftError: null }) }));
     // Admission is already confirmed. A later detail-load failure must not
     // turn this into an uncertain start or invite a fresh nonce.
-    try {
-      await get().open(summary.investigation_id);
-      if (get().conversationId === summary.conversation_id) {
-        ++conversationRequest;
-        set({ conversationLoading: false });
-        // Admission is already confirmed; an optional conversation refresh must
-        // not keep the start action busy while its page is loading.
-        void get().loadConversation();
+    if (!deferOpen) {
+      try {
+        await get().open(summary.investigation_id);
+      } catch {
+        set({ error: 'Investigation started, but its detail could not be loaded. Refresh the saved investigation.' });
       }
-    } catch {
-      set({ error: 'Investigation started, but its detail could not be loaded. Refresh the saved investigation.' });
+    }
+    if (get().conversationId === summary.conversation_id) {
+      ++conversationRequest;
+      set({ conversationLoading: false });
+      // Admission is already confirmed; an optional conversation refresh must
+      // not keep the start action busy while its page is loading.
+      void get().loadConversation();
     }
     return summary.investigation_id;
   };
@@ -904,30 +909,30 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           set(options.preserveComposer ? { startError: message } : { obligationDraftError: message });
           return null;
         }
-        return startRequest(request, options.preserveComposer === true);
+        return startRequest(request, options.preserveComposer === true, options.deferOpen === true);
       } else if (completionObligations !== undefined) return null;
       else if (draft.specialist_id.endsWith('@6')) {
         const { inspection_requirements: requirements, ...qualified } = legacyBase;
         if (requirements !== undefined && requirements.length === 0) return null;
         return startRequest(structuredClone({ ...qualified, schema_version: 3, request_nonce,
           ...(requirements ? { expected_graph_revision: requirements[0].graph_snapshot_id,
-            inspection_requirements: requirements } : {}) }), options.preserveComposer === true);
+          inspection_requirements: requirements } : {}) }), options.preserveComposer === true, options.deferOpen === true);
       } else if (draft.specialist_id.endsWith('@5')) {
         const { expected_context_id, ...inspectionDraft } = legacyBase;
         if (!draft.inspection_requirements?.length || expected_context_id !== undefined) return null;
         return startRequest(structuredClone({ ...inspectionDraft, schema_version: 2, request_nonce,
           expected_graph_revision: draft.inspection_requirements[0].graph_snapshot_id,
-          inspection_requirements: draft.inspection_requirements }), options.preserveComposer === true);
+          inspection_requirements: draft.inspection_requirements }), options.preserveComposer === true, options.deferOpen === true);
       } else {
         // Preserve legacy schema bytes: requirements are absent, never an empty list.
         const { inspection_requirements: requirements, expected_context_id, ...legacy } = legacyBase;
         if (requirements?.length || expected_context_id !== undefined) return null;
-        return startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }), options.preserveComposer === true);
+        return startRequest(structuredClone({ ...legacy, schema_version: 1, request_nonce }), options.preserveComposer === true, options.deferOpen === true);
       }
     },
-    retryStart: async () => {
+    retryStart: async (options) => {
       const request = get().pendingStart;
-      return request ? startRequest(request) : null;
+      return request ? startRequest(request, pendingStartPreservesComposer, options?.deferOpen === true) : null;
     },
     open: async (id, options) => {
       if (options?.loadingSignal?.aborted) return;
