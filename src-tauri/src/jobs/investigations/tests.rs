@@ -1713,6 +1713,11 @@ fn investigation_specialist_activity_projects_saved_provider_within_existing_bou
             .unwrap()
             .detail
             .summary;
+        // AC-0417: preserve all u64 digits and each unknown direction independently.
+        let mut task = load_task(&fixture.store.conn, &summary.investigation_id).unwrap();
+        task.detail.usage.reported_input_tokens = (index == 0).then_some(u64::MAX);
+        task.detail.usage.reported_output_tokens = (index == 1).then_some(0);
+        storage::save_task(&fixture.store.conn, &task, summary.revision, false).unwrap();
         ids.push((summary.investigation_id, mode, provider_id, model));
     }
 
@@ -1728,6 +1733,15 @@ fn investigation_specialist_activity_projects_saved_provider_within_existing_bou
         assert_eq!(item.saved_provider.mode, mode);
         assert_eq!(item.saved_provider.provider_id, provider_id);
         assert_eq!(item.saved_provider.model, model);
+        let usage = item.reported_usage.as_ref().unwrap();
+        assert_eq!(
+            usage.input_tokens.as_deref(),
+            (mode == InvestigationProviderMode::Local).then_some("18446744073709551615")
+        );
+        assert_eq!(
+            usage.output_tokens.as_deref(),
+            (mode == InvestigationProviderMode::Cloud).then_some("0")
+        );
     }
     let wire = serde_json::to_string(&page).unwrap();
     assert!(!wire.contains("127.0.0.1"));
@@ -1748,7 +1762,7 @@ fn investigation_specialist_activity_projects_saved_provider_within_existing_bou
 fn investigation_specialist_activity_reuses_active_selection_order_and_rejects_invalid_cursor() {
     // AC-0381: the projection uses the existing bounded active selection.
     let mut fixture = Fixture::new();
-    for index in 0..2 {
+    for index in 0..MAX_LIVE_TASKS {
         fixture
             .store
             .start_investigation(
@@ -1779,12 +1793,79 @@ fn investigation_specialist_activity_reuses_active_selection_order_and_rejects_i
             .map(|item| item.investigation_id.as_str())
             .collect::<Vec<_>>(),
     );
+    assert_eq!(first.next_cursor, expected.next_cursor);
+    assert_eq!(first.items.len(), MAX_LIVE_TASKS);
     assert!(first.next_cursor.is_none());
+    assert!(first.items.iter().all(|item| item.reported_usage.is_some()));
+    assert!(serde_json::to_vec(&first).unwrap().len() <= 256 * 1024);
     assert!(
         fixture
             .store
             .specialist_task_activity(Some("not-a-cursor"))
             .is_err()
+    );
+}
+
+#[test]
+fn investigation_specialist_activity_usage_fits_exactly_or_keeps_legacy_base_bytes() {
+    // AC-0417: optional telemetry never invalidates an otherwise valid legacy item.
+    let mut fixture = Fixture::new();
+    let detail = fixture
+        .store
+        .start_investigation(
+            &request("usage-boundary", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail;
+    let id = detail.summary.investigation_id;
+    let mut task = load_task(&fixture.store.conn, &id).unwrap();
+    let mut item = fixture
+        .store
+        .specialist_task_activity(None)
+        .unwrap()
+        .items
+        .remove(0);
+    let mut growth = 4096 - serde_json::to_vec(&item).unwrap().len();
+    let extra = growth.min(2048 - item.saved_provider.provider_id.len());
+    item.saved_provider.provider_id.push_str(&"p".repeat(extra));
+    growth -= extra;
+    assert!(item.saved_provider.model.len() + growth < 2048);
+    item.saved_provider.model.push_str(&"m".repeat(growth));
+    task.detail.provider.provider_id = item.saved_provider.provider_id;
+    task.detail.provider.model = item.saved_provider.model;
+    storage::save_task(
+        &fixture.store.conn,
+        &task,
+        task.detail.summary.revision,
+        false,
+    )
+    .unwrap();
+    let exact = fixture.store.specialist_task_activity(None).unwrap();
+    assert!(exact.items[0].reported_usage.is_some());
+    assert_eq!(serde_json::to_vec(&exact.items[0]).unwrap().len(), 4096);
+    task.detail.provider.model.push('m');
+    storage::save_task(
+        &fixture.store.conn,
+        &task,
+        task.detail.summary.revision,
+        false,
+    )
+    .unwrap();
+    let legacy =
+        reads::encode_specialist_activity_item(&task.detail.summary, &task.detail.provider)
+            .unwrap();
+    let page = fixture.store.specialist_task_activity(None).unwrap();
+    assert!(page.items[0].reported_usage.is_none());
+    assert_eq!(serde_json::to_vec(&page.items[0]).unwrap(), legacy);
+    assert!(page.next_cursor.is_none());
+    assert_eq!(
+        fixture
+            .store
+            .investigation_history(None, None)
+            .unwrap()
+            .items[0],
+        task.detail.summary
     );
 }
 
@@ -1858,7 +1939,7 @@ fn investigation_specialist_activity_admission_charges_exact_escaped_projection(
         )
         .unwrap()
         .detail;
-    let item = fixture
+    let mut item = fixture
         .store
         .specialist_task_activity(None)
         .unwrap()
@@ -1869,6 +1950,9 @@ fn investigation_specialist_activity_admission_charges_exact_escaped_projection(
     let task = load_task(&fixture.store.conn, &detail.summary.investigation_id).unwrap();
     let exact_projection =
         reads::encode_specialist_activity_item(&item.summary, &task.detail.provider).unwrap();
+    let current = serde_json::to_value(&item).unwrap();
+    assert!(current["reported_usage"]["input_tokens"].is_null());
+    item.reported_usage = None;
     assert_eq!(exact_projection, serde_json::to_vec(&item).unwrap());
     assert!(exact_projection.windows(2).any(|bytes| bytes == b"\\\""));
     assert!(
