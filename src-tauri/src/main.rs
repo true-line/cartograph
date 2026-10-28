@@ -1793,7 +1793,25 @@ fn extract_tree_with_registries(
         .filter(|n| n.label == "Endpoint")
         .map(|n| n.id.clone())
         .collect();
-    let fetched = events::stitch_fetches(&extraction.fetch_sites, &endpoint_ids, &cfg, &ev_id);
+    // Go's `ServeMux` serves HEAD from a GET pattern (AC-0434).
+    let get_serves_head: std::collections::BTreeSet<String> = extraction
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.label == "Endpoint"
+                && n.props["framework"] == "net/http"
+                && n.props["language"] == "go"
+                && n.props["method"] == "GET"
+        })
+        .map(|n| n.id.clone())
+        .collect();
+    let fetched = events::stitch_fetches_with(
+        &extraction.fetch_sites,
+        &endpoint_ids,
+        &get_serves_head,
+        &cfg,
+        &ev_id,
+    );
     layers.events.nodes += distinct_node_count(&fetched.nodes);
     layers.events.edges += distinct_edge_count(&fetched.edges);
     extraction.nodes.extend(fetched.nodes);

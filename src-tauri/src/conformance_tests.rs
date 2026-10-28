@@ -309,7 +309,8 @@ def sync():
 #[test]
 fn go_net_http_calls_stitch_to_same_repo_routes_even_client_only() {
     // AC-0434: a `net/http` client call is a fetch site the ordinary stitch
-    // binds to the same repository's method-less route, and a manifest
+    // binds to the same repository's method-less route (and a HEAD call to
+    // a GET pattern, which `ServeMux` also serves for HEAD), and a manifest
     // selecting only the client layer still runs the Go pass.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -320,12 +321,18 @@ import "net/http"
 
 func users(w http.ResponseWriter, r *http.Request) {}
 
+func health(w http.ResponseWriter, r *http.Request) {}
+
 func sync(base string) {
 	http.Get("/users")
 	http.Post(base+"/users", "application/json", nil)
+	http.Head("/health")
 }
 
-func main() { http.HandleFunc("/users", users) }
+func main() {
+	http.HandleFunc("/users", users)
+	http.HandleFunc("GET /health", health)
+}
 "#,
     )
     .unwrap();
@@ -342,19 +349,25 @@ func main() { http.HandleFunc("/users", users) }
             &[],
         )
         .unwrap();
-        assert_eq!(x.fetch_sites.len(), 2, "{layers:?}");
+        assert_eq!(x.fetch_sites.len(), 3, "{layers:?}");
         let fetches: Vec<(&str, &str)> = x
             .edges
             .iter()
             .filter(|edge| edge.label == "FETCHES")
             .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
             .collect();
-        assert_eq!(fetches.len(), 2, "{layers:?}");
+        assert_eq!(fetches.len(), 3, "{layers:?}");
         assert_eq!(
             fetches[0],
             (sync.as_str(), "ep:local/p@ANY:/users"),
             "{layers:?}"
         );
         assert!(fetches[1].1.starts_with("gap:fetch:"), "{layers:?}");
+        // A GET pattern also serves HEAD on Go's `ServeMux`.
+        assert_eq!(
+            fetches[2],
+            (sync.as_str(), "ep:local/p@GET:/health"),
+            "{layers:?}"
+        );
     }
 }

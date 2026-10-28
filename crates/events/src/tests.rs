@@ -379,6 +379,43 @@ fn method_less_routes_match_every_fetch_method() {
     );
 }
 
+// AC-0434: a HEAD fetch binds a GET route only where the caller names that
+// route as one its framework also serves for HEAD (Go's `ServeMux`).
+#[test]
+fn head_fetches_bind_get_routes_only_where_the_framework_serves_head() {
+    let endpoints = eps(&["ep:test@GET:/health", "ep:test@GET:/ready"]);
+    let serves_head = ["ep:test@GET:/health".to_string()].into_iter().collect();
+    let cfg = ConfigIndex::default();
+    let id = SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let out = stitch_fetches_with(
+        &[
+            fetch_site("HEAD", IdentityExpr::Literal("/health".into())),
+            fetch_site("HEAD", IdentityExpr::Literal("/ready".into())),
+        ],
+        &endpoints,
+        &serves_head,
+        &cfg,
+        &id,
+    );
+    let bound: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "FETCHES")
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(bound[0], "ep:test@GET:/health");
+    let reasons: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["reason"].as_str())
+        .collect();
+    assert_eq!(reasons, ["no recovered endpoint matches HEAD /ready"]);
+}
+
 // AC-0014: everything unresolvable escalates to an explicit Gap with a
 // reason — computed URL, no matching endpoint, ambiguous match. (T-0014)
 #[test]
