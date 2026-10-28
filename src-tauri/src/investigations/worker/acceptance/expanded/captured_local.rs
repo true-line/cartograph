@@ -69,6 +69,64 @@ pub(in super::super) fn run(
         },
     )
 }
+// Same explicit loopback constructor as the existing manual local acceptance.
+// Construction performs no model call; the frozen descriptor remains authority.
+fn configured_provider(
+    url: &str,
+    model: &str,
+    expected: &InvestigationProvider,
+) -> Result<std::sync::Arc<dyn llm::LlmProvider>, String> {
+    let provider = std::sync::Arc::new(
+        llm::OllamaProvider::new(url, model, std::time::Duration::from_secs(180))
+            .map_err(|error| error.to_string())?,
+    );
+    if crate::investigations::runtime::descriptor(
+        provider.as_ref(),
+        InvestigationProviderMode::Local,
+    )
+    .map_err(|error| error.to_string())?
+        != *expected
+    {
+        return Err("Explicit local configuration differs from frozen identity.".into());
+    }
+    Ok(provider)
+}
+// AC-0429: pure constructor/identity checks; no server, model call or attempt.
+#[test]
+fn captured_local_explicit_configuration_matches_only_frozen_descriptor() {
+    let expected = InvestigationProvider {
+        mode: InvestigationProviderMode::Local,
+        provider_id: "ollama:explicit-control-model".into(),
+        model: "explicit-control-model".into(),
+        endpoint: "http://127.0.0.1:1/api/chat".into(),
+        deployment: None,
+        protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+        available: true,
+        unavailable_reason: None,
+    };
+    let provider =
+        configured_provider("http://127.0.0.1:1/", "explicit-control-model", &expected).unwrap();
+    assert_eq!(
+        crate::investigations::runtime::descriptor(
+            provider.as_ref(),
+            InvestigationProviderMode::Local
+        )
+        .unwrap(),
+        expected
+    );
+    assert!(configured_provider("http://127.0.0.1:1/", "different-model", &expected).is_err());
+    assert!(
+        configured_provider("http://127.0.0.1:2/", "explicit-control-model", &expected).is_err()
+    );
+    assert!(
+        configured_provider(
+            "http://example.invalid/",
+            "explicit-control-model",
+            &expected
+        )
+        .is_err()
+    );
+}
 // AC-0429: explicit manual adapter; ordinary tests do not execute a real provider.
 #[test]
 #[ignore = "manual captured-profile local provider; requires independent frozen definition and explicit execute/reopen action"]
@@ -85,16 +143,44 @@ fn vendure_captured_local_analyst() {
         "reopen" => false,
         _ => panic!("explicit execute or reopen required"),
     };
-    run(
+    let provider = if execute {
+        Some(
+            configured_provider(
+                &super::super::required("CARTOGRAPH_ACCEPTANCE_URL"),
+                &super::super::required("CARTOGRAPH_ACCEPTANCE_MODEL"),
+                &expected.provider,
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    let output = path("CARTOGRAPH_VENDURE_ANALYST_PREPARATION_OUTPUT");
+    vendure_prepare::reopen_bound(
         [
             &path("CARTOGRAPH_VENDURE_NATIVE_CONFIG"),
             &path("CARTOGRAPH_VENDURE_PREPARATION_RECEIPT"),
             &definition,
-            &path("CARTOGRAPH_VENDURE_ANALYST_PREPARATION_OUTPUT"),
+            &output,
         ],
         &expected,
         vendure::InputPolicy::FrozenVendure,
-        execute,
+        |app, request, id, manifest, data| {
+            if let Some(provider) = provider {
+                app.state::<crate::AppState>()
+                    .investigations
+                    .set_test_provider(InvestigationProviderMode::Local, provider);
+            }
+            use_task(
+                (app, data),
+                request,
+                id,
+                manifest,
+                &output,
+                &expected,
+                execute,
+            )
+        },
     )
     .unwrap();
 }
