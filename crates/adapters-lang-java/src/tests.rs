@@ -3640,3 +3640,286 @@ fn spring_shadowed_dynamic_mappings_report_the_shadowing() {
         2
     );
 }
+
+/// `(method, url, base, entry)` rows of Feign sites, sorted.
+fn feign_rows(sites: &[adapters_fw::client::FetchSite]) -> Vec<[String; 4]> {
+    let expr = |expr: &IdentityExpr| match expr {
+        IdentityExpr::Literal(url) => format!("literal:{url}"),
+        IdentityExpr::EnvRef(key) => format!("env:{key}"),
+        IdentityExpr::Computed(text) => format!("computed:{text}"),
+    };
+    let mut rows = sites
+        .iter()
+        .map(|site| {
+            [
+                site.method.clone(),
+                expr(&site.url),
+                site.base
+                    .as_ref()
+                    .map(|base| expr(&base.url))
+                    .unwrap_or_default(),
+                site.entry.clone().unwrap_or_default(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn feign_client_methods_become_fetch_sites_with_their_base() {
+    // AC-0437: abstract mapped methods of proven @FeignClient interfaces,
+    // with the client's path prefix and its url, service or placeholder base.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/UsersClient.java",
+            r#"package io.demo;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.*;
+
+@FeignClient(name = "users", url = "users.example:8080/", path = "api/")
+interface UsersClient {
+    @GetMapping("/users/{id}")
+    User get(@PathVariable long id);
+
+    @PostMapping("users")
+    User create(User user);
+
+    @RequestMapping(value = "/users/{id}", method = RequestMethod.DELETE)
+    void delete(long id);
+
+    @RequestMapping("/health")
+    String health();
+
+    @RequestMapping(value = "/both", method = {RequestMethod.GET, RequestMethod.POST})
+    String both();
+
+    @PutMapping
+    String root();
+
+    @GetMapping(PATH)
+    String constant();
+
+    @GetMapping("/local")
+    default String local() { return ""; }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/OrdersClient.java",
+            r#"package io.demo;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+
+@FeignClient("orders")
+interface OrdersClient {
+    @GetMapping("/orders")
+    List<Order> all();
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/PayClient.java",
+            r#"package io.demo;
+
+@org.springframework.cloud.openfeign.FeignClient(name = "pay", url = "${pay.url}")
+interface PayClient {
+    @org.springframework.web.bind.annotation.GetMapping("/charges")
+    List<Charge> charges();
+}
+"#,
+        ),
+    ]);
+    let users = "computed:@GetMapping(PATH)";
+    let base = "literal:http://users.example:8080";
+    let mut want = [
+        ["GET", "literal:/api/users/{id}", base, "UsersClient.get"],
+        ["POST", "literal:/api/users", base, "UsersClient.create"],
+        [
+            "DELETE",
+            "literal:/api/users/{id}",
+            base,
+            "UsersClient.delete",
+        ],
+        ["GET", "literal:/api/health", base, "UsersClient.health"],
+        ["?", "literal:/api/both", base, "UsersClient.both"],
+        ["PUT", "literal:/api", base, "UsersClient.root"],
+        ["GET", users, base, "UsersClient.constant"],
+        [
+            "GET",
+            "literal:/orders",
+            "computed:orders",
+            "OrdersClient.all",
+        ],
+        [
+            "GET",
+            "literal:/charges",
+            "computed:${pay.url}",
+            "PayClient.charges",
+        ],
+    ]
+    .map(|row| row.map(str::to_string));
+    want.sort();
+    assert_eq!(feign_rows(&sites), want);
+}
+
+#[test]
+fn unproven_feign_clients_yield_no_fetch_sites() {
+    // AC-0437: wildcard and lookalike imports, a file-declared FeignClient,
+    // a class, unproven mappings and a test source set prove nothing; a
+    // class-level @RequestMapping, which OpenFeign rejects, makes the
+    // client's sites computed.
+    let client = |import: &str, annotation: &str| {
+        format!(
+            "package io.demo;\n\n{import}\nimport org.springframework.web.bind.annotation.GetMapping;\n\n\
+             {annotation}\ninterface Client {{\n    @GetMapping(\"/x\")\n    String x();\n}}\n"
+        )
+    };
+    let wildcard = client(
+        "import org.springframework.cloud.openfeign.*;",
+        "@FeignClient(\"a\")",
+    );
+    let lookalike = client("import com.acme.FeignClient;", "@FeignClient(\"a\")");
+    let declared = format!(
+        "{}\n@interface FeignClient {{ String value(); }}\n",
+        client(
+            "import org.springframework.cloud.openfeign.FeignClient;",
+            "@FeignClient(\"a\")"
+        )
+    );
+    let class = "package io.demo;\n\nimport org.springframework.cloud.openfeign.FeignClient;\n\
+                 import org.springframework.web.bind.annotation.GetMapping;\n\n\
+                 @FeignClient(\"a\")\nabstract class Client {\n    @GetMapping(\"/x\")\n    abstract String x();\n}\n";
+    let unmapped = "package io.demo;\n\nimport org.springframework.cloud.openfeign.FeignClient;\n\n\
+                    @FeignClient(\"a\")\ninterface Client {\n    @GetMapping(\"/x\")\n    String x();\n}\n";
+    let proven = client(
+        "import org.springframework.cloud.openfeign.FeignClient;",
+        "@FeignClient(\"a\")",
+    );
+    let class_mapping = client(
+        "import org.springframework.cloud.openfeign.FeignClient;\n\
+         import org.springframework.web.bind.annotation.RequestMapping;",
+        "@FeignClient(\"a\")\n@RequestMapping(\"/api\")",
+    );
+    let shadowed = format!(
+        "{}\n@interface GetMapping {{ String value(); }}\n",
+        client(
+            "import org.springframework.cloud.openfeign.FeignClient;",
+            "@FeignClient(\"a\")"
+        )
+    );
+    let lookalike_mapping = "package io.demo;\n\nimport org.springframework.cloud.openfeign.FeignClient;\n\
+                             import org.springframework.web.bind.annotation.GetMapping;\n\n\
+                             @FeignClient(\"a\")\ninterface Client {\n    @com.acme.GetMapping(\"/x\")\n    String x();\n}\n";
+    for (rel, source) in [
+        ("src/main/java/io/demo/Client.java", shadowed.as_str()),
+        ("src/main/java/io/demo/Client.java", lookalike_mapping),
+        ("src/main/java/io/demo/Client.java", wildcard.as_str()),
+        ("src/main/java/io/demo/Client.java", lookalike.as_str()),
+        ("src/main/java/io/demo/Client.java", declared.as_str()),
+        ("src/main/java/io/demo/Client.java", class),
+        ("src/main/java/io/demo/Client.java", unmapped),
+        ("src/test/java/io/demo/Client.java", proven.as_str()),
+    ] {
+        assert_eq!(
+            feign_rows(&retrofit_sites(&[(rel, source)])),
+            Vec::<[String; 4]>::new(),
+            "{source}"
+        );
+    }
+    let rows = feign_rows(&retrofit_sites(&[(
+        "src/main/java/io/demo/Client.java",
+        class_mapping.as_str(),
+    )]));
+    assert_eq!(
+        rows,
+        [[
+            "GET",
+            "computed:@GetMapping(\"/x\")",
+            "computed:a",
+            "Client.x"
+        ]
+        .map(str::to_string)]
+    );
+}
+
+#[test]
+fn same_package_types_obscure_wildcard_feign_mapping_proof() {
+    // AC-0437: a same-package type obscures an on-demand import (JLS
+    // §6.4.1), so a mapping proven only by a wildcard yields no site, and a
+    // `RequestMethod` proven only by one leaves the method `?`. A named
+    // import, a package without the type and a test-only type are controls.
+    let wildcard = "import org.springframework.cloud.openfeign.FeignClient;\n\
+                    import org.springframework.web.bind.annotation.*;";
+    let client = |package: &str, imports: &str, name: &str, body: &str| {
+        format!(
+            "package {package};\n\n{imports}\n\n@FeignClient(name = \"c\", url = \"https://x\")\n\
+             interface {name} {{\n{body}}}\n"
+        )
+    };
+    let shadowed = client(
+        "p",
+        wildcard,
+        "C",
+        "    @GetMapping(\"/x\")\n    void call();\n\n    \
+         @RequestMapping(value = \"/y\", method = RequestMethod.POST)\n    void post();\n",
+    );
+    let named = client(
+        "p",
+        "import org.springframework.cloud.openfeign.FeignClient;\n\
+         import org.springframework.web.bind.annotation.GetMapping;",
+        "Named",
+        "    @GetMapping(\"/z\")\n    void z();\n",
+    );
+    let other = client(
+        "q",
+        wildcard,
+        "Q",
+        "    @GetMapping(\"/q\")\n    void q();\n",
+    );
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/p/GetMapping.java",
+            "package p;\n\npublic @interface GetMapping { String value(); }\n",
+        ),
+        (
+            "src/main/java/p/RequestMethod.java",
+            "package p;\n\npublic enum RequestMethod { GET, POST }\n",
+        ),
+        ("src/main/java/p/C.java", shadowed.as_str()),
+        ("src/main/java/p/Named.java", named.as_str()),
+        ("src/main/java/q/Q.java", other.as_str()),
+        (
+            "src/test/java/q/GetMapping.java",
+            "package q;\n\npublic @interface GetMapping { String value(); }\n",
+        ),
+    ]);
+    let mut want = [
+        ["?", "literal:/y", "literal:https://x", "C.post"],
+        ["GET", "literal:/z", "literal:https://x", "Named.z"],
+        ["GET", "literal:/q", "literal:https://x", "Q.q"],
+    ]
+    .map(|row| row.map(str::to_string));
+    want.sort();
+    assert_eq!(feign_rows(&sites), want);
+}
+
+#[test]
+fn single_file_extraction_exposes_feign_sites() {
+    // AC-0437: the public single-file API returns Feign sites as fetch sites,
+    // settled against the file's own declared types.
+    let out = extract_source(
+        b"package io.demo;\n\nimport org.springframework.cloud.openfeign.FeignClient;\n\
+          import org.springframework.web.bind.annotation.*;\n\n\
+          @FeignClient(\"users\")\ninterface Users {\n    @GetMapping(\"/users\")\n    String all();\n}\n",
+        "src/main/java/io/demo/Users.java",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        feign_rows(&out.fetch_sites),
+        [["GET", "literal:/users", "computed:users", "Users.all"].map(str::to_string)]
+    );
+}

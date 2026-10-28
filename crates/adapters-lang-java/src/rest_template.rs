@@ -39,7 +39,7 @@ fn verb(name: &str) -> Option<Option<&'static str>> {
 }
 
 /// Simple names of every type and type parameter the file declares.
-fn declared_names(cx: &FileCx<'_>, root: TsNode<'_>) -> BTreeSet<String> {
+pub(crate) fn declared_names(cx: &FileCx<'_>, root: TsNode<'_>) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {

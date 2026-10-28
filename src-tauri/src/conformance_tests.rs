@@ -441,3 +441,74 @@ class Users {
     );
     assert!(fetches[1].1.starts_with("gap:fetch:"));
 }
+
+#[test]
+fn java_feign_clients_join_their_base_and_cite_unresolved_services() {
+    // AC-0437: a Feign client method is a fetch site joined to its literal
+    // url, while a load-balanced service name stays a Gap naming the client
+    // entry until the system manifest declares it.
+    let dir = tempfile::tempdir().unwrap();
+    let java = dir.path().join("src/main/java/io/demo");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        java.join("Clients.java"),
+        r#"package io.demo;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+
+@FeignClient(name = "users", url = "https://users.example.com", path = "/api")
+interface UsersClient {
+    @GetMapping("/users/{id}")
+    String get(long id);
+}
+
+@FeignClient("orders")
+interface OrdersClient {
+    @GetMapping("/orders")
+    String all();
+}
+"#,
+    )
+    .unwrap();
+    let (x, _) = crate::extract_tree_with_summary(
+        dir.path(),
+        REPO,
+        "workdir",
+        &["client".to_string()],
+        &BTreeMap::new(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(x.fetch_sites.len(), 2);
+    let mut gaps: Vec<(String, String)> = x
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:fetch:"))
+        .map(|node| {
+            (
+                node.props["request"]["url"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                node.props["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+    assert_eq!(gaps[0].0, "", "{gaps:?}");
+    assert_eq!(
+        gaps[0].1,
+        "runtime base URL `orders` of OrdersClient.all is not declared in the system manifest"
+    );
+    assert_eq!(
+        gaps[1].0, "https://users.example.com/api/users/{id}",
+        "{gaps:?}"
+    );
+}
