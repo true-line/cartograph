@@ -139,6 +139,10 @@ pub(crate) struct Pending {
     site: FetchSite,
     mapping: Option<String>,
     method: Option<String>,
+    /// A class-level `@RequestMapping` proven only by a wildcard makes the
+    /// path computed unless this same-package type obscures it, in which
+    /// case the method's own path stands.
+    class_mapping: Option<(String, IdentityExpr)>,
 }
 
 /// Settle pending sites against the types this repository declares
@@ -151,6 +155,11 @@ pub(crate) fn resolve(pending: Vec<Pending>, declared: impl Fn(&str) -> bool) ->
         .map(|mut pending| {
             if pending.method.as_deref().is_some_and(&declared) {
                 pending.site.method = "?".into();
+            }
+            if let Some((fqn, url)) = pending.class_mapping
+                && declared(&fqn)
+            {
+                pending.site.url = url;
             }
             pending.site
         })
@@ -260,12 +269,15 @@ pub(crate) fn sites(
         }) else {
             continue;
         };
-        // Even an obscured class-level mapping only makes paths computed,
-        // never wrong, so it needs no settling.
-        let class_mapping = client_annotations.iter().any(|(simple, annotation)| {
-            simple == "RequestMapping"
-                && mapping_proven(cx, *annotation, simple, imports, &declared).is_some()
-        });
+        // A proven class-level mapping makes paths computed; one proven only
+        // by a wildcard is settled at the join, and a direct proof dominates.
+        let class_mapping = client_annotations
+            .iter()
+            .filter(|(simple, _)| simple == "RequestMapping")
+            .filter_map(|(simple, annotation)| {
+                mapping_proven(cx, *annotation, simple, imports, &declared)
+            })
+            .min();
         let obscuring = |name: &str| match package {
             Some(package) => format!("{package}.{name}"),
             None => name.to_string(),
@@ -281,8 +293,8 @@ pub(crate) fn sites(
                 }
                 None => continue,
             };
-            let path = match (class_mapping, client_prefix(cx, client)) {
-                (false, Some(prefix)) => match annotation_path(cx, annotation) {
+            let path = match client_prefix(cx, client) {
+                Some(prefix) => match annotation_path(cx, annotation) {
                     PathArg::Absent => Some(prefix),
                     PathArg::Literal(paths) => match paths.as_slice() {
                         [tail] if tail.is_empty() || tail.starts_with('/') => {
@@ -293,19 +305,26 @@ pub(crate) fn sites(
                     },
                     PathArg::Dynamic => None,
                 },
-                _ => None,
+                None => None,
             };
             let entry = if chain.is_empty() {
                 name.clone()
             } else {
                 format!("{}.{name}", chain.join("."))
             };
+            let computed = IdentityExpr::Computed(cx.text(&annotation).to_string());
+            let own = match path {
+                Some(path) => IdentityExpr::Literal(path),
+                None => computed.clone(),
+            };
+            let (url, class_mapping) = match class_mapping {
+                None => (own, None),
+                Some(false) => (computed, None),
+                Some(true) => (computed, Some((obscuring("RequestMapping"), own))),
+            };
             let site = FetchSite {
                 method: http_method,
-                url: match path {
-                    Some(path) => IdentityExpr::Literal(path),
-                    None => IdentityExpr::Computed(cx.text(&annotation).to_string()),
-                },
+                url,
                 symbol: Some(symbol.clone()),
                 path: cx.path.to_string(),
                 byte_start: method.start_byte() as u64,
@@ -322,6 +341,7 @@ pub(crate) fn sites(
                 site,
                 mapping: wildcard.then(|| obscuring(&simple)),
                 method: method_wildcard.then(|| obscuring("RequestMethod")),
+                class_mapping,
             });
         }
     }

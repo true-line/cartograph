@@ -3923,3 +3923,57 @@ fn single_file_extraction_exposes_feign_sites() {
         [["GET", "literal:/users", "computed:users", "Users.all"].map(str::to_string)]
     );
 }
+
+// AC-0437 (#1289 review): a class-level `@RequestMapping` proven only by a
+// wildcard makes the Feign paths computed unless a same-package type obscures
+// it, in which case the method's own literal path stands; a directly imported
+// class mapping keeps them computed whatever the package declares.
+#[test]
+fn feign_wildcard_class_mapping_settles_at_the_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = |package: &str, imports: &str, name: &str| {
+        format!(
+            "package {package};\n\nimport org.springframework.cloud.openfeign.FeignClient;\nimport org.springframework.web.bind.annotation.GetMapping;\n{imports}\n@FeignClient(name = \"users\", url = \"https://users.example.com\")\n@RequestMapping(\"/api\")\npublic interface {name} {{\n    @GetMapping(\"/x\")\n    String get();\n}}\n"
+        )
+    };
+    let wildcard = "import org.springframework.web.bind.annotation.*;\n";
+    let named = "import org.springframework.web.bind.annotation.RequestMapping;\n";
+    write(
+        dir.path(),
+        "src/main/java/com/demo/shadow/RequestMapping.java",
+        "package com.demo.shadow;\n\npublic @interface RequestMapping { String value() default \"\"; }\n",
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/shadow/Shadowed.java",
+        &client("com.demo.shadow", wildcard, "Shadowed"),
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/shadow/Named.java",
+        &client("com.demo.shadow", named, "Named"),
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/plain/Plain.java",
+        &client("com.demo.plain", wildcard, "Plain"),
+    );
+    let rows: Vec<[String; 2]> = feign_rows(&extract_dir(dir.path(), &id()).unwrap().fetch_sites)
+        .into_iter()
+        .map(|[_, url, _, entry]| [entry, url])
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            [
+                "Named.get".to_string(),
+                "computed:@GetMapping(\"/x\")".to_string()
+            ],
+            [
+                "Plain.get".to_string(),
+                "computed:@GetMapping(\"/x\")".to_string()
+            ],
+            ["Shadowed.get".to_string(), "literal:/x".to_string()],
+        ]
+    );
+}
