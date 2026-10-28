@@ -518,7 +518,6 @@ pub fn preflight_scan(
 
     let total = files.len();
     let mut walked = std::collections::BTreeSet::new();
-    let mut saw_go = false;
     for (done, (path, name, rel)) in files.into_iter().enumerate() {
         if on_file(ScanStep {
             path: &rel,
@@ -532,7 +531,6 @@ pub fn preflight_scan(
         // Framework chips and config-behind-code findings quote the
         // toolchain registry (#215) — the same detection that produces
         // the graph's Tool facts, so the two surfaces cannot disagree.
-        saw_go |= name == "go.mod" || name.ends_with(".go");
         let detection = crate::toolchain::detect_in_file(&name, &rel, &path);
         if detection
             .framework_labels
@@ -573,10 +571,11 @@ pub fn preflight_scan(
         detect_language(&extension, rel, plugins, &mut languages, &mut unsupported);
     }
     // Go recovery walks its own scope (it reads `target/`, for one), so the
-    // skips come from that walk rather than this one (#1258). It runs only
-    // for a tree this walk saw Go in, and stays under the same hook: each
-    // step reports the finished file count, and a break stops the scan.
-    if saw_go {
+    // skips come from that walk rather than this one (#1258), including in
+    // a tree whose only Go is somewhere this walk skips. It stays under the
+    // same hook: each step reports the finished file count, and a break
+    // stops the scan.
+    {
         let mut on_step = |path: &str| {
             on_file(ScanStep {
                 path,
@@ -1682,7 +1681,9 @@ mod tests {
             vec![
                 (String::new(), 0, None),
                 ("a.ts".to_string(), 0, Some(2)),
-                ("b.ts".to_string(), 1, Some(2))
+                ("b.ts".to_string(), 1, Some(2)),
+                // The Go skip pass lists the tree again (#1258).
+                (String::new(), 2, Some(2))
             ]
         );
         let mut announced = 0;
@@ -1862,5 +1863,22 @@ mod tests {
         .unwrap();
         assert!(stopped.is_none());
         assert_eq!(go_steps, vec!["target/gen/zz_linux.go".to_string()]);
+    }
+
+    // AC-0427 (#1258): a tree whose only Go sits where preflight's own walk
+    // does not go (`target/`) still has its skipped Go files named.
+    #[test]
+    fn go_skips_are_named_when_all_go_is_outside_the_preflight_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "target/go.mod", "module example.com/gen\n");
+        write(dir.path(), "target/gen/zz_linux.go", "package gen\n");
+        let report = preflight(dir.path()).unwrap();
+        let skipped: Vec<&str> = report
+            .unsupported
+            .iter()
+            .filter(|finding| finding.kind == "go-skipped-source")
+            .map(|finding| finding.path.as_str())
+            .collect();
+        assert_eq!(skipped, vec!["target/gen/zz_linux.go"]);
     }
 }
