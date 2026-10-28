@@ -93,6 +93,7 @@ mod tests {
             tier: llm::AnalysisTier::Semantic,
             action_id: "action-1".to_string(),
             payload: llm::CompletionPayload {
+                response_schema: None,
                 system: String::new(),
                 prompt: "prompt".to_string(),
                 spans: Vec::new(),

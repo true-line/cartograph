@@ -349,6 +349,7 @@ impl AgentBroker {
             action_id: task.action_id.clone(),
             tier: AnalysisTier::Agentic,
             payload: CompletionPayload {
+                response_schema: None,
                 system: concat!(
                     "You are Cartograph's bounded T3 resolver. Propose one link only. ",
                     "Choose an existing allowed target, cite evidence from both sides, ",

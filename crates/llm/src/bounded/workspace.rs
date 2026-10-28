@@ -37,6 +37,8 @@ impl CompletionLimits {
             MAX_ENDPOINT_BYTES,
             MAX_MODEL_BYTES,
         ])?;
+        // Optional schema is owned text within the same serialized-input cap;
+        // it introduces no Value tree. Its String header is in CompletionPayload.
         let payload = sum(&[
             size_of::<CompletionPayload>(),
             input,

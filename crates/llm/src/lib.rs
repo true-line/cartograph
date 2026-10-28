@@ -72,6 +72,11 @@ pub struct PayloadSpan {
 /// Structured completion payload shown to the user and sent to the provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionPayload {
+    /// Inactive by default. JSON object text for bounded Ollama only. Preparation
+    /// refuses JSON escapes or redaction-changing text; it does not validate
+    /// JSON Schema semantics. Host response validation remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<String>,
     /// System instructions.
     pub system: String,
     /// Task instructions; evidence text lives only in `spans`.
@@ -297,6 +302,11 @@ pub trait LlmProvider: Send + Sync {
         Err(ProviderError::Unsupported("chat completion"))
     }
 
+    /// Explicit bounded schema support; legacy and other transports default deny.
+    fn supports_bounded_response_schema(&self) -> bool {
+        false
+    }
+
     /// Pure identity of the separately bounded completion protocol. Legacy
     /// providers must opt in explicitly; no unbounded fallback is permitted.
     fn bounded_profile(&self) -> Result<bounded::ProviderProfile, bounded::BoundedCallError> {
@@ -331,6 +341,9 @@ impl EgressFirewall {
         provider: &dyn LlmProvider,
         action: &CompletionAction,
     ) -> Result<EgressPreview, ProviderError> {
+        if action.payload.response_schema.is_some() {
+            return Err(ProviderError::Unsupported("legacy response schema"));
+        }
         if !provider.capabilities().chat {
             return Err(ProviderError::Unsupported("chat completion"));
         }
@@ -636,6 +649,9 @@ struct ChatResponseMessage {
 }
 
 impl LlmProvider for OllamaProvider {
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
     fn bounded_profile(&self) -> Result<bounded::ProviderProfile, bounded::BoundedCallError> {
         bounded::ollama_profile(self.id(), &self.base_url, &self.completion_model)
     }
@@ -819,6 +835,7 @@ fn redact_payload(payload: &CompletionPayload) -> (CompletionPayload, usize) {
         .collect();
     (
         CompletionPayload {
+            response_schema: payload.response_schema.clone(),
             system,
             prompt,
             spans,
@@ -844,6 +861,7 @@ mod tests {
             action_id: "resolve-gap-1".into(),
             tier: AnalysisTier::Agentic,
             payload: CompletionPayload {
+                response_schema: None,
                 system: "Return JSON only".into(),
                 prompt: "Resolve the explicit Gap".into(),
                 spans: vec![PayloadSpan {

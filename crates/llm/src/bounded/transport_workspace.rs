@@ -30,6 +30,8 @@ impl CompletionLimits {
         let response = usize::try_from(self.0.response_bytes).ok()?;
         let output = usize::try_from(self.0.output_text_bytes).ok()?;
         let user = sum(&[input, input, b"\n\nEvidence spans (JSON):\n".len()])?;
+        // Optional schema is borrowed as RawValue from authorized input;
+        // transport does not repeat the preparation-only redaction check.
         // Borrowed request_wire DTOs clone no strings or Value tree. The span
         // encoding and formatted user message can coexist before encode caps
         // the wire buffer; charge both phases conservatively together.

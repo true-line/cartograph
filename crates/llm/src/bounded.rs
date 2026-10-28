@@ -451,6 +451,10 @@ impl EgressFirewall {
         let profile = provider.bounded_profile()?;
         validate_provider(provider, &profile)?;
         check_policy(self, &profile, action.tier)?;
+        if action.payload.response_schema.is_some() && !provider.supports_bounded_response_schema()
+        {
+            return Err(BoundedCallError::unsupported());
+        }
         let wire = prepare_wire(&profile, action, limits)?;
         Ok(PreparedBoundedCompletion {
             original_action_hash: wire.original_action_hash,
@@ -483,6 +487,11 @@ impl EgressFirewall {
         if profile != prepared.preview.profile {
             return Err(not_sent(FailureCode::ProfileChanged));
         }
+        if prepared.preview.egress.payload.response_schema.is_some()
+            && !provider.supports_bounded_response_schema()
+        {
+            return Err(BoundedCallError::unsupported());
+        }
         check_policy(self, &profile, prepared.preview.egress.tier)?;
         if profile.locality == Locality::Cloud {
             let grant = consent.ok_or_else(|| not_sent(FailureCode::ConsentRequired))?;
@@ -494,6 +503,22 @@ impl EgressFirewall {
             preview: prepared.preview.clone(),
         })
     }
+}
+
+// Borrow validated raw JSON without a Value tree or schema rewrite.
+fn response_schema(
+    payload: &CompletionPayload,
+) -> Result<Option<&serde_json::value::RawValue>, BoundedCallError> {
+    payload
+        .response_schema
+        .as_deref()
+        .map(|schema| {
+            if !schema.trim_start().starts_with('{') {
+                return Err(not_sent(FailureCode::InvalidInput));
+            }
+            serde_json::from_str(schema).map_err(|_| not_sent(FailureCode::InvalidInput))
+        })
+        .transpose()
 }
 
 fn prepare_wire(
@@ -515,6 +540,7 @@ fn prepare_wire(
     }
     let strings = [&action.payload.system, &action.payload.prompt]
         .into_iter()
+        .chain(action.payload.response_schema.iter())
         .chain(action.payload.spans.iter().flat_map(|span| {
             [
                 &span.id,
@@ -539,6 +565,14 @@ fn prepare_wire(
         FailureCode::InputTooLarge,
     )?
     .len() as u64;
+    if let Some(schema) = &action.payload.response_schema {
+        // Reject escaped text instead of pretending raw-text redaction inspects
+        // decoded schema strings. Never rewrite accepted schema semantics.
+        if schema.contains('\\') || crate::redact_text(schema).1 != 0 {
+            return Err(not_sent(FailureCode::InvalidInput));
+        }
+    }
+    response_schema(&action.payload)?;
     let (mut payload, mut redaction_count) = crate::redact_payload(&action.payload);
     // Legacy redaction is unchanged. The new protocol covers metadata too.
     for span in &mut payload.spans {
@@ -1001,6 +1035,7 @@ pub(super) fn complete_ollama(
             &request.payload().system,
             &user,
             request.limits().0.max_output_tokens,
+            response_schema(request.payload())?,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
@@ -1105,6 +1140,9 @@ pub(super) fn complete_openai_compatible(
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
     check_request(profile, request, control)?;
+    if request.payload().response_schema.is_some() {
+        return Err(BoundedCallError::unsupported());
+    }
     let user = user_message(request)?;
     let body = encode(
         &request_wire::openai_compatible(
@@ -1130,6 +1168,9 @@ pub(super) fn complete_anthropic(
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
     check_request(profile, request, control)?;
+    if request.payload().response_schema.is_some() {
+        return Err(BoundedCallError::unsupported());
+    }
     if api_key.is_empty()
         || api_key.len() > 4096
         || reqwest::header::HeaderValue::from_str(api_key).is_err()

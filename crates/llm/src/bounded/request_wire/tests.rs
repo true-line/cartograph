@@ -22,7 +22,7 @@ fn borrowed_ollama_request_preserves_wire_and_exact_cap() {
     for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
         for tokens in [0, 1, u32::MAX] {
             matches_wire_and_cap(
-                &ollama(&text, &text, &text, tokens),
+                &ollama(&text, &text, &text, tokens, None),
                 json!({
                     "model":text,
                     "messages":[{"role":"system","content":text},{"role":"user","content":text}],

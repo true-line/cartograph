@@ -115,6 +115,7 @@ mod tests {
 
     fn payload() -> CompletionPayload {
         CompletionPayload {
+            response_schema: None,
             system: "system \"quoted\" \\ é\n".into(),
             prompt: "previous \"prompt\"\u{0}".into(),
             spans: vec![PayloadSpan {
@@ -402,6 +403,7 @@ mod tests {
                 // Exact pre-refactor path: prompt JSON becomes a String, then
                 // the ordinary CompletionPayload serializer writes that string.
                 let reference = CompletionPayload {
+                    response_schema: None,
                     system: specialist.prompt(),
                     prompt: String::from_utf8(bounded_bytes(&value, MAX_INPUT_BYTES).unwrap())
                         .unwrap(),
