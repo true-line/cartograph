@@ -2745,10 +2745,41 @@ public class Elsewhere {
         && edge.dst == handler
         && edge.src.starts_with("gap:route:")));
 
+    // Reused files carry deferred evidence to the new commit: the pending
+    // Endpoint and Gap, and both HANDLES edges, cite it.
+    let next = SourceId {
+        repo: "local/demo",
+        commit: "abc123",
+    };
+    let (moved, stats) = extract_dir_incremental(dir.path(), &next, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+    let commit = |props: &serde_json::Value| props["prov"]["evidence"][0]["commit_sha"].clone();
+    let shadow_gap = moved
+        .nodes
+        .iter()
+        .find(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .unwrap();
+    let elsewhere = node(&moved.nodes, "ep:local/demo@GET:/elsewhere");
+    let handles = |src: &str| {
+        moved
+            .edges
+            .iter()
+            .find(|edge| edge.label == "HANDLES" && edge.src == src)
+            .unwrap()
+    };
+    for props in [
+        &shadow_gap.props,
+        &handles(&shadow_gap.id).props,
+        &elsewhere.props,
+        &handles(&elsewhere.id).props,
+    ] {
+        assert_eq!(commit(props), "abc123");
+    }
+
     // Shadowing is settled at the join, never baked into a cached file: once
     // the shadowing type is gone, the reused Shadowed.java is an Endpoint.
     std::fs::remove_file(dir.path().join(format!("{rest}/GET.java"))).unwrap();
-    let (out, stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let (out, stats) = extract_dir_incremental(dir.path(), &next, &mut cache).unwrap();
     assert_eq!((stats.recomputed_files, stats.deleted_files), (0, 1));
     assert!(
         out.nodes

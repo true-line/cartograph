@@ -313,6 +313,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.overload_gap.0.props, commit);
         retarget_props_commit(&mut pending.overload_gap.1.props, commit);
     }
+    for pending in &mut extraction.pending_jaxrs {
+        pending.retarget(|props| retarget_props_commit(props, commit));
+    }
     jpa::retarget(extraction, commit);
 }
 

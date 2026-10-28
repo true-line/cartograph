@@ -263,6 +263,17 @@ pub(crate) struct Pending {
     gap: (Node, Edge),
 }
 
+impl Pending {
+    /// Apply `retarget` to the props of all four held facts, so a cached
+    /// file's deferred evidence follows the commit being extracted.
+    pub(crate) fn retarget(&mut self, mut retarget: impl FnMut(&mut serde_json::Value)) {
+        retarget(&mut self.endpoint.0.props);
+        retarget(&mut self.endpoint.1.props);
+        retarget(&mut self.gap.0.props);
+        retarget(&mut self.gap.1.props);
+    }
+}
+
 /// Settle wildcard-proven endpoints against every type the repository
 /// declares (`declared` takes a fully qualified name). A shadowing type in
 /// another module of the same package is still a Gap, never a silent pick.
