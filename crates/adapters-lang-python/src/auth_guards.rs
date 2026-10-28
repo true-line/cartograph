@@ -14,8 +14,11 @@
 //!   `before_request` / `before_app_request` hook in the repository is
 //!   non-blocking, and every `wsgi_app` assignment wraps it in werkzeug's
 //!   `ProxyFix`. A hook is non-blocking when walking all descendants of
-//!   its body finds no `return` of a value other than the literal `None`,
-//!   no `raise`, and no `abort` call, and every repository function it
+//!   its body finds no `return` of a value other than the literal `None`
+//!   or a `(body, <status>)` pair with a literal 429 or 5xx status other
+//!   than 511, Network Authentication Required (#1317,
+//!   recorded as `request_hook_statuses_do_not_authenticate`; Flask applies
+//!   the pair's status over the body's), no `raise`, and no `abort` call, and every repository function it
 //!   calls is itself non-blocking (followed at most four deep; deeper or
 //!   a cycle is blocking). A called function's own `return` of a value
 //!   does not block: only the hook's return value ends the request, and a
@@ -154,6 +157,9 @@ pub(crate) struct FnEffects {
     pub symbol: Option<String>,
     pub blocks: bool,
     pub returns_value: bool,
+    /// Returns a `(body, 429 | 5xx)` pair, which ends a request without
+    /// authenticating it (#1317).
+    pub status_returns: bool,
     pub calls: Vec<FnKey>,
     /// It may end a request with 401/403 when called: it aborts, raises
     /// anything but a non-auth werkzeug error, or is decorated (#1173).
@@ -669,14 +675,19 @@ fn fn_effects(
         .parent()
         .is_some_and(|parent| parent.kind() == "decorated_definition");
     let mut returns_value = false;
+    let mut status_returns = false;
     let mut calls = BTreeSet::new();
     let mut refs = BTreeSet::new();
     every_descendant(body, &mut |node| match node.kind() {
         "return_statement" => {
-            if let Some(value) = node.named_child(0)
-                && unparenthesize(value).kind() != "none"
+            if let Some(value) = node.named_child(0).map(unparenthesize)
+                && value.kind() != "none"
             {
-                returns_value = true;
+                if non_auth_status_pair(cx, value) {
+                    status_returns = true;
+                } else {
+                    returns_value = true;
+                }
             }
         }
         "raise_statement" => {
@@ -720,12 +731,36 @@ fn fn_effects(
         symbol: Some(symbol.to_string()),
         blocks,
         returns_value,
+        status_returns,
         calls: calls.into_iter().collect(),
         denies,
         refs: refs.into_iter().collect(),
         proof: decorator_proof::proof(cx, root, function, resolver),
         evidence: cx.evidence(&function),
     })
+}
+
+/// Whether `value` is a `(body, <status>)` pair whose literal status is 429
+/// or 5xx other than 511: never a redirect, a credential challenge, a hidden resource
+/// (404) or a page served in the view's place (2xx). A third element may
+/// carry headers such as `WWW-Authenticate`, so it is not one.
+fn non_auth_status_pair(cx: &FileCx<'_>, value: TsNode<'_>) -> bool {
+    if !matches!(value.kind(), "tuple" | "expression_list") {
+        return false;
+    }
+    let parts = named(value)
+        .into_iter()
+        .filter(|part| part.kind() != "comment")
+        .collect::<Vec<_>>();
+    let [_, status] = parts.as_slice() else {
+        return false;
+    };
+    status.kind() == "integer"
+        && cx
+            .text(status)
+            .parse::<u16>()
+            // 511 is Network Authentication Required (RFC 6585).
+            .is_ok_and(|status| status == 429 || ((500..=599).contains(&status) && status != 511))
 }
 
 /// Whether `callee` is `<receiver>.before_request` (or the `before_app`
@@ -1383,6 +1418,7 @@ pub(crate) fn resolve(
                 }
                 merged.blocks |= found.blocks;
                 merged.returns_value |= found.returns_value;
+                merged.status_returns |= found.status_returns;
                 merged.calls.extend(found.calls);
                 merged.calls.sort();
                 merged.calls.dedup();
@@ -1406,6 +1442,8 @@ pub(crate) fn resolve(
     // Each registration whose hook may block, with the applications it is
     // registered on: cited on every `unknown` fact it reaches.
     let mut blocking = Vec::new();
+    // Non-blocking hooks that may end a request with a 429 / 5xx pair.
+    let mut status_hooks = Vec::new();
     for hook in &hooks {
         match hook {
             HookFact::Resolved {
@@ -1425,6 +1463,8 @@ pub(crate) fn resolve(
                         .clone()
                         .or_else(|| found.and_then(|found| found.symbol.clone()));
                     blocking.push((symbol, evidence.clone(), scope.apps(app)));
+                } else if found.is_some_and(|found| found.status_returns) {
+                    status_hooks.push(scope.apps(app));
                 }
             }
             HookFact::Unresolved { app, evidence } => {
@@ -1659,6 +1699,9 @@ pub(crate) fn resolve(
             if proven_non_auth {
                 assumptions.push("non_repository_calls_in_repository_decorators_do_not_abort");
                 assumptions.push("werkzeug_errors_keep_their_status");
+            }
+            if status_hooks.iter().any(|hook| hook.meets(apps)) {
+                assumptions.push("request_hook_statuses_do_not_authenticate");
             }
             let mut value = serde_json::json!({
                 "state": "none",
