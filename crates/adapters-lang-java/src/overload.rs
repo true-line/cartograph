@@ -6,7 +6,14 @@
 //! T0 still does not type arbitrary argument expressions, but a literal, a
 //! `null` or a lambda proves enough to rule a parameter out: a string
 //! literal can only bind to `String` or one of its supertypes, and a lambda
-//! never binds to a primitive, an array, `String` or a boxed primitive.
+//! never binds to a primitive or an array.
+//!
+//! Exclusions never depend on a class name meaning its `java.lang` type. A
+//! literal excludes every name outside its type's supertype list, and no
+//! project type can be a supertype of `String` or a boxed primitive, so a
+//! shadowing `Integer` or `p.String` only ever keeps a candidate. A lambda is
+//! not excluded by name at all: a project may declare its own functional
+//! interface called `Integer`.
 //!
 //! Narrowing only removes overloads the argument provably cannot invoke in
 //! any of Java's applicability phases (JLS 15.12.2), so when exactly one
@@ -195,20 +202,6 @@ const STRING_SUPERTYPES: &[&str] = &[
     "ConstantDesc",
 ];
 
-/// Boxed primitives and `String`: final classes that are not functional
-/// interfaces, so no lambda binds to them.
-const NON_FUNCTIONAL: &[&str] = &[
-    "String",
-    "Integer",
-    "Long",
-    "Short",
-    "Byte",
-    "Character",
-    "Boolean",
-    "Double",
-    "Float",
-];
-
 /// Whether `arg` could bind to a parameter of shape `param` in some
 /// applicability phase. `false` only when that is impossible.
 fn accepts(param: &ParamShape, arg: ArgKind) -> bool {
@@ -226,8 +219,7 @@ fn accepts(param: &ParamShape, arg: ArgKind) -> bool {
             widened.contains(&primitive.as_str())
         }
         (ParamShape::Array, arg) => arg == ArgKind::Null,
-        (ParamShape::Named(_), ArgKind::Null) => true,
-        (ParamShape::Named(name), ArgKind::Lambda) => !NON_FUNCTIONAL.contains(&name.as_str()),
+        (ParamShape::Named(_), ArgKind::Null | ArgKind::Lambda) => true,
         (ParamShape::Named(name), arg) => {
             let boxed = match arg {
                 ArgKind::Str => return STRING_SUPERTYPES.contains(&name.as_str()),
@@ -310,7 +302,9 @@ mod tests {
         assert!(accepts(&named("Number"), ArgKind::Long));
         assert!(!accepts(&named("String"), ArgKind::Int));
 
-        assert!(!accepts(&named("String"), ArgKind::Lambda));
+        // A same-package or qualified `Integer` may be a functional interface.
+        assert!(accepts(&named("String"), ArgKind::Lambda));
+        assert!(accepts(&named("Integer"), ArgKind::Lambda));
         assert!(!accepts(
             &ParamShape::Primitive("int".into()),
             ArgKind::Lambda

@@ -291,6 +291,8 @@ public class Waits<T> {
     void put(int[] values) {}
     void log(String message) {}
     void log(Object message) {}
+    void retry(Integer attempts) {}
+    void retry(Object attempts) {}
 
     void run() {
         await(() -> {}, 10 * 1000, "Failed to poll.");
@@ -298,7 +300,13 @@ public class Waits<T> {
         await(() -> {}, 5, this.details);
         put("x");
         log("both apply");
+        retry(() -> 1);
     }
+}
+
+// Shadows `java.lang.Integer` in this file: a lambda can bind to it.
+interface Integer {
+    int get();
 }
 "#;
     let path = "src/main/java/com/demo/Waits.java";
@@ -306,12 +314,12 @@ public class Waits<T> {
     let run = format!("sym:local/demo@{path}#Waits.run()");
     let eager = format!("sym:local/demo@{path}#Waits.await(Runnable,long,String)");
     let lazy = format!("sym:local/demo@{path}#Waits.await(Runnable,long,Supplier<String>)");
+    let custom = format!("sym:local/demo@{path}#Waits.retry(Integer)");
     let put = format!("sym:local/demo@{path}#Waits.put(T)");
 
-    // A string literal cannot bind to `Supplier`; a lambda cannot bind to
-    // `String`; a string literal binds to the class type variable `T` but
-    // not to an array.
-    for dst in [&eager, &lazy, &put] {
+    // A string literal cannot bind to `Supplier`, and binds to the class
+    // type variable `T` but not to an array.
+    for dst in [&eager, &put] {
         let resolved = edge(&out.edges, &run, dst, "CALLS");
         assert_eq!(
             resolved.props["overload_resolution"],
@@ -319,10 +327,13 @@ public class Waits<T> {
         );
     }
 
-    // A field access proves nothing, and `log(String)`/`log(Object)` both
-    // accept a string literal: no most-specific guess, two Gaps.
+    // A lambda is never excluded by a class name: here `Integer` is a
+    // functional interface, so `retry(() -> 1)` keeps both overloads, and the
+    // lazy `await` keeps its `String` overload too. A field access proves
+    // nothing, and `log(String)`/`log(Object)` both accept a string literal:
+    // no most-specific guess. Four Gaps.
     let gaps: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Gap").collect();
-    assert_eq!(gaps.len(), 2);
+    assert_eq!(gaps.len(), 4);
     for gap in &gaps {
         assert_eq!(
             gap.props["reason"],
@@ -330,9 +341,16 @@ public class Waits<T> {
         );
         edge(&out.edges, &run, &gap.id, "CALLS");
     }
-    for overload in ["log(String)", "log(Object)"] {
+    for overload in ["log(String)", "log(Object)", "retry(Object)"] {
         let dst = format!("sym:local/demo@{path}#Waits.{overload}");
         assert!(!out.edges.iter().any(|e| e.dst == dst && e.label == "CALLS"));
+    }
+    for dst in [&lazy, &custom] {
+        assert!(
+            !out.edges
+                .iter()
+                .any(|e| &e.dst == dst && e.label == "CALLS")
+        );
     }
 }
 
