@@ -2792,3 +2792,122 @@ public class Elsewhere {
             .any(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
     );
 }
+
+// AC-0431 (#1250): endpoints are product facts. A Spring controller or a
+// JAX-RS resource in a Maven/Gradle test source set yields no Endpoint and
+// no route Gap; the same declarations under `src/main` are unchanged.
+#[test]
+fn test_source_set_controllers_yield_no_product_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let spring = |name: &str, route: &str| {
+        format!(
+            r#"package com.demo;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class {name} {{
+    @GetMapping("{route}")
+    public String get() {{ return ""; }}
+}}
+"#
+        )
+    };
+    let jaxrs = |name: &str, route: &str| {
+        format!(
+            r#"package com.demo;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("{route}")
+public class {name} {{
+    @GET
+    public String get() {{ return ""; }}
+
+    @Path("/sub")
+    public Object sub() {{ return null; }}
+}}
+"#
+        )
+    };
+    write(
+        dir.path(),
+        "web/src/main/java/com/demo/Live.java",
+        &spring("Live", "/live"),
+    );
+    write(
+        dir.path(),
+        "web/src/main/java/com/demo/LiveRes.java",
+        &jaxrs("LiveRes", "/live-res"),
+    );
+    write(
+        dir.path(),
+        "web/src/test/java/com/demo/TestCtl.java",
+        &spring("TestCtl", "/test-only"),
+    );
+    write(
+        dir.path(),
+        "web/src/integrationTest/java/com/demo/ItRes.java",
+        &jaxrs("ItRes", "/it-res"),
+    );
+    // A package directory named `src/test` below a production root is product.
+    write(
+        dir.path(),
+        "web/src/main/java/com/acme/src/test/Nested.java",
+        &spring("Nested", "/nested"),
+    );
+    // A test-only type never shadows a product wildcard import.
+    write(
+        dir.path(),
+        "web/src/main/java/com/demo/Wild.java",
+        r#"package com.demo;
+
+import jakarta.ws.rs.*;
+
+@Path("/wild")
+public class Wild {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "web/src/test/java/com/demo/GET.java",
+        "package com.demo;\n\npublic @interface GET {}\n",
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@GET:/live",
+            "ep:local/demo@GET:/live-res",
+            "ep:local/demo@GET:/nested",
+            "ep:local/demo@GET:/wild",
+        ])
+    );
+    let route_gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:route:"))
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(route_gaps.len(), 1, "{route_gaps:?}");
+    assert!(route_gaps[0].contains("/src/main/"), "{route_gaps:?}");
+    // Test sources are still recovered as code: only the endpoint is withheld.
+    assert!(
+        out.nodes
+            .iter()
+            .any(|node| node.id.ends_with("TestCtl.java#TestCtl.get()"))
+    );
+}
