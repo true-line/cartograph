@@ -263,12 +263,28 @@ fn uncovered_language(extension: &str) -> Option<&'static str> {
         .map(|(_, language)| *language)
 }
 
-/// Languages Preflight names without a catalog entry, by extension.
+/// Languages Preflight names without a catalog entry, by extension. Only
+/// unambiguous extensions: `.pl` (Perl or Prolog) would name a language the
+/// file may not be.
 const NAMED_ONLY: &[(&str, &str)] = &[
     ("rb", "Ruby"),
     ("cs", "C#"),
     ("php", "PHP"),
     ("wasm", "WebAssembly"),
+    ("scala", "Scala"),
+    ("groovy", "Groovy"),
+    ("dart", "Dart"),
+    ("ex", "Elixir"),
+    ("exs", "Elixir"),
+    ("erl", "Erlang"),
+    ("clj", "Clojure"),
+    ("cljs", "Clojure"),
+    ("cljc", "Clojure"),
+    ("fs", "F#"),
+    ("fsx", "F#"),
+    ("vb", "Visual Basic"),
+    ("hs", "Haskell"),
+    ("lua", "Lua"),
 ];
 
 /// Every extension Preflight attributes to `language` (case-insensitive),
@@ -1665,5 +1681,60 @@ mod tests {
                 ("b".to_string(), 2, None)
             ]
         );
+    }
+
+    // AC-0426 (#1251): common languages with no adapter are named with their
+    // file count and one uncovered-language finding, never silently skipped.
+    #[test]
+    fn languages_without_an_adapter_are_named_not_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = [
+            ("core/Broker.scala", "Scala"),
+            ("src/Tasks.groovy", "Groovy"),
+            ("app/main.dart", "Dart"),
+            ("lib/app.ex", "Elixir"),
+            ("test/app_test.exs", "Elixir"),
+            ("src/app.erl", "Erlang"),
+            ("src/app.clj", "Clojure"),
+            ("src/app.cljs", "Clojure"),
+            ("src/app.cljc", "Clojure"),
+            ("src/App.fs", "F#"),
+            ("scripts/build.fsx", "F#"),
+            ("src/Module.vb", "Visual Basic"),
+            ("src/Main.hs", "Haskell"),
+            ("scripts/init.lua", "Lua"),
+        ];
+        for (path, _) in named {
+            write(dir.path(), path, "x\n");
+        }
+        // An ambiguous extension (Perl or Prolog) stays unnamed, not misnamed.
+        write(dir.path(), "tools/run.pl", "x\n");
+        let report = preflight(dir.path()).unwrap();
+        let mut expected: BTreeMap<&str, u64> = BTreeMap::new();
+        for (_, language) in named {
+            *expected.entry(language).or_default() += 1;
+        }
+        let found: BTreeMap<&str, u64> = report
+            .languages
+            .iter()
+            .map(|language| {
+                assert_eq!(language.adapter, None, "{}", language.language);
+                (language.language.as_str(), language.files)
+            })
+            .collect();
+        assert_eq!(found, expected);
+        for language in expected.keys() {
+            assert!(!planned_adapter_for(language));
+            assert_eq!(
+                report
+                    .unsupported
+                    .iter()
+                    .filter(|finding| finding.kind == "uncovered-language"
+                        && finding.request_adapter.as_deref() == Some(*language))
+                    .count(),
+                1,
+                "{language}"
+            );
+        }
     }
 }

@@ -47,7 +47,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0035 | AC-0242..0245 | spec, core-prov, core-graph, app, ui | P1 (ROADMAP) | — | ADR-0036 | T-0242..0245 |
 | US-0036 | AC-0246..0247 | spec, app, ui | P2 (ROADMAP) | F-* | ADR-0036 | T-0246..0247 |
 | US-0037 | AC-0248..0252 | agents, spec, app, ui | P3 (ROADMAP) | — | ADR-0019, ADR-0036 | T-0248..0252 |
-| US-0038 | AC-0253..0255, AC-0263, AC-0361, AC-0362, AC-0369, AC-0371 | ingest, adapters-fw, dynamic, adapters-plugin-host, app, ui | P1 (ROADMAP) | — | ADR-0017, ADR-0036 | T-0253..0255, T-0263, T-0361, T-0362, T-0369, T-0371 |
+| US-0038 | AC-0253..0255, AC-0263, AC-0361, AC-0362, AC-0369, AC-0371, AC-0426 | ingest, adapters-fw, dynamic, adapters-plugin-host, app, ui | P1 (ROADMAP) | — | ADR-0017, ADR-0036 | T-0253..0255, T-0263, T-0361, T-0362, T-0369, T-0371, T-0426 |
 | US-0039 | AC-0270 | semantic, app | P1 (#257) | — | ADR-0036 | T-0270 |
 | US-0040 | AC-0271..0278 | semantic, app, ui | P3 | — | ADR-0037, ADR-0038 | T-0271..0278 |
 | US-0041 | AC-0288..0290, AC-0304..0309, AC-0311..0312 | core-graph, spec, context-hub, mcp-wire, mcp-local, mcp-relay, app, ui | W8a (#718, #732 packaged client skill, #840 lazy read acquisition) | — | ADR-0044 | T-0288..0290, T-0304..0309, T-0311..0312 |
