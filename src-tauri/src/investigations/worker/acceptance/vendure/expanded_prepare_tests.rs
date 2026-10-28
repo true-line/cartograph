@@ -51,6 +51,7 @@ fn sha(bytes: &[u8]) -> String {
 fn expanded_captured_profile_freezes_reopens_and_recovers_lost_ack_without_execution() {
     captured_case(false);
 }
+// AC-0429: synthetic adapter mechanics only, not actual-provider or #598 acceptance.
 #[test]
 fn expanded_captured_local_analyst_executes_once_and_reopens_without_dispatch() {
     captured_case(true);

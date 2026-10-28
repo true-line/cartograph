@@ -69,7 +69,7 @@ pub(in super::super) fn run(
         },
     )
 }
-// AC-0287/#598: explicit manual adapter, never enabled in ordinary test runs.
+// AC-0429: explicit manual adapter; ordinary tests do not execute a real provider.
 #[test]
 #[ignore = "manual captured-profile local provider; requires independent frozen definition and explicit execute/reopen action"]
 fn vendure_captured_local_analyst() {
