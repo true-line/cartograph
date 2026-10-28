@@ -20,3 +20,18 @@ url = "https://github.com/vendure-ecommerce/vendure"
 commit = "2cc309deb5394af176314552ac7320a7b26a0104"
 # The repository root holds a CLAUDE.md symlink, which TS/JS capture refuses (#1229).
 path = "packages/core"
+
+[[repo]]
+name = "openmrs-core"
+url = "https://github.com/openmrs/openmrs-core"
+commit = "0755f785f7d237a7a2e9d9f4e76aff43b7613ad3"
+
+[[repo]]
+name = "kafka"
+url = "https://github.com/apache/kafka"
+commit = "7596c4bc4b252083fa2fec8da798d16dc988f077"
+
+[[repo]]
+name = "kubernetes"
+url = "https://github.com/kubernetes/kubernetes"
+commit = "7f2897a0f477bcd9a78a6ec9fea35dffb639510a"
