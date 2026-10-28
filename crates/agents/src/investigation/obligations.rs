@@ -399,6 +399,11 @@ fn request_family(
             &["domain-analyst@10", "evidence-auditor@10"],
             b"cartograph:investigation-client-intent:v7\0",
         )),
+        ("investigation-v2", 7, "domain-analyst@11" | "evidence-auditor@11") => Ok((
+            7,
+            &["domain-analyst@11", "evidence-auditor@11"],
+            b"cartograph:investigation-client-intent:v7\0",
+        )),
         _ => Err(InvestigationError::InvalidRequest),
     }
 }

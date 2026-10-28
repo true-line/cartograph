@@ -882,6 +882,14 @@ forgetting remain pending. A later native handoff must use the same recorded
 directory map and databases after harness handles close, without copying or
 rebasing databases.
 
+Captured analyst definitions may explicitly include `"specialist_id":"domain-analyst@11"`
+for versioned progress guidance (#1273). Omitting the field retains @10 and its
+original serialized identity. Use a new frozen definition, nonce and output for
+@11; never modify an existing @10 definition or receipt. The selected role is
+bound through the frozen request and its hashes in the start/manifest. Existing
+synthetic Expanded controls keep their @10 definitions. This is preparation and
+execution plumbing, not observed model-efficacy or full #598 acceptance.
+
 **Vendure selection measurement (#686).** Keep the preparation receipt and the
 same disposable profile in place. Measurement reopens those production stores;
 it must not recreate the profile, register another source, copy databases or

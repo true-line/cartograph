@@ -1177,3 +1177,27 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
     }
     assert_eq!(messages.len(), 9);
 }
+
+// AC-0432: both generations keep their saved definitions through actual worker refusal/reopen.
+#[test]
+fn progress_guidance_roles_preserve_saved_v10_and_v11_definitions() {
+    for role in [
+        SpecialistId::DomainAnalystV10,
+        SpecialistId::EvidenceAuditorV10,
+        SpecialistId::DomainAnalystV11,
+        SpecialistId::EvidenceAuditorV11,
+    ] {
+        let provider = Arc::new(Scripted::new(Mode::Malformed));
+        let f = NextFixture::new(provider.as_ref(), role);
+        f.run(provider);
+        let state = f.base.base.app.state::<AppState>();
+        let detail = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.summary.schema_version, 7);
+        assert_eq!(detail.specialist, role.definition().unwrap());
+        assert_eq!(detail.usage.model_invocations, 1);
+        assert_eq!(detail.usage.tool_actions, 0);
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    }
+}

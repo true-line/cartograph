@@ -49,14 +49,19 @@ fn sha(bytes: &[u8]) -> String {
 // it is not real Vendure/provider/native acceptance evidence.
 #[test]
 fn expanded_captured_profile_freezes_reopens_and_recovers_lost_ack_without_execution() {
-    captured_case(false);
+    captured_case(false, None);
 }
 // AC-0429: synthetic adapter mechanics only, not actual-provider or #598 acceptance.
 #[test]
 fn expanded_captured_local_analyst_executes_once_and_reopens_without_dispatch() {
-    captured_case(true);
+    captured_case(true, None);
 }
-fn captured_case(execute: bool) {
+// AC-0432: explicit @11 is frozen separately; historical absent-field @10 stays byte stable.
+#[test]
+fn captured_progress_guidance_role_is_explicit_and_reopen_bound() {
+    captured_case(false, Some("domain-analyst@11"));
+}
+fn captured_case(execute: bool, specialist: Option<&str>) {
     let case = Case::new();
     let prepared = case.prepare().unwrap();
     let base = case.root.parent().unwrap();
@@ -78,6 +83,7 @@ fn captured_case(execute: bool) {
         })
         .unwrap();
     let expected = Definition {
+        specialist_id: specialist.map(str::to_owned),
         binding: super::super::completion::prepare::PreparationBinding {
             run_id: "captured-test".into(),
             protocol_hash: "a".repeat(64),
@@ -124,6 +130,17 @@ fn captured_case(execute: bool) {
             InputPolicy::OfflineFixture,
         )
     };
+    if specialist.is_none() {
+        let wire = serde_json::to_vec(&expected).unwrap();
+        assert!(
+            serde_json::to_value(&expected)
+                .unwrap()
+                .get("specialist_id")
+                .is_none()
+        );
+        let restored: Definition = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), wire);
+    }
     let manifest = run(&expected).unwrap();
     let wire = std::fs::read(output.join("analyst-request.json")).unwrap();
     let request: StagedObligationRequest = serde_json::from_slice(&wire).unwrap();
@@ -133,7 +150,11 @@ fn captured_case(execute: bool) {
             request.specialist_id.as_str(),
             request.limit_profile.as_str()
         ),
-        (7, "domain-analyst@10", "investigation-v2")
+        (
+            7,
+            specialist.unwrap_or("domain-analyst@10"),
+            "investigation-v2"
+        )
     );
     assert!(request.obligations.obligations.iter().any(|item| matches!(item,
         Obligation::Inventory { target, .. } if target.inventory_hash == prepared.graph.coverage.inventory_hash)));
@@ -227,9 +248,19 @@ fn captured_case(execute: bool) {
         "digest",
         "nonce",
         "binding",
+        "specialist",
+        "unsupported_specialist",
     ] {
         let mut changed = expected.clone();
         match field {
+            "specialist" => {
+                changed.specialist_id = Some(if specialist.is_some() {
+                    "domain-analyst@10".into()
+                } else {
+                    "domain-analyst@11".into()
+                })
+            }
+            "unsupported_specialist" => changed.specialist_id = Some("evidence-auditor@11".into()),
             "question" => changed.question.push('?'),
             "selection" => changed.selections[0].ordinal += 1,
             "provider" => changed.provider.model.push('x'),
