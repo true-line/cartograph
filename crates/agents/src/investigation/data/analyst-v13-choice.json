@@ -1,0 +1,226 @@
+{
+  "$defs": {
+    "fact_key": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {"kind": {"const": "node"}, "id": {"type": "string"}},
+          "required": ["kind", "id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "edge"},
+            "source": {"type": "string"},
+            "label": {"type": "string"},
+            "destination": {"type": "string"}
+          },
+          "required": ["kind", "source", "label", "destination"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "range_role": {
+      "enum": [
+        "provenance",
+        "rule_exit",
+        "condition_branch",
+        "condition_expression",
+        "return_value",
+        "throw_value",
+        "dependency",
+        "dependency_declaration",
+        "redaction",
+        "definition_declaration",
+        "definition_use",
+        "definition_initializer",
+        "definition_expression",
+        "definition_dependency",
+        "definition_dependency_declaration"
+      ]
+    },
+    "query_scope": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {"type": {"const": "all"}},
+          "required": ["type"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {"const": "neighborhood"},
+            "anchor": {"type": "string"},
+            "hops": {"type": "integer", "minimum": 1, "maximum": 3}
+          },
+          "required": ["type", "anchor", "hops"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "query_cursor": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "snapshot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "selection_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 50000}
+          },
+          "required": ["snapshot_id", "selection_id", "offset"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "query": {
+      "type": "object",
+      "properties": {
+        "scope": {"$ref": "#/$defs/query_scope"},
+        "kind": {"anyOf": [{"type": "null"}, {"enum": ["node", "edge"]}]},
+        "labels": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "maxItems": 16
+        },
+        "max_facts": {"type": "integer", "minimum": 1, "maximum": 32},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768},
+        "cursor": {"$ref": "#/$defs/query_cursor"}
+      },
+      "required": ["scope", "kind", "labels", "max_facts", "max_bytes", "cursor"],
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "claim_kind": {
+          "enum": [
+            "implemented_behavior",
+            "documented_intent",
+            "inferred_interpretation",
+            "proposed_design"
+          ]
+        },
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "statement": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "citation_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": ["claim_kind", "title", "statement", "citation_ids", "limitations"],
+      "additionalProperties": false
+    },
+    "supported_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "finish"},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}, "minItems": 1, "maxItems": 12},
+        "knowledge_completeness": {"const": "partial"},
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": ["type", "findings", "knowledge_completeness", "limitations"],
+      "additionalProperties": false
+    },
+    "supported_wrapper": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": 1},
+        "outcome": {"const": "supported"},
+        "action": {"$ref": "#/$defs/supported_action"}
+      },
+      "required": ["schema_version", "outcome", "action"],
+      "additionalProperties": false
+    },
+    "insufficient_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "finish"},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}, "minItems": 0, "maxItems": 0},
+        "knowledge_completeness": {"const": "insufficient_evidence"},
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": ["type", "findings", "knowledge_completeness", "limitations"],
+      "additionalProperties": false
+    },
+    "insufficient_wrapper": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": 1},
+        "outcome": {"const": "insufficient_evidence"},
+        "action": {"$ref": "#/$defs/insufficient_action"}
+      },
+      "required": ["schema_version", "outcome", "action"],
+      "additionalProperties": false
+    }
+  },
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {"const": "query_context"},
+        "context_id": {"type": "string"},
+        "query": {"$ref": "#/$defs/query"}
+      },
+      "required": ["type", "context_id", "query"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {"const": "read_evidence"},
+        "fact": {"$ref": "#/$defs/fact_key"},
+        "role": {"$ref": "#/$defs/range_role"},
+        "index": {"type": "integer", "minimum": 0, "maximum": 1023}
+      },
+      "required": ["type", "fact", "role", "index"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {"const": "read_coverage_inventory"},
+        "context_id": {"type": "string"},
+        "repo": {"type": "string"},
+        "inventory_hash": {"type": "string"},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768}
+      },
+      "required": ["type", "context_id", "repo", "inventory_hash", "max_bytes"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {"const": "replay_query"},
+        "context_id": {"type": "string"},
+        "query_index": {"type": "integer", "minimum": 0},
+        "query_id": {"type": "string"}
+      },
+      "required": ["type", "context_id", "query_index", "query_id"],
+      "additionalProperties": false
+    },
+    {"$ref": "#/$defs/supported_wrapper"},
+    {"$ref": "#/$defs/insufficient_wrapper"}
+  ]
+}

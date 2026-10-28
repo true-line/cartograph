@@ -60,7 +60,11 @@ fn expanded_captured_local_analyst_executes_once_and_reopens_without_dispatch() 
 // AC-0432, AC-0439: explicit @11/@12 is frozen separately; historical absent-field @10 stays byte stable.
 #[test]
 fn captured_progress_guidance_role_is_explicit_and_reopen_bound() {
-    for role in ["domain-analyst@11", "domain-analyst@12"] {
+    for role in [
+        "domain-analyst@11",
+        "domain-analyst@12",
+        "domain-analyst@13",
+    ] {
         captured_case(false, Some(role));
     }
 }

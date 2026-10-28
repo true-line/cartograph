@@ -8,6 +8,10 @@ pub(in crate::investigation) fn admission_protected_fields(
 ) -> Result<(), InvestigationError> {
     let before = parse_prompt(&original.prompt)?;
     let after = parse_prompt(&redacted.prompt)?;
+    response_schema::validate(original, &before)?;
+    if original.response_schema != redacted.response_schema {
+        return Err(InvestigationError::InvalidInput);
+    }
     admission_protected_values(&before, &after, &original.system, &redacted.system)
 }
 

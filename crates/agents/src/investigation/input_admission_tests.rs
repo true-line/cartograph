@@ -135,6 +135,7 @@ fn admission_prompt_builds_actual_progressive_input_for_both_roles_and_modes() {
         SpecialistId::EvidenceAuditorV10,
         SpecialistId::DomainAnalystV11,
         SpecialistId::DomainAnalystV12,
+        SpecialistId::DomainAnalystV13,
         SpecialistId::EvidenceAuditorV11,
     ] {
         let fixture = Fixture::new(role, 7);
@@ -358,6 +359,7 @@ fn admission_prompt_reserve_dominates_actual_simultaneous_feedback_in_both_modes
     for role in [
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
+        SpecialistId::DomainAnalystV13,
     ] {
         let mut fixture = Fixture::new(role, 7);
         // Immutable source-authored strings stay fixed even when redaction
@@ -1030,3 +1032,113 @@ mod sealing_tests;
 
 #[path = "input_source_preview_tests.rs"]
 mod source_preview_tests;
+
+#[test]
+fn analyst_schema_is_exact_for_role_mode_and_reserve() {
+    // AC-0445: real preparation, firewall and sealing; no provider execution.
+    use llm::{EgressFirewall, EgressPolicy, LlmProvider, OllamaProvider};
+    let role = SpecialistId::DomainAnalystV13;
+    let fixture = Fixture::new(role, 7);
+    let provider = OllamaProvider::local_default().unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let limits = llm::bounded::CompletionLimits::default();
+    for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+        let input = fixture.build(role, &usage(mode), mode, 0, None).unwrap();
+        let expected = response_schema::select(role, mode).unwrap();
+        assert_eq!(input.payload.response_schema.as_deref(), Some(expected));
+        let action = input.action("inv:schema".into()).unwrap();
+        let prepared = firewall
+            .prepare_bounded(&provider, &action, &limits)
+            .unwrap();
+        let unsupported = llm::openai_compatible::OpenAiCompatibleProvider::new(
+            "http://127.0.0.1:8000",
+            "test",
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            firewall
+                .prepare_bounded(&unsupported, &action, &limits)
+                .unwrap_err()
+                .code,
+            llm::bounded::FailureCode::Unsupported
+        );
+        assert_eq!(
+            prepared.preview().egress.payload.response_schema,
+            action.payload.response_schema
+        );
+        assert!(
+            input
+                .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+                .unwrap()
+                .is_some()
+        );
+        for replacement in [
+            None,
+            Some("{}".into()),
+            response_schema::select(
+                role,
+                if mode == CompletionCallMode::Choice {
+                    CompletionCallMode::FinishOnly
+                } else {
+                    CompletionCallMode::Choice
+                },
+            )
+            .map(str::to_owned),
+        ] {
+            let mut changed = input.clone();
+            changed.payload.response_schema = replacement;
+            assert!(
+                changed
+                    .admission_reserve_basis(&INVESTIGATION_V2_POLICY)
+                    .is_err()
+            );
+            let prepared = firewall
+                .prepare_bounded(
+                    &provider,
+                    &changed.action("inv:schema".into()).unwrap(),
+                    &limits,
+                )
+                .unwrap();
+            assert!(
+                changed
+                    .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+                    .is_err()
+            );
+        }
+        assert!(
+            input
+                .measure_v9_reserve_with_policy(
+                    &provider.bounded_profile().unwrap(),
+                    &limits,
+                    "inv:schema",
+                    &INVESTIGATION_V2_POLICY
+                )
+                .is_ok()
+        );
+    }
+    let old = Fixture::new(SpecialistId::DomainAnalystV12, 7)
+        .build(
+            SpecialistId::DomainAnalystV12,
+            &usage(CompletionCallMode::Choice),
+            CompletionCallMode::Choice,
+            0,
+            None,
+        )
+        .unwrap();
+    assert!(old.payload.response_schema.is_none());
+    assert_eq!(
+        SpecialistId::DomainAnalystV12
+            .definition()
+            .unwrap()
+            .prompt_fingerprint,
+        "4cc0655d2e7954c4062c6d7c33cfef2f2d87ccc4a721398104a7afd7c675a4c8"
+    );
+    assert_ne!(
+        role.definition().unwrap().prompt_fingerprint,
+        SpecialistId::DomainAnalystV12
+            .definition()
+            .unwrap()
+            .prompt_fingerprint
+    );
+}

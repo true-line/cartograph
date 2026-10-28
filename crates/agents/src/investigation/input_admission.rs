@@ -86,7 +86,7 @@ impl InvestigationInput {
         if metadata.next_call_mode_with_policy(usage, policy)? != mode {
             return Err(InvestigationError::InvalidInput);
         }
-        let (input, mut prompt) = Self::prepare_progressive_parts_with_policy(
+        let (mut input, mut prompt) = Self::prepare_progressive_parts_with_policy(
             question,
             specialist,
             ledger,
@@ -107,6 +107,8 @@ impl InvestigationInput {
             capacity_refusal_count,
             &capacity_feedback,
         )?;
+        input.payload.response_schema =
+            response_schema::select(specialist, mode).map(str::to_owned);
         input.finish_progressive_input(&prompt, coverage_details)
     }
 }
@@ -272,6 +274,8 @@ impl InvestigationInput {
             action_hash: "f".repeat(64),
             reason: CapacityRefusalReason::UnprovenContribution,
         };
+        // admission_reserve_basis already authenticated exact role/schema.
+        let schema_role = action.payload.response_schema.is_some();
         let mut measure = |mode| -> Result<_, InvestigationError> {
             let mut prompt = reserved.clone();
             apply_admission_progress(
@@ -285,6 +289,11 @@ impl InvestigationInput {
                 context_hub::logical::count(&prompt).unwrap()
                     <= reserve_projection_bytes(policy).unwrap()
             );
+            action.payload.response_schema = if schema_role {
+                response_schema::select(SpecialistId::DomainAnalystV13, mode).map(str::to_owned)
+            } else {
+                None
+            };
             wire::replace_prompt(&mut action.payload, &prompt, MAX_INPUT_BYTES)?;
             if protect {
                 let inspected = llm::bounded::inspect_bounded_action(profile, &action, limits)
@@ -638,6 +647,7 @@ impl InvestigationInput {
                 SpecialistId::EvidenceAuditorV10,
                 SpecialistId::DomainAnalystV11,
                 SpecialistId::DomainAnalystV12,
+                SpecialistId::DomainAnalystV13,
                 SpecialistId::EvidenceAuditorV11,
             ]
             .iter()
@@ -647,6 +657,7 @@ impl InvestigationInput {
         }
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
+        response_schema::validate(&self.payload, &prompt)?;
         let proof = self
             .ledger
             .coverage

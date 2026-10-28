@@ -1,0 +1,87 @@
+{
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "properties": {
+        "claim_kind": {
+          "enum": [
+            "implemented_behavior",
+            "documented_intent",
+            "inferred_interpretation",
+            "proposed_design"
+          ]
+        },
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "statement": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "citation_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": ["claim_kind", "title", "statement", "citation_ids", "limitations"],
+      "additionalProperties": false
+    },
+    "supported_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "finish"},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}, "minItems": 1, "maxItems": 12},
+        "knowledge_completeness": {"const": "partial"},
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": ["type", "findings", "knowledge_completeness", "limitations"],
+      "additionalProperties": false
+    },
+    "supported_wrapper": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": 1},
+        "outcome": {"const": "supported"},
+        "action": {"$ref": "#/$defs/supported_action"}
+      },
+      "required": ["schema_version", "outcome", "action"],
+      "additionalProperties": false
+    },
+    "insufficient_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "finish"},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}, "minItems": 0, "maxItems": 0},
+        "knowledge_completeness": {"const": "insufficient_evidence"},
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": ["type", "findings", "knowledge_completeness", "limitations"],
+      "additionalProperties": false
+    },
+    "insufficient_wrapper": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": 1},
+        "outcome": {"const": "insufficient_evidence"},
+        "action": {"$ref": "#/$defs/insufficient_action"}
+      },
+      "required": ["schema_version", "outcome", "action"],
+      "additionalProperties": false
+    }
+  },
+  "anyOf": [{"$ref": "#/$defs/supported_wrapper"}, {"$ref": "#/$defs/insufficient_wrapper"}]
+}
