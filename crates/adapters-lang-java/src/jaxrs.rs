@@ -254,18 +254,25 @@ fn route_gap(
 
 /// An Endpoint whose annotations are proven only by a wildcard import. The
 /// directory join emits `endpoint` unless the repository declares a type
-/// named in `shadowed_by`, in which case it emits `gap` instead.
+/// named by every member of some `shadowed_by` group, in which case it emits
+/// `gap` instead. A group is the alternatives that prove one annotation role
+/// (Spring's `@RestController` or `@Controller`); any one unshadowed member
+/// still proves that role.
 #[derive(Debug, Clone)]
 pub(crate) struct Pending {
-    /// `<file package>.<Name>` for each wildcard-proven annotation.
-    shadowed_by: Vec<String>,
+    /// `<file package>.<Name>` per wildcard-proven annotation, grouped by role.
+    shadowed_by: Vec<Vec<String>>,
     endpoint: (Node, Edge),
     gap: (Node, Edge),
 }
 
 impl Pending {
     /// Spring endpoints proven only by a wildcard import settle the same way.
-    pub(crate) fn new(shadowed_by: Vec<String>, endpoint: (Node, Edge), gap: (Node, Edge)) -> Self {
+    pub(crate) fn new(
+        shadowed_by: Vec<Vec<String>>,
+        endpoint: (Node, Edge),
+        gap: (Node, Edge),
+    ) -> Self {
         Self {
             shadowed_by,
             endpoint,
@@ -293,7 +300,11 @@ pub(crate) fn resolve(
 ) {
     let mut gaps = BTreeSet::new();
     for pending in pending {
-        let (node, edge) = if pending.shadowed_by.iter().any(|fqn| declared(fqn)) {
+        let (node, edge) = if pending
+            .shadowed_by
+            .iter()
+            .any(|group| group.iter().all(|fqn| declared(fqn)))
+        {
             if !gaps.insert(pending.gap.0.id.clone()) {
                 continue;
             }
@@ -489,7 +500,7 @@ pub(crate) fn endpoints(
             edges.push(edge);
         } else {
             pending.push(Pending {
-                shadowed_by: wildcard.into_iter().collect(),
+                shadowed_by: wildcard.into_iter().map(|fqn| vec![fqn]).collect(),
                 endpoint: (node, edge),
                 gap: route_gap(
                     cx,

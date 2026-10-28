@@ -3489,3 +3489,94 @@ public class Orders {
             .any(|node| node.id == "ep:local/demo@GET:/orders")
     );
 }
+
+// AC-0438 (#1296 review): any one proven stereotype makes a controller, so a
+// directly imported `@Controller` keeps the endpoint whatever the annotation
+// order, and wildcard-only stereotypes fail closed only when every one of
+// them is shadowed by a same-package type.
+#[test]
+fn spring_direct_controller_proof_dominates_a_shadowed_wildcard() {
+    let dir = tempfile::tempdir().unwrap();
+    let one = "src/main/java/com/demo/one";
+    let half = "src/main/java/com/demo/half";
+    let both = "src/main/java/com/demo/both";
+    let class = |package: &str, imports: &str, annotations: &str, class: &str| {
+        format!(
+            "package {package};\n\n{imports}\n{annotations}\npublic class {class} {{\n    @GetMapping(\"/{route}\")\n    public String get() {{ return \"\"; }}\n}}\n",
+            route = class.to_lowercase()
+        )
+    };
+    let direct = "import org.springframework.web.bind.annotation.*;\nimport org.springframework.web.bind.annotation.GetMapping;\nimport org.springframework.stereotype.Controller;\n";
+    let wildcards = "import org.springframework.web.bind.annotation.*;\nimport org.springframework.web.bind.annotation.GetMapping;\nimport org.springframework.stereotype.*;\n";
+    // Both stereotypes are declared here, but the named `Controller` import
+    // wins over its same-package type, so the endpoints stand.
+    for (package, shadows) in [
+        (one, &["RestController", "Controller"][..]),
+        (half, &["RestController"][..]),
+        (both, &["RestController", "Controller"][..]),
+    ] {
+        let name = package.rsplit('/').next().unwrap();
+        for shadow in shadows {
+            write(
+                dir.path(),
+                &format!("{package}/{shadow}.java"),
+                &format!("package com.demo.{name};\n\npublic @interface {shadow} {{}}\n"),
+            );
+        }
+    }
+    for (name, imports, annotations) in [
+        ("RestFirst", direct, "@RestController\n@Controller"),
+        ("ControllerFirst", direct, "@Controller\n@RestController"),
+    ] {
+        write(
+            dir.path(),
+            &format!("{one}/{name}.java"),
+            &class("com.demo.one", imports, annotations, name),
+        );
+    }
+    write(
+        dir.path(),
+        &format!("{half}/OneShadowed.java"),
+        &class(
+            "com.demo.half",
+            wildcards,
+            "@RestController\n@Controller",
+            "OneShadowed",
+        ),
+    );
+    write(
+        dir.path(),
+        &format!("{both}/AllShadowed.java"),
+        &class(
+            "com.demo.both",
+            wildcards,
+            "@RestController\n@Controller",
+            "AllShadowed",
+        ),
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint" && node.props["framework"] == "spring")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@GET:/controllerfirst",
+            "ep:local/demo@GET:/oneshadowed",
+            "ep:local/demo@GET:/restfirst",
+        ])
+    );
+    let gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "spring")
+        .map(|node| node.props["handler_sym"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![format!("sym:local/demo@{both}/AllShadowed.java#AllShadowed.get()").as_str()]
+    );
+}

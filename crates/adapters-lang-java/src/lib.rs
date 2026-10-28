@@ -959,18 +959,27 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         };
         let class_annotations = declaration_annotations(&cx, class_decl);
         // Same-package types that would obscure a wildcard-only proof.
-        let mut shadowed_by = BTreeSet::new();
-        let controller = class_annotations.iter().find_map(|(name, annotation)| {
-            matches!(name.as_str(), "RestController" | "Controller")
-                .then(|| spring_proof(&cx, *annotation, name, &imports))
-                .flatten()
-                .map(|wildcard| (name, wildcard))
-        });
-        let Some((controller, wildcard)) = controller else {
+        let mut shadowed_by: BTreeSet<Vec<String>> = BTreeSet::new();
+        // Any one proven stereotype makes the class a controller: a direct
+        // proof dominates, and wildcard-only proofs fail closed only when a
+        // same-package type shadows every one of them.
+        let controllers: Vec<(&str, bool)> = class_annotations
+            .iter()
+            .filter(|(name, _)| matches!(name.as_str(), "RestController" | "Controller"))
+            .filter_map(|(name, annotation)| {
+                spring_proof(&cx, *annotation, name, &imports)
+                    .map(|wildcard| (name.as_str(), wildcard))
+            })
+            .collect();
+        if controllers.is_empty() {
             continue;
-        };
-        if wildcard {
-            shadowed_by.insert(same_package_type(package.as_deref(), controller));
+        }
+        if controllers.iter().all(|(_, wildcard)| *wildcard) {
+            let group: BTreeSet<String> = controllers
+                .iter()
+                .map(|(controller, _)| same_package_type(package.as_deref(), controller))
+                .collect();
+            shadowed_by.insert(group.into_iter().collect());
         }
         // "No @RequestMapping" and "@RequestMapping with no path argument"
         // both mean Spring's default base (""); a present-but-dynamic base
@@ -982,7 +991,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 .map(|wildcard| (*node, wildcard))
         });
         if let Some((_, true)) = base_mapping {
-            shadowed_by.insert(same_package_type(package.as_deref(), "RequestMapping"));
+            shadowed_by.insert(vec![same_package_type(
+                package.as_deref(),
+                "RequestMapping",
+            )]);
         }
         let base_mapping = base_mapping.map(|(node, _)| node);
         let bases = match base_mapping {
@@ -998,7 +1010,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             };
             let mut shadowed_by = shadowed_by.clone();
             if wildcard {
-                shadowed_by.insert(same_package_type(package.as_deref(), &name));
+                shadowed_by.insert(vec![same_package_type(package.as_deref(), &name)]);
             }
             let tails = annotation_path(&cx, annotation).segments();
             let (Some(bases), Some(tails)) = (bases.as_ref(), tails) else {
