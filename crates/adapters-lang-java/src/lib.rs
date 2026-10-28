@@ -593,6 +593,9 @@ fn spring_proof(
     spring_proven(name, imports).then(|| !imports.bindings.contains_key(name))
 }
 
+const SPRING_SHADOWED: &str =
+    "Spring annotation proven only by a wildcard import is shadowed by a same-package type";
+
 /// A Spring route Gap anchored at the method mapping, the last evidence node.
 fn spring_route_gap(
     cx: &FileCx<'_>,
@@ -1026,15 +1029,26 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     (true, Some(base)) => vec![base, annotation],
                     _ => vec![annotation],
                 };
-                let (node, edge) = spring_route_gap(
+                let dynamic = spring_route_gap(
                     &cx,
                     &evidence,
                     handler,
                     http_method,
                     "dynamic Spring mapping path",
                 );
-                out.nodes.push(node);
-                out.edges.push(edge);
+                if shadowed_by.is_empty() {
+                    out.nodes.push(dynamic.0);
+                    out.edges.push(dynamic.1);
+                } else {
+                    // A shadowed binding, not the path, is then what blocks.
+                    let shadowed =
+                        spring_route_gap(&cx, &evidence, handler, http_method, SPRING_SHADOWED);
+                    out.pending_endpoints.push(jaxrs::Pending::new(
+                        shadowed_by.iter().cloned().collect(),
+                        dynamic,
+                        shadowed,
+                    ));
+                }
                 continue;
             };
             // Sorted and de-duplicated so emission order never depends on
@@ -1051,15 +1065,8 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 .collect();
             // A wildcard-only proof waits for the directory join, where a
             // same-package type of that name turns the route into a Gap.
-            let shadow_gap = (!shadowed_by.is_empty()).then(|| {
-                spring_route_gap(
-                    &cx,
-                    &evidence,
-                    handler,
-                    http_method,
-                    "Spring annotation proven only by a wildcard import is shadowed by a same-package type",
-                )
-            });
+            let shadow_gap = (!shadowed_by.is_empty())
+                .then(|| spring_route_gap(&cx, &evidence, handler, http_method, SPRING_SHADOWED));
             for route in routes {
                 let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
                 let node = Node {

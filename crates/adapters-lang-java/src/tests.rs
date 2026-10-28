@@ -3580,3 +3580,63 @@ fn spring_direct_controller_proof_dominates_a_shadowed_wildcard() {
         vec![format!("sym:local/demo@{both}/AllShadowed.java#AllShadowed.get()").as_str()]
     );
 }
+
+// AC-0438 (#1296 review): a shadowed annotation, not its dynamic path, blocks
+// the route, so a shadowed dynamic mapping settles to the shadowing Gap at the
+// directory join while an unshadowed one keeps the dynamic-path Gap.
+#[test]
+fn spring_shadowed_dynamic_mappings_report_the_shadowing() {
+    let dir = tempfile::tempdir().unwrap();
+    let controller = |package: &str| {
+        format!(
+            "package {package};\n\nimport org.springframework.web.bind.annotation.*;\n\n@RestController\npublic class Paths {{\n    static final String PATH = \"/p\";\n    @GetMapping(PATH)\n    public String get() {{ return \"\"; }}\n}}\n"
+        )
+    };
+    write(
+        dir.path(),
+        "src/main/java/com/demo/shadow/GetMapping.java",
+        "package com.demo.shadow;\n\npublic @interface GetMapping { String value() default \"\"; }\n",
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/shadow/Paths.java",
+        &controller("com.demo.shadow"),
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/plain/Paths.java",
+        &controller("com.demo.plain"),
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let gaps: BTreeSet<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "spring")
+        .map(|node| {
+            (
+                node.props["handler_sym"].as_str().unwrap(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        BTreeSet::from([
+            (
+                "sym:local/demo@src/main/java/com/demo/plain/Paths.java#Paths.get()",
+                "dynamic Spring mapping path",
+            ),
+            (
+                "sym:local/demo@src/main/java/com/demo/shadow/Paths.java#Paths.get()",
+                "Spring annotation proven only by a wildcard import is shadowed by a same-package type",
+            ),
+        ])
+    );
+    assert_eq!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.label == "HANDLES" && edge.src.starts_with("gap:route:"))
+            .count(),
+        2
+    );
+}
