@@ -2852,6 +2852,32 @@ public class {name} {{
         "web/src/integrationTest/java/com/demo/ItRes.java",
         &jaxrs("ItRes", "/it-res"),
     );
+    // A package directory named `src/test` below a production root is product.
+    write(
+        dir.path(),
+        "web/src/main/java/com/acme/src/test/Nested.java",
+        &spring("Nested", "/nested"),
+    );
+    // A test-only type never shadows a product wildcard import.
+    write(
+        dir.path(),
+        "web/src/main/java/com/demo/Wild.java",
+        r#"package com.demo;
+
+import jakarta.ws.rs.*;
+
+@Path("/wild")
+public class Wild {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "web/src/test/java/com/demo/GET.java",
+        "package com.demo;\n\npublic @interface GET {}\n",
+    );
     let (out, _) =
         extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
 
@@ -2863,7 +2889,12 @@ public class {name} {{
         .collect();
     assert_eq!(
         endpoints,
-        BTreeSet::from(["ep:local/demo@GET:/live", "ep:local/demo@GET:/live-res"])
+        BTreeSet::from([
+            "ep:local/demo@GET:/live",
+            "ep:local/demo@GET:/live-res",
+            "ep:local/demo@GET:/nested",
+            "ep:local/demo@GET:/wild",
+        ])
     );
     let route_gaps: Vec<&str> = out
         .nodes

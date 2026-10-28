@@ -110,14 +110,27 @@ impl HttpFrameworkRegistry {
 /// ship, so a JVM adapter emits no product Endpoint from them (#1250).
 const JVM_TEST_SOURCE_SETS: &[&str] = &["test", "testFixtures", "integrationTest", "androidTest"];
 
-/// Whether `path` lies in a Maven/Gradle test source set: some `src/<set>`
-/// segment pair names one of [`JVM_TEST_SOURCE_SETS`]. `src/main` and any
-/// other source set are product code.
+/// Source-root directories under `src/<set>/` that hold JVM sources.
+const JVM_SOURCE_LANGUAGES: &[&str] = &["java", "kotlin", "groovy", "scala"];
+
+/// Whether `path` lies in a Maven/Gradle test source set. The source set is
+/// the one its source root names: the first `src/<set>/<language>` triple,
+/// else the first `src/<set>` pair. Package directories below that root
+/// never name a second source set, so `src/main/java/a/src/test/X.java` is
+/// product code. `src/main` and every non-test set are product code.
 pub fn in_jvm_test_source_set(path: &str) -> bool {
     let segments: Vec<&str> = path.split(['/', '\\']).collect();
-    segments
-        .windows(2)
-        .any(|pair| pair[0] == "src" && JVM_TEST_SOURCE_SETS.contains(&pair[1]))
+    let root = segments
+        .windows(3)
+        .find(|triple| triple[0] == "src" && JVM_SOURCE_LANGUAGES.contains(&triple[2]))
+        .map(|triple| triple[1])
+        .or_else(|| {
+            segments
+                .windows(2)
+                .find(|pair| pair[0] == "src")
+                .map(|pair| pair[1])
+        });
+    root.is_some_and(|set| JVM_TEST_SOURCE_SETS.contains(&set))
 }
 
 #[cfg(test)]
@@ -125,7 +138,8 @@ mod tests {
     use super::*;
 
     // AC-0431 (#1250): only test source sets are excluded; a `test` segment
-    // that is not a `src/<set>` pair, `src/main` and other sets stay product.
+    // that is not a `src/<set>` pair, `src/main`, other sets and package
+    // directories named `src/test` below a production source root stay product.
     #[test]
     fn jvm_test_source_sets_are_exactly_the_test_sets() {
         for path in [
@@ -134,6 +148,8 @@ mod tests {
             "app/src/integrationTest/kotlin/X.kt",
             "app/src/androidTest/java/X.kt",
             "a\\src\\test\\java\\X.java",
+            "src/app/src/test/java/X.java",
+            "src/test/X.java",
         ] {
             assert!(in_jvm_test_source_set(path), "{path}");
         }
@@ -143,6 +159,9 @@ mod tests {
             "src/jvmMain/kotlin/X.kt",
             "src/testing/java/X.java",
             "test/src/main/java/X.java",
+            "web/src/main/java/com/acme/src/test/Controller.java",
+            "src/main/kotlin/com/acme/src/test/Controller.kt",
+            "src/main/java/a/src/test/java/X.java",
             "X.java",
         ] {
             assert!(!in_jvm_test_source_set(path), "{path}");

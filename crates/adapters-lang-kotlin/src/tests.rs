@@ -2977,13 +2977,22 @@ object Marker{name}
         "src/testFixtures/kotlin/com/demo/web/Fixture.kt",
         &controller("Fixture", "/fixture"),
     );
+    // A package directory named `src/test` below a production root is product.
+    write(
+        dir.path(),
+        "src/main/kotlin/com/acme/src/test/Nested.kt",
+        &controller("Nested", "/nested"),
+    );
     let (out, _) =
         extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
-    let endpoints: Vec<&str> = out
+    let endpoints: std::collections::BTreeSet<&str> = out
         .nodes
         .iter()
         .filter(|node| node.label == "Endpoint")
         .map(|node| node.id.as_str())
         .collect();
-    assert_eq!(endpoints, vec!["ep:local/demo@GET:/live"]);
+    assert_eq!(
+        endpoints,
+        std::collections::BTreeSet::from(["ep:local/demo@GET:/live", "ep:local/demo@GET:/nested"])
+    );
 }

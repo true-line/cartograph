@@ -976,8 +976,12 @@ pub fn extract_source(
     out.nodes.extend(jaxrs_nodes);
     out.edges.extend(jaxrs_edges);
     out.pending_jaxrs.extend(jaxrs_pending);
-    out.package_types
-        .extend(jaxrs::top_level_types(&cx, root, package.as_deref()));
+    // Test-only types are not compiled with the product, so they never shadow
+    // a product file's wildcard import.
+    if product {
+        out.package_types
+            .extend(jaxrs::top_level_types(&cx, root, package.as_deref()));
+    }
 
     // Calls: same-class unqualified/this calls resolve locally; calls on an
     // imported type resolve repo-wide at the directory join, failing closed
