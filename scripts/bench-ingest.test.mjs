@@ -11,7 +11,7 @@ const sha = 'a'.repeat(40);
 
 test('the shipped manifest pins every repository to a full commit', async () => {
   const repos = parseManifest(await readFile(new URL('../bench/repos.toml', import.meta.url), 'utf8'));
-  assert.deepEqual(repos.map((repo) => repo.name), ['simplelogin', 'rea', 'vendure']);
+  assert.deepEqual(repos.map((repo) => repo.name), ['simplelogin', 'rea', 'vendure', 'openmrs-core', 'kafka', 'kubernetes']);
 });
 
 test('manifest entries need a name, credential-free https url and exact commit', () => {
