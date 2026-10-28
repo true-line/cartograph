@@ -2358,3 +2358,437 @@ fn retrofit_bases_must_be_unique_and_proven() {
         IdentityExpr::Computed("no Retrofit base URL in repo".into())
     );
 }
+
+// AC-0428 (#1257): JAX-RS resource classes become endpoints joining the
+// class @Path with each method's own @Path, proven by the jakarta or javax
+// package; what T0 cannot place is a route Gap naming its handler.
+#[test]
+fn jaxrs_resources_compose_paths_and_unplaceable_methods_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "src/main/java/com/demo/rest";
+    write(
+        dir.path(),
+        &format!("{base}/Connectors.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+
+@Path("/connectors")
+public class Connectors {
+    @GET
+    public String list() { return ""; }
+
+    @POST
+    @Path("{connector}/restart")
+    public String restart(@PathParam("connector") String connector) { return ""; }
+
+    @Path("/{connector}/tasks")
+    public Object tasks() { return null; }
+
+    static final String DYNAMIC = "/x";
+
+    @GET
+    @Path(DYNAMIC)
+    public String dynamic() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Root.java"),
+        r#"package com.demo.rest;
+
+import javax.ws.rs.*;
+
+@Path("/")
+public class Root {
+    @GET
+    public String root() { return ""; }
+
+    @jakarta.ws.rs.DELETE
+    @Path("/tasks/")
+    public String clear() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Internal.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+
+public abstract class Internal {
+    @PUT
+    @Path("/{connector}/fence")
+    public String fence() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Api.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/api")
+public interface Api {
+    @GET
+    String ping();
+}
+"#,
+    );
+    // Same-named annotations from another package prove nothing.
+    write(
+        dir.path(),
+        &format!("{base}/Fake.java"),
+        r#"package com.demo.rest;
+
+import com.other.GET;
+import com.other.Path;
+
+@Path("/fake")
+public class Fake {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    // A wildcard of any other package proves nothing either.
+    write(
+        dir.path(),
+        &format!("{base}/Wild.java"),
+        r#"package com.demo.rest;
+
+import com.other.rs.*;
+
+@Path("/wild")
+public class Wild {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@DELETE:/tasks/",
+            "ep:local/demo@GET:/",
+            "ep:local/demo@GET:/connectors",
+            "ep:local/demo@POST:/connectors/{connector}/restart",
+        ])
+    );
+    let restart = node(
+        &out.nodes,
+        "ep:local/demo@POST:/connectors/{connector}/restart",
+    );
+    assert_eq!(restart.props["framework"], "jax-rs");
+    assert_eq!(restart.props["method"], "POST");
+    edge(
+        &out.edges,
+        "ep:local/demo@POST:/connectors/{connector}/restart",
+        &format!("sym:local/demo@{base}/Connectors.java#Connectors.restart(String)"),
+        "HANDLES",
+    );
+
+    let mut gaps: Vec<(String, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .map(|node| {
+            (
+                node.props["handler_sym"].as_str().unwrap().to_string(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    let sym = |file: &str, method: &str| format!("sym:local/demo@{base}/{file}.java#{method}");
+    assert_eq!(
+        gaps,
+        vec![
+            (
+                sym("Api", "Api.ping()"),
+                "JAX-RS resource method on an interface: served only by an implementing resource class"
+            ),
+            (
+                sym("Connectors", "Connectors.dynamic()"),
+                "dynamic JAX-RS path"
+            ),
+            (
+                sym("Connectors", "Connectors.tasks()"),
+                "JAX-RS sub-resource locator: routes are resolved at runtime"
+            ),
+            (
+                sym("Internal", "Internal.fence()"),
+                "JAX-RS resource method without a class-level @Path (inherited or sub-resource)"
+            ),
+        ]
+    );
+    for (handler, _) in &gaps {
+        assert!(out.edges.iter().any(|edge| edge.label == "HANDLES"
+            && &edge.dst == handler
+            && edge.src.starts_with("gap:route:")));
+    }
+}
+
+// AC-0428 (#1264 review): only public methods are resource methods, a type
+// the file declares shadows an imported simple annotation name, a method
+// path of `/` keeps its trailing slash, and an anonymous class's methods are
+// never composed with the enclosing resource's @Path.
+#[test]
+fn jaxrs_skips_non_public_shadowed_and_anonymous_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "src/main/java/com/demo/rest";
+    write(
+        dir.path(),
+        &format!("{base}/Hidden.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/hidden")
+public class Hidden {
+    @GET
+    @Path("/")
+    public String index() { return ""; }
+
+    @GET
+    @Path("/private")
+    private String secret() { return ""; }
+
+    @GET
+    @Path("/protected")
+    protected String guarded() { return ""; }
+
+    @GET
+    @Path("/package")
+    String local() { return ""; }
+
+    @Path("/sub")
+    public Object sub() {
+        return new Object() {
+            @GET
+            public String inner() { return ""; }
+        };
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Shadow.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/shadow")
+public class Shadow {
+    @interface GET {}
+
+    @GET
+    public String get() { return ""; }
+
+    @jakarta.ws.rs.POST
+    public String post() { return ""; }
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from(["ep:local/demo@GET:/hidden/", "ep:local/demo@POST:/shadow"])
+    );
+    let gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .map(|node| node.props["handler_sym"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![format!("sym:local/demo@{base}/Hidden.java#Hidden.sub()").as_str()]
+    );
+}
+
+// AC-0428 (#1264 review): a same-package type in another file shadows a
+// wildcard-imported annotation (JLS §6.4.1), so the wildcard-only endpoint
+// becomes a route Gap at the directory join; a named import, a qualified
+// spelling and a wildcard in another package are unaffected.
+#[test]
+fn jaxrs_wildcard_proof_yields_to_a_same_package_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let rest = "src/main/java/com/demo/rest";
+    let other = "src/main/java/com/demo/other";
+    write(
+        dir.path(),
+        &format!("{rest}/GET.java"),
+        "package com.demo.rest;\n\npublic @interface GET {}\n",
+    );
+    write(
+        dir.path(),
+        &format!("{rest}/Shadowed.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/shadowed")
+public class Shadowed {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{rest}/Named.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/named")
+public class Named {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{rest}/Qualified.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/qualified")
+public class Qualified {
+    @jakarta.ws.rs.GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{other}/Elsewhere.java"),
+        r#"package com.demo.other;
+
+import jakarta.ws.rs.*;
+
+@Path("/elsewhere")
+public class Elsewhere {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    let mut cache = IncrementalCache::default();
+    let (out, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@GET:/elsewhere",
+            "ep:local/demo@GET:/named",
+            "ep:local/demo@GET:/qualified",
+        ])
+    );
+    let gaps: Vec<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .map(|node| {
+            (
+                node.props["handler_sym"].as_str().unwrap(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let handler = format!("sym:local/demo@{rest}/Shadowed.java#Shadowed.get()");
+    assert_eq!(
+        gaps,
+        vec![(
+            handler.as_str(),
+            "JAX-RS annotation proven only by a wildcard import is shadowed by a same-package type"
+        )]
+    );
+    assert!(out.edges.iter().any(|edge| edge.label == "HANDLES"
+        && edge.dst == handler
+        && edge.src.starts_with("gap:route:")));
+
+    // Reused files carry deferred evidence to the new commit: the pending
+    // Endpoint and Gap, and both HANDLES edges, cite it.
+    let next = SourceId {
+        repo: "local/demo",
+        commit: "abc123",
+    };
+    let (moved, stats) = extract_dir_incremental(dir.path(), &next, &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
+    let commit = |props: &serde_json::Value| props["prov"]["evidence"][0]["commit_sha"].clone();
+    let shadow_gap = moved
+        .nodes
+        .iter()
+        .find(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .unwrap();
+    let elsewhere = node(&moved.nodes, "ep:local/demo@GET:/elsewhere");
+    let handles = |src: &str| {
+        moved
+            .edges
+            .iter()
+            .find(|edge| edge.label == "HANDLES" && edge.src == src)
+            .unwrap()
+    };
+    for props in [
+        &shadow_gap.props,
+        &handles(&shadow_gap.id).props,
+        &elsewhere.props,
+        &handles(&elsewhere.id).props,
+    ] {
+        assert_eq!(commit(props), "abc123");
+    }
+
+    // Shadowing is settled at the join, never baked into a cached file: once
+    // the shadowing type is gone, the reused Shadowed.java is an Endpoint.
+    std::fs::remove_file(dir.path().join(format!("{rest}/GET.java"))).unwrap();
+    let (out, stats) = extract_dir_incremental(dir.path(), &next, &mut cache).unwrap();
+    assert_eq!((stats.recomputed_files, stats.deleted_files), (0, 1));
+    assert!(
+        out.nodes
+            .iter()
+            .any(|node| node.id == "ep:local/demo@GET:/shadowed")
+    );
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+    );
+}

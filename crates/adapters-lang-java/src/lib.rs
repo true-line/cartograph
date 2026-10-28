@@ -19,6 +19,7 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+mod jaxrs;
 mod jpa;
 pub mod jvm;
 
@@ -74,6 +75,12 @@ pub struct Extraction {
     pending_links: Vec<jpa::PendingLink>,
     /// Repository call sites awaiting the receiver type's resolution.
     pending_repo_calls: Vec<jpa::PendingRepoCall>,
+    /// Wildcard-proven JAX-RS endpoints awaiting same-package shadowing.
+    pending_jaxrs: Vec<jaxrs::Pending>,
+    /// Fully qualified names of every top-level type a file declares,
+    /// annotation types included: the package members that can shadow a
+    /// wildcard import.
+    package_types: Vec<String>,
 }
 
 /// One declared method or constructor, indexed for overload resolution by
@@ -305,6 +312,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.unresolved_gap.1.props, commit);
         retarget_props_commit(&mut pending.overload_gap.0.props, commit);
         retarget_props_commit(&mut pending.overload_gap.1.props, commit);
+    }
+    for pending in &mut extraction.pending_jaxrs {
+        pending.retarget(|props| retarget_props_commit(props, commit));
     }
     jpa::retarget(extraction, commit);
 }
@@ -952,6 +962,16 @@ pub fn extract_source(
         let _ = chain;
     }
 
+    // JAX-RS resource endpoints (#1257): class `@Path` plus method HTTP
+    // annotations; what T0 cannot place is a route Gap.
+    let (jaxrs_nodes, jaxrs_edges, jaxrs_pending) =
+        jaxrs::endpoints(&cx, &methods, &imports, package.as_deref());
+    out.nodes.extend(jaxrs_nodes);
+    out.edges.extend(jaxrs_edges);
+    out.pending_jaxrs.extend(jaxrs_pending);
+    out.package_types
+        .extend(jaxrs::top_level_types(&cx, root, package.as_deref()));
+
     // Calls: same-class unqualified/this calls resolve locally; calls on an
     // imported type resolve repo-wide at the directory join, failing closed
     // to an explicit Gap when the project-local target cannot be proven.
@@ -1279,6 +1299,8 @@ pub fn extract_dir_incremental_with_progress(
             out.repository_index.extend(extraction.repository_index);
             out.pending_links.extend(extraction.pending_links);
             out.pending_repo_calls.extend(extraction.pending_repo_calls);
+            out.pending_jaxrs.extend(extraction.pending_jaxrs);
+            out.package_types.extend(extraction.package_types);
             Ok(())
         },
     );
@@ -1321,6 +1343,13 @@ pub fn extract_dir_incremental_with_progress(
             .or_default()
             .push((method.min_arity, method.variadic, method.symbol.as_str()));
     }
+    let package_types: BTreeSet<&str> = out.package_types.iter().map(String::as_str).collect();
+    jaxrs::resolve(
+        std::mem::take(&mut out.pending_jaxrs),
+        |fqn| package_types.contains(fqn),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     for pending in std::mem::take(&mut out.pending_calls) {
         let declared = types_by_fqn.get(pending.fqn.as_str()).copied().flatten();
         match declared {

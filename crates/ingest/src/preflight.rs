@@ -189,7 +189,7 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         id: "t0.adapter-java",
         language: "Java",
         extensions: &["java"],
-        covers: "types, methods, call graph, Spring Web endpoint annotations",
+        covers: "types, methods, call graph, Spring Web and JAX-RS endpoint annotations",
     },
     AdapterInfo {
         id: "t0.adapter-kotlin",
