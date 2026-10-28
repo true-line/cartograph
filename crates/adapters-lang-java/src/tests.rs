@@ -2633,3 +2633,131 @@ public class Shadow {
         vec![format!("sym:local/demo@{base}/Hidden.java#Hidden.sub()").as_str()]
     );
 }
+
+// AC-0428 (#1264 review): a same-package type in another file shadows a
+// wildcard-imported annotation (JLS §6.4.1), so the wildcard-only endpoint
+// becomes a route Gap at the directory join; a named import, a qualified
+// spelling and a wildcard in another package are unaffected.
+#[test]
+fn jaxrs_wildcard_proof_yields_to_a_same_package_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let rest = "src/main/java/com/demo/rest";
+    let other = "src/main/java/com/demo/other";
+    write(
+        dir.path(),
+        &format!("{rest}/GET.java"),
+        "package com.demo.rest;\n\npublic @interface GET {}\n",
+    );
+    write(
+        dir.path(),
+        &format!("{rest}/Shadowed.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/shadowed")
+public class Shadowed {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{rest}/Named.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/named")
+public class Named {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{rest}/Qualified.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/qualified")
+public class Qualified {
+    @jakarta.ws.rs.GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{other}/Elsewhere.java"),
+        r#"package com.demo.other;
+
+import jakarta.ws.rs.*;
+
+@Path("/elsewhere")
+public class Elsewhere {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    let mut cache = IncrementalCache::default();
+    let (out, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@GET:/elsewhere",
+            "ep:local/demo@GET:/named",
+            "ep:local/demo@GET:/qualified",
+        ])
+    );
+    let gaps: Vec<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .map(|node| {
+            (
+                node.props["handler_sym"].as_str().unwrap(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let handler = format!("sym:local/demo@{rest}/Shadowed.java#Shadowed.get()");
+    assert_eq!(
+        gaps,
+        vec![(
+            handler.as_str(),
+            "JAX-RS annotation proven only by a wildcard import is shadowed by a same-package type"
+        )]
+    );
+    assert!(out.edges.iter().any(|edge| edge.label == "HANDLES"
+        && edge.dst == handler
+        && edge.src.starts_with("gap:route:")));
+
+    // Shadowing is settled at the join, never baked into a cached file: once
+    // the shadowing type is gone, the reused Shadowed.java is an Endpoint.
+    std::fs::remove_file(dir.path().join(format!("{rest}/GET.java"))).unwrap();
+    let (out, stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    assert_eq!((stats.recomputed_files, stats.deleted_files), (0, 1));
+    assert!(
+        out.nodes
+            .iter()
+            .any(|node| node.id == "ep:local/demo@GET:/shadowed")
+    );
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+    );
+}

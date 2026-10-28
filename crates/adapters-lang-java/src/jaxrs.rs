@@ -16,8 +16,9 @@
 //! Only public methods are resource methods (Jakarta REST 3.1 §3.3.1), and a
 //! method of an anonymous class is never a direct method of the resource that
 //! encloses it. A simple annotation name is unproven when the file declares a
-//! type of that name, which shadows any import (JLS §6.4.1); a same-package
-//! type shadowing a wildcard import is outside this per-file view.
+//! type of that name, which shadows any import (JLS §6.4.1); an endpoint proven
+//! only by a wildcard import waits for the directory join, where a same-package
+//! type of that name anywhere in the repository turns it into a route Gap.
 
 use core_graph::{Edge, Node};
 use core_prov::ConfidenceTier;
@@ -44,16 +45,27 @@ fn verb(simple: &str) -> Option<&'static str> {
     }
 }
 
+/// How an annotation is proven to be the JAX-RS one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    /// A fully qualified use or a named import: nothing can shadow it.
+    Direct,
+    /// Only a wildcard import, which a same-package type of the same simple
+    /// name shadows (JLS §6.4.1); settled at the directory join.
+    Wildcard,
+}
+
 /// Proven by a fully qualified use, a named import of exactly
 /// `<package>.<Name>`, or a wildcard of exactly that package, for either
-/// JAX-RS package. A same-named annotation from anywhere else proves nothing.
-fn proven(
+/// JAX-RS package. A same-named annotation from anywhere else, or a simple
+/// name shadowed by a type this file declares, proves nothing.
+fn proof(
     cx: &FileCx<'_>,
     annotation: TsNode<'_>,
     simple: &str,
     imports: &Imports,
     declared: &BTreeSet<String>,
-) -> bool {
+) -> Option<Proof> {
     let spelled = annotation
         .child_by_field_name("name")
         .map(|name| cx.text(&name).to_string())
@@ -62,33 +74,37 @@ fn proven(
         .iter()
         .any(|package| spelled == format!("{package}.{simple}"))
     {
-        return true;
+        return Some(Proof::Direct);
     }
     if spelled != simple || declared.contains(simple) {
-        return false;
+        return None;
     }
     if let Some(fqn) = imports.bindings.get(simple) {
         return PACKAGES
             .iter()
-            .any(|package| fqn == &format!("{package}.{simple}"));
+            .any(|package| fqn == &format!("{package}.{simple}"))
+            .then_some(Proof::Direct);
     }
     imports
         .wildcard_packages
         .iter()
         .any(|wildcard| PACKAGES.contains(&wildcard.as_str()))
+        .then_some(Proof::Wildcard)
 }
 
-/// The proven `@Path` among `annotations`, if any.
+/// The proven `@Path` among `annotations`, if any, with how it is proven.
 fn path_annotation<'t>(
     cx: &FileCx<'_>,
     annotations: &[(String, TsNode<'t>)],
     imports: &Imports,
     declared: &BTreeSet<String>,
-) -> Option<TsNode<'t>> {
-    annotations
-        .iter()
-        .find(|(name, node)| name == "Path" && proven(cx, *node, name, imports, declared))
-        .map(|(_, node)| *node)
+) -> Option<(TsNode<'t>, Proof)> {
+    annotations.iter().find_map(|(name, node)| {
+        (name == "Path")
+            .then(|| proof(cx, *node, name, imports, declared))
+            .flatten()
+            .map(|proof| (*node, proof))
+    })
 }
 
 /// Join a resource path with a method path. JAX-RS ignores a leading `/` on
@@ -190,51 +206,129 @@ fn declared_types(cx: &FileCx<'_>, any: TsNode<'_>) -> BTreeSet<String> {
     names
 }
 
+/// A route Gap and its `HANDLES` edge, citing `evidence` and anchored on its
+/// last node.
+fn route_gap(
+    cx: &FileCx<'_>,
+    evidence: &[TsNode<'_>],
+    handler: &str,
+    http_method: Option<&str>,
+    reason: &str,
+) -> (Node, Edge) {
+    let anchor = evidence.last().expect("a Gap cites at least one node");
+    let gap_id = format!(
+        "gap:route:{}@{}@{}",
+        cx.id.repo,
+        cx.path,
+        anchor.start_byte()
+    );
+    let node = Node {
+        id: gap_id.clone(),
+        label: "Gap".into(),
+        props: serde_json::json!({
+            "method": http_method,
+            "handler_sym": handler,
+            "framework": FRAMEWORK,
+            "language": "java",
+            "reason": reason,
+            "attempted_tiers": ["T0"],
+            "prov": cx.prov_spanning(evidence, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+        }),
+    };
+    let edge = Edge {
+        src: gap_id.clone(),
+        dst: handler.to_string(),
+        label: "HANDLES".into(),
+        props: serde_json::json!({
+            "reason": reason,
+            "attempted_resolution": "literal-path",
+            "prov": cx.prov_spanning(
+                evidence,
+                ConfidenceTier::Gap,
+                &format!("HANDLES {gap_id} -> {handler}"),
+            ),
+        }),
+    };
+    (node, edge)
+}
+
+/// An Endpoint whose annotations are proven only by a wildcard import. The
+/// directory join emits `endpoint` unless the repository declares a type
+/// named in `shadowed_by`, in which case it emits `gap` instead.
+#[derive(Debug, Clone)]
+pub(crate) struct Pending {
+    /// `<file package>.<Name>` for each wildcard-proven annotation.
+    shadowed_by: Vec<String>,
+    endpoint: (Node, Edge),
+    gap: (Node, Edge),
+}
+
+/// Settle wildcard-proven endpoints against every type the repository
+/// declares (`declared` takes a fully qualified name). A shadowing type in
+/// another module of the same package is still a Gap, never a silent pick.
+pub(crate) fn resolve(
+    pending: Vec<Pending>,
+    declared: impl Fn(&str) -> bool,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    let mut gaps = BTreeSet::new();
+    for pending in pending {
+        let (node, edge) = if pending.shadowed_by.iter().any(|fqn| declared(fqn)) {
+            if !gaps.insert(pending.gap.0.id.clone()) {
+                continue;
+            }
+            pending.gap
+        } else {
+            pending.endpoint
+        };
+        nodes.push(node);
+        edges.push(edge);
+    }
+}
+
+/// `<package>.<Name>` for each top-level type `root` declares, of any kind.
+pub(crate) fn top_level_types(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    package: Option<&str>,
+) -> Vec<String> {
+    let mut walk = root.walk();
+    root.named_children(&mut walk)
+        .filter(|node| {
+            matches!(
+                node.kind(),
+                "class_declaration"
+                    | "interface_declaration"
+                    | "enum_declaration"
+                    | "record_declaration"
+                    | "annotation_type_declaration"
+            )
+        })
+        .filter_map(|node| node.child_by_field_name("name"))
+        .map(|name| match package {
+            Some(package) => format!("{package}.{}", cx.text(&name)),
+            None => cx.text(&name).to_string(),
+        })
+        .collect()
+}
+
 /// Endpoints, route Gaps and their `HANDLES` edges for this file's JAX-RS
-/// resource methods.
+/// resource methods, plus the endpoints that wait on the directory join.
 pub(crate) fn endpoints(
     cx: &FileCx<'_>,
     methods: &[(TsNode<'_>, String, Vec<String>, String)],
     imports: &Imports,
-) -> (Vec<Node>, Vec<Edge>) {
+    package: Option<&str>,
+) -> (Vec<Node>, Vec<Edge>, Vec<Pending>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
+    let mut pending = Vec::new();
     let mut gap =
         |evidence: &[TsNode<'_>], handler: &str, http_method: Option<&str>, reason: &str| {
-            let anchor = evidence.last().expect("a Gap cites at least one node");
-            let gap_id = format!(
-                "gap:route:{}@{}@{}",
-                cx.id.repo,
-                cx.path,
-                anchor.start_byte()
-            );
-            nodes.push(Node {
-            id: gap_id.clone(),
-            label: "Gap".into(),
-            props: serde_json::json!({
-                "method": http_method,
-                "handler_sym": handler,
-                "framework": FRAMEWORK,
-                "language": "java",
-                "reason": reason,
-                "attempted_tiers": ["T0"],
-                "prov": cx.prov_spanning(evidence, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
-            }),
-        });
-            edges.push(Edge {
-                src: gap_id.clone(),
-                dst: handler.to_string(),
-                label: "HANDLES".into(),
-                props: serde_json::json!({
-                    "reason": reason,
-                    "attempted_resolution": "literal-path",
-                    "prov": cx.prov_spanning(
-                        evidence,
-                        ConfidenceTier::Gap,
-                        &format!("HANDLES {gap_id} -> {handler}"),
-                    ),
-                }),
-            });
+            let (node, edge) = route_gap(cx, evidence, handler, http_method, reason);
+            nodes.push(node);
+            edges.push(edge);
         };
     let declared = methods
         .first()
@@ -247,9 +341,9 @@ pub(crate) fn endpoints(
         }
         let annotations = declaration_annotations(cx, *method);
         let http_method = annotations.iter().find_map(|(name, node)| {
-            verb(name)
-                .filter(|_| proven(cx, *node, name, imports, &declared))
-                .map(|verb| (verb, *node))
+            let verb = verb(name)?;
+            let proof = proof(cx, *node, name, imports, &declared)?;
+            Some((verb, *node, proof))
         });
         let method_path = path_annotation(cx, &annotations, imports, &declared);
         if http_method.is_none() && method_path.is_none() {
@@ -263,10 +357,10 @@ pub(crate) fn endpoints(
         }
         let owner_path =
             path_annotation(cx, &declaration_annotations(cx, owner), imports, &declared);
-        let mut evidence: Vec<TsNode<'_>> = owner_path.into_iter().collect();
-        evidence.extend(method_path);
-        evidence.extend(http_method.map(|(_, node)| node));
-        let Some((http_method, _)) = http_method else {
+        let mut evidence: Vec<TsNode<'_>> = owner_path.map(|(node, _)| node).into_iter().collect();
+        evidence.extend(method_path.map(|(node, _)| node));
+        evidence.extend(http_method.map(|(_, node, _)| node));
+        let Some((http_method, verb_node, verb_proof)) = http_method else {
             // A sub-resource locator returns the object that routes the rest
             // of the request; only a resource class's locator is in scope.
             if owner_path.is_some() {
@@ -288,7 +382,7 @@ pub(crate) fn endpoints(
             );
             continue;
         }
-        let Some(owner_path) = owner_path else {
+        let Some((owner_path, owner_proof)) = owner_path else {
             gap(
                 &evidence,
                 handler,
@@ -299,25 +393,51 @@ pub(crate) fn endpoints(
         };
         let (Some(bases), Some(tails)) = (
             annotation_path(cx, owner_path).segments(),
-            method_path.map_or(Some(vec![String::new()]), |node| {
+            method_path.map_or(Some(vec![String::new()]), |(node, _)| {
                 annotation_path(cx, node).segments()
             }),
         ) else {
             gap(&evidence, handler, Some(http_method), "dynamic JAX-RS path");
             continue;
         };
+        let simple = |node: TsNode<'_>| {
+            let name = node
+                .child_by_field_name("name")
+                .map(|name| cx.text(&name))
+                .unwrap_or_default();
+            name.rsplit('.').next().unwrap_or(name).to_string()
+        };
+        let wildcard: BTreeSet<String> = [
+            Some((verb_node, verb_proof)),
+            Some((owner_path, owner_proof)),
+            method_path,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|(_, proof)| *proof == Proof::Wildcard)
+        .map(|(node, _)| match package {
+            Some(package) => format!("{package}.{}", simple(node)),
+            None => simple(node),
+        })
+        .collect();
         // Sorted and de-duplicated so emission never depends on source order.
         let routes: BTreeSet<String> = bases
             .iter()
             .flat_map(|base| tails.iter().map(move |tail| join_route(base, tail)))
             .collect();
         for route in routes {
-            endpoints.push((route, http_method, handler.clone(), evidence.clone()));
+            endpoints.push((
+                route,
+                http_method,
+                handler.clone(),
+                evidence.clone(),
+                wildcard.clone(),
+            ));
         }
     }
-    for (route, http_method, handler, evidence) in endpoints {
+    for (route, http_method, handler, evidence, wildcard) in endpoints {
         let endpoint = format!("ep:{}@{http_method}:{route}", cx.id.repo);
-        nodes.push(Node {
+        let node = Node {
             id: endpoint.clone(),
             label: "Endpoint".into(),
             props: serde_json::json!({
@@ -332,8 +452,8 @@ pub(crate) fn endpoints(
                     &format!("Endpoint {endpoint}"),
                 ),
             }),
-        });
-        edges.push(Edge {
+        };
+        let edge = Edge {
             src: endpoint.clone(),
             dst: handler.clone(),
             label: "HANDLES".into(),
@@ -344,7 +464,23 @@ pub(crate) fn endpoints(
                     &format!("HANDLES {endpoint} -> {handler}"),
                 ),
             }),
-        });
+        };
+        if wildcard.is_empty() {
+            nodes.push(node);
+            edges.push(edge);
+        } else {
+            pending.push(Pending {
+                shadowed_by: wildcard.into_iter().collect(),
+                endpoint: (node, edge),
+                gap: route_gap(
+                    cx,
+                    &evidence,
+                    &handler,
+                    Some(http_method),
+                    "JAX-RS annotation proven only by a wildcard import is shadowed by a same-package type",
+                ),
+            });
+        }
     }
-    (nodes, edges)
+    (nodes, edges, pending)
 }
