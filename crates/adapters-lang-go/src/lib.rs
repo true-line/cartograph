@@ -805,33 +805,65 @@ pub fn extract_source(
     extract_source_with_module(source, path, id, None)
 }
 
-/// Directories Go recovery never walks. Preflight shares this predicate so
-/// its skipped-file counts match what recovery reads (#1258).
-pub fn skips_dir(name: &str) -> bool {
+fn skips_dir(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "vendor" | "node_modules" | "dist" | "build" | "bin")
 }
 
-fn collect_go_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractError> {
+/// Why recovery skips an in-scope, non-test Go file (#1258).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// A `_GOOS` or `_GOARCH` file-name suffix.
+    PlatformSuffix,
+    /// A `//go:build` or `// +build` line before the package clause.
+    BuildConstraint,
+}
+
+/// Walk `root` exactly as recovery does: each non-test Go file in walk order,
+/// with the reason recovery skips it, or `None` when recovery reads it.
+fn walk_go_files(root: &Path) -> Result<Vec<(String, Option<SkipReason>)>, ExtractError> {
+    let mut out = Vec::new();
     for file in source_walk::files(root, &skips_dir, source_walk::Gitignores::Honor)? {
         if file
             .path
             .extension()
             .and_then(|extension| extension.to_str())
-            == Some("go")
-            && !file.name.ends_with("_test.go")
-            && !has_platform_suffix(&file.name)
-            && !has_explicit_build_constraint(&std::fs::read(&file.path)?)
+            != Some("go")
+            || file.name.ends_with("_test.go")
         {
-            out.push(file.rel);
+            continue;
         }
+        let reason = if has_platform_suffix(&file.name) {
+            Some(SkipReason::PlatformSuffix)
+        } else if has_explicit_build_constraint(&std::fs::read(&file.path)?) {
+            Some(SkipReason::BuildConstraint)
+        } else {
+            None
+        };
+        out.push((file.rel, reason));
     }
+    Ok(out)
+}
+
+/// The Go files recovery skips under `root`, with their reasons, in walk order.
+/// Preflight discloses these so the skip is never silent (#1258).
+pub fn skipped_files(root: &Path) -> Result<Vec<(String, SkipReason)>, ExtractError> {
+    Ok(walk_go_files(root)?
+        .into_iter()
+        .filter_map(|(rel, reason)| Some((rel, reason?)))
+        .collect())
+}
+
+fn collect_go_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractError> {
+    out.extend(
+        walk_go_files(root)?
+            .into_iter()
+            .filter(|(_, reason)| reason.is_none())
+            .map(|(rel, _)| rel),
+    );
     Ok(())
 }
 
-/// Whether `source` carries a `//go:build` or `// +build` line before its
-/// package clause. Recovery skips such files: it does not evaluate build
-/// tags, so it cannot say which build includes them.
-pub fn has_explicit_build_constraint(source: &[u8]) -> bool {
+fn has_explicit_build_constraint(source: &[u8]) -> bool {
     let text = String::from_utf8_lossy(source);
     for line in text.lines() {
         let line = line.trim();
@@ -845,9 +877,7 @@ pub fn has_explicit_build_constraint(source: &[u8]) -> bool {
     false
 }
 
-/// Whether `name` ends in a `_GOOS` or `_GOARCH` suffix (`x_linux.go`).
-/// Recovery skips such files for the same reason as build-constrained ones.
-pub fn has_platform_suffix(name: &str) -> bool {
+fn has_platform_suffix(name: &str) -> bool {
     const GOOS: &[&str] = &[
         "aix",
         "android",

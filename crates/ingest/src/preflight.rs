@@ -518,7 +518,6 @@ pub fn preflight_scan(
 
     let total = files.len();
     let mut walked = std::collections::BTreeSet::new();
-    let mut go_skips = GoSkips::default();
     for (done, (path, name, rel)) in files.into_iter().enumerate() {
         if on_file(ScanStep {
             path: &rel,
@@ -569,12 +568,11 @@ pub fn preflight_scan(
             scan_source(&path, &rel, eval, &mut unsupported, &mut potential_gaps)?;
             walked.insert(rel.clone());
         }
-        if extension == "go" {
-            go_skips.observe(&path, &name, &rel)?;
-        }
         detect_language(&extension, rel, plugins, &mut languages, &mut unsupported);
     }
-    go_skips.report(&mut unsupported);
+    // Go recovery walks its own scope (it reads `target/`, for one), so the
+    // skips come from that walk rather than this one (#1258).
+    go_skipped_sources(root, &mut unsupported)?;
 
     // Captured members the live walk no longer reaches still carry the
     // extraction's claims; scan their captured bytes. No hook: the host's
@@ -859,51 +857,28 @@ fn scan_source(
     Ok(())
 }
 
-/// Go files in recovery's scope that recovery still skips, by reason (#1258):
-/// count and first path in walk order.
-#[derive(Default)]
-struct GoSkips {
-    platform: Option<(u64, String)>,
-    constrained: Option<(u64, String)>,
-}
-
-impl GoSkips {
-    fn observe(&mut self, path: &Path, name: &str, rel: &str) -> std::io::Result<()> {
-        let outside = Path::new(rel)
-            .parent()
-            .into_iter()
-            .flat_map(Path::components)
-            .any(|part| adapters_lang_go::skips_dir(&part.as_os_str().to_string_lossy()));
-        if outside || name.ends_with("_test.go") {
-            return Ok(());
-        }
-        let slot = if adapters_lang_go::has_platform_suffix(name) {
-            &mut self.platform
-        } else if adapters_lang_go::has_explicit_build_constraint(&std::fs::read(path)?) {
-            &mut self.constrained
-        } else {
-            return Ok(());
-        };
-        slot.get_or_insert_with(|| (0, rel.to_string())).0 += 1;
-        Ok(())
+/// One `go-skipped-source` finding per reason Go recovery skips files under
+/// `root` (#1258): the count and the first path in recovery's walk order.
+fn go_skipped_sources(root: &Path, unsupported: &mut Vec<PatternFinding>) -> std::io::Result<()> {
+    use adapters_lang_go::SkipReason;
+    let skipped = adapters_lang_go::skipped_files(root).map_err(std::io::Error::other)?;
+    for (reason, label) in [
+        (SkipReason::PlatformSuffix, "a GOOS/GOARCH file-name suffix"),
+        (SkipReason::BuildConstraint, "a //go:build constraint"),
+    ] {
+        let mut paths = skipped
+            .iter()
+            .filter(|(_, why)| *why == reason)
+            .map(|(rel, _)| rel);
+        let Some(first) = paths.next() else { continue };
+        let count = 1 + paths.count();
+        let message = format!(
+            "{count} Go source file(s) carry {label} and are not analysed: \
+             recovery does not evaluate build tags (first: {first})"
+        );
+        unsupported.push(finding("go-skipped-source", first, 1, &message));
     }
-
-    fn report(self, unsupported: &mut Vec<PatternFinding>) {
-        let reasons = [
-            (self.platform, "a GOOS/GOARCH file-name suffix"),
-            (self.constrained, "a //go:build constraint"),
-        ];
-        for (count, first, reason) in reasons
-            .into_iter()
-            .filter_map(|(seen, reason)| seen.map(|(count, first)| (count, first, reason)))
-        {
-            let message = format!(
-                "{count} Go source file(s) carry {reason} and are not analysed: \
-                 recovery does not evaluate build tags (first: {first})"
-            );
-            unsupported.push(finding("go-skipped-source", &first, 1, &message));
-        }
-    }
+    Ok(())
 }
 
 fn finding(kind: &str, path: &str, line: u64, message: &str) -> PatternFinding {
