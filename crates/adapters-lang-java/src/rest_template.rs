@@ -21,7 +21,7 @@ use adapters_fw::client::FetchSite;
 use adapters_fw::events::IdentityExpr;
 
 const REST_TEMPLATE: &str = "org.springframework.web.client.RestTemplate";
-const HTTP_METHOD: &str = "org.springframework.http.HttpMethod";
+pub(crate) const HTTP_METHOD: &str = "org.springframework.http.HttpMethod";
 
 /// The method a verb method sends, or `None` for `exchange`/`execute`.
 fn verb(name: &str) -> Option<Option<&'static str>> {
@@ -65,15 +65,24 @@ pub(crate) fn declared_names(cx: &FileCx<'_>, root: TsNode<'_>) -> BTreeSet<Stri
     names
 }
 
-struct Proof<'a> {
-    cx: &'a FileCx<'a>,
-    imports: &'a Imports,
-    declared: BTreeSet<String>,
+/// Type and constant proof for a file, shared with [`crate::webclient`].
+pub(crate) struct Proof<'a> {
+    pub(crate) cx: &'a FileCx<'a>,
+    pub(crate) imports: &'a Imports,
+    pub(crate) declared: BTreeSet<String>,
 }
 
-impl Proof<'_> {
+impl<'a> Proof<'a> {
+    pub(crate) fn new(cx: &'a FileCx<'a>, root: TsNode<'_>, imports: &'a Imports) -> Self {
+        Proof {
+            cx,
+            imports,
+            declared: declared_names(cx, root),
+        }
+    }
+
     /// Whether a type spelling names `fqn` in this file.
-    fn names(&self, spelling: &str, fqn: &str) -> bool {
+    pub(crate) fn names(&self, spelling: &str, fqn: &str) -> bool {
         let spelling: String = spelling.chars().filter(|c| !c.is_whitespace()).collect();
         if spelling == fqn {
             return true;
@@ -84,8 +93,15 @@ impl Proof<'_> {
             && !self.declared.contains(simple)
     }
 
-    /// Whether `object` at `call` in `method` is a proven `RestTemplate`.
-    fn is_client(&self, method: TsNode<'_>, call: TsNode<'_>, object: TsNode<'_>) -> bool {
+    /// Whether `object` at `call` in `method` is a proven `client` (a fully
+    /// qualified type name).
+    pub(crate) fn is_client(
+        &self,
+        method: TsNode<'_>,
+        call: TsNode<'_>,
+        object: TsNode<'_>,
+        client: &str,
+    ) -> bool {
         let cx = self.cx;
         let (receiver, this_only) = match object.kind() {
             "object_creation_expression" => {
@@ -96,7 +112,7 @@ impl Proof<'_> {
                     .any(|child| child.kind() == "class_body");
                 return !anonymous
                     && object.child_by_field_name("type").is_some_and(|ty| {
-                        ty.kind() != "generic_type" && self.names(cx.text(&ty), REST_TEMPLATE)
+                        ty.kind() != "generic_type" && self.names(cx.text(&ty), client)
                     });
             }
             "identifier" => (cx.text(&object), false),
@@ -115,11 +131,16 @@ impl Proof<'_> {
             _ => return false,
         };
         jpa::receiver_type(cx, method, call, receiver, this_only)
-            .is_some_and(|ty| self.names(&ty, REST_TEMPLATE))
+            .is_some_and(|ty| self.names(&ty, client))
     }
 
     /// The method an `HttpMethod.X` argument names, else `?`.
-    fn method(&self, method: TsNode<'_>, call: TsNode<'_>, argument: TsNode<'_>) -> String {
+    pub(crate) fn method(
+        &self,
+        method: TsNode<'_>,
+        call: TsNode<'_>,
+        argument: TsNode<'_>,
+    ) -> String {
         let cx = self.cx;
         let constant = (argument.kind() == "field_access")
             .then(|| {
@@ -147,6 +168,26 @@ impl Proof<'_> {
     }
 }
 
+/// The innermost method or constructor of `call`: its owner and binding scope.
+pub(crate) fn enclosing<'t>(
+    call: TsNode<'t>,
+    methods_by_start: &HashMap<usize, String>,
+) -> Option<(TsNode<'t>, String)> {
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        if let Some(symbol) = methods_by_start.get(&parent.start_byte())
+            && matches!(
+                parent.kind(),
+                "method_declaration" | "constructor_declaration"
+            )
+        {
+            return Some((parent, symbol.clone()));
+        }
+        node = parent;
+    }
+    None
+}
+
 /// `RestTemplate` fetch sites in this file, owned by their enclosing method
 /// or constructor.
 pub(crate) fn sites(
@@ -163,11 +204,7 @@ pub(crate) fn sites(
     if !named(REST_TEMPLATE) {
         return Vec::new();
     }
-    let proof = Proof {
-        cx,
-        imports,
-        declared: declared_names(cx, root),
-    };
+    let proof = Proof::new(cx, root, imports);
     let query = crate::queries::query("(method_invocation) @call");
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, cx.source);
@@ -195,25 +232,10 @@ pub(crate) fn sites(
         if fixed.is_none() && args.len() < 4 {
             continue;
         }
-        // The innermost method or constructor: owner and binding scope.
-        let mut node = call;
-        let mut enclosing = None;
-        while let Some(parent) = node.parent() {
-            if let Some(symbol) = methods_by_start.get(&parent.start_byte())
-                && matches!(
-                    parent.kind(),
-                    "method_declaration" | "constructor_declaration"
-                )
-            {
-                enclosing = Some((parent, symbol.clone()));
-                break;
-            }
-            node = parent;
-        }
-        let Some((method, symbol)) = enclosing else {
+        let Some((method, symbol)) = enclosing(call, methods_by_start) else {
             continue;
         };
-        if !proof.is_client(method, call, object) {
+        if !proof.is_client(method, call, object, REST_TEMPLATE) {
             continue;
         }
         let http_method = match fixed {

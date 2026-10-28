@@ -3977,3 +3977,151 @@ fn feign_wildcard_class_mapping_settles_at_the_join() {
         ]
     );
 }
+
+fn webclient_rows(sites: &[adapters_fw::client::FetchSite]) -> Vec<[String; 3]> {
+    let expr = |expr: &IdentityExpr| match expr {
+        IdentityExpr::Literal(url) => format!("literal:{url}"),
+        IdentityExpr::EnvRef(key) => format!("env:{key}"),
+        IdentityExpr::Computed(text) => format!("computed:{text}"),
+    };
+    sites
+        .iter()
+        .map(|site| {
+            [
+                site.method.clone(),
+                expr(&site.url),
+                site.base
+                    .as_ref()
+                    .map(|base| expr(&base.url))
+                    .unwrap_or_else(|| "none".into()),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn webclient_request_chains_on_proven_clients_become_fetch_sites() {
+    // AC-0441: every verb and `method(HttpMethod.X)` on a field, `this.`
+    // field, parameter and local typed `WebClient`, plus inline `create` and
+    // `builder()…build()` clients with literal, computed and absent bases.
+    let sites = retrofit_sites(&[(
+        "src/main/java/io/demo/Client.java",
+        r#"package io.demo;
+
+import org.springframework.http.HttpMethod;
+import org.springframework.web.reactive.function.client.WebClient;
+
+class Client {
+    private final WebClient users;
+
+    Client(WebClient users) { this.users = users; }
+
+    void calls(WebClient param, String id) {
+        users.get().uri("/users/{id}", id).retrieve();
+        this.users.post().uri("/users").retrieve();
+        param.put().uri("/users/" + id).retrieve();
+        WebClient local = param;
+        local.delete().uri("/users/{id}", id).retrieve();
+        users.patch().uri("/a").retrieve();
+        users.head().uri("/b").retrieve();
+        users.options().uri("/c").retrieve();
+        users.method(HttpMethod.POST).uri("/d").retrieve();
+        users.method(verb()).uri("/e").retrieve();
+        WebClient.create("https://orders.example.com/").get().uri("/orders").retrieve();
+        WebClient.create().get().uri("https://absolute.example.com/x").retrieve();
+        WebClient.builder().baseUrl("https://old.example.com").baseUrl("https://stock.example.com").build().get().uri("/stock").retrieve();
+        WebClient.builder().baseUrl(host()).build().get().uri("/f").retrieve();
+        WebClient.builder().build().get().uri("/g").retrieve();
+    }
+}
+"#,
+    )]);
+    assert_eq!(
+        webclient_rows(&sites),
+        [
+            ["GET", "literal:/users/{id}", "computed:users"],
+            ["POST", "literal:/users", "computed:this.users"],
+            ["PUT", "computed:\"/users/\" + id", "computed:param"],
+            ["DELETE", "literal:/users/{id}", "computed:local"],
+            ["PATCH", "literal:/a", "computed:users"],
+            ["HEAD", "literal:/b", "computed:users"],
+            ["OPTIONS", "literal:/c", "computed:users"],
+            ["POST", "literal:/d", "computed:users"],
+            ["?", "literal:/e", "computed:users"],
+            [
+                "GET",
+                "literal:/orders",
+                "literal:https://orders.example.com"
+            ],
+            ["GET", "literal:https://absolute.example.com/x", "none"],
+            ["GET", "literal:/stock", "literal:https://stock.example.com"],
+            ["GET", "literal:/f", "computed:host()"],
+            ["GET", "literal:/g", "none"],
+        ]
+        .map(|row| row.map(String::from))
+    );
+}
+
+#[test]
+fn unproven_webclient_chains_yield_no_fetch_sites() {
+    // AC-0441: a wildcard import, a lookalike type, a file-local `WebClient`,
+    // a variable obscuring `WebClient.create`, an untyped receiver, verb
+    // calls of the wrong arity and a test source yield nothing.
+    let source = |imports: &str, body: &str| {
+        format!(
+            "package io.demo;\n\n{imports}\nclass C {{\n    void calls(WebClient client) {{\n        {body}\n    }}\n}}\n"
+        )
+    };
+    let proven = "import org.springframework.web.reactive.function.client.WebClient;\n";
+    for (path, text) in [
+        (
+            "src/main/java/io/demo/Wild.java",
+            source(
+                "import org.springframework.web.reactive.function.client.*;\n",
+                "client.get().uri(\"/w\").retrieve();",
+            ),
+        ),
+        (
+            "src/main/java/io/demo/Lookalike.java",
+            source(
+                "import com.acme.WebClient;\n",
+                "client.get().uri(\"/l\").retrieve();",
+            ),
+        ),
+        (
+            "src/main/java/io/demo/Local.java",
+            format!(
+                "{}\ninterface WebClient {{}}\n",
+                source(proven, "client.get().uri(\"/d\").retrieve();")
+            ),
+        ),
+        (
+            "src/main/java/io/demo/Obscured.java",
+            source(
+                proven,
+                "Object WebClient = null; WebClient.create(\"http://x\").get().uri(\"/o\");",
+            ),
+        ),
+        (
+            "src/main/java/io/demo/Untyped.java",
+            source(
+                proven,
+                "var other = make(); other.get().uri(\"/u\").retrieve();",
+            ),
+        ),
+        (
+            "src/main/java/io/demo/Arity.java",
+            source(
+                proven,
+                "client.get(\"x\").uri(\"/g\"); client.method().uri(\"/m\");",
+            ),
+        ),
+        (
+            "src/test/java/io/demo/Test.java",
+            source(proven, "client.get().uri(\"/t\").retrieve();"),
+        ),
+    ] {
+        let sites = retrofit_sites(&[(path, text.as_str())]);
+        assert!(sites.is_empty(), "{path}: {:?}", webclient_rows(&sites));
+    }
+}
