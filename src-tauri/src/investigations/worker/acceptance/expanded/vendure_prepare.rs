@@ -46,10 +46,50 @@ fn write(directory: &Path, name: &str, value: &impl Serialize) -> Result<(), Str
     sync_directory(directory)
 }
 fn sync_directory(path: &Path) -> Result<(), String> {
-    std::fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| error.to_string())
+    #[cfg(any(unix, windows))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Directory opens need backup semantics; FlushFileBuffers also
+            // requires GENERIC_WRITE, matching job_execution's directory sync.
+            options
+                .write(true)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        let directory = options.open(path).map_err(|error| error.to_string())?;
+        if !directory
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            return Err("capture sync target must be a directory".into());
+        }
+        directory.sync_all().map_err(|error| error.to_string())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err("capture directory synchronization is unsupported on this platform".into())
+    }
 }
+
+#[test]
+fn captured_preparation_directory_sync_requires_directory_and_preserves_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    sync_directory(directory.path()).unwrap();
+    let file = directory.path().join("artifact.json");
+    std::fs::write(&file, b"{}").unwrap();
+    assert!(
+        sync_directory(&file)
+            .unwrap_err()
+            .contains("must be a directory")
+    );
+    assert!(sync_directory(&directory.path().join("missing")).is_err());
+}
+
 /// Fresh output starts exactly one queued task. Existing output can only reopen
 /// the exact already-started task, including a committed start whose ack was lost.
 /// A crash between task commit and its synced start receipt requires explicit
