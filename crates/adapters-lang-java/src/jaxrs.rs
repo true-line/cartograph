@@ -12,6 +12,12 @@
 //!   resource class implements it;
 //! - a sub-resource locator (`@Path` with no HTTP method), routed at runtime;
 //! - a path that is not a provable string literal.
+//!
+//! Only public methods are resource methods (Jakarta REST 3.1 §3.3.1), and a
+//! method of an anonymous class is never a direct method of the resource that
+//! encloses it. A simple annotation name is unproven when the file declares a
+//! type of that name, which shadows any import (JLS §6.4.1); a same-package
+//! type shadowing a wildcard import is outside this per-file view.
 
 use core_graph::{Edge, Node};
 use core_prov::ConfidenceTier;
@@ -41,7 +47,13 @@ fn verb(simple: &str) -> Option<&'static str> {
 /// Proven by a fully qualified use, a named import of exactly
 /// `<package>.<Name>`, or a wildcard of exactly that package, for either
 /// JAX-RS package. A same-named annotation from anywhere else proves nothing.
-fn proven(cx: &FileCx<'_>, annotation: TsNode<'_>, simple: &str, imports: &Imports) -> bool {
+fn proven(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'_>,
+    simple: &str,
+    imports: &Imports,
+    declared: &BTreeSet<String>,
+) -> bool {
     let spelled = annotation
         .child_by_field_name("name")
         .map(|name| cx.text(&name).to_string())
@@ -52,7 +64,7 @@ fn proven(cx: &FileCx<'_>, annotation: TsNode<'_>, simple: &str, imports: &Impor
     {
         return true;
     }
-    if spelled != simple {
+    if spelled != simple || declared.contains(simple) {
         return false;
     }
     if let Some(fqn) = imports.bindings.get(simple) {
@@ -71,21 +83,31 @@ fn path_annotation<'t>(
     cx: &FileCx<'_>,
     annotations: &[(String, TsNode<'t>)],
     imports: &Imports,
+    declared: &BTreeSet<String>,
 ) -> Option<TsNode<'t>> {
     annotations
         .iter()
-        .find(|(name, node)| name == "Path" && proven(cx, *node, name, imports))
+        .find(|(name, node)| name == "Path" && proven(cx, *node, name, imports, declared))
         .map(|(_, node)| *node)
 }
 
 /// Join a resource path with a method path. JAX-RS ignores a leading `/` on
 /// either, so segments meet at exactly one `/` under a leading `/`; a trailing
-/// slash spelled on the last segment is kept, as the Spring join keeps it.
-fn join_route(base: &str, tail: &str) -> String {
+/// slash spelled on the last segment is kept, as the Spring join keeps it,
+/// including a method path that is only `/`.
+fn join_route(base: &str, spelled_tail: &str) -> String {
     let base = base.trim_start_matches('/');
-    let tail = tail.trim_start_matches('/');
+    let tail = spelled_tail.trim_start_matches('/');
     if tail.is_empty() {
-        return format!("/{base}");
+        if spelled_tail.is_empty() {
+            return format!("/{base}");
+        }
+        let base = base.trim_end_matches('/');
+        return if base.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{base}/")
+        };
     }
     if base.trim_end_matches('/').is_empty() {
         return format!("/{tail}");
@@ -93,10 +115,17 @@ fn join_route(base: &str, tail: &str) -> String {
     format!("/{}/{tail}", base.trim_end_matches('/'))
 }
 
-/// The nearest enclosing type declaration of `method`.
+/// The nearest enclosing type declaration of `method`, or `None` when the
+/// nearest type is anonymous (an instance creation or enum constant body).
 fn enclosing_type(method: TsNode<'_>) -> Option<TsNode<'_>> {
     let mut node = method;
     while let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "object_creation_expression" | "enum_constant"
+        ) {
+            return None;
+        }
         if matches!(
             parent.kind(),
             "class_declaration"
@@ -109,6 +138,56 @@ fn enclosing_type(method: TsNode<'_>) -> Option<TsNode<'_>> {
         node = parent;
     }
     None
+}
+
+/// Whether a method is public: spelled `public` in a class, or any method of
+/// an interface that is not declared `private`.
+fn is_public(method: TsNode<'_>, owner: TsNode<'_>) -> bool {
+    let mut walk = method.walk();
+    let keywords: Vec<&str> = method
+        .children(&mut walk)
+        .filter(|child| child.kind() == "modifiers")
+        .flat_map(|modifiers| {
+            let mut inner = modifiers.walk();
+            modifiers
+                .children(&mut inner)
+                .map(|keyword| keyword.kind())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if keywords.contains(&"public") {
+        return true;
+    }
+    owner.kind() == "interface_declaration"
+        && !keywords
+            .iter()
+            .any(|kind| matches!(*kind, "private" | "protected"))
+}
+
+/// Simple names of every type this file declares, at any depth.
+fn declared_types(cx: &FileCx<'_>, any: TsNode<'_>) -> BTreeSet<String> {
+    let mut root = any;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut names = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "annotation_type_declaration"
+        ) && let Some(name) = node.child_by_field_name("name")
+        {
+            names.insert(cx.text(&name).to_string());
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    names
 }
 
 /// Endpoints, route Gaps and their `HANDLES` edges for this file's JAX-RS
@@ -157,6 +236,10 @@ pub(crate) fn endpoints(
                 }),
             });
         };
+    let declared = methods
+        .first()
+        .map(|(method, ..)| declared_types(cx, *method))
+        .unwrap_or_default();
     let mut endpoints = Vec::new();
     for (method, handler, _, _) in methods {
         if method.kind() != "method_declaration" {
@@ -165,17 +248,21 @@ pub(crate) fn endpoints(
         let annotations = declaration_annotations(cx, *method);
         let http_method = annotations.iter().find_map(|(name, node)| {
             verb(name)
-                .filter(|_| proven(cx, *node, name, imports))
+                .filter(|_| proven(cx, *node, name, imports, &declared))
                 .map(|verb| (verb, *node))
         });
-        let method_path = path_annotation(cx, &annotations, imports);
+        let method_path = path_annotation(cx, &annotations, imports, &declared);
         if http_method.is_none() && method_path.is_none() {
             continue;
         }
         let Some(owner) = enclosing_type(*method) else {
             continue;
         };
-        let owner_path = path_annotation(cx, &declaration_annotations(cx, owner), imports);
+        if !is_public(*method, owner) {
+            continue;
+        }
+        let owner_path =
+            path_annotation(cx, &declaration_annotations(cx, owner), imports, &declared);
         let mut evidence: Vec<TsNode<'_>> = owner_path.into_iter().collect();
         evidence.extend(method_path);
         evidence.extend(http_method.map(|(_, node)| node));

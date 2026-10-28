@@ -2546,3 +2546,90 @@ public class Wild {
             && edge.src.starts_with("gap:route:")));
     }
 }
+
+// AC-0428 (#1264 review): only public methods are resource methods, a type
+// the file declares shadows an imported simple annotation name, a method
+// path of `/` keeps its trailing slash, and an anonymous class's methods are
+// never composed with the enclosing resource's @Path.
+#[test]
+fn jaxrs_skips_non_public_shadowed_and_anonymous_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "src/main/java/com/demo/rest";
+    write(
+        dir.path(),
+        &format!("{base}/Hidden.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/hidden")
+public class Hidden {
+    @GET
+    @Path("/")
+    public String index() { return ""; }
+
+    @GET
+    @Path("/private")
+    private String secret() { return ""; }
+
+    @GET
+    @Path("/protected")
+    protected String guarded() { return ""; }
+
+    @GET
+    @Path("/package")
+    String local() { return ""; }
+
+    @Path("/sub")
+    public Object sub() {
+        return new Object() {
+            @GET
+            public String inner() { return ""; }
+        };
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Shadow.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/shadow")
+public class Shadow {
+    @interface GET {}
+
+    @GET
+    public String get() { return ""; }
+
+    @jakarta.ws.rs.POST
+    public String post() { return ""; }
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from(["ep:local/demo@GET:/hidden/", "ep:local/demo@POST:/shadow"])
+    );
+    let gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .map(|node| node.props["handler_sym"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![format!("sym:local/demo@{base}/Hidden.java#Hidden.sub()").as_str()]
+    );
+}
