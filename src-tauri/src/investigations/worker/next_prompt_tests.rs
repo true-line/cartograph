@@ -1172,6 +1172,11 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         for stage in [
             DecodeStage::Preflight,
             DecodeStage::TypedEnvelope,
+            DecodeStage::TypedStagedFinish,
+            DecodeStage::TypedCoverageRead,
+            DecodeStage::TypedLegacyAction,
+            DecodeStage::TypedReplay,
+            DecodeStage::BareFinish,
             DecodeStage::CanonicalFields,
             DecodeStage::Semantic,
             DecodeStage::HostBinding,
@@ -1246,9 +1251,20 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
     });
     let mut nested_typed = finish.clone();
     nested_typed["action"]["findings"][0]["title"] = json!(1);
+    let mut missing = finish.clone();
+    missing["action"]["findings"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("claim_kind");
+    let typed_cases = [
+        (missing, DecodeStage::TypedStagedFinish),
+        (finish["action"].clone(), DecodeStage::BareFinish),
+        (json!({"type":"read_coverage_inventory","context_id":"context","repo":1,"inventory_hash":"a".repeat(64),"max_bytes":1}), DecodeStage::TypedCoverageRead),
+        (json!({"type":"replay_query","context_id":"context","query_index":"0","query_id":"a".repeat(64)}), DecodeStage::TypedReplay),
+    ].map(|(value, stage)| (decoded(stage, InvestigationError::InvalidAction), value.to_string()));
     for (stage, text) in [
         (
-            decoded(DecodeStage::TypedEnvelope, InvestigationError::InvalidAction),
+            decoded(DecodeStage::TypedStagedFinish, InvestigationError::InvalidAction),
             nested_typed.to_string(),
         ),
         (
@@ -1264,7 +1280,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             SENTINEL.into(),
         ),
         (
-            decoded(DecodeStage::TypedEnvelope, InvestigationError::InvalidAction),
+            decoded(DecodeStage::TypedLegacyAction, InvestigationError::InvalidAction),
             json!({"type":"unsupported_action", "private":SENTINEL}).to_string(),
         ),
         (
@@ -1292,7 +1308,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             FailureCode::OwnershipLost,
             InvocationOutcome::ResponseReceived,
         ),
-    ].into_iter().chain(finish_cases) {
+    ].into_iter().chain(finish_cases).chain(typed_cases) {
         let provider = Arc::new(Rejected {
             profile: Scripted::new(Mode::Malformed),
             calls: AtomicUsize::new(0),
@@ -1355,7 +1371,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             }
         }
     }
-    assert_eq!(messages.len(), 14);
+    assert_eq!(messages.len(), 18);
 }
 
 // AC-0432, AC-0439: explicit generations keep their saved definitions through actual worker refusal/reopen.

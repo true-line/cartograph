@@ -222,7 +222,7 @@ impl CompletionInvestigationAction {
         match QualifiedInvestigationAction::decode_detailed(raw, context_id)? {
             QualifiedInvestigationAction::SourceOrFinish(InvestigationAction::Finish {
                 ..
-            }) => Err(Stage::TypedEnvelope.invalid()),
+            }) => Err(Stage::BareFinish.invalid()),
             read => Ok(Self::Read(read)),
         }
     }

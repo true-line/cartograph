@@ -26,7 +26,8 @@ impl StagedFinish {
         use ActionDecodeStage as Stage;
         strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)
             .map_err(|error| Stage::Preflight.failure(error))?;
-        let finish: Self = serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+        let finish: Self =
+            serde_json::from_str(raw).map_err(|_| Stage::TypedStagedFinish.invalid())?;
         finish.validate_for_role_detailed(false)?;
         if serde_json::to_value(&finish).map_err(|_| Stage::CanonicalFields.invalid())?
             != serde_json::from_str::<serde_json::Value>(raw)
@@ -687,6 +688,11 @@ fn nested_finish_failure_mapping_preserves_errors_without_claiming_reachability(
         for stage in [
             Stage::Preflight,
             Stage::TypedEnvelope,
+            Stage::TypedStagedFinish,
+            Stage::TypedCoverageRead,
+            Stage::TypedLegacyAction,
+            Stage::TypedReplay,
+            Stage::BareFinish,
             Stage::CanonicalFields,
         ] {
             assert_eq!(

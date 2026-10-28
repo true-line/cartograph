@@ -475,6 +475,11 @@ impl InvestigationStopReason {
                 match failure.stage {
                     Stage::Preflight => message!("preflight"),
                     Stage::TypedEnvelope => message!("typed_envelope"),
+                    Stage::TypedStagedFinish => message!("typed_staged_finish"),
+                    Stage::TypedCoverageRead => message!("typed_coverage_read"),
+                    Stage::TypedLegacyAction => message!("typed_legacy_action"),
+                    Stage::TypedReplay => message!("typed_replay"),
+                    Stage::BareFinish => message!("bare_finish"),
                     Stage::CanonicalFields => message!("canonical_fields"),
                     Stage::Semantic => message!("semantic"),
                     Stage::SemanticRule(rule) => match rule {

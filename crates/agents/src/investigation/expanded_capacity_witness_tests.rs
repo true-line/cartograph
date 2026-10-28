@@ -718,7 +718,7 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
         ),
         (
             json!({"type":"PRIVATE-REJECTED-1281"}).to_string(),
-            Stage::TypedEnvelope,
+            Stage::TypedLegacyAction,
             InvestigationError::InvalidAction,
         ),
         (
@@ -851,7 +851,11 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
             json!(["citation", "citation"]),
             Stage::SemanticRule(ActionSemanticRule::FindingCitations),
         ),
-        ("/action/findings/0/title", json!(1), Stage::TypedEnvelope),
+        (
+            "/action/findings/0/title",
+            json!(1),
+            Stage::TypedStagedFinish,
+        ),
     ] {
         let mut value_under_test = supported.clone();
         *value_under_test.pointer_mut(pointer).unwrap() = value;
@@ -904,6 +908,41 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
         decode(&noncanonical.to_string()).unwrap_err().stage,
         Stage::CanonicalFields
     );
+    let mut missing = supported.clone();
+    missing["action"]["findings"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("claim_kind");
+    for (value, stage) in [
+        (missing, Stage::TypedStagedFinish),
+        (supported["action"].clone(), Stage::BareFinish),
+        (
+            json!({"type":"read_coverage_inventory","context_id":context,"repo":1,"inventory_hash":"a".repeat(64),"max_bytes":1}),
+            Stage::TypedCoverageRead,
+        ),
+        (
+            json!({"type":"read_evidence","fact":{"kind":"node","id":"node:test"},"role":"provenance","index":"0"}),
+            Stage::TypedLegacyAction,
+        ),
+        (
+            json!({"type":"replay_query","context_id":context,"query_index":"0","query_id":reference.query_id}),
+            Stage::TypedReplay,
+        ),
+    ] {
+        let raw = value.to_string();
+        assert_eq!(
+            decode(&raw).unwrap_err(),
+            ActionDecodeFailure {
+                stage,
+                error: InvestigationError::InvalidAction
+            }
+        );
+        assert_eq!(
+            ProgressiveInvestigationAction::decode_resolved(&raw, &context, &hash, &ledger, policy)
+                .unwrap_err(),
+            InvestigationError::InvalidAction
+        );
+    }
     let host = ProgressiveInvestigationAction::decode_resolved_detailed(
         "{}", "wrong", &hash, &ledger, policy,
     )
