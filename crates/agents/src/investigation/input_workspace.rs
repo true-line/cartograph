@@ -51,6 +51,7 @@ impl InvestigationInput {
         let details = queries.checked_mul(MAX_QUERY_BYTES.checked_add(1)?)?;
         sum(&[
             Self::retained_workspace_bytes(policy)?,
+            response_schema::workspace_bytes(policy)?,
             json_bytes(MAX_RECORD_BYTES)?, // incoming owned ledger, before validation
             ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
             projection,

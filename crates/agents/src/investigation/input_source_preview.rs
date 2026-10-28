@@ -139,10 +139,11 @@ impl InvestigationInput {
 /// All source metadata survives redaction; only each independently redacted
 /// source text may change. This includes both existing and appended spans.
 pub(super) fn protected_representation(
+    ledger: &InvestigationInputLedger,
     before: &CompletionPayload,
     after: &CompletionPayload,
 ) -> Result<(), InvestigationError> {
-    super::super::sealing::admission_protected_fields(before, after)?;
+    super::super::sealing::admission_protected_fields(ledger, before, after)?;
     if before.spans.len() != after.spans.len()
         || before.spans.iter().zip(&after.spans).any(|(a, b)| {
             a.id != b.id

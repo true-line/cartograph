@@ -42,6 +42,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         else {
             return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
         };
+        current
+            .validate_admitted_source_fact(&fact)
+            .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
         self.check_new_work()?;
         let original: serde_json::Value = serde_json::from_str(&completion.text)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;

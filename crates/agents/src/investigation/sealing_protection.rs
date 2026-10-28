@@ -3,12 +3,13 @@
 use super::*;
 
 pub(in crate::investigation) fn admission_protected_fields(
+    ledger: &InvestigationInputLedger,
     original: &CompletionPayload,
     redacted: &CompletionPayload,
 ) -> Result<(), InvestigationError> {
     let before = parse_prompt(&original.prompt)?;
     let after = parse_prompt(&redacted.prompt)?;
-    response_schema::validate(original, &before)?;
+    response_schema::validate(ledger, original, &before)?;
     if original.response_schema != redacted.response_schema {
         return Err(InvestigationError::InvalidInput);
     }

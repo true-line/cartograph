@@ -307,10 +307,13 @@ fn source_preview_protection_checks_span_metadata_but_allows_independent_text_re
     let inspected =
         inspect_bounded_action(&profile(), &action, &CompletionLimits::default()).unwrap();
     assert_ne!(payload.spans[0].text, inspected.payload().spans[0].text);
-    input::source_preview::protected_representation(&payload, inspected.payload()).unwrap();
+    input::source_preview::protected_representation(input.ledger(), &payload, inspected.payload())
+        .unwrap();
     let mut wrong = inspected.payload().clone();
     wrong.spans[0].path = "different".into();
-    assert!(input::source_preview::protected_representation(&payload, &wrong).is_err());
+    assert!(
+        input::source_preview::protected_representation(input.ledger(), &payload, &wrong).is_err()
+    );
 }
 
 #[test]

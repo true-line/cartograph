@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Task ownership, bounded row decoding, saved-call/ledger/result replay and
 /// host encodings are separate. Regex/native allocations are not modeled.
 pub fn next_prompt_validation_workspace() -> Option<usize> {
-    let definition = definition_workspace(SpecialistId::DomainAnalystV13)?
+    let definition = definition_workspace(SpecialistId::DomainAnalystV14)?
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
@@ -22,7 +22,7 @@ pub fn next_prompt_validation_workspace() -> Option<usize> {
     ])
 }
 
-fn definition_workspace(role: SpecialistId) -> Option<usize> {
+pub(super) fn definition_workspace(role: SpecialistId) -> Option<usize> {
     let prompt = role.prompt();
     let definition = role.definition().ok()?;
     let wire = count(&(role, definition.version, &prompt))?;
@@ -33,11 +33,12 @@ fn definition_workspace(role: SpecialistId) -> Option<usize> {
     // replacements and final formatted prompt. Each is shorter than the final
     // prompt. Spec Writer @2's extra replacement/append consumes its temporary;
     // retained pre-message common, message common, discovery and final prompt
-    // stay within these seven owners. No resource ceiling is increased.
-    // Account all seven even though some lifetimes do not overlap.
+    // stay within seven owners. @13 and @14 each add one formatted prompt
+    // while retaining their preceding version. No resource ceiling is increased.
+    // Account all nine even though some lifetimes do not overlap.
     sum(&[
-        prompt.len().checked_mul(7)?,
-        slots::<String>(7)?,
+        prompt.len().checked_mul(9)?,
+        slots::<String>(9)?,
         wire,
         wire,
         b"cartograph:specialist-definition:v1\0".len(),
@@ -98,7 +99,7 @@ mod tests {
     // Pin the definition component independently, not the much larger total.
     #[test]
     fn saved_family_definitions_fit_admitted_definition_workspace() {
-        let admitted = definition_workspace(SpecialistId::DomainAnalystV13)
+        let admitted = definition_workspace(SpecialistId::DomainAnalystV14)
             .unwrap()
             .max(definition_workspace(SpecialistId::EvidenceAuditorV11).unwrap());
         for role in [
@@ -125,6 +126,7 @@ mod tests {
             SpecialistId::DomainAnalystV11,
             SpecialistId::DomainAnalystV12,
             SpecialistId::DomainAnalystV13,
+            SpecialistId::DomainAnalystV14,
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::SpecWriterV1,
             SpecialistId::SpecWriterV2,
@@ -146,10 +148,11 @@ mod tests {
             SpecialistId::DomainAnalystV11,
             SpecialistId::DomainAnalystV12,
             SpecialistId::DomainAnalystV13,
+            SpecialistId::DomainAnalystV14,
             SpecialistId::EvidenceAuditorV11,
         ] {
             let definition = role.definition().unwrap();
-            assert!(matches!(definition.version, 10..=13));
+            assert!(matches!(definition.version, 10..=14));
             assert!(
                 definition_workspace(role).unwrap()
                     >= role.prompt().len() + count(&definition).unwrap()

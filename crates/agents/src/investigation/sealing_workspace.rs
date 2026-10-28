@@ -54,6 +54,7 @@ impl InvestigationInput {
         ])?;
         let reserved = super::admission_input::reserve_projection_bytes(policy)?;
         let measurement = sum(&[
+            response_schema::workspace_bytes(policy)?,
             json_bytes(reserved)?.checked_mul(2)?, // reserve and per-mode clone
             tree.checked_mul(3)?,                  // candidate/current/reserve action payloads
             slots::<CompletionAction>(3)?,
@@ -89,6 +90,7 @@ impl InvestigationInput {
         // feedback each own a cloned Value followed by a decoded DTO. Sum these
         // phases conservatively rather than relying on temporary drop timing.
         let admission = sum(&[
+            response_schema::workspace_bytes(policy)?,
             tree.checked_mul(2)?,
             tree.checked_mul(2)?, // contract clone / decoded contract
             tree.checked_mul(2)?, // metadata clone / decoded metadata
