@@ -7,6 +7,8 @@ use agents::investigation::InvestigationProvider;
 use std::path::Path;
 #[path = "expanded/analyst.rs"]
 mod analyst;
+#[path = "expanded/captured_local.rs"]
+pub(super) mod captured_local;
 #[path = "expanded/vendure_prepare.rs"]
 pub(super) mod vendure_prepare;
 

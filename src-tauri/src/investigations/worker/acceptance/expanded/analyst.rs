@@ -1,4 +1,4 @@
-//! Scripted analyst only. No auditor or live-provider entrypoint is installed.
+//! Shared analyst execution and durable receipt helpers. Auditor execution is separate.
 use super::{CaptureFixture, PreparationBinding, PreparedState, reopen, reopen_control};
 use crate::{
     investigations::{runtime::descriptor, worker::run_completion},
@@ -18,10 +18,10 @@ use std::{
 use tauri::Manager;
 
 const MAX_RECEIPT: usize = 2 * 1024 * 1024;
-fn bytes(value: &Value) -> Result<Vec<u8>, String> {
+pub(super) fn bytes(value: &Value) -> Result<Vec<u8>, String> {
     crate::investigations::context::bounded_json(value, MAX_RECEIPT).map_err(|e| e.to_string())
 }
-fn exclusive(path: &Path, body: &[u8]) -> Result<(), String> {
+pub(super) fn exclusive(path: &Path, body: &[u8]) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -79,12 +79,37 @@ fn rows(db: &rusqlite::Connection, id: &str, table: &str) -> Result<Vec<String>,
         })
         .collect()
 }
+pub(super) struct Authority<'a> {
+    pub app: &'a tauri::App<tauri::test::MockRuntime>,
+    pub app_data: &'a Path,
+    pub analyst_id: &'a str,
+    pub request: &'a StagedObligationRequest,
+    pub binding: &'a PreparationBinding,
+    pub manifest_hash: &'a str,
+    pub provider: &'a InvestigationProvider,
+}
+impl<'a> Authority<'a> {
+    fn synthetic(prepared: &'a PreparedState) -> Self {
+        Self {
+            app: &prepared.app,
+            app_data: &prepared.app_data,
+            analyst_id: &prepared.analyst_id,
+            request: &prepared.analyst_request,
+            binding: &prepared.manifest.binding,
+            manifest_hash: &prepared.manifest_hash,
+            provider: &prepared.manifest.provider,
+        }
+    }
+}
 fn collect(prepared: &PreparedState) -> Result<Value, String> {
-    let database = prepared.app_data.join("state.db");
+    collect_bound(&Authority::synthetic(prepared))
+}
+pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> {
+    let database = authority.app_data.join("state.db");
     let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
     // This production reader authenticates task3 and historical @10 metadata.
     let (detail, result, ledger, events) =
-        super::super::completion::execution::read_expanded_state(&jobs, &prepared.analyst_id)?;
+        super::super::completion::execution::read_expanded_state(&jobs, authority.analyst_id)?;
     if !matches!(
         detail.summary.status,
         InvestigationStatus::Completed
@@ -98,7 +123,7 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
     let db =
         rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| e.to_string())?;
-    let invocations = rows(&db, &prepared.analyst_id, "investigation_invocations")?;
+    let invocations = rows(&db, authority.analyst_id, "investigation_invocations")?;
     let calls = invocations
         .iter()
         .map(|body| {
@@ -107,10 +132,10 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
         .collect::<Result<Vec<_>, _>>()?;
     let capacity = rows(
         &db,
-        &prepared.analyst_id,
+        authority.analyst_id,
         "investigation_admission_refusals",
     )?;
-    let finish = rows(&db, &prepared.analyst_id, "staged_completion_refusals")?;
+    let finish = rows(&db, authority.analyst_id, "staged_completion_refusals")?;
     if calls.len() as u32 != detail.usage.model_invocations {
         return Err("Invocation denominator changed.".into());
     }
@@ -133,9 +158,9 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
         .count();
     Ok(
         json!({"schema_version":1,"family":"request7-specialist10-prompt9-disclosure6-result7","role":"analyst",
-        "binding":prepared.manifest.binding,"manifest_hash":prepared.manifest_hash,
-        "request_hash":prepared.manifest.analyst_request_hash,
-        "obligations_hash":prepared.analyst_request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
+        "binding":authority.binding,"manifest_hash":authority.manifest_hash,
+        "request_hash":authority.request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
+        "obligations_hash":authority.request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
         "initial_prompt_measurement_basis":"first_saved_invocation_only_not_pre_dispatch_preparation",
         "initial_prompt_bytes":calls.first().map(|call| call.input_bytes),
         "finish_only_calls":finish_only_calls,"choice_calls":calls.len()-finish_only_calls,
@@ -181,8 +206,19 @@ fn run_control(
     fixture: CaptureFixture,
 ) -> Result<Value, String> {
     let prepared = reopen_control(directory, expected, fixture)?;
+    if prepared.auditor_id.is_some() {
+        return Err("Unexpected auditor task.".into());
+    }
+    execute_bound(directory, &Authority::synthetic(&prepared), provider)?;
+    reopen_control_receipt(directory, expected, fixture)
+}
+pub(super) fn execute_bound(
+    directory: &Path,
+    authority: &Authority<'_>,
+    provider: Arc<dyn LlmProvider>,
+) -> Result<Value, String> {
     if descriptor(provider.as_ref(), InvestigationProviderMode::Local).map_err(|e| e.to_string())?
-        != prepared.manifest.provider
+        != *authority.provider
     {
         return Err("Provider differs from frozen identity.".into());
     }
@@ -190,17 +226,14 @@ fn run_control(
     // error, unknown acknowledgement or receipt failure keeps it consumed.
     exclusive(
         &directory.join("analyst-attempt.json"),
-        &bytes(&json!({"binding":expected,"manifest_hash":prepared.manifest_hash}))?,
+        &bytes(&json!({"binding":authority.binding,"manifest_hash":authority.manifest_hash}))?,
     )?;
-    let state = prepared.app.state::<crate::AppState>();
+    let state = authority.app.state::<crate::AppState>();
     let mut jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
     let detail = jobs
-        .investigation(&prepared.analyst_id)
+        .investigation(authority.analyst_id)
         .map_err(|e| e.to_string())?;
-    if detail.summary.status != InvestigationStatus::Queued
-        || detail.usage.model_invocations != 0
-        || prepared.auditor_id.is_some()
-    {
+    if detail.summary.status != InvestigationStatus::Queued || detail.usage.model_invocations != 0 {
         return Err("Analyst is not fresh.".into());
     }
     let plan = jobs
@@ -216,20 +249,20 @@ fn run_control(
     drop(jobs);
     let live = state
         .investigations
-        .insert(&prepared.analyst_id)
+        .insert(authority.analyst_id)
         .map_err(|e| e.to_string())?;
     run_completion(
-        prepared.app.handle().clone(),
-        prepared.analyst_id.clone(),
-        prepared.analyst_request.clone(),
+        authority.app.handle().clone(),
+        authority.analyst_id.to_owned(),
+        authority.request.clone(),
         execution,
         provider,
         live,
         Instant::now(),
     );
-    let receipt = collect(&prepared)?;
+    let receipt = collect_bound(authority)?;
     exclusive(&directory.join("analyst-receipt.json"), &bytes(&receipt)?)?;
-    reopen_control_receipt(directory, expected, fixture)
+    Ok(receipt)
 }
 
 #[cfg(test)]
