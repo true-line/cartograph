@@ -147,7 +147,10 @@ fn bound<T>(
         .specialist_id
         .as_deref()
         .unwrap_or("domain-analyst@10");
-    if !matches!(specialist, "domain-analyst@10" | "domain-analyst@11") {
+    if !matches!(
+        specialist,
+        "domain-analyst@10" | "domain-analyst@11" | "domain-analyst@12"
+    ) {
         return Err("unsupported captured analyst specialist".into());
     }
     capture::validate_binding(&expected.binding)?;

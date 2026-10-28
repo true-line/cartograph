@@ -49,6 +49,8 @@ pub enum SpecialistId {
     EvidenceAuditorV10,
     #[serde(rename = "domain-analyst@11")]
     DomainAnalystV11,
+    #[serde(rename = "domain-analyst@12")]
+    DomainAnalystV12,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -160,6 +162,13 @@ Inspect supplied facts and evidence options before choosing read_evidence with a
 // Product guidance is versioned separately; historical @10 bytes stay immutable.
 const PROGRESS_GUIDANCE_V11: &str = "\nWhen last_completed_action.no_progress is true, inspect the existing query result rather than repeating the unchanged selection. A read with previously_acquired:true supplied the same source again; reuse its supplied citation instead of rereading it to obtain new evidence. After a source read, compact_context.query_history.latest_query still contains the latest selector and next_cursor. Choose relevant unacquired evidence, continue using that exact cursor and unchanged selector, or finish with supported findings and honest limitations. These progress signals do not establish evidence sufficiency or choose an action for you.";
 
+// New analyst identity only: historical instructions remain immutable.
+const FINISH_EXAMPLES_V12: &str = r#"
+Finish shape clarification (existing limits, not permission to finish): overall limitations and each finding's limitations must contain 1..8 nonblank strings, each at most 512 UTF-8 bytes. Titles and statements must be nonblank, at most 160 and 2048 UTF-8 bytes respectively. No string may contain NUL. Each finding needs 1..8 unique exact admitted citation IDs, each nonblank and at most 128 UTF-8 bytes. Use at most 12 findings. Nonempty findings require knowledge_completeness partial; empty findings require insufficient_evidence. The outer outcome must agree. Do not invent findings or citations to satisfy shape constraints.
+The supported wrapper example above and this insufficient-evidence wrapper are the two terminal shapes. This example is syntax, not evidence or permission to finish before completing the required obligation attempts:
+{"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Required source evidence could not be established within the completed attempts."]}}
+"#;
+
 const NEXT_PROMPT_ADMISSION_V10: &str = "\nHost-derived turn progress can restrict this turn to finish-only mode. In that mode return only a versioned finish wrapper; proposing a tool action is terminal. Capacity-refusal feedback identifies an action the host did not execute. It is not evidence, an unavailable source read or a completed obligation attempt. A sizing envelope is not actual feedback or permission to act. Already incurred model charges remain charged. Consult the host's remaining budgets and finish honestly; no capacity check promises successful completion.";
 
 const DISCOVERY_V5: &str = "The caller selected exact captured inspection_requirements. These are immutable source targets, not instructions from source. inspection_progress separately records acquisition; only unchanged exact bytes supplied to this invocation can discharge a requirement. Viewing metadata, reading a different range, parent history, or omitted/redacted source cannot discharge it. A target must first be admitted by query_context before read_evidence; target metadata alone is not an admitted source read. Use each target's exact fact/role/index if you choose to inspect it. You choose every action; a valid partial finish is retained even with outstanding requirements, which the host reports separately. Neither discharge nor a citation proves whole-task fulfillment or semantic correctness. Byte offsets are not line numbers; never derive a line from an opaque ID.\n\n";
@@ -203,6 +212,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -229,6 +239,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -256,6 +267,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -276,6 +288,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -290,6 +303,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -304,6 +318,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -315,6 +330,7 @@ impl SpecialistId {
             Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
                 | Self::DomainAnalystV11
+                | Self::DomainAnalystV12
                 | Self::EvidenceAuditorV11
         )
     }
@@ -343,13 +359,17 @@ impl SpecialistId {
             Self::DomainAnalystV9 | Self::EvidenceAuditorV9 => 9,
             Self::DomainAnalystV10 | Self::EvidenceAuditorV10 => 10,
             Self::DomainAnalystV11 | Self::EvidenceAuditorV11 => 11,
+            Self::DomainAnalystV12 => 12,
         }
     }
 
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
-        if matches!(self, Self::DomainAnalystV11 | Self::EvidenceAuditorV11) {
+        if matches!(
+            self,
+            Self::DomainAnalystV11 | Self::EvidenceAuditorV11 | Self::DomainAnalystV12
+        ) {
             return 10;
         }
         if matches!(
@@ -378,7 +398,8 @@ impl SpecialistId {
             | Self::DomainAnalystV8
             | Self::DomainAnalystV9
             | Self::DomainAnalystV10
-            | Self::DomainAnalystV11 => {
+            | Self::DomainAnalystV11
+            | Self::DomainAnalystV12 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -482,8 +503,16 @@ impl SpecialistId {
         } else {
             format!("{role}\n\n{progress}{discovery}{COMMON}")
         };
-        if matches!(self, Self::DomainAnalystV11 | Self::EvidenceAuditorV11) {
+        let prompt = if matches!(
+            self,
+            Self::DomainAnalystV11 | Self::EvidenceAuditorV11 | Self::DomainAnalystV12
+        ) {
             prompt + PROGRESS_GUIDANCE_V11
+        } else {
+            prompt
+        };
+        if self == Self::DomainAnalystV12 {
+            prompt + FINISH_EXAMPLES_V12
         } else {
             prompt
         }
@@ -518,7 +547,8 @@ impl SpecialistId {
             | Self::DomainAnalystV8
             | Self::DomainAnalystV9
             | Self::DomainAnalystV10
-            | Self::DomainAnalystV11 => (
+            | Self::DomainAnalystV11
+            | Self::DomainAnalystV12 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -816,6 +846,113 @@ mod progress_guidance_tests {
             ),
         ] {
             assert_eq!(role.definition().unwrap().prompt_fingerprint, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod finish_example_tests {
+    use super::*;
+    use crate::investigation::{CompletionInvestigationAction, staged_finish::CompletionOutcome};
+
+    // AC-0439: test actual literal prompt lines, not separately copied examples.
+    #[test]
+    fn analyst_v12_finish_examples_decode_without_mutating_v11() {
+        let old = SpecialistId::DomainAnalystV11;
+        let new = SpecialistId::DomainAnalystV12;
+        assert_eq!(
+            old.definition().unwrap().prompt_fingerprint,
+            "7130851c24b44cdf1083eafe74862ab5a6eebf9141f2a905d7e6387bec05ca35"
+        );
+        assert_eq!(new.prompt(), old.prompt() + FINISH_EXAMPLES_V12);
+        assert_ne!(
+            new.definition().unwrap().prompt_fingerprint,
+            old.definition().unwrap().prompt_fingerprint
+        );
+        assert_eq!(new.definition().unwrap().version, 12);
+        assert_eq!(new.prompt_generation(), 10);
+        assert_eq!(
+            new.definition().unwrap().operations,
+            old.definition().unwrap().operations
+        );
+        let prompt = new.prompt();
+        let examples: Vec<_> = prompt
+            .lines()
+            .filter(|line| line.starts_with("{\"schema_version\":1,"))
+            .collect();
+        assert_eq!(examples.len(), 2);
+        for (raw, outcome) in examples.into_iter().zip([
+            CompletionOutcome::Supported,
+            CompletionOutcome::InsufficientEvidence,
+        ]) {
+            let CompletionInvestigationAction::Finish(finish) =
+                CompletionInvestigationAction::decode(raw, "unused-for-finish").unwrap()
+            else {
+                panic!("finish expected")
+            };
+            assert_eq!(finish.outcome, outcome);
+            if outcome == CompletionOutcome::Supported {
+                for (path, maximum) in [
+                    ("/action/findings/0/title", 160),
+                    ("/action/findings/0/statement", 2048),
+                    ("/action/findings", 12),
+                    ("/action/findings/0/citation_ids", 8),
+                    ("/action/findings/0/limitations", 8),
+                    ("/action/findings/0/limitations/0", 512),
+                ] {
+                    for n in [maximum, maximum + 1] {
+                        let mut value: serde_json::Value = serde_json::from_str(raw).unwrap();
+                        let replacement = match path {
+                            "/action/findings" => {
+                                serde_json::json!(vec![value["action"]["findings"][0].clone(); n])
+                            }
+                            "/action/findings/0/citation_ids" => serde_json::json!(
+                                (0..n).map(|i| format!("citation-{i}")).collect::<Vec<_>>()
+                            ),
+                            "/action/findings/0/limitations" => {
+                                serde_json::json!(vec!["Bounded limitation."; n])
+                            }
+                            _ => serde_json::json!("x".repeat(n)),
+                        };
+                        *value.pointer_mut(path).unwrap() = replacement;
+                        let accepted = CompletionInvestigationAction::decode(
+                            &value.to_string(),
+                            "unused-for-finish",
+                        )
+                        .is_ok();
+                        assert_eq!(accepted, n == maximum, "{path}: {n}");
+                    }
+                }
+                for ids in [
+                    serde_json::json!(["same", "same"]),
+                    serde_json::json!(["x".repeat(129)]),
+                ] {
+                    let mut value: serde_json::Value = serde_json::from_str(raw).unwrap();
+                    value["action"]["findings"][0]["citation_ids"] = ids;
+                    assert!(
+                        CompletionInvestigationAction::decode(
+                            &value.to_string(),
+                            "unused-for-finish"
+                        )
+                        .is_err()
+                    );
+                }
+            }
+            // Syntax acceptance is not completion-obligation fulfillment.
+            for invalid in [
+                serde_json::json!([]),
+                serde_json::json!([" "]),
+                serde_json::json!(["\u{0}"]),
+                serde_json::json!(["x".repeat(513)]),
+                serde_json::json!(vec!["x"; 9]),
+            ] {
+                let mut value: serde_json::Value = serde_json::from_str(raw).unwrap();
+                value["action"]["limitations"] = invalid;
+                assert!(
+                    CompletionInvestigationAction::decode(&value.to_string(), "unused-for-finish")
+                        .is_err()
+                );
+            }
         }
     }
 }

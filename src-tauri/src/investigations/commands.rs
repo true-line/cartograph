@@ -34,6 +34,7 @@ fn available_specialists() -> Vec<SpecialistId> {
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::DomainAnalystV11,
+            SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
         ]);
     }
@@ -64,6 +65,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                         SpecialistId::DomainAnalystV10,
                         SpecialistId::EvidenceAuditorV10,
                         SpecialistId::DomainAnalystV11,
+                        SpecialistId::DomainAnalystV12,
                         SpecialistId::EvidenceAuditorV11,
                     ]
                 } else {
@@ -846,6 +848,7 @@ mod policy_catalog_tests {
         );
         for role in [
             SpecialistId::DomainAnalystV11,
+            SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
         ] {
             assert_eq!(

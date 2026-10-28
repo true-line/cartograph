@@ -1216,13 +1216,14 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
     assert_eq!(messages.len(), 11);
 }
 
-// AC-0432: both generations keep their saved definitions through actual worker refusal/reopen.
+// AC-0432, AC-0439: explicit generations keep their saved definitions through actual worker refusal/reopen.
 #[test]
 fn progress_guidance_roles_preserve_saved_v10_and_v11_definitions() {
     for role in [
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
         SpecialistId::DomainAnalystV11,
+        SpecialistId::DomainAnalystV12,
         SpecialistId::EvidenceAuditorV11,
     ] {
         let provider = Arc::new(Scripted::new(Mode::Malformed));
