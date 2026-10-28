@@ -518,6 +518,7 @@ pub fn preflight_scan(
 
     let total = files.len();
     let mut walked = std::collections::BTreeSet::new();
+    let mut go_skips = GoSkips::default();
     for (done, (path, name, rel)) in files.into_iter().enumerate() {
         if on_file(ScanStep {
             path: &rel,
@@ -568,8 +569,12 @@ pub fn preflight_scan(
             scan_source(&path, &rel, eval, &mut unsupported, &mut potential_gaps)?;
             walked.insert(rel.clone());
         }
+        if extension == "go" {
+            go_skips.observe(&path, &name, &rel)?;
+        }
         detect_language(&extension, rel, plugins, &mut languages, &mut unsupported);
     }
+    go_skips.report(&mut unsupported);
 
     // Captured members the live walk no longer reaches still carry the
     // extraction's claims; scan their captured bytes. No hook: the host's
@@ -852,6 +857,53 @@ fn scan_source(
         }
     }
     Ok(())
+}
+
+/// Go files in recovery's scope that recovery still skips, by reason (#1258):
+/// count and first path in walk order.
+#[derive(Default)]
+struct GoSkips {
+    platform: Option<(u64, String)>,
+    constrained: Option<(u64, String)>,
+}
+
+impl GoSkips {
+    fn observe(&mut self, path: &Path, name: &str, rel: &str) -> std::io::Result<()> {
+        let outside = Path::new(rel)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .any(|part| adapters_lang_go::skips_dir(&part.as_os_str().to_string_lossy()));
+        if outside || name.ends_with("_test.go") {
+            return Ok(());
+        }
+        let slot = if adapters_lang_go::has_platform_suffix(name) {
+            &mut self.platform
+        } else if adapters_lang_go::has_explicit_build_constraint(&std::fs::read(path)?) {
+            &mut self.constrained
+        } else {
+            return Ok(());
+        };
+        slot.get_or_insert_with(|| (0, rel.to_string())).0 += 1;
+        Ok(())
+    }
+
+    fn report(self, unsupported: &mut Vec<PatternFinding>) {
+        let reasons = [
+            (self.platform, "a GOOS/GOARCH file-name suffix"),
+            (self.constrained, "a //go:build constraint"),
+        ];
+        for (count, first, reason) in reasons
+            .into_iter()
+            .filter_map(|(seen, reason)| seen.map(|(count, first)| (count, first, reason)))
+        {
+            let message = format!(
+                "{count} Go source file(s) carry {reason} and are not analysed: \
+                 recovery does not evaluate build tags (first: {first})"
+            );
+            unsupported.push(finding("go-skipped-source", &first, 1, &message));
+        }
+    }
 }
 
 fn finding(kind: &str, path: &str, line: u64, message: &str) -> PatternFinding {
@@ -1735,5 +1787,62 @@ mod tests {
                 "{language}"
             );
         }
+    }
+
+    // AC-0427 (#1258): Go files the adapter skips are counted per reason,
+    // never silently dropped; vendored, test and plain files are not counted.
+    #[test]
+    fn go_files_recovery_skips_are_named_with_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "go.mod", "module example.com/app\n");
+        write(dir.path(), "cmd/main.go", "package main\n");
+        write(dir.path(), "pkg/sys_linux.go", "package pkg\n");
+        write(dir.path(), "pkg/sys_windows_amd64.go", "package pkg\n");
+        write(
+            dir.path(),
+            "pkg/tagged.go",
+            "//go:build linux\n\npackage pkg\n",
+        );
+        write(
+            dir.path(),
+            "pkg/legacy.go",
+            "// +build ignore\n\npackage pkg\n",
+        );
+        write(
+            dir.path(),
+            "pkg/late.go",
+            "package pkg\n\n//go:build linux\n",
+        );
+        write(dir.path(), "pkg/sys_linux_test.go", "package pkg\n");
+        write(dir.path(), "vendor/dep/dep_linux.go", "package dep\n");
+        write(
+            dir.path(),
+            "vendor/dep/tagged.go",
+            "//go:build linux\npackage dep\n",
+        );
+        let report = preflight(dir.path()).unwrap();
+        let skipped: Vec<(&str, &str)> = report
+            .unsupported
+            .iter()
+            .filter(|finding| finding.kind == "go-skipped-source")
+            .map(|finding| (finding.path.as_str(), finding.message.as_str()))
+            .collect();
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert_eq!(skipped[0].0, "pkg/sys_linux.go");
+        assert!(
+            skipped[0]
+                .1
+                .starts_with("2 Go source file(s) carry a GOOS/GOARCH")
+        );
+        assert_eq!(skipped[1].0, "pkg/legacy.go");
+        assert!(
+            skipped[1]
+                .1
+                .starts_with("2 Go source file(s) carry a //go:build")
+        );
+        assert_eq!(
+            report.unsupported,
+            preflight(dir.path()).unwrap().unsupported
+        );
     }
 }

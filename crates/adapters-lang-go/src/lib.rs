@@ -805,12 +805,14 @@ pub fn extract_source(
     extract_source_with_module(source, path, id, None)
 }
 
+/// Directories Go recovery never walks. Preflight shares this predicate so
+/// its skipped-file counts match what recovery reads (#1258).
+pub fn skips_dir(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "vendor" | "node_modules" | "dist" | "build" | "bin")
+}
+
 fn collect_go_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractError> {
-    let skip = |name: &str| {
-        name.starts_with('.')
-            || matches!(name, "vendor" | "node_modules" | "dist" | "build" | "bin")
-    };
-    for file in source_walk::files(root, &skip, source_walk::Gitignores::Honor)? {
+    for file in source_walk::files(root, &skips_dir, source_walk::Gitignores::Honor)? {
         if file
             .path
             .extension()
@@ -826,7 +828,10 @@ fn collect_go_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractErr
     Ok(())
 }
 
-fn has_explicit_build_constraint(source: &[u8]) -> bool {
+/// Whether `source` carries a `//go:build` or `// +build` line before its
+/// package clause. Recovery skips such files: it does not evaluate build
+/// tags, so it cannot say which build includes them.
+pub fn has_explicit_build_constraint(source: &[u8]) -> bool {
     let text = String::from_utf8_lossy(source);
     for line in text.lines() {
         let line = line.trim();
@@ -840,7 +845,9 @@ fn has_explicit_build_constraint(source: &[u8]) -> bool {
     false
 }
 
-fn has_platform_suffix(name: &str) -> bool {
+/// Whether `name` ends in a `_GOOS` or `_GOARCH` suffix (`x_linux.go`).
+/// Recovery skips such files for the same reason as build-constrained ones.
+pub fn has_platform_suffix(name: &str) -> bool {
     const GOOS: &[&str] = &[
         "aix",
         "android",
