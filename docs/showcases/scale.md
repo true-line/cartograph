@@ -31,24 +31,28 @@ The harness builds the release showcase test binary once. It then runs each lane
 
 Measured at Cartograph `151a403b` on an M4 laptop (darwin-arm64), with the release test binary already built.
 
-| Lane | Files | Wall | Peak RSS | Peak footprint | Nodes | Edges | Gap findings | Endpoints | Rules | Receipts |
+| Lane | Files | Wall | Peak RSS | Peak footprint | Nodes | Edges | `Gap` nodes | Endpoints | Rules | Receipts |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| simplelogin | 766 | 58.0 s | 1.00 GB | 0.69 GB | 26,069 | 37,757 | 7,041 | 426 | 1,169 | 12,642 |
-| rea | 5,493 | 298.5 s | 3.91 GB | 5.99 GB | 310,343 | 437,800 | 161,516 | 34 | 26,262 | 37,025 |
-| vendure | 940 | 18.0 s | 1.23 GB | 0.55 GB | 29,124 | 46,997 | 7,812 | 374 | 1,414 | 18,076 |
-| openmrs-core | 1,488 | 11.5 s | 1.29 GB | 0.82 GB | 28,190 | 45,839 | 3,761 | 6 | 542 | 3,188 |
-| kafka | 6,453 | 89.7 s | 2.64 GB | 4.90 GB | 105,947 | 227,627 | 6,449 | 0 | 0 | 0 |
-| kubernetes | 8,758 | 69.7 s | 1.54 GB | 1.90 GB | 80,947 | 151,259 | 100 | 53 | 12 | 113 |
+| simplelogin | 766 | 58.0 s | 1.00 GiB | 0.69 GiB | 26,069 | 37,757 | 7,041 | 426 | 1,169 | 12,642 |
+| rea | 5,493 | 298.5 s | 3.91 GiB | 5.99 GiB | 310,343 | 437,800 | 161,516 | 34 | 26,262 | 37,025 |
+| vendure | 940 | 18.0 s | 1.23 GiB | 0.55 GiB | 29,124 | 46,997 | 7,812 | 374 | 1,414 | 18,076 |
+| openmrs-core | 1,488 | 11.5 s | 1.29 GiB | 0.82 GiB | 28,190 | 45,839 | 3,761 | 6 | 542 | 3,188 |
+| kafka | 6,453 | 89.7 s | 2.64 GiB | 4.90 GiB | 105,947 | 227,627 | 6,449 | 0 | 0 | 0 |
+| kubernetes | 8,758 | 69.7 s | 1.54 GiB | 1.90 GiB | 80,947 | 151,259 | 100 | 53 | 12 | 113 |
 
-**Timing caveat.** A full workspace test suite was running on the same machine during this run, so the wall times above are likely high. Earlier runs at the same pins with the machine otherwise idle:
+**Timing caveat.** A full workspace test suite was running on the same machine during this run, so the wall times above are likely high. Earlier runs at the same pins, with the machine otherwise idle, measured at Cartograph `dcb68037`:
 
 | Lane | Wall | Peak RSS | Peak footprint |
 |---|---:|---:|---:|
-| openmrs-core | 8.95 s | — | — |
-| kafka | 70.35 s | 3.42 GB | 5.29 GB |
-| kubernetes | 27.9 s | 1.96 GB | 2.06 GB |
+| openmrs-core | 8.95 s | 1.28 GiB | 0.86 GiB |
+| kafka | 70.35 s | 3.18 GiB | 4.93 GiB |
+| kubernetes | 27.9 s | 1.82 GiB | 1.92 GiB |
 
-The node, edge, gap, endpoint, rule and receipt counts for openmrs-core, kafka and kubernetes were identical across runs.
+The node, edge, `Gap` node, endpoint, rule and receipt counts for openmrs-core, kafka and kubernetes were identical across the two commits.
+
+Memory is binary: 1 GiB = 2^30 bytes. `Gap` nodes are graph facts. They are not the gap-register finding counts below, which group instances by class.
+
+**Receipt omissions.** On rea, 107,022 nodes and 11,217 edges are in the graph but have no stored source receipt. The TypeScript adapter's receipt budget gives precedence to rules over declarations, and it records each omitted fact in `source_node_omissions` / `source_edge_omissions` (`receipt_omissions` in the results JSON). So rea's receipt count does not cover its whole graph. The other lanes had no omissions.
 
 ## What the gap registers say
 
