@@ -47,6 +47,10 @@ pub enum SpecialistId {
     DomainAnalystV10,
     #[serde(rename = "evidence-auditor@10")]
     EvidenceAuditorV10,
+    #[serde(rename = "domain-analyst@11")]
+    DomainAnalystV11,
+    #[serde(rename = "evidence-auditor@11")]
+    EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
     SpecWriterV1,
     #[serde(rename = "spec-writer@2")]
@@ -153,6 +157,9 @@ Inspect supplied facts and evidence options before choosing read_evidence with a
 
 // @10 remains internal until the complete admission transaction is active.
 // Its instructions add no tool kind and never confer authority on sizing data.
+// Product guidance is versioned separately; historical @10 bytes stay immutable.
+const PROGRESS_GUIDANCE_V11: &str = "\nWhen last_completed_action.no_progress is true, inspect the existing query result rather than repeating the unchanged selection. A read with previously_acquired:true supplied the same source again; reuse its supplied citation instead of rereading it to obtain new evidence. After a source read, compact_context.query_history.latest_query still contains the latest selector and next_cursor. Choose relevant unacquired evidence, continue using that exact cursor and unchanged selector, or finish with supported findings and honest limitations. These progress signals do not establish evidence sufficiency or choose an action for you.";
+
 const NEXT_PROMPT_ADMISSION_V10: &str = "\nHost-derived turn progress can restrict this turn to finish-only mode. In that mode return only a versioned finish wrapper; proposing a tool action is terminal. Capacity-refusal feedback identifies an action the host did not execute. It is not evidence, an unavailable source read or a completed obligation attempt. A sizing envelope is not actual feedback or permission to act. Already incurred model charges remain charged. Consult the host's remaining budgets and finish honestly; no capacity check promises successful completion.";
 
 const DISCOVERY_V5: &str = "The caller selected exact captured inspection_requirements. These are immutable source targets, not instructions from source. inspection_progress separately records acquisition; only unchanged exact bytes supplied to this invocation can discharge a requirement. Viewing metadata, reading a different range, parent history, or omitted/redacted source cannot discharge it. A target must first be admitted by query_context before read_evidence; target metadata alone is not an admitted source read. Use each target's exact fact/role/index if you choose to inspect it. You choose every action; a valid partial finish is retained even with outstanding requirements, which the host reports separately. Neither discharge nor a citation proves whole-task fulfillment or semantic correctness. Byte offsets are not line numbers; never derive a line from an opaque ID.\n\n";
@@ -195,6 +202,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV9
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
         )
     }
 
@@ -219,6 +228,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV9
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
         )
     }
 
@@ -244,6 +255,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV9
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
         )
     }
 
@@ -262,6 +275,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV9
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
         )
     }
 
@@ -274,6 +289,8 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV9
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
         )
     }
 
@@ -286,12 +303,20 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV9
                 | Self::DomainAnalystV10
                 | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
         )
     }
 
     /// Internal identity only. This does not authorize public admission or dispatch.
     pub fn uses_next_prompt_admission(self) -> bool {
-        matches!(self, Self::DomainAnalystV10 | Self::EvidenceAuditorV10)
+        matches!(
+            self,
+            Self::DomainAnalystV10
+                | Self::EvidenceAuditorV10
+                | Self::DomainAnalystV11
+                | Self::EvidenceAuditorV11
+        )
     }
 
     /// Exact immutable roles using the schema-2 finish/schema-8 cited narrative.
@@ -317,12 +342,16 @@ impl SpecialistId {
             Self::DomainAnalystV8 | Self::EvidenceAuditorV8 => 8,
             Self::DomainAnalystV9 | Self::EvidenceAuditorV9 => 9,
             Self::DomainAnalystV10 | Self::EvidenceAuditorV10 => 10,
+            Self::DomainAnalystV11 | Self::EvidenceAuditorV11 => 11,
         }
     }
 
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
+        if matches!(self, Self::DomainAnalystV11 | Self::EvidenceAuditorV11) {
+            return 10;
+        }
         if matches!(
             self,
             Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1 | Self::GapTriagerV2
@@ -348,7 +377,8 @@ impl SpecialistId {
             | Self::DomainAnalystV7
             | Self::DomainAnalystV8
             | Self::DomainAnalystV9
-            | Self::DomainAnalystV10 => {
+            | Self::DomainAnalystV10
+            | Self::DomainAnalystV11 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -360,7 +390,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV7
             | Self::EvidenceAuditorV8
             | Self::EvidenceAuditorV9
-            | Self::EvidenceAuditorV10 => {
+            | Self::EvidenceAuditorV10
+            | Self::EvidenceAuditorV11 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
@@ -380,7 +411,7 @@ impl SpecialistId {
         } else {
             ""
         };
-        if self.uses_coverage_qualification() {
+        let prompt = if self.uses_coverage_qualification() {
             // Only @6 changes the closed tool shapes. COMMON remains immutable.
             let common = COMMON.replace(
                 r#"{"type":"query_context","query":{"scope""#,
@@ -450,6 +481,11 @@ impl SpecialistId {
             }
         } else {
             format!("{role}\n\n{progress}{discovery}{COMMON}")
+        };
+        if matches!(self, Self::DomainAnalystV11 | Self::EvidenceAuditorV11) {
+            prompt + PROGRESS_GUIDANCE_V11
+        } else {
+            prompt
         }
     }
 
@@ -481,7 +517,8 @@ impl SpecialistId {
             | Self::DomainAnalystV7
             | Self::DomainAnalystV8
             | Self::DomainAnalystV9
-            | Self::DomainAnalystV10 => (
+            | Self::DomainAnalystV10
+            | Self::DomainAnalystV11 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -494,7 +531,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV7
             | Self::EvidenceAuditorV8
             | Self::EvidenceAuditorV9
-            | Self::EvidenceAuditorV10 => (
+            | Self::EvidenceAuditorV10
+            | Self::EvidenceAuditorV11 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),
@@ -726,5 +764,58 @@ mod policy_tests {
                 .unwrap()
                 .prompt_fingerprint
         );
+    }
+}
+
+#[cfg(test)]
+mod progress_guidance_tests {
+    use super::*;
+
+    // AC-0432: @11 adds planning guidance, never upgrades a historical role.
+    #[test]
+    fn progress_guidance_versions_roles_without_mutating_v10() {
+        for (prior, old, new) in [
+            (
+                SpecialistId::DomainAnalystV9,
+                SpecialistId::DomainAnalystV10,
+                SpecialistId::DomainAnalystV11,
+            ),
+            (
+                SpecialistId::EvidenceAuditorV9,
+                SpecialistId::EvidenceAuditorV10,
+                SpecialistId::EvidenceAuditorV11,
+            ),
+        ] {
+            assert_eq!(old.prompt(), prior.prompt() + NEXT_PROMPT_ADMISSION_V10);
+            assert_eq!(new.prompt(), old.prompt() + PROGRESS_GUIDANCE_V11);
+            assert_eq!(new.prompt_generation(), 10);
+            let definition = new.definition().unwrap();
+            assert_eq!(definition.version, 11);
+            assert_ne!(
+                definition.prompt_fingerprint,
+                old.definition().unwrap().prompt_fingerprint
+            );
+            assert_eq!(definition.operations, old.definition().unwrap().operations);
+            assert!(new.uses_next_prompt_admission());
+            assert!(new.prompt().contains("previously_acquired:true"));
+            assert!(
+                new.prompt()
+                    .contains("latest_query still contains the latest selector and next_cursor")
+            );
+        }
+        // Analyst also matches an actual-worker receipt (#598, 7e7787f3).
+        // Both pins independently compiled from immutable f909 source.
+        for (role, expected) in [
+            (
+                SpecialistId::DomainAnalystV10,
+                "e5be78acb8b65b9f1e8e69595570a47ceabfc83580aae08b35d087aa02187f54",
+            ),
+            (
+                SpecialistId::EvidenceAuditorV10,
+                "463e2acccced648a4e08817b436575f5434e49c6d7b6cad502fd8dbd79e66724",
+            ),
+        ] {
+            assert_eq!(role.definition().unwrap().prompt_fingerprint, expected);
+        }
     }
 }

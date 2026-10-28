@@ -133,6 +133,8 @@ fn admission_prompt_builds_actual_progressive_input_for_both_roles_and_modes() {
     for role in [
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
+        SpecialistId::DomainAnalystV11,
+        SpecialistId::EvidenceAuditorV11,
     ] {
         let fixture = Fixture::new(role, 7);
         for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {

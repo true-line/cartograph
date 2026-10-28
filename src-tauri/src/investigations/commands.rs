@@ -33,6 +33,8 @@ fn available_specialists() -> Vec<SpecialistId> {
         specialists.extend([
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
+            SpecialistId::DomainAnalystV11,
+            SpecialistId::EvidenceAuditorV11,
         ]);
     }
     specialists
@@ -61,6 +63,8 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                     vec![
                         SpecialistId::DomainAnalystV10,
                         SpecialistId::EvidenceAuditorV10,
+                        SpecialistId::DomainAnalystV11,
+                        SpecialistId::EvidenceAuditorV11,
                     ]
                 } else {
                     vec![
@@ -840,6 +844,15 @@ mod policy_catalog_tests {
             available_specialists().contains(&SpecialistId::DomainAnalystV10),
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
+        for role in [
+            SpecialistId::DomainAnalystV11,
+            SpecialistId::EvidenceAuditorV11,
+        ] {
+            assert_eq!(
+                available_specialists().contains(&role),
+                InvestigationPolicy::for_profile("investigation-v2").is_some()
+            );
+        }
     }
 
     #[test]

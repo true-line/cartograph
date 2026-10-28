@@ -54,6 +54,8 @@ pub(super) fn seal_with_admission_policy(
         if ![
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
+            SpecialistId::DomainAnalystV11,
+            SpecialistId::EvidenceAuditorV11,
         ]
         .iter()
         .any(|role| original.system == role.prompt())

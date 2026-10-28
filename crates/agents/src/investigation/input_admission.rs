@@ -636,6 +636,8 @@ impl InvestigationInput {
             || ![
                 SpecialistId::DomainAnalystV10,
                 SpecialistId::EvidenceAuditorV10,
+                SpecialistId::DomainAnalystV11,
+                SpecialistId::EvidenceAuditorV11,
             ]
             .iter()
             .any(|role| self.payload.system == role.prompt())

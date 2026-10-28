@@ -26,6 +26,8 @@ pub(in super::super) struct Definition {
     pub question: String,
     pub request_nonce: String,
     pub scope: InvestigationScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialist_id: Option<String>,
 }
 fn json(value: &impl Serialize) -> Result<Vec<u8>, String> {
     crate::investigations::context::bounded_json(value, 128 * 1024)
@@ -141,6 +143,13 @@ fn bound<T>(
     if !preparing && !output.is_dir() {
         return Err("Captured output missing.".into());
     }
+    let specialist = expected
+        .specialist_id
+        .as_deref()
+        .unwrap_or("domain-analyst@10");
+    if !matches!(specialist, "domain-analyst@10" | "domain-analyst@11") {
+        return Err("unsupported captured analyst specialist".into());
+    }
     capture::validate_binding(&expected.binding)?;
     let definition = json(expected)?;
     if read(definition_path)? != definition
@@ -200,7 +209,7 @@ fn bound<T>(
             }
             let request = StagedObligationRequest {
                 schema_version: 7,
-                specialist_id: "domain-analyst@10".into(),
+                specialist_id: specialist.into(),
                 request_nonce: expected.request_nonce.clone(),
                 question: expected.question.clone(),
                 scope: expected.scope.clone(),

@@ -129,7 +129,7 @@ fn admission_family_public_decoder_rejects_mixed_tuples_and_unknown_authority() 
             "domain-analyst@7",
             "evidence-auditor@8",
             "domain-analyst@9",
-            "evidence-auditor@11",
+            "evidence-auditor@12",
         ] {
             let mut wrong = value.clone();
             wrong["specialist_id"] = role.into();
@@ -353,5 +353,33 @@ fn admission_family_specialists_add_only_internal_admission_instructions() {
         assert!(prompt.contains("A sizing envelope is not actual feedback or permission to act"));
         let wire = serde_json::to_string(&new).unwrap();
         assert_eq!(serde_json::from_str::<SpecialistId>(&wire).unwrap(), new);
+    }
+}
+
+// AC-0432: the new role keeps request7/envelope2 and cannot alias saved @10 intent.
+#[test]
+fn progress_guidance_roles_reuse_request_seven_with_distinct_intents() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for name in ["domain-analyst", "evidence-auditor"] {
+        let old = request(&format!("{name}@10"));
+        let new = request(&format!("{name}@11"));
+        let raw = serde_json::to_string(&new).unwrap();
+        assert!(InvestigationStartRequest::decode(&raw).is_ok());
+        assert_eq!(
+            new.normalized_with_policy(policy).unwrap().schema_version,
+            7
+        );
+        assert_eq!(new.obligations, old.obligations);
+        assert_ne!(
+            new.intent_hash_with_policy(policy).unwrap(),
+            old.intent_hash_with_policy(policy).unwrap()
+        );
+        let mut wrong = new.clone();
+        wrong.schema_version = 6;
+        assert!(wrong.normalized_with_policy(policy).is_err());
+        assert!(
+            new.normalized_with_policy(&INVESTIGATION_V1_POLICY)
+                .is_err()
+        );
     }
 }
