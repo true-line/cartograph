@@ -3,6 +3,7 @@ use super::tests::Case;
 use super::*;
 use agents::investigation::*;
 use llm::{Embedding, LlmProvider, Locality, ProviderCaps, ProviderError, bounded::*};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{
     Arc,
@@ -337,4 +338,178 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
     }
     std::fs::write(&case.config, b"{}").unwrap();
     assert!(run(&expected).is_err());
+}
+
+// AC-0429, AC-0439: offline synthetic evidence; no old database is opened or reused.
+// This does NOT reproduce #598 run 7: only the canonical-query/size hypothesis
+// is tested. The actual failed action is unknown; no causal host fix is claimed.
+#[test]
+#[ignore = "requires existing frozen 17-file packet; creates a retained fresh disposable profile"]
+fn captured_v12_canonical_query_continuation_repro() {
+    use super::super::expanded::{captured_local, vendure_prepare};
+    use crate::investigations::worker::tests::completion_tests::expanded_query_repro_provider;
+    let packet = std::path::PathBuf::from(super::super::required("CARTOGRAPH_REPRO_PACKET"));
+    let template = std::path::PathBuf::from(super::super::required("CARTOGRAPH_REPRO_DEFINITION"));
+    let prior: Definition = serde_json::from_slice(&std::fs::read(&template).unwrap()).unwrap();
+    assert_eq!(prior.specialist_id.as_deref(), Some("domain-analyst@12"));
+    assert_eq!(prior.selections.len(), 7);
+    let manifest = packet.join("evaluator/vendure-cart-readiness.input.json");
+    let proof = packet.join("evaluator/input-proof.json");
+    let source = packet.join("source");
+    let before = super::input::verify(&source, &manifest, &proof).unwrap();
+    assert_eq!(before.files.len(), 17);
+    let old: Value = serde_json::from_slice(
+        &std::fs::read(packet.join("preparation-output/preparation.json")).unwrap(),
+    )
+    .unwrap();
+    let mut old_receipts: Vec<_> = std::fs::read_dir(&packet)
+        .unwrap()
+        .map(|p| p.unwrap().path().join("analyst-receipt.json"))
+        .filter(|p| p.is_file())
+        .map(|p| {
+            let hash = sha(&std::fs::read(&p).unwrap());
+            (p, hash)
+        })
+        .collect();
+    assert_eq!(
+        old_receipts.len(),
+        7,
+        "all seven historical receipts retained"
+    );
+    for path in [
+        template,
+        packet.join("preparation-output/preparation.json"),
+        manifest.clone(),
+        proof.clone(),
+    ] {
+        old_receipts.push((path.clone(), sha(&std::fs::read(path).unwrap())));
+    }
+    let mut case = Case::new();
+    case.retain();
+    let base = case.config.parent().unwrap();
+    // Copy only verified members; all preparation paths stay in the fresh fixture.
+    for path in ["order.ts", "stock.ts"] {
+        std::fs::remove_file(case.root.join(path)).unwrap();
+    }
+    for path in before.files.keys() {
+        let target = case.root.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(source.join(path), target).unwrap();
+    }
+    let fresh_manifest = base.join("frozen-input.json");
+    let fresh_proof = base.join("frozen-proof.json");
+    std::fs::copy(&manifest, &fresh_manifest).unwrap();
+    std::fs::copy(&proof, &fresh_proof).unwrap();
+    assert_eq!(
+        super::input::verify(&case.root, &fresh_manifest, &fresh_proof).unwrap(),
+        before
+    );
+    eprintln!("synthetic repro retained at {}", base.display());
+    let prepared = super::prepare(
+        &case.root,
+        &fresh_manifest,
+        &fresh_proof,
+        &case.config,
+        prior.binding.source_commit.clone(),
+        &base.join("frozen-report"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(prepared.input, before);
+    let fresh = serde_json::to_value(&prepared.graph).unwrap();
+    let mut expected = prior.clone();
+    expected.selections = prior
+        .selections
+        .iter()
+        .map(|selection| {
+            let prior = old["graph"]["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| {
+                    c["binding"]["receipt_id"] == selection.receipt_id
+                        && c["binding"]["fact"] == serde_json::to_value(&selection.fact).unwrap()
+                })
+                .unwrap();
+            let fact = serde_json::to_string(&selection.fact).unwrap().replace(
+                old["graph"]["source_id"].as_str().unwrap(),
+                &prepared.graph.source_id,
+            );
+            let matches: Vec<_> = fresh["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|c| {
+                    c["binding"]["fact"] == serde_json::from_str::<Value>(&fact).unwrap()
+                        && c["receipt"]["content"]["file"]["digest"]
+                            == prior["receipt"]["content"]["file"]["digest"]
+                        && c["receipt"]["content"]["ranges"]
+                            == prior["receipt"]["content"]["ranges"]
+                })
+                .collect();
+            assert_eq!(matches.len(), 1, "exact fresh selected target");
+            Selection {
+                fact: serde_json::from_value(matches[0]["binding"]["fact"].clone()).unwrap(),
+                graph_snapshot_id: prepared.graph.graph_snapshot_id.clone(),
+                receipt_id: matches[0]["binding"]["receipt_id"].as_str().unwrap().into(),
+                ordinal: selection.ordinal,
+            }
+        })
+        .collect();
+    let provider = expanded_query_repro_provider();
+    expected.provider = crate::investigations::runtime::descriptor(
+        provider.as_ref(),
+        InvestigationProviderMode::Local,
+    )
+    .unwrap();
+    expected.binding.run_id = format!(
+        "synthetic-{}",
+        &sha(base.to_str().unwrap().as_bytes())[..24]
+    );
+    expected.request_nonce = expected.binding.run_id.clone();
+    let receipt = base.join("preparation.json");
+    let definition = base.join("definition.json");
+    let output = base.join("synthetic-output");
+    let bytes = serde_json::to_vec(&prepared).unwrap();
+    expected.preparation_sha256 = sha(&bytes);
+    std::fs::write(&receipt, bytes).unwrap();
+    std::fs::write(&definition, serde_json::to_vec(&expected).unwrap()).unwrap();
+    prepare_bound(
+        &case.config,
+        &receipt,
+        &definition,
+        &output,
+        &expected,
+        InputPolicy::FrozenVendure,
+    )
+    .unwrap();
+    let result = vendure_prepare::reopen_bound(
+        [&case.config, &receipt, &definition, &output],
+        &expected,
+        InputPolicy::FrozenVendure,
+        |app, request, id, manifest, data| {
+            app.state::<AppState>()
+                .investigations
+                .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+            captured_local::use_task((app, data), request, id, manifest, &output, &expected, true)
+        },
+    )
+    .unwrap();
+    eprintln!("synthetic terminal: {}", result["detail"]);
+    assert_eq!(
+        super::input::verify(&source, &manifest, &proof).unwrap(),
+        before
+    );
+    for (path, hash) in old_receipts {
+        assert_eq!(sha(&std::fs::read(path).unwrap()), hash);
+    }
+    assert_eq!(result["detail"]["usage"]["model_invocations"], 2);
+    assert_eq!(result["detail"]["usage"]["tool_actions"], 1);
+    assert_eq!(result["ledger"]["queries"].as_array().unwrap().len(), 1);
+    assert_eq!(result["detail"]["status"], "failed");
+    assert_eq!(
+        result["detail"]["error"],
+        "Action decode refused: preflight: invalid_input."
+    );
+    assert!(result["result"].is_null());
 }

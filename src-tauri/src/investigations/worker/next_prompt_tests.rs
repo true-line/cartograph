@@ -102,6 +102,7 @@ struct NextProvider {
     observed: Scripted,
     malformed: bool,
     metadata_order: Option<[bool; 2]>,
+    metadata_query: Option<Value>,
     inventory_max_bytes: usize,
     lose_metadata_ack: bool,
     source_scenario: Option<SourceScenario>,
@@ -115,6 +116,7 @@ impl NextProvider {
             observed: Scripted::new(Mode::CompletionNoAttempt),
             malformed,
             metadata_order: None,
+            metadata_query: None,
             inventory_max_bytes: 32768,
             lose_metadata_ack: false,
             source_scenario: None,
@@ -219,13 +221,16 @@ impl LlmProvider for NextProvider {
                     "type":"finish","findings":findings,
                     "knowledge_completeness":"partial","limitations":["No complete business policy was established."]}}).to_string()
             }
-        } else if let Some(order) = self.metadata_order.filter(|_| call < 2) {
+        } else if let Some(order) = self
+            .metadata_order
+            .filter(|_| call < if self.malformed { 1 } else { 2 })
+        {
             let prompt = self.observed.prompts.lock().unwrap();
             let prompt = prompt.last().unwrap();
             if order[call] {
-                json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                json!({"type":"query_context","context_id":prompt["context_id"],"query":self.metadata_query.clone().unwrap_or_else(|| json!({
                     "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
-                    "max_facts":1,"max_bytes":32768,"cursor":null}})
+                    "max_facts":1,"max_bytes":32768,"cursor":null}))})
                 .to_string()
             } else {
                 let inventory =
@@ -359,11 +364,21 @@ fn next_prompt_worker_invalid_response_stops_after_one_actual_invocation() {
 
 #[test]
 fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7() {
-    for order in [[true, false], [false, true], [false, false]] {
+    // AC-0439: new disposable @12 task uses the canonical first discovery query.
+    for (role, order) in [
+        (SpecialistId::DomainAnalystV10, [true, false]),
+        (SpecialistId::DomainAnalystV10, [false, true]),
+        (SpecialistId::DomainAnalystV10, [false, false]),
+        (SpecialistId::DomainAnalystV12, [true, false]),
+    ] {
         let mut scripted = NextProvider::new(false);
         scripted.metadata_order = Some(order);
+        if role == SpecialistId::DomainAnalystV12 {
+            scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+                "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+        }
         let provider = Arc::new(scripted);
-        let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV10);
+        let f = NextFixture::new(provider.as_ref(), role);
         f.run(provider.clone());
         let state = f.base.base.app.state::<AppState>();
         let jobs = state.jobs.lock().unwrap();
@@ -426,6 +441,18 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
                 .unwrap()
                 .starts_with("investigation-disclosure-v6:")
         );
+        if order[0] {
+            let body: Vec<u8> = connection.query_row(
+                "SELECT body FROM investigation_inputs WHERE task_id=?1 ORDER BY revision LIMIT 1 OFFSET 1",
+                [&f.id], |row| row.get(0)).unwrap();
+            let ledger: InvestigationInputLedger = serde_json::from_slice(&body).unwrap();
+            assert_eq!(ledger.queries.len(), 1, "first query durably published");
+            let second: Vec<u8> = connection.query_row(
+                "SELECT body FROM investigation_invocations WHERE task_id=?1 AND step_id='step-2'",
+                [&f.id], |row| row.get(0)).unwrap();
+            let second: Value = serde_json::from_slice(&second).unwrap();
+            assert!(second["input_bytes"].as_u64().unwrap() > 0);
+        }
         let inputs: i64 = connection
             .query_row(
                 "SELECT count(*) FROM investigation_inputs WHERE task_id=?1",
@@ -966,6 +993,16 @@ pub(in crate::investigations) fn expanded_scripted_provider(partial: bool) -> Ar
         provider.source_scenario = Some(SourceScenario::Acquired);
         provider.extra_inventory = true;
     }
+    Arc::new(provider)
+}
+
+// AC-0439: one canonical query, then a deliberate malformed terminal control.
+pub(in crate::investigations) fn expanded_query_repro_provider() -> Arc<dyn LlmProvider> {
+    let mut provider = NextProvider::new(true);
+    provider.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+        "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+    // Only the first call uses metadata_order; subsequent calls are malformed.
+    provider.metadata_order = Some([true, false]);
     Arc::new(provider)
 }
 
