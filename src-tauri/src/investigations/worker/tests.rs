@@ -2,7 +2,9 @@ use super::*;
 use adapters_lang_ts::captured;
 use core_graph::GraphStore;
 use core_prov::{ConfidenceTier, Tier};
-use llm::bounded::{AuthorizedBoundedCompletion, ProviderProfile, ReportedUsage};
+use llm::bounded::{
+    AuthorizedBoundedCompletion, FailureCode, InvocationOutcome, ProviderProfile, ReportedUsage,
+};
 use llm::{Embedding, ProviderCaps, ProviderError};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -1059,4 +1061,78 @@ fn public_start_fixture_retains_state_after_inline_run_and_owner_drop() {
             assert!(app.try_state::<AppState>().is_some());
         },
     );
+}
+
+// AC-0430: all existing bounded codes preserve classification without raw errors.
+#[test]
+fn investigation_provider_failure_codes_preserve_terminal_semantics_and_bounds() {
+    use InvestigationStopReason as Stop;
+    let codes = [
+        (FailureCode::Unsupported, Stop::ProviderFailure),
+        (FailureCode::InvalidLimits, Stop::ProviderFailure),
+        (FailureCode::InvalidInput, Stop::ProviderFailure),
+        (FailureCode::InvalidProfile, Stop::ProviderFailure),
+        (FailureCode::ProfileChanged, Stop::ProviderFailure),
+        (FailureCode::EgressDenied, Stop::ProviderFailure),
+        (FailureCode::ConsentRequired, Stop::ProviderFailure),
+        (FailureCode::ConsentMismatch, Stop::ProviderFailure),
+        (FailureCode::InputTooLarge, Stop::LimitExceeded),
+        (FailureCode::RequestTooLarge, Stop::LimitExceeded),
+        (FailureCode::ResponseTooLarge, Stop::LimitExceeded),
+        (FailureCode::OutputTooLarge, Stop::LimitExceeded),
+        (FailureCode::Cancelled, Stop::Cancelled),
+        (FailureCode::OwnershipLost, Stop::Operational),
+        (FailureCode::DeadlineExceeded, Stop::LimitExceeded),
+        (FailureCode::Transport, Stop::ProviderFailure),
+        (FailureCode::HttpStatus, Stop::ProviderFailure),
+        (FailureCode::UnsupportedEncoding, Stop::ProviderFailure),
+        (FailureCode::InvalidResponse, Stop::ProviderFailure),
+        (FailureCode::IncompleteResponse, Stop::ProviderFailure),
+        (FailureCode::Refused, Stop::ProviderFailure),
+        (FailureCode::EmptyCompletion, Stop::ProviderFailure),
+    ];
+    let historical_max = Stop::FinishOnlyToolProposal.test_message().len();
+    assert_eq!(historical_max, 74);
+    let mut messages = std::collections::BTreeSet::new();
+    for (code, expected) in codes {
+        for outcome in [
+            InvocationOutcome::NotDispatched,
+            InvocationOutcome::ResponseReceived,
+            InvocationOutcome::Unknown,
+        ] {
+            let error = BoundedCallError { code, outcome };
+            let reason = provider_failure(error).reason().unwrap();
+            assert_eq!(reason, Stop::BoundedProvider(error));
+            assert_eq!(
+                reason.terminal_class(),
+                if outcome == InvocationOutcome::Unknown {
+                    Stop::OutcomeUnknown
+                } else {
+                    expected
+                }
+            );
+            assert!(reason.test_message().len() <= Stop::InvalidResponse.test_message().len());
+            assert!(reason.test_message().len() <= historical_max);
+            assert_eq!(
+                reason
+                    .test_message()
+                    .starts_with("Provider outcome unknown: "),
+                outcome == InvocationOutcome::Unknown
+            );
+            messages.insert(reason.test_message());
+        }
+    }
+    assert_eq!(messages.len(), 44);
+    let host = Failure::Host(HostError::LimitExceeded).reason().unwrap();
+    let store = Failure::Store(InvestigationStoreError::Capacity)
+        .reason()
+        .unwrap();
+    assert_eq!(host, Stop::HostLimit);
+    assert_eq!(store, Stop::StoreCapacity);
+    for reason in [host, store] {
+        assert_eq!(reason.terminal_class(), Stop::LimitExceeded);
+        assert!(reason.test_message().len() <= Stop::InvalidResponse.test_message().len());
+        assert!(!messages.contains(reason.test_message()));
+    }
+    assert_ne!(host.test_message(), store.test_message());
 }

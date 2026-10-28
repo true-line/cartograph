@@ -21,7 +21,7 @@ fn v4_repeated_query_budget_matches_actual_host_limit_and_reopens() {
     assert_eq!(detail.summary.status, InvestigationStatus::Failed);
     assert_eq!(
         detail.error.as_deref(),
-        Some("An investigation work or storage limit was reached.")
+        Some("Investigation limit reached: host_limit.")
     );
     let ledger = jobs.investigation_ledger(&fixture.id).unwrap().unwrap();
     let before = jobs.investigation_turn_basis(&fixture.id).unwrap();

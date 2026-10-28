@@ -174,7 +174,7 @@ fn qualified_worker_refuses_inventory_capacity_before_model_dispatch() {
     assert_eq!(detail.summary.status, InvestigationStatus::Failed);
     assert_eq!(
         detail.error.as_deref(),
-        Some("An investigation work or storage limit was reached.")
+        Some("Investigation limit reached: host_limit.")
     );
     assert!(detail.coverage_context.is_none());
     assert!(jobs.investigation_ledger(&fixture.id).unwrap().is_none());

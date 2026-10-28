@@ -1260,7 +1260,7 @@ fn completion_worker_preserves_admitted_source_limit_before_provider() {
     assert!(terminal(detail.summary.status));
     assert_eq!(
         detail.error.as_deref(),
-        Some("An investigation work or storage limit was reached.")
+        Some("Investigation limit reached: host_limit.")
     );
     assert!(!detail.summary.has_result);
     assert_eq!(detail.usage.model_invocations, 0);
