@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
+const RESPONSE_SCHEMA: &str = r#"{"anyOf":[{"type":"object","properties":{"type":{"enum":["query_context","read_evidence"]}},"required":["type"],"additionalProperties":false},{"type":"object","properties":{"schema_version":{"const":1},"outcome":{"enum":["supported","insufficient_evidence"]},"action":{"type":"object"}},"required":["schema_version","outcome","action"],"additionalProperties":false}]}"#;
+
 struct FramedRequest {
     headers: String,
     body: Vec<u8>,
@@ -94,6 +96,7 @@ fn action() -> CompletionAction {
         action_id: "investigation-1:step-1".into(),
         tier: AnalysisTier::Agentic,
         payload: CompletionPayload {
+            response_schema: None,
             system: "Return exactly one JSON action.".into(),
             prompt: "Investigate the selected rules.".into(),
             spans: vec![PayloadSpan {
@@ -214,6 +217,27 @@ fn bounded_providers_send_exact_generation_limits_and_consented_payload() {
     assert!(serde_json::to_vec(&output).unwrap().len() <= workspace.completion_bytes);
     assert_eq!(output.usage.unwrap().output_tokens, Some(7));
     assert_eq!(output.response_model.as_deref(), Some("test-model"));
+
+    // Same real bounded dispatch with schema object framing, no model involved.
+    let (endpoint, server) = http(framed(&local_body));
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let mut selected = action();
+    selected.payload.response_schema = Some(RESPONSE_SCHEMA.into());
+    let prepared = firewall
+        .prepare_bounded(&local, &selected, &limits)
+        .unwrap();
+    let authorized = firewall.authorize_bounded(&local, &prepared, None).unwrap();
+    let output = local.complete_bounded(&authorized, &control()).unwrap();
+    let request = server.join().unwrap();
+    let wire: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(
+        wire["format"],
+        serde_json::from_str::<Value>(RESPONSE_SCHEMA).unwrap()
+    );
+    assert_eq!(wire["options"]["num_predict"], 37);
+    assert_eq!(wire["think"], false);
+    assert_eq!(output.request_bytes, request.body.len() as u64);
 
     let cloud_body = anthropic_body(r#"{"action":"finish"}"#);
     let (endpoint, server) = http(framed(&cloud_body));
@@ -1519,4 +1543,108 @@ fn openai_compatible_legacy_completion_admits_only_a_stopped_assistant_choice() 
         assert!(!format!("{error:?} {error}").contains("PRIVATE SOURCE"));
         server.join().unwrap();
     }
+}
+
+#[test]
+fn bounded_response_schema_is_bound_bounded_and_explicit() {
+    // AC-0185: no provider invocation; exercise production preparation/wire gates.
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let limits = CompletionLimits::default();
+    let mut original = action();
+    let legacy = serde_json::to_value(&original.payload).unwrap();
+    assert_eq!(
+        legacy,
+        json!({"system":original.payload.system,"prompt":original.payload.prompt,"spans":original.payload.spans})
+    );
+    let old = firewall
+        .prepare_bounded(&provider, &original, &limits)
+        .unwrap();
+    let schema = RESPONSE_SCHEMA;
+    original.payload.response_schema = Some(schema.into());
+    let prepared = firewall
+        .prepare_bounded(&provider, &original, &limits)
+        .unwrap();
+    assert!(!old.matches_action(&original));
+    assert!(!ConsentGrant::from_preview(&old.preview().egress).matches(&prepared.preview().egress));
+    assert_eq!(
+        prepared.preview().egress.payload.response_schema.as_deref(),
+        Some(schema)
+    );
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    let wire = request_wire::ollama(
+        "test-model",
+        "system",
+        "user",
+        2048,
+        response_schema(authorized.payload()).unwrap(),
+    );
+    let bytes = encode(
+        &wire,
+        limits.values().request_bytes,
+        FailureCode::RequestTooLarge,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["format"],
+        serde_json::from_str::<Value>(schema).unwrap()
+    );
+    assert_eq!(
+        encode(&wire, bytes.len() as u64 - 1, FailureCode::RequestTooLarge).unwrap_err(),
+        not_sent(FailureCode::RequestTooLarge)
+    );
+    original.payload.response_schema = Some(format!(" {schema}"));
+    assert!(!prepared.matches_action(&original));
+    let whitespace = firewall
+        .prepare_bounded(&provider, &original, &limits)
+        .unwrap();
+    assert_ne!(
+        prepared.preview().egress.payload_hash,
+        whitespace.preview().egress.payload_hash
+    );
+    for rejected in [
+        "[]",
+        "{} trailing",
+        r#"{"description":"password=secret123456"}"#,
+        r#"{"description":"\u0070assword=secret123456"}"#,
+    ] {
+        original.payload.response_schema = Some(rejected.into());
+        assert_eq!(
+            firewall
+                .prepare_bounded(&provider, &original, &limits)
+                .unwrap_err(),
+            not_sent(FailureCode::InvalidInput)
+        );
+    }
+    original.payload.response_schema = Some("x".repeat(limits.values().input_bytes as usize));
+    assert_eq!(
+        firewall
+            .prepare_bounded(&provider, &original, &limits)
+            .unwrap_err(),
+        not_sent(FailureCode::InputTooLarge)
+    );
+    original.payload.response_schema = Some(schema.into());
+    let other = OpenAiCompatibleProvider::new(
+        "http://127.0.0.1:8000",
+        "test-model",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(
+        firewall
+            .prepare_bounded(&other, &original, &limits)
+            .unwrap_err(),
+        BoundedCallError::unsupported()
+    );
+    assert!(matches!(
+        firewall.complete(&provider, &original, None),
+        Err(ProviderError::Unsupported("legacy response schema"))
+    ));
 }

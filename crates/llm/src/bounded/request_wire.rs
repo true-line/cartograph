@@ -14,8 +14,15 @@ struct Options {
 }
 
 #[derive(Serialize)]
+#[serde(untagged)]
+enum Format<'a> {
+    Json(&'static str),
+    Schema(&'a serde_json::value::RawValue),
+}
+
+#[derive(Serialize)]
 struct Ollama<'a> {
-    format: &'static str,
+    format: Format<'a>,
     messages: [Message<'a>; 2],
     model: &'a str,
     options: Options,
@@ -28,9 +35,10 @@ pub(super) fn ollama<'a>(
     system: &'a str,
     user: &'a str,
     max_tokens: u32,
+    schema: Option<&'a serde_json::value::RawValue>,
 ) -> impl Serialize + 'a {
     Ollama {
-        format: "json",
+        format: schema.map_or(Format::Json("json"), Format::Schema),
         messages: [
             Message {
                 content: system,

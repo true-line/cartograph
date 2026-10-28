@@ -92,6 +92,7 @@ fn serialized_sizes(
     let prompt_string = String::from_utf8(prompt_bytes.clone()).unwrap();
     let escaped_prompt = bounded_bytes(&prompt_string, MAX_INPUT_BYTES).unwrap();
     let payload = CompletionPayload {
+        response_schema: None,
         system: "Fixed system text with \"quotes\" and \\slashes.".into(),
         prompt: prompt_string,
         spans: vec![],

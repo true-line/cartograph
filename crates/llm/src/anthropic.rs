@@ -321,6 +321,7 @@ mod tests {
             action_id: "propose-gap-target".into(),
             tier: AnalysisTier::Agentic,
             payload: CompletionPayload {
+                response_schema: None,
                 system: "You are a bounded resolver.".into(),
                 prompt: "Cite only listed candidates.".into(),
                 spans: vec![PayloadSpan {

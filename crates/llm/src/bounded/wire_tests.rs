@@ -45,6 +45,7 @@ fn action() -> CompletionAction {
         action_id: "investigation:wire:step-1".into(),
         tier: AnalysisTier::Agentic,
         payload: CompletionPayload {
+            response_schema: None,
             system: "Return JSON. password=aaaa ".into(),
             prompt: "Nested inventory {\"reason\":\"secret=bbbb \"} é\n".into(),
             spans: vec![PayloadSpan {
