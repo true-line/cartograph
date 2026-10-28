@@ -302,10 +302,11 @@ fn certify(
 
 #[test]
 fn context_preview_binds_actual_query_and_inventory_serialization_and_continuation() {
-    // AC-0287: deterministic retained metadata, no source/provider dispatch.
+    // AC-0287, AC-0439: deterministic retained metadata, no source/provider dispatch.
     for role in [
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
+        SpecialistId::DomainAnalystV12,
     ] {
         let fixture = Fixture::new(
             role,

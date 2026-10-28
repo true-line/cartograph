@@ -13,6 +13,9 @@ pub(super) struct Case {
 }
 
 impl Case {
+    pub(super) fn retain(&mut self) {
+        self._directory.disable_cleanup(true);
+    }
     pub(super) fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let base = crate::paths::canonicalize(directory.path()).unwrap();

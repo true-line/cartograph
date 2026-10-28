@@ -102,6 +102,8 @@ struct NextProvider {
     observed: Scripted,
     malformed: bool,
     metadata_order: Option<[bool; 2]>,
+    metadata_query: Option<Value>,
+    received_payloads: std::sync::Mutex<Vec<llm::CompletionPayload>>,
     inventory_max_bytes: usize,
     lose_metadata_ack: bool,
     source_scenario: Option<SourceScenario>,
@@ -115,6 +117,8 @@ impl NextProvider {
             observed: Scripted::new(Mode::CompletionNoAttempt),
             malformed,
             metadata_order: None,
+            metadata_query: None,
+            received_payloads: std::sync::Mutex::new(Vec::new()),
             inventory_max_bytes: 32768,
             lose_metadata_ack: false,
             source_scenario: None,
@@ -145,6 +149,12 @@ impl LlmProvider for NextProvider {
         control: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
         assert_eq!((control.check)(), CallDirective::Continue);
+        if self.metadata_query.is_some() {
+            self.received_payloads
+                .lock()
+                .unwrap()
+                .push(request.payload().clone());
+        }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         assert_eq!(prompt["schema_version"], 9);
         self.observed.prompts.lock().unwrap().push(prompt);
@@ -219,13 +229,16 @@ impl LlmProvider for NextProvider {
                     "type":"finish","findings":findings,
                     "knowledge_completeness":"partial","limitations":["No complete business policy was established."]}}).to_string()
             }
-        } else if let Some(order) = self.metadata_order.filter(|_| call < 2) {
+        } else if let Some(order) = self
+            .metadata_order
+            .filter(|_| call < if self.malformed { 1 } else { 2 })
+        {
             let prompt = self.observed.prompts.lock().unwrap();
             let prompt = prompt.last().unwrap();
             if order[call] {
-                json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                json!({"type":"query_context","context_id":prompt["context_id"],"query":self.metadata_query.clone().unwrap_or_else(|| json!({
                     "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
-                    "max_facts":1,"max_bytes":32768,"cursor":null}})
+                    "max_facts":1,"max_bytes":32768,"cursor":null}))})
                 .to_string()
             } else {
                 let inventory =
@@ -359,11 +372,21 @@ fn next_prompt_worker_invalid_response_stops_after_one_actual_invocation() {
 
 #[test]
 fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7() {
-    for order in [[true, false], [false, true], [false, false]] {
+    // AC-0439: new disposable @12 task uses the canonical first discovery query.
+    for (role, order) in [
+        (SpecialistId::DomainAnalystV10, [true, false]),
+        (SpecialistId::DomainAnalystV10, [false, true]),
+        (SpecialistId::DomainAnalystV10, [false, false]),
+        (SpecialistId::DomainAnalystV12, [true, false]),
+    ] {
         let mut scripted = NextProvider::new(false);
         scripted.metadata_order = Some(order);
+        if role == SpecialistId::DomainAnalystV12 {
+            scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+                "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+        }
         let provider = Arc::new(scripted);
-        let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV10);
+        let f = NextFixture::new(provider.as_ref(), role);
         f.run(provider.clone());
         let state = f.base.base.app.state::<AppState>();
         let jobs = state.jobs.lock().unwrap();
@@ -426,6 +449,28 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
                 .unwrap()
                 .starts_with("investigation-disclosure-v6:")
         );
+        if order[0] {
+            let body: Vec<u8> = connection.query_row(
+                "SELECT body FROM investigation_inputs WHERE task_id=?1 ORDER BY revision LIMIT 1 OFFSET 1",
+                [&f.id], |row| row.get(0)).unwrap();
+            let ledger: InvestigationInputLedger = serde_json::from_slice(&body).unwrap();
+            assert_eq!(ledger.queries.len(), 1, "first query durably published");
+            let second: Vec<u8> = connection.query_row(
+                "SELECT body FROM investigation_invocations WHERE task_id=?1 AND step_id='step-2'",
+                [&f.id], |row| row.get(0)).unwrap();
+            let second: Value = serde_json::from_slice(&second).unwrap();
+            if role == SpecialistId::DomainAnalystV12 {
+                assert_canonical_query_continuation(
+                    &provider.received_payloads.lock().unwrap()[1],
+                    &ledger,
+                    &f.request
+                        .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+                        .unwrap(),
+                    second["input_bytes"].as_u64().unwrap() as usize,
+                    8,
+                );
+            }
+        }
         let inputs: i64 = connection
             .query_row(
                 "SELECT count(*) FROM investigation_inputs WHERE task_id=?1",
@@ -967,6 +1012,69 @@ pub(in crate::investigations) fn expanded_scripted_provider(partial: bool) -> Ar
         provider.extra_inventory = true;
     }
     Arc::new(provider)
+}
+
+fn assert_canonical_query_continuation(
+    payload: &llm::CompletionPayload,
+    ledger: &InvestigationInputLedger,
+    request_hash: &str,
+    saved_bytes: usize,
+    expected_count: usize,
+) {
+    let prompt: Value = serde_json::from_str(&payload.prompt).unwrap();
+    let compact: ProgressiveInvestigationContext =
+        serde_json::from_value(prompt["compact_context"].clone()).unwrap();
+    compact
+        .query_history
+        .validate_registry(request_hash, ledger, &INVESTIGATION_V2_POLICY)
+        .unwrap();
+    let latest = compact.query_history.latest_query.as_ref().unwrap();
+    assert_eq!(
+        serde_json::to_value(&latest.selection).unwrap(),
+        json!({"scope":{"type":"all"},"kind":null,
+        "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null})
+    );
+    assert_eq!(latest.context.fact_indexes.len(), expected_count);
+    assert_eq!(compact.facts.len(), expected_count);
+    assert_eq!(latest.evidence_option_indexes.len(), expected_count);
+    assert_eq!(ledger.selected_facts.len(), expected_count);
+    let expected: std::collections::BTreeSet<_> = ledger
+        .selected_facts
+        .iter()
+        .map(|selected| serde_json::to_string(&selected.fact).unwrap())
+        .collect();
+    let actual: std::collections::BTreeSet<_> = latest
+        .context
+        .fact_indexes
+        .iter()
+        .map(|&index| {
+            let fact: context_hub::ContextFact =
+                serde_json::from_value(compact.facts[index].clone()).unwrap();
+            serde_json::to_string(&fact.reference).unwrap()
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    // Exact complete payload encoding, not a guessed lower bound or fixed size.
+    assert_eq!(saved_bytes, serde_json::to_vec(payload).unwrap().len());
+}
+
+// AC-0439: one canonical query, then a deliberate malformed terminal control.
+pub(in crate::investigations) fn expanded_query_repro_provider() -> (
+    Arc<dyn LlmProvider>,
+    impl Fn(&InvestigationInputLedger, &str, usize),
+) {
+    let mut provider = NextProvider::new(true);
+    provider.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+        "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+    // Only the first call uses metadata_order; subsequent calls are malformed.
+    provider.metadata_order = Some([true, false]);
+    let provider = Arc::new(provider);
+    let observed = provider.clone();
+    (provider, move |ledger, hash, bytes| {
+        let payloads = observed.received_payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 2);
+        assert_canonical_query_continuation(&payloads[1], ledger, hash, bytes, 12);
+    })
 }
 
 pub(in crate::investigations) fn expanded_capacity_provider() -> Arc<dyn LlmProvider> {
