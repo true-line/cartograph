@@ -335,10 +335,29 @@ pub(crate) enum InvestigationTransition {
     },
 }
 
+/// Closed host boundaries only, never an invalid field or response fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparationPhase {
+    Continuation,
+    Finish,
+    Metadata,
+    Query,
+    Inventory,
+    Candidate,
+    Certification,
+    Seal,
+    Publication,
+    Source,
+    SourcePrepare,
+    SourceCertification,
+    SourceReservation,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InvestigationStopReason {
     Cancelled,
     PreparationFailed,
+    PreparationAt(PreparationPhase),
     InputChanged,
     SourceUnavailable,
     InvalidResponse,
@@ -379,6 +398,7 @@ impl InvestigationStopReason {
                 | Code::OutputTooLarge => Self::LimitExceeded,
                 _ => Self::ProviderFailure,
             },
+            Self::PreparationAt(_) => Self::PreparationFailed,
             Self::HostLimit | Self::StoreCapacity => Self::LimitExceeded,
             Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
             other => other,
@@ -392,6 +412,27 @@ impl InvestigationStopReason {
         match self {
             Self::Cancelled => "Cancellation requested; no further work was started.",
             Self::PreparationFailed => "Investigation input preparation failed.",
+            Self::PreparationAt(phase) => match phase {
+                PreparationPhase::Continuation => "Input preparation failed: continuation.",
+                PreparationPhase::Finish => "Input preparation failed: finish.",
+                PreparationPhase::Metadata => "Input preparation failed: metadata.",
+                PreparationPhase::Query => "Input preparation failed: metadata_query.",
+                PreparationPhase::Inventory => "Input preparation failed: metadata_inventory.",
+                PreparationPhase::Candidate => "Input preparation failed: metadata_candidate.",
+                PreparationPhase::Certification => {
+                    "Input preparation failed: metadata_certification."
+                }
+                PreparationPhase::Seal => "Input preparation failed: metadata_seal.",
+                PreparationPhase::Publication => "Input preparation failed: metadata_publication.",
+                PreparationPhase::Source => "Input preparation failed: source.",
+                PreparationPhase::SourcePrepare => "Input preparation failed: source_prepare.",
+                PreparationPhase::SourceCertification => {
+                    "Input preparation failed: source_certification."
+                }
+                PreparationPhase::SourceReservation => {
+                    "Input preparation failed: source_reservation."
+                }
+            },
             Self::InputChanged => "The selected graph or source binding changed.",
             Self::SourceUnavailable => "Selected source evidence is unavailable.",
             Self::InvalidResponse => {
