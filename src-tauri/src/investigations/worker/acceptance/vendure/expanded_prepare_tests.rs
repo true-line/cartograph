@@ -456,7 +456,7 @@ fn captured_v12_canonical_query_continuation_repro() {
             }
         })
         .collect();
-    let provider = expanded_query_repro_provider();
+    let (provider, assert_received) = expanded_query_repro_provider();
     expected.provider = crate::investigations::runtime::descriptor(
         provider.as_ref(),
         InvestigationProviderMode::Local,
@@ -506,6 +506,14 @@ fn captured_v12_canonical_query_continuation_repro() {
     assert_eq!(result["detail"]["usage"]["model_invocations"], 2);
     assert_eq!(result["detail"]["usage"]["tool_actions"], 1);
     assert_eq!(result["ledger"]["queries"].as_array().unwrap().len(), 1);
+    let ledger: InvestigationInputLedger =
+        serde_json::from_value(result["ledger"].clone()).unwrap();
+    let second: Value = serde_json::from_str(result["invocations"][1].as_str().unwrap()).unwrap();
+    assert_received(
+        &ledger,
+        result["request_hash"].as_str().unwrap(),
+        second["input_bytes"].as_u64().unwrap() as usize,
+    );
     assert_eq!(result["detail"]["status"], "failed");
     assert_eq!(
         result["detail"]["error"],
