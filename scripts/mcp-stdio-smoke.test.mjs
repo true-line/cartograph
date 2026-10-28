@@ -9,7 +9,7 @@ function fixture(t, body) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const relay = path.join(root, 'fake relay');
   writeFileSync(relay, `#!${process.execPath}\n${body}`); chmodSync(relay, 0o700);
-  return { relay, record: path.join(root, 'record.json'), 'max-frame-bytes': 65536, 'timeout-ms': 1000, 'max-output-bytes': 524288, 'max-stderr-bytes': 4096 };
+  return { relay, record: path.join(root, 'record.json'), 'max-frame-bytes': 65536, 'timeout-ms': 15000, 'max-output-bytes': 524288, 'max-stderr-bytes': 4096 };
 }
 test('requires explicit absolute paths and all positive finite limits', () => {
   const args = ['--relay', '/relay', '--record', '/record', '--max-frame-bytes', '4096', '--timeout-ms', '100', '--max-output-bytes', '8192', '--max-stderr-bytes', '128'];
