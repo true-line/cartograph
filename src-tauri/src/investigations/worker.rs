@@ -62,7 +62,8 @@ impl Failure {
             Self::Host(HostError::InputChanged) => Stop::InputChanged,
             Self::Host(HostError::SourceUnavailable) => Stop::SourceUnavailable,
             Self::Host(HostError::LimitExceeded) => Stop::HostLimit,
-            Self::Store(InvestigationStoreError::Capacity) => Stop::StoreCapacity,
+            Self::Host(HostError::StoreCapacity)
+            | Self::Store(InvestigationStoreError::Capacity) => Stop::StoreCapacity,
             Self::Store(InvestigationStoreError::Cancelled) => Stop::Cancelled,
             Self::Host(HostError::InvalidInput) => Stop::PreparationFailed,
             Self::Host(HostError::Operational) | Self::Store(_) => Stop::Operational,
@@ -1194,7 +1195,8 @@ impl<R: tauri::Runtime> AcquisitionSink for WorkerSink<'_, '_, R> {
 fn acquisition_error(error: Failure) -> HostError {
     match error {
         Failure::Host(error) => error,
-        Failure::Store(InvestigationStoreError::Capacity) => HostError::LimitExceeded,
+        Failure::Store(InvestigationStoreError::Capacity)
+        | Failure::Stop(InvestigationStopReason::StoreCapacity) => HostError::StoreCapacity,
         Failure::Stop(reason)
             if reason.terminal_class() == InvestigationStopReason::LimitExceeded =>
         {

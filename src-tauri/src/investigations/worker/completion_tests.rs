@@ -14,6 +14,11 @@ fn export_wire(name: &str, detail: &InvestigationDetail, result: Option<&Investi
 }
 
 pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value {
+    if matches!(mode, Mode::CompletionHostLimit) {
+        return json!({"type":"query_context","context_id":prompt["context_id"],
+            "query":{"scope":{"type":"all"},"kind":null,"labels":[],
+                "max_facts":1,"max_bytes":1,"cursor":null}});
+    }
     let message = matches!(
         mode,
         Mode::SpecWriterMessage | Mode::SpecWriterMessageInsufficient | Mode::GapTriagerMessage

@@ -22,6 +22,9 @@ enum Mode {
     CancelTool,
     Malformed,
     Unknown,
+    ResponseTooLarge,
+    UnknownResponseTooLarge,
+    CompletionHostLimit,
     RepeatQuery,
     RepeatRead,
     UnavailableRead,
@@ -109,6 +112,19 @@ impl LlmProvider for Scripted {
     ) -> Result<BoundedCompletion, BoundedCallError> {
         assert_eq!((control.check)(), CallDirective::Continue);
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if matches!(
+            self.mode,
+            Mode::ResponseTooLarge | Mode::UnknownResponseTooLarge
+        ) {
+            return Err(BoundedCallError {
+                code: FailureCode::ResponseTooLarge,
+                outcome: if matches!(self.mode, Mode::UnknownResponseTooLarge) {
+                    InvocationOutcome::Unknown
+                } else {
+                    InvocationOutcome::ResponseReceived
+                },
+            });
+        }
         if matches!(self.mode, Mode::Unknown) {
             return Err(BoundedCallError {
                 code: FailureCode::Transport,
@@ -1135,4 +1151,54 @@ fn investigation_provider_failure_codes_preserve_terminal_semantics_and_bounds()
         assert!(!messages.contains(reason.test_message()));
     }
     assert_ne!(host.test_message(), store.test_message());
+    // Both acquisition callbacks use this typed round-trip on transition errors.
+    assert_eq!(
+        Failure::from(acquisition_error(Failure::Store(
+            InvestigationStoreError::Capacity
+        )))
+        .reason(),
+        Some(Stop::StoreCapacity)
+    );
+    assert_eq!(
+        Failure::from(acquisition_error(Failure::Host(HostError::LimitExceeded))).reason(),
+        Some(Stop::HostLimit)
+    );
+    struct CapacitySink(InvestigationUsage);
+    impl AcquisitionSink for CapacitySink {
+        fn usage(&self) -> &InvestigationUsage {
+            &self.0
+        }
+        fn reserve_validation(&mut self, _: u64) -> Result<(), HostError> {
+            panic!("metadata query must not reserve source validation")
+        }
+        fn publish_input(
+            &mut self,
+            _: &InvestigationInputLedger,
+            _: InvestigationUsage,
+        ) -> Result<(), HostError> {
+            Err(acquisition_error(Failure::Stop(Stop::StoreCapacity)))
+        }
+    }
+    let provider = Scripted::new(Mode::Finish);
+    let fixture = Fixture::new(&provider);
+    let state = fixture.app.state::<AppState>();
+    let mut context = FrozenContext::prepare(&state, &fixture.request, &[]).unwrap();
+    let before = context.ledger.fingerprint().unwrap();
+    let error = context
+        .query(
+            &state,
+            InvestigationQuery {
+                scope: InvestigationScope::All,
+                kind: None,
+                labels: vec![],
+                max_facts: 1,
+                max_bytes: 16384,
+                cursor: None,
+            },
+            &mut CapacitySink(InvestigationUsage::default()),
+        )
+        .unwrap_err();
+    assert_eq!(error, HostError::StoreCapacity);
+    assert_eq!(Failure::from(error).reason(), Some(Stop::StoreCapacity));
+    assert_eq!(context.ledger.fingerprint().unwrap(), before);
 }
