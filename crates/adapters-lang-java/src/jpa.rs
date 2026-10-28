@@ -1038,6 +1038,83 @@ fn collect_fields(
     }
 }
 
+/// The declared type spelling of receiver `x` (or `this.x` when
+/// `this_only`) at `call` inside `method`: the visible local or parameter,
+/// else a field of the immediately enclosing named type (#1283). Anonymous
+/// class bodies, inherited and outer-class fields prove nothing, and a name
+/// bound by a pattern or with no declared type fails closed.
+pub(crate) fn receiver_type(
+    cx: &FileCx<'_>,
+    method: TsNode<'_>,
+    call: TsNode<'_>,
+    receiver: &str,
+    this_only: bool,
+) -> Option<String> {
+    if !this_only {
+        let mut patterns = BTreeSet::new();
+        collect_pattern_names(cx, method, &mut patterns);
+        if patterns.contains(receiver) {
+            return None;
+        }
+        if let Some(binding) = visible_binding(cx, method, call, receiver) {
+            return binding.ty;
+        }
+    }
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "class_body"
+            && parent
+                .parent()
+                .is_some_and(|owner| owner.kind() == "object_creation_expression")
+        {
+            return None;
+        }
+        if TYPE_KINDS.contains(&parent.kind()) {
+            let mut table = HashMap::new();
+            collect_fields(cx, parent, &mut table);
+            let types = table.remove(receiver)?;
+            return (types.len() == 1).then(|| types.into_iter().next().expect("one type"));
+        }
+        node = parent;
+    }
+    None
+}
+
+/// Whether any variable named `name` may be visible at `call` inside
+/// `method`: a local, parameter or pattern, or a field of any enclosing
+/// type. A type name spelled like such a variable may be that variable.
+pub(crate) fn names_a_variable(
+    cx: &FileCx<'_>,
+    method: TsNode<'_>,
+    call: TsNode<'_>,
+    name: &str,
+) -> bool {
+    let mut patterns = BTreeSet::new();
+    collect_pattern_names(cx, method, &mut patterns);
+    if patterns.contains(name) || visible_binding(cx, method, call, name).is_some() {
+        return true;
+    }
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        if TYPE_KINDS.contains(&parent.kind()) || parent.kind() == "class_body" {
+            let mut table = HashMap::new();
+            let owner = if parent.kind() == "class_body" {
+                parent.parent()
+            } else {
+                Some(parent)
+            };
+            if let Some(owner) = owner {
+                collect_fields(cx, owner, &mut table);
+            }
+            if table.contains_key(name) {
+                return true;
+            }
+        }
+        node = parent;
+    }
+    false
+}
+
 /// Calls of the form `receiver.verb(…)` / `this.receiver.verb(…)` with a
 /// Spring Data vocabulary verb, on a receiver whose type is declared in this
 /// file (a local, parameter, or field of the enclosing type).

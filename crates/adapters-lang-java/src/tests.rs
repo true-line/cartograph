@@ -3047,3 +3047,244 @@ public class Wild {
             .any(|node| node.id.ends_with("TestCtl.java#TestCtl.get()"))
     );
 }
+
+fn site_rows(sites: &[adapters_fw::client::FetchSite]) -> Vec<(String, String, String)> {
+    sites
+        .iter()
+        .map(|site| {
+            let url = match &site.url {
+                IdentityExpr::Literal(url) => format!("literal:{url}"),
+                IdentityExpr::EnvRef(key) => format!("env:{key}"),
+                IdentityExpr::Computed(text) => format!("computed:{text}"),
+            };
+            (
+                site.method.clone(),
+                url,
+                site.symbol.clone().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn rest_template_calls_on_proven_receivers_become_fetch_sites() {
+    // AC-0435: verb methods and `exchange` on a field, `this.` field,
+    // parameter, local and `new` receiver typed `RestTemplate`.
+    let sites = retrofit_sites(&[(
+        "src/main/java/io/demo/Client.java",
+        r#"package io.demo;
+
+import org.springframework.http.HttpMethod;
+import org.springframework.web.client.RestTemplate;
+
+class Client {
+    private final RestTemplate rest = new RestTemplate();
+
+    void sync(RestTemplate given, String base) {
+        rest.getForObject("/users/{id}", String.class, 1);
+        this.rest.postForEntity("/users", null, String.class);
+        given.put("/users/1", null);
+        RestTemplate local = rest;
+        local.delete(base + "/users/1");
+        new RestTemplate().headForHeaders("/health");
+        rest.exchange("/orders", HttpMethod.PATCH, null, String.class);
+        rest.exchange("/orders", method(), null, String.class);
+        rest.patchForObject("/a\\u0062", null, String.class);
+        rest.optionsForAllow("/users");
+    }
+
+    HttpMethod method() { return HttpMethod.GET; }
+}
+"#,
+    )]);
+    let owner = "sym:local/demo@src/main/java/io/demo/Client.java#Client.sync(RestTemplate,String)";
+    let want = [
+        ("GET", "literal:/users/{id}"),
+        ("POST", "literal:/users"),
+        ("PUT", "literal:/users/1"),
+        ("DELETE", "computed:base + \"/users/1\""),
+        ("HEAD", "literal:/health"),
+        ("PATCH", "literal:/orders"),
+        ("?", "literal:/orders"),
+        ("PATCH", "computed:\"/a\\\\u0062\""),
+        ("OPTIONS", "literal:/users"),
+    ]
+    .map(|(method, url)| (method.to_string(), url.to_string(), owner.to_string()));
+    assert_eq!(site_rows(&sites), want);
+}
+
+#[test]
+fn obscured_http_method_constants_give_an_unknown_method() {
+    // AC-0435: a local, parameter or field named `org`, or a type named
+    // `org` anywhere in the file, obscures the package in
+    // `org.springframework.http.HttpMethod.GET`, so only the unobscured
+    // spelling proves the method.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Client.java",
+            r#"package io.demo;
+
+import org.springframework.web.client.RestTemplate;
+
+class Client {
+    private final RestTemplate rest = new RestTemplate();
+
+    void plain() {
+        rest.exchange("/plain", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+
+    void local(Holder holder) {
+        Holder org = holder;
+        rest.exchange("/local", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+
+    void param(Holder org) {
+        rest.exchange("/param", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+}
+
+class Fielded {
+    private final RestTemplate rest = new RestTemplate();
+    private Holder org;
+
+    void field() {
+        rest.exchange("/field", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Typed.java",
+            r#"package io.demo;
+
+import org.springframework.web.client.RestTemplate;
+
+class Typed {
+    static class org {}
+    private final RestTemplate rest = new RestTemplate();
+
+    void typed() {
+        rest.exchange("/typed", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+}
+"#,
+        ),
+    ]);
+    let rows = site_rows(&sites)
+        .into_iter()
+        .map(|(method, url, _)| (method, url))
+        .collect::<Vec<_>>();
+    let want = [
+        ("GET", "literal:/plain"),
+        ("?", "literal:/local"),
+        ("?", "literal:/param"),
+        ("?", "literal:/field"),
+        ("?", "literal:/typed"),
+    ]
+    .map(|(method, url)| (method.to_string(), url.to_string()));
+    assert_eq!(rows, want);
+}
+
+#[test]
+fn unproven_rest_template_receivers_yield_no_fetch_sites() {
+    // AC-0435: wildcard imports, lookalike types, a same-named nested type or
+    // type parameter, untyped and pattern bindings, anonymous subclasses,
+    // outer and inherited fields, and test source sets prove nothing.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Wild.java",
+            r#"package io.demo;
+import org.springframework.web.client.*;
+class Wild {
+    RestTemplate rest;
+    void a() { rest.getForObject("/wild", String.class); }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Look.java",
+            r#"package io.demo;
+import com.acme.RestTemplate;
+class Look {
+    RestTemplate rest;
+    void a() { rest.getForObject("/look", String.class); }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Shadow.java",
+            r#"package io.demo;
+import org.springframework.web.client.RestTemplate;
+class Shadow<T> {
+    static class RestTemplate { void getForObject(String u, Class<?> c) {} }
+    RestTemplate rest;
+    void a() { rest.getForObject("/nested", String.class); }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Param.java",
+            r#"package io.demo;
+import org.springframework.web.client.RestTemplate;
+class Param {
+    <RestTemplate> void a(RestTemplate rest) { rest.getForObject("/generic", String.class); }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Scopes.java",
+            r#"package io.demo;
+import java.util.function.Consumer;
+import org.springframework.web.client.RestTemplate;
+class Scopes extends Base {
+    RestTemplate outer;
+    void a(Object o) {
+        Consumer<Object> c = rest -> ((RestTemplate) rest).getForObject("/cast", String.class);
+        if (o instanceof RestTemplate t) { t.getForObject("/pattern", String.class); }
+        new RestTemplate() {}.getForObject("/anonymous", String.class);
+        inherited.getForObject("/inherited", String.class);
+        Runnable r = new Runnable() {
+            public void run() { outer.getForObject("/anon-outer", String.class); }
+        };
+    }
+    class Inner {
+        void b() { outer.getForObject("/inner-outer", String.class); }
+    }
+}
+"#,
+        ),
+        (
+            "src/test/java/io/demo/ClientTest.java",
+            r#"package io.demo;
+import org.springframework.web.client.RestTemplate;
+class ClientTest {
+    RestTemplate rest;
+    void a() { rest.getForObject("/test", String.class); }
+}
+"#,
+        ),
+    ]);
+    assert!(sites.is_empty(), "{:?}", site_rows(&sites));
+}
+
+#[test]
+fn single_file_extraction_exposes_rest_template_sites() {
+    // AC-0435: the public single-file API returns RestTemplate sites as
+    // fetch sites, never holding them back for a directory join.
+    let out = extract_source(
+        b"package io.demo;\n\nimport org.springframework.web.client.RestTemplate;\n\n\
+          class Client {\n    void sync(RestTemplate rest) { rest.getForObject(\"/users\", String.class); }\n}\n",
+        "src/main/java/io/demo/Client.java",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        site_rows(&out.fetch_sites),
+        [(
+            "GET".to_string(),
+            "literal:/users".to_string(),
+            "sym:local/demo@src/main/java/io/demo/Client.java#Client.sync(RestTemplate)"
+                .to_string()
+        )]
+    );
+}
