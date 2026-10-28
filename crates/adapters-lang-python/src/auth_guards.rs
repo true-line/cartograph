@@ -61,7 +61,22 @@
 //! `ProxyFix` is known non-auth only when it wraps the assigned attribute
 //! itself (`app.wsgi_app = ProxyFix(app.wsgi_app, …)`); the assignment is
 //! cited on a `none` fact.
+//!
+//! A repository decorator that is not a guard, or a `@factory(…)` call with
+//! inert arguments whose factory returns a class-based decorator, is
+//! non-authenticating when `decorator_proof` proves its wrapper ends a
+//! request only through the wrapped view, `None` or a non-401/403 werkzeug
+//! error, and every repository function it names is deny-free: it raises
+//! only such errors, never aborts or calls into an authentication library,
+//! is undecorated, and names only deny-free functions (at most four deep)
+//! (#1173). It is listed in
+//! `non_auth_decorators`; the `none` fact records that non-repository calls
+//! in it do not abort and that those errors keep their status. The proof is
+//! void once the decorator, factory or class name is written elsewhere, or
+//! `werkzeug.exceptions` or `functools.wraps` is replaced. An unproven
+//! factory stays `unclassified_decorator`.
 use crate::app_scope::{self, AppRef, Apps};
+use crate::decorator_proof::{self, WrapperProof};
 use crate::request_inputs::{binding_sites, handler_bindings};
 use crate::responses::{self, FnKey, Resolver};
 use crate::{
@@ -94,6 +109,17 @@ pub(crate) enum DecoratorFact {
     /// A decorator that never authenticates: an import-proven
     /// `flask_cors.cross_origin(…)` with inert arguments (#1157).
     NonAuth { text: String, evidence: EvidenceRef },
+    /// `@factory(…)` with inert arguments, `key` naming a repository
+    /// function: non-authenticating once resolve finds its proof. `package`
+    /// is `(package module file, name)` when `key` reads
+    /// `from package import name` as a submodule, which holds only when the
+    /// package binds no such name itself.
+    Factory {
+        key: FnKey,
+        package: Option<FnKey>,
+        text: String,
+        evidence: EvidenceRef,
+    },
     /// `<name>.limit(…)` / `.shared_limit(…)` with inert arguments: non-
     /// authenticating once resolve proves `key` a flask-limiter `Limiter`.
     Limit {
@@ -129,6 +155,13 @@ pub(crate) struct FnEffects {
     pub blocks: bool,
     pub returns_value: bool,
     pub calls: Vec<FnKey>,
+    /// It may end a request with 401/403 when called: it aborts, raises
+    /// anything but a non-auth werkzeug error, or is decorated (#1173).
+    pub denies: bool,
+    /// Every repository function it names, called or not.
+    pub refs: Vec<FnKey>,
+    /// What it proves as a non-authenticating decorator or factory.
+    pub proof: Option<WrapperProof>,
     pub evidence: EvidenceRef,
 }
 
@@ -155,13 +188,13 @@ pub(crate) struct WsgiFact {
     pub evidence: EvidenceRef,
 }
 
-fn named(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+pub(crate) fn named(node: TsNode<'_>) -> Vec<TsNode<'_>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).collect()
 }
 
 /// Every node under `node`, nested scopes included.
-fn every_descendant<'t>(node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
+pub(crate) fn every_descendant<'t>(node: TsNode<'t>, f: &mut dyn FnMut(TsNode<'t>)) {
     f(node);
     for child in named(node) {
         every_descendant(child, f);
@@ -189,6 +222,11 @@ fn dotted_parts(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<Vec<String>> {
         }
         _ => None,
     }
+}
+
+/// The first name of a dotted `node`, as `rebound` checks it.
+pub(crate) fn dotted_root(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+    dotted_parts(cx, node)?.into_iter().next()
 }
 
 /// The full dotted name an identifier / attribute chain names through
@@ -342,7 +380,23 @@ fn classify(
                         text,
                         evidence,
                     },
-                    None => unclassified(),
+                    None => match resolver.target(cx, callee, &BTreeSet::new()) {
+                        Some(key) => DecoratorFact::Factory {
+                            key,
+                            package: None,
+                            text,
+                            evidence,
+                        },
+                        None => match submodule_member(cx, callee, bindings) {
+                            Some((key, package)) => DecoratorFact::Factory {
+                                key,
+                                package: Some(package),
+                                text,
+                                evidence,
+                            },
+                            None => unclassified(),
+                        },
+                    },
                 },
                 None => unclassified(),
             }
@@ -369,6 +423,38 @@ fn classify(
         }
         _ => unclassified(),
     }
+}
+
+/// `name.member` where `from package import name` may import submodule
+/// `package.name`: its member's key, and `(package module file, name)`.
+fn submodule_member(
+    cx: &FileCx<'_>,
+    callee: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<(FnKey, FnKey)> {
+    let object = callee.child_by_field_name("object")?;
+    let member = callee.child_by_field_name("attribute")?;
+    if callee.kind() != "attribute" || object.kind() != "identifier" {
+        return None;
+    }
+    let ImportBinding::Symbol {
+        module, exported, ..
+    } = bindings.get(cx.text(&object))?
+    else {
+        return None;
+    };
+    let submodule = if module.chars().all(|ch| ch == '.') {
+        format!("{module}{exported}")
+    } else {
+        format!("{module}.{exported}")
+    };
+    Some((
+        (
+            crate::module_file(cx.path, &submodule)?,
+            cx.text(&member).to_string(),
+        ),
+        (crate::module_file(cx.path, module)?, exported.clone()),
+    ))
 }
 
 /// Whether call decorator `callee` is flask-cors's `cross_origin`, its local
@@ -428,7 +514,7 @@ fn inert_arguments(cx: &FileCx<'_>, root: TsNode<'_>, call: TsNode<'_>) -> bool 
             })
 }
 
-fn inert(cx: &FileCx<'_>, root: TsNode<'_>, value: TsNode<'_>) -> bool {
+pub(crate) fn inert(cx: &FileCx<'_>, root: TsNode<'_>, value: TsNode<'_>) -> bool {
     match value.kind() {
         "integer" | "float" | "true" | "false" | "none" => true,
         "string" | "concatenated_string" => {
@@ -578,8 +664,13 @@ fn fn_effects(
                 .filter_map(|decorator| decorator.named_child(0).map(unparenthesize))
                 .any(|expression| !is_hook_attribute(cx, expression))
         });
+    let root = std::iter::successors(Some(function), |node| node.parent()).last()?;
+    let mut denies = function
+        .parent()
+        .is_some_and(|parent| parent.kind() == "decorated_definition");
     let mut returns_value = false;
     let mut calls = BTreeSet::new();
+    let mut refs = BTreeSet::new();
     every_descendant(body, &mut |node| match node.kind() {
         "return_statement" => {
             if let Some(value) = node.named_child(0)
@@ -588,7 +679,19 @@ fn fn_effects(
                 returns_value = true;
             }
         }
-        "raise_statement" => blocks = true,
+        "raise_statement" => {
+            blocks = true;
+            denies |= !decorator_proof::allowed_raise(cx, root, node, resolver);
+        }
+        "identifier" | "attribute" => {
+            let field = node.parent().is_some_and(|parent| {
+                parent.kind() == "attribute"
+                    && parent.child_by_field_name("attribute") == Some(node)
+            });
+            if !field && let Some(key) = resolver.target(cx, node, &bound) {
+                refs.insert(key);
+            }
+        }
         // A generator function returns a generator object, never `None`.
         "yield" => returns_value = true,
         "call" => {
@@ -602,8 +705,10 @@ fn fn_effects(
                     .is_some_and(|attribute| cx.text(&attribute) == "abort"),
                 _ => false,
             };
+            denies |= decorator_proof::denying_call(cx, callee, resolver);
             if abort {
                 blocks = true;
+                denies = true;
             } else if let Some(key) = resolver.target(cx, callee, &bound) {
                 calls.insert(key);
             }
@@ -616,6 +721,9 @@ fn fn_effects(
         blocks,
         returns_value,
         calls: calls.into_iter().collect(),
+        denies,
+        refs: refs.into_iter().collect(),
+        proof: decorator_proof::proof(cx, root, function, resolver),
         evidence: cx.evidence(&function),
     })
 }
@@ -701,6 +809,10 @@ fn trusted_member(dotted: &str) -> Option<String> {
         | "flask_cors.decorator.cross_origin" => Some(CORS.into()),
         "flask_limiter.extension" => Some(LIMITER.into()),
         "flask.abort" | "flask.helpers" | "flask.helpers.abort" => Some(ABORT.into()),
+        "functools.wraps" => Some(WRAPS.into()),
+        _ if dotted == "werkzeug.exceptions" || dotted.starts_with("werkzeug.exceptions.") => {
+            Some(WERKZEUG_ERRORS.into())
+        }
         "flask_login.current_user"
         | "flask_login.utils"
         | "flask_login.utils.current_user"
@@ -728,6 +840,8 @@ fn trusted_member(dotted: &str) -> Option<String> {
 const CORS: &str = "flask_cors.cross_origin";
 const LIMITER: &str = "flask_limiter.Limiter";
 pub(crate) const ABORT: &str = "flask.abort";
+const WRAPS: &str = "functools.wraps";
+const WERKZEUG_ERRORS: &str = "werkzeug.exceptions";
 /// `flask_login.current_user`, or what it reads, replaced.
 pub(crate) const CURRENT_USER: &str = "flask_login.current_user";
 /// A Flask response helper other than `abort` replaced.
@@ -762,6 +876,10 @@ fn target_writes(
             }
             if let Some(object) = target.child_by_field_name("object") {
                 written(object, out);
+            }
+            if let Some(attribute) = target.child_by_field_name("attribute") {
+                out.written_attributes
+                    .insert(cx.text(&attribute).to_string());
             }
         }
         "subscript" => {
@@ -827,6 +945,8 @@ fn setattr_guards(
             "make_response",
             "render_template",
             "templating",
+            "wraps",
+            "exceptions",
         ]
         .into_iter()
         .filter_map(|member| trusted_member(&format!("{module}.{member}")))
@@ -846,6 +966,100 @@ pub(crate) fn collect(
     functions: &[(TsNode<'_>, String)],
     out: &mut Extraction,
 ) {
+    if cx.path == "__init__.py" || cx.path.ends_with("/__init__.py") {
+        binding_sites(cx, root, &mut |_, names| {
+            for name in names {
+                out.package_names
+                    .insert((cx.path.to_string(), name.clone()));
+            }
+        });
+        every_descendant(root, &mut |node| {
+            if node.kind() == "wildcard_import" {
+                out.package_names
+                    .insert((cx.path.to_string(), "*".to_string()));
+            }
+        });
+    }
+    // Every member a file reaches by name, so a factory's class that is
+    // imported, read as an attribute or fetched by a literal `getattr`
+    // elsewhere is not proven (#1173).
+    every_descendant(root, &mut |node| {
+        let last = |name: TsNode<'_>| cx.text(&name).rsplit('.').next().map(str::to_string);
+        // Importing `a.b.c` runs `a`, `a.b` and `a.b.c`, whichever name it binds.
+        let segments = |name: &str| {
+            name.split('.')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        match node.kind() {
+            "attribute" => out.member_references.extend(
+                node.child_by_field_name("attribute")
+                    .map(|name| cx.text(&name).to_string()),
+            ),
+            "import_statement" => {
+                for imported in named(node) {
+                    let name = match imported.kind() {
+                        "dotted_name" => Some(imported),
+                        "aliased_import" => imported.child_by_field_name("name"),
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        out.member_references.extend(segments(cx.text(&name)));
+                    }
+                }
+            }
+            "import_from_statement" => {
+                let module = node.child_by_field_name("module_name");
+                if let Some(module) = module {
+                    out.member_references.extend(segments(cx.text(&module)));
+                }
+                // `from m import *` may bind any public name of `m`.
+                if named(node)
+                    .iter()
+                    .any(|child| child.kind() == "wildcard_import")
+                {
+                    out.member_references
+                        .extend(module.and_then(last).map(|stem| format!("*{stem}")));
+                }
+                for imported in named(node) {
+                    let name = match imported.kind() {
+                        "dotted_name" if Some(imported) != module => Some(imported),
+                        "aliased_import" => imported.child_by_field_name("name"),
+                        _ => None,
+                    };
+                    out.member_references.extend(name.and_then(last));
+                }
+            }
+            "call" => {
+                let fetched = node
+                    .child_by_field_name("function")
+                    .filter(|callee| callee.kind() == "identifier" && cx.text(callee) == "getattr")
+                    .and_then(|_| node.child_by_field_name("arguments"))
+                    .and_then(|arguments| {
+                        named(arguments)
+                            .into_iter()
+                            .filter(|argument| argument.kind() != "comment")
+                            .nth(1)
+                    })
+                    .and_then(|name| crate::literal_string(cx, unparenthesize(name)));
+                out.member_references.extend(fetched);
+            }
+            // Any loader, however spelled or aliased, may import a module
+            // named by a literal, so every dotted-name literal counts.
+            "string" => {
+                let dotted = crate::literal_string(cx, node).filter(|text| {
+                    !text.is_empty()
+                        && text
+                            .chars()
+                            .all(|c| c == '.' || c == '_' || c.is_alphanumeric())
+                });
+                out.member_references
+                    .extend(dotted.iter().flat_map(|text| segments(text)));
+            }
+            _ => {}
+        }
+    });
     let top_level = |function: &TsNode<'_>, symbol: &str| {
         function
             .child_by_field_name("name")
@@ -915,6 +1129,16 @@ pub(crate) fn collect(
                             .insert(cx.text(&part).to_string());
                     }
                 });
+                let name = node
+                    .child_by_field_name("arguments")
+                    .and_then(|arguments| {
+                        named(arguments)
+                            .into_iter()
+                            .filter(|argument| argument.kind() != "comment")
+                            .nth(1)
+                    })
+                    .and_then(|name| crate::literal_string(cx, unparenthesize(name)));
+                out.written_attributes.extend(name);
             }
             let patched = setattr_guards(cx, node, callee, bindings);
             if !patched.is_empty() {
@@ -1066,6 +1290,34 @@ fn non_blocking(
     result
 }
 
+/// Whether `key`, and every repository function it names, cannot end a
+/// request with 401/403 (#1173). A name in a repository file with no
+/// recovered function is unproven; one outside the repository is assumed
+/// not to abort.
+fn deny_free(
+    key: &FnKey,
+    effects: &HashMap<FnKey, FnEffects>,
+    files: &HashSet<String>,
+    visited: &mut HashSet<FnKey>,
+    depth: usize,
+) -> bool {
+    if lookup_effects(effects, key).is_none() {
+        return !repository_file(files, key);
+    }
+    if depth > MAX_HOOK_DEPTH || !visited.insert(key.clone()) {
+        return false;
+    }
+    let result = lookup_effects(effects, key).is_some_and(|found| {
+        !found.denies
+            && found
+                .refs
+                .iter()
+                .all(|named| deny_free(named, effects, files, visited, depth + 1))
+    });
+    visited.remove(key);
+    result
+}
+
 /// Evidence sorted and deduplicated by span, truncated to the bound.
 pub(crate) fn bounded(mut evidence: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
     evidence.sort_by(|a, b| {
@@ -1134,6 +1386,8 @@ pub(crate) fn resolve(
                 merged.calls.extend(found.calls);
                 merged.calls.sort();
                 merged.calls.dedup();
+                merged.denies = true;
+                merged.proof = None;
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(found);
@@ -1191,6 +1445,37 @@ pub(crate) fn resolve(
         repo_reasons.insert("wsgi_middleware_unknown".to_string());
     }
 
+    // Whether the repository decorator or factory `key` is proven not to
+    // authenticate (#1173).
+    let trusted = !patched.contains(WRAPS) && !patched.contains(WERKZEUG_ERRORS);
+    let proven = |key: &FnKey, factory: bool| {
+        let written = |name: &String| {
+            out.module_attr_writes.contains(name) || out.attribute_write_objects.contains(name)
+        };
+        // A helper may write a proof name through any object it is passed,
+        // as in `m.lock = …`; the class itself may not escape at all.
+        let attribute_written = |name: &String| out.written_attributes.contains(name);
+        trusted
+            && lookup_effects(&effects, key)
+                .and_then(|found| found.proof.as_ref())
+                .is_some_and(|proof| {
+                    proof.factory == factory
+                        && proof.clean
+                        && !proof.names.iter().any(written)
+                        && !proof.names.iter().any(attribute_written)
+                        && !proof.class.as_ref().is_some_and(|class| {
+                            let stem = key.0.rsplit('/').next().unwrap_or(&key.0);
+                            let stem = stem.strip_suffix(".py").unwrap_or(stem);
+                            out.member_references.contains(class)
+                                || out.member_references.contains(&format!("*{stem}"))
+                        })
+                        && proof
+                            .calls
+                            .iter()
+                            .all(|call| deny_free(call, &effects, &files, &mut HashSet::new(), 1))
+                })
+    };
+
     let mut by_handler: HashMap<String, HandlerAuthFacts> = HashMap::new();
     for facts in handlers {
         by_handler.entry(facts.handler.clone()).or_insert(facts);
@@ -1212,6 +1497,9 @@ pub(crate) fn resolve(
         // Decorators proven not to authenticate, cited on a `none` fact.
         let mut non_auth = BTreeSet::new();
         let mut non_auth_evidence = Vec::new();
+        // Which kinds of non-authenticating decorator the fact rests on.
+        let mut trusted_non_auth = false;
+        let mut proven_non_auth = false;
         for decorator in &facts.decorators {
             match decorator {
                 DecoratorFact::NonAuth { text, .. } if patched.contains(CORS) => {
@@ -1223,6 +1511,7 @@ pub(crate) fn resolve(
                 } => {
                     non_auth.insert(text.clone());
                     non_auth_evidence.push(span.clone());
+                    trusted_non_auth = true;
                 }
                 DecoratorFact::Limit {
                     key,
@@ -1232,6 +1521,7 @@ pub(crate) fn resolve(
                     if limiters.contains(key) {
                         non_auth.insert(text.clone());
                         non_auth_evidence.push(span.clone());
+                        trusted_non_auth = true;
                     } else {
                         reasons.insert(format!("unclassified_decorator:{text}"));
                     }
@@ -1289,11 +1579,47 @@ pub(crate) fn resolve(
                         basis.insert("decorator_aborts_401_or_403");
                         evidence.extend(aborts.iter().cloned());
                     }
-                    if !returns && aborts.is_empty() {
+                    if returns || !aborts.is_empty() {
+                        // A guard: recorded above.
+                    } else if proven(key, false) {
+                        non_auth.insert(text.clone());
+                        non_auth_evidence.push(span.clone());
+                        proven_non_auth = true;
+                    } else {
                         reasons.insert(format!(
                             "decorator_not_classified:{}",
                             symbol_id(repo, &key.0, &key.1)
                         ));
+                    }
+                }
+                DecoratorFact::Factory {
+                    key,
+                    package,
+                    text,
+                    evidence: span,
+                } => {
+                    // A package module, or a package binding the name, makes
+                    // `from package import name` something else.
+                    let submodule = package.as_ref().is_none_or(|(module, name)| {
+                        let init = module
+                            .strip_suffix(".py")
+                            .map(|stem| format!("{stem}/__init__.py"));
+                        !files.contains(module)
+                            && init.is_none_or(|init| {
+                                !out.package_names.contains(&(init.clone(), name.clone()))
+                                    && !out.package_names.contains(&(init.clone(), "*".to_string()))
+                                    // A module `__getattr__` may answer any name.
+                                    && !out
+                                        .package_names
+                                        .contains(&(init, "__getattr__".to_string()))
+                            })
+                    });
+                    if submodule && proven(key, true) {
+                        non_auth.insert(text.clone());
+                        non_auth_evidence.push(span.clone());
+                        proven_non_auth = true;
+                    } else {
+                        reasons.insert(format!("unclassified_decorator:{text}"));
                     }
                 }
                 DecoratorFact::Unclassified { reason } => {
@@ -1327,8 +1653,12 @@ pub(crate) fn resolve(
             if scoped_out {
                 assumptions.push("request_hooks_reach_only_their_application");
             }
-            if !non_auth.is_empty() {
+            if trusted_non_auth {
                 assumptions.push("rate_limit_and_cors_decorators_do_not_authenticate");
+            }
+            if proven_non_auth {
+                assumptions.push("non_repository_calls_in_repository_decorators_do_not_abort");
+                assumptions.push("werkzeug_errors_keep_their_status");
             }
             let mut value = serde_json::json!({
                 "state": "none",
@@ -1395,6 +1725,7 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
                 DecoratorFact::Framework { evidence, .. }
                 | DecoratorFact::Repository { evidence, .. }
                 | DecoratorFact::NonAuth { evidence, .. }
+                | DecoratorFact::Factory { evidence, .. }
                 | DecoratorFact::Limit { evidence, .. } => {
                     evidence.commit_sha = commit.into();
                 }

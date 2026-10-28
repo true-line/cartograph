@@ -4963,7 +4963,8 @@ def create_app():
 #[test]
 fn call_and_unresolved_decorators_are_unknown() {
     // AC-0380 (T-0380): a call decorator, a `jwt_required` call with an
-    // argument, and a pass-through repository decorator are unknown.
+    // argument, and a repository decorator neither proven a guard nor
+    // proven not to authenticate (AC-0446) are unknown.
     let source = br#"
 from flask import Flask, jsonify
 from flask_jwt_extended import jwt_required
@@ -4972,7 +4973,8 @@ app = Flask(__name__)
 
 def passthrough(f):
     def wrapper(*args, **kwargs):
-        return f(*args, **kwargs)
+        rv = f(*args, **kwargs)
+        return rv
     return wrapper
 
 @app.route("/limited")
@@ -6958,5 +6960,464 @@ admin.add_view(Reports(endpoint="reports"))
     assert_eq!(
         rows(app, auth, None),
         vec!["GET /back/reports/ unknown flask_admin_access_check:Guarded,flask_admin_version_not_pinned".to_string()]
+    );
+}
+
+/// SimpleLogin's class-based concurrency lock (#1173), as one module.
+const PARALLEL_LIMITER: &str = r#"import uuid
+from datetime import timedelta
+from functools import wraps
+from typing import Callable, Any, Optional
+
+from flask import request
+from flask_login import current_user
+from limits.storage import RedisStorage
+from werkzeug import exceptions
+
+lock_redis: Optional[RedisStorage] = None
+
+
+def set_redis_concurrent_lock(redis: RedisStorage):
+    global lock_redis
+    lock_redis = redis
+
+
+class _InnerLock:
+    def __init__(
+        self,
+        lock_suffix: Optional[str] = None,
+        max_wait_secs: int = 5,
+        only_when: Optional[Callable[..., bool]] = None,
+    ):
+        self.lock_suffix = lock_suffix
+        self.max_wait_secs = max_wait_secs
+        self.only_when = only_when
+
+    def acquire_lock(self, lock_name: str, lock_value: str):
+        if not lock_redis.storage.set(
+            lock_name, lock_value, ex=timedelta(seconds=self.max_wait_secs), nx=True
+        ):
+            raise exceptions.TooManyRequests()
+
+    def release_lock(self, lock_name: str, lock_value: str):
+        current_lock_value = lock_redis.storage.get(lock_name)
+        if current_lock_value == lock_value.encode("utf-8"):
+            lock_redis.storage.delete(lock_name)
+
+    def __call__(self, f: Callable[..., Any]):
+        if self.lock_suffix is None:
+            lock_suffix = f.__name__
+        else:
+            lock_suffix = self.lock_suffix
+
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if self.only_when and not self.only_when():
+                return f(*args, **kwargs)
+            if not lock_redis:
+                return f(*args, **kwargs)
+
+            lock_value = str(uuid.uuid4())[:10]
+            if "id" in dir(current_user):
+                lock_name = f"cl:{current_user.id}:{lock_suffix}"
+            else:
+                lock_name = f"cl:{request.remote_addr}:{lock_suffix}"
+            self.acquire_lock(lock_name, lock_value)
+            try:
+                return f(*args, **kwargs)
+            finally:
+                self.release_lock(lock_name, lock_value)
+
+        return decorated
+
+
+def lock(
+    name: Optional[str] = None,
+    max_wait_secs: int = 5,
+    only_when: Optional[Callable[..., bool]] = None,
+):
+    return _InnerLock(name, max_wait_secs, only_when)
+"#;
+
+/// The auth of `/mfa`, decorated with `decorator` from `parallel_limiter`
+/// as `limiter` (with `edit` applied), beside `extra` files.
+fn lock_auth(edit: (&str, &str), decorator: &str, extra: &[(&str, &str)]) -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    let limiter = PARALLEL_LIMITER.replacen(edit.0, edit.1, 1);
+    assert!(
+        edit.0.is_empty() || limiter != PARALLEL_LIMITER,
+        "{}",
+        edit.0
+    );
+    write(dir.path(), "app/parallel_limiter.py", &limiter);
+    write(dir.path(), "app/__init__.py", "");
+    write(
+        dir.path(),
+        "app/views.py",
+        &format!(
+            r#"from flask import Flask, jsonify
+from app import parallel_limiter
+
+app = Flask(__name__)
+
+@app.route("/mfa", methods=["POST"])
+{decorator}
+def mfa():
+    return jsonify(ok=True)
+"#
+        ),
+    );
+    for (path, source) in extra {
+        write(dir.path(), path, source);
+    }
+    auth_at(&extract_dir(dir.path(), &id()).unwrap(), "/mfa")
+}
+
+#[test]
+fn a_class_based_lock_factory_is_proven_not_to_authenticate() {
+    // AC-0446 (T-0446): `@parallel_limiter.lock(name="mfa_auth")` follows the
+    // factory to `_InnerLock.__call__`'s wrapper, which only calls the view or
+    // raises a 429 through its own method, so the route is unauthenticated.
+    let decorator = r#"@parallel_limiter.lock(name="mfa_auth")"#;
+    let auth = lock_auth(("", ""), decorator, &[]);
+    assert_eq!(auth["state"], "none", "{auth}");
+    assert_eq!(auth["authenticated"], false);
+    assert_eq!(
+        auth["non_auth_decorators"],
+        serde_json::json!([r#"parallel_limiter.lock(name="mfa_auth")"#])
+    );
+    let assumptions = auth["assumptions"].as_array().unwrap();
+    for assumption in [
+        "non_repository_calls_in_repository_decorators_do_not_abort",
+        "werkzeug_errors_keep_their_status",
+    ] {
+        assert!(
+            assumptions.contains(&serde_json::json!(assumption)),
+            "{auth}"
+        );
+    }
+    assert!(!assumptions.contains(&serde_json::json!(
+        "rate_limit_and_cors_decorators_do_not_authenticate"
+    )));
+    // A repository helper the wrapper calls is proven too.
+    let helper = (
+        "            self.acquire_lock(lock_name, lock_value)\n",
+        "            self.acquire_lock(lock_name, lock_value)\n            throttle()\n",
+    );
+    let throttle = "\n\ndef throttle():\n    raise exceptions.TooManyRequests()\n";
+    let dir_auth = lock_auth(helper, decorator, &[]);
+    // `throttle` is not defined: an unrecovered name is assumed external,
+    // since it resolves to no repository file.
+    assert_eq!(dir_auth["state"], "none", "{dir_auth}");
+    let with_helper = |body: &str| {
+        let mut module = PARALLEL_LIMITER.replacen(helper.0, helper.1, 1);
+        module.push_str(&throttle.replace("    raise exceptions.TooManyRequests()\n", body));
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/parallel_limiter.py", &module);
+        write(dir.path(), "app/__init__.py", "");
+        write(
+            dir.path(),
+            "app/views.py",
+            "from flask import Flask\nfrom app import parallel_limiter\n\napp = Flask(__name__)\n\n@app.route(\"/mfa\")\n@parallel_limiter.lock()\ndef mfa():\n    return \"ok\"\n",
+        );
+        auth_at(&extract_dir(dir.path(), &id()).unwrap(), "/mfa")
+    };
+    assert_eq!(
+        with_helper("    raise exceptions.TooManyRequests()\n")["state"],
+        "none"
+    );
+    for denying in [
+        "    raise exceptions.Forbidden()\n",
+        "    abort(429)\n",
+        "    raise\n",
+        "    raise ValueError()\n",
+        // A replacement response, an aliased abort, or an auth library.
+        "    raise exceptions.TooManyRequests(response=make_response(\"no\", 401))\n",
+        "    from flask import abort as deny\n    deny(401)\n",
+        "    from flask_jwt_extended import verify_jwt_in_request as verify\n    verify()\n",
+    ] {
+        let auth = with_helper(denying);
+        assert_eq!(auth["state"], "unknown", "{denying}: {auth}");
+        assert_eq!(
+            auth["reasons"],
+            serde_json::json!(["unclassified_decorator:parallel_limiter.lock()"]),
+            "{denying}"
+        );
+    }
+}
+
+#[test]
+fn unproven_class_based_decorators_stay_unknown() {
+    // AC-0446 (T-0446): any step the proof cannot see through keeps the
+    // factory `unclassified_decorator`.
+    let decorator = r#"@parallel_limiter.lock(name="mfa_auth")"#;
+    let reason =
+        serde_json::json!([r#"unclassified_decorator:parallel_limiter.lock(name="mfa_auth")"#]);
+    let cases: &[((&str, &str), &str)] = &[
+        // A 401/403 or unknown error from the method the wrapper calls.
+        (
+            ("exceptions.TooManyRequests()", "exceptions.Unauthorized()"),
+            decorator,
+        ),
+        (
+            ("raise exceptions.TooManyRequests()", "abort(429)"),
+            decorator,
+        ),
+        // The wrapper returning a response of its own.
+        (
+            (
+                "            if not lock_redis:\n                return f(*args, **kwargs)",
+                "            if not lock_redis:\n                return redirect(\"/login\")",
+            ),
+            decorator,
+        ),
+        // A non-inert decorator argument or factory default, or a factory
+        // passing something else to the class.
+        (("", ""), "@parallel_limiter.lock(only_when=is_admin)"),
+        (
+            (
+                "max_wait_secs: int = 5,\n    only_when",
+                "max_wait_secs: int = timeout(),\n    only_when",
+            ),
+            decorator,
+        ),
+        (
+            (
+                "_InnerLock(name, max_wait_secs, only_when)",
+                "_InnerLock(name, max_wait_secs, check)",
+            ),
+            decorator,
+        ),
+        // An instance attribute from anything but a literal or parameter.
+        (
+            ("self.only_when = only_when", "self.only_when = check"),
+            decorator,
+        ),
+        // A base class, a class decorator, or a dunder that changes lookup.
+        (("class _InnerLock:", "class _InnerLock(Base):"), decorator),
+        (
+            ("class _InnerLock:", "@dataclass\nclass _InnerLock:"),
+            decorator,
+        ),
+        (
+            (
+                "    def acquire_lock(",
+                "    def __getattr__(self, name):\n        return None\n\n    def acquire_lock(",
+            ),
+            decorator,
+        ),
+        // A method passed on rather than called, or rebinding the instance.
+        (
+            (
+                "            self.acquire_lock(lock_name, lock_value)",
+                "            acquire = self.acquire_lock\n            acquire(lock_name, lock_value)",
+            ),
+            decorator,
+        ),
+        (
+            (
+                "        current_lock_value = ",
+                "        self.max_wait_secs = 0\n        current_lock_value = ",
+            ),
+            decorator,
+        ),
+        // The instance aliased or passed on, which may reach a method the
+        // proof never follows.
+        (
+            (
+                "            self.acquire_lock(lock_name, lock_value)",
+                "            other = self\n            other.acquire_lock(lock_name, lock_value)",
+            ),
+            decorator,
+        ),
+        (
+            (
+                "            lock_suffix = self.lock_suffix\n",
+                "            lock_suffix = self.lock_suffix\n        other = self\n",
+            ),
+            decorator,
+        ),
+        (
+            (
+                "            self.release_lock(lock_name, lock_value)",
+                "            release(self, lock_name, lock_value)",
+            ),
+            decorator,
+        ),
+        (
+            (
+                "        current_lock_value = ",
+                "        other = self\n        current_lock_value = ",
+            ),
+            decorator,
+        ),
+        // The class name shadowed in the factory, by a binding or parameter.
+        (
+            (
+                "    return _InnerLock(name",
+                "    _InnerLock = Guard\n    return _InnerLock(name",
+            ),
+            decorator,
+        ),
+        (
+            (
+                "    name: Optional[str] = None,\n    max_wait_secs",
+                "    name: Optional[str] = None,\n    _InnerLock=None,\n    max_wait_secs",
+            ),
+            decorator,
+        ),
+        // A decorator on the wrapper other than `wraps(f)`.
+        (("        @wraps(f)\n", "        @retry\n"), decorator),
+        // A call through an expression, which may be a method.
+        (
+            (
+                "            self.acquire_lock(lock_name, lock_value)",
+                "            getattr(self, \"acquire_lock\")(lock_name, lock_value)",
+            ),
+            decorator,
+        ),
+    ];
+    for (edit, decorator) in cases {
+        let auth = lock_auth(*edit, decorator, &[]);
+        assert_eq!(auth["state"], "unknown", "{edit:?}: {auth}");
+        if *decorator == r#"@parallel_limiter.lock(name="mfa_auth")"# {
+            assert_eq!(auth["reasons"], reason, "{edit:?}");
+        }
+    }
+    // The class or factory replaced elsewhere, or werkzeug's exceptions.
+    for patch in [
+        "from app import parallel_limiter\n\nparallel_limiter._InnerLock.acquire_lock = print\n",
+        "from app import parallel_limiter\n\nparallel_limiter.lock = print\n",
+        "from werkzeug import exceptions\n\nexceptions.TooManyRequests = exceptions.Unauthorized\n",
+        "import functools\n\nfunctools.wraps = print\n",
+        // A helper writing the class it is passed, or any computed name.
+        "from app import parallel_limiter\n\ndef patch(cls):\n    cls.__call__ = print\n\npatch(parallel_limiter._InnerLock)\n",
+        "from app.parallel_limiter import _InnerLock as Lock\n\ndef patch(cls):\n    cls.acquire_lock = print\n\npatch(Lock)\n",
+        "from app import parallel_limiter\n\ndef patch(cls, name):\n    setattr(cls, name, print)\n\npatch(getattr(parallel_limiter, \"_InnerLock\"), \"acquire_lock\")\n",
+        "from app.parallel_limiter import *\n",
+        // Or the factory, through the module it is passed.
+        "from app import parallel_limiter\n\ndef patch(m):\n    m.lock = print\n\npatch(parallel_limiter)\n",
+    ] {
+        let auth = lock_auth(("", ""), decorator, &[("app/patch.py", patch)]);
+        assert_eq!(auth["state"], "unknown", "{patch}: {auth}");
+    }
+    // The class escaping its own module, and an unapplied helper.
+    let escaped = (
+        "    return _InnerLock(name, max_wait_secs, only_when)\n",
+        "    return _InnerLock(name, max_wait_secs, only_when)\n\n\nREGISTRY = [_InnerLock]\n",
+    );
+    assert_eq!(lock_auth(escaped, decorator, &[])["state"], "unknown");
+    // A pytest module importing the class to test it changes nothing.
+    let tested = "from app.parallel_limiter import _InnerLock\n\ndef test_lock():\n    _InnerLock(\"t\").acquire_lock(\"a\", \"b\")\n";
+    for path in ["tests/test_parallel_limiter.py", "tests/conftest.py"] {
+        assert_eq!(
+            lock_auth(("", ""), decorator, &[(path, tested)])["state"],
+            "none",
+            "{path}"
+        );
+    }
+    // Unless the product imports the pytest module, directly or through
+    // another one, where its helper runs at startup.
+    let patching = "from app.parallel_limiter import _InnerLock\n\ndef patch(cls):\n    cls.__call__ = print\n\npatch(_InnerLock)\nmarker = 1\n";
+    for importer in [
+        "from app import test_patch\n",
+        "import app.test_patch\n",
+        "import importlib\n\nimportlib.import_module(\"app.test_patch\")\n",
+        // Importing a name from it, or all of it, runs it too.
+        // A loader by any spelling, given a literal module name.
+        "from importlib import import_module as load\n\nload(\"app.test_patch\")\n",
+        "import builtins\n\nbuiltins.__import__(\"app.test_patch\")\n",
+        "from app.test_patch import marker\n",
+        "from app.test_patch import *\n",
+        "from .test_patch import marker\n",
+    ] {
+        let auth = lock_auth(
+            ("", ""),
+            decorator,
+            &[
+                ("app/test_patch.py", patching),
+                ("app/startup.py", importer),
+            ],
+        );
+        assert_eq!(auth["state"], "unknown", "{importer}");
+    }
+    let chained = lock_auth(
+        ("", ""),
+        decorator,
+        &[
+            ("app/test_patch.py", patching),
+            ("app/test_chain.py", "from app import test_patch\n"),
+            ("app/startup.py", "from app import test_chain\n"),
+        ],
+    );
+    assert_eq!(chained["state"], "unknown");
+    let isolated = lock_auth(("", ""), decorator, &[("tests/test_patch.py", patching)]);
+    assert_eq!(isolated["state"], "none");
+    let unapplied = "def patch(cls):\n    cls.acquire_lock = print\n";
+    assert_eq!(
+        lock_auth(("", ""), decorator, &[("app/patch.py", unapplied)])["state"],
+        "none"
+    );
+    // A package `__getattr__` may answer `from app import parallel_limiter`.
+    let dynamic = (
+        "app/__init__.py",
+        "def __getattr__(name):\n    return None\n",
+    );
+    assert_eq!(
+        lock_auth(("", ""), decorator, &[dynamic])["state"],
+        "unknown"
+    );
+}
+
+#[test]
+fn a_pass_through_repository_decorator_does_not_authenticate() {
+    // AC-0446 (T-0446): a bare repository decorator whose wrapper only calls
+    // the view is non-authenticating; one returning anything else is not
+    // classified.
+    let auth = |wrapper: &str| {
+        let source = format!(
+            "from functools import wraps\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\ndef passthrough(f):\n    @wraps(f)\n    def wrapper(*args, **kwargs):\n{wrapper}\n    return wrapper\n\n@app.route(\"/passed\")\n@passthrough\ndef passed():\n    return jsonify(ok=True)\n"
+        );
+        auth_at(
+            &extract_source(source.as_bytes(), "app.py", &id()).unwrap(),
+            "/passed",
+        )
+    };
+    let passed = auth("        return f(*args, **kwargs)");
+    assert_eq!(passed["state"], "none", "{passed}");
+    assert_eq!(
+        passed["non_auth_decorators"],
+        serde_json::json!(["passthrough"])
+    );
+    for wrapper in [
+        "        rv = f(*args, **kwargs)\n        return rv",
+        "        yield f(*args, **kwargs)",
+        "        return redirect(\"/login\")",
+        // Authentication enforced by a call whose result is ignored.
+        "        verify_jwt_in_request()\n        return f(*args, **kwargs)",
+        "        current_app.login_manager.unauthorized()\n        return f(*args, **kwargs)",
+    ] {
+        let auth = auth(wrapper);
+        assert_eq!(auth["state"], "unknown", "{wrapper}: {auth}");
+    }
+    // `f` rebound by the decorator is no longer the view, and a wrapper
+    // name bound twice may be either function.
+    for decorator in [
+        "def passthrough(f):\n    f = login_required(f)\n    @wraps(f)\n    def wrapper(*args, **kwargs):\n        return f(*args, **kwargs)\n    return wrapper\n",
+        "def passthrough(f):\n    def wrapper(*args, **kwargs):\n        return f(*args, **kwargs)\n    wrapper = login_required(wrapper)\n    return wrapper\n",
+    ] {
+        let source = format!(
+            "from functools import wraps\nfrom flask import Flask\nfrom flask_login import login_required\n\napp = Flask(__name__)\n\n{decorator}\n@app.route(\"/passed\")\n@passthrough\ndef passed():\n    return \"ok\"\n"
+        );
+        let auth = auth_at(
+            &extract_source(source.as_bytes(), "app.py", &id()).unwrap(),
+            "/passed",
+        );
+        assert_ne!(auth["state"], "none", "{decorator}: {auth}");
+    }
+    // A 401 response is still a guard.
+    assert_eq!(
+        auth("        return jsonify(error=\"no\"), 401")["state"],
+        "required"
     );
 }

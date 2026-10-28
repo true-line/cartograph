@@ -100,12 +100,12 @@ fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn is_test_file(path: &str) -> bool {
+pub(crate) fn is_test_file(path: &str) -> bool {
     let name = base_name(path);
     name.ends_with(".py") && (name.starts_with("test_") || name.ends_with("_test.py"))
 }
 
-fn is_conftest(path: &str) -> bool {
+pub(crate) fn is_conftest(path: &str) -> bool {
     base_name(path) == "conftest.py"
 }
 
