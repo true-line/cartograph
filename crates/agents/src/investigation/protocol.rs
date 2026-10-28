@@ -144,7 +144,8 @@ impl InvestigationAction {
         use ActionDecodeStage as Stage;
         strict::preflight(raw, MAX_ACTION_BYTES, 16, 4096, 32)
             .map_err(|_| Stage::Preflight.invalid())?;
-        let action: Self = serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+        let action: Self =
+            serde_json::from_str(raw).map_err(|_| Stage::TypedLegacyAction.invalid())?;
         // Close optional-field omissions and reused nested decoder behavior.
         let original: serde_json::Value =
             serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;

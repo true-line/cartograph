@@ -57,7 +57,7 @@ impl QualifiedInvestigationAction {
             return InvestigationAction::decode_detailed(raw).map(Self::SourceOrFinish);
         }
         let action: ReadAction =
-            serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+            serde_json::from_str(raw).map_err(|_| Stage::TypedCoverageRead.invalid())?;
         if serde_json::to_value(&action).map_err(|_| Stage::CanonicalFields.invalid())? != original
         {
             return Err(Stage::CanonicalFields.invalid());

@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 pub enum ActionDecodeStage {
     Preflight,
     TypedEnvelope,
+    TypedStagedFinish,
+    TypedCoverageRead,
+    TypedLegacyAction,
+    TypedReplay,
+    BareFinish,
     CanonicalFields,
     /// Includes nested shape checks; never an exact rejected field or value.
     Semantic,
@@ -100,7 +105,7 @@ impl ProgressiveInvestigationAction {
             return CompletionInvestigationAction::decode_detailed(raw, context_id);
         }
         let action: ReplayAction =
-            serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+            serde_json::from_str(raw).map_err(|_| Stage::TypedReplay.invalid())?;
         if serde_json::to_value(&action).map_err(|_| Stage::CanonicalFields.invalid())? != value {
             return Err(Stage::CanonicalFields.invalid());
         }
