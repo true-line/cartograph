@@ -17,6 +17,7 @@ use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 mod alembic;
 mod app_scope;
 mod auth_guards;
+mod decorator_proof;
 mod flask_admin;
 mod flask_admin_access;
 mod flask_admin_library;
@@ -86,6 +87,18 @@ pub struct Extraction {
     limiter_defs: Vec<(String, String)>,
     /// Names an attribute write or `setattr` / `delattr` goes through.
     attribute_write_objects: BTreeSet<String>,
+    /// Attribute names written anywhere, through any object or a literal
+    /// `setattr` / `delattr` name (#1173).
+    written_attributes: BTreeSet<String>,
+    /// Names read as an attribute (`m.name`) or imported by name
+    /// (`from m import name`) anywhere (#1173).
+    member_references: BTreeSet<String>,
+    /// Pytest modules' `(stem, written_attributes, member_references)`,
+    /// counted only once a counted file imports the module (#1173).
+    pytest_modules: Vec<(String, BTreeSet<String>, BTreeSet<String>)>,
+    /// `(path, name)` for each name a package `__init__.py` binds at module
+    /// scope; `*` for a star import (#1173).
+    package_names: BTreeSet<(String, String)>,
     /// Flask-Admin views, classes and registrations (#1193).
     flask_admin: flask_admin::Facts,
 }
@@ -2237,11 +2250,35 @@ pub fn extract_dir_incremental_with_progress(
             out.limiter_defs.extend(extraction.limiter_defs);
             out.attribute_write_objects
                 .extend(extraction.attribute_write_objects);
+            // A pytest module runs under pytest unless the product imports
+            // it, so its writes and references wait for such an import.
+            if target_tests::is_test_file(path) || target_tests::is_conftest(path) {
+                let file = path.rsplit('/').next().unwrap_or(path);
+                out.pytest_modules.push((
+                    file.strip_suffix(".py").unwrap_or(file).to_string(),
+                    extraction.written_attributes,
+                    extraction.member_references,
+                ));
+            } else {
+                out.written_attributes.extend(extraction.written_attributes);
+                out.member_references.extend(extraction.member_references);
+            }
+            out.package_names.extend(extraction.package_names);
             out.flask_admin.extend(extraction.flask_admin);
             Ok(())
         },
     );
     merged?;
+    // Count each pytest module a counted file imports, transitively.
+    let mut pytest_modules = std::mem::take(&mut out.pytest_modules);
+    while let Some(index) = pytest_modules
+        .iter()
+        .position(|(stem, _, _)| out.member_references.contains(stem))
+    {
+        let (_, written, references) = pytest_modules.swap_remove(index);
+        out.written_attributes.extend(written);
+        out.member_references.extend(references);
+    }
     let known = out
         .nodes
         .iter()

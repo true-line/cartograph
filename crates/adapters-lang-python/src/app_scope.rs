@@ -227,7 +227,7 @@ pub(crate) fn collect(
 }
 
 /// Every `module.name` under binding target `target`, where `module` is an
-/// imported module.
+/// imported module, or an imported name that may be a submodule (#1173).
 fn module_attribute_writes(
     cx: &FileCx<'_>,
     target: TsNode<'_>,
@@ -242,10 +242,7 @@ fn module_attribute_writes(
                 node.child_by_field_name("attribute"),
             )
             && object.kind() == "identifier"
-            && matches!(
-                bindings.get(cx.text(&object)),
-                Some(ImportBinding::Module { .. })
-            )
+            && bindings.contains_key(cx.text(&object))
         {
             out.module_attr_writes.insert(cx.text(&name).to_string());
         }
