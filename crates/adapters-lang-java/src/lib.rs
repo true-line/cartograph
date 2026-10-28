@@ -19,6 +19,7 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+mod jaxrs;
 mod jpa;
 pub mod jvm;
 
@@ -951,6 +952,12 @@ pub fn extract_source(
         }
         let _ = chain;
     }
+
+    // JAX-RS resource endpoints (#1257): class `@Path` plus method HTTP
+    // annotations; what T0 cannot place is a route Gap.
+    let (jaxrs_nodes, jaxrs_edges) = jaxrs::endpoints(&cx, &methods, &imports);
+    out.nodes.extend(jaxrs_nodes);
+    out.edges.extend(jaxrs_edges);
 
     // Calls: same-class unqualified/this calls resolve locally; calls on an
     // imported type resolve repo-wide at the directory join, failing closed

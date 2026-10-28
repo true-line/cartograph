@@ -268,6 +268,14 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Java", "spring-web", HttpEndpoints, Supported, ""),
     cell(
         "Java",
+        "jax-rs",
+        HttpEndpoints,
+        Partial,
+        "resource methods inherited from a base class or declared on an interface, \
+         sub-resource locators and non-literal paths are explicit route Gaps",
+    ),
+    cell(
+        "Java",
         "jpa",
         DataModel,
         Partial,

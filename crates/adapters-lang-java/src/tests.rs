@@ -2358,3 +2358,191 @@ fn retrofit_bases_must_be_unique_and_proven() {
         IdentityExpr::Computed("no Retrofit base URL in repo".into())
     );
 }
+
+// AC-0428 (#1257): JAX-RS resource classes become endpoints joining the
+// class @Path with each method's own @Path, proven by the jakarta or javax
+// package; what T0 cannot place is a route Gap naming its handler.
+#[test]
+fn jaxrs_resources_compose_paths_and_unplaceable_methods_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "src/main/java/com/demo/rest";
+    write(
+        dir.path(),
+        &format!("{base}/Connectors.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+
+@Path("/connectors")
+public class Connectors {
+    @GET
+    public String list() { return ""; }
+
+    @POST
+    @Path("{connector}/restart")
+    public String restart(@PathParam("connector") String connector) { return ""; }
+
+    @Path("/{connector}/tasks")
+    public Object tasks() { return null; }
+
+    static final String DYNAMIC = "/x";
+
+    @GET
+    @Path(DYNAMIC)
+    public String dynamic() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Root.java"),
+        r#"package com.demo.rest;
+
+import javax.ws.rs.*;
+
+@Path("/")
+public class Root {
+    @GET
+    public String root() { return ""; }
+
+    @jakarta.ws.rs.DELETE
+    @Path("/tasks/")
+    public String clear() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Internal.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+
+public abstract class Internal {
+    @PUT
+    @Path("/{connector}/fence")
+    public String fence() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Api.java"),
+        r#"package com.demo.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/api")
+public interface Api {
+    @GET
+    String ping();
+}
+"#,
+    );
+    // Same-named annotations from another package prove nothing.
+    write(
+        dir.path(),
+        &format!("{base}/Fake.java"),
+        r#"package com.demo.rest;
+
+import com.other.GET;
+import com.other.Path;
+
+@Path("/fake")
+public class Fake {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    // A wildcard of any other package proves nothing either.
+    write(
+        dir.path(),
+        &format!("{base}/Wild.java"),
+        r#"package com.demo.rest;
+
+import com.other.rs.*;
+
+@Path("/wild")
+public class Wild {
+    @GET
+    public String get() { return ""; }
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@DELETE:/tasks/",
+            "ep:local/demo@GET:/",
+            "ep:local/demo@GET:/connectors",
+            "ep:local/demo@POST:/connectors/{connector}/restart",
+        ])
+    );
+    let restart = node(
+        &out.nodes,
+        "ep:local/demo@POST:/connectors/{connector}/restart",
+    );
+    assert_eq!(restart.props["framework"], "jax-rs");
+    assert_eq!(restart.props["method"], "POST");
+    edge(
+        &out.edges,
+        "ep:local/demo@POST:/connectors/{connector}/restart",
+        &format!("sym:local/demo@{base}/Connectors.java#Connectors.restart(String)"),
+        "HANDLES",
+    );
+
+    let mut gaps: Vec<(String, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jax-rs")
+        .map(|node| {
+            (
+                node.props["handler_sym"].as_str().unwrap().to_string(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    let sym = |file: &str, method: &str| format!("sym:local/demo@{base}/{file}.java#{method}");
+    assert_eq!(
+        gaps,
+        vec![
+            (
+                sym("Api", "Api.ping()"),
+                "JAX-RS resource method on an interface: served only by an implementing resource class"
+            ),
+            (
+                sym("Connectors", "Connectors.dynamic()"),
+                "dynamic JAX-RS path"
+            ),
+            (
+                sym("Connectors", "Connectors.tasks()"),
+                "JAX-RS sub-resource locator: routes are resolved at runtime"
+            ),
+            (
+                sym("Internal", "Internal.fence()"),
+                "JAX-RS resource method without a class-level @Path (inherited or sub-resource)"
+            ),
+        ]
+    );
+    for (handler, _) in &gaps {
+        assert!(out.edges.iter().any(|edge| edge.label == "HANDLES"
+            && &edge.dst == handler
+            && edge.src.starts_with("gap:route:")));
+    }
+}
