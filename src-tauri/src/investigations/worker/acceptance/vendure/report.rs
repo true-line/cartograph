@@ -20,14 +20,14 @@ pub(super) struct Candidate {
 }
 
 #[derive(Serialize)]
-pub(super) struct GraphPreparation {
+pub(in super::super) struct GraphPreparation {
     pub graph_snapshot_id: String,
     pub source_id: String,
     pub repo_key: String,
     pub capture_id: String,
     pub capture: source_capture::CaptureManifest,
     pub coverage: core_graph::coverage::StoredCoverage,
-    pub candidates: Vec<Candidate>,
+    pub(super) candidates: Vec<Candidate>,
     pub facts_without_primary_binding: usize,
     input_closure: &'static str,
     selection_status: &'static str,

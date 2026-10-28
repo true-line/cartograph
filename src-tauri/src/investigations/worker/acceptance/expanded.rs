@@ -7,6 +7,8 @@ use agents::investigation::InvestigationProvider;
 use std::path::Path;
 #[path = "expanded/analyst.rs"]
 mod analyst;
+#[path = "expanded/vendure_prepare.rs"]
+pub(super) mod vendure_prepare;
 
 fn prepare(
     directory: &Path,

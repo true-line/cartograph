@@ -159,7 +159,7 @@ fn hash(value: &str, length: usize) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
-fn validate_binding(binding: &PreparationBinding) -> Result<(), String> {
+pub(in super::super) fn validate_binding(binding: &PreparationBinding) -> Result<(), String> {
     if binding.run_id.is_empty()
         || binding.run_id.len() > 120
         || !binding

@@ -13,7 +13,7 @@ mod measurement;
 #[path = "vendure/profile.rs"]
 mod profile;
 #[path = "vendure/report.rs"]
-mod report;
+pub(super) mod report;
 #[cfg(test)]
 #[path = "vendure/tests.rs"]
 mod tests;
@@ -322,3 +322,17 @@ fn vendure_capture_preparation() {
         }
     }
 }
+
+pub(super) use measurement::{InputPolicy, reopen_preparation};
+pub(super) fn write_preparation_artifact(
+    path: &Path,
+    value: &impl Serialize,
+) -> Result<(), String> {
+    report::write_new(path, value)
+}
+pub(super) fn read_preparation_artifact(path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
+    input::read_bounded(path, maximum)
+}
+#[cfg(test)]
+#[path = "vendure/expanded_prepare_tests.rs"]
+mod expanded_prepare_tests;
