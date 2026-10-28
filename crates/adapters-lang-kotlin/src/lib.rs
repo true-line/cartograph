@@ -74,6 +74,25 @@ pub struct Extraction {
     /// Spring endpoints proven only by a star import, awaiting the
     /// same-package check (#1288).
     pending_endpoints: Vec<PendingEndpoint>,
+    /// Top-level type names a product file declares, which can obscure a
+    /// star import (#1288).
+    shadow_names: Vec<ShadowName>,
+}
+
+/// A top-level class, interface, object, enum, annotation class or type
+/// alias of a product source: a name that obscures a star-imported
+/// annotation of its package. A `private` one is visible only in its file.
+#[derive(Debug, Clone)]
+struct ShadowName {
+    fqn: String,
+    path: String,
+    private: bool,
+}
+
+impl ShadowName {
+    fn obscures(&self, fqn: &str, path: &str) -> bool {
+        self.fqn == fqn && (!self.private || self.path == path)
+    }
 }
 
 /// A Spring endpoint (or its dynamic-path Gap) whose proof rests on star
@@ -85,6 +104,8 @@ pub struct Extraction {
 /// member still proves it.
 #[derive(Debug, Clone)]
 struct PendingEndpoint {
+    /// The file whose imports the proof rests on.
+    path: String,
     shadowed_by: Vec<Vec<String>>,
     endpoint: (Node, Edge),
     gap: (Node, Edge),
@@ -92,11 +113,16 @@ struct PendingEndpoint {
 
 impl PendingEndpoint {
     /// Emit the endpoint, or the shadow Gap when a role is obscured.
-    fn settle(self, declared: impl Fn(&str) -> bool, nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
+    fn settle(
+        self,
+        declared: impl Fn(&str, &str) -> bool,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+    ) {
         let shadowed = self
             .shadowed_by
             .iter()
-            .any(|group| group.iter().all(|fqn| declared(fqn)));
+            .any(|group| group.iter().all(|fqn| declared(fqn, &self.path)));
         let (node, edge) = if shadowed { self.gap } else { self.endpoint };
         nodes.push(node);
         edges.push(edge);
@@ -665,6 +691,49 @@ fn spring_route_gap(
     (node, edge)
 }
 
+/// The file's top-level type-namespace declarations, default package
+/// included (#1288).
+fn shadow_names(cx: &FileCx<'_>, root: TsNode<'_>, package: Option<&str>) -> Vec<ShadowName> {
+    let private = |declaration: TsNode<'_>| {
+        let mut walk = declaration.walk();
+        declaration
+            .named_children(&mut walk)
+            .filter(|child| child.kind() == "modifiers")
+            .any(|modifiers| {
+                let mut walk = modifiers.walk();
+                modifiers.named_children(&mut walk).any(|modifier| {
+                    modifier.kind() == "visibility_modifier" && cx.text(&modifier) == "private"
+                })
+            })
+    };
+    let mut out = Vec::new();
+    let mut walk = root.walk();
+    for declaration in root.named_children(&mut walk) {
+        let (name, private) = match declaration.kind() {
+            "class_declaration" | "object_declaration" => (
+                declaration.child_by_field_name("name"),
+                private(declaration),
+            ),
+            "type_alias" => (
+                declaration.child_by_field_name("type"),
+                private(declaration),
+            ),
+            // `@A(...) annotation class Name`, parsed as an expression; a
+            // modifier there breaks the shape, so it is never private.
+            "annotated_expression" => (annotation_class_name(cx, declaration), false),
+            _ => continue,
+        };
+        if let Some(name) = name {
+            out.push(ShadowName {
+                fqn: same_package_name(package, cx.text(&name)),
+                path: cx.path.to_string(),
+                private,
+            });
+        }
+    }
+    out
+}
+
 /// `<file package>.<Name>`: the declaration that would obscure a star proof.
 fn same_package_name(package: Option<&str>, name: &str) -> String {
     match package {
@@ -996,14 +1065,13 @@ pub fn extract_source(
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
-    let declared: BTreeSet<String> = out
-        .declared_types
-        .iter()
-        .chain(&out.declared_importables)
-        .map(|item| item.fqn.clone())
-        .collect();
+    let names = out.shadow_names.clone();
     for pending in std::mem::take(&mut out.pending_endpoints) {
-        pending.settle(|fqn| declared.contains(fqn), &mut out.nodes, &mut out.edges);
+        pending.settle(
+            |fqn, path| names.iter().any(|name| name.obscures(fqn, path)),
+            &mut out.nodes,
+            &mut out.edges,
+        );
     }
     Ok(out)
 }
@@ -1248,6 +1316,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     if let Some(package) = &package {
         collect_importables(&cx, root, package, path, &mut out.declared_importables);
     }
+    // Test-only types are not compiled with the product, so they never
+    // obscure a product file's star import.
+    if !adapters_fw::in_jvm_test_source_set(path) {
+        out.shadow_names = shadow_names(&cx, root, package.as_deref());
+    }
 
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
@@ -1384,6 +1457,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 // same-package declaration of that name makes the route a
                 // Gap: the shadowed binding, not the path, then blocks.
                 out.pending_endpoints.push(PendingEndpoint {
+                    path: path.to_string(),
                     shadowed_by: shadowed_by.into_iter().collect(),
                     endpoint: fact,
                     gap: spring_route_gap(
@@ -1877,6 +1951,7 @@ pub fn extract_dir_incremental_with_progress(
             out.navigation3.extend(extraction.navigation3);
             out.hilt_binds.extend(extraction.hilt_binds);
             out.pending_endpoints.extend(extraction.pending_endpoints);
+            out.shadow_names.extend(extraction.shadow_names);
             Ok(())
         },
     );
@@ -1924,18 +1999,29 @@ pub fn extract_dir_incremental_with_progress(
             .or_insert_with(|| Some(item.path.clone()));
     }
     let functions_by_fqn = unique_by_fqn(&out.declared_functions);
-    // Star-proven Spring endpoints (#1288): any same-package type, type
-    // alias, annotation class or other importable of that name obscures the
-    // star import, so the route fails closed to a Gap.
-    let obscuring: BTreeSet<&str> = out
-        .declared_types
-        .iter()
-        .chain(&out.declared_importables)
-        .map(|item| item.fqn.as_str())
-        .collect();
+    // Star-proven Spring endpoints (#1288): a same-package top-level type
+    // or type alias of that name obscures the star import, so the route
+    // fails closed to a Gap. In a mixed JVM tree a product Java type of the
+    // package obscures it too; Java sources are read only when some route
+    // waits on the check.
+    let java_types: BTreeSet<String> = if out.pending_endpoints.is_empty() {
+        BTreeSet::new()
+    } else {
+        adapters_lang_java::product_top_level_types(root)
+            .map_err(|error| match error {
+                adapters_lang_java::ExtractError::Language(error) => ExtractError::Language(error),
+                adapters_lang_java::ExtractError::NoTree(path) => ExtractError::NoTree(path),
+                adapters_lang_java::ExtractError::Io(error) => ExtractError::Io(error),
+            })?
+            .into_iter()
+            .collect()
+    };
     for pending in std::mem::take(&mut out.pending_endpoints) {
         pending.settle(
-            |fqn| obscuring.contains(fqn),
+            |fqn, path| {
+                java_types.contains(fqn)
+                    || out.shadow_names.iter().any(|name| name.obscures(fqn, path))
+            },
             &mut out.nodes,
             &mut out.edges,
         );

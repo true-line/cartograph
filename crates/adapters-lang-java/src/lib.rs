@@ -752,6 +752,59 @@ pub fn extract_source(
 }
 
 /// One file's facts, with the facts the directory join settles held back.
+/// The file's `package` clause, if any.
+fn java_package(cx: &FileCx<'_>, root: TsNode<'_>) -> Option<String> {
+    let query =
+        crate::queries::query("(package_declaration [(scoped_identifier) (identifier)] @package)");
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, cx.source);
+    matches
+        .next()
+        .map(|found| cx.text(&found.captures()[0].node).to_string())
+}
+
+/// Top-level type names (`package.Name`, or `Name` in the default package)
+/// declared by the product Java sources under `root`, sorted. In a mixed
+/// JVM tree they are same-package declarations that can obscure a Kotlin
+/// star import (#1288). Test source sets are not compiled with the product,
+/// so they are skipped.
+pub fn product_top_level_types(root: &Path) -> Result<Vec<String>, ExtractError> {
+    let mut files = Vec::new();
+    collect_java_files(root, &mut files)?;
+    files.sort();
+    let language: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+    let mut parser = Parser::new();
+    parser.set_language(&language)?;
+    let id = SourceId {
+        repo: "",
+        commit: "",
+    };
+    let mut out = Vec::new();
+    for path in files
+        .iter()
+        .filter(|path| !adapters_fw::in_jvm_test_source_set(path))
+    {
+        let source = std::fs::read(root.join(path))?;
+        let tree = parser
+            .parse(&source, None)
+            .ok_or_else(|| ExtractError::NoTree(path.clone()))?;
+        let cx = FileCx {
+            source: &source,
+            path,
+            id: &id,
+        };
+        let root = tree.root_node();
+        out.extend(jaxrs::top_level_types(
+            &cx,
+            root,
+            java_package(&cx, root).as_deref(),
+        ));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extraction, ExtractError> {
     let language: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
     let mut parser = Parser::new();
@@ -772,18 +825,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         }),
     });
 
-    let package = {
-        let query = crate::queries::query(
-            "(package_declaration [(scoped_identifier) (identifier)] @package)",
-        );
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(query, root, source);
-        let mut package = None;
-        if let Some(found) = matches.next() {
-            package = Some(cx.text(&found.captures()[0].node).to_string());
-        }
-        package
-    };
+    let package = java_package(&cx, root);
     out.packages.extend(package.clone());
     let imports = parse_imports(&cx, root, &mut out);
 

@@ -3313,3 +3313,107 @@ class Solo {
         .collect();
     assert_eq!(commits, BTreeSet::from(["abc123".to_string()]));
 }
+
+// AC-0442: a same-package product Java type obscures a Kotlin star import
+// in a mixed JVM tree; test-source declarations (Java or Kotlin) never
+// obscure a product import; a `private` top-level declaration obscures only
+// within its own file; default-package declarations obscure too.
+#[test]
+fn spring_star_shadowing_spans_jvm_languages_visibility_and_source_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/GetMapping.java",
+        "package com.demo.web;\n\npublic @interface GetMapping { String value(); }\n",
+    );
+    write(
+        dir.path(),
+        "src/test/java/com/demo/web/PostMapping.java",
+        "package com.demo.web;\n\npublic @interface PostMapping { String value(); }\n",
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/demo/web/PutMapping.kt",
+        "package com.demo.web\n\nannotation class PutMapping(val value: String = \"\")\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Hidden.kt",
+        "package com.demo.web\n\nprivate annotation class DeleteMapping(val value: String = \"\")\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Users.kt",
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class Users {
+    @GetMapping("/users")
+    fun list(): String = "l"
+
+    @PostMapping("/users")
+    fun create(): String = "c"
+
+    @PutMapping("/users")
+    fun replace(): String = "r"
+
+    @DeleteMapping("/users")
+    fun remove(): String = "d"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Own.kt",
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+private annotation class PatchMapping(val value: String = "")
+
+@RestController
+class Own {
+    @PatchMapping("/own")
+    fun patch(): String = "p"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/Root.kt",
+        r#"import org.springframework.web.bind.annotation.*
+
+annotation class GetMapping(val value: String = "")
+
+@RestController
+class Root {
+    @GetMapping("/root")
+    fun root(): String = "r"
+
+    @PostMapping("/root")
+    fun post(): String = "p"
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let gap = |path: &str, member: &str| {
+        (
+            format!("gap sym:local/demo@src/main/kotlin/{path}#{member}"),
+            SHADOWED.to_string(),
+        )
+    };
+    assert_eq!(
+        route_rows(&out),
+        [
+            ("ep:local/demo@DELETE:/users".to_string(), String::new()),
+            ("ep:local/demo@POST:/root".to_string(), String::new()),
+            ("ep:local/demo@POST:/users".to_string(), String::new()),
+            ("ep:local/demo@PUT:/users".to_string(), String::new()),
+            gap("Root.kt", "Root.root"),
+            gap("com/demo/web/Own.kt", "Own.patch"),
+            gap("com/demo/web/Users.kt", "Users.list"),
+        ]
+    );
+}
