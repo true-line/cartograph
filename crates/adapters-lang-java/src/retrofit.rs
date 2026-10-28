@@ -43,7 +43,11 @@ fn proven(cx: &FileCx<'_>, annotation: TsNode<'_>, simple: &str, imports: &Impor
 }
 
 /// The value of a `name = …` element of an annotation, if present.
-fn element<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>, name: &str) -> Option<TsNode<'t>> {
+pub(crate) fn element<'t>(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'t>,
+    name: &str,
+) -> Option<TsNode<'t>> {
     let arguments = annotation.child_by_field_name("arguments")?;
     let mut walk = arguments.walk();
     arguments

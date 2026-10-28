@@ -82,6 +82,8 @@ pub struct Extraction {
     pending_repo_calls: Vec<jpa::PendingRepoCall>,
     /// Wildcard-proven JAX-RS endpoints awaiting same-package shadowing.
     pending_endpoints: Vec<jaxrs::Pending>,
+    /// OpenFeign sites awaiting same-package shadowing of wildcard proofs.
+    pending_feign: Vec<feign::Pending>,
     /// Fully qualified names of every top-level type a file declares,
     /// annotation types included: the package members that can shadow a
     /// wildcard import.
@@ -726,7 +728,7 @@ fn resolve_repo_imports(
 /// Recover deterministic facts from one Java source file. Facts a directory
 /// join would otherwise settle are settled within the file alone: its
 /// RestTemplate sites are fetch sites like any other, and its wildcard-proven
-/// endpoints are settled against the types this file declares.
+/// endpoints and Feign sites are settled against the types this file declares.
 pub fn extract_source(
     source: &[u8],
     path: &str,
@@ -742,6 +744,10 @@ pub fn extract_source(
         &mut out.nodes,
         &mut out.edges,
     );
+    let feign_sites = feign::resolve(std::mem::take(&mut out.pending_feign), |fqn| {
+        package_types.contains(fqn)
+    });
+    out.fetch_sites.extend(feign_sites);
     Ok(out)
 }
 
@@ -937,6 +943,14 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             root,
             &imports,
             &methods_by_start,
+        ));
+        // OpenFeign clients (AC-0437) wait for the same-package check.
+        out.pending_feign.extend(feign::sites(
+            &cx,
+            root,
+            &methods,
+            &imports,
+            package.as_deref(),
         ));
     }
 
@@ -1467,6 +1481,7 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_links.extend(extraction.pending_links);
             out.pending_repo_calls.extend(extraction.pending_repo_calls);
             out.pending_endpoints.extend(extraction.pending_endpoints);
+            out.pending_feign.extend(extraction.pending_feign);
             out.package_types.extend(extraction.package_types);
             Ok(())
         },
@@ -1524,6 +1539,11 @@ pub fn extract_dir_incremental_with_progress(
         &mut out.nodes,
         &mut out.edges,
     );
+    // Feign sites carry their own base, so they follow the Retrofit join.
+    let feign_sites = feign::resolve(std::mem::take(&mut out.pending_feign), |fqn| {
+        package_types.contains(fqn)
+    });
+    out.fetch_sites.extend(feign_sites);
     for pending in std::mem::take(&mut out.pending_calls) {
         let declared = types_by_fqn.get(pending.fqn.as_str()).copied().flatten();
         match declared {
@@ -1618,6 +1638,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod feign;
 mod rest_template;
 mod retrofit;
 

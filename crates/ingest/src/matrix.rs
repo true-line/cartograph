@@ -157,8 +157,9 @@ const NO_JVM_CLIENT: &str =
     "outbound HTTP client calls are recognized only through Retrofit interfaces";
 /// What the Java RestTemplate client cell reads (AC-0435).
 const JAVA_REST: &str = "single-type-imported or fully qualified `RestTemplate` receivers: a local, parameter or own-type field, or `new RestTemplate()`; wildcard imports, inherited or outer-class fields and `RestTemplateBuilder` results are not read, and a URL must be an exact literal";
-/// What the Java core client cell still lacks (AC-0435).
-const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit interfaces and Spring `RestTemplate`";
+const JAVA_FEIGN: &str = "single-type-imported or fully qualified `@FeignClient` interfaces with Spring mapping annotations; `Feign.builder()` clients, inherited interface methods and `@RequestLine` contracts are not read, and a service-name or placeholder base resolves only through the system manifest";
+/// What the Java core client cell still lacks (AC-0435, AC-0437).
+const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces and Spring `RestTemplate`";
 const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript";
 const TSX_ONLY: &str = "recorded in .tsx/.js/.jsx files; plain .ts modules are not scanned";
 
@@ -289,6 +290,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("Java", "retrofit", HttpClientCalls, Supported, ""),
     cell("Java", "rest-template", HttpClientCalls, Partial, JAVA_REST),
+    cell("Java", "openfeign", HttpClientCalls, Partial, JAVA_FEIGN),
     cell("Java", CORE, HttpClientCalls, Unsupported, NO_JAVA_CLIENT),
     cell("Java", CORE, EventSites, Unsupported, NO_EVENTS),
     cell("Kotlin", CORE, Types, Supported, ""),
