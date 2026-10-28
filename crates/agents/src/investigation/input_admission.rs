@@ -637,6 +637,7 @@ impl InvestigationInput {
                 SpecialistId::DomainAnalystV10,
                 SpecialistId::EvidenceAuditorV10,
                 SpecialistId::DomainAnalystV11,
+                SpecialistId::DomainAnalystV12,
                 SpecialistId::EvidenceAuditorV11,
             ]
             .iter()

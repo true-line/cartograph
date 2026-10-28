@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Task ownership, bounded row decoding, saved-call/ledger/result replay and
 /// host encodings are separate. Regex/native allocations are not modeled.
 pub fn next_prompt_validation_workspace() -> Option<usize> {
-    let definition = definition_workspace(SpecialistId::DomainAnalystV11)?
+    let definition = definition_workspace(SpecialistId::DomainAnalystV12)?
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
@@ -98,7 +98,7 @@ mod tests {
     // Pin the definition component independently, not the much larger total.
     #[test]
     fn saved_family_definitions_fit_admitted_definition_workspace() {
-        let admitted = definition_workspace(SpecialistId::DomainAnalystV11)
+        let admitted = definition_workspace(SpecialistId::DomainAnalystV12)
             .unwrap()
             .max(definition_workspace(SpecialistId::EvidenceAuditorV11).unwrap());
         for role in [
@@ -123,6 +123,7 @@ mod tests {
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::DomainAnalystV11,
+            SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::SpecWriterV1,
             SpecialistId::SpecWriterV2,
@@ -142,10 +143,11 @@ mod tests {
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::DomainAnalystV11,
+            SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
         ] {
             let definition = role.definition().unwrap();
-            assert!(matches!(definition.version, 10 | 11));
+            assert!(matches!(definition.version, 10..=12));
             assert!(
                 definition_workspace(role).unwrap()
                     >= role.prompt().len() + count(&definition).unwrap()

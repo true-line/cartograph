@@ -17,6 +17,10 @@ for (const old of admissionCatalog.specialists.filter((role) => role.version ===
   progressCatalog.specialists.push({ ...old, id, version: 11, prompt_fingerprint: `fixture-${id}` });
   progressCatalog.policies![0].specialist_ids.push(id);
 }
+const analyst12 = { ...progressCatalog.specialists.find((role) => role.id === 'domain-analyst@11')!,
+  id: 'domain-analyst@12' as SpecialistId, version: 12, prompt_fingerprint: 'fixture-domain-analyst@12' };
+progressCatalog.specialists.push(analyst12);
+progressCatalog.policies![0].specialist_ids.push(analyst12.id);
 
 beforeEach(() => { vi.stubGlobal('window', {}); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); });
 afterEach(() => { clearMocks(); vi.unstubAllGlobals(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); });
@@ -37,7 +41,7 @@ it('accepts only the exact @10 summary7/result7/disclosure6 mapping', () => {
   expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@9' })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: 6 })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: '7' as unknown as 7 })).toBe(false);
-  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@12' as SpecialistId })).toBe(false);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@13' as SpecialistId })).toBe(false);
 });
 
 it.each(['domain-analyst@10', 'evidence-auditor@10'] as const)('requires advertised request7/envelope2/v2 for %s', async (specialist) => {
@@ -173,7 +177,8 @@ it('rejects a higher-revision no-result family, definition or limits rebind whil
 });
 
 // AC-0432: opt-in @11 uses the existing request7/result7/disclosure6 family.
-it.each(['domain-analyst@11', 'evidence-auditor@11'] as const)('admits advertised progress role %s without upgrading saved @10', async (specialist) => {
+// AC-0439: the new analyst remains an explicit selection.
+it.each(['domain-analyst@11', 'evidence-auditor@11', 'domain-analyst@12'] as const)('admits advertised progress role %s without upgrading saved @10', async (specialist) => {
   expect(investigationPolicy(admissionCatalog, 'investigation-v2', specialist)).toBeUndefined();
   expect(investigationPolicy(progressCatalog, 'investigation-v2', specialist)?.request_schema_version).toBe(7);
   const detail = admissionDetail(); const original = structuredClone(detail); original.last_event_sequence = 0;

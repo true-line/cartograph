@@ -129,11 +129,12 @@ fn prompt(input: &InvestigationInput) -> Value {
 
 #[test]
 fn admission_prompt_builds_actual_progressive_input_for_both_roles_and_modes() {
-    // AC-0287: this builder is internal and grants no dispatch authority.
+    // AC-0287, AC-0439: this builder is internal and grants no dispatch authority.
     for role in [
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
         SpecialistId::DomainAnalystV11,
+        SpecialistId::DomainAnalystV12,
         SpecialistId::EvidenceAuditorV11,
     ] {
         let fixture = Fixture::new(role, 7);
