@@ -81,7 +81,7 @@ pub struct Extraction {
     /// Repository call sites awaiting the receiver type's resolution.
     pending_repo_calls: Vec<jpa::PendingRepoCall>,
     /// Wildcard-proven JAX-RS endpoints awaiting same-package shadowing.
-    pending_jaxrs: Vec<jaxrs::Pending>,
+    pending_endpoints: Vec<jaxrs::Pending>,
     /// Fully qualified names of every top-level type a file declares,
     /// annotation types included: the package members that can shadow a
     /// wildcard import.
@@ -328,7 +328,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.overload_gap.0.props, commit);
         retarget_props_commit(&mut pending.overload_gap.1.props, commit);
     }
-    for pending in &mut extraction.pending_jaxrs {
+    for pending in &mut extraction.pending_endpoints {
         pending.retarget(|props| retarget_props_commit(props, commit));
     }
     jpa::retarget(extraction, commit);
@@ -570,6 +570,85 @@ fn spring_proven(name: &str, imports: &Imports) -> bool {
         .any(|wildcard| wildcard == package)
 }
 
+/// How one spelled Spring annotation is proven (#1288): `None` when it is
+/// not; `Some(true)` when only a wildcard import of its package proves it,
+/// which a same-package type of the same simple name obscures (JLS §6.4.1),
+/// so the directory join settles it; `Some(false)` when a named import or
+/// the exact qualified spelling proves it outright. A qualified spelling of
+/// any other type is a lookalike, whatever the imports say.
+fn spring_proof(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'_>,
+    name: &str,
+    imports: &Imports,
+) -> Option<bool> {
+    let package = spring_annotation_package(name)?;
+    let spelling = annotation
+        .child_by_field_name("name")
+        .map(|spelled| cx.text(&spelled))
+        .unwrap_or_default();
+    if spelling.contains('.') {
+        return (spelling == format!("{package}.{name}")).then_some(false);
+    }
+    spring_proven(name, imports).then(|| !imports.bindings.contains_key(name))
+}
+
+const SPRING_SHADOWED: &str =
+    "Spring annotation proven only by a wildcard import is shadowed by a same-package type";
+
+/// A Spring route Gap anchored at the method mapping, the last evidence node.
+fn spring_route_gap(
+    cx: &FileCx<'_>,
+    evidence: &[TsNode<'_>],
+    handler: &str,
+    http_method: &str,
+    reason: &str,
+) -> (Node, Edge) {
+    let anchor = evidence.last().expect("a Gap cites at least one node");
+    let gap_id = format!(
+        "gap:route:{}@{}@{}",
+        cx.id.repo,
+        cx.path,
+        anchor.start_byte()
+    );
+    let node = Node {
+        id: gap_id.clone(),
+        label: "Gap".into(),
+        props: serde_json::json!({
+            "method": http_method,
+            "handler_sym": handler,
+            "framework": "spring",
+            "language": "java",
+            "reason": reason,
+            "attempted_tiers": ["T0"],
+            "prov": cx.prov_spanning(evidence, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+        }),
+    };
+    let edge = Edge {
+        src: gap_id.clone(),
+        dst: handler.to_string(),
+        label: "HANDLES".into(),
+        props: serde_json::json!({
+            "reason": reason,
+            "attempted_resolution": "literal-path",
+            "prov": cx.prov_spanning(
+                evidence,
+                ConfidenceTier::Gap,
+                &format!("HANDLES {gap_id} -> {handler}"),
+            ),
+        }),
+    };
+    (node, edge)
+}
+
+/// `<file package>.<Name>`: the type that would obscure a wildcard proof.
+fn same_package_type(package: Option<&str>, name: &str) -> String {
+    match package {
+        Some(package) => format!("{package}.{name}"),
+        None => name.to_string(),
+    }
+}
+
 fn mapping_method(annotation_name: &str) -> Option<&'static str> {
     match annotation_name {
         "GetMapping" => Some("GET"),
@@ -646,7 +725,8 @@ fn resolve_repo_imports(
 
 /// Recover deterministic facts from one Java source file. Facts a directory
 /// join would otherwise settle are settled within the file alone: its
-/// RestTemplate sites are fetch sites like any other.
+/// RestTemplate sites are fetch sites like any other, and its wildcard-proven
+/// endpoints are settled against the types this file declares.
 pub fn extract_source(
     source: &[u8],
     path: &str,
@@ -655,6 +735,13 @@ pub fn extract_source(
     let mut out = extract_file(source, path, id)?;
     let rest_template_sites = std::mem::take(&mut out.rest_template_sites);
     out.fetch_sites.extend(rest_template_sites);
+    let package_types: BTreeSet<String> = out.package_types.iter().cloned().collect();
+    jaxrs::resolve(
+        std::mem::take(&mut out.pending_endpoints),
+        |fqn| package_types.contains(fqn),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     Ok(out)
 }
 
@@ -874,20 +961,45 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             continue;
         };
         let class_annotations = declaration_annotations(&cx, class_decl);
-        let is_controller = class_annotations.iter().any(|(name, _)| {
-            matches!(name.as_str(), "RestController" | "Controller")
-                && spring_proven(name, &imports)
-        });
-        if !is_controller {
+        // Same-package types that would obscure a wildcard-only proof.
+        let mut shadowed_by: BTreeSet<Vec<String>> = BTreeSet::new();
+        // Any one proven stereotype makes the class a controller: a direct
+        // proof dominates, and wildcard-only proofs fail closed only when a
+        // same-package type shadows every one of them.
+        let controllers: Vec<(&str, bool)> = class_annotations
+            .iter()
+            .filter(|(name, _)| matches!(name.as_str(), "RestController" | "Controller"))
+            .filter_map(|(name, annotation)| {
+                spring_proof(&cx, *annotation, name, &imports)
+                    .map(|wildcard| (name.as_str(), wildcard))
+            })
+            .collect();
+        if controllers.is_empty() {
             continue;
+        }
+        if controllers.iter().all(|(_, wildcard)| *wildcard) {
+            let group: BTreeSet<String> = controllers
+                .iter()
+                .map(|(controller, _)| same_package_type(package.as_deref(), controller))
+                .collect();
+            shadowed_by.insert(group.into_iter().collect());
         }
         // "No @RequestMapping" and "@RequestMapping with no path argument"
         // both mean Spring's default base (""); a present-but-dynamic base
         // poisons every mapping under it (None), failing them closed.
-        let base_mapping = class_annotations
-            .iter()
-            .find(|(name, _)| name == "RequestMapping" && spring_proven(name, &imports))
-            .map(|(_, node)| *node);
+        let base_mapping = class_annotations.iter().find_map(|(name, node)| {
+            (name == "RequestMapping")
+                .then(|| spring_proof(&cx, *node, name, &imports))
+                .flatten()
+                .map(|wildcard| (*node, wildcard))
+        });
+        if let Some((_, true)) = base_mapping {
+            shadowed_by.insert(vec![same_package_type(
+                package.as_deref(),
+                "RequestMapping",
+            )]);
+        }
+        let base_mapping = base_mapping.map(|(node, _)| node);
         let bases = match base_mapping {
             None => Some(vec![String::new()]),
             Some(node) => annotation_path(&cx, node).segments(),
@@ -896,8 +1008,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             let Some(http_method) = mapping_method(&name) else {
                 continue;
             };
-            if !spring_proven(&name, &imports) {
+            let Some(wildcard) = spring_proof(&cx, annotation, &name, &imports) else {
                 continue;
+            };
+            let mut shadowed_by = shadowed_by.clone();
+            if wildcard {
+                shadowed_by.insert(vec![same_package_type(package.as_deref(), &name)]);
             }
             let tails = annotation_path(&cx, annotation).segments();
             let (Some(bases), Some(tails)) = (bases.as_ref(), tails) else {
@@ -906,7 +1022,6 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 // base). T0 cannot confirm the route, so the endpoint is an
                 // explicit Gap, never a default path presented as Confirmed
                 // (R-INT-4).
-                let gap_id = format!("gap:route:{}@{}@{}", id.repo, path, annotation.start_byte());
                 // Cite what made the route unprovable: the class base when it
                 // is dynamic, and always the method mapping that binds the
                 // handler, so the evidence shows the actual expression.
@@ -914,37 +1029,26 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     (true, Some(base)) => vec![base, annotation],
                     _ => vec![annotation],
                 };
-                out.nodes.push(Node {
-                    id: gap_id.clone(),
-                    label: "Gap".into(),
-                    props: serde_json::json!({
-                        "method": http_method,
-                        "handler_sym": handler,
-                        "framework": "spring",
-                        "language": "java",
-                        "reason": "dynamic Spring mapping path",
-                        "attempted_tiers": ["T0"],
-                        "prov": cx.prov_spanning(
-                            &evidence,
-                            ConfidenceTier::Gap,
-                            &format!("Gap {gap_id}"),
-                        ),
-                    }),
-                });
-                out.edges.push(Edge {
-                    src: gap_id.clone(),
-                    dst: handler.clone(),
-                    label: "HANDLES".into(),
-                    props: serde_json::json!({
-                        "reason": "dynamic Spring mapping path",
-                        "attempted_resolution": "literal-path",
-                        "prov": cx.prov_spanning(
-                            &evidence,
-                            ConfidenceTier::Gap,
-                            &format!("HANDLES {gap_id} -> {handler}"),
-                        ),
-                    }),
-                });
+                let dynamic = spring_route_gap(
+                    &cx,
+                    &evidence,
+                    handler,
+                    http_method,
+                    "dynamic Spring mapping path",
+                );
+                if shadowed_by.is_empty() {
+                    out.nodes.push(dynamic.0);
+                    out.edges.push(dynamic.1);
+                } else {
+                    // A shadowed binding, not the path, is then what blocks.
+                    let shadowed =
+                        spring_route_gap(&cx, &evidence, handler, http_method, SPRING_SHADOWED);
+                    out.pending_endpoints.push(jaxrs::Pending::new(
+                        shadowed_by.iter().cloned().collect(),
+                        dynamic,
+                        shadowed,
+                    ));
+                }
                 continue;
             };
             // Sorted and de-duplicated so emission order never depends on
@@ -959,9 +1063,13 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 .into_iter()
                 .chain(std::iter::once(annotation))
                 .collect();
+            // A wildcard-only proof waits for the directory join, where a
+            // same-package type of that name turns the route into a Gap.
+            let shadow_gap = (!shadowed_by.is_empty())
+                .then(|| spring_route_gap(&cx, &evidence, handler, http_method, SPRING_SHADOWED));
             for route in routes {
                 let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
-                out.nodes.push(Node {
+                let node = Node {
                     id: endpoint.clone(),
                     label: "Endpoint".into(),
                     props: serde_json::json!({
@@ -976,8 +1084,8 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                             &format!("Endpoint {endpoint}"),
                         ),
                     }),
-                });
-                out.edges.push(Edge {
+                };
+                let edge = Edge {
                     src: endpoint.clone(),
                     dst: handler.clone(),
                     label: "HANDLES".into(),
@@ -988,7 +1096,18 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                             &format!("HANDLES {endpoint} -> {handler}"),
                         ),
                     }),
-                });
+                };
+                match &shadow_gap {
+                    None => {
+                        out.nodes.push(node);
+                        out.edges.push(edge);
+                    }
+                    Some(gap) => out.pending_endpoints.push(jaxrs::Pending::new(
+                        shadowed_by.iter().cloned().collect(),
+                        (node, edge),
+                        gap.clone(),
+                    )),
+                }
             }
         }
         let _ = chain;
@@ -1004,7 +1123,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     );
     out.nodes.extend(jaxrs_nodes);
     out.edges.extend(jaxrs_edges);
-    out.pending_jaxrs.extend(jaxrs_pending);
+    out.pending_endpoints.extend(jaxrs_pending);
     // Test-only types are not compiled with the product, so they never shadow
     // a product file's wildcard import.
     if product {
@@ -1347,7 +1466,7 @@ pub fn extract_dir_incremental_with_progress(
             out.repository_index.extend(extraction.repository_index);
             out.pending_links.extend(extraction.pending_links);
             out.pending_repo_calls.extend(extraction.pending_repo_calls);
-            out.pending_jaxrs.extend(extraction.pending_jaxrs);
+            out.pending_endpoints.extend(extraction.pending_endpoints);
             out.package_types.extend(extraction.package_types);
             Ok(())
         },
@@ -1400,7 +1519,7 @@ pub fn extract_dir_incremental_with_progress(
     }
     let package_types: BTreeSet<&str> = out.package_types.iter().map(String::as_str).collect();
     jaxrs::resolve(
-        std::mem::take(&mut out.pending_jaxrs),
+        std::mem::take(&mut out.pending_endpoints),
         |fqn| package_types.contains(fqn),
         &mut out.nodes,
         &mut out.edges,
