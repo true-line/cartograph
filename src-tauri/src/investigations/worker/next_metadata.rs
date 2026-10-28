@@ -31,7 +31,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             current.ledger(),
             policy,
         )
-        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidNextAction))?;
         self.check_new_work()?;
         let (read, kind) = match action {
             CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {

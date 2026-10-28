@@ -26,7 +26,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             input.ledger(),
             policy,
         )
-        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidNextAction))?;
         if matches!(action, CompletionInvestigationAction::Read(_))
             && mode != staged_refusal::CompletionCallMode::FinishOnly
         {
