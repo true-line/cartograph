@@ -88,6 +88,8 @@ fn same_class_overloads_get_distinct_ids_and_calls_resolve_by_arity() {
     let source = br#"package com.demo;
 
 public class Store {
+    String label;
+
     public void save() {}
     public void save(String name) {}
     public void save(int id) {}
@@ -95,7 +97,7 @@ public class Store {
 
     void run() {
         save();
-        save("a");
+        save(this.label);
         save("a", 1);
         save(9, 9, 9);
     }
@@ -119,8 +121,9 @@ public class Store {
     edge(&out.edges, &run, &no_arg, "CALLS");
     edge(&out.edges, &run, &two, "CALLS");
 
-    // `save("a")` (arity 1) matches both `save(String)` and `save(int)`:
-    // T0 proves arity only, so this is ambiguous, not a guess.
+    // `save(this.label)` (arity 1) matches both `save(String)` and
+    // `save(int)`, and a field access proves no argument kind, so this is
+    // ambiguous, not a guess.
     let gaps: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Gap").collect();
     assert_eq!(gaps.len(), 2);
     let ambiguous = gaps
@@ -269,6 +272,121 @@ public class Store {
         out.nodes.iter().filter(|node| node.label == "Gap").count(),
         1
     );
+}
+
+// AC-0433: literal, null and lambda arguments rule out same-arity overloads
+// they cannot bind to; a unique survivor resolves, anything else stays a Gap.
+#[test]
+fn same_arity_overloads_narrow_by_literal_argument_kinds() {
+    let source = br#"package com.demo;
+
+import java.util.function.Supplier;
+
+public class Waits<T> {
+    Supplier<String> details;
+
+    void await(Runnable condition, long maxWaitMs, String details) {}
+    void await(Runnable condition, long maxWaitMs, Supplier<String> details) {}
+    void put(T value) {}
+    void put(int[] values) {}
+    void log(String message) {}
+    void log(Object message) {}
+
+    void run() {
+        await(() -> {}, 10 * 1000, "Failed to poll.");
+        await(() -> {}, 10 * 1000, () -> "lazy");
+        await(() -> {}, 5, this.details);
+        put("x");
+        log("both apply");
+    }
+}
+"#;
+    let path = "src/main/java/com/demo/Waits.java";
+    let out = extract_source(source, path, &id()).unwrap();
+    let run = format!("sym:local/demo@{path}#Waits.run()");
+    let eager = format!("sym:local/demo@{path}#Waits.await(Runnable,long,String)");
+    let lazy = format!("sym:local/demo@{path}#Waits.await(Runnable,long,Supplier<String>)");
+    let put = format!("sym:local/demo@{path}#Waits.put(T)");
+
+    // A string literal cannot bind to `Supplier`; a lambda cannot bind to
+    // `String`; a string literal binds to the class type variable `T` but
+    // not to an array.
+    for dst in [&eager, &lazy, &put] {
+        let resolved = edge(&out.edges, &run, dst, "CALLS");
+        assert_eq!(
+            resolved.props["overload_resolution"],
+            "literal-argument-kinds"
+        );
+    }
+
+    // A field access proves nothing, and `log(String)`/`log(Object)` both
+    // accept a string literal: no most-specific guess, two Gaps.
+    let gaps: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 2);
+    for gap in &gaps {
+        assert_eq!(
+            gap.props["reason"],
+            "ambiguous overload: multiple local methods accept this argument count"
+        );
+        edge(&out.edges, &run, &gap.id, "CALLS");
+    }
+    for overload in ["log(String)", "log(Object)"] {
+        let dst = format!("sym:local/demo@{path}#Waits.{overload}");
+        assert!(!out.edges.iter().any(|e| e.dst == dst && e.label == "CALLS"));
+    }
+}
+
+// AC-0433: the same narrowing applies to import-proven cross-file calls.
+#[test]
+fn imported_same_arity_overloads_narrow_by_literal_argument_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/src/main/java/com/demo/App.java",
+        r#"package com.demo;
+
+import com.demo.util.Store;
+
+public class App {
+    void run() {
+        Store.save("a", 1);
+        Store.save(null, 1);
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "app/src/main/java/com/demo/util/Store.java",
+        r#"package com.demo.util;
+
+import java.util.function.Supplier;
+
+public class Store {
+    public static void save(String name, int retries) {}
+    public static void save(Supplier<String> name, int retries) {}
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+    let src = "sym:local/demo@app/src/main/java/com/demo/App.java#App.run()";
+    let eager = "sym:local/demo@app/src/main/java/com/demo/util/Store.java#Store.save(String,int)";
+    let resolved = edge(&out.edges, src, eager, "CALLS");
+    assert_eq!(resolved.props["resolution"], "import-proven");
+    assert_eq!(
+        resolved.props["overload_resolution"],
+        "literal-argument-kinds"
+    );
+
+    // `null` binds to either reference type: still a Gap.
+    let gaps: Vec<&Node> = out.nodes.iter().filter(|n| n.label == "Gap").collect();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(
+        gaps[0].props["reason"],
+        "no unique overload proves this call's argument count"
+    );
+    edge(&out.edges, src, &gaps[0].id, "CALLS");
 }
 
 #[test]

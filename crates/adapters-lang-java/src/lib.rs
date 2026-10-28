@@ -22,6 +22,7 @@ use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 mod jaxrs;
 mod jpa;
 pub mod jvm;
+mod overload;
 mod queries;
 
 use jvm::{classify_import, external_module_id, foreign_packages, in_system};
@@ -98,6 +99,8 @@ struct MethodSig {
     /// The last declared parameter is varargs (`T...`): the method accepts
     /// `min_arity` or more call-site arguments, not exactly `min_arity`.
     variadic: bool,
+    /// Shapes of the fixed parameters, for literal-kind narrowing (AC-0433).
+    params: Vec<overload::ParamShape>,
     symbol: String,
 }
 
@@ -114,10 +117,16 @@ fn arity_matches(min_arity: usize, variadic: bool, call_arity: usize) -> bool {
 }
 
 /// (owner fully qualified name, method name) -> every declared overload's
-/// (min_arity, variadic, symbol id), repo-wide (#435). Keyed by the owning
-/// type's package-prefixed FQN so two packages' same-named types never share
-/// an overload set (#435 review).
-type TypeMethodIndex<'a> = HashMap<(&'a str, &'a str), Vec<(usize, bool, &'a str)>>;
+/// (min_arity, variadic, symbol id, fixed parameter shapes), repo-wide
+/// (#435). Keyed by the owning type's package-prefixed FQN so two packages'
+/// same-named types never share an overload set (#435 review).
+type TypeMethodIndex<'a> =
+    HashMap<(&'a str, &'a str), Vec<(usize, bool, &'a str, &'a [overload::ParamShape])>>;
+
+/// Simple qualified name (no signature) -> every same-file overload's
+/// (min_arity, variadic, full signature-qualified symbol id, fixed parameter
+/// shapes) (#435, AC-0433).
+type LocalMethodIndex = HashMap<String, Vec<(usize, bool, String, Vec<overload::ParamShape>)>>;
 
 /// A call to an imported type, resolvable only with the whole directory in
 /// view (the import names a FQN; only the repo-wide type index knows which
@@ -128,13 +137,15 @@ struct PendingCall {
     fqn: String,
     method: String,
     /// Argument count at the call site, matched against the resolved
-    /// type's overloads (#435). T0 proves arity only, not argument types.
+    /// type's overloads (#435). T0 does not type argument expressions.
     arity: usize,
+    /// What each argument proves, for narrowing same-arity overloads.
+    args: Vec<overload::ArgKind>,
     resolved_props: serde_json::Value,
     /// The FQN does not resolve to a type this repo declares exactly once.
     unresolved_gap: (Node, Edge),
-    /// The FQN resolves, but no single declared overload's arity matches
-    /// the call (zero candidates, or more than one — ambiguous).
+    /// The FQN resolves, but no single declared overload matches the call
+    /// by arity, or by argument kinds where arity leaves several (AC-0433).
     overload_gap: (Node, Edge),
 }
 
@@ -275,8 +286,8 @@ fn signature_suffix(param_types: &[String]) -> String {
 }
 
 /// Argument count of a call site (`method_invocation`'s `arguments` field),
-/// the only overload-selection signal T0 proves without resolving argument
-/// expression types (#435).
+/// the first overload-selection signal (#435); literal argument kinds narrow
+/// further when arity leaves several overloads (AC-0433).
 fn call_arity(call: TsNode<'_>) -> usize {
     let Some(arguments) = call.child_by_field_name("arguments") else {
         return 0;
@@ -735,9 +746,7 @@ pub fn extract_source(
           (constructor_declaration name: (identifier) @name) @method]",
     );
     let mut methods_by_start: HashMap<usize, String> = HashMap::new();
-    // Simple qualified name (no signature) -> every local overload's
-    // (min_arity, variadic, full signature-qualified symbol id) (#435).
-    let mut local_method_index: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
+    let mut local_method_index: LocalMethodIndex = HashMap::new();
     let mut methods = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(method_query, root, source);
@@ -775,18 +784,20 @@ pub fn extract_source(
         } else {
             param_types.len()
         };
+        let params = overload::param_shapes(source, method);
         let qualified = format!("{simple_qualified}{}", signature_suffix(&param_types));
         let symbol = symbol_id(id.repo, path, &qualified);
         methods_by_start.insert(method.start_byte(), symbol.clone());
         local_method_index
             .entry(simple_qualified)
             .or_default()
-            .push((min_arity, variadic, symbol.clone()));
+            .push((min_arity, variadic, symbol.clone(), params.clone()));
         out.method_index.push(MethodSig {
             owner_fqn,
             name: name.clone(),
             min_arity,
             variadic,
+            params,
             symbol: symbol.clone(),
         });
         out.nodes.push(Node {
@@ -1030,32 +1041,42 @@ pub fn extract_source(
                     continue;
                 };
                 let call_arity = call_arity(call);
-                let matches: Vec<&str> = candidates
+                let matches: Vec<(&str, &[overload::ParamShape])> = candidates
                     .iter()
-                    .filter(|(min_arity, variadic, _)| {
+                    .filter(|(min_arity, variadic, _, _)| {
                         arity_matches(*min_arity, *variadic, call_arity)
                     })
-                    .map(|(_, _, symbol)| symbol.as_str())
+                    .map(|(_, _, symbol, params)| (symbol.as_str(), params.as_slice()))
                     .collect();
-                match matches.as_slice() {
-                    [dst] => {
+                let narrowed = overload::narrow(&matches, &overload::arg_kinds(source, call));
+                let target = match matches.as_slice() {
+                    [(dst, _)] => Some(*dst),
+                    _ => narrowed,
+                };
+                match target {
+                    Some(dst) => {
                         let dst = dst.to_string();
                         if dst != src {
+                            let mut props = serde_json::json!({
+                                "prov": cx.prov(&call, &format!("CALLS {qualified}")),
+                            });
+                            if narrowed.is_some() {
+                                props["overload_resolution"] = overload::RESOLUTION.into();
+                            }
                             out.edges.push(Edge {
                                 src,
                                 dst,
                                 label: "CALLS".into(),
-                                props: serde_json::json!({
-                                    "prov": cx.prov(&call, &format!("CALLS {qualified}")),
-                                }),
+                                props,
                             });
                         }
                     }
-                    _ => {
-                        // Zero or multiple local overloads accept this
-                        // call's argument count: T0 proves arity only, so
-                        // fail closed to an explicit Gap rather than guess
-                        // which overload runs (#435).
+                    None => {
+                        // Zero local overloads accept this call's argument
+                        // count, or several do and its argument kinds leave
+                        // zero or several (AC-0433): fail closed to an
+                        // explicit Gap rather than guess which overload
+                        // runs (#435).
                         let reason = if matches.is_empty() {
                             "no local overload accepts this call's argument count"
                         } else {
@@ -1170,6 +1191,7 @@ pub fn extract_source(
                     fqn: fqn.clone(),
                     method: name,
                     arity: call_arity,
+                    args: overload::arg_kinds(source, call),
                     resolved_props: serde_json::json!({
                         "resolution": "import-proven",
                         "prov": cx.prov(&call, &format!("CALLS {callee}")),
@@ -1343,7 +1365,12 @@ pub fn extract_dir_incremental_with_progress(
         type_method_index
             .entry((method.owner_fqn.as_str(), method.name.as_str()))
             .or_default()
-            .push((method.min_arity, method.variadic, method.symbol.as_str()));
+            .push((
+                method.min_arity,
+                method.variadic,
+                method.symbol.as_str(),
+                method.params.as_slice(),
+            ));
     }
     let package_types: BTreeSet<&str> = out.package_types.iter().map(String::as_str).collect();
     jaxrs::resolve(
@@ -1360,24 +1387,35 @@ pub fn extract_dir_incremental_with_progress(
                     .get(&(declared.fqn.as_str(), pending.method.as_str()))
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let matches: Vec<&str> = candidates
+                let matches: Vec<(&str, &[overload::ParamShape])> = candidates
                     .iter()
-                    .filter(|(min_arity, variadic, _)| {
+                    .filter(|(min_arity, variadic, _, _)| {
                         arity_matches(*min_arity, *variadic, pending.arity)
                     })
-                    .map(|(_, _, symbol)| *symbol)
+                    .map(|(_, _, symbol, params)| (*symbol, *params))
                     .collect();
-                match matches.as_slice() {
+                let narrowed = overload::narrow(&matches, &pending.args);
+                let target = match matches.as_slice() {
+                    [(dst, _)] => Some(*dst),
+                    _ => narrowed,
+                };
+                match target {
                     // The declared type's own Symbol nodes were just
                     // indexed above, so a match is always `known` — no
                     // need to re-check membership like the old code did.
-                    [dst] => out.edges.push(Edge {
-                        src: pending.src,
-                        dst: dst.to_string(),
-                        label: "CALLS".into(),
-                        props: pending.resolved_props,
-                    }),
-                    _ => {
+                    Some(dst) => {
+                        let mut props = pending.resolved_props;
+                        if narrowed.is_some() {
+                            props["overload_resolution"] = overload::RESOLUTION.into();
+                        }
+                        out.edges.push(Edge {
+                            src: pending.src,
+                            dst: dst.to_string(),
+                            label: "CALLS".into(),
+                            props,
+                        });
+                    }
+                    None => {
                         let (node, edge) = pending.overload_gap;
                         out.nodes.push(node);
                         out.edges.push(edge);
