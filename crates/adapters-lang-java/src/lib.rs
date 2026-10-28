@@ -821,9 +821,12 @@ pub fn extract_source(
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
 
+    // Endpoints are product facts: a test source set yields none (#1250).
+    let product = !adapters_fw::in_jvm_test_source_set(path);
+
     // Spring Web endpoints: annotation-proven controllers, class-level
     // @RequestMapping base path, method-level @{Get,Post,...}Mapping.
-    for (method, handler, chain, _) in &methods {
+    for (method, handler, chain, _) in methods.iter().filter(|_| product) {
         if method.kind() != "method_declaration" {
             continue;
         }
@@ -964,8 +967,12 @@ pub fn extract_source(
 
     // JAX-RS resource endpoints (#1257): class `@Path` plus method HTTP
     // annotations; what T0 cannot place is a route Gap.
-    let (jaxrs_nodes, jaxrs_edges, jaxrs_pending) =
-        jaxrs::endpoints(&cx, &methods, &imports, package.as_deref());
+    let (jaxrs_nodes, jaxrs_edges, jaxrs_pending) = jaxrs::endpoints(
+        &cx,
+        if product { &methods } else { &[] },
+        &imports,
+        package.as_deref(),
+    );
     out.nodes.extend(jaxrs_nodes);
     out.edges.extend(jaxrs_edges);
     out.pending_jaxrs.extend(jaxrs_pending);

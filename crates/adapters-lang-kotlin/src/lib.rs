@@ -1141,9 +1141,12 @@ pub fn extract_source(
         );
     }
 
+    // Endpoints are product facts: a test source set yields none (#1250).
+    let product = !adapters_fw::in_jvm_test_source_set(path);
+
     // Spring Web endpoints: annotation-proven controllers, class-level
     // @RequestMapping base path, function-level @{Get,Post,...}Mapping.
-    for (function, handler) in &functions {
+    for (function, handler) in functions.iter().filter(|_| product) {
         let Some(class_decl) = ({
             let mut node = *function;
             let mut found = None;

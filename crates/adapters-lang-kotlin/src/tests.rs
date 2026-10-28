@@ -2940,3 +2940,50 @@ abstract class TestModule {
     let vm_prov: Provenance = serde_json::from_value(vm_call.props["prov"].clone()).unwrap();
     assert_eq!(vm_prov.confidence_tier, ConfidenceTier::Confirmed);
 }
+
+// AC-0431 (#1250): a Spring controller in a Gradle test source set yields no
+// product Endpoint; the same controller under `src/main` is unchanged.
+#[test]
+fn test_source_set_spring_controllers_yield_no_product_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let controller = |name: &str, route: &str| {
+        format!(
+            r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class {name} {{
+    @GetMapping("{route}")
+    fun get(): String = "u"
+}}
+
+object Marker{name}
+"#
+        )
+    };
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Live.kt",
+        &controller("Live", "/live"),
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/demo/web/TestOnly.kt",
+        &controller("TestOnly", "/test-only"),
+    );
+    write(
+        dir.path(),
+        "src/testFixtures/kotlin/com/demo/web/Fixture.kt",
+        &controller("Fixture", "/fixture"),
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+    let endpoints: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(endpoints, vec!["ep:local/demo@GET:/live"]);
+}

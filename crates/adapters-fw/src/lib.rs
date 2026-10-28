@@ -106,9 +106,48 @@ impl HttpFrameworkRegistry {
     }
 }
 
+/// Maven/Gradle source sets that hold only test code. Their sources never
+/// ship, so a JVM adapter emits no product Endpoint from them (#1250).
+const JVM_TEST_SOURCE_SETS: &[&str] = &["test", "testFixtures", "integrationTest", "androidTest"];
+
+/// Whether `path` lies in a Maven/Gradle test source set: some `src/<set>`
+/// segment pair names one of [`JVM_TEST_SOURCE_SETS`]. `src/main` and any
+/// other source set are product code.
+pub fn in_jvm_test_source_set(path: &str) -> bool {
+    let segments: Vec<&str> = path.split(['/', '\\']).collect();
+    segments
+        .windows(2)
+        .any(|pair| pair[0] == "src" && JVM_TEST_SOURCE_SETS.contains(&pair[1]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-0431 (#1250): only test source sets are excluded; a `test` segment
+    // that is not a `src/<set>` pair, `src/main` and other sets stay product.
+    #[test]
+    fn jvm_test_source_sets_are_exactly_the_test_sets() {
+        for path in [
+            "web/src/test/java/org/x/T.java",
+            "src/testFixtures/java/X.java",
+            "app/src/integrationTest/kotlin/X.kt",
+            "app/src/androidTest/java/X.kt",
+            "a\\src\\test\\java\\X.java",
+        ] {
+            assert!(in_jvm_test_source_set(path), "{path}");
+        }
+        for path in [
+            "src/main/java/org/x/test/T.java",
+            "test-suite/module/omod/src/main/java/X.java",
+            "src/jvmMain/kotlin/X.kt",
+            "src/testing/java/X.java",
+            "test/src/main/java/X.java",
+            "X.java",
+        ] {
+            assert!(!in_jvm_test_source_set(path), "{path}");
+        }
+    }
 
     #[test]
     fn express_methods_map_to_verbs() {
