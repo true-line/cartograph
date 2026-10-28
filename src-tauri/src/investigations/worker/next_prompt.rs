@@ -19,14 +19,14 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .coverage
             .as_ref()
             .ok_or(HostError::InvalidInput)?;
-        let action = ProgressiveInvestigationAction::decode_resolved(
+        let action = ProgressiveInvestigationAction::decode_resolved_detailed(
             &completion.text,
             &context.context_id,
             &request.intent_hash_with_policy(policy)?,
             input.ledger(),
             policy,
         )
-        .map_err(|error| Failure::Stop(InvestigationStopReason::InvalidNextAction(error)))?;
+        .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
         if matches!(action, CompletionInvestigationAction::Read(_))
             && mode != staged_refusal::CompletionCallMode::FinishOnly
         {

@@ -978,7 +978,9 @@ pub(in crate::investigations) fn expanded_capacity_provider() -> Arc<dyn LlmProv
 // AC-0430: rejection stages survive reopen without retaining rejected content.
 #[test]
 fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
-    use agents::investigation::InvestigationError;
+    use agents::investigation::{
+        ActionDecodeFailure, ActionDecodeStage as DecodeStage, InvestigationError,
+    };
     const SENTINEL: &str = "PRIVATE-REJECTED-RESPONSE-1266";
     struct Rejected {
         profile: Scripted,
@@ -1058,6 +1060,26 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         InvestigationError::SourceReplay,
         InvestigationError::SensitiveOutput,
     ] {
+        for stage in [
+            DecodeStage::Preflight,
+            DecodeStage::TypedEnvelope,
+            DecodeStage::CanonicalFields,
+            DecodeStage::Semantic,
+            DecodeStage::HostBinding,
+        ] {
+            let reason =
+                InvestigationStopReason::ActionDecode(ActionDecodeFailure { stage, error });
+            assert!(
+                reason.test_message().len()
+                    <= InvestigationStopReason::InvalidResponse
+                        .test_message()
+                        .len()
+            );
+            assert_eq!(
+                reason.terminal_class(),
+                InvestigationStopReason::InvalidNextAction(error)
+            );
+        }
         assert!(
             InvestigationStopReason::InvalidNextAction(error)
                 .test_message()
@@ -1067,6 +1089,8 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
                     .len()
         );
     }
+    let decoded =
+        |stage, error| InvestigationStopReason::ActionDecode(ActionDecodeFailure { stage, error });
     let bounded = |code, outcome| {
         (
             InvestigationStopReason::BoundedProvider(BoundedCallError { code, outcome }),
@@ -1083,20 +1107,23 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             SENTINEL.into(),
         ),
         (
-            InvestigationStopReason::InvalidNextAction(InvestigationError::InvalidInput),
+            decoded(DecodeStage::Preflight, InvestigationError::InvalidInput),
             SENTINEL.into(),
         ),
         (
-            InvestigationStopReason::InvalidNextAction(InvestigationError::InvalidAction),
+            decoded(DecodeStage::TypedEnvelope, InvestigationError::InvalidAction),
             json!({"type":"unsupported_action", "private":SENTINEL}).to_string(),
         ),
         (
-            InvestigationStopReason::InvalidNextAction(InvestigationError::InvalidAction),
+            decoded(DecodeStage::Semantic, InvestigationError::InvalidAction),
             json!({"type":"query_context", "context_id":format!("context-v2:{}", "a".repeat(64)),
                 "query":{"scope":{"type":"all"},"kind":null,"labels":[SENTINEL],
                     "max_facts":1,"max_bytes":1024,"cursor":null}})
             .to_string(),
         ),
+        (decoded(DecodeStage::CanonicalFields, InvestigationError::InvalidAction),
+            json!({"type":"query_context","context_id":"wrong",
+                "query":{"scope":{"type":"all"},"labels":[SENTINEL],"max_facts":1,"max_bytes":1024,"cursor":null}}).to_string()),
         (
             InvestigationStopReason::InvalidCompletionEnvelope,
             oversized,
@@ -1175,7 +1202,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             }
         }
     }
-    assert_eq!(messages.len(), 9);
+    assert_eq!(messages.len(), 11);
 }
 
 // AC-0432: both generations keep their saved definitions through actual worker refusal/reopen.

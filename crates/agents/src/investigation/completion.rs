@@ -205,16 +205,24 @@ impl CompletionInvestigationAction {
         Self::decode(raw, context_id)
     }
     pub fn decode(raw: &str, context_id: &str) -> Result<Self, InvestigationError> {
-        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
+        Self::decode_detailed(raw, context_id).map_err(|failure| failure.error)
+    }
+    pub(super) fn decode_detailed(
+        raw: &str,
+        context_id: &str,
+    ) -> Result<Self, ActionDecodeFailure> {
+        use ActionDecodeStage as Stage;
+        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)
+            .map_err(|error| Stage::Preflight.failure(error))?;
         let value: serde_json::Value =
-            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+            serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
         if value.get("schema_version").is_some() {
-            return super::staged_finish::StagedFinish::decode(raw).map(Self::Finish);
+            return super::staged_finish::StagedFinish::decode_detailed(raw).map(Self::Finish);
         }
-        match QualifiedInvestigationAction::decode(raw, context_id)? {
+        match QualifiedInvestigationAction::decode_detailed(raw, context_id)? {
             QualifiedInvestigationAction::SourceOrFinish(InvestigationAction::Finish {
                 ..
-            }) => Err(InvestigationError::InvalidAction),
+            }) => Err(Stage::TypedEnvelope.invalid()),
             read => Ok(Self::Read(read)),
         }
     }

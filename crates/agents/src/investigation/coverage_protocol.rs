@@ -33,34 +33,43 @@ impl QualifiedInvestigationAction {
     /// Admit one strict action against the already prepared qualified identity.
     /// The caller obtains that identity from its validated immutable ledger.
     pub fn decode(raw: &str, expected_context_id: &str) -> Result<Self, InvestigationError> {
+        Self::decode_detailed(raw, expected_context_id).map_err(|failure| failure.error)
+    }
+    pub(super) fn decode_detailed(
+        raw: &str,
+        expected_context_id: &str,
+    ) -> Result<Self, ActionDecodeFailure> {
+        use ActionDecodeStage as Stage;
         if !expected_context_id
             .strip_prefix("context-v2:")
             .is_some_and(crate::source_basis::hash)
         {
-            return Err(InvestigationError::InvalidAction);
+            return Err(Stage::HostBinding.invalid());
         }
         strict::preflight(raw, MAX_ACTION_BYTES, 16, 4096, 32)
-            .map_err(|_| InvestigationError::InvalidAction)?;
+            .map_err(|_| Stage::Preflight.invalid())?;
         let original: serde_json::Value =
-            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+            serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
         if !matches!(
             original["type"].as_str(),
             Some("query_context" | "read_coverage_inventory")
         ) {
-            return InvestigationAction::decode(raw).map(Self::SourceOrFinish);
+            return InvestigationAction::decode_detailed(raw).map(Self::SourceOrFinish);
         }
         let action: ReadAction =
-            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
-        if serde_json::to_value(&action).map_err(|_| InvestigationError::InvalidAction)? != original
+            serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+        if serde_json::to_value(&action).map_err(|_| Stage::CanonicalFields.invalid())? != original
         {
-            return Err(InvestigationError::InvalidAction);
+            return Err(Stage::CanonicalFields.invalid());
         }
         match action {
             ReadAction::QueryContext { context_id, query } => {
                 if context_id != expected_context_id {
-                    return Err(InvestigationError::InvalidAction);
+                    return Err(Stage::Semantic.invalid());
                 }
-                query.validate()?;
+                query
+                    .validate()
+                    .map_err(|error| Stage::Semantic.failure(error))?;
                 Ok(Self::QueryContext { context_id, query })
             }
             ReadAction::ReadCoverageInventory {
@@ -74,7 +83,7 @@ impl QualifiedInvestigationAction {
                     || !crate::source_basis::hash(&inventory_hash)
                     || !(1..=MAX_QUERY_BYTES).contains(&max_bytes)
                 {
-                    return Err(InvestigationError::InvalidAction);
+                    return Err(Stage::Semantic.invalid());
                 }
                 Ok(Self::ReadCoverageInventory(InvestigationCoverageRead {
                     context_id,
