@@ -356,6 +356,18 @@ jobs:
           arguments-json: '["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"]'
           timeout-seconds: '600'
 
+      # Report what the tests left behind so the leaking holder can be found
+      # (#1307 follow-up). Read-only: runner.temp is emptied after the job.
+      - name: Report leaked test temporary directories
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $leaked = @(Get-ChildItem -Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'tests') -Filter '.tmp*' -ErrorAction SilentlyContinue)
+          "Leaked test temporary directories: $($leaked.Count)"
+          $leaked | Select-Object -First 20 | ForEach-Object {
+            "$($_.Name): $((Get-ChildItem -Force -Name -Path $_.FullName) -join ', ')"
+          }
+
   # License compliance + supply-chain gate (#222). This remains a complete-
   # suite lane and retains its stable context.
   compliance:
