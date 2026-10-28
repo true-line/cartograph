@@ -644,12 +644,22 @@ fn resolve_repo_imports(
     }
 }
 
-/// Recover deterministic facts from one Java source file.
+/// Recover deterministic facts from one Java source file. Facts a directory
+/// join would otherwise settle are settled within the file alone: its
+/// RestTemplate sites are fetch sites like any other.
 pub fn extract_source(
     source: &[u8],
     path: &str,
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
+    let mut out = extract_file(source, path, id)?;
+    let rest_template_sites = std::mem::take(&mut out.rest_template_sites);
+    out.fetch_sites.extend(rest_template_sites);
+    Ok(out)
+}
+
+/// One file's facts, with the facts the directory join settles held back.
+fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extraction, ExtractError> {
     let language: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
@@ -1298,7 +1308,7 @@ pub fn extract_dir_incremental_with_progress(
             let fresh = if reusable {
                 None
             } else {
-                Some(extract_source(&source, path, id)?)
+                Some(extract_file(&source, path, id)?)
             };
             Ok::<_, ExtractError>((source_hash, fresh))
         },

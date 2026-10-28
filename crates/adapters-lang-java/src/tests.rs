@@ -3266,3 +3266,25 @@ class ClientTest {
     ]);
     assert!(sites.is_empty(), "{:?}", site_rows(&sites));
 }
+
+#[test]
+fn single_file_extraction_exposes_rest_template_sites() {
+    // AC-0435: the public single-file API returns RestTemplate sites as
+    // fetch sites, never holding them back for a directory join.
+    let out = extract_source(
+        b"package io.demo;\n\nimport org.springframework.web.client.RestTemplate;\n\n\
+          class Client {\n    void sync(RestTemplate rest) { rest.getForObject(\"/users\", String.class); }\n}\n",
+        "src/main/java/io/demo/Client.java",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        site_rows(&out.fetch_sites),
+        [(
+            "GET".to_string(),
+            "literal:/users".to_string(),
+            "sym:local/demo@src/main/java/io/demo/Client.java#Client.sync(RestTemplate)"
+                .to_string()
+        )]
+    );
+}
