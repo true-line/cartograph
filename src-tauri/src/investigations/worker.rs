@@ -15,7 +15,7 @@ use agents::investigation::*;
 use core_prov::content_hash;
 use llm::bounded::{
     BoundedCallError, BoundedCompletion, CallDirective, CompletionControl, CompletionLimits,
-    FailureCode, InvocationOutcome, PreparedBoundedCompletion,
+    PreparedBoundedCompletion,
 };
 use llm::{ConsentGrant, EgressFirewall, LlmProvider, Locality};
 use std::sync::Arc;
@@ -61,8 +61,9 @@ impl Failure {
             Self::Stop(reason) => *reason,
             Self::Host(HostError::InputChanged) => Stop::InputChanged,
             Self::Host(HostError::SourceUnavailable) => Stop::SourceUnavailable,
-            Self::Host(HostError::LimitExceeded)
-            | Self::Store(InvestigationStoreError::Capacity) => Stop::LimitExceeded,
+            Self::Host(HostError::LimitExceeded) => Stop::HostLimit,
+            Self::Host(HostError::StoreCapacity)
+            | Self::Store(InvestigationStoreError::Capacity) => Stop::StoreCapacity,
             Self::Store(InvestigationStoreError::Cancelled) => Stop::Cancelled,
             Self::Host(HostError::InvalidInput) => Stop::PreparationFailed,
             Self::Host(HostError::Operational) | Self::Store(_) => Stop::Operational,
@@ -1195,7 +1196,12 @@ fn acquisition_error(error: Failure) -> HostError {
     match error {
         Failure::Host(error) => error,
         Failure::Store(InvestigationStoreError::Capacity)
-        | Failure::Stop(InvestigationStopReason::LimitExceeded) => HostError::LimitExceeded,
+        | Failure::Stop(InvestigationStopReason::StoreCapacity) => HostError::StoreCapacity,
+        Failure::Stop(reason)
+            if reason.terminal_class() == InvestigationStopReason::LimitExceeded =>
+        {
+            HostError::LimitExceeded
+        }
         _ => HostError::Operational,
     }
 }
@@ -1251,21 +1257,9 @@ fn execution_directive(state: &AppState, execution: &JobExecution, id: &str) -> 
     }
 }
 fn provider_failure(error: BoundedCallError) -> Failure {
-    Failure::Stop(if error.outcome == InvocationOutcome::Unknown {
-        InvestigationStopReason::OutcomeUnknown
-    } else {
-        match error.code {
-            FailureCode::Cancelled => InvestigationStopReason::Cancelled,
-            FailureCode::OwnershipLost => InvestigationStopReason::Operational,
-            FailureCode::DeadlineExceeded
-            | FailureCode::InputTooLarge
-            | FailureCode::RequestTooLarge
-            | FailureCode::ResponseTooLarge
-            | FailureCode::OutputTooLarge => InvestigationStopReason::LimitExceeded,
-            _ => InvestigationStopReason::ProviderFailure,
-        }
-    })
+    Failure::Stop(InvestigationStopReason::BoundedProvider(error))
 }
+
 fn validate_completion(
     completion: &BoundedCompletion,
     prepared: &PreparedBoundedCompletion,

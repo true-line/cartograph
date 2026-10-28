@@ -949,7 +949,7 @@ fn next_prompt_worker_preserves_source_file_and_span_caps() {
             assert!(terminal(detail.summary.status));
             assert_eq!(
                 detail.error.as_deref(),
-                Some("An investigation work or storage limit was reached.")
+                Some("Investigation limit reached: host_limit.")
             );
             assert_eq!(detail.usage.evidence_requests, 0);
             assert_eq!(detail.usage.captured_validation_bytes, 0);
@@ -1008,6 +1008,9 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             _: &CompletionControl<'_>,
         ) -> Result<BoundedCompletion, BoundedCallError> {
             assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+            if let InvestigationStopReason::BoundedProvider(error) = self.stage {
+                return Err(error);
+            }
             Ok(BoundedCompletion {
                 text: self.text.clone(),
                 requested_model:
@@ -1064,6 +1067,12 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
                     .len()
         );
     }
+    let bounded = |code, outcome| {
+        (
+            InvestigationStopReason::BoundedProvider(BoundedCallError { code, outcome }),
+            SENTINEL.into(),
+        )
+    };
     for (stage, text) in [
         (
             InvestigationStopReason::InvalidCompletionEnvelope,
@@ -1092,6 +1101,17 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             InvestigationStopReason::InvalidCompletionEnvelope,
             oversized,
         ),
+        bounded(
+            FailureCode::ResponseTooLarge,
+            InvocationOutcome::ResponseReceived,
+        ),
+        bounded(FailureCode::Transport, InvocationOutcome::Unknown),
+        bounded(FailureCode::Cancelled, InvocationOutcome::Unknown),
+        bounded(FailureCode::Cancelled, InvocationOutcome::ResponseReceived),
+        bounded(
+            FailureCode::OwnershipLost,
+            InvocationOutcome::ResponseReceived,
+        ),
     ] {
         let provider = Arc::new(Rejected {
             profile: Scripted::new(Mode::Malformed),
@@ -1104,7 +1124,16 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         let state = f.base.base.app.state::<AppState>();
         let jobs = state.jobs.lock().unwrap();
         let detail = jobs.investigation(&f.id).unwrap();
-        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        let expected_status = match stage.terminal_class() {
+            InvestigationStopReason::OutcomeUnknown => InvestigationStatus::OutcomeUnknown,
+            InvestigationStopReason::Cancelled => InvestigationStatus::Cancelled,
+            _ => InvestigationStatus::Failed,
+        };
+        assert_eq!(detail.summary.status, expected_status);
+        assert_eq!(
+            detail.summary.cancel_requested,
+            expected_status == InvestigationStatus::Cancelled
+        );
         assert_eq!(detail.error.as_deref(), Some(stage.test_message()));
         messages.insert(stage.test_message());
         assert!(
@@ -1146,5 +1175,5 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             }
         }
     }
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 9);
 }

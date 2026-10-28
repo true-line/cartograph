@@ -350,6 +350,9 @@ pub(crate) enum InvestigationStopReason {
     FinishOnlyToolProposal,
     LimitExceeded,
     ProviderFailure,
+    BoundedProvider(llm::bounded::BoundedCallError),
+    HostLimit,
+    StoreCapacity,
     OutcomeUnknown,
     ConsentExpired,
     ConsentDeclined,
@@ -357,6 +360,28 @@ pub(crate) enum InvestigationStopReason {
 }
 
 impl InvestigationStopReason {
+    // Classification preserves existing terminal/phase semantics; diagnostics
+    // retain the closed provider code independently of that classification.
+    pub(crate) fn terminal_class(self) -> Self {
+        use llm::bounded::{FailureCode as Code, InvocationOutcome};
+        match self {
+            Self::BoundedProvider(error) if error.outcome == InvocationOutcome::Unknown => {
+                Self::OutcomeUnknown
+            }
+            Self::BoundedProvider(error) => match error.code {
+                Code::Cancelled => Self::Cancelled,
+                Code::OwnershipLost => Self::Operational,
+                Code::DeadlineExceeded
+                | Code::InputTooLarge
+                | Code::RequestTooLarge
+                | Code::ResponseTooLarge
+                | Code::OutputTooLarge => Self::LimitExceeded,
+                _ => Self::ProviderFailure,
+            },
+            Self::HostLimit | Self::StoreCapacity => Self::LimitExceeded,
+            other => other,
+        }
+    }
     #[cfg(test)]
     pub(crate) fn test_message(self) -> &'static str {
         self.message()
@@ -424,6 +449,48 @@ impl InvestigationStopReason {
                 "The provider proposed a tool when only a finishing response was permitted."
             }
             Self::LimitExceeded => "An investigation work or storage limit was reached.",
+            Self::HostLimit => "Investigation limit reached: host_limit.",
+            Self::StoreCapacity => "Investigation limit reached: store_capacity.",
+            Self::BoundedProvider(error) => {
+                use llm::bounded::{FailureCode as Code, InvocationOutcome};
+                // Compile-time literals keep the full taxonomy closed without
+                // allocating strings or claiming a known outcome for Unknown.
+                macro_rules! message {
+                    ($($code:ident => $label:literal),+ $(,)?) => {
+                        match error.code {
+                            $(Code::$code => if error.outcome == InvocationOutcome::Unknown {
+                                concat!("Provider outcome unknown: ", $label, ".")
+                            } else {
+                                concat!("Provider call failed: ", $label, ".")
+                            }),+
+                        }
+                    };
+                }
+                message! {
+                    Unsupported => "unsupported",
+                    InvalidLimits => "invalid_limits",
+                    InvalidInput => "invalid_input",
+                    InvalidProfile => "invalid_profile",
+                    ProfileChanged => "profile_changed",
+                    EgressDenied => "egress_denied",
+                    ConsentRequired => "consent_required",
+                    ConsentMismatch => "consent_mismatch",
+                    InputTooLarge => "input_too_large",
+                    RequestTooLarge => "request_too_large",
+                    ResponseTooLarge => "response_too_large",
+                    OutputTooLarge => "output_too_large",
+                    Cancelled => "cancelled",
+                    OwnershipLost => "ownership_lost",
+                    DeadlineExceeded => "deadline_exceeded",
+                    Transport => "transport",
+                    HttpStatus => "http_status",
+                    UnsupportedEncoding => "unsupported_encoding",
+                    InvalidResponse => "invalid_response",
+                    IncompleteResponse => "incomplete_response",
+                    Refused => "refused",
+                    EmptyCompletion => "empty_completion",
+                }
+            }
             Self::ProviderFailure => "The provider call failed without a usable response.",
             Self::OutcomeUnknown => "A dispatched provider call has no durable admitted outcome.",
             Self::ConsentExpired => "The exact step consent wait expired.",

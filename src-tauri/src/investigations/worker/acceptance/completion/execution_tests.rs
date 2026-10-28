@@ -555,3 +555,30 @@ fn completion_execution_trailing_unadmitted_usage_is_unknown_not_success() {
         );
     }
 }
+
+// AC-0430/0267: genuine host and provider limits keep the existing control class.
+#[test]
+fn completion_execution_new_limit_messages_preserve_exhausted_and_unknown() {
+    for (mode, classification) in [
+        (Mode::CompletionHostLimit, ControlClassification::Exhausted),
+        (Mode::ResponseTooLarge, ControlClassification::Exhausted),
+        (
+            Mode::UnknownResponseTooLarge,
+            ControlClassification::Unknown,
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = Arc::new(Scripted::new(mode));
+        let prepared = prepared(directory.path(), provider.as_ref());
+        let evidence = run_role(&prepared, Role::Analyst, provider.clone()).unwrap();
+        assert_eq!(evidence.receipt.classification, classification);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(evidence.detail.usage.model_invocations, 1);
+        assert_eq!(
+            evidence.detail.usage.tool_actions,
+            u32::from(matches!(mode, Mode::CompletionHostLimit))
+        );
+        assert!(evidence.result.is_none());
+        evidence.receipt.validate().unwrap();
+    }
+}

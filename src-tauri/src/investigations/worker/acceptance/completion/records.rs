@@ -10,8 +10,33 @@ use std::{
 };
 
 pub(super) const MAX_RECEIPT_BYTES: usize = 64 * 1024;
-// Exact existing production LimitExceeded message; no usage-based inference.
+// Historical message remains accepted; new messages come only from the closed
+// production reason mapping. Never infer exhaustion from usage counters.
 const EXHAUSTION_REASON: &str = "An investigation work or storage limit was reached.";
+fn exhaustion_reason(message: &str) -> bool {
+    use crate::jobs::investigations::InvestigationStopReason as Stop;
+    use llm::bounded::{BoundedCallError, FailureCode, InvocationOutcome};
+    message == EXHAUSTION_REASON
+        || [Stop::HostLimit, Stop::StoreCapacity]
+            .iter()
+            .any(|reason| message == reason.test_message())
+        || [
+            FailureCode::DeadlineExceeded,
+            FailureCode::InputTooLarge,
+            FailureCode::RequestTooLarge,
+            FailureCode::ResponseTooLarge,
+            FailureCode::OutputTooLarge,
+        ]
+        .iter()
+        .any(|code| {
+            let reason = Stop::BoundedProvider(BoundedCallError {
+                code: *code,
+                outcome: InvocationOutcome::ResponseReceived,
+            });
+            reason.terminal_class() == Stop::LimitExceeded && message == reason.test_message()
+        })
+}
+
 #[derive(Debug)]
 pub(super) enum RecordError {
     Invalid,
@@ -186,7 +211,7 @@ impl RoleReceipt {
             ControlClassification::Exhausted => {
                 self.terminal_status == InvestigationStatus::Failed
                     && !has_result
-                    && self.stop_cause.as_deref() == Some(EXHAUSTION_REASON)
+                    && self.stop_cause.as_deref().is_some_and(exhaustion_reason)
             }
             ControlClassification::Cancelled => {
                 self.terminal_status == InvestigationStatus::Cancelled && !has_result
@@ -351,10 +376,10 @@ pub(super) fn record_role(
             ControlClassification::ObligationsUnmet
         }
         InvestigationStatus::Failed
-            if detail.error.as_deref() == Some(EXHAUSTION_REASON)
+            if detail.error.as_deref().is_some_and(exhaustion_reason)
                 && events.last().is_some_and(|event| {
                     event.kind == InvestigationEventKind::Failed
-                        && event.summary == EXHAUSTION_REASON
+                        && Some(event.summary.as_str()) == detail.error.as_deref()
                 }) =>
         {
             ControlClassification::Exhausted

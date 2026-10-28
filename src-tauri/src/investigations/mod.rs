@@ -40,6 +40,8 @@ pub(crate) enum HostError {
     InvalidInput,
     #[error("Investigation limit exhausted.")]
     LimitExceeded,
+    #[error("Investigation durable store capacity exhausted.")]
+    StoreCapacity,
     #[error("Investigation storage or source ownership could not be verified.")]
     Operational,
 }

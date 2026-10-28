@@ -635,7 +635,7 @@ fn investigation_correction_provider_failure_is_terminal() {
     assert_eq!(detail.summary.status, InvestigationStatus::Failed);
     assert_eq!(
         detail.error.as_deref(),
-        Some("The provider call failed without a usable response.")
+        Some("Provider call failed: transport.")
     );
     let events = ordered_events(&jobs, &id);
     assert_eq!(

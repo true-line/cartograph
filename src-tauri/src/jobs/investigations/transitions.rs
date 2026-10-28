@@ -1183,7 +1183,8 @@ pub(super) fn stop(
     task: &mut StoredTask,
     reason: InvestigationStopReason,
 ) -> Result<(), InvestigationStoreError> {
-    if reason == InvestigationStopReason::OutcomeUnknown && task.phase != Phase::Invocation {
+    let terminal = reason.terminal_class();
+    if terminal == InvestigationStopReason::OutcomeUnknown && task.phase != Phase::Invocation {
         return Err(InvestigationStoreError::Stale);
     }
     if task.phase == Phase::Invocation {
@@ -1191,10 +1192,10 @@ pub(super) fn stop(
     }
     let cancelled = task.detail.summary.cancel_requested
         || matches!(
-            reason,
+            terminal,
             InvestigationStopReason::Cancelled | InvestigationStopReason::ConsentDeclined
         );
-    let unknown = reason == InvestigationStopReason::OutcomeUnknown;
+    let unknown = terminal == InvestigationStopReason::OutcomeUnknown;
     task.phase = Phase::Terminal;
     mark_inspection_not_assessed(task);
     task.pending = None;

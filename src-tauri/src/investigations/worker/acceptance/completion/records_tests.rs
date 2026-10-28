@@ -435,3 +435,63 @@ fn completion_acceptance_early_failure_without_context_cannot_pass_supported() {
         .is_err()
     );
 }
+
+// AC-0430/0267: two valid limit messages cannot authenticate each other.
+#[test]
+fn completion_acceptance_exhaustion_requires_matching_closed_limit_messages() {
+    use crate::jobs::investigations::InvestigationStopReason as Stop;
+    use llm::bounded::{BoundedCallError, FailureCode, InvocationOutcome};
+    let host = Stop::HostLimit.test_message();
+    let store = Stop::StoreCapacity.test_message();
+    let unknown = Stop::BoundedProvider(BoundedCallError {
+        code: FailureCode::ResponseTooLarge,
+        outcome: InvocationOutcome::Unknown,
+    })
+    .test_message();
+    for (detail_reason, event_reason, classification) in [
+        (host, host, ControlClassification::Exhausted),
+        (store, store, ControlClassification::Exhausted),
+        (host, store, ControlClassification::Failed),
+        (unknown, unknown, ControlClassification::Failed),
+    ] {
+        let (mut detail, _, mut events, binding) = fixture("terminal");
+        detail.summary.completion_outcome = None;
+        detail.error = Some(detail_reason.into());
+        events.last_mut().unwrap().summary = event_reason.into();
+        let receipt = record_role(
+            fixture_role(&detail),
+            binding,
+            &detail,
+            None,
+            &events,
+            checks(CheckStatus::Unknown),
+        )
+        .unwrap();
+        assert_eq!(receipt.classification, classification);
+        if detail_reason == unknown {
+            let mut forged = receipt;
+            forged.classification = ControlClassification::Exhausted;
+            assert!(forged.validate().is_err());
+        }
+    }
+    for code in [
+        FailureCode::DeadlineExceeded,
+        FailureCode::InputTooLarge,
+        FailureCode::RequestTooLarge,
+        FailureCode::ResponseTooLarge,
+        FailureCode::OutputTooLarge,
+    ] {
+        for outcome in [
+            InvocationOutcome::NotDispatched,
+            InvocationOutcome::ResponseReceived,
+            InvocationOutcome::Unknown,
+        ] {
+            assert_eq!(
+                exhaustion_reason(
+                    Stop::BoundedProvider(BoundedCallError { code, outcome }).test_message()
+                ),
+                outcome != InvocationOutcome::Unknown
+            );
+        }
+    }
+}
