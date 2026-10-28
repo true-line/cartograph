@@ -8,7 +8,7 @@ use super::{
 };
 use crate::jobs::investigations::{
     InvestigationResponseMeta, InvestigationStopReason, InvestigationStoreError,
-    InvestigationTransition, PendingInvestigationStep,
+    InvestigationTransition, PendingInvestigationStep, PreparationPhase,
 };
 use crate::{AppState, job_execution::JobExecution, jobs::ExecutionCheck};
 use agents::investigation::*;
@@ -54,6 +54,23 @@ impl From<InvestigationError> for Failure {
 }
 
 impl Failure {
+    // Only the existing host InvalidInput is decorated; a prior phase wins.
+    fn preparation_at(self, phase: PreparationPhase) -> Self {
+        match self {
+            Self::Host(HostError::InvalidInput) => {
+                Self::Stop(InvestigationStopReason::PreparationAt(phase))
+            }
+            other => other,
+        }
+    }
+    // Catch residual next-family preparation failures outside annotated calls.
+    fn preparation_after_call(self, specialist: SpecialistId, invocations: u32) -> Self {
+        if specialist.uses_next_prompt_admission() && invocations > 0 {
+            self.preparation_at(PreparationPhase::Continuation)
+        } else {
+            self
+        }
+    }
     fn reason(&self) -> Option<InvestigationStopReason> {
         use InvestigationStopReason as Stop;
         Some(match self {
@@ -186,7 +203,14 @@ fn run_inner<R: tauri::Runtime>(
             clock: &mut clock,
             task_limits,
         };
-        worker.execute_inner(&request, completion_request.as_ref(), provider.as_ref())
+        worker
+            .execute_inner(&request, completion_request.as_ref(), provider.as_ref())
+            .map_err(|failure| {
+                failure.preparation_after_call(
+                    request.specialist_id,
+                    worker.detail.usage.model_invocations,
+                )
+            })
     })();
     if let Err(failure) = outcome
         && let Some(reason) = failure.reason()
@@ -543,14 +567,16 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .validate_response_metadata(completion.response_model.as_deref())
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponseMetadata))?;
             if let Some(mode) = admission_mode
-                && self.admit_next_finish_response(
-                    completion_request.ok_or(HostError::InvalidInput)?,
-                    &input,
-                    &prepared,
-                    &completion,
-                    mode,
-                    &step_id,
-                )?
+                && self
+                    .admit_next_finish_response(
+                        completion_request.ok_or(HostError::InvalidInput)?,
+                        &input,
+                        &prepared,
+                        &completion,
+                        mode,
+                        &step_id,
+                    )
+                    .map_err(|error| error.preparation_at(PreparationPhase::Finish))?
             {
                 if terminal(self.detail.summary.status) {
                     return Ok(());
@@ -558,16 +584,19 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 continue;
             }
             if admission_mode.is_some() {
-                if self.admit_next_metadata_response(
-                    completion_request.ok_or(HostError::InvalidInput)?,
-                    &input,
-                    &prepared,
-                    &completion,
-                    &step_id,
-                    provider,
-                    &mut context,
-                    &history,
-                )? {
+                if self
+                    .admit_next_metadata_response(
+                        completion_request.ok_or(HostError::InvalidInput)?,
+                        &input,
+                        &prepared,
+                        &completion,
+                        &step_id,
+                        provider,
+                        &mut context,
+                        &history,
+                    )
+                    .map_err(|error| error.preparation_at(PreparationPhase::Metadata))?
+                {
                     continue;
                 }
                 self.admit_next_source_response(
@@ -579,7 +608,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     provider,
                     &mut context,
                     &history,
-                )?;
+                )
+                .map_err(|error| error.preparation_at(PreparationPhase::Source))?;
                 if terminal(self.detail.summary.status) {
                     return Ok(());
                 }

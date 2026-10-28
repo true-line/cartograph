@@ -38,13 +38,17 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 query,
                 ..
             }) => (
-                context.prepare_query(self.state, query)?,
+                context.prepare_query(self.state, query).map_err(|error| {
+                    Failure::from(error).preparation_at(PreparationPhase::Query)
+                })?,
                 ContextPreviewKind::Query,
             ),
             CompletionInvestigationAction::Read(
                 QualifiedInvestigationAction::ReadCoverageInventory(read),
             ) => (
-                context.prepare_inventory(read)?,
+                context.prepare_inventory(read).map_err(|error| {
+                    Failure::from(error).preparation_at(PreparationPhase::Inventory)
+                })?,
                 ContextPreviewKind::Inventory,
             ),
             CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
@@ -96,7 +100,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     active_milliseconds,
                 },
             )?;
-        let view = context.prospective_context(&read)?;
+        let view = context
+            .prospective_context(&read)
+            .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::Candidate))?;
         let candidate = InvestigationInput::prepare_v9_with_policy(
             &request.question,
             self.detail.summary.specialist_id,
@@ -120,7 +126,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.refuse_next_metadata_capacity(&response, &original)?;
                 return Ok(true);
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(Failure::from(error).preparation_at(PreparationPhase::Candidate));
+            }
         };
         // The certificate reserves both continuation modes and feedback through
         // the same production serializer/redactor. It is not a storage permit.
@@ -140,14 +148,20 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.refuse_next_metadata_capacity(&response, &original)?;
                 return Ok(true);
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(Failure::from(error).preparation_at(PreparationPhase::Certification));
+            }
         };
-        let action = candidate.action(snapshot.next_action_id().into())?;
+        let action = candidate
+            .action(snapshot.next_action_id().into())
+            .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::Candidate))?;
         let candidate_prepared = firewall(self.state)?
             .prepare_bounded(provider, &action, current_prepared.limits())
             .map_err(provider_failure)?;
         // Size certification and actual protected-field sealing are independent.
-        candidate.seal_disclosure_with_policy(&candidate_prepared, policy)?;
+        candidate
+            .seal_disclosure_with_policy(&candidate_prepared, policy)
+            .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::Seal))?;
         let result = context.publish_admitted_metadata(
             self.state,
             self.execution,
@@ -168,7 +182,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         );
         self.detail = match result {
             Ok(detail) => detail,
-            Err(MetadataPublicationError::Host(error)) => return Err(error.into()),
+            Err(MetadataPublicationError::Host(error)) => {
+                return Err(Failure::from(error).preparation_at(PreparationPhase::Publication));
+            }
             Err(MetadataPublicationError::Store(error)) => return Err(error.into()),
         };
         super::super::emit_changed(self.app, &self.detail);

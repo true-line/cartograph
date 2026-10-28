@@ -66,8 +66,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         };
         // This uses frozen receipt metadata only; no captured text is read here.
         let source = context
-            .prepare_captured_read(self.state, &fact, role, index)?
-            .with_read_limits(self.task_limits.map(|limits| limits.evidence))?;
+            .prepare_captured_read(self.state, &fact, role, index)
+            .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::SourcePrepare))?
+            .with_read_limits(self.task_limits.map(|limits| limits.evidence))
+            .map_err(|error| {
+                Failure::from(error).preparation_at(PreparationPhase::SourcePrepare)
+            })?;
         let next_ordinal = self
             .detail
             .usage
@@ -100,7 +104,11 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 super::super::emit_changed(self.app, &self.detail);
                 return Ok(());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(
+                    Failure::from(error).preparation_at(PreparationPhase::SourceCertification)
+                );
+            }
         };
         let firewall = firewall(self.state)?;
         let reservation = source
@@ -121,7 +129,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 },
             )
             .map_err(|error| match error {
-                SourceReservationError::Host(error) => Failure::Host(error),
+                SourceReservationError::Host(error) => {
+                    Failure::Host(error).preparation_at(PreparationPhase::SourceReservation)
+                }
                 SourceReservationError::Store(error) => Failure::Store(error),
             })?;
         self.detail = reservation.detail().clone();

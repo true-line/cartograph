@@ -25,6 +25,7 @@ enum Mode {
     ResponseTooLarge,
     UnknownResponseTooLarge,
     CompletionHostLimit,
+    ForeignCursor,
     RepeatQuery,
     RepeatRead,
     UnavailableRead,
@@ -143,7 +144,11 @@ impl LlmProvider for Scripted {
             !(call == 1 && matches!(self.mode, Mode::PanicAfterQuery)),
             "simulated owner loss"
         );
-        let mut action = if matches!(prompt["schema_version"].as_u64(), Some(6..=8)) {
+        let mut action = if matches!(self.mode, Mode::ForeignCursor) {
+            json!({"type":"query_context","query":{"scope":{"type":"all"},"kind":null,
+                "labels":[],"max_facts":12,"max_bytes":16384,"cursor":{
+                    "snapshot_id":"PRIVATE-FOREIGN-CURSOR-1293","selection_id":"foreign-selection","offset":0}}})
+        } else if matches!(prompt["schema_version"].as_u64(), Some(6..=8)) {
             completion_tests::scripted_action(self.mode, call, &prompt)
         } else if matches!(self.mode, Mode::UnadmittedRead) {
             assert_eq!(call, 0, "unadmitted reads never buy a second call");

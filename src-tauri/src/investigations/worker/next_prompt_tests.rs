@@ -1240,3 +1240,149 @@ fn progress_guidance_roles_preserve_saved_v10_and_v11_definitions() {
         assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
     }
 }
+
+// AC-0440: only Host InvalidInput gains a phase; outer routing cannot replace it.
+#[test]
+fn next_prompt_preparation_phases_preserve_failures() {
+    use PreparationPhase::*;
+    let mut messages = std::collections::BTreeSet::new();
+    for phase in [
+        Continuation,
+        Finish,
+        Metadata,
+        Query,
+        Inventory,
+        Candidate,
+        Certification,
+        Seal,
+        Publication,
+        Source,
+        SourcePrepare,
+        SourceCertification,
+        SourceReservation,
+    ] {
+        let annotated = Failure::Host(HostError::InvalidInput).preparation_at(phase);
+        let reason = annotated.reason().unwrap();
+        assert_eq!(reason, InvestigationStopReason::PreparationAt(phase));
+        assert_eq!(
+            reason.terminal_class(),
+            InvestigationStopReason::PreparationFailed
+        );
+        // Compatibility baseline: the existing 61-byte InvalidResponse message,
+        // not a separately claimed durable-column schema limit.
+        assert!(
+            reason.test_message().len()
+                <= InvestigationStopReason::InvalidResponse
+                    .test_message()
+                    .len()
+        );
+        assert!(messages.insert(reason.test_message()));
+        assert_eq!(
+            annotated
+                .preparation_at(Source)
+                .preparation_after_call(SpecialistId::DomainAnalystV12, 1)
+                .reason(),
+            Some(reason)
+        );
+    }
+    for original in [
+        Failure::AlreadyTerminal,
+        Failure::Host(HostError::LimitExceeded),
+        Failure::Host(HostError::StoreCapacity),
+        Failure::Host(HostError::Operational),
+        Failure::Host(HostError::InputChanged),
+        Failure::Host(HostError::SourceUnavailable),
+        Failure::Store(InvestigationStoreError::Invalid),
+        Failure::Store(InvestigationStoreError::Capacity),
+        Failure::Store(InvestigationStoreError::Cancelled),
+        Failure::Stop(InvestigationStopReason::Cancelled),
+        Failure::Stop(InvestigationStopReason::ActionDecode(ActionDecodeFailure {
+            stage: ActionDecodeStage::Semantic,
+            error: InvestigationError::InvalidAction,
+        })),
+        Failure::Stop(InvestigationStopReason::BoundedProvider(BoundedCallError {
+            code: FailureCode::Transport,
+            outcome: InvocationOutcome::Unknown,
+        })),
+    ] {
+        let before = format!("{original:?}");
+        assert_eq!(
+            format!(
+                "{:?}",
+                original
+                    .preparation_at(Query)
+                    .preparation_after_call(SpecialistId::DomainAnalystV12, 1)
+            ),
+            before
+        );
+    }
+    for (role, calls, expected) in [
+        (
+            SpecialistId::DomainAnalystV12,
+            0,
+            InvestigationStopReason::PreparationFailed,
+        ),
+        (
+            SpecialistId::DomainAnalystV12,
+            1,
+            InvestigationStopReason::PreparationAt(Continuation),
+        ),
+        (
+            SpecialistId::DomainAnalystV7,
+            1,
+            InvestigationStopReason::PreparationFailed,
+        ),
+    ] {
+        assert_eq!(
+            Failure::Host(HostError::InvalidInput)
+                .preparation_after_call(role, calls)
+                .reason(),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        InvestigationStopReason::PreparationFailed.test_message(),
+        "Investigation input preparation failed."
+    );
+}
+
+// AC-0440: a syntactically valid cursor can fail at the host query boundary.
+#[test]
+fn next_prompt_foreign_cursor_preparation_phase_is_durable() {
+    let provider = Arc::new(Scripted::new(Mode::ForeignCursor));
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV12);
+    f.run(provider.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    let reason = InvestigationStopReason::PreparationAt(PreparationPhase::Query);
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(detail.error.as_deref(), Some(reason.test_message()));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(detail.usage.model_invocations, 1);
+    assert_eq!(detail.usage.tool_actions, 0);
+    assert_eq!(detail.usage.selected_facts, 0);
+    assert_eq!(detail.usage.evidence_items, 0);
+    assert!(jobs.investigation_result(&f.id).unwrap().is_none());
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    assert!(
+        serde_json::to_string(&events)
+            .unwrap()
+            .contains(reason.test_message())
+    );
+    drop(jobs);
+    let db = f.base.base.app_data.join("state.db");
+    let reopened = crate::jobs::JobStore::open(&db).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+    for path in [db.clone(), db.with_file_name("state.db-wal")] {
+        if path.exists() {
+            assert!(
+                !std::fs::read(path)
+                    .unwrap()
+                    .windows(b"PRIVATE-FOREIGN-CURSOR-1293".len())
+                    .any(|bytes| bytes == b"PRIVATE-FOREIGN-CURSOR-1293")
+            );
+        }
+    }
+}
