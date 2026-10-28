@@ -393,10 +393,14 @@ fn captured_fixture_state(
     (state, app_data, graph_before)
 }
 
+#[path = "fixture_app.rs"]
+mod fixture_app;
+use fixture_app::FixtureApp;
+
 struct Fixture {
+    app: FixtureApp,
     _directory: tempfile::TempDir,
     app_data: PathBuf,
-    app: tauri::App<tauri::test::MockRuntime>,
     request: StartInvestigationRequest,
     id: String,
     execution: JobExecution,
@@ -438,7 +442,7 @@ impl Fixture {
         required_role: Option<agents::TaskRangeRole>,
         original: &str,
     ) -> Self {
-        Self::with_prepared_contract(
+        Self::with_optional_contract(
             provider,
             directory,
             question,
@@ -446,7 +450,13 @@ impl Fixture {
             required_role,
             original,
             None,
-            |_, _, _| {},
+            None::<
+                fn(
+                    &tauri::AppHandle<tauri::test::MockRuntime>,
+                    &AppState,
+                    &mut StartInvestigationRequest,
+                ),
+            >,
         )
     }
 
@@ -464,6 +474,34 @@ impl Fixture {
             &AppState,
             &mut StartInvestigationRequest,
         ),
+    ) -> Self {
+        Self::with_optional_contract(
+            provider,
+            directory,
+            question,
+            specialist_id,
+            required_role,
+            original,
+            inventory_json,
+            Some(before_start),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn with_optional_contract(
+        provider: &dyn LlmProvider,
+        directory: tempfile::TempDir,
+        question: &str,
+        specialist_id: SpecialistId,
+        required_role: Option<agents::TaskRangeRole>,
+        original: &str,
+        inventory_json: Option<fn(&str) -> String>,
+        before_start: Option<
+            impl FnOnce(
+                &tauri::AppHandle<tauri::test::MockRuntime>,
+                &AppState,
+                &mut StartInvestigationRequest,
+            ),
+        >,
     ) -> Self {
         let (state, app_data, graph_before) = captured_fixture_state(
             directory.path(),
@@ -524,12 +562,11 @@ impl Fixture {
             conversation_id: None,
             parent_id: None,
         };
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
-        app.manage(state);
+        let app = FixtureApp::new(state);
         let state = app.state::<AppState>();
-        before_start(app.handle(), &state, &mut request);
+        if let Some(before_start) = before_start {
+            before_start(app.handle(), &state, &mut request);
+        }
         request.validate().unwrap();
         let start_time = Instant::now();
         let started = state
@@ -577,8 +614,7 @@ impl Fixture {
     }
 
     fn run(&self, provider: Arc<dyn LlmProvider>) {
-        run(
-            self.app.handle().clone(),
+        self.app.run_legacy(
             self.id.clone(),
             self.request.clone(),
             self.execution.clone(),
@@ -1012,3 +1048,15 @@ mod finding_review_integration_tests;
 
 #[path = "refusal_diagnostics_tests.rs"]
 mod refusal_diagnostics;
+
+#[test]
+fn public_start_fixture_retains_state_after_inline_run_and_owner_drop() {
+    with_public_start_fixture_then(
+        Arc::new(Scripted::new(Mode::Finish)),
+        true,
+        |app, _, _| app.clone(),
+        |app, _| {
+            assert!(app.try_state::<AppState>().is_some());
+        },
+    );
+}

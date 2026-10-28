@@ -78,8 +78,7 @@ impl NextFixture {
         }
     }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
-        run_completion(
-            self.base.base.app.handle().clone(),
+        self.base.base.app.run_completion(
             self.id.clone(),
             self.request.clone(),
             self.execution.clone(),
@@ -675,6 +674,9 @@ pub(in crate::investigations) fn with_public_start_fixture_then<T>(
         false,
     );
     let mut request = fixture.request.clone();
+    // This callback can dispatch detached workers or return cloned handles.
+    // Opt out before even the optional inline run; its return cannot re-enable release.
+    fixture.base.app.retain_for_external_use();
     if legacy_completed {
         fixture.run(provider);
         assert_eq!(
@@ -712,7 +714,8 @@ pub(in crate::investigations) fn with_public_start_fixture_then<T>(
     }
     let result = test(fixture.base.app.handle(), request, &fixture.base.app_data);
     let app_data = fixture.base.app_data.clone();
-    // Keep only the disposable directory, dropping every old host/store owner.
+    // Keep the disposable directory while dropping the fixture owner. Tauri and
+    // detached workers may still retain managed state; this is not a worker join.
     let directory = std::mem::replace(&mut fixture.base._directory, tempfile::tempdir().unwrap());
     drop(fixture);
     after_drop(result, &app_data);
