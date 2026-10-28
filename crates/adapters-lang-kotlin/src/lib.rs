@@ -71,6 +71,62 @@ pub struct Extraction {
     declared_importables: Vec<Declared>,
     /// Package headers, one per file that has one.
     packages: Vec<String>,
+    /// Spring endpoints proven only by a star import, awaiting the
+    /// same-package check (#1288).
+    pending_endpoints: Vec<PendingEndpoint>,
+    /// Top-level type names a product file declares, which can obscure a
+    /// star import (#1288).
+    shadow_names: Vec<ShadowName>,
+}
+
+/// A top-level class, interface, object, enum, annotation class or type
+/// alias of a product source: a name that obscures a star-imported
+/// annotation of its package. A `private` one is visible only in its file.
+#[derive(Debug, Clone)]
+struct ShadowName {
+    fqn: String,
+    path: String,
+    private: bool,
+}
+
+impl ShadowName {
+    fn obscures(&self, fqn: &str, path: &str) -> bool {
+        self.fqn == fqn && (!self.private || self.path == path)
+    }
+}
+
+/// A Spring endpoint (or its dynamic-path Gap) whose proof rests on star
+/// imports. A same-package declaration obscures a star import (Kotlin
+/// resolves explicit imports, then the package, then star imports), so when
+/// every member of some `shadowed_by` group is declared by this repository,
+/// `gap` replaces `endpoint`. A group is the alternatives proving one
+/// annotation role (`@RestController` or `@Controller`); any one unshadowed
+/// member still proves it.
+#[derive(Debug, Clone)]
+struct PendingEndpoint {
+    /// The file whose imports the proof rests on.
+    path: String,
+    shadowed_by: Vec<Vec<String>>,
+    endpoint: (Node, Edge),
+    gap: (Node, Edge),
+}
+
+impl PendingEndpoint {
+    /// Emit the endpoint, or the shadow Gap when a role is obscured.
+    fn settle(
+        self,
+        declared: impl Fn(&str, &str) -> bool,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+    ) {
+        let shadowed = self
+            .shadowed_by
+            .iter()
+            .any(|group| group.iter().all(|fqn| declared(fqn, &self.path)));
+        let (node, edge) = if shadowed { self.gap } else { self.endpoint };
+        nodes.push(node);
+        edges.push(edge);
+    }
 }
 
 /// A call proven by an import, resolvable only with the whole directory in
@@ -245,6 +301,12 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
             None => {}
         }
     }
+    for pending in &mut extraction.pending_endpoints {
+        for (node, edge) in [&mut pending.endpoint, &mut pending.gap] {
+            retarget_props_commit(&mut node.props, commit);
+            retarget_props_commit(&mut edge.props, commit);
+        }
+    }
     extraction.navigation3.retarget(commit);
     hilt_binds::retarget(&mut extraction.hilt_binds, commit);
 }
@@ -346,6 +408,8 @@ enum PathArg {
 /// evidence span, and its path argument.
 struct AnnotationUse<'t> {
     simple: String,
+    /// The name as written, `org.x.Name` or `Name`, whitespace removed.
+    spelled: String,
     node: TsNode<'t>,
     path: PathArg,
 }
@@ -417,31 +481,28 @@ fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<Annota
     for child in annotation.named_children(&mut walk) {
         match child.kind() {
             "user_type" => {
-                let simple = cx.text(&child);
-                let simple = simple.rsplit('.').next().unwrap_or(simple).trim();
+                let spelled = spelling(cx.text(&child));
                 return Some(AnnotationUse {
-                    simple: simple.to_string(),
+                    simple: spelled.rsplit('.').next().unwrap_or("").to_string(),
+                    spelled,
                     node: annotation,
                     path: PathArg::Absent,
                 });
             }
             "constructor_invocation" => {
                 let mut inner = child.walk();
-                let mut simple = None;
+                let mut spelled = None;
                 let mut path = PathArg::Absent;
                 for part in child.named_children(&mut inner) {
                     match part.kind() {
-                        "user_type" => {
-                            let name = cx.text(&part);
-                            simple =
-                                Some(name.rsplit('.').next().unwrap_or(name).trim().to_string());
-                        }
+                        "user_type" => spelled = Some(spelling(cx.text(&part))),
                         "value_arguments" => path = arguments_path(cx, part),
                         _ => {}
                     }
                 }
-                return simple.map(|simple| AnnotationUse {
-                    simple,
+                return spelled.map(|spelled| AnnotationUse {
+                    simple: spelled.rsplit('.').next().unwrap_or("").to_string(),
+                    spelled,
                     node: annotation,
                     path,
                 });
@@ -550,21 +611,135 @@ fn spring_annotation_package(name: &str) -> Option<&'static str> {
     }
 }
 
-/// A Spring annotation is proven only by its import: a named import of
-/// exactly `{declaring package}.{name}`, or a wildcard import of exactly
-/// its declaring package. Lookalikes — including same-named annotations
-/// from other packages, Spring or not — prove nothing.
-fn spring_proven(name: &str, imports: &Imports) -> bool {
-    let Some(package) = spring_annotation_package(name) else {
-        return false;
-    };
-    if let Some(fqn) = imports.bindings.get(name) {
-        return fqn == &format!("{package}.{name}");
+/// A type spelling with its whitespace removed.
+fn spelling(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Whether a Spring annotation is proven, and if so whether only by a star
+/// import (`Some(true)`), which a same-package declaration of that name
+/// would obscure. Proof is the fully qualified spelling
+/// `{declaring package}.{name}`, a named import of exactly that, or a star
+/// import of exactly its declaring package. Lookalikes, including
+/// same-named annotations from other packages (Spring or not) and other
+/// qualified spellings, prove nothing.
+fn spring_proof(annotation: &AnnotationUse<'_>, imports: &Imports) -> Option<bool> {
+    let name = annotation.simple.as_str();
+    let package = spring_annotation_package(name)?;
+    let fqn = format!("{package}.{name}");
+    if annotation.spelled.contains('.') {
+        return (annotation.spelled == fqn).then_some(false);
+    }
+    if let Some(bound) = imports.bindings.get(name) {
+        return (*bound == fqn).then_some(false);
     }
     imports
         .wildcard_packages
         .iter()
         .any(|wildcard| wildcard == package)
+        .then_some(true)
+}
+
+const SPRING_SHADOWED: &str =
+    "Spring annotation proven only by a star import is shadowed by a same-package declaration";
+
+/// A Spring route Gap anchored at the method mapping annotation.
+fn spring_route_gap(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'_>,
+    handler: &str,
+    http_method: &str,
+    reason: &str,
+) -> (Node, Edge) {
+    let gap_id = format!(
+        "gap:route:{}@{}@{}",
+        cx.id.repo,
+        cx.path,
+        annotation.start_byte()
+    );
+    let node = Node {
+        id: gap_id.clone(),
+        label: "Gap".into(),
+        props: serde_json::json!({
+            "method": http_method,
+            "handler_sym": handler,
+            "framework": "spring",
+            "language": "kotlin",
+            "reason": reason,
+            "attempted_tiers": ["T0"],
+            "prov": cx.prov_with_confidence(
+                &annotation,
+                ConfidenceTier::Gap,
+                &format!("Gap {gap_id}"),
+            ),
+        }),
+    };
+    let edge = Edge {
+        src: gap_id.clone(),
+        dst: handler.to_string(),
+        label: "HANDLES".into(),
+        props: serde_json::json!({
+            "reason": reason,
+            "attempted_resolution": "literal-path",
+            "prov": cx.prov_with_confidence(
+                &annotation,
+                ConfidenceTier::Gap,
+                &format!("HANDLES {gap_id} -> {handler}"),
+            ),
+        }),
+    };
+    (node, edge)
+}
+
+/// The file's top-level type-namespace declarations, default package
+/// included (#1288).
+fn shadow_names(cx: &FileCx<'_>, root: TsNode<'_>, package: Option<&str>) -> Vec<ShadowName> {
+    let private = |declaration: TsNode<'_>| {
+        let mut walk = declaration.walk();
+        declaration
+            .named_children(&mut walk)
+            .filter(|child| child.kind() == "modifiers")
+            .any(|modifiers| {
+                let mut walk = modifiers.walk();
+                modifiers.named_children(&mut walk).any(|modifier| {
+                    modifier.kind() == "visibility_modifier" && cx.text(&modifier) == "private"
+                })
+            })
+    };
+    let mut out = Vec::new();
+    let mut walk = root.walk();
+    for declaration in root.named_children(&mut walk) {
+        let (name, private) = match declaration.kind() {
+            "class_declaration" | "object_declaration" => (
+                declaration.child_by_field_name("name"),
+                private(declaration),
+            ),
+            "type_alias" => (
+                declaration.child_by_field_name("type"),
+                private(declaration),
+            ),
+            // `@A(...) annotation class Name`, parsed as an expression; a
+            // modifier there breaks the shape, so it is never private.
+            "annotated_expression" => (annotation_class_name(cx, declaration), false),
+            _ => continue,
+        };
+        if let Some(name) = name {
+            out.push(ShadowName {
+                fqn: same_package_name(package, cx.text(&name)),
+                path: cx.path.to_string(),
+                private,
+            });
+        }
+    }
+    out
+}
+
+/// `<file package>.<Name>`: the declaration that would obscure a star proof.
+fn same_package_name(package: Option<&str>, name: &str) -> String {
+    match package {
+        Some(package) => format!("{package}.{name}"),
+        None => name.to_string(),
+    }
 }
 
 fn mapping_method(annotation_name: &str) -> Option<&'static str> {
@@ -880,11 +1055,28 @@ fn resolve_repo_imports(
 }
 
 /// Recover deterministic facts from one Kotlin source file.
+/// Recover deterministic facts from one Kotlin source file. Facts a
+/// directory join would otherwise settle against the repository are settled
+/// against this file alone: a star-proven Spring endpoint stands unless the
+/// file itself declares the name that obscures it.
 pub fn extract_source(
     source: &[u8],
     path: &str,
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
+    let mut out = extract_file(source, path, id)?;
+    let names = out.shadow_names.clone();
+    for pending in std::mem::take(&mut out.pending_endpoints) {
+        pending.settle(
+            |fqn, path| names.iter().any(|name| name.obscures(fqn, path)),
+            &mut out.nodes,
+            &mut out.edges,
+        );
+    }
+    Ok(out)
+}
+
+fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extraction, ExtractError> {
     let language: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
@@ -1124,6 +1316,11 @@ pub fn extract_source(
     if let Some(package) = &package {
         collect_importables(&cx, root, package, path, &mut out.declared_importables);
     }
+    // Test-only types are not compiled with the product, so they never
+    // obscure a product file's star import.
+    if !adapters_fw::in_jvm_test_source_set(path) {
+        out.shadow_names = shadow_names(&cx, root, package.as_deref());
+    }
 
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
@@ -1147,108 +1344,131 @@ pub fn extract_source(
         };
         let mut class_annotations = declaration_annotations(&cx, class_decl);
         class_annotations.extend(preceding_expression_annotations(&cx, class_decl));
-        let is_controller = class_annotations.iter().any(|annotation| {
-            matches!(annotation.simple.as_str(), "RestController" | "Controller")
-                && spring_proven(&annotation.simple, &imports)
-        });
-        if !is_controller {
+        // Same-package declarations that would obscure a star-only proof.
+        let mut shadowed_by: BTreeSet<Vec<String>> = BTreeSet::new();
+        // Any one proven stereotype makes the class a controller: a direct
+        // proof dominates, and star-only proofs fail closed only when a
+        // same-package declaration shadows every one of them.
+        let controllers: Vec<(&str, bool)> = class_annotations
+            .iter()
+            .filter(|annotation| {
+                matches!(annotation.simple.as_str(), "RestController" | "Controller")
+            })
+            .filter_map(|annotation| {
+                spring_proof(annotation, &imports).map(|star| (annotation.simple.as_str(), star))
+            })
+            .collect();
+        if controllers.is_empty() {
             continue;
+        }
+        if controllers.iter().all(|(_, star)| *star) {
+            let group: BTreeSet<String> = controllers
+                .iter()
+                .map(|(controller, _)| same_package_name(package.as_deref(), controller))
+                .collect();
+            shadowed_by.insert(group.into_iter().collect());
         }
         // "No @RequestMapping" and "@RequestMapping with no path argument"
         // both mean Spring's default base (""); a present-but-dynamic base
         // poisons every mapping under it (None), failing them closed.
-        let base = match class_annotations.iter().find(|annotation| {
-            annotation.simple == "RequestMapping" && spring_proven(&annotation.simple, &imports)
-        }) {
-            None => Some(String::new()),
-            Some(annotation) => match &annotation.path {
-                PathArg::Absent => Some(String::new()),
-                PathArg::Literal(path) => Some(path.clone()),
-                PathArg::Dynamic => None,
-            },
+        let base_mapping = class_annotations.iter().find_map(|annotation| {
+            (annotation.simple == "RequestMapping")
+                .then(|| spring_proof(annotation, &imports))
+                .flatten()
+                .map(|star| (annotation, star))
+        });
+        if let Some((_, true)) = base_mapping {
+            shadowed_by.insert(vec![same_package_name(
+                package.as_deref(),
+                "RequestMapping",
+            )]);
+        }
+        let base = match base_mapping.map(|(annotation, _)| &annotation.path) {
+            None | Some(PathArg::Absent) => Some(String::new()),
+            Some(PathArg::Literal(path)) => Some(path.clone()),
+            Some(PathArg::Dynamic) => None,
         };
         for annotation in declaration_annotations(&cx, *function) {
             let Some(http_method) = mapping_method(&annotation.simple) else {
                 continue;
             };
-            if !spring_proven(&annotation.simple, &imports) {
+            let Some(star) = spring_proof(&annotation, &imports) else {
                 continue;
+            };
+            let mut shadowed_by = shadowed_by.clone();
+            if star {
+                shadowed_by.insert(vec![same_package_name(
+                    package.as_deref(),
+                    &annotation.simple,
+                )]);
             }
             let tail = match &annotation.path {
                 PathArg::Absent => Some(String::new()),
                 PathArg::Literal(path) => Some(path.clone()),
                 PathArg::Dynamic => None,
             };
-            let (Some(base), Some(tail)) = (base.clone(), tail) else {
+            let fact = match (base.clone(), tail) {
+                (Some(base), Some(tail)) => {
+                    let route = join_route(&base, &tail);
+                    let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
+                    let node = Node {
+                        id: endpoint.clone(),
+                        label: "Endpoint".into(),
+                        props: serde_json::json!({
+                            "method": http_method,
+                            "path": route,
+                            "handler_sym": handler,
+                            "framework": "spring",
+                            "language": "kotlin",
+                            "prov": cx.prov(&annotation.node, &format!("Endpoint {endpoint}")),
+                        }),
+                    };
+                    let edge = Edge {
+                        src: endpoint.clone(),
+                        dst: handler.clone(),
+                        label: "HANDLES".into(),
+                        props: serde_json::json!({
+                            "prov": cx.prov(
+                                &annotation.node,
+                                &format!("HANDLES {endpoint} -> {handler}"),
+                            ),
+                        }),
+                    };
+                    (node, edge)
+                }
                 // The mapping is proven but its route is a runtime
                 // identity (template/constant/expression path, on the
                 // method or the class base). T0 cannot confirm the route,
                 // so the endpoint is an explicit Gap, never a guessed or
                 // default path presented as Confirmed (R-INT-4).
-                let gap_id = format!(
-                    "gap:route:{}@{}@{}",
-                    id.repo,
-                    path,
-                    annotation.node.start_byte()
-                );
-                out.nodes.push(Node {
-                    id: gap_id.clone(),
-                    label: "Gap".into(),
-                    props: serde_json::json!({
-                        "method": http_method,
-                        "handler_sym": handler,
-                        "framework": "spring",
-                        "language": "kotlin",
-                        "reason": "dynamic Spring mapping path",
-                        "attempted_tiers": ["T0"],
-                        "prov": cx.prov_with_confidence(
-                            &annotation.node,
-                            ConfidenceTier::Gap,
-                            &format!("Gap {gap_id}"),
-                        ),
-                    }),
-                });
-                out.edges.push(Edge {
-                    src: gap_id.clone(),
-                    dst: handler.clone(),
-                    label: "HANDLES".into(),
-                    props: serde_json::json!({
-                        "reason": "dynamic Spring mapping path",
-                        "attempted_resolution": "literal-path",
-                        "prov": cx.prov_with_confidence(
-                            &annotation.node,
-                            ConfidenceTier::Gap,
-                            &format!("HANDLES {gap_id} -> {handler}"),
-                        ),
-                    }),
-                });
-                continue;
+                _ => spring_route_gap(
+                    &cx,
+                    annotation.node,
+                    handler,
+                    http_method,
+                    "dynamic Spring mapping path",
+                ),
             };
-            let route = join_route(&base, &tail);
-            let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
-            out.nodes.push(Node {
-                id: endpoint.clone(),
-                label: "Endpoint".into(),
-                props: serde_json::json!({
-                    "method": http_method,
-                    "path": route,
-                    "handler_sym": handler,
-                    "framework": "spring",
-                    "language": "kotlin",
-                    "prov": cx.prov(&annotation.node, &format!("Endpoint {endpoint}")),
-                }),
-            });
-            out.edges.push(Edge {
-                src: endpoint.clone(),
-                dst: handler.clone(),
-                label: "HANDLES".into(),
-                props: serde_json::json!({
-                    "prov": cx.prov(
-                        &annotation.node,
-                        &format!("HANDLES {endpoint} -> {handler}"),
+            if shadowed_by.is_empty() {
+                out.nodes.push(fact.0);
+                out.edges.push(fact.1);
+            } else {
+                // A star-only proof waits for the directory join, where a
+                // same-package declaration of that name makes the route a
+                // Gap: the shadowed binding, not the path, then blocks.
+                out.pending_endpoints.push(PendingEndpoint {
+                    path: path.to_string(),
+                    shadowed_by: shadowed_by.into_iter().collect(),
+                    endpoint: fact,
+                    gap: spring_route_gap(
+                        &cx,
+                        annotation.node,
+                        handler,
+                        http_method,
+                        SPRING_SHADOWED,
                     ),
-                }),
-            });
+                });
+            }
         }
     }
 
@@ -1691,7 +1911,7 @@ pub fn extract_dir_incremental_with_progress(
             let fresh = if reusable {
                 None
             } else {
-                Some(extract_source(&source, path, id)?)
+                Some(extract_file(&source, path, id)?)
             };
             Ok::<_, ExtractError>((source_hash, fresh))
         },
@@ -1730,6 +1950,8 @@ pub fn extract_dir_incremental_with_progress(
             out.retrofit_bases.extend(extraction.retrofit_bases);
             out.navigation3.extend(extraction.navigation3);
             out.hilt_binds.extend(extraction.hilt_binds);
+            out.pending_endpoints.extend(extraction.pending_endpoints);
+            out.shadow_names.extend(extraction.shadow_names);
             Ok(())
         },
     );
@@ -1777,6 +1999,33 @@ pub fn extract_dir_incremental_with_progress(
             .or_insert_with(|| Some(item.path.clone()));
     }
     let functions_by_fqn = unique_by_fqn(&out.declared_functions);
+    // Star-proven Spring endpoints (#1288): a same-package top-level type
+    // or type alias of that name obscures the star import, so the route
+    // fails closed to a Gap. In a mixed JVM tree a product Java type of the
+    // package obscures it too; Java sources are read only when some route
+    // waits on the check.
+    let java_types: BTreeSet<String> = if out.pending_endpoints.is_empty() {
+        BTreeSet::new()
+    } else {
+        adapters_lang_java::product_top_level_types(root)
+            .map_err(|error| match error {
+                adapters_lang_java::ExtractError::Language(error) => ExtractError::Language(error),
+                adapters_lang_java::ExtractError::NoTree(path) => ExtractError::NoTree(path),
+                adapters_lang_java::ExtractError::Io(error) => ExtractError::Io(error),
+            })?
+            .into_iter()
+            .collect()
+    };
+    for pending in std::mem::take(&mut out.pending_endpoints) {
+        pending.settle(
+            |fqn, path| {
+                java_types.contains(fqn)
+                    || out.shadow_names.iter().any(|name| name.obscures(fqn, path))
+            },
+            &mut out.nodes,
+            &mut out.edges,
+        );
+    }
     // Every package this repository declares — Java sources included, so a
     // mixed JVM tree never mistakes its own Java package for external.
     let mut repo_packages: BTreeSet<String> = out.packages.iter().cloned().collect();

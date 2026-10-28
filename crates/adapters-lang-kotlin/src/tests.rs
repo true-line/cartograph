@@ -2996,3 +2996,424 @@ object Marker{name}
         std::collections::BTreeSet::from(["ep:local/demo@GET:/live", "ep:local/demo@GET:/nested"])
     );
 }
+
+/// `(id, reason)` of each route-bearing fact, sorted: endpoints with no
+/// reason, Gaps with theirs.
+fn route_rows(out: &Extraction) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint" || node.id.starts_with("gap:route:"))
+        .map(|node| {
+            let reason = node.props["reason"].as_str().unwrap_or("").to_string();
+            let id = if node.label == "Endpoint" {
+                node.id.clone()
+            } else {
+                format!("gap {}", node.props["handler_sym"].as_str().unwrap_or(""))
+            };
+            (id, reason)
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+const SHADOWED: &str =
+    "Spring annotation proven only by a star import is shadowed by a same-package declaration";
+
+// AC-0442 (#1288): a same-package declaration obscures a star-imported
+// Spring annotation (Kotlin resolves explicit imports, then the package,
+// then star imports), whether it is the controller stereotype, the class
+// `@RequestMapping` base or the method mapping, so the star-only endpoint
+// becomes a route Gap at the directory join. A named import, a fully
+// qualified spelling, a directly proven sibling stereotype and other
+// packages are unaffected; qualified lookalikes prove nothing.
+#[test]
+fn spring_star_proof_yields_to_a_same_package_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let web = "src/main/kotlin/com/demo/web";
+    write(
+        dir.path(),
+        &format!("{web}/Local.kt"),
+        "package com.demo.web\n\nannotation class GetMapping(val value: String = \"\")\n\ntypealias RequestMapping = Any\n",
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Users.kt"),
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class Users {
+    @GetMapping("/users")
+    fun list(): String = "u"
+
+    @PostMapping("/users")
+    fun create(): String = "c"
+
+    @PostMapping("/users/$suffix")
+    fun computed(): String = "d"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Named.kt"),
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+import org.springframework.web.bind.annotation.GetMapping
+
+@RestController
+class Named {
+    @GetMapping("/named")
+    fun named(): String = "n"
+
+    @org.springframework.web.bind.annotation.PutMapping("/qualified")
+    fun qualified(): String = "q"
+
+    @com.other.PostMapping("/lookalike")
+    fun lookalike(): String = "l"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Based.kt"),
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+@RequestMapping("/based")
+class Based {
+    @PostMapping("/x")
+    fun x(): String = "x"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/other/Elsewhere.kt",
+        r#"package com.demo.other
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class Elsewhere {
+    @GetMapping("/elsewhere")
+    fun elsewhere(): String = "e"
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let sym = |path: &str, member: &str| format!("sym:local/demo@{web}/{path}#{member}");
+    assert_eq!(
+        route_rows(&out),
+        [
+            ("ep:local/demo@GET:/elsewhere".to_string(), String::new()),
+            ("ep:local/demo@GET:/named".to_string(), String::new()),
+            ("ep:local/demo@POST:/users".to_string(), String::new()),
+            ("ep:local/demo@PUT:/qualified".to_string(), String::new()),
+            (
+                format!("gap {}", sym("Based.kt", "Based.x")),
+                SHADOWED.to_string()
+            ),
+            (
+                format!("gap {}", sym("Users.kt", "Users.computed")),
+                "dynamic Spring mapping path".to_string()
+            ),
+            (
+                format!("gap {}", sym("Users.kt", "Users.list")),
+                SHADOWED.to_string()
+            ),
+        ]
+    );
+}
+
+// AC-0442: an obscured controller stereotype shadows every star-only route
+// of its class, unless a directly proven or unshadowed star-proven sibling
+// stereotype still proves the class (even when its own name is declared in
+// the package); a same-package type (here an `object`)
+// obscures like an annotation class; a shadowed route with a dynamic path
+// reports the shadowing.
+#[test]
+fn spring_shadowed_stereotypes_and_dynamic_paths_settle_at_the_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let web = "src/main/kotlin/com/demo/web";
+    write(
+        dir.path(),
+        &format!("{web}/Local.kt"),
+        "package com.demo.web\n\nannotation class RestController\n\nannotation class PostMapping(val value: String = \"\")\n",
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Shadowed.kt"),
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class Shadowed {
+    @GetMapping("/shadowed")
+    fun shadowed(): String = "s"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Both.kt"),
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+import org.springframework.stereotype.Controller
+
+@RestController
+@Controller
+class Both {
+    @GetMapping("/both")
+    fun both(): String = "b"
+
+    @PostMapping(ROUTE)
+    fun computed(): String = "d"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Stars.kt"),
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+import org.springframework.stereotype.*
+
+@RestController
+@Controller
+class Stars {
+    @GetMapping("/stars")
+    fun stars(): String = "s"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/api/Api.kt",
+        r#"package com.demo.api
+
+import org.springframework.web.bind.annotation.*
+
+object PutMapping
+
+@RestController
+class Api {
+    @PutMapping("/api")
+    fun put(): String = "p"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/dom/Direct.kt",
+        r#"package com.demo.dom
+
+import org.springframework.web.bind.annotation.*
+import org.springframework.stereotype.Controller
+
+annotation class RestController
+
+annotation class Controller
+
+@RestController
+@Controller
+class Direct {
+    @PostMapping("/direct")
+    fun direct(): String = "d"
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let sym = |path: &str, member: &str| format!("sym:local/demo@{web}/{path}#{member}");
+    assert_eq!(
+        route_rows(&out),
+        [
+            ("ep:local/demo@GET:/both".to_string(), String::new()),
+            ("ep:local/demo@GET:/stars".to_string(), String::new()),
+            ("ep:local/demo@POST:/direct".to_string(), String::new()),
+            (
+                "gap sym:local/demo@src/main/kotlin/com/demo/api/Api.kt#Api.put".to_string(),
+                SHADOWED.to_string()
+            ),
+            (
+                format!("gap {}", sym("Both.kt", "Both.computed")),
+                SHADOWED.to_string()
+            ),
+            (
+                format!("gap {}", sym("Shadowed.kt", "Shadowed.shadowed")),
+                SHADOWED.to_string()
+            ),
+        ]
+    );
+}
+
+// AC-0442: single-file extraction settles star-proven endpoints against the
+// file's own declarations, and a reused cached file's pending endpoint is
+// retargeted to the new commit.
+#[test]
+fn single_file_and_cached_star_endpoints_settle() {
+    let path = "src/main/kotlin/com/demo/web/Solo.kt";
+    let source = r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+typealias GetMapping = Any
+
+@RestController
+class Solo {
+    @GetMapping("/solo")
+    fun solo(): String = "s"
+
+    @PostMapping("/solo")
+    fun post(): String = "p"
+}
+"#;
+    let out = extract_source(source.as_bytes(), path, &id()).unwrap();
+    assert_eq!(
+        route_rows(&out),
+        [
+            ("ep:local/demo@POST:/solo".to_string(), String::new()),
+            (
+                "gap sym:local/demo@src/main/kotlin/com/demo/web/Solo.kt#Solo.solo".to_string(),
+                SHADOWED.to_string()
+            ),
+        ]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), path, source);
+    let mut cache = IncrementalCache::default();
+    extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let second = SourceId {
+        repo: "local/demo",
+        commit: "abc123",
+    };
+    let (out, stats) = extract_dir_incremental(dir.path(), &second, &mut cache).unwrap();
+    assert_eq!(stats.reused_files, 1);
+    let commits: BTreeSet<String> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint" || node.id.starts_with("gap:route:"))
+        .flat_map(|node| {
+            node.props["prov"]["evidence"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .map(|evidence| evidence["commit_sha"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(commits, BTreeSet::from(["abc123".to_string()]));
+}
+
+// AC-0442: a same-package product Java type obscures a Kotlin star import
+// in a mixed JVM tree; test-source declarations (Java or Kotlin) never
+// obscure a product import; a `private` top-level declaration obscures only
+// within its own file; default-package declarations obscure too.
+#[test]
+fn spring_star_shadowing_spans_jvm_languages_visibility_and_source_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/GetMapping.java",
+        "package com.demo.web;\n\npublic @interface GetMapping { String value(); }\n",
+    );
+    write(
+        dir.path(),
+        "src/test/java/com/demo/web/PostMapping.java",
+        "package com.demo.web;\n\npublic @interface PostMapping { String value(); }\n",
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/demo/web/PutMapping.kt",
+        "package com.demo.web\n\nannotation class PutMapping(val value: String = \"\")\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Hidden.kt",
+        "package com.demo.web\n\nprivate annotation class DeleteMapping(val value: String = \"\")\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Users.kt",
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class Users {
+    @GetMapping("/users")
+    fun list(): String = "l"
+
+    @PostMapping("/users")
+    fun create(): String = "c"
+
+    @PutMapping("/users")
+    fun replace(): String = "r"
+
+    @DeleteMapping("/users")
+    fun remove(): String = "d"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Own.kt",
+        r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+private annotation class PatchMapping(val value: String = "")
+
+@RestController
+class Own {
+    @PatchMapping("/own")
+    fun patch(): String = "p"
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/Root.kt",
+        r#"import org.springframework.web.bind.annotation.*
+
+annotation class GetMapping(val value: String = "")
+
+@RestController
+class Root {
+    @GetMapping("/root")
+    fun root(): String = "r"
+
+    @PostMapping("/root")
+    fun post(): String = "p"
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let gap = |path: &str, member: &str| {
+        (
+            format!("gap sym:local/demo@src/main/kotlin/{path}#{member}"),
+            SHADOWED.to_string(),
+        )
+    };
+    assert_eq!(
+        route_rows(&out),
+        [
+            ("ep:local/demo@DELETE:/users".to_string(), String::new()),
+            ("ep:local/demo@POST:/root".to_string(), String::new()),
+            ("ep:local/demo@POST:/users".to_string(), String::new()),
+            ("ep:local/demo@PUT:/users".to_string(), String::new()),
+            gap("Root.kt", "Root.root"),
+            gap("com/demo/web/Own.kt", "Own.patch"),
+            gap("com/demo/web/Users.kt", "Users.list"),
+        ]
+    );
+}
