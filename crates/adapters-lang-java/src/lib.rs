@@ -62,6 +62,9 @@ pub struct Extraction {
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
+    /// RestTemplate calls (AC-0435): whole URLs, kept out of the Retrofit
+    /// base join and appended to `fetch_sites` after it.
+    rest_template_sites: Vec<adapters_fw::client::FetchSite>,
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<DeclaredType>,
     /// Package declarations, one per file that has one.
@@ -830,6 +833,15 @@ pub fn extract_source(
 
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
+    // RestTemplate client calls (AC-0435) are product facts too.
+    if product {
+        out.rest_template_sites.extend(rest_template::sites(
+            &cx,
+            root,
+            &imports,
+            &methods_by_start,
+        ));
+    }
 
     // Spring Web endpoints: annotation-proven controllers, class-level
     // @RequestMapping base path, method-level @{Get,Post,...}Mapping.
@@ -1318,6 +1330,8 @@ pub fn extract_dir_incremental_with_progress(
             out.packages.extend(extraction.packages);
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
+            out.rest_template_sites
+                .extend(extraction.rest_template_sites);
             out.method_index.extend(extraction.method_index);
             out.entity_index.extend(extraction.entity_index);
             out.repository_index.extend(extraction.repository_index);
@@ -1334,6 +1348,8 @@ pub fn extract_dir_incremental_with_progress(
         &out.retrofit_bases,
         retrofit::LIBRARY,
     );
+    let rest_template_sites = std::mem::take(&mut out.rest_template_sites);
+    out.fetch_sites.extend(rest_template_sites);
 
     // Directory join: an imported FQN resolves only to a type this repo
     // declares exactly once — a duplicate FQN (the same class in two source
@@ -1473,6 +1489,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod rest_template;
 mod retrofit;
 
 #[cfg(test)]
