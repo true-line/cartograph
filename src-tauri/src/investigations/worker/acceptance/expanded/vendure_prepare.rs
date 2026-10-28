@@ -45,7 +45,7 @@ fn write(directory: &Path, name: &str, value: &impl Serialize) -> Result<(), Str
     vendure::write_preparation_artifact(&directory.join(name), value)?;
     sync_directory(directory)
 }
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(super) fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(any(unix, windows))]
     {
         let mut options = std::fs::OpenOptions::new();
@@ -102,6 +102,45 @@ pub(in super::super) fn prepare_bound(
     expected: &Definition,
     policy: vendure::InputPolicy,
 ) -> Result<serde_json::Value, String> {
+    bound(
+        [config, preparation, definition_path, output],
+        expected,
+        policy,
+        true,
+        |_, _, _, manifest, _| Ok(manifest.clone()),
+    )
+}
+pub(in super::super) fn reopen_bound<T>(
+    paths: [&Path; 4],
+    expected: &Definition,
+    policy: vendure::InputPolicy,
+    use_task: impl FnOnce(
+        &tauri::App<tauri::test::MockRuntime>,
+        &StagedObligationRequest,
+        &str,
+        &serde_json::Value,
+        &Path,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    bound(paths, expected, policy, false, use_task)
+}
+fn bound<T>(
+    paths: [&Path; 4],
+    expected: &Definition,
+    policy: vendure::InputPolicy,
+    preparing: bool,
+    use_task: impl FnOnce(
+        &tauri::App<tauri::test::MockRuntime>,
+        &StagedObligationRequest,
+        &str,
+        &serde_json::Value,
+        &Path,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    let [config, preparation, definition_path, output] = paths;
+    if !preparing && !output.is_dir() {
+        return Err("Captured output missing.".into());
+    }
     capture::validate_binding(&expected.binding)?;
     let definition = json(expected)?;
     if read(definition_path)? != definition
@@ -112,6 +151,7 @@ pub(in super::super) fn prepare_bound(
     {
         return Err("independent capture definition required".into());
     }
+    let mut unsealed_manifest = None;
     let result = vendure::reopen_preparation(
         config,
         preparation,
@@ -194,13 +234,17 @@ pub(in super::super) fn prepare_bound(
             {
                 return Err("fresh capture nonce already consumed".into());
             }
-            let fresh = match std::fs::create_dir(output) {
-                Ok(()) => {
-                    sync_directory(output.parent().ok_or("missing capture output parent")?)?;
-                    true
+            let fresh = if !preparing {
+                false
+            } else {
+                match std::fs::create_dir(output) {
+                    Ok(()) => {
+                        sync_directory(output.parent().ok_or("missing capture output parent")?)?;
+                        true
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+                    Err(_) => return Err("capture output unavailable".into()),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-                Err(_) => return Err("capture output unavailable".into()),
             };
             if fresh {
                 write(output, "definition.json", expected)?;
@@ -235,8 +279,9 @@ pub(in super::super) fn prepare_bound(
                 return Err("sealed start absent or changed; explicit recovery required".into());
             }
             if task.provider != expected.provider
-                || task.summary.status != InvestigationStatus::Queued
-                || task.usage.model_invocations != 0
+                || (preparing
+                    && (task.summary.status != InvestigationStatus::Queued
+                        || task.usage.model_invocations != 0))
             {
                 return Err("stored capture task differs or was executed".into());
             }
@@ -252,15 +297,32 @@ pub(in super::super) fn prepare_bound(
             if path.exists() && read(&path)? != json(&manifest)? {
                 return Err("capture manifest differs".into());
             }
-            Ok(manifest)
+            if !path.exists() {
+                if !preparing {
+                    return Err("Captured manifest missing.".into());
+                }
+                unsealed_manifest = Some(manifest.clone());
+            }
+            drop(jobs);
+            let app_data = Path::new(
+                saved["profile"]["app"]["appDirectoriesOverride"]["data"]
+                    .as_str()
+                    .ok_or("validated profile data missing")?,
+            );
+            use_task(
+                app,
+                &request,
+                &task.summary.investigation_id,
+                &manifest,
+                app_data,
+            )
         },
     )?;
     if read(definition_path)? != definition {
         return Err("caller definition changed".into());
     }
-    let manifest = output.join("captured-analyst.json");
-    if !manifest.exists() {
-        write(output, "captured-analyst.json", &result)?;
+    if let Some(manifest) = unsealed_manifest {
+        write(output, "captured-analyst.json", &manifest)?;
     }
     Ok(result)
 }
