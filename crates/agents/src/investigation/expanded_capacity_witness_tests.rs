@@ -665,3 +665,90 @@ fn query_history_firewall_redaction_rejects_latest_selector_after_action_match()
             .is_err()
     );
 }
+
+// AC-0430: original errors and accepted actions survive detailed attribution.
+#[test]
+fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
+    use ActionDecodeStage as Stage;
+    let (_, mut ledger, request) = fixture();
+    let policy = &INVESTIGATION_V2_POLICY;
+    let context = ledger.coverage.as_ref().unwrap().context_id.clone();
+    let hash = request.intent_hash_with_policy(policy).unwrap();
+    let query = json!({"type":"query_context","context_id":context,"query":{"scope":{"type":"all"},"kind":null,"labels":[],"max_facts":1,"max_bytes":1024,"cursor":null}});
+    ledger.revision += 1;
+    ledger.queries.push(InvestigationQueryManifest {
+        query: serde_json::from_value(query["query"].clone()).unwrap(),
+        response_hash: content_hash(b"retained query response"),
+        response_bytes: 23,
+        returned_facts: 0,
+        total_selected: 0,
+        has_more: false,
+    });
+    let reference = QueryHistoryReference::from_ledger(&hash, &ledger, 0, policy).unwrap();
+    let decode = |raw: &str| {
+        ProgressiveInvestigationAction::decode_resolved_detailed(
+            raw, &context, &hash, &ledger, policy,
+        )
+    };
+    for valid in [
+        query.clone(),
+        json!({"type":"read_evidence","fact":{"kind":"node","id":"node:test"},"role":"provenance","index":0}),
+        json!({"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Missing evidence."]}}),
+        json!({"type":"replay_query","context_id":context,"query_index":0,"query_id":reference.query_id}),
+    ] {
+        let raw = valid.to_string();
+        let original =
+            ProgressiveInvestigationAction::decode_resolved(&raw, &context, &hash, &ledger, policy)
+                .unwrap();
+        assert_eq!(
+            format!("{original:?}"),
+            format!("{:?}", decode(&raw).unwrap())
+        );
+    }
+    let mut omitted = query.clone();
+    omitted["query"].as_object_mut().unwrap().remove("kind");
+    let mut wrong_context = query;
+    wrong_context["context_id"] = json!("PRIVATE-REJECTED-1281");
+    for (raw, stage, error) in [
+        (
+            "PRIVATE-REJECTED-1281".into(),
+            Stage::Preflight,
+            InvestigationError::InvalidInput,
+        ),
+        (
+            json!({"type":"PRIVATE-REJECTED-1281"}).to_string(),
+            Stage::TypedEnvelope,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            omitted.to_string(),
+            Stage::CanonicalFields,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            wrong_context.to_string(),
+            Stage::Semantic,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            "x".repeat(MAX_ACTION_BYTES + 1),
+            Stage::Preflight,
+            InvestigationError::LimitExceeded,
+        ),
+    ] {
+        let failure = decode(&raw).unwrap_err();
+        assert_eq!(failure, ActionDecodeFailure { stage, error });
+        assert_eq!(
+            ProgressiveInvestigationAction::decode_resolved(&raw, &context, &hash, &ledger, policy)
+                .unwrap_err(),
+            error
+        );
+        assert!(!format!("{failure:?}").contains("PRIVATE-REJECTED-1281"));
+    }
+    let host = ProgressiveInvestigationAction::decode_resolved_detailed(
+        "{}", "wrong", &hash, &ledger, policy,
+    )
+    .unwrap_err();
+    assert_eq!(host.stage, Stage::HostBinding);
+    assert_eq!(host.error, InvestigationError::InvalidAction);
+}

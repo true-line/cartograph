@@ -20,15 +20,21 @@ pub struct StagedFinish {
 }
 impl StagedFinish {
     pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
-        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)?;
-        let finish: Self =
-            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
-        finish.validate_for_role(false)?;
-        if serde_json::to_value(&finish).map_err(|_| InvestigationError::InvalidAction)?
+        Self::decode_detailed(raw).map_err(|failure| failure.error)
+    }
+    pub(super) fn decode_detailed(raw: &str) -> Result<Self, ActionDecodeFailure> {
+        use ActionDecodeStage as Stage;
+        strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)
+            .map_err(|error| Stage::Preflight.failure(error))?;
+        let finish: Self = serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+        finish
+            .validate_for_role(false)
+            .map_err(|error| Stage::Semantic.failure(error))?;
+        if serde_json::to_value(&finish).map_err(|_| Stage::CanonicalFields.invalid())?
             != serde_json::from_str::<serde_json::Value>(raw)
-                .map_err(|_| InvestigationError::InvalidAction)?
+                .map_err(|_| Stage::TypedEnvelope.invalid())?
         {
-            return Err(InvestigationError::InvalidAction);
+            return Err(Stage::CanonicalFields.invalid());
         }
         Ok(finish)
     }

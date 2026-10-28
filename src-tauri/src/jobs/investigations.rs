@@ -345,6 +345,7 @@ pub(crate) enum InvestigationStopReason {
     InvalidCompletionEnvelope,
     InvalidResponseMetadata,
     InvalidNextAction(agents::investigation::InvestigationError),
+    ActionDecode(agents::investigation::ActionDecodeFailure),
     InvalidFinish(agents::investigation::InvestigationError),
     UnadmittedRead,
     FinishOnlyToolProposal,
@@ -379,6 +380,7 @@ impl InvestigationStopReason {
                 _ => Self::ProviderFailure,
             },
             Self::HostLimit | Self::StoreCapacity => Self::LimitExceeded,
+            Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
             other => other,
         }
     }
@@ -397,6 +399,45 @@ impl InvestigationStopReason {
             }
             Self::InvalidCompletionEnvelope => "Provider response refused: completion_envelope.",
             Self::InvalidResponseMetadata => "Provider response refused: response_metadata.",
+            Self::ActionDecode(failure) => {
+                use agents::investigation::{
+                    ActionDecodeStage as Stage, InvestigationError as Error,
+                };
+                macro_rules! message {
+                    ($stage:literal) => {
+                        match failure.error {
+                            Error::InvalidRequest => {
+                                concat!("Action decode refused: ", $stage, ": invalid_request.")
+                            }
+                            Error::InvalidAction => {
+                                concat!("Action decode refused: ", $stage, ": invalid_action.")
+                            }
+                            Error::LimitExceeded => {
+                                concat!("Action decode refused: ", $stage, ": limit_exceeded.")
+                            }
+                            Error::InvalidInput => {
+                                concat!("Action decode refused: ", $stage, ": invalid_input.")
+                            }
+                            Error::InvalidCitation => {
+                                concat!("Action decode refused: ", $stage, ": invalid_citation.")
+                            }
+                            Error::SourceReplay => {
+                                concat!("Action decode refused: ", $stage, ": source_replay.")
+                            }
+                            Error::SensitiveOutput => {
+                                concat!("Action decode refused: ", $stage, ": sensitive_output.")
+                            }
+                        }
+                    };
+                }
+                match failure.stage {
+                    Stage::Preflight => message!("preflight"),
+                    Stage::TypedEnvelope => message!("typed_envelope"),
+                    Stage::CanonicalFields => message!("canonical_fields"),
+                    Stage::Semantic => message!("semantic"),
+                    Stage::HostBinding => message!("host_binding"),
+                }
+            }
             Self::InvalidNextAction(error) => match error {
                 agents::investigation::InvestigationError::InvalidRequest => {
                     "Action decode refused: invalid_request."

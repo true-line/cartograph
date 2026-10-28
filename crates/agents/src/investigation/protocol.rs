@@ -1,6 +1,6 @@
 use super::{
-    InvestigationError, MAX_ACTION_BYTES, MAX_QUERY_BYTES, MAX_QUERY_FACTS, bounded_bytes,
-    reject_prose_replay, strict, text,
+    ActionDecodeFailure, ActionDecodeStage, InvestigationError, MAX_ACTION_BYTES, MAX_QUERY_BYTES,
+    MAX_QUERY_FACTS, bounded_bytes, reject_prose_replay, strict, text,
 };
 use crate::{TaskFactKey, TaskRangeRole};
 use core_prov::{ConfidenceTier, Tier};
@@ -137,18 +137,23 @@ pub enum InvestigationAction {
 impl InvestigationAction {
     /// Admit exactly one complete strict JSON value, without extraction or repair.
     pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
+        Self::decode_detailed(raw).map_err(|failure| failure.error)
+    }
+    pub(super) fn decode_detailed(raw: &str) -> Result<Self, ActionDecodeFailure> {
+        use ActionDecodeStage as Stage;
         strict::preflight(raw, MAX_ACTION_BYTES, 16, 4096, 32)
-            .map_err(|_| InvestigationError::InvalidAction)?;
-        let action: Self =
-            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
+            .map_err(|_| Stage::Preflight.invalid())?;
+        let action: Self = serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
         // Close optional-field omissions and reused nested decoder behavior.
         let original: serde_json::Value =
-            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidAction)?;
-        if serde_json::to_value(&action).map_err(|_| InvestigationError::InvalidAction)? != original
+            serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+        if serde_json::to_value(&action).map_err(|_| Stage::CanonicalFields.invalid())? != original
         {
-            return Err(InvestigationError::InvalidAction);
+            return Err(Stage::CanonicalFields.invalid());
         }
-        action.validate_shape()?;
+        action
+            .validate_shape()
+            .map_err(|error| Stage::Semantic.failure(error))?;
         Ok(action)
     }
 
