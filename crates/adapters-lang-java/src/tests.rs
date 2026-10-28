@@ -3288,3 +3288,204 @@ fn single_file_extraction_exposes_rest_template_sites() {
         )]
     );
 }
+
+// AC-0438 (#1288): a same-package type obscures a wildcard-imported Spring
+// annotation (JLS §6.4.1), whether it is the controller stereotype, the class
+// `@RequestMapping` base or the method mapping, so the wildcard-only endpoint
+// becomes a route Gap at the directory join. A named import, the exact
+// qualified spelling, a wildcard in another package and a test-only type are
+// unaffected; a qualified lookalike proves nothing.
+#[test]
+fn spring_wildcard_proof_yields_to_a_same_package_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let web = "src/main/java/com/demo/web";
+    let ctl = "src/main/java/com/demo/ctl";
+    let base = "src/main/java/com/demo/base";
+    let other = "src/main/java/com/demo/other";
+    let wildcard_controller = |package: &str, class: &str, route: &str| {
+        format!(
+            "package {package};\n\nimport org.springframework.web.bind.annotation.*;\n\n@RestController\npublic class {class} {{\n    @GetMapping(\"{route}\")\n    public String get() {{ return \"\"; }}\n}}\n"
+        )
+    };
+    write(
+        dir.path(),
+        &format!("{web}/GetMapping.java"),
+        "package com.demo.web;\n\npublic @interface GetMapping { String value() default \"\"; }\n",
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Shadowed.java"),
+        &wildcard_controller("com.demo.web", "Shadowed", "/shadowed"),
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Named.java"),
+        r#"package com.demo.web;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+
+@RestController
+public class Named {
+    @GetMapping("/named")
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{web}/Qualified.java"),
+        r#"package com.demo.web;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+public class Qualified {
+    @org.springframework.web.bind.annotation.GetMapping("/qualified")
+    public String get() { return ""; }
+
+    @com.acme.GetMapping("/lookalike")
+    public String lookalike() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{ctl}/RestController.java"),
+        "package com.demo.ctl;\n\npublic @interface RestController {}\n",
+    );
+    write(
+        dir.path(),
+        &format!("{ctl}/Stereotype.java"),
+        &wildcard_controller("com.demo.ctl", "Stereotype", "/stereotype"),
+    );
+    write(
+        dir.path(),
+        &format!("{base}/RequestMapping.java"),
+        "package com.demo.base;\n\npublic @interface RequestMapping { String value() default \"\"; }\n",
+    );
+    write(
+        dir.path(),
+        &format!("{base}/Based.java"),
+        r#"package com.demo.base;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api")
+public class Based {
+    @GetMapping("/based")
+    public String get() { return ""; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        &format!("{other}/Elsewhere.java"),
+        &wildcard_controller("com.demo.other", "Elsewhere", "/elsewhere"),
+    );
+    write(
+        dir.path(),
+        "src/test/java/com/demo/other/GetMapping.java",
+        "package com.demo.other;\n\npublic @interface GetMapping { String value() default \"\"; }\n",
+    );
+    let mut cache = IncrementalCache::default();
+    let (out, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+
+    let endpoints: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint" && node.props["framework"] == "spring")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        endpoints,
+        BTreeSet::from([
+            "ep:local/demo@GET:/elsewhere",
+            "ep:local/demo@GET:/named",
+            "ep:local/demo@GET:/qualified",
+        ])
+    );
+    let gaps: BTreeSet<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "spring")
+        .map(|node| {
+            (
+                node.props["handler_sym"].as_str().unwrap(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let reason =
+        "Spring annotation proven only by a wildcard import is shadowed by a same-package type";
+    let shadowed = format!("sym:local/demo@{web}/Shadowed.java#Shadowed.get()");
+    let stereotype = format!("sym:local/demo@{ctl}/Stereotype.java#Stereotype.get()");
+    let based = format!("sym:local/demo@{base}/Based.java#Based.get()");
+    assert_eq!(
+        gaps,
+        BTreeSet::from([
+            (based.as_str(), reason),
+            (shadowed.as_str(), reason),
+            (stereotype.as_str(), reason),
+        ])
+    );
+    for handler in [&shadowed, &stereotype, &based] {
+        assert!(out.edges.iter().any(|edge| edge.label == "HANDLES"
+            && &edge.dst == handler
+            && edge.src.starts_with("gap:route:")));
+    }
+
+    // A reused file's deferred endpoint settles the same way at the next commit.
+    let next = SourceId {
+        repo: "local/demo",
+        commit: "abc123",
+    };
+    let (moved, _) = extract_dir_incremental(dir.path(), &next, &mut cache).unwrap();
+    let moved_gaps = moved
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["reason"] == reason)
+        .count();
+    assert_eq!(moved_gaps, 3);
+}
+
+// AC-0438 (#1288): single-file extraction settles wildcard-proven Spring and
+// JAX-RS endpoints against the file's own types instead of dropping them.
+#[test]
+fn single_file_extraction_settles_wildcard_endpoints() {
+    let spring = br#"package com.demo.web;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+public class Users {
+    @GetMapping("/users")
+    public String list() { return ""; }
+}
+"#;
+    let out = extract_source(spring, "src/main/java/com/demo/web/Users.java", &id()).unwrap();
+    assert!(
+        out.nodes
+            .iter()
+            .any(|node| node.id == "ep:local/demo@GET:/users")
+    );
+    let jaxrs = br#"package com.demo.rest;
+
+import jakarta.ws.rs.*;
+
+@Path("/orders")
+public class Orders {
+    @GET
+    public String list() { return ""; }
+}
+"#;
+    let out = extract_source(jaxrs, "src/main/java/com/demo/rest/Orders.java", &id()).unwrap();
+    assert!(
+        out.nodes
+            .iter()
+            .any(|node| node.id == "ep:local/demo@GET:/orders")
+    );
+}

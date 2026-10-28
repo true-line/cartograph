@@ -264,6 +264,14 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
+    /// Spring endpoints proven only by a wildcard import settle the same way.
+    pub(crate) fn new(shadowed_by: Vec<String>, endpoint: (Node, Edge), gap: (Node, Edge)) -> Self {
+        Self {
+            shadowed_by,
+            endpoint,
+            gap,
+        }
+    }
     /// Apply `retarget` to the props of all four held facts, so a cached
     /// file's deferred evidence follows the commit being extracted.
     pub(crate) fn retarget(&mut self, mut retarget: impl FnMut(&mut serde_json::Value)) {
