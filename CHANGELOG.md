@@ -1,5 +1,52 @@
 # cartograph
 
+## 0.42.0
+
+### Minor Changes
+
+- b78ccdd: Show exact saved provider-reported token observations on active specialist task rows without expanding projection limits.
+- b4f4347: Show exact provider-reported cache-read tokens in specialist task activity with independent unknown and unavailable states.
+- d8ee6d7: Persist provider-reported cache-read usage through bounded investigation replay and expose optional exact activity metadata without changing resource limits.
+- 55ce195: Give saved chat panes independent keyboard-scrollable message regions and distinct author styling.
+- 5f2d2e0: Graph load moves recovered facts into the publish instead of copying every edge and changed node, and receipt matching reads a borrowed view of the merged edges, lowering peak memory on large ingests (#1235).
+- f24f5dd: Flask-Admin model views and default index views now show the routes Flask-Admin itself provides (list, create, edit, details, delete, action, export and ajax), when the repository pins a checked Flask-Admin release (1.5.7 or 1.5.8). Unpinned or unchecked versions stay Gaps.
+- 2bf0141: Mark Flask-Admin views as requiring login when their `is_accessible` provably checks `flask_login.current_user.is_authenticated` on pinned, checked releases.
+- b3b8e06: Go `net/http` client calls (`http.Get`/`Head`/`Post`/`PostForm`, `http.DefaultClient` verbs and `http.NewRequest`) now become fetch sites that stitch to same-repo endpoints or cited Gaps, also in client-only manifests (#1279). Method-less routes such as Go `HandleFunc("/x", …)` now match a fetch of any method.
+- 7b57678: The Java adapter now recovers JAX-RS resource endpoints (`jakarta.ws.rs` and `javax.ws.rs`). Methods it cannot place, such as inherited resource methods, interface methods, sub-resource locators and dynamic paths, become explicit route Gaps.
+- 28108e6: OpenFeign `@FeignClient` interface methods now become fetch sites joined to their client's url, or Gaps naming an undeclared service (#1287).
+- bf45266: Resolve same-arity Java overloads when literal, null or lambda arguments rule out every overload but one, instead of reporting an ambiguous-overload gap.
+- a2869d5: Spring `RestTemplate` calls on proven receivers now become fetch sites that stitch to same-repo endpoints or cited Gaps (#1283).
+- 031d602: Java Spring `WebClient` request chains on proven clients become fetch sites, with inline literal bases joined and field-held client bases reported as undeclared runtime bases.
+- 3623dac: Spring Web and JAX-RS endpoints declared in Java or Kotlin test source sets (`src/test`, `src/testFixtures`, `src/integrationTest`, `src/androidTest`) are no longer reported as product endpoints. The test code itself is still recovered.
+- 585a1bd: Add an explicit bounded local Ollama metadata API check in Agent Chats without task dispatch or model-readiness claims.
+- 7595f7c: Preflight now counts and names the Go files that recovery skips because of a platform file-name suffix or a build constraint, instead of leaving them out silently.
+- 9220406: Preflight now names Scala, Groovy, Dart, Elixir, Erlang, Clojure, F#, Visual Basic, Haskell and Lua sources that no adapter covers, instead of omitting them silently.
+- a064463: Python `requests` and `httpx` module calls are now recovered as fetch sites, so they stitch to same-repo endpoints or show as cited Gaps (#1238).
+- d1b0eee: Python `requests.Session()` and `httpx.Client()`/`AsyncClient()` receivers are now recovered as fetch sites, and httpx `base_url` joins resolve under the base path (#1240).
+- cb044d5: Show exact provider-reported usage in task-bound saved chat snapshots without changing durable records or resource limits.
+- 6ffa0cb: Add a local scale benchmark (`scripts/bench-ingest.mjs`) that records ingest time, peak memory and deterministic coverage counts for pinned repositories, and compares two runs.
+- b46f90c: Add opt-in analyst and auditor @11 progress guidance while preserving historical @10 definitions and existing investigation limits.
+- 442d008: Recover TS/JS repositories that contain symlinks (such as `CLAUDE.md -> AGENTS.md`): symlinks are skipped unread and named in coverage instead of failing the whole recovery.
+
+### Patch Changes
+
+- e6c3170: Retain fixed action-decoder stage and error-class diagnostics without rejected content or changes to accepted actions.
+- 3f9d7bb: Compile the Python and Kotlin adapters' tree-sitter queries once per process instead of once per file.
+- bb426ed: Compile the Go and Java adapters' tree-sitter queries once per process instead of once per file.
+- 1ca5046: Add an explicitly selected analyst definition with complete finish examples and existing shape bounds.
+- ddb2f86: Add inactive bounded Ollama response-schema transport support with exact firewall binding and existing resource limits.
+- 6ac7a6f: Distinguish fixed action families at existing typed rejection boundaries without retaining rejected content or changing accepted actions.
+- 287fee1: Add explicit captured analyst @13 with bound role/mode response schemas, preserving historical definitions and desktop availability.
+- 2c5d9af: Kotlin functions, properties and parameters named `dynamic` or `suspend` no longer make the parser drop the declaration, or under stacked class annotations the whole class with its endpoints. A block comment before a declaration, such as after an expression-bodied function, no longer drops that declaration either.
+- 90f21a8: Kotlin Spring endpoints proven only by a star import now become route Gaps when the repository declares a same-package name that obscures the import, and qualified lookalike annotations no longer prove a Spring mapping.
+- 224ce73: Retain fixed content-free phases for existing next-prompt input-preparation failures.
+- 325fd8a: Preserve fixed bounded-provider failure codes and distinguish host-limit and store-capacity diagnostics without changing terminal status, retries or resource limits.
+- 40b790c: Distinguish content-free investigation response rejection stages in saved failure diagnostics without retaining rejected provider content.
+- 3cbcf6d: Attribute action semantic refusals to fixed content-free rule categories without changing admission.
+- 490641d: Java Spring endpoints proven only by a wildcard import now become route Gaps when the repository declares a same-package type of that name, qualified lookalike annotations no longer prove a Spring mapping, and single-file extraction keeps wildcard-proven Spring and JAX-RS endpoints.
+- 7c2f60e: Preserve nested finish decoder diagnostics and distinguish bounded finish shape groups without changing accepted actions.
+- f909e19: Retain the existing content-free action-decode refusal class in saved investigation failures without retaining rejected provider output.
+
 ## 0.41.0
 
 ### Minor Changes
