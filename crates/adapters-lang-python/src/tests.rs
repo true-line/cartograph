@@ -4841,6 +4841,73 @@ def me():
 }
 
 #[test]
+fn a_hook_returning_only_unavailable_statuses_does_not_authenticate() {
+    // AC-0448 (T-0448): a maintenance hook that ends requests only with a
+    // literal 429 / 5xx `(body, status)` pair leaves undecorated routes
+    // `none`, with the assumption recorded; any other value-return blocks.
+    let source = |returns: &str| {
+        format!(
+            r#"
+from flask import Flask, jsonify, redirect, render_template, request
+
+app = Flask(__name__)
+
+@app.before_request
+def maintenance():
+    if request.path.startswith("/health"):
+        return
+{returns}
+
+@app.route("/health")
+def health():
+    return "success", 200
+"#
+        )
+    };
+    let auth = |returns: &str| {
+        let extraction = extract_source(source(returns).as_bytes(), "app.py", &id()).unwrap();
+        auth_at(&extraction, "/health")
+    };
+    for returns in [
+        "    if request.path.startswith(\"/api/\"):\n        return jsonify(error=\"maintenance\"), 503\n    return render_template(\"503.html\"), 503",
+        "    return (\"slow down\", 429)",
+        "    return redirect(\"/login\"), 500",
+    ] {
+        let found = auth(returns);
+        assert_eq!(found["state"], "none", "{returns}: {found}");
+        assert_eq!(
+            found["assumptions"],
+            serde_json::json!([
+                "non_repository_calls_in_request_hooks_do_not_abort",
+                "request_hook_statuses_do_not_authenticate"
+            ]),
+            "{returns}"
+        );
+    }
+    for returns in [
+        "    return \"no\", 401",
+        "    return \"no\", 403",
+        "    return \"proxy\", 407",
+        "    return \"sign in to the network\", 511",
+        "    return \"missing\", 404",
+        "    return redirect(\"/login\"), 302",
+        "    return render_template(\"login.html\"), 200",
+        "    return \"down\", 503, {\"WWW-Authenticate\": \"Basic\"}",
+        "    return \"down\", STATUS",
+        "    return render_template(\"503.html\")",
+        "    if request.path.startswith(\"/api/\"):\n        return \"down\", 503\n    return redirect(\"/login\")",
+    ] {
+        let found = auth(returns);
+        assert_eq!(found["state"], "unknown", "{returns}: {found}");
+        assert_eq!(
+            found["reasons"],
+            serde_json::json!(["request_hook_may_block"]),
+            "{returns}"
+        );
+    }
+}
+
+#[test]
 fn an_unknown_fact_cites_each_hook_that_may_block() {
     // AC-0380 (T-0380): `blocking_hooks` names every registration whose
     // hook may block, by symbol (null for an unresolved argument) and the
