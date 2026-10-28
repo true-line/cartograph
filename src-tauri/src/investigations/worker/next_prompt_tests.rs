@@ -974,3 +974,117 @@ pub(in crate::investigations) fn expanded_capacity_provider() -> Arc<dyn LlmProv
     provider.capacity_control = true;
     Arc::new(provider)
 }
+
+// AC-0430: rejection stages survive reopen without retaining rejected content.
+#[test]
+fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
+    const SENTINEL: &str = "PRIVATE-REJECTED-RESPONSE-1266";
+    struct Rejected {
+        profile: Scripted,
+        calls: AtomicUsize,
+        stage: InvestigationStopReason,
+    }
+    impl LlmProvider for Rejected {
+        fn id(&self) -> &str {
+            self.profile.id()
+        }
+        fn locality(&self) -> Locality {
+            Locality::Local
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            self.profile.capabilities()
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture embeddings"))
+        }
+        fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
+            self.profile.bounded_profile()
+        }
+        fn complete_bounded(
+            &self,
+            _: &AuthorizedBoundedCompletion,
+            _: &CompletionControl<'_>,
+        ) -> Result<BoundedCompletion, BoundedCallError> {
+            assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+            Ok(BoundedCompletion {
+                text: SENTINEL.into(),
+                requested_model:
+                    if self.stage == InvestigationStopReason::InvalidCompletionEnvelope {
+                        "wrong-model"
+                    } else {
+                        "scripted-model"
+                    }
+                    .into(),
+                response_model: Some(
+                    if self.stage == InvestigationStopReason::InvalidResponseMetadata {
+                        format!("\0{SENTINEL}")
+                    } else {
+                        "scripted-model-observed".into()
+                    },
+                ),
+                provider_request_id: Some(SENTINEL.into()),
+                usage: None,
+                request_bytes: 100,
+                response_bytes: 100,
+            })
+        }
+    }
+    let mut messages = std::collections::BTreeSet::new();
+    for stage in [
+        InvestigationStopReason::InvalidCompletionEnvelope,
+        InvestigationStopReason::InvalidResponseMetadata,
+        InvestigationStopReason::InvalidNextAction,
+    ] {
+        let provider = Arc::new(Rejected {
+            profile: Scripted::new(Mode::Malformed),
+            calls: AtomicUsize::new(0),
+            stage,
+        });
+        let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV10);
+        f.run(provider.clone());
+        let state = f.base.base.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&f.id).unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.error.as_deref(), Some(stage.test_message()));
+        assert!(messages.insert(stage.test_message()));
+        assert!(
+            stage.test_message().len()
+                <= InvestigationStopReason::InvalidResponse
+                    .test_message()
+                    .len()
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(detail.usage.model_invocations, 1);
+        assert_eq!(detail.usage.tool_actions, 0);
+        assert_eq!(detail.usage.evidence_items, 0);
+        assert!(jobs.investigation_result(&f.id).unwrap().is_none());
+        let events = jobs.investigation_events(&f.id, 0).unwrap();
+        assert!(!events.has_more);
+        assert!(
+            serde_json::to_string(&events)
+                .unwrap()
+                .contains(stage.test_message())
+        );
+        drop(jobs);
+        let db = f.base.base.app_data.join("state.db");
+        let reopened = crate::jobs::JobStore::open(&db).unwrap();
+        assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+        assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+        assert!(reopened.investigation_result(&f.id).unwrap().is_none());
+        // Include SQLite's WAL: rejected response bytes and their digest must
+        // not be retained even in pages outside the current logical rows.
+        for path in [db.clone(), db.with_file_name("state.db-wal")] {
+            if path.exists() {
+                let bytes = std::fs::read(path).unwrap();
+                for forbidden in [SENTINEL.to_owned(), content_hash(SENTINEL.as_bytes())] {
+                    assert!(
+                        !bytes
+                            .windows(forbidden.len())
+                            .any(|b| b == forbidden.as_bytes())
+                    );
+                }
+            }
+        }
+    }
+}

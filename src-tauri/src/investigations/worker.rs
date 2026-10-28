@@ -540,7 +540,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             }
             input
                 .validate_response_metadata(completion.response_model.as_deref())
-                .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+                .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponseMetadata))?;
             if let Some(mode) = admission_mode
                 && self.admit_next_finish_response(
                     completion_request.ok_or(HostError::InvalidInput)?,
@@ -1277,7 +1277,9 @@ fn validate_completion(
         || completion.request_bytes > limits.request_bytes
         || completion.response_bytes > limits.response_bytes
     {
-        return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
+        return Err(Failure::Stop(
+            InvestigationStopReason::InvalidCompletionEnvelope,
+        ));
     }
     Ok(())
 }

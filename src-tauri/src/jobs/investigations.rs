@@ -342,6 +342,9 @@ pub(crate) enum InvestigationStopReason {
     InputChanged,
     SourceUnavailable,
     InvalidResponse,
+    InvalidCompletionEnvelope,
+    InvalidResponseMetadata,
+    InvalidNextAction,
     InvalidFinish(agents::investigation::InvestigationError),
     UnadmittedRead,
     FinishOnlyToolProposal,
@@ -367,6 +370,9 @@ impl InvestigationStopReason {
             Self::InvalidResponse => {
                 "The completed provider response was not an admissible action."
             }
+            Self::InvalidCompletionEnvelope => "Provider response refused: completion_envelope.",
+            Self::InvalidResponseMetadata => "Provider response refused: response_metadata.",
+            Self::InvalidNextAction => "Provider response refused: next_action_decode.",
             // Fixed classes only: never format rejected text or provider details.
             Self::InvalidFinish(error) => match error {
                 agents::investigation::InvestigationError::InvalidRequest => {
