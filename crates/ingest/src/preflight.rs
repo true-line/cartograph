@@ -864,7 +864,10 @@ fn go_skipped_sources(root: &Path, unsupported: &mut Vec<PatternFinding>) -> std
     let skipped = adapters_lang_go::skipped_files(root).map_err(std::io::Error::other)?;
     for (reason, label) in [
         (SkipReason::PlatformSuffix, "a GOOS/GOARCH file-name suffix"),
-        (SkipReason::BuildConstraint, "a //go:build constraint"),
+        (
+            SkipReason::BuildConstraint,
+            "a //go:build or // +build constraint",
+        ),
     ] {
         let mut paths = skipped
             .iter()
