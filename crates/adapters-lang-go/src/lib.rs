@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::ControlFlow;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 
 const EXTRACTOR_ID: &str = "t0.adapter-go";
 
@@ -198,14 +198,13 @@ fn default_import_name(import_path: &str) -> &str {
 fn parse_imports(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     module_path: Option<&str>,
     out: &mut Extraction,
 ) -> HashMap<String, ImportBinding> {
-    let query = Query::new(language, "(import_spec) @spec").expect("static query");
+    let query = crate::queries::query("(import_spec) @spec");
     let mut bindings = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let spec = found.captures()[0].node;
         let Some(path_node) = spec.child_by_field_name("path") else {
@@ -327,13 +326,12 @@ fn framework_factory(callee: &str, bindings: &HashMap<String, ImportBinding>) ->
 fn assignment_receivers(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     bindings: &HashMap<String, ImportBinding>,
 ) -> HashMap<String, Framework> {
-    let query = Query::new(language, "(short_var_declaration) @assignment").expect("static query");
+    let query = crate::queries::query("(short_var_declaration) @assignment");
     let mut receivers = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let assignment = found.captures()[0].node;
         let raw = cx.text(&assignment);
@@ -630,18 +628,15 @@ fn extract_source_with_module(
             "prov": cx.prov(&root, &format!("File {path}")),
         }),
     });
-    let bindings = parse_imports(&cx, root, &language, module_path, &mut out);
-    let receivers = assignment_receivers(&cx, root, &language, &bindings);
+    let bindings = parse_imports(&cx, root, module_path, &mut out);
+    let receivers = assignment_receivers(&cx, root, &bindings);
 
-    let function_query = Query::new(
-        &language,
-        "[(function_declaration) (method_declaration)] @function",
-    )
-    .expect("static query");
+    let function_query =
+        crate::queries::query("[(function_declaration) (method_declaration)] @function");
     let mut functions_by_start = HashMap::new();
     let mut locals = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&function_query, root, source);
+    let mut matches = cursor.matches(function_query, root, source);
     while let Some(found) = matches.next() {
         let function = found.captures()[0].node;
         let Some((simple, qualified)) = function_name(&cx, function) else {
@@ -674,9 +669,9 @@ fn extract_source_with_module(
         });
     }
 
-    let call_query = Query::new(&language, "(call_expression) @call").expect("static query");
+    let call_query = crate::queries::query("(call_expression) @call");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&call_query, root, source);
+    let mut matches = cursor.matches(call_query, root, source);
     while let Some(found) = matches.next() {
         let call = found.captures()[0].node;
         let Some(function) = call.child_by_field_name("function") else {
@@ -1130,6 +1125,8 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
     extract_dir_incremental(root, id, &mut IncrementalCache::default())
         .map(|(extraction, _)| extraction)
 }
+
+mod queries;
 
 #[cfg(test)]
 mod tests;

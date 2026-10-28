@@ -22,6 +22,7 @@ use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 mod jaxrs;
 mod jpa;
 pub mod jvm;
+mod queries;
 
 use jvm::{classify_import, external_module_id, foreign_packages, in_system};
 
@@ -351,16 +352,11 @@ struct Imports {
     wildcard_packages: Vec<String>,
 }
 
-fn parse_imports(
-    cx: &FileCx<'_>,
-    root: TsNode<'_>,
-    language: &tree_sitter::Language,
-    out: &mut Extraction,
-) -> Imports {
-    let query = Query::new(language, "(import_declaration) @import").expect("static query");
+fn parse_imports(cx: &FileCx<'_>, root: TsNode<'_>, out: &mut Extraction) -> Imports {
+    let query = crate::queries::query("(import_declaration) @import");
     let mut imports = Imports::default();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let statement = found.captures()[0].node;
         let raw = cx.text(&statement).replace(['\n', '\\'], " ");
@@ -660,13 +656,11 @@ pub fn extract_source(
     });
 
     let package = {
-        let query = Query::new(
-            &language,
+        let query = crate::queries::query(
             "(package_declaration [(scoped_identifier) (identifier)] @package)",
-        )
-        .expect("static query");
+        );
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, root, source);
+        let mut matches = cursor.matches(query, root, source);
         let mut package = None;
         if let Some(found) = matches.next() {
             package = Some(cx.text(&found.captures()[0].node).to_string());
@@ -674,19 +668,23 @@ pub fn extract_source(
         package
     };
     out.packages.extend(package.clone());
-    let imports = parse_imports(&cx, root, &language, &mut out);
+    let imports = parse_imports(&cx, root, &mut out);
 
     // Types: classes, interfaces, enums, records — nested chains included.
-    let type_query = {
+    // Built from TYPE_KINDS, so compiled once here rather than through the
+    // static-pattern cache.
+    static TYPE_QUERY: std::sync::LazyLock<Query> = std::sync::LazyLock::new(|| {
         let clauses = TYPE_KINDS
             .iter()
             .map(|kind| format!("({kind} name: (identifier) @name) @decl"))
             .collect::<Vec<_>>()
             .join(" ");
-        Query::new(&language, &format!("[{clauses}]")).expect("static query")
-    };
+        Query::new(&tree_sitter_java::LANGUAGE.into(), &format!("[{clauses}]"))
+            .expect("static query")
+    });
+    let type_query: &Query = &TYPE_QUERY;
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&type_query, root, source);
+    let mut matches = cursor.matches(type_query, root, source);
     while let Some(found) = matches.next() {
         let (mut decl, mut name) = (None, None);
         for capture in found.captures() {
@@ -732,19 +730,17 @@ pub fn extract_source(
     }
 
     // Methods and constructors, qualified by their enclosing type chain.
-    let method_query = Query::new(
-        &language,
+    let method_query = crate::queries::query(
         "[(method_declaration name: (identifier) @name) @method
           (constructor_declaration name: (identifier) @name) @method]",
-    )
-    .expect("static query");
+    );
     let mut methods_by_start: HashMap<usize, String> = HashMap::new();
     // Simple qualified name (no signature) -> every local overload's
     // (min_arity, variadic, full signature-qualified symbol id) (#435).
     let mut local_method_index: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     let mut methods = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&method_query, root, source);
+    let mut matches = cursor.matches(method_query, root, source);
     while let Some(found) = matches.next() {
         let (mut method, mut name) = (None, None);
         for capture in found.captures() {
@@ -986,13 +982,9 @@ pub fn extract_source(
     // Calls: same-class unqualified/this calls resolve locally; calls on an
     // imported type resolve repo-wide at the directory join, failing closed
     // to an explicit Gap when the project-local target cannot be proven.
-    let call_query = Query::new(
-        &language,
-        "(method_invocation name: (identifier) @name) @call",
-    )
-    .expect("static query");
+    let call_query = crate::queries::query("(method_invocation name: (identifier) @name) @call");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&call_query, root, source);
+    let mut matches = cursor.matches(call_query, root, source);
     while let Some(found) = matches.next() {
         let (mut call, mut name) = (None, None);
         for capture in found.captures() {
@@ -1192,7 +1184,6 @@ pub fn extract_source(
     jpa::extract(
         &cx,
         root,
-        &language,
         &imports,
         package.as_deref(),
         &methods_by_start,
