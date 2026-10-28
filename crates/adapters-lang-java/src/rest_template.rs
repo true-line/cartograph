@@ -10,7 +10,8 @@
 //! imports prove nothing, since a same-package type would win.
 //!
 //! Verb methods give their method. `exchange`/`execute(url, method, …)`
-//! take an import-proven `HttpMethod.X` constant, else `?`. The URL is the
+//! take an import-proven `HttpMethod.X` constant whose first segment no
+//! visible variable, declared type or imported type obscures, else `?`. The URL is the
 //! first argument, a literal only as an exact string literal (URI
 //! templates included); anything else is a computed URL the stitcher keeps
 //! as a Gap.
@@ -125,9 +126,15 @@ impl Proof<'_> {
                 let object = argument.child_by_field_name("object")?;
                 let field = argument.child_by_field_name("field")?;
                 let spelling = cx.text(&object);
+                // In expression context a variable obscures a type, and a
+                // type obscures a package, so the first segment of the
+                // spelling must name neither.
+                let first = spelling.split('.').next().unwrap_or(spelling).trim();
                 let proven = self.names(spelling, HTTP_METHOD)
-                    && (spelling.contains('.')
-                        || !jpa::names_a_variable(cx, method, call, spelling));
+                    && !jpa::names_a_variable(cx, method, call, first)
+                    && (!spelling.contains('.')
+                        || (!self.declared.contains(first)
+                            && !self.imports.bindings.contains_key(first)));
                 proven.then(|| cx.text(&field))
             })
             .flatten();

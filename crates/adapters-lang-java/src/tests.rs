@@ -3114,6 +3114,78 @@ class Client {
 }
 
 #[test]
+fn obscured_http_method_constants_give_an_unknown_method() {
+    // AC-0435: a local, parameter or field named `org`, or a type named
+    // `org` anywhere in the file, obscures the package in
+    // `org.springframework.http.HttpMethod.GET`, so only the unobscured
+    // spelling proves the method.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Client.java",
+            r#"package io.demo;
+
+import org.springframework.web.client.RestTemplate;
+
+class Client {
+    private final RestTemplate rest = new RestTemplate();
+
+    void plain() {
+        rest.exchange("/plain", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+
+    void local(Holder holder) {
+        Holder org = holder;
+        rest.exchange("/local", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+
+    void param(Holder org) {
+        rest.exchange("/param", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+}
+
+class Fielded {
+    private final RestTemplate rest = new RestTemplate();
+    private Holder org;
+
+    void field() {
+        rest.exchange("/field", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Typed.java",
+            r#"package io.demo;
+
+import org.springframework.web.client.RestTemplate;
+
+class Typed {
+    static class org {}
+    private final RestTemplate rest = new RestTemplate();
+
+    void typed() {
+        rest.exchange("/typed", org.springframework.http.HttpMethod.GET, null, String.class);
+    }
+}
+"#,
+        ),
+    ]);
+    let rows = site_rows(&sites)
+        .into_iter()
+        .map(|(method, url, _)| (method, url))
+        .collect::<Vec<_>>();
+    let want = [
+        ("GET", "literal:/plain"),
+        ("?", "literal:/local"),
+        ("?", "literal:/param"),
+        ("?", "literal:/field"),
+        ("?", "literal:/typed"),
+    ]
+    .map(|(method, url)| (method.to_string(), url.to_string()));
+    assert_eq!(rows, want);
+}
+
+#[test]
 fn unproven_rest_template_receivers_yield_no_fetch_sites() {
     // AC-0435: wildcard imports, lookalike types, a same-named nested type or
     // type parameter, untyped and pattern bindings, anonymous subclasses,
