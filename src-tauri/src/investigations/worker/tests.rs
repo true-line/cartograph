@@ -393,10 +393,65 @@ fn captured_fixture_state(
     (state, app_data, graph_before)
 }
 
+// Tauri 2.12.5's managed PathResolver/core plugins retain AppHandle cycles.
+// Only these audited inline worker fixtures may explicitly release their stores.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixtureLifetime {
+    Retain,
+    SynchronousReturn,
+    ExternalUse,
+}
+struct FixtureApp {
+    app: tauri::App<tauri::test::MockRuntime>,
+    lifetime: std::cell::Cell<FixtureLifetime>,
+}
+impl FixtureApp {
+    fn new(app: tauri::App<tauri::test::MockRuntime>) -> Self {
+        Self {
+            app,
+            lifetime: std::cell::Cell::new(FixtureLifetime::Retain),
+        }
+    }
+    fn begin_synchronous_run(&self) {
+        if self.lifetime.get() != FixtureLifetime::ExternalUse {
+            self.lifetime.set(FixtureLifetime::Retain);
+        }
+    }
+    fn end_synchronous_run(&self) {
+        if self.lifetime.get() != FixtureLifetime::ExternalUse {
+            self.lifetime.set(FixtureLifetime::SynchronousReturn);
+        }
+    }
+    fn retain_for_external_use(&self) {
+        self.lifetime.set(FixtureLifetime::ExternalUse);
+    }
+}
+impl std::ops::Deref for FixtureApp {
+    type Target = tauri::App<tauri::test::MockRuntime>;
+    fn deref(&self) -> &Self::Target {
+        &self.app
+    }
+}
+impl Drop for FixtureApp {
+    fn drop(&mut self) {
+        if self.lifetime.get() != FixtureLifetime::SynchronousReturn {
+            return;
+        }
+        // SAFETY: inline run/run_completion returned and its Cleanup ran. Every
+        // borrowed State/store guard ends before this owner can drop. Audited
+        // Scripted callbacks acquire State only during that inline invocation;
+        // none retains borrowed State or dispatches work. Public-start callbacks
+        // permanently opt out before execution, including on unwind. A missing
+        // normal worker return retains state. Never use this for detached apps.
+        #[allow(deprecated)]
+        drop(self.app.unmanage::<AppState>());
+    }
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     app_data: PathBuf,
-    app: tauri::App<tauri::test::MockRuntime>,
+    app: FixtureApp,
     request: StartInvestigationRequest,
     id: String,
     execution: JobExecution,
@@ -566,7 +621,7 @@ impl Fixture {
         Self {
             _directory: directory,
             app_data,
-            app,
+            app: FixtureApp::new(app),
             request,
             id,
             execution,
@@ -577,6 +632,7 @@ impl Fixture {
     }
 
     fn run(&self, provider: Arc<dyn LlmProvider>) {
+        self.app.begin_synchronous_run();
         run(
             self.app.handle().clone(),
             self.id.clone(),
@@ -586,6 +642,7 @@ impl Fixture {
             self.live.clone(),
             Instant::now(),
         );
+        self.app.end_synchronous_run();
     }
 
     fn cancel_inside_call(&self, provider: &Scripted, clear_job: bool) {
@@ -1012,3 +1069,42 @@ mod finding_review_integration_tests;
 
 #[path = "refusal_diagnostics_tests.rs"]
 mod refusal_diagnostics;
+
+#[test]
+fn synchronous_worker_fixture_releases_stores_only_after_normal_return() {
+    let provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = Fixture::new(provider.as_ref());
+    let sources = Arc::downgrade(&fixture.app.state::<AppState>().sources);
+    fixture.run(provider);
+    drop(fixture);
+    assert!(
+        sources.upgrade().is_none(),
+        "synchronous AppState was retained"
+    );
+
+    let provider = Arc::new(Scripted::new(Mode::Finish));
+    let fixture = Fixture::new(provider.as_ref());
+    let sources = Arc::downgrade(&fixture.app.state::<AppState>().sources);
+    fixture.run(provider);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        fixture.app.begin_synchronous_run();
+        panic!("unfinished second inline run");
+    }));
+    assert!(unwind.is_err());
+    assert!(
+        sources.upgrade().is_some(),
+        "unfinished run must retain state"
+    );
+}
+
+#[test]
+fn public_start_fixture_retains_state_after_inline_run_and_owner_drop() {
+    with_public_start_fixture_then(
+        Arc::new(Scripted::new(Mode::Finish)),
+        true,
+        |app, _, _| app.clone(),
+        |app, _| {
+            assert!(app.try_state::<AppState>().is_some());
+        },
+    );
+}

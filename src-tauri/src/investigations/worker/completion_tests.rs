@@ -309,6 +309,7 @@ impl CompletionFixture {
         }
     }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
+        self.base.app.begin_synchronous_run();
         run_completion(
             self.base.app.handle().clone(),
             self.id.clone(),
@@ -318,6 +319,7 @@ impl CompletionFixture {
             self.live.clone(),
             Instant::now(),
         );
+        self.base.app.end_synchronous_run();
     }
 }
 
