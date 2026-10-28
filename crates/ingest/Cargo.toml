@@ -18,6 +18,8 @@ core-prov = { workspace = true }
 source-walk = { workspace = true }
 core-redact = { workspace = true }
 adapters-fw = { workspace = true }
+# Go recovery's own file filter, so skipped files are named (#1258).
+adapters-lang-go = { workspace = true }
 # The W6 work packet an uncovered adapter cell is handed off as (#1072).
 work-packets = { workspace = true }
 toml = "1.1"

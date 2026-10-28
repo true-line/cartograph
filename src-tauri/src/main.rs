@@ -11210,7 +11210,11 @@ export function App() {
             steps,
             vec![
                 (String::new(), 0, None),
-                ("main.go".to_string(), 0, Some(1))
+                ("main.go".to_string(), 0, Some(1)),
+                // The Go skip pass (#1258) walks Go recovery's scope after the
+                // report walk, at the finished count.
+                (String::new(), 1, Some(1)),
+                ("main.go".to_string(), 1, Some(1))
             ]
         );
     }

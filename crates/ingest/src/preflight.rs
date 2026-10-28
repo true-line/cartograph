@@ -570,6 +570,26 @@ pub fn preflight_scan(
         }
         detect_language(&extension, rel, plugins, &mut languages, &mut unsupported);
     }
+    // Go recovery walks its own scope (it reads `target/`, for one), so the
+    // skips come from that walk rather than this one (#1258), including in
+    // a tree whose only Go is somewhere this walk skips. It stays under the
+    // same hook: each step reports the finished file count, and a break
+    // stops the scan.
+    {
+        let mut on_step = |path: &str| {
+            on_file(ScanStep {
+                path,
+                done: total,
+                total: Some(total),
+            })
+        };
+        let Some(skipped) = adapters_lang_go::skipped_files_until(root, &mut on_step)
+            .map_err(std::io::Error::other)?
+        else {
+            return Ok(None);
+        };
+        go_skipped_sources(&skipped, &mut unsupported);
+    }
 
     // Captured members the live walk no longer reaches still carry the
     // extraction's claims; scan their captured bytes. No hook: the host's
@@ -852,6 +872,34 @@ fn scan_source(
         }
     }
     Ok(())
+}
+
+/// One `go-skipped-source` finding per reason Go recovery skips files
+/// (#1258): the count and the first path in recovery's walk order.
+fn go_skipped_sources(
+    skipped: &[(String, adapters_lang_go::SkipReason)],
+    unsupported: &mut Vec<PatternFinding>,
+) {
+    use adapters_lang_go::SkipReason;
+    for (reason, label) in [
+        (SkipReason::PlatformSuffix, "a GOOS/GOARCH file-name suffix"),
+        (
+            SkipReason::BuildConstraint,
+            "a //go:build or // +build constraint",
+        ),
+    ] {
+        let mut paths = skipped
+            .iter()
+            .filter(|(_, why)| *why == reason)
+            .map(|(rel, _)| rel);
+        let Some(first) = paths.next() else { continue };
+        let count = 1 + paths.count();
+        let message = format!(
+            "{count} Go source file(s) carry {label} and are not analysed: \
+             recovery does not evaluate build tags (first: {first})"
+        );
+        unsupported.push(finding("go-skipped-source", first, 1, &message));
+    }
 }
 
 fn finding(kind: &str, path: &str, line: u64, message: &str) -> PatternFinding {
@@ -1633,7 +1681,9 @@ mod tests {
             vec![
                 (String::new(), 0, None),
                 ("a.ts".to_string(), 0, Some(2)),
-                ("b.ts".to_string(), 1, Some(2))
+                ("b.ts".to_string(), 1, Some(2)),
+                // The Go skip pass lists the tree again (#1258).
+                (String::new(), 2, Some(2))
             ]
         );
         let mut announced = 0;
@@ -1735,5 +1785,100 @@ mod tests {
                 "{language}"
             );
         }
+    }
+
+    // AC-0427 (#1258): Go files the adapter skips are counted per reason,
+    // never silently dropped; vendored, test and plain files are not counted.
+    #[test]
+    fn go_files_recovery_skips_are_named_with_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "go.mod", "module example.com/app\n");
+        write(dir.path(), "cmd/main.go", "package main\n");
+        write(dir.path(), "pkg/sys_linux.go", "package pkg\n");
+        write(dir.path(), "pkg/sys_windows_amd64.go", "package pkg\n");
+        write(
+            dir.path(),
+            "pkg/tagged.go",
+            "//go:build linux\n\npackage pkg\n",
+        );
+        write(
+            dir.path(),
+            "pkg/legacy.go",
+            "// +build ignore\n\npackage pkg\n",
+        );
+        write(
+            dir.path(),
+            "pkg/late.go",
+            "package pkg\n\n//go:build linux\n",
+        );
+        write(dir.path(), "pkg/sys_linux_test.go", "package pkg\n");
+        write(dir.path(), "vendor/dep/dep_linux.go", "package dep\n");
+        write(
+            dir.path(),
+            "vendor/dep/tagged.go",
+            "//go:build linux\npackage dep\n",
+        );
+        // Preflight's own walk skips `target/`; Go recovery reads it.
+        write(dir.path(), "target/gen/zz_linux.go", "package gen\n");
+        let report = preflight(dir.path()).unwrap();
+        let skipped: Vec<(&str, &str)> = report
+            .unsupported
+            .iter()
+            .filter(|finding| finding.kind == "go-skipped-source")
+            .map(|finding| (finding.path.as_str(), finding.message.as_str()))
+            .collect();
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert_eq!(skipped[0].0, "pkg/sys_linux.go");
+        assert!(
+            skipped[0]
+                .1
+                .starts_with("3 Go source file(s) carry a GOOS/GOARCH")
+        );
+        assert_eq!(skipped[1].0, "pkg/legacy.go");
+        assert!(
+            skipped[1]
+                .1
+                .starts_with("2 Go source file(s) carry a //go:build")
+        );
+        assert_eq!(
+            report.unsupported,
+            preflight(dir.path()).unwrap().unsupported
+        );
+
+        // The Go pass runs under the scan hook: a break there stops the
+        // scan, so no report returns after cancellation.
+        let mut go_steps = Vec::new();
+        let stopped = preflight_scan(
+            dir.path(),
+            &[],
+            EvalProofSource::PendingRecovery,
+            &mut |step| {
+                if step.path == "target/gen/zz_linux.go" {
+                    go_steps.push(step.path.to_string());
+                    return std::ops::ControlFlow::Break(());
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert!(stopped.is_none());
+        assert_eq!(go_steps, vec!["target/gen/zz_linux.go".to_string()]);
+    }
+
+    // AC-0427 (#1258): a tree whose only Go sits where preflight's own walk
+    // does not go (`target/`) still has its skipped Go files named.
+    #[test]
+    fn go_skips_are_named_when_all_go_is_outside_the_preflight_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "target/go.mod", "module example.com/gen\n");
+        write(dir.path(), "target/gen/zz_linux.go", "package gen\n");
+        let report = preflight(dir.path()).unwrap();
+        let skipped: Vec<&str> = report
+            .unsupported
+            .iter()
+            .filter(|finding| finding.kind == "go-skipped-source")
+            .map(|finding| finding.path.as_str())
+            .collect();
+        assert_eq!(skipped, vec!["target/gen/zz_linux.go"]);
     }
 }

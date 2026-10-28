@@ -2504,6 +2504,7 @@ name = "ingest"
 version = "0.41.0"
 dependencies = [
  "adapters-fw",
+ "adapters-lang-go",
  "cap-fs-ext",
  "cap-std",
  "core-graph",
