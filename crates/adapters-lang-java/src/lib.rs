@@ -62,9 +62,9 @@ pub struct Extraction {
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
-    /// RestTemplate calls (AC-0435): whole URLs, kept out of the Retrofit
-    /// base join and appended to `fetch_sites` after it.
-    rest_template_sites: Vec<adapters_fw::client::FetchSite>,
+    /// RestTemplate (AC-0435) and WebClient (AC-0441) calls: kept out of the
+    /// Retrofit base join and appended to `fetch_sites` after it.
+    unjoined_sites: Vec<adapters_fw::client::FetchSite>,
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<DeclaredType>,
     /// Package declarations, one per file that has one.
@@ -735,8 +735,8 @@ pub fn extract_source(
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
-    let rest_template_sites = std::mem::take(&mut out.rest_template_sites);
-    out.fetch_sites.extend(rest_template_sites);
+    let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
+    out.fetch_sites.extend(unjoined_sites);
     let package_types: BTreeSet<String> = out.package_types.iter().cloned().collect();
     jaxrs::resolve(
         std::mem::take(&mut out.pending_endpoints),
@@ -936,14 +936,13 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
 
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
-    // RestTemplate client calls (AC-0435) are product facts too.
+    // RestTemplate (AC-0435) and WebClient (AC-0441) client calls are
+    // product facts too, and never take a Retrofit base.
     if product {
-        out.rest_template_sites.extend(rest_template::sites(
-            &cx,
-            root,
-            &imports,
-            &methods_by_start,
-        ));
+        out.unjoined_sites
+            .extend(rest_template::sites(&cx, root, &imports, &methods_by_start));
+        out.unjoined_sites
+            .extend(webclient::sites(&cx, root, &imports, &methods_by_start));
         // OpenFeign clients (AC-0437) wait for the same-package check.
         out.pending_feign.extend(feign::sites(
             &cx,
@@ -1473,8 +1472,7 @@ pub fn extract_dir_incremental_with_progress(
             out.packages.extend(extraction.packages);
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
-            out.rest_template_sites
-                .extend(extraction.rest_template_sites);
+            out.unjoined_sites.extend(extraction.unjoined_sites);
             out.method_index.extend(extraction.method_index);
             out.entity_index.extend(extraction.entity_index);
             out.repository_index.extend(extraction.repository_index);
@@ -1492,8 +1490,8 @@ pub fn extract_dir_incremental_with_progress(
         &out.retrofit_bases,
         retrofit::LIBRARY,
     );
-    let rest_template_sites = std::mem::take(&mut out.rest_template_sites);
-    out.fetch_sites.extend(rest_template_sites);
+    let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
+    out.fetch_sites.extend(unjoined_sites);
 
     // Directory join: an imported FQN resolves only to a type this repo
     // declares exactly once — a duplicate FQN (the same class in two source
@@ -1641,6 +1639,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 mod feign;
 mod rest_template;
 mod retrofit;
+mod webclient;
 
 #[cfg(test)]
 mod tests;

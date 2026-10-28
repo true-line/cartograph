@@ -373,6 +373,75 @@ func main() {
 }
 
 #[test]
+fn java_webclient_calls_bind_or_cite_their_runtime_base() {
+    // AC-0441: a base-less `WebClient.create()` call binds to the same
+    // repository's Spring endpoint like any whole URL, while a field-held
+    // client's base is a runtime value the stitcher names as a Gap.
+    let dir = tempfile::tempdir().unwrap();
+    let java = dir.path().join("src/main/java/io/demo");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        java.join("Users.java"),
+        r#"package io.demo;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.reactive.function.client.WebClient;
+
+@RestController
+class Users {
+    private final WebClient orders;
+
+    Users(WebClient orders) { this.orders = orders; }
+
+    @GetMapping("/users/{id}")
+    String user() { return ""; }
+
+    void sync() {
+        WebClient.create().get().uri("/users/{id}", 1).retrieve();
+        orders.get().uri("/orders").retrieve();
+    }
+}
+"#,
+    )
+    .unwrap();
+    let (x, _) = crate::extract_tree_with_summary(
+        dir.path(),
+        REPO,
+        "workdir",
+        &["client".to_string()],
+        &BTreeMap::new(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(x.fetch_sites.len(), 2);
+    let sync = format!("sym:{REPO}@src/main/java/io/demo/Users.java#Users.sync()");
+    let fetches: Vec<(&str, &str)> = x
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "FETCHES")
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    assert!(
+        fetches.contains(&(sync.as_str(), "ep:local/p@GET:/users/{id}")),
+        "{fetches:?}"
+    );
+    let reasons: Vec<&str> = x
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:fetch:"))
+        .filter_map(|node| node.props["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        ["runtime base URL `orders` of Users.sync is not declared in the system manifest"],
+        "{fetches:?}"
+    );
+}
+
+#[test]
 fn java_rest_template_calls_stitch_to_same_repo_spring_endpoints() {
     // AC-0435: a RestTemplate call is a fetch site the ordinary stitch binds
     // to the same repository's Spring endpoint, or names as a Gap.
