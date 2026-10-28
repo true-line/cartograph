@@ -666,7 +666,7 @@ fn query_history_firewall_redaction_rejects_latest_selector_after_action_match()
     );
 }
 
-// AC-0430: original errors and accepted actions survive detailed attribution.
+// AC-0430, AC-0436: original errors and accepted actions survive detailed attribution.
 #[test]
 fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
     use ActionDecodeStage as Stage;
@@ -692,6 +692,7 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
     };
     for valid in [
         query.clone(),
+        json!({"type":"read_coverage_inventory","context_id":context,"repo":"repo","inventory_hash":"a".repeat(64),"max_bytes":1}),
         json!({"type":"read_evidence","fact":{"kind":"node","id":"node:test"},"role":"provenance","index":0}),
         json!({"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Missing evidence."]}}),
         json!({"type":"replay_query","context_id":context,"query_index":0,"query_id":reference.query_id}),
@@ -727,7 +728,7 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
         ),
         (
             wrong_context.to_string(),
-            Stage::Semantic,
+            Stage::SemanticRule(ActionSemanticRule::QueryContext),
             InvestigationError::InvalidAction,
         ),
         (
@@ -744,6 +745,87 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
             error
         );
         assert!(!format!("{failure:?}").contains("PRIVATE-REJECTED-1281"));
+    }
+    // Pin the old public error independently of the new rule attribution.
+    let finish = json!({"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Missing evidence."]}});
+    let mut shape = finish.clone();
+    shape["action"]["limitations"] = json!([]);
+    let mut role = finish.clone();
+    role["schema_version"] = json!(2);
+    let mut outcome = finish;
+    outcome["outcome"] = json!("supported");
+    let mut query_shape = ledger.queries[0].query.clone();
+    query_shape.max_facts = 0;
+    let mut scope = query_shape.clone();
+    scope.scope = InvestigationScope::Neighborhood {
+        anchor: String::new(),
+        hops: 1,
+    };
+    for (value, rule, error) in [
+        (
+            json!({"type":"query_context","context_id":context,"query":scope}),
+            ActionSemanticRule::QueryShape,
+            InvestigationError::InvalidRequest,
+        ),
+        (
+            json!({"type":"query_context","context_id":context,"query":query_shape}),
+            ActionSemanticRule::QueryShape,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            json!({"type":"read_coverage_inventory","context_id":"wrong","repo":"repo","inventory_hash":"a".repeat(64),"max_bytes":1}),
+            ActionSemanticRule::InventoryContext,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            json!({"type":"read_coverage_inventory","context_id":context,"repo":"","inventory_hash":"a".repeat(64),"max_bytes":1}),
+            ActionSemanticRule::InventoryShape,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            json!({"type":"replay_query","context_id":"wrong","query_index":0,"query_id":reference.query_id}),
+            ActionSemanticRule::ReplayContext,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            json!({"type":"replay_query","context_id":context,"query_index":1,"query_id":reference.query_id}),
+            ActionSemanticRule::ReplayReference,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            json!({"type":"read_evidence","fact":{"kind":"node","id":""},"role":"provenance","index":0}),
+            ActionSemanticRule::EvidenceShape,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            role,
+            ActionSemanticRule::FinishRole,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            shape,
+            ActionSemanticRule::FinishShape,
+            InvestigationError::InvalidAction,
+        ),
+        (
+            outcome,
+            ActionSemanticRule::FinishOutcome,
+            InvestigationError::InvalidAction,
+        ),
+    ] {
+        let raw = value.to_string();
+        assert_eq!(
+            decode(&raw).unwrap_err(),
+            ActionDecodeFailure {
+                stage: Stage::SemanticRule(rule),
+                error
+            }
+        );
+        assert_eq!(
+            ProgressiveInvestigationAction::decode_resolved(&raw, &context, &hash, &ledger, policy)
+                .unwrap_err(),
+            error
+        );
     }
     let host = ProgressiveInvestigationAction::decode_resolved_detailed(
         "{}", "wrong", &hash, &ledger, policy,

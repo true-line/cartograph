@@ -27,9 +27,7 @@ impl StagedFinish {
         strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)
             .map_err(|error| Stage::Preflight.failure(error))?;
         let finish: Self = serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
-        finish
-            .validate_for_role(false)
-            .map_err(|error| Stage::Semantic.failure(error))?;
+        finish.validate_for_role_detailed(false)?;
         if serde_json::to_value(&finish).map_err(|_| Stage::CanonicalFields.invalid())?
             != serde_json::from_str::<serde_json::Value>(raw)
                 .map_err(|_| Stage::TypedEnvelope.invalid())?
@@ -52,17 +50,25 @@ impl StagedFinish {
         Ok(finish)
     }
     fn validate_for_role(&self, message: bool) -> Result<(), InvestigationError> {
+        self.validate_for_role_detailed(message)
+            .map_err(|failure| failure.error)
+    }
+    fn validate_for_role_detailed(&self, message: bool) -> Result<(), ActionDecodeFailure> {
         if self.schema_version != if message { 2 } else { 1 }
             || (!message && self.narrative.is_some())
             || (message
                 && (self.outcome == CompletionOutcome::Supported) != self.narrative.is_some())
         {
-            return Err(InvestigationError::InvalidAction);
+            return Err(ActionSemanticRule::FinishRole.invalid());
         }
         let action = InvestigationAction::decode(
-            &String::from_utf8(bounded_bytes(&self.action, MAX_ACTION_BYTES)?)
-                .map_err(|_| InvestigationError::InvalidAction)?,
-        )?;
+            &String::from_utf8(
+                bounded_bytes(&self.action, MAX_ACTION_BYTES)
+                    .map_err(|error| ActionSemanticRule::FinishShape.failure(error))?,
+            )
+            .map_err(|_| ActionSemanticRule::FinishShape.invalid())?,
+        )
+        .map_err(|error| ActionSemanticRule::FinishShape.failure(error))?;
         match (&action, self.outcome) {
             (
                 InvestigationAction::Finish {
@@ -88,7 +94,10 @@ impl StagedFinish {
             {
                 Ok(())
             }
-            _ => Err(InvestigationError::InvalidAction),
+            (InvestigationAction::Finish { .. }, _) => {
+                Err(ActionSemanticRule::FinishOutcome.invalid())
+            }
+            _ => Err(ActionSemanticRule::FinishRole.invalid()),
         }
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {

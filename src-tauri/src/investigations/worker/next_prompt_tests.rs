@@ -975,11 +975,12 @@ pub(in crate::investigations) fn expanded_capacity_provider() -> Arc<dyn LlmProv
     Arc::new(provider)
 }
 
-// AC-0430: rejection stages survive reopen without retaining rejected content.
+// AC-0430, AC-0436: rejection stages survive reopen without retaining rejected content.
 #[test]
 fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
     use agents::investigation::{
-        ActionDecodeFailure, ActionDecodeStage as DecodeStage, InvestigationError,
+        ActionDecodeFailure, ActionDecodeStage as DecodeStage, ActionSemanticRule as Rule,
+        InvestigationError,
     };
     const SENTINEL: &str = "PRIVATE-REJECTED-RESPONSE-1266";
     struct Rejected {
@@ -1066,6 +1067,16 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             DecodeStage::CanonicalFields,
             DecodeStage::Semantic,
             DecodeStage::HostBinding,
+            DecodeStage::SemanticRule(Rule::QueryContext),
+            DecodeStage::SemanticRule(Rule::QueryShape),
+            DecodeStage::SemanticRule(Rule::InventoryContext),
+            DecodeStage::SemanticRule(Rule::InventoryShape),
+            DecodeStage::SemanticRule(Rule::ReplayContext),
+            DecodeStage::SemanticRule(Rule::ReplayReference),
+            DecodeStage::SemanticRule(Rule::EvidenceShape),
+            DecodeStage::SemanticRule(Rule::FinishRole),
+            DecodeStage::SemanticRule(Rule::FinishShape),
+            DecodeStage::SemanticRule(Rule::FinishOutcome),
         ] {
             let reason =
                 InvestigationStopReason::ActionDecode(ActionDecodeFailure { stage, error });
@@ -1115,7 +1126,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             json!({"type":"unsupported_action", "private":SENTINEL}).to_string(),
         ),
         (
-            decoded(DecodeStage::Semantic, InvestigationError::InvalidAction),
+            decoded(DecodeStage::SemanticRule(Rule::QueryContext), InvestigationError::InvalidAction),
             json!({"type":"query_context", "context_id":format!("context-v2:{}", "a".repeat(64)),
                 "query":{"scope":{"type":"all"},"kind":null,"labels":[SENTINEL],
                     "max_facts":1,"max_bytes":1024,"cursor":null}})

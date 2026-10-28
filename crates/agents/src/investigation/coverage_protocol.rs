@@ -65,11 +65,11 @@ impl QualifiedInvestigationAction {
         match action {
             ReadAction::QueryContext { context_id, query } => {
                 if context_id != expected_context_id {
-                    return Err(Stage::Semantic.invalid());
+                    return Err(ActionSemanticRule::QueryContext.invalid());
                 }
                 query
                     .validate()
-                    .map_err(|error| Stage::Semantic.failure(error))?;
+                    .map_err(|error| ActionSemanticRule::QueryShape.failure(error))?;
                 Ok(Self::QueryContext { context_id, query })
             }
             ReadAction::ReadCoverageInventory {
@@ -78,12 +78,14 @@ impl QualifiedInvestigationAction {
                 inventory_hash,
                 max_bytes,
             } => {
-                if context_id != expected_context_id
-                    || !text(&repo, 256)
+                if context_id != expected_context_id {
+                    return Err(ActionSemanticRule::InventoryContext.invalid());
+                }
+                if !text(&repo, 256)
                     || !crate::source_basis::hash(&inventory_hash)
                     || !(1..=MAX_QUERY_BYTES).contains(&max_bytes)
                 {
-                    return Err(Stage::Semantic.invalid());
+                    return Err(ActionSemanticRule::InventoryShape.invalid());
                 }
                 Ok(Self::ReadCoverageInventory(InvestigationCoverageRead {
                     context_id,
