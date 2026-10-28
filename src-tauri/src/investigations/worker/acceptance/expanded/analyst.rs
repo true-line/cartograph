@@ -33,9 +33,7 @@ pub(super) fn exclusive(path: &Path, body: &[u8]) -> Result<(), String> {
     file.write_all(body)
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
-    File::open(path.parent().ok_or("Missing artifact parent.")?)
-        .and_then(|parent| parent.sync_all())
-        .map_err(|e| e.to_string())
+    super::vendure_prepare::sync_directory(path.parent().ok_or("Missing artifact parent.")?)
 }
 // Preserve exact bounded journal bodies, including their independently validated
 // historical admission cutoffs. Never reconstruct modes from terminal usage.
