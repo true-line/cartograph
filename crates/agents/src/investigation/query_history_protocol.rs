@@ -10,7 +10,30 @@ pub enum ActionDecodeStage {
     CanonicalFields,
     /// Includes nested shape checks; never an exact rejected field or value.
     Semantic,
+    SemanticRule(ActionSemanticRule),
     HostBinding,
+}
+/// Closed rule families, not rejected fields or values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionSemanticRule {
+    QueryContext,
+    QueryShape,
+    InventoryContext,
+    InventoryShape,
+    ReplayContext,
+    ReplayReference,
+    EvidenceShape,
+    FinishRole,
+    FinishShape,
+    FinishOutcome,
+}
+impl ActionSemanticRule {
+    pub(super) fn failure(self, error: InvestigationError) -> ActionDecodeFailure {
+        Stage::SemanticRule(self).failure(error)
+    }
+    pub(super) fn invalid(self) -> ActionDecodeFailure {
+        self.failure(InvestigationError::InvalidAction)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionDecodeFailure {
@@ -84,14 +107,14 @@ impl ProgressiveInvestigationAction {
             query_id,
         } = action;
         if actual != context_id {
-            return Err(Stage::Semantic.invalid());
+            return Err(ActionSemanticRule::ReplayContext.invalid());
         }
         let query = QueryHistoryReference {
             query_index,
             query_id,
         }
         .resolve(request_hash, ledger, policy)
-        .map_err(|_| Stage::Semantic.invalid())?;
+        .map_err(|_| ActionSemanticRule::ReplayReference.invalid())?;
         Ok(CompletionInvestigationAction::Read(
             QualifiedInvestigationAction::QueryContext {
                 context_id: actual,

@@ -401,7 +401,8 @@ impl InvestigationStopReason {
             Self::InvalidResponseMetadata => "Provider response refused: response_metadata.",
             Self::ActionDecode(failure) => {
                 use agents::investigation::{
-                    ActionDecodeStage as Stage, InvestigationError as Error,
+                    ActionDecodeStage as Stage, ActionSemanticRule as Rule,
+                    InvestigationError as Error,
                 };
                 macro_rules! message {
                     ($stage:literal) => {
@@ -435,6 +436,18 @@ impl InvestigationStopReason {
                     Stage::TypedEnvelope => message!("typed_envelope"),
                     Stage::CanonicalFields => message!("canonical_fields"),
                     Stage::Semantic => message!("semantic"),
+                    Stage::SemanticRule(rule) => match rule {
+                        Rule::QueryContext => message!("query_context"),
+                        Rule::QueryShape => message!("query_shape"),
+                        Rule::InventoryContext => message!("inventory_context"),
+                        Rule::InventoryShape => message!("inventory_shape"),
+                        Rule::ReplayContext => message!("replay_context"),
+                        Rule::ReplayReference => message!("replay_reference"),
+                        Rule::EvidenceShape => message!("evidence_shape"),
+                        Rule::FinishRole => message!("finish_role"),
+                        Rule::FinishShape => message!("finish_shape"),
+                        Rule::FinishOutcome => message!("finish_outcome"),
+                    },
                     Stage::HostBinding => message!("host_binding"),
                 }
             }

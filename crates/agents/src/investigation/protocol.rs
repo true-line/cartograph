@@ -1,6 +1,7 @@
 use super::{
-    ActionDecodeFailure, ActionDecodeStage, InvestigationError, MAX_ACTION_BYTES, MAX_QUERY_BYTES,
-    MAX_QUERY_FACTS, bounded_bytes, reject_prose_replay, strict, text,
+    ActionDecodeFailure, ActionDecodeStage, ActionSemanticRule, InvestigationError,
+    MAX_ACTION_BYTES, MAX_QUERY_BYTES, MAX_QUERY_FACTS, bounded_bytes, reject_prose_replay, strict,
+    text,
 };
 use crate::{TaskFactKey, TaskRangeRole};
 use core_prov::{ConfidenceTier, Tier};
@@ -151,9 +152,7 @@ impl InvestigationAction {
         {
             return Err(Stage::CanonicalFields.invalid());
         }
-        action
-            .validate_shape()
-            .map_err(|error| Stage::Semantic.failure(error))?;
+        action.validate_shape_detailed()?;
         Ok(action)
     }
 
@@ -166,11 +165,17 @@ impl InvestigationAction {
     }
 
     fn validate_shape(&self) -> Result<(), InvestigationError> {
+        self.validate_shape_detailed()
+            .map_err(|failure| failure.error)
+    }
+    fn validate_shape_detailed(&self) -> Result<(), ActionDecodeFailure> {
         match self {
-            Self::QueryContext { query } => query.validate(),
+            Self::QueryContext { query } => query
+                .validate()
+                .map_err(|error| ActionSemanticRule::QueryShape.failure(error)),
             Self::ReadEvidence { fact, index, .. } => {
                 if !valid_fact(fact) || *index >= 1024 {
-                    return Err(InvestigationError::InvalidAction);
+                    return Err(ActionSemanticRule::EvidenceShape.invalid());
                 }
                 Ok(())
             }
@@ -194,7 +199,7 @@ impl InvestigationAction {
                             || !valid_limitations(&f.limitations)
                     })
                 {
-                    return Err(InvestigationError::InvalidAction);
+                    return Err(ActionSemanticRule::FinishShape.invalid());
                 }
                 Ok(())
             }
