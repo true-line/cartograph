@@ -25,6 +25,9 @@ pub enum ActionSemanticRule {
     EvidenceShape,
     FinishRole,
     FinishShape,
+    FinishOverall,
+    FindingTextLimits,
+    FindingCitations,
     FinishOutcome,
 }
 impl ActionSemanticRule {

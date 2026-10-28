@@ -61,14 +61,14 @@ impl StagedFinish {
         {
             return Err(ActionSemanticRule::FinishRole.invalid());
         }
-        let action = InvestigationAction::decode(
+        let action = InvestigationAction::decode_detailed(
             &String::from_utf8(
                 bounded_bytes(&self.action, MAX_ACTION_BYTES)
                     .map_err(|error| ActionSemanticRule::FinishShape.failure(error))?,
             )
             .map_err(|_| ActionSemanticRule::FinishShape.invalid())?,
         )
-        .map_err(|error| ActionSemanticRule::FinishShape.failure(error))?;
+        .map_err(nested_finish_failure)?;
         match (&action, self.outcome) {
             (
                 InvestigationAction::Finish {
@@ -664,4 +664,37 @@ pub fn derive_assessment_for_binding_with_policy(
         });
     }
     Ok(assessment)
+}
+
+// Nonsemantic nested stages describe a host-reserialized action, not the raw
+// response. Retain the historical coarse label rather than imply otherwise.
+fn nested_finish_failure(failure: ActionDecodeFailure) -> ActionDecodeFailure {
+    match failure.stage {
+        ActionDecodeStage::SemanticRule(_) => failure,
+        _ => ActionSemanticRule::FinishShape.failure(failure.error),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn nested_finish_failure_mapping_preserves_errors_without_claiming_reachability() {
+    use ActionDecodeStage as Stage;
+    for error in [
+        InvestigationError::InvalidAction,
+        InvestigationError::InvalidInput,
+        InvestigationError::LimitExceeded,
+    ] {
+        for stage in [
+            Stage::Preflight,
+            Stage::TypedEnvelope,
+            Stage::CanonicalFields,
+        ] {
+            assert_eq!(
+                nested_finish_failure(ActionDecodeFailure { stage, error }),
+                ActionSemanticRule::FinishShape.failure(error)
+            );
+        }
+        let semantic = ActionSemanticRule::FindingCitations.failure(error);
+        assert_eq!(nested_finish_failure(semantic), semantic);
+    }
 }

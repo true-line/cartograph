@@ -1184,6 +1184,9 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             DecodeStage::SemanticRule(Rule::EvidenceShape),
             DecodeStage::SemanticRule(Rule::FinishRole),
             DecodeStage::SemanticRule(Rule::FinishShape),
+            DecodeStage::SemanticRule(Rule::FinishOverall),
+            DecodeStage::SemanticRule(Rule::FindingTextLimits),
+            DecodeStage::SemanticRule(Rule::FindingCitations),
             DecodeStage::SemanticRule(Rule::FinishOutcome),
         ] {
             let reason =
@@ -1216,7 +1219,38 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             SENTINEL.into(),
         )
     };
+    let finish = json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Title","statement":"Statement","citation_ids":["citation"],"limitations":["Limited."]}],"knowledge_completeness":"partial","limitations":["Limited."]}});
+    let finish_cases = [
+        ("/action/limitations", json!([]), Rule::FinishOverall),
+        (
+            "/action/findings/0/title",
+            json!(""),
+            Rule::FindingTextLimits,
+        ),
+        (
+            "/action/findings/0/citation_ids",
+            json!([]),
+            Rule::FindingCitations,
+        ),
+    ]
+    .map(|(pointer, value, rule)| {
+        let mut response = finish.clone();
+        *response.pointer_mut(pointer).unwrap() = value;
+        (
+            decoded(
+                DecodeStage::SemanticRule(rule),
+                InvestigationError::InvalidAction,
+            ),
+            response.to_string(),
+        )
+    });
+    let mut nested_typed = finish.clone();
+    nested_typed["action"]["findings"][0]["title"] = json!(1);
     for (stage, text) in [
+        (
+            decoded(DecodeStage::TypedEnvelope, InvestigationError::InvalidAction),
+            nested_typed.to_string(),
+        ),
         (
             InvestigationStopReason::InvalidCompletionEnvelope,
             SENTINEL.into(),
@@ -1258,7 +1292,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             FailureCode::OwnershipLost,
             InvocationOutcome::ResponseReceived,
         ),
-    ] {
+    ].into_iter().chain(finish_cases) {
         let provider = Arc::new(Rejected {
             profile: Scripted::new(Mode::Malformed),
             calls: AtomicUsize::new(0),
@@ -1321,7 +1355,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             }
         }
     }
-    assert_eq!(messages.len(), 11);
+    assert_eq!(messages.len(), 14);
 }
 
 // AC-0432, AC-0439: explicit generations keep their saved definitions through actual worker refusal/reopen.

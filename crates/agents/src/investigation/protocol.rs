@@ -188,18 +188,24 @@ impl InvestigationAction {
                     || (findings.is_empty()
                         != (*knowledge_completeness == KnowledgeCompleteness::InsufficientEvidence))
                     || !valid_limitations(limitations)
-                    || findings.iter().any(|f| {
-                        !text(&f.title, 160)
-                            || !text(&f.statement, 2048)
-                            || f.citation_ids.is_empty()
-                            || f.citation_ids.len() > 8
-                            || f.citation_ids.iter().any(|id| !text(id, 128))
-                            || f.citation_ids.iter().collect::<BTreeSet<_>>().len()
-                                != f.citation_ids.len()
-                            || !valid_limitations(&f.limitations)
-                    })
                 {
-                    return Err(ActionSemanticRule::FinishShape.invalid());
+                    return Err(ActionSemanticRule::FinishOverall.invalid());
+                }
+                for f in findings {
+                    if !text(&f.title, 160) || !text(&f.statement, 2048) {
+                        return Err(ActionSemanticRule::FindingTextLimits.invalid());
+                    }
+                    if f.citation_ids.is_empty()
+                        || f.citation_ids.len() > 8
+                        || f.citation_ids.iter().any(|id| !text(id, 128))
+                        || f.citation_ids.iter().collect::<BTreeSet<_>>().len()
+                            != f.citation_ids.len()
+                    {
+                        return Err(ActionSemanticRule::FindingCitations.invalid());
+                    }
+                    if !valid_limitations(&f.limitations) {
+                        return Err(ActionSemanticRule::FindingTextLimits.invalid());
+                    }
                 }
                 Ok(())
             }
