@@ -3417,3 +3417,204 @@ class Root {
         ]
     );
 }
+
+// AC-0443 (#1302): the soft keywords the grammar lexes as keywords still
+// name declarations. `dynamic` and `suspend` as function, property and
+// parameter names keep their Symbols with exact spans and source text, a
+// class under stacked annotations keeps its members and endpoints, and a
+// real `suspend` modifier and `dynamic` type still parse.
+#[test]
+fn soft_keyword_names_keep_their_declarations() {
+    let path = "src/main/kotlin/com/demo/web/Both.kt";
+    let source = r#"package com.demo.web
+
+import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.stereotype.Controller
+
+@RestController
+@Controller
+class Both {
+    @GetMapping("/both")
+    fun both(): String = "b"
+
+    @GetMapping("/dynamic")
+    fun dynamic(): String = "dynamic"
+
+    fun suspend(dynamic: Int): Int = dynamic
+
+    suspend fun load(): dynamic = null
+
+    fun /* named */ suspend(name: String): String = name
+
+    fun ref(): Int = suspend
+
+    suspend /* modifier */ fun later(block: suspend () -> Unit) {}
+
+    /* leading */ suspend fun first(): Int {
+        return 1
+    }
+
+    /* // = */ suspend fun second(): Int = 2
+
+    val dynamicValue = 1
+}
+"#;
+    let out = extract_source(source.as_bytes(), path, &id()).unwrap();
+    let mut endpoints: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        ["ep:local/demo@GET:/both", "ep:local/demo@GET:/dynamic"]
+    );
+    for member in ["Both.both", "Both.dynamic", "Both.suspend", "Both.load"] {
+        let symbol = node(&out.nodes, &format!("sym:local/demo@{path}#{member}"));
+        let span = &symbol.props["prov"]["evidence"][0];
+        let start = span["byte_start"].as_u64().unwrap() as usize;
+        let end = span["byte_end"].as_u64().unwrap() as usize;
+        let name = member.rsplit('.').next().unwrap();
+        assert!(
+            source[start..end].contains(&format!("fun {name}(")),
+            "{member}: {}",
+            &source[start..end]
+        );
+        assert_eq!(symbol.props["name"], member);
+    }
+    // A commented name, a reference ending an expression body and a modifier
+    // separated by a comment all keep the members around them.
+    for member in ["Both.ref", "Both.later", "Both.first", "Both.second"] {
+        node(&out.nodes, &format!("sym:local/demo@{path}#{member}"));
+    }
+    assert!(out.nodes.iter().any(|node| {
+        node.props["name"] == "Both.suspend"
+            && node.props["prov"]["evidence"][0]["byte_start"]
+                .as_u64()
+                .is_some_and(|start| {
+                    source[start as usize..].starts_with("fun /* named */ suspend(")
+                })
+    }));
+}
+
+// AC-0443: the mask is the same length, respells only whole words, and
+// keeps `suspend` wherever it is a modifier or a call.
+#[test]
+fn soft_keyword_mask_respells_only_names() {
+    for (source, masked) in [
+        (
+            "val dynamic = x.dynamicValue",
+            "val dynami_ = x.dynamicValue",
+        ),
+        (
+            "fun f(): dynamic = dynamic(1)",
+            "fun f(): dynami_ = dynami_(1)",
+        ),
+        (
+            "val suspend = 1\nvar  suspend = 2",
+            "val suspen_ = 1\nvar  suspen_ = 2",
+        ),
+        ("fun suspend() {}", "fun suspen_() {}"),
+        (
+            "suspend fun go() = suspend { }",
+            "suspend fun go() = suspend { }",
+        ),
+        (
+            "funsuspend() undynamic dynamic2",
+            "funsuspend() undynamic dynamic2",
+        ),
+        ("éval suspend fun x()", "éval suspend fun x()"),
+        ("fun f() = suspend", "fun f() = suspen_"),
+        ("fun /* c */ suspend() = 1", "fun         suspen_() = 1"),
+        (
+            "fun f(suspend: Int) = suspend",
+            "fun f(suspen_: Int) = suspen_",
+        ),
+        (
+            "val g = suspend\nfun h() = 1",
+            "val g = suspen_\nfun h() = 1",
+        ),
+        (
+            "x = suspend.invoke() + suspend(1)",
+            "x = suspen_.invoke() + suspen_(1)",
+        ),
+        (
+            "private suspend fun a()\n@A suspend fun b()\nsuspend /* c */ fun c()",
+            "private suspend fun a()\n@A suspend fun b()\nsuspend         fun c()",
+        ),
+        (
+            "val t: suspend () -> Unit\nfun r(b: suspend String.() -> Unit)",
+            "val t: suspend () -> Unit\nfun r(b: suspend String.() -> Unit)",
+        ),
+        ("return suspend\nfun z()", "return suspen_\nfun z()"),
+        ("x in suspend\ny", "x in suspen_\ny"),
+        (
+            "/* c */ suspend fun a()\n// note\nsuspend fun b()",
+            "        suspend fun a()\n// note\nsuspend fun b()",
+        ),
+        (
+            "val u = \"http://x\"\nsuspend fun c()",
+            "val u = \"http://x\"\nsuspend fun c()",
+        ),
+        (
+            "x = // why\n  suspend\nfun d()",
+            "x = // why\n  suspen_\nfun d()",
+        ),
+        (
+            "x = /* why */ suspend\nfun e()",
+            "x =           suspen_\nfun e()",
+        ),
+        (
+            "/* // note */ suspend fun f()\n/* a /* b */ = */ suspend fun g()",
+            "              suspend fun f()\n                  suspend fun g()",
+        ),
+        (
+            "val s = \"= /* (\"\nsuspend fun h()\nval c = '='\nsuspend fun i()",
+            "val s = \"= /* (\"\nsuspend fun h()\nval c = '='\nsuspend fun i()",
+        ),
+        (
+            "val r = \"\"\"x = \"\"\"\nsuspend fun j()",
+            "val r = \"\"\"x = \"\"\"\nsuspend fun j()",
+        ),
+        (
+            "val t = \"${suspend}\" + \"suspend dynamic\"",
+            "val t = \"${suspen_}\" + \"suspen_ dynami_\"",
+        ),
+    ] {
+        let out = mask_soft_keyword_names(source.as_bytes());
+        assert_eq!(std::str::from_utf8(&out).unwrap(), masked, "{source}");
+    }
+}
+
+// AC-0444 (#1306): a block comment on the line before a declaration, even
+// after an expression body, keeps that declaration and its class.
+#[test]
+fn block_comments_keep_the_next_declaration() {
+    let path = "src/main/kotlin/com/demo/A.kt";
+    let source = "package com.demo\n\nclass A {\n    fun x() = 1\n    /* c */ fun y() = 1\n    /* c */ private fun z() = 1\n    /* a /* nested */ b */ inline fun w() = 1\n    /** doc\n     * lines */\n    val v = \"/* not a comment */\"\n}\n";
+    let out = extract_source(source.as_bytes(), path, &id()).unwrap();
+    for (member, text) in [
+        ("A.y", "fun y() = 1"),
+        ("A.z", "private fun z() = 1"),
+        ("A.w", "inline fun w() = 1"),
+    ] {
+        let symbol = node(&out.nodes, &format!("sym:local/demo@{path}#{member}"));
+        let span = &symbol.props["prov"]["evidence"][0];
+        let start = span["byte_start"].as_u64().unwrap() as usize;
+        let end = span["byte_end"].as_u64().unwrap() as usize;
+        assert!(
+            source[start..end].contains(text),
+            "{member}: {}",
+            &source[start..end]
+        );
+    }
+    let masked = mask_soft_keyword_names(source.as_bytes());
+    assert_eq!(masked.len(), source.len());
+    let masked = std::str::from_utf8(&masked).unwrap();
+    assert!(masked.contains("val v = \"/* not a comment */\""));
+    assert!(masked.contains("    fun y() = 1"));
+    assert_eq!(masked.matches('\n').count(), source.matches('\n').count());
+}
