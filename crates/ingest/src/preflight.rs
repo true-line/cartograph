@@ -518,6 +518,7 @@ pub fn preflight_scan(
 
     let total = files.len();
     let mut walked = std::collections::BTreeSet::new();
+    let mut saw_go = false;
     for (done, (path, name, rel)) in files.into_iter().enumerate() {
         if on_file(ScanStep {
             path: &rel,
@@ -531,6 +532,7 @@ pub fn preflight_scan(
         // Framework chips and config-behind-code findings quote the
         // toolchain registry (#215) — the same detection that produces
         // the graph's Tool facts, so the two surfaces cannot disagree.
+        saw_go |= name == "go.mod" || name.ends_with(".go");
         let detection = crate::toolchain::detect_in_file(&name, &rel, &path);
         if detection
             .framework_labels
@@ -571,8 +573,24 @@ pub fn preflight_scan(
         detect_language(&extension, rel, plugins, &mut languages, &mut unsupported);
     }
     // Go recovery walks its own scope (it reads `target/`, for one), so the
-    // skips come from that walk rather than this one (#1258).
-    go_skipped_sources(root, &mut unsupported)?;
+    // skips come from that walk rather than this one (#1258). It runs only
+    // for a tree this walk saw Go in, and stays under the same hook: each
+    // step reports the finished file count, and a break stops the scan.
+    if saw_go {
+        let mut on_step = |path: &str| {
+            on_file(ScanStep {
+                path,
+                done: total,
+                total: Some(total),
+            })
+        };
+        let Some(skipped) = adapters_lang_go::skipped_files_until(root, &mut on_step)
+            .map_err(std::io::Error::other)?
+        else {
+            return Ok(None);
+        };
+        go_skipped_sources(&skipped, &mut unsupported);
+    }
 
     // Captured members the live walk no longer reaches still carry the
     // extraction's claims; scan their captured bytes. No hook: the host's
@@ -857,11 +875,13 @@ fn scan_source(
     Ok(())
 }
 
-/// One `go-skipped-source` finding per reason Go recovery skips files under
-/// `root` (#1258): the count and the first path in recovery's walk order.
-fn go_skipped_sources(root: &Path, unsupported: &mut Vec<PatternFinding>) -> std::io::Result<()> {
+/// One `go-skipped-source` finding per reason Go recovery skips files
+/// (#1258): the count and the first path in recovery's walk order.
+fn go_skipped_sources(
+    skipped: &[(String, adapters_lang_go::SkipReason)],
+    unsupported: &mut Vec<PatternFinding>,
+) {
     use adapters_lang_go::SkipReason;
-    let skipped = adapters_lang_go::skipped_files(root).map_err(std::io::Error::other)?;
     for (reason, label) in [
         (SkipReason::PlatformSuffix, "a GOOS/GOARCH file-name suffix"),
         (
@@ -881,7 +901,6 @@ fn go_skipped_sources(root: &Path, unsupported: &mut Vec<PatternFinding>) -> std
         );
         unsupported.push(finding("go-skipped-source", first, 1, &message));
     }
-    Ok(())
 }
 
 fn finding(kind: &str, path: &str, line: u64, message: &str) -> PatternFinding {
@@ -1798,6 +1817,8 @@ mod tests {
             "vendor/dep/tagged.go",
             "//go:build linux\npackage dep\n",
         );
+        // Preflight's own walk skips `target/`; Go recovery reads it.
+        write(dir.path(), "target/gen/zz_linux.go", "package gen\n");
         let report = preflight(dir.path()).unwrap();
         let skipped: Vec<(&str, &str)> = report
             .unsupported
@@ -1810,7 +1831,7 @@ mod tests {
         assert!(
             skipped[0]
                 .1
-                .starts_with("2 Go source file(s) carry a GOOS/GOARCH")
+                .starts_with("3 Go source file(s) carry a GOOS/GOARCH")
         );
         assert_eq!(skipped[1].0, "pkg/legacy.go");
         assert!(
@@ -1822,5 +1843,24 @@ mod tests {
             report.unsupported,
             preflight(dir.path()).unwrap().unsupported
         );
+
+        // The Go pass runs under the scan hook: a break there stops the
+        // scan, so no report returns after cancellation.
+        let mut go_steps = Vec::new();
+        let stopped = preflight_scan(
+            dir.path(),
+            &[],
+            EvalProofSource::PendingRecovery,
+            &mut |step| {
+                if step.path == "target/gen/zz_linux.go" {
+                    go_steps.push(step.path.to_string());
+                    return std::ops::ControlFlow::Break(());
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert!(stopped.is_none());
+        assert_eq!(go_steps, vec!["target/gen/zz_linux.go".to_string()]);
     }
 }

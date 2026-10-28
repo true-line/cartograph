@@ -8,6 +8,7 @@ use core_graph::placeholder::Boundary;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::ControlFlow;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
@@ -818,11 +819,28 @@ pub enum SkipReason {
     BuildConstraint,
 }
 
+/// A Go file's repo-relative path, with why recovery skips it (`None`: read).
+type WalkedGoFile = (String, Option<SkipReason>);
+
 /// Walk `root` exactly as recovery does: each non-test Go file in walk order,
 /// with the reason recovery skips it, or `None` when recovery reads it.
-fn walk_go_files(root: &Path) -> Result<Vec<(String, Option<SkipReason>)>, ExtractError> {
+/// `on_step` runs before each directory and each Go file is read, with its
+/// repo-relative path; a break stops the walk and returns `None`.
+fn walk_go_files(
+    root: &Path,
+    on_step: &mut dyn FnMut(&str) -> ControlFlow<()>,
+) -> Result<Option<Vec<WalkedGoFile>>, ExtractError> {
+    let Some(files) = source_walk::files_until(
+        root,
+        &skips_dir,
+        source_walk::Gitignores::Honor,
+        &mut |step| on_step(step.dir),
+    )?
+    else {
+        return Ok(None);
+    };
     let mut out = Vec::new();
-    for file in source_walk::files(root, &skips_dir, source_walk::Gitignores::Honor)? {
+    for file in files {
         if file
             .path
             .extension()
@@ -831,6 +849,9 @@ fn walk_go_files(root: &Path) -> Result<Vec<(String, Option<SkipReason>)>, Extra
             || file.name.ends_with("_test.go")
         {
             continue;
+        }
+        if on_step(&file.rel).is_break() {
+            return Ok(None);
         }
         let reason = if has_platform_suffix(&file.name) {
             Some(SkipReason::PlatformSuffix)
@@ -841,21 +862,28 @@ fn walk_go_files(root: &Path) -> Result<Vec<(String, Option<SkipReason>)>, Extra
         };
         out.push((file.rel, reason));
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
-/// The Go files recovery skips under `root`, with their reasons, in walk order.
-/// Preflight discloses these so the skip is never silent (#1258).
-pub fn skipped_files(root: &Path) -> Result<Vec<(String, SkipReason)>, ExtractError> {
-    Ok(walk_go_files(root)?
-        .into_iter()
-        .filter_map(|(rel, reason)| Some((rel, reason?)))
-        .collect())
+/// The Go files recovery skips under `root`, with their reasons, in walk
+/// order, so preflight can disclose them (#1258). `on_step` is as for the
+/// walk: a break returns `None`.
+pub fn skipped_files_until(
+    root: &Path,
+    on_step: &mut dyn FnMut(&str) -> ControlFlow<()>,
+) -> Result<Option<Vec<(String, SkipReason)>>, ExtractError> {
+    Ok(walk_go_files(root, on_step)?.map(|files| {
+        files
+            .into_iter()
+            .filter_map(|(rel, reason)| Some((rel, reason?)))
+            .collect()
+    }))
 }
 
 fn collect_go_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractError> {
     out.extend(
-        walk_go_files(root)?
+        walk_go_files(root, &mut |_| ControlFlow::Continue(()))?
+            .expect("a hook that never breaks walks the whole tree")
             .into_iter()
             .filter(|(_, reason)| reason.is_none())
             .map(|(rel, _)| rel),
