@@ -82,7 +82,7 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 #[derive(Clone, Copy)]
-enum InputPolicy {
+pub(in super::super) enum InputPolicy {
     FrozenVendure,
     #[cfg(test)]
     OfflineFixture,
@@ -109,16 +109,21 @@ impl CodeBinding {
     }
 }
 
-/// The original bounded preparation receipt is an external binding, not a new
-/// preparation. Status text is never deserialized into trusted static fields.
-fn measure_bound(
+/// Shared read/revalidation boundary. The callback receives no provider capability;
+/// source retention remains guarded through fresh graph/config/receipt checks.
+pub(in super::super) fn reopen_preparation<T>(
     config: &Path,
     preparation: &Path,
     proposal: &Path,
     output: &Path,
-    code_revision: &str,
     input_policy: InputPolicy,
-) -> Result<Vec<Measurement>, String> {
+    use_preparation: impl FnOnce(
+        &tauri::App<tauri::test::MockRuntime>,
+        &report::GraphPreparation,
+        &Value,
+        &[u8],
+    ) -> Result<T, String>,
+) -> Result<T, String> {
     let saved = input::read_bounded(preparation, 16 * 1024 * 1024)?;
     let expected: Value =
         serde_json::from_slice(&saved).map_err(|_| "invalid preparation receipt")?;
@@ -133,22 +138,9 @@ fn measure_bound(
             .as_str()
             .ok_or("missing source root")?,
     );
+    let proposal_bytes = input::read_bounded(proposal, MAX_SELECTION_BYTES)?;
     let (profile, config_hash) = profile::NativeProfile::read(config)?;
     validate_paths(source_root, preparation, proposal, config, &profile, output)?;
-    let raw = input::read_bounded(proposal, MAX_SELECTION_BYTES)?;
-    let selections: Vec<RoleSelection> = agents::investigation::decode_record(
-        std::str::from_utf8(&raw).map_err(|_| "invalid proposal")?,
-    )
-    .map_err(|_| "invalid bounded proposal")?;
-    if selections.len() != 2
-        || selections[0].specialist_id != "domain-analyst@7"
-        || selections[1].specialist_id != "evidence-auditor@7"
-        || selections
-            .iter()
-            .any(|role| role.sources.is_empty() || role.sources.len() > MAX_SOURCES)
-    {
-        return Err("explicit bounded analyst and auditor selections required".into());
-    }
     if expected["native_config_sha256"] != config_hash
         || expected["profile"] != serde_json::to_value(&profile).map_err(|_| "invalid profile")?
     {
@@ -171,7 +163,6 @@ fn measure_bound(
     }
     let input: input::VerifiedInput = serde_json::from_value(expected["input"].clone())
         .map_err(|_| "invalid preparation input binding")?;
-    let code = CodeBinding::new(code_revision, &expected)?;
     if matches!(input_policy, InputPolicy::FrozenVendure) {
         verify_frozen_input(&input)?;
     }
@@ -201,30 +192,76 @@ fn measure_bound(
     {
         return Err("prepared graph, source, capture or coverage drift".into());
     }
-    let mut result = Vec::new();
-    for role in selections {
-        result.push(measure_role(
-            app.handle(),
-            &state,
-            &recovered,
-            role,
-            &hash(&saved),
-            &hash(&raw),
-            &code,
-        )?);
-    }
+    let result = use_preparation(&app, &recovered, &expected, &saved)?;
     let after = report::collect(&state, &source, &input, profile.data())?;
     if bytes(&recovered)? != bytes(&after)? {
         return Err("preparation changed during measurement".into());
     }
     verify_config(config, &config_hash)?;
     if input::read_bounded(preparation, 16 * 1024 * 1024)? != saved
-        || input::read_bounded(proposal, MAX_SELECTION_BYTES)? != raw
+        || input::read_bounded(proposal, MAX_SELECTION_BYTES)? != proposal_bytes
     {
         return Err("external measurement bindings changed".into());
     }
     drop(guard);
     Ok(result)
+}
+
+fn measure_bound(
+    config: &Path,
+    preparation: &Path,
+    proposal: &Path,
+    output: &Path,
+    code_revision: &str,
+    input_policy: InputPolicy,
+) -> Result<Vec<Measurement>, String> {
+    let raw = input::read_bounded(proposal, MAX_SELECTION_BYTES)?;
+    let selections: Vec<RoleSelection> = agents::investigation::decode_record(
+        std::str::from_utf8(&raw).map_err(|_| "invalid proposal")?,
+    )
+    .map_err(|_| "invalid bounded proposal")?;
+    if selections.len() != 2
+        || selections[0].specialist_id != "domain-analyst@7"
+        || selections[1].specialist_id != "evidence-auditor@7"
+        || selections
+            .iter()
+            .any(|role| role.sources.is_empty() || role.sources.len() > MAX_SOURCES)
+    {
+        return Err("explicit bounded analyst and auditor selections required".into());
+    }
+    // Preserve measurement's code-identity refusal before frozen-input admission;
+    // the callback rechecks the helper's fresh receipt rather than trusting this read.
+    let expected: Value =
+        serde_json::from_slice(&input::read_bounded(preparation, 16 * 1024 * 1024)?)
+            .map_err(|_| "invalid preparation receipt")?;
+    CodeBinding::new(code_revision, &expected)?;
+    reopen_preparation(
+        config,
+        preparation,
+        proposal,
+        output,
+        input_policy,
+        |app, recovered, expected, saved| {
+            let code = CodeBinding::new(code_revision, expected)?;
+            let state = app.state::<AppState>();
+            let mut result = Vec::new();
+            for role in selections {
+                result.push(measure_role(
+                    app.handle(),
+                    &state,
+                    recovered,
+                    role,
+                    &hash(saved),
+                    &hash(&raw),
+                    &code,
+                )?);
+            }
+            if input::read_bounded(proposal, MAX_SELECTION_BYTES)? != raw {
+                return Err("external measurement bindings changed".into());
+            }
+            Ok(result)
+        },
+    )
 }
 
 fn envelope(obligations: Vec<Obligation>) -> ObligationEnvelope {
