@@ -3,6 +3,7 @@
 //! Import-proven `net/http`, chi, and gin registrations become
 //! Endpoint/HANDLES facts. Functions, imports, and direct calls become the
 //! server graph, with Go-module-aware directory joins for local packages.
+//! Import-proven `net/http` client calls become fetch sites (AC-0434).
 
 use core_graph::placeholder::Boundary;
 use core_graph::{Edge, Node};
@@ -44,6 +45,8 @@ pub struct Extraction {
     pub nodes: Vec<Node>,
     /// Recovered edges.
     pub edges: Vec<Edge>,
+    /// `net/http` client calls, stitched to endpoints by the caller.
+    pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     pending_calls: Vec<PendingCall>,
     pending_endpoints: Vec<PendingEndpoint>,
 }
@@ -630,6 +633,7 @@ fn extract_source_with_module(
     });
     let bindings = parse_imports(&cx, root, module_path, &mut out);
     let receivers = assignment_receivers(&cx, root, &bindings);
+    let client = client::Proof::new(&cx, &bindings);
 
     let function_query =
         crate::queries::query("[(function_declaration) (method_declaration)] @function");
@@ -752,7 +756,12 @@ fn extract_source_with_module(
             }
         }
 
-        let Some(src) = enclosing_function(call, &functions_by_start) else {
+        let owner = enclosing_function(call, &functions_by_start);
+        if let Some(site) = client.fetch_site(call, owner.clone()) {
+            out.fetch_sites.push(site);
+        }
+
+        let Some(src) = owner else {
             continue;
         };
         if !callee.contains('.') {
@@ -1062,6 +1071,7 @@ pub fn extract_dir_incremental_with_progress(
             );
             out.nodes.extend(extraction.nodes);
             out.edges.extend(extraction.edges);
+            out.fetch_sites.extend(extraction.fetch_sites);
             out.pending_calls.extend(extraction.pending_calls);
             out.pending_endpoints.extend(extraction.pending_endpoints);
             Ok(())
@@ -1126,6 +1136,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod client;
 mod queries;
 
 #[cfg(test)]

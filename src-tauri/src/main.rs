@@ -1593,7 +1593,10 @@ fn extract_tree_with_registries(
         layers.python.edges += distinct_edge_count(&observed_edges);
         extraction.nodes.extend(observed_nodes);
         extraction.edges.extend(observed_edges);
-
+    }
+    // Go carries server routes and `net/http` client calls (AC-0434), so a
+    // client-only Go repository runs it too.
+    if wants_application {
         let go_id = adapters_lang_go::SourceId { repo, commit };
         let mut go_progress = |path: &str| on_file(&format!("Reading Go sources — {path}"));
         let (go, stats) = adapters_lang_go::extract_dir_incremental_with_progress(
@@ -1619,6 +1622,7 @@ fn extract_tree_with_registries(
         };
         extraction.nodes.extend(go.nodes);
         extraction.edges.extend(go.edges);
+        extraction.fetch_sites.extend(go.fetch_sites);
     }
     // Rust carries server routes (axum, actix-web) and client calls
     // (reqwest), so a client-only Rust repository runs it too, as Java does.
@@ -8483,8 +8487,9 @@ export function queueOrder() {
 
     #[test]
     fn go_server_ingest_reports_layer_and_endpoints() {
-        // AC-0054/T-0054: the app runs Go only for server scope and reports
-        // its facts independently from the other deterministic languages.
+        // AC-0054/T-0054: the app runs Go for application scope (its client
+        // calls are client facts, AC-0434) and reports its facts
+        // independently from the other deterministic languages.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.com/api\n").unwrap();
         std::fs::write(
@@ -8518,7 +8523,7 @@ export function queueOrder() {
         assert_eq!(endpoint.props["framework"], "net/http");
         assert_eq!(endpoint.props["prov"]["extractor_id"], "t0.adapter-go");
 
-        let (client_only, client_summary) = crate::extract_tree_with_summary(
+        let (_, client_summary) = crate::extract_tree_with_summary(
             dir.path(),
             "local/go-app",
             "workdir",
@@ -8529,9 +8534,21 @@ export function queueOrder() {
             &[],
         )
         .unwrap();
-        assert_eq!(client_summary.go, crate::LayerSummary::default());
+        assert_eq!(client_summary.go, summary.go);
+        let (infra_only, infra_summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/go-app",
+            "workdir",
+            &["infra".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(infra_summary.go, crate::LayerSummary::default());
         assert!(
-            client_only
+            infra_only
                 .nodes
                 .iter()
                 .all(|node| node.props["language"] != "go")

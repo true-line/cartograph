@@ -607,3 +607,140 @@ fn go_mod_comments_and_dot_segments_never_confirm_a_boundary() {
         ("unresolved".into(), Gap)
     );
 }
+
+fn fetches(extraction: &Extraction) -> Vec<(String, String, Option<String>)> {
+    use adapters_fw::events::IdentityExpr;
+    extraction
+        .fetch_sites
+        .iter()
+        .map(|site| {
+            let url = match &site.url {
+                IdentityExpr::Literal(url) => format!("literal:{url}"),
+                IdentityExpr::EnvRef(key) => format!("env:{key}"),
+                IdentityExpr::Computed(text) => format!("computed:{text}"),
+            };
+            (site.method.clone(), url, site.symbol.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn net_http_client_calls_become_fetch_sites() {
+    // AC-0434: package verbs, `DefaultClient` verbs and `NewRequest` sites on
+    // the file's `net/http` import, with their method and exact URL text.
+    let source = br#"
+package client
+
+import (
+    "context"
+    web "net/http"
+)
+
+type Api struct{}
+
+func (a *Api) Sync(ctx context.Context, base string) {
+    web.Get("https://api.example.com/users")
+    web.Head(`/health`)
+    web.Post("/users", "application/json", nil)
+    web.PostForm("/login", nil)
+    web.DefaultClient.Get("/me")
+    web.NewRequest("", "/a", nil)
+    web.NewRequest("PUT", "/b", nil)
+    web.NewRequestWithContext(ctx, web.MethodDelete, "/c", nil)
+    web.NewRequest(method(), "/d", nil)
+    web.NewRequest("GET", base+"/e", nil)
+    web.NewRequest("GET", "/f\x2f", nil)
+    web.DefaultClient.Do(nil)
+    web.HandleFunc("/g", nil)
+}
+
+func method() string { return "GET" }
+"#;
+    let x = extract_source(source, "client.go", &id()).unwrap();
+    let sync = Some("sym:local/go-service@client.go#Api.Sync".to_string());
+    let want = [
+        ("GET", "literal:https://api.example.com/users"),
+        ("HEAD", "literal:/health"),
+        ("POST", "literal:/users"),
+        ("POST", "literal:/login"),
+        ("GET", "literal:/me"),
+        ("GET", "literal:/a"),
+        ("PUT", "literal:/b"),
+        ("DELETE", "literal:/c"),
+        ("?", "literal:/d"),
+        ("GET", "computed:base+\"/e\""),
+        ("GET", "computed:\"/f\\x2f\""),
+    ]
+    .map(|(method, url)| (method.to_string(), url.to_string(), sync.clone()));
+    assert_eq!(fetches(&x), want);
+}
+
+#[test]
+fn shadowed_or_unproven_http_names_yield_no_fetch_sites() {
+    // AC-0434: a local value or type named like the import, a lookalike
+    // package, and a file without `net/http` are not client calls.
+    let source = br#"
+package client
+
+import (
+    "net/http"
+    fake "example.com/http"
+)
+
+type client struct{}
+
+func (client) Get(string) {}
+
+func param(http client) { http.Get("/a") }
+
+func local() {
+    http := client{}
+    http.Get("/b")
+}
+
+func closure() {
+    run := func() {
+        var http client
+        http.Get("/c")
+    }
+    run()
+}
+
+func lookalike() { fake.Get("/d") }
+
+func proven() { http.Get("/e") }
+"#;
+    let x = extract_source(source, "client.go", &id()).unwrap();
+    assert_eq!(
+        fetches(&x),
+        [(
+            "GET".to_string(),
+            "literal:/e".to_string(),
+            Some("sym:local/go-service@client.go#proven".to_string()),
+        )]
+    );
+    let none = extract_source(
+        b"package c\nimport http \"example.com/http\"\nfunc f() { http.Get(\"/x\") }\n",
+        "c.go",
+        &id(),
+    )
+    .unwrap();
+    assert!(none.fetch_sites.is_empty());
+}
+
+#[test]
+fn directory_extraction_keeps_fetch_sites_across_incremental_reuse() {
+    // AC-0434: fetch sites survive the per-file incremental cache.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.go"),
+        "package main\nimport \"net/http\"\nfunc main() { http.Get(\"/users\") }\n",
+    )
+    .unwrap();
+    let mut cache = IncrementalCache::default();
+    let (first, _) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    let (second, stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
+    assert_eq!(stats.reused_files, 1);
+    assert_eq!(fetches(&first), fetches(&second));
+    assert_eq!(fetches(&second).len(), 1);
+}

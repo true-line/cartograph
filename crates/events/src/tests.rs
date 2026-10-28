@@ -335,6 +335,50 @@ fn resolvable_fetch_urls_confirm_against_endpoints() {
     assert!(out.nodes.iter().all(|n| n.label != "Gap"));
 }
 
+// AC-0434: a method-less route (`ANY`, Go's `HandleFunc("/x")` or actix
+// `web::route()`) serves every method; a method route beside it on the same
+// path makes the match ambiguous rather than silently picking one.
+#[test]
+fn method_less_routes_match_every_fetch_method() {
+    let endpoints = eps(&[
+        "ep:test@ANY:/users",
+        "ep:test@ANY:/orders",
+        "ep:test@POST:/orders",
+    ]);
+    let cfg = ConfigIndex::default();
+    let id = SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let out = stitch_fetches(
+        &[
+            fetch_site("GET", IdentityExpr::Literal("/users".into())),
+            fetch_site("DELETE", IdentityExpr::Literal("/users".into())),
+            fetch_site("POST", IdentityExpr::Literal("/orders".into())),
+        ],
+        &endpoints,
+        &cfg,
+        &id,
+    );
+    let bound: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "FETCHES")
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(bound[..2], ["ep:test@ANY:/users", "ep:test@ANY:/users"]);
+    let reasons: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        ["ambiguous endpoint match for POST /orders (2 candidates)"]
+    );
+}
+
 // AC-0014: everything unresolvable escalates to an explicit Gap with a
 // reason — computed URL, no matching endpoint, ambiguous match. (T-0014)
 #[test]

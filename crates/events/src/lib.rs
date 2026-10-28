@@ -497,7 +497,10 @@ pub fn stitch_fetches(
             (Some((path, resolver)), method) => {
                 let hits: Vec<&str> = endpoints
                     .iter()
-                    .filter(|(_, verb, route)| *verb == method && route_matches(route, path))
+                    // A method-less route (`ANY`) serves every method.
+                    .filter(|(_, verb, route)| {
+                        (*verb == method || *verb == "ANY") && route_matches(route, path)
+                    })
                     .map(|(eid, _, _)| *eid)
                     .collect();
                 match hits.as_slice() {

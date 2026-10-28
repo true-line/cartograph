@@ -1,0 +1,6 @@
+{
+  "fetch_sites": [
+    { "method": "GET", "url": "https://api.example.com/users" },
+    { "method": "DELETE", "url": "https://api.example.com/users/1" }
+  ]
+}

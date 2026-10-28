@@ -98,7 +98,7 @@ fn inventory_reports_each_producer_input_and_capability_with_a_scoped_reason() {
         state_of(&coverage, "t0.adapter-go"),
         (
             &ProducerState::NotSelected,
-            "not selected: layer hints [infra] exclude server"
+            "not selected: layer hints [infra] exclude server and events and client"
         )
     );
     // Application layers are excluded, so TypeScript ran for Pulumi only
