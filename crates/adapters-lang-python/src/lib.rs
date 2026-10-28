@@ -12,7 +12,7 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 
 mod alembic;
 mod app_scope;
@@ -21,6 +21,7 @@ mod flask_admin;
 mod flask_admin_access;
 mod flask_admin_library;
 pub mod observed_infra;
+mod queries;
 mod request_inputs;
 mod responses;
 mod sqlalchemy;
@@ -389,17 +390,12 @@ fn clean_import_piece(piece: &str) -> &str {
 fn parse_imports(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     out: &mut Extraction,
 ) -> HashMap<String, ImportBinding> {
-    let query = Query::new(
-        language,
-        "[(import_statement) (import_from_statement)] @import",
-    )
-    .expect("static query");
+    let query = crate::queries::query("[(import_statement) (import_from_statement)] @import");
     let mut bindings = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let statement = found.captures()[0].node;
         let raw = cx.text(&statement).replace(['\n', '\\'], " ");
@@ -999,18 +995,14 @@ fn framework_factory(callee: &str, bindings: &HashMap<String, ImportBinding>) ->
 fn assignment_receivers(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     bindings: &HashMap<String, ImportBinding>,
     out: &mut Extraction,
 ) -> HashMap<String, Framework> {
-    let query = Query::new(
-        language,
-        r#"(assignment left: (identifier) @variable right: (call) @call)"#,
-    )
-    .expect("static query");
+    let query =
+        crate::queries::query(r#"(assignment left: (identifier) @variable right: (call) @call)"#);
     let mut receivers = HashMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let mut variable = None;
         let mut call = None;
@@ -1285,17 +1277,13 @@ fn classify_import(module: &str, local_names: &BTreeSet<String>) -> Boundary {
 fn collect_mounts(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     bindings: &HashMap<String, ImportBinding>,
     out: &mut Extraction,
 ) {
-    let query = Query::new(
-        language,
-        "(call function: (attribute attribute: (identifier) @verb)) @call",
-    )
-    .expect("static query");
+    let query =
+        crate::queries::query("(call function: (attribute attribute: (identifier) @verb)) @call");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let (mut call, mut verb) = (None, None);
         for capture in found.captures() {
@@ -1812,23 +1800,20 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         }),
     });
 
-    let bindings = parse_imports(&cx, root, &language, &mut out);
-    let receivers = assignment_receivers(&cx, root, &language, &bindings, &mut out);
-    collect_mounts(&cx, root, &language, &bindings, &mut out);
+    let bindings = parse_imports(&cx, root, &mut out);
+    let receivers = assignment_receivers(&cx, root, &bindings, &mut out);
+    collect_mounts(&cx, root, &bindings, &mut out);
     app_scope::collect(&cx, root, &bindings, &mut out);
-    sqlalchemy::extract(&cx, root, &language, &bindings, &mut out);
+    sqlalchemy::extract(&cx, root, &bindings, &mut out);
     target_tests::extract(&cx, root, &bindings, &mut out);
     flask_admin::collect(&cx, root, &bindings, &mut out);
-    let function_query = Query::new(
-        &language,
-        "(function_definition name: (identifier) @name) @function",
-    )
-    .expect("static query");
+    let function_query =
+        crate::queries::query("(function_definition name: (identifier) @name) @function");
     let mut functions_by_start = HashMap::new();
     let mut locals = HashMap::new();
     let mut functions = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&function_query, root, source);
+    let mut matches = cursor.matches(function_query, root, source);
     while let Some(found) = matches.next() {
         let mut function = None;
         let mut simple_name = None;
@@ -2022,13 +2007,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         }
     }
 
-    let call_query = Query::new(
-        &language,
-        "(call function: [(identifier) (attribute)] @callee) @call",
-    )
-    .expect("static query");
+    let call_query =
+        crate::queries::query("(call function: [(identifier) (attribute)] @callee) @call");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&call_query, root, source);
+    let mut matches = cursor.matches(call_query, root, source);
     while let Some(found) = matches.next() {
         let mut call = None;
         let mut callee = None;

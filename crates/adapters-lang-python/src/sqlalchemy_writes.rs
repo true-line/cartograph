@@ -14,7 +14,7 @@ use super::{
     scope_binding, symbol_id,
 };
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::QueryCursor;
 
 /// Kind of data mutation performed on a SQLAlchemy model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -683,16 +683,10 @@ pub(crate) fn extract_class_methods(
 }
 
 /// Collect per-function write candidates across the file.
-pub(crate) fn extract_functions(
-    cx: &FileCx<'_>,
-    root: TsNode<'_>,
-    language: &tree_sitter::Language,
-    file: &mut OrmFile,
-) {
-    let function_query =
-        Query::new(language, "(function_definition) @function").expect("static query");
+pub(crate) fn extract_functions(cx: &FileCx<'_>, root: TsNode<'_>, file: &mut OrmFile) {
+    let function_query = crate::queries::query("(function_definition) @function");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&function_query, root, cx.source);
+    let mut matches = cursor.matches(function_query, root, cx.source);
     while let Some(found) = matches.next() {
         let function = found.captures()[0].node;
         let Some(qualified_name) = qualified_function_name(cx, function) else {

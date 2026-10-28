@@ -16,7 +16,7 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
+use tree_sitter::{Node as TsNode, Parser, QueryCursor};
 
 const EXTRACTOR_ID: &str = "t0.adapter-kotlin";
 
@@ -279,16 +279,11 @@ struct Imports {
     wildcard_packages: Vec<String>,
 }
 
-fn parse_imports(
-    cx: &FileCx<'_>,
-    root: TsNode<'_>,
-    language: &tree_sitter::Language,
-    out: &mut Extraction,
-) -> Imports {
-    let query = Query::new(language, "(import) @import").expect("static query");
+fn parse_imports(cx: &FileCx<'_>, root: TsNode<'_>, out: &mut Extraction) -> Imports {
+    let query = crate::queries::query("(import) @import");
     let mut imports = Imports::default();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let statement = found.captures()[0].node;
         let raw = cx.text(&statement).replace(['\n', '\\'], " ");
@@ -762,7 +757,6 @@ fn extension_receiver(cx: &FileCx<'_>, function: TsNode<'_>, name: TsNode<'_>) -
 fn collect_importables(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     package: &str,
     path: &str,
     out: &mut Vec<Declared>,
@@ -803,9 +797,9 @@ fn collect_importables(
             push(cx.text(&name).to_string());
         }
     }
-    let query = Query::new(language, "(enum_entry (identifier) @entry)").expect("static query");
+    let query = crate::queries::query("(enum_entry (identifier) @entry)");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     while let Some(found) = matches.next() {
         let entry = found.captures()[0].node;
         let mut chain = enclosing_type_chain(cx, entry);
@@ -911,9 +905,9 @@ pub fn extract_source(
     });
 
     let package = {
-        let query = Query::new(&language, "(package_header) @package").expect("static query");
+        let query = crate::queries::query("(package_header) @package");
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, root, source);
+        let mut matches = cursor.matches(query, root, source);
         let mut package = None;
         if let Some(found) = matches.next() {
             let raw = cx.text(&found.captures()[0].node).replace('\n', " ");
@@ -926,7 +920,7 @@ pub fn extract_source(
         package
     };
     out.packages.extend(package.clone());
-    let imports = parse_imports(&cx, root, &language, &mut out);
+    let imports = parse_imports(&cx, root, &mut out);
     let hilt: HashSet<String> = imports
         .bindings
         .iter()
@@ -951,16 +945,14 @@ pub fn extract_source(
 
     // Types: classes, interfaces, enums, data classes, objects — nested
     // chains included.
-    let type_query = Query::new(
-        &language,
+    let type_query = crate::queries::query(
         "[(class_declaration name: (identifier) @name) @decl
           (object_declaration name: (identifier) @name) @decl]",
-    )
-    .expect("static query");
+    );
     let mut local_types: HashSet<String> = HashSet::new();
     let mut type_decls: Vec<(TsNode<'_>, String)> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&type_query, root, source);
+    let mut matches = cursor.matches(type_query, root, source);
     while let Some(found) = matches.next() {
         let (mut decl, mut name) = (None, None);
         for capture in found.captures() {
@@ -1017,14 +1009,13 @@ pub fn extract_source(
 
     // Functions: top-level, member, and extension, qualified by their
     // enclosing type chain and (for extensions) their receiver type.
-    let function_query = Query::new(&language, "(function_declaration name: (identifier) @name)")
-        .expect("static query");
+    let function_query = crate::queries::query("(function_declaration name: (identifier) @name)");
     let mut functions_by_start: HashMap<usize, String> = HashMap::new();
     let mut returns: Vec<(String, TsNode<'_>, Option<String>)> = Vec::new();
     let mut local_functions: HashSet<String> = HashSet::new();
     let mut functions = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&function_query, root, source);
+    let mut matches = cursor.matches(function_query, root, source);
     while let Some(found) = matches.next() {
         let name_node = found.captures()[0].node;
         let Some(function) = name_node.parent() else {
@@ -1131,14 +1122,7 @@ pub fn extract_source(
     }
 
     if let Some(package) = &package {
-        collect_importables(
-            &cx,
-            root,
-            &language,
-            package,
-            path,
-            &mut out.declared_importables,
-        );
+        collect_importables(&cx, root, package, path, &mut out.declared_importables);
     }
 
     // Endpoints are product facts: a test source set yields none (#1250).
@@ -1303,9 +1287,9 @@ pub fn extract_source(
     // receiver whose lexical binding states its type resolves through that
     // type (#1048); any other receiver (an inferred local, a call result)
     // is unproven and asserts nothing at T0.
-    let call_query = Query::new(&language, "(call_expression) @call").expect("static query");
+    let call_query = crate::queries::query("(call_expression) @call");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&call_query, root, source);
+    let mut matches = cursor.matches(call_query, root, source);
     while let Some(found) = matches.next() {
         let call = found.captures()[0].node;
         let Some(callee) = call.named_child(0) else {
@@ -1981,6 +1965,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 
 mod hilt_binds;
 pub mod navigation3;
+mod queries;
 mod receivers;
 mod retrofit;
 
