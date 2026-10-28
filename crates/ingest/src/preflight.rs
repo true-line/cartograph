@@ -264,8 +264,9 @@ fn uncovered_language(extension: &str) -> Option<&'static str> {
 }
 
 /// Languages Preflight names without a catalog entry, by extension. Only
-/// unambiguous extensions: `.pl` (Perl or Prolog) would name a language the
-/// file may not be.
+/// extensions that need no content heuristic: `.ex` (Elixir or Euphoria),
+/// `.fs` (F#, GLSL, Forth or Filterscript) and `.pl` (Perl or Prolog) would
+/// name a language the file may not be.
 const NAMED_ONLY: &[(&str, &str)] = &[
     ("rb", "Ruby"),
     ("cs", "C#"),
@@ -274,13 +275,11 @@ const NAMED_ONLY: &[(&str, &str)] = &[
     ("scala", "Scala"),
     ("groovy", "Groovy"),
     ("dart", "Dart"),
-    ("ex", "Elixir"),
     ("exs", "Elixir"),
     ("erl", "Erlang"),
     ("clj", "Clojure"),
     ("cljs", "Clojure"),
     ("cljc", "Clojure"),
-    ("fs", "F#"),
     ("fsx", "F#"),
     ("vb", "Visual Basic"),
     ("hs", "Haskell"),
@@ -1692,13 +1691,11 @@ mod tests {
             ("core/Broker.scala", "Scala"),
             ("src/Tasks.groovy", "Groovy"),
             ("app/main.dart", "Dart"),
-            ("lib/app.ex", "Elixir"),
             ("test/app_test.exs", "Elixir"),
             ("src/app.erl", "Erlang"),
             ("src/app.clj", "Clojure"),
             ("src/app.cljs", "Clojure"),
             ("src/app.cljc", "Clojure"),
-            ("src/App.fs", "F#"),
             ("scripts/build.fsx", "F#"),
             ("src/Module.vb", "Visual Basic"),
             ("src/Main.hs", "Haskell"),
@@ -1707,8 +1704,10 @@ mod tests {
         for (path, _) in named {
             write(dir.path(), path, "x\n");
         }
-        // An ambiguous extension (Perl or Prolog) stays unnamed, not misnamed.
-        write(dir.path(), "tools/run.pl", "x\n");
+        // Ambiguous extensions stay unnamed rather than misnamed.
+        for path in ["lib/app.ex", "shaders/frag.fs", "tools/run.pl"] {
+            write(dir.path(), path, "x\n");
+        }
         let report = preflight(dir.path()).unwrap();
         let mut expected: BTreeMap<&str, u64> = BTreeMap::new();
         for (_, language) in named {
