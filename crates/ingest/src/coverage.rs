@@ -259,9 +259,9 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         Some(APPLICATION_LAYERS),
     ),
     ("t0.adapter-python", "Python", Some(SERVER_LAYERS)),
-    ("t0.adapter-go", "Go", Some(SERVER_LAYERS)),
-    // Rust and JVM sources carry client calls (reqwest, Retrofit) as well
-    // as server routes.
+    // Go, Rust and JVM sources carry client calls (net/http, reqwest,
+    // Retrofit) as well as server routes.
+    ("t0.adapter-go", "Go", Some(APPLICATION_LAYERS)),
     ("t0.adapter-rust", "Rust", Some(APPLICATION_LAYERS)),
     ("t0.adapter-java", "Java", Some(APPLICATION_LAYERS)),
     ("t0.adapter-kotlin", "Kotlin", Some(APPLICATION_LAYERS)),

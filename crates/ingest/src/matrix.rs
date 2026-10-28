@@ -149,7 +149,8 @@ const fn cell(
 use Capability::*;
 use Support::*;
 
-const NO_CLIENT: &str = "no Go HTTP client library is recognized";
+/// What the Go HTTP client cell reads (AC-0434).
+const GO_CLIENT: &str = "`net/http` package functions, `http.DefaultClient` verbs and `NewRequest` sites; a constructed `http.Client` is read only through its `NewRequest`, and a URL must be an exact literal";
 /// What the Python HTTP client cells read (AC-0424).
 const PY_CLIENT: &str = "module functions and once-bound `Session`/`Client` receivers in their own scope; instance attributes and passed-in clients are not read, and a URL is followed only within its file";
 const NO_JVM_CLIENT: &str =
@@ -255,7 +256,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Go", "net-http", HttpEndpoints, Supported, ""),
     cell("Go", "chi", HttpEndpoints, Supported, ""),
     cell("Go", "gin", HttpEndpoints, Supported, ""),
-    cell("Go", CORE, HttpClientCalls, Unsupported, NO_CLIENT),
+    cell("Go", "net-http", HttpClientCalls, Partial, GO_CLIENT),
     cell("Go", CORE, EventSites, Unsupported, NO_EVENTS),
     cell("Rust", CORE, Imports, Supported, ""),
     cell("Rust", CORE, Calls, Supported, ""),

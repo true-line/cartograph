@@ -15,7 +15,7 @@
 use adapters_fw::events::{ChannelRole, EventSite, IdentityExpr, RegistryIdentity};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub mod http_binding;
@@ -443,6 +443,18 @@ pub fn stitch_fetches(
     cfg: &ConfigIndex,
     id: &SourceId,
 ) -> Extraction {
+    stitch_fetches_with(sites, endpoint_ids, &BTreeSet::new(), cfg, id)
+}
+
+/// [`stitch_fetches`], where each id in `get_serves_head` is a GET route
+/// its framework also serves for HEAD (Go's `ServeMux`, AC-0434).
+pub fn stitch_fetches_with(
+    sites: &[adapters_fw::client::FetchSite],
+    endpoint_ids: &[String],
+    get_serves_head: &BTreeSet<String>,
+    cfg: &ConfigIndex,
+    id: &SourceId,
+) -> Extraction {
     // ep:{repo}@VERB:route (repo-namespaced), parsed once. Fetch sites only
     // match endpoints of their own repo at T0; cross-repo is M5 manifest work.
     let ns = format!("{}@", id.repo);
@@ -497,7 +509,13 @@ pub fn stitch_fetches(
             (Some((path, resolver)), method) => {
                 let hits: Vec<&str> = endpoints
                     .iter()
-                    .filter(|(_, verb, route)| *verb == method && route_matches(route, path))
+                    // A method-less route (`ANY`) serves every method.
+                    .filter(|(eid, verb, route)| {
+                        (*verb == method
+                            || *verb == "ANY"
+                            || (method == "HEAD" && get_serves_head.contains(*eid)))
+                            && route_matches(route, path)
+                    })
                     .map(|(eid, _, _)| *eid)
                     .collect();
                 match hits.as_slice() {

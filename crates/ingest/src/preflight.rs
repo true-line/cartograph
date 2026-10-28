@@ -977,7 +977,7 @@ mod tests {
             go.coverage
                 .iter()
                 .any(|cell| (cell.framework.as_str(), cell.capability.as_str())
-                    == ("core", "http_client_calls")
+                    == ("core", "event_sites")
                     && cell.support == crate::matrix::Support::Unsupported
                     && !cell.note.is_empty())
         );
