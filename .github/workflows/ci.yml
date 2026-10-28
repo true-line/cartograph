@@ -336,6 +336,18 @@ jobs:
           key: windows-job-ownership
           cache-bin: "false"
 
+      # Tests here open state.db in temporary directories. Windows cannot
+      # delete a file that is still open and TempDir ignores the failure, so
+      # leaked directories filled the self-hosted runner's disk (#1307). The
+      # runner empties runner.temp for every job, so nothing outlives it.
+      - name: Keep test temporary files in the job's temp directory
+        shell: pwsh
+        run: |
+          $temp = Join-Path $env:RUNNER_TEMP 'tests'
+          New-Item -ItemType Directory -Force -Path $temp | Out-Null
+          "TMP=$temp" >> $env:GITHUB_ENV
+          "TEMP=$temp" >> $env:GITHUB_ENV
+
       - name: Test production job ownership on Windows
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
