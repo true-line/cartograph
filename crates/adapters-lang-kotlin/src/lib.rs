@@ -1054,6 +1054,236 @@ fn resolve_repo_imports(
     }
 }
 
+/// Which bytes of `source` are code: not inside a comment (block comments
+/// nest) or a string or character literal, whose opening quote alone stands
+/// for it as a token. Code inside a string template `${...}` is code again.
+/// The second vector marks the bytes of block comments.
+fn code_bytes(source: &[u8]) -> (Vec<bool>, Vec<bool>) {
+    enum Mode {
+        Code(usize),
+        Str,
+        Raw,
+    }
+    let mut code = vec![false; source.len()];
+    let mut block = vec![false; source.len()];
+    let mut modes = vec![Mode::Code(0)];
+    let mut at = 0;
+    while at < source.len() {
+        let rest = &source[at..];
+        let nested = modes.len() > 1;
+        match modes.last_mut() {
+            Some(Mode::Code(braces)) => {
+                if rest.starts_with(b"//") {
+                    at += rest.iter().take_while(|&&byte| byte != b'\n').count();
+                } else if rest.starts_with(b"/*") {
+                    let open = at;
+                    let mut depth = 0usize;
+                    loop {
+                        match source.get(at..at + 2) {
+                            Some(b"/*") => (depth, at) = (depth + 1, at + 2),
+                            Some(b"*/") => (depth, at) = (depth - 1, at + 2),
+                            Some(_) => at += 1,
+                            None => at = source.len(),
+                        }
+                        if depth == 0 || at >= source.len() {
+                            break;
+                        }
+                    }
+                    block[open..at.min(source.len())].fill(true);
+                } else if rest.starts_with(br#"""""#) {
+                    code[at] = true;
+                    modes.push(Mode::Raw);
+                    at += 3;
+                } else if rest[0] == b'"' {
+                    code[at] = true;
+                    modes.push(Mode::Str);
+                    at += 1;
+                } else if rest[0] == b'\'' {
+                    code[at] = true;
+                    at += if rest.get(1) == Some(&b'\\') { 3 } else { 2 };
+                    while source
+                        .get(at)
+                        .is_some_and(|&byte| byte != b'\'' && byte != b'\n')
+                    {
+                        at += 1;
+                    }
+                    at += 1;
+                } else if rest[0] == b'}' && *braces == 0 && nested {
+                    modes.pop();
+                    at += 1;
+                } else {
+                    match rest[0] {
+                        b'{' => *braces += 1,
+                        b'}' => *braces = braces.saturating_sub(1),
+                        _ => {}
+                    }
+                    code[at] = true;
+                    at += 1;
+                }
+            }
+            Some(Mode::Str) => match rest {
+                [b'\\', ..] => at += 2,
+                [b'$', b'{', ..] => {
+                    modes.push(Mode::Code(0));
+                    at += 2;
+                }
+                [b'"' | b'\n', ..] => {
+                    modes.pop();
+                    at += 1;
+                }
+                _ => at += 1,
+            },
+            Some(Mode::Raw) => {
+                if rest.starts_with(br#"""""#) {
+                    modes.pop();
+                    at += rest.iter().take_while(|&&byte| byte == b'"').count();
+                } else if rest.starts_with(b"${") {
+                    modes.push(Mode::Code(0));
+                    at += 2;
+                } else {
+                    at += 1;
+                }
+            }
+            None => break,
+        }
+    }
+    (code, block)
+}
+
+/// A same-length copy of `source` in which soft keywords that the grammar
+/// cannot take as names are respelled (#1302). tree-sitter-kotlin-ng lexes
+/// `dynamic` (a Kotlin/JS type) and `suspend` as keywords, so `fun
+/// dynamic()` loses its name and, under stacked class annotations, the whole
+/// class falls out of the tree (even a string literal that reads `"dynamic"`
+/// breaks it). Every whole-word `dynamic` becomes `dynami_`, which is still a
+/// type name where it was one. `suspend` keeps its spelling only in code
+/// where it is a modifier: before `fun`, another modifier
+/// or an annotation (unless an expression is still open before it), before a
+/// function type `(...) ->` or a receiver type on the same line, or before a
+/// lambda. Every other `suspend` (a declared name, a reference, a call) is
+/// respelled `suspen_`. Tokens are found with [`code_bytes`], so comments
+/// and literals never count as neighbours. Block comments are blanked to
+/// spaces (line breaks kept): the grammar can otherwise drop the
+/// declaration after one, or the whole class (#1306).
+fn mask_soft_keyword_names(source: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const MODIFIERS: &[&[u8]] = &[
+        b"fun",
+        b"public",
+        b"private",
+        b"internal",
+        b"protected",
+        b"inline",
+        b"override",
+        b"open",
+        b"abstract",
+        b"final",
+        b"operator",
+        b"infix",
+        b"tailrec",
+        b"external",
+        b"actual",
+        b"expect",
+    ];
+    if !source
+        .windows(7)
+        .any(|window| window == b"dynamic" || window == b"suspend")
+        && !source.windows(2).any(|window| window == b"/*")
+    {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let (code, block) = code_bytes(source);
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii();
+    let token = |at: usize| code[at] && !source[at].is_ascii_whitespace();
+    let starts = |at: usize, keyword: &[u8]| {
+        source[at..].starts_with(keyword)
+            && (at == 0 || !word(source[at - 1]))
+            && source
+                .get(at + keyword.len())
+                .is_none_or(|&next| !word(next))
+    };
+    // The next token at or after `at`, and whether a line break comes first.
+    let next_token = |at: usize| {
+        let next = (at..source.len())
+            .find(|&at| token(at))
+            .unwrap_or(source.len());
+        (next, source[at..next].contains(&b'\n'))
+    };
+    let word_at = |at: usize| {
+        let len = source[at..].iter().take_while(|&&byte| word(byte)).count();
+        &source[at..at + len]
+    };
+    // An expression is still open when the token before `at` is an
+    // operator, a separator or `return`.
+    let expression_open = |at: usize| match (0..at).rev().find(|&at| token(at)) {
+        Some(last) if b"=(,.:<>+-*/%&|!?[".contains(&source[last]) => true,
+        Some(last) => {
+            let first = (0..=last)
+                .rev()
+                .take_while(|&at| word(source[at]))
+                .last()
+                .unwrap_or(last + 1);
+            &source[first..=last] == b"return"
+        }
+        None => false,
+    };
+    let modifier = |at: usize| {
+        if !code[at] {
+            return false;
+        }
+        let (next, newline) = next_token(at + b"suspend".len());
+        match source.get(next) {
+            Some(b'@') => !expression_open(at),
+            Some(b'{') => true,
+            Some(b'(') => {
+                let mut depth = 0usize;
+                let close = (next..source.len()).filter(|&at| code[at]).find(|&at| {
+                    match source[at] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                });
+                close.is_some_and(|close| {
+                    let (after, _) = next_token(close + 1);
+                    source[after..].starts_with(b"->")
+                })
+            }
+            Some(&byte) if word(byte) => {
+                let name = word_at(next);
+                if MODIFIERS.contains(&name) {
+                    !expression_open(at)
+                } else {
+                    !newline && ![&b"in"[..], b"is", b"as"].contains(&name)
+                }
+            }
+            _ => false,
+        }
+    };
+    let mut masked: Option<Vec<u8>> = None;
+    for at in 0..source.len() {
+        if block[at] {
+            if source[at] != b'\n' {
+                masked.get_or_insert_with(|| source.to_vec())[at] = b' ';
+            }
+            continue;
+        }
+        let keyword = if starts(at, b"dynamic") {
+            b"dynamic"
+        } else if starts(at, b"suspend") && !modifier(at) {
+            b"suspend"
+        } else {
+            continue;
+        };
+        let copy = masked.get_or_insert_with(|| source.to_vec());
+        copy[at + keyword.len() - 1] = b'_';
+    }
+    match masked {
+        Some(copy) => std::borrow::Cow::Owned(copy),
+        None => std::borrow::Cow::Borrowed(source),
+    }
+}
+
 /// Recover deterministic facts from one Kotlin source file.
 /// Recover deterministic facts from one Kotlin source file. Facts a
 /// directory join would otherwise settle against the repository are settled
@@ -1080,8 +1310,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     let language: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
     let mut parser = Parser::new();
     parser.set_language(&language)?;
+    // The tree comes from a masked copy (same length, so every span is
+    // exact); text is always read from the real source.
     let tree = parser
-        .parse(source, None)
+        .parse(mask_soft_keyword_names(source), None)
         .ok_or_else(|| ExtractError::NoTree(path.into()))?;
     let root = tree.root_node();
     let cx = FileCx { source, path, id };
