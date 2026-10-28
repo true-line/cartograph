@@ -978,11 +978,13 @@ pub(in crate::investigations) fn expanded_capacity_provider() -> Arc<dyn LlmProv
 // AC-0430: rejection stages survive reopen without retaining rejected content.
 #[test]
 fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
+    use agents::investigation::InvestigationError;
     const SENTINEL: &str = "PRIVATE-REJECTED-RESPONSE-1266";
     struct Rejected {
         profile: Scripted,
         calls: AtomicUsize,
         stage: InvestigationStopReason,
+        text: String,
     }
     impl LlmProvider for Rejected {
         fn id(&self) -> &str {
@@ -1007,9 +1009,11 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         ) -> Result<BoundedCompletion, BoundedCallError> {
             assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
             Ok(BoundedCompletion {
-                text: SENTINEL.into(),
+                text: self.text.clone(),
                 requested_model:
-                    if self.stage == InvestigationStopReason::InvalidCompletionEnvelope {
+                    if self.stage == InvestigationStopReason::InvalidCompletionEnvelope
+                        && self.text.len() <= agents::investigation::MAX_ACTION_BYTES
+                    {
                         "wrong-model"
                     } else {
                         "scripted-model"
@@ -1030,15 +1034,70 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         }
     }
     let mut messages = std::collections::BTreeSet::new();
-    for stage in [
-        InvestigationStopReason::InvalidCompletionEnvelope,
-        InvestigationStopReason::InvalidResponseMetadata,
-        InvestigationStopReason::InvalidNextAction,
+    let oversized = SENTINEL.repeat(agents::investigation::MAX_ACTION_BYTES / SENTINEL.len() + 1);
+    // The decoder's byte-limit class exists, but the real worker envelope
+    // rejects this size first. Do not bypass that earlier production gate.
+    assert!(matches!(
+        CompletionInvestigationAction::decode(&oversized, ""),
+        Err(InvestigationError::LimitExceeded)
+    ));
+    assert_eq!(
+        InvestigationStopReason::InvalidNextAction(InvestigationError::LimitExceeded)
+            .test_message(),
+        "Action decode refused: limit_exceeded."
+    );
+    for error in [
+        InvestigationError::InvalidRequest,
+        InvestigationError::InvalidAction,
+        InvestigationError::LimitExceeded,
+        InvestigationError::InvalidInput,
+        InvestigationError::InvalidCitation,
+        InvestigationError::SourceReplay,
+        InvestigationError::SensitiveOutput,
+    ] {
+        assert!(
+            InvestigationStopReason::InvalidNextAction(error)
+                .test_message()
+                .len()
+                <= InvestigationStopReason::InvalidResponse
+                    .test_message()
+                    .len()
+        );
+    }
+    for (stage, text) in [
+        (
+            InvestigationStopReason::InvalidCompletionEnvelope,
+            SENTINEL.into(),
+        ),
+        (
+            InvestigationStopReason::InvalidResponseMetadata,
+            SENTINEL.into(),
+        ),
+        (
+            InvestigationStopReason::InvalidNextAction(InvestigationError::InvalidInput),
+            SENTINEL.into(),
+        ),
+        (
+            InvestigationStopReason::InvalidNextAction(InvestigationError::InvalidAction),
+            json!({"type":"unsupported_action", "private":SENTINEL}).to_string(),
+        ),
+        (
+            InvestigationStopReason::InvalidNextAction(InvestigationError::InvalidAction),
+            json!({"type":"query_context", "context_id":format!("context-v2:{}", "a".repeat(64)),
+                "query":{"scope":{"type":"all"},"kind":null,"labels":[SENTINEL],
+                    "max_facts":1,"max_bytes":1024,"cursor":null}})
+            .to_string(),
+        ),
+        (
+            InvestigationStopReason::InvalidCompletionEnvelope,
+            oversized,
+        ),
     ] {
         let provider = Arc::new(Rejected {
             profile: Scripted::new(Mode::Malformed),
             calls: AtomicUsize::new(0),
             stage,
+            text: text.clone(),
         });
         let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV10);
         f.run(provider.clone());
@@ -1047,7 +1106,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         let detail = jobs.investigation(&f.id).unwrap();
         assert_eq!(detail.summary.status, InvestigationStatus::Failed);
         assert_eq!(detail.error.as_deref(), Some(stage.test_message()));
-        assert!(messages.insert(stage.test_message()));
+        messages.insert(stage.test_message());
         assert!(
             stage.test_message().len()
                 <= InvestigationStopReason::InvalidResponse
@@ -1077,7 +1136,7 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         for path in [db.clone(), db.with_file_name("state.db-wal")] {
             if path.exists() {
                 let bytes = std::fs::read(path).unwrap();
-                for forbidden in [SENTINEL.to_owned(), content_hash(SENTINEL.as_bytes())] {
+                for forbidden in [SENTINEL.to_owned(), content_hash(text.as_bytes())] {
                     assert!(
                         !bytes
                             .windows(forbidden.len())
@@ -1087,4 +1146,5 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
             }
         }
     }
+    assert_eq!(messages.len(), 4);
 }

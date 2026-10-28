@@ -344,7 +344,7 @@ pub(crate) enum InvestigationStopReason {
     InvalidResponse,
     InvalidCompletionEnvelope,
     InvalidResponseMetadata,
-    InvalidNextAction,
+    InvalidNextAction(agents::investigation::InvestigationError),
     InvalidFinish(agents::investigation::InvestigationError),
     UnadmittedRead,
     FinishOnlyToolProposal,
@@ -372,7 +372,29 @@ impl InvestigationStopReason {
             }
             Self::InvalidCompletionEnvelope => "Provider response refused: completion_envelope.",
             Self::InvalidResponseMetadata => "Provider response refused: response_metadata.",
-            Self::InvalidNextAction => "Provider response refused: next_action_decode.",
+            Self::InvalidNextAction(error) => match error {
+                agents::investigation::InvestigationError::InvalidRequest => {
+                    "Action decode refused: invalid_request."
+                }
+                agents::investigation::InvestigationError::InvalidAction => {
+                    "Action decode refused: invalid_action."
+                }
+                agents::investigation::InvestigationError::LimitExceeded => {
+                    "Action decode refused: limit_exceeded."
+                }
+                agents::investigation::InvestigationError::InvalidInput => {
+                    "Action decode refused: invalid_input."
+                }
+                agents::investigation::InvestigationError::InvalidCitation => {
+                    "Action decode refused: invalid_citation."
+                }
+                agents::investigation::InvestigationError::SourceReplay => {
+                    "Action decode refused: source_replay."
+                }
+                agents::investigation::InvestigationError::SensitiveOutput => {
+                    "Action decode refused: sensitive_output."
+                }
+            },
             // Fixed classes only: never format rejected text or provider details.
             Self::InvalidFinish(error) => match error {
                 agents::investigation::InvestigationError::InvalidRequest => {

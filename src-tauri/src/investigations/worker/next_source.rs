@@ -35,7 +35,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             current.ledger(),
             policy,
         )
-        .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidNextAction))?;
+        .map_err(|error| Failure::Stop(InvestigationStopReason::InvalidNextAction(error)))?;
         let CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
             InvestigationAction::ReadEvidence { fact, role, index },
         )) = action
