@@ -195,14 +195,7 @@ impl CompletionFixture {
             .unwrap()
             .investigation_coverage_archive_capacity(&base.id)
             .unwrap();
-        let context = FrozenContext::prepare_with_app(
-            base.app.handle(),
-            &state,
-            &base.request,
-            &[],
-            Some(capacity),
-        )
-        .unwrap();
+        let context = base.app.prepare_context(&base.request, capacity).unwrap();
         let proof = context.ledger.coverage.as_ref().unwrap();
         let mut items = Vec::new();
         if source {
@@ -309,9 +302,7 @@ impl CompletionFixture {
         }
     }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
-        self.base.app.begin_synchronous_run();
-        run_completion(
-            self.base.app.handle().clone(),
+        self.base.app.run_completion(
             self.id.clone(),
             self.request.clone(),
             self.execution.clone(),
@@ -319,7 +310,6 @@ impl CompletionFixture {
             self.live.clone(),
             Instant::now(),
         );
-        self.base.app.end_synchronous_run();
     }
 }
 

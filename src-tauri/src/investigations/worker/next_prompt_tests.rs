@@ -78,9 +78,7 @@ impl NextFixture {
         }
     }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
-        self.base.base.app.begin_synchronous_run();
-        run_completion(
-            self.base.base.app.handle().clone(),
+        self.base.base.app.run_completion(
             self.id.clone(),
             self.request.clone(),
             self.execution.clone(),
@@ -88,7 +86,6 @@ impl NextFixture {
             self.live.clone(),
             Instant::now(),
         );
-        self.base.base.app.end_synchronous_run();
     }
 }
 
