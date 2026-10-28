@@ -140,6 +140,9 @@ impl LlmProvider for NextProvider {
     fn embed(&self, text: &[String]) -> Result<Vec<Embedding>, ProviderError> {
         self.observed.embed(text)
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
     fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
         self.observed.bounded_profile()
     }
@@ -156,6 +159,23 @@ impl LlmProvider for NextProvider {
                 .push(request.payload().clone());
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        if let Some(schema) = &request.payload().response_schema {
+            let parsed: Value = serde_json::from_str(schema).unwrap();
+            assert_eq!(
+                parsed["anyOf"].as_array().unwrap().len(),
+                if prompt["turn_progress"]["admission_mode"] == "finish_only" {
+                    2
+                } else {
+                    6
+                }
+            );
+            assert!(
+                request
+                    .payload()
+                    .system
+                    .contains("Compiled analyst response schemas:")
+            );
+        }
         assert_eq!(prompt["schema_version"], 9);
         self.observed.prompts.lock().unwrap().push(prompt);
         let call = self.observed.calls.fetch_add(1, Ordering::SeqCst);
@@ -378,16 +398,29 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
         (SpecialistId::DomainAnalystV10, [false, true]),
         (SpecialistId::DomainAnalystV10, [false, false]),
         (SpecialistId::DomainAnalystV12, [true, false]),
+        (SpecialistId::DomainAnalystV13, [true, false]),
     ] {
         let mut scripted = NextProvider::new(false);
         scripted.metadata_order = Some(order);
-        if role == SpecialistId::DomainAnalystV12 {
+        if matches!(
+            role,
+            SpecialistId::DomainAnalystV12 | SpecialistId::DomainAnalystV13
+        ) {
             scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
                 "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
         }
         let provider = Arc::new(scripted);
         let f = NextFixture::new(provider.as_ref(), role);
         f.run(provider.clone());
+        if role == SpecialistId::DomainAnalystV13 {
+            let received = provider.received_payloads.lock().unwrap();
+            assert_eq!(received.len(), 3);
+            assert!(
+                received
+                    .iter()
+                    .all(|payload| payload.response_schema.is_some())
+            );
+        }
         let state = f.base.base.app.state::<AppState>();
         let jobs = state.jobs.lock().unwrap();
         let detail = jobs
@@ -459,7 +492,10 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
                 "SELECT body FROM investigation_invocations WHERE task_id=?1 AND step_id='step-2'",
                 [&f.id], |row| row.get(0)).unwrap();
             let second: Value = serde_json::from_slice(&second).unwrap();
-            if role == SpecialistId::DomainAnalystV12 {
+            if matches!(
+                role,
+                SpecialistId::DomainAnalystV12 | SpecialistId::DomainAnalystV13
+            ) {
                 assert_canonical_query_continuation(
                     &provider.received_payloads.lock().unwrap()[1],
                     &ledger,

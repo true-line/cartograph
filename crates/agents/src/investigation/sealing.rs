@@ -42,6 +42,10 @@ pub(super) fn seal_with_admission_policy(
         return Err(InvestigationError::InvalidInput);
     }
     if let Some(state) = &admission {
+        response_schema::validate(original, &before)?;
+        if original.response_schema != egress.payload.response_schema {
+            return Err(InvestigationError::InvalidInput);
+        }
         protection::admission_protected_values(
             &before,
             &after,
@@ -56,6 +60,7 @@ pub(super) fn seal_with_admission_policy(
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::DomainAnalystV11,
             SpecialistId::DomainAnalystV12,
+            SpecialistId::DomainAnalystV13,
             SpecialistId::EvidenceAuditorV11,
         ]
         .iter()

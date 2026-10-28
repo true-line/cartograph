@@ -25,6 +25,7 @@ mod projection;
 mod protocol;
 mod record_workspace;
 mod records;
+mod response_schema;
 mod result_workspace;
 mod sealing;
 mod specialists;

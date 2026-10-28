@@ -149,7 +149,7 @@ fn bound<T>(
         .unwrap_or("domain-analyst@10");
     if !matches!(
         specialist,
-        "domain-analyst@10" | "domain-analyst@11" | "domain-analyst@12"
+        "domain-analyst@10" | "domain-analyst@11" | "domain-analyst@12" | "domain-analyst@13"
     ) {
         return Err("unsupported captured analyst specialist".into());
     }

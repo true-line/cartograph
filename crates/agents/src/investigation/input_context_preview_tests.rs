@@ -307,6 +307,7 @@ fn context_preview_binds_actual_query_and_inventory_serialization_and_continuati
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
         SpecialistId::DomainAnalystV12,
+        SpecialistId::DomainAnalystV13,
     ] {
         let fixture = Fixture::new(
             role,

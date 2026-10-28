@@ -41,7 +41,7 @@ it('accepts only the exact @10 summary7/result7/disclosure6 mapping', () => {
   expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@9' })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: 6 })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: '7' as unknown as 7 })).toBe(false);
-  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@13' as SpecialistId })).toBe(false);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@14' as SpecialistId })).toBe(false);
 });
 
 it.each(['domain-analyst@10', 'evidence-auditor@10'] as const)('requires advertised request7/envelope2/v2 for %s', async (specialist) => {
@@ -200,4 +200,20 @@ it.each(['domain-analyst@11', 'evidence-auditor@11', 'domain-analyst@12'] as con
   await useInvestigationStore.getState().open(original.investigation_id);
   expect(useInvestigationStore.getState().error).toBeNull();
   expect(useInvestigationStore.getState().detail).toEqual(original);
+});
+
+// AC-0445: synthetic saved-task recognition, not desktop availability.
+it('reopens saved @13 without advertising it for dispatch', async () => {
+  const detail = structuredClone(terminalWire.detail) as unknown as InvestigationDetail;
+  detail.specialist_id = 'domain-analyst@13';
+  detail.specialist = { ...detail.specialist, id: 'domain-analyst@13', version: 13 };
+  useInvestigationStore.setState({ catalog: admissionCatalog });
+  expect(admissionCatalog.specialists.some((role) => role.id === detail.specialist_id)).toBe(false);
+  expect(validCompletionSummary(detail)).toBe(true);
+  mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? null :
+    command === 'investigation_events' ? { investigation_id: detail.investigation_id, items: terminalWire.events,
+      next_sequence: detail.last_event_sequence, has_more: false } : null);
+  await useInvestigationStore.getState().open(detail.investigation_id);
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().detail?.specialist_id).toBe('domain-analyst@13');
 });
