@@ -64,8 +64,8 @@ Memory is binary: 1 GiB = 2^30 bytes. `Gap` nodes are graph facts. They are not 
 
 - **Test sources counted as product endpoints (#1250).** Five of openmrs-core's six Spring endpoints come from `src/test/java`.
 - **Languages without an adapter were silently omitted (#1251).** Fixed: preflight now names each one with an uncovered-language finding. Kafka's Scala files are the visible case.
-- **JAX-RS endpoints are neither recovered nor reported (#1257).** Kafka has 49 JAX-RS files and 0 recovered endpoints, and no gap says so.
-- **The Go adapter silently skips files (#1258).** Preflight counts 17,994 Go files in Kubernetes. Of those, 4,339 are vendored and most of the rest are `_test.go` files, which leaves 10,073 non-vendor, non-test files. About 145 of them are platform-suffixed and about 1,179 carry a `//go:build` constraint, and the adapter skips both kinds without disclosure. The other 8,758 were recovered.
+- **JAX-RS endpoints were neither recovered nor reported (#1257).** Kafka has 49 JAX-RS files and recovered 0 endpoints, with no gap saying so. Fixed in #1264: at Cartograph `7b57678d` the same Kafka pin recovers 43 JAX-RS endpoints (29 in Connect runtime, 14 in Trogdor). It also emits 2 route Gaps for `InternalClusterResource` methods, which are served only through subclasses. One of the 43 is a test-source resource in Connect's integration tests, the #1250 class. The results table above predates this fix.
+- **The Go adapter silently skips files (#1258).** Preflight counts 17,994 Go files in Kubernetes. Of those, 4,339 are vendored and most of the rest are `_test.go` files, which leaves 10,073 non-vendor, non-test files. About 145 of them are platform-suffixed and about 1,179 carry a `//go:build` constraint, and the adapter skipped both kinds without disclosure. The other 8,758 were recovered. Fixed in #1262: preflight now names both skip classes with their counts. Re-measured at `7b57678d`, the recovered Kubernetes graph counts are unchanged.
 
 ## Limits
 
