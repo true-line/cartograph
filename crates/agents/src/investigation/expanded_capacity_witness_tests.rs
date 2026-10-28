@@ -804,7 +804,7 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
         ),
         (
             shape,
-            ActionSemanticRule::FinishShape,
+            ActionSemanticRule::FinishOverall,
             InvestigationError::InvalidAction,
         ),
         (
@@ -827,6 +827,83 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
             error
         );
     }
+    // Ordered predicates and nested stages retain the old public InvalidAction.
+    let supported = json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Title","statement":"Statement","citation_ids":["citation"],"limitations":["Limited."]}],"knowledge_completeness":"partial","limitations":["Limited."]}});
+    assert!(decode(&supported.to_string()).is_ok());
+    for (pointer, value, stage) in [
+        (
+            "/action/limitations",
+            json!([]),
+            Stage::SemanticRule(ActionSemanticRule::FinishOverall),
+        ),
+        (
+            "/action/findings/0/title",
+            json!(""),
+            Stage::SemanticRule(ActionSemanticRule::FindingTextLimits),
+        ),
+        (
+            "/action/findings/0/limitations",
+            json!([]),
+            Stage::SemanticRule(ActionSemanticRule::FindingTextLimits),
+        ),
+        (
+            "/action/findings/0/citation_ids",
+            json!(["citation", "citation"]),
+            Stage::SemanticRule(ActionSemanticRule::FindingCitations),
+        ),
+        ("/action/findings/0/title", json!(1), Stage::TypedEnvelope),
+    ] {
+        let mut value_under_test = supported.clone();
+        *value_under_test.pointer_mut(pointer).unwrap() = value;
+        let raw = value_under_test.to_string();
+        assert_eq!(
+            decode(&raw).unwrap_err(),
+            ActionDecodeFailure {
+                stage,
+                error: InvestigationError::InvalidAction
+            }
+        );
+        assert_eq!(
+            ProgressiveInvestigationAction::decode_resolved(&raw, &context, &hash, &ledger, policy)
+                .unwrap_err(),
+            InvestigationError::InvalidAction
+        );
+    }
+    let mut ordered = supported.clone();
+    ordered["action"]["findings"][0]["citation_ids"] = json!([]);
+    ordered["action"]["findings"][0]["limitations"] = json!([]);
+    assert_eq!(
+        decode(&ordered.to_string()).unwrap_err().stage,
+        Stage::SemanticRule(ActionSemanticRule::FindingCitations)
+    );
+    ordered["action"]["findings"][0]["title"] = json!("");
+    assert_eq!(
+        decode(&ordered.to_string()).unwrap_err().stage,
+        Stage::SemanticRule(ActionSemanticRule::FindingTextLimits)
+    );
+    ordered["action"]["limitations"] = json!([]);
+    assert_eq!(
+        decode(&ordered.to_string()).unwrap_err().stage,
+        Stage::SemanticRule(ActionSemanticRule::FinishOverall)
+    );
+    let nested = json!({"schema_version":1,"outcome":"supported","action":{"type":"read_evidence","fact":{"kind":"node","id":""},"role":"provenance","index":0}});
+    assert_eq!(
+        decode(&nested.to_string()).unwrap_err().stage,
+        Stage::SemanticRule(ActionSemanticRule::EvidenceShape)
+    );
+    // Inner typed serialization normalizes omitted query.kind before decoding;
+    // the unchanged role check precedes the outer canonical check.
+    let omitted = json!({"schema_version":1,"outcome":"supported","action":{"type":"query_context","query":{"scope":{"type":"all"},"labels":[],"max_facts":1,"max_bytes":1024,"cursor":null}}});
+    assert_eq!(
+        decode(&omitted.to_string()).unwrap_err().stage,
+        Stage::SemanticRule(ActionSemanticRule::FinishRole)
+    );
+    let mut noncanonical = supported.clone();
+    noncanonical["narrative"] = serde_json::Value::Null;
+    assert_eq!(
+        decode(&noncanonical.to_string()).unwrap_err().stage,
+        Stage::CanonicalFields
+    );
     let host = ProgressiveInvestigationAction::decode_resolved_detailed(
         "{}", "wrong", &hash, &ledger, policy,
     )
