@@ -4003,7 +4003,9 @@ fn webclient_rows(sites: &[adapters_fw::client::FetchSite]) -> Vec<[String; 3]> 
 fn webclient_request_chains_on_proven_clients_become_fetch_sites() {
     // AC-0441: every verb and `method(HttpMethod.X)` on a field, `this.`
     // field, parameter and local typed `WebClient`, plus inline `create` and
-    // `builder()…build()` clients with literal, computed and absent bases.
+    // `builder()…build()` clients with literal, computed and absent bases; a
+    // URI builder factory (either order) or `apply` makes the base runtime,
+    // and an absolute request URL drops the base.
     let sites = retrofit_sites(&[(
         "src/main/java/io/demo/Client.java",
         r#"package io.demo;
@@ -4032,6 +4034,14 @@ class Client {
         WebClient.builder().baseUrl("https://old.example.com").baseUrl("https://stock.example.com").build().get().uri("/stock").retrieve();
         WebClient.builder().baseUrl(host()).build().get().uri("/f").retrieve();
         WebClient.builder().build().get().uri("/g").retrieve();
+        WebClient.builder().baseUrl("https://a.example").uriBuilderFactory(factory).build().get().uri("/h").retrieve();
+        WebClient.builder().uriBuilderFactory(factory).baseUrl("https://a.example").build().get().uri("/i").retrieve();
+        WebClient.builder().uriBuilderFactory(factory).build().get().uri("/j").retrieve();
+        WebClient.builder().apply(b -> b.baseUrl(host())).build().get().uri("/k").retrieve();
+        WebClient.create("https://orders.example.com").get().uri("https://other.example.com/l").retrieve();
+        users.get().uri("http://other.example.com/m").retrieve();
+        users.get().uri("/n?next=https://x").retrieve();
+        users.get().uri("9p://not-a-scheme").retrieve();
     }
 }
 "#,
@@ -4057,6 +4067,30 @@ class Client {
             ["GET", "literal:/stock", "literal:https://stock.example.com"],
             ["GET", "literal:/f", "computed:host()"],
             ["GET", "literal:/g", "none"],
+            [
+                "GET",
+                "literal:/h",
+                "computed:WebClient.builder().baseUrl(\"https://a.example\").uriBuilderFactory(factory).build()"
+            ],
+            [
+                "GET",
+                "literal:/i",
+                "computed:WebClient.builder().uriBuilderFactory(factory).baseUrl(\"https://a.example\").build()"
+            ],
+            [
+                "GET",
+                "literal:/j",
+                "computed:WebClient.builder().uriBuilderFactory(factory).build()"
+            ],
+            [
+                "GET",
+                "literal:/k",
+                "computed:WebClient.builder().apply(b -> b.baseUrl(host())).build()"
+            ],
+            ["GET", "literal:https://other.example.com/l", "none"],
+            ["GET", "literal:http://other.example.com/m", "none"],
+            ["GET", "literal:/n?next=https://x", "computed:users"],
+            ["GET", "literal:9p://not-a-scheme", "computed:users"],
         ]
         .map(|row| row.map(String::from))
     );

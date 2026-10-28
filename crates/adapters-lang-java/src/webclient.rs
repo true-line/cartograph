@@ -13,7 +13,10 @@
 //! The base is the inline `create("<literal>")` argument or the last
 //! `baseUrl("<literal>")` of an inline builder; any other base is a runtime
 //! value named by the client expression, which the stitcher reports as an
-//! undeclared runtime base rather than guessing the service.
+//! undeclared runtime base rather than guessing the service. A builder that
+//! sets a `uriBuilderFactory` (which overrides `baseUrl` in either order) or
+//! runs an opaque `apply` callback has such a runtime base. An absolute
+//! literal request URL ignores any base, as Spring does.
 
 use super::rest_template::Proof;
 use super::*;
@@ -99,17 +102,24 @@ fn client_base(
             .is_some_and(|name| cx.text(&name) == "build")
     {
         // Walk the builder chain back to `WebClient.builder()`; the last
-        // `baseUrl` call is the one that applies.
+        // `baseUrl` call is the one that applies, unless a URI builder
+        // factory or an opaque callback decides the base at runtime.
         let mut base = None;
+        let mut opaque = false;
         let mut node = client.child_by_field_name("object")?;
         loop {
             if static_call(proof, method, node, "builder") {
-                return Some(base);
+                return Some(if opaque {
+                    Some(IdentityExpr::Computed(cx.text(&client).to_string()))
+                } else {
+                    base
+                });
             }
             if node.kind() != "method_invocation" {
                 return None;
             }
             let name = node.child_by_field_name("name")?;
+            opaque |= matches!(cx.text(&name), "uriBuilderFactory" | "apply");
             if cx.text(&name) == "baseUrl" && base.is_none() {
                 let args = arguments(node);
                 let [url] = args.as_slice() else {
@@ -123,6 +133,16 @@ fn client_base(
     proof
         .is_client(method, call, client, WEB_CLIENT)
         .then(|| Some(IdentityExpr::Computed(cx.text(&client).to_string())))
+}
+
+/// Whether a URL literal carries a scheme (RFC 3986 §3.1).
+fn absolute(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 /// `WebClient` fetch sites in this file, owned by their enclosing method or
@@ -184,13 +204,16 @@ pub(crate) fn sites(
             Some(verb) => verb.to_string(),
             None => proof.method(method, call, verb_args[0]),
         };
+        let literal = string_literal(cx, url);
+        // An absolute request URL replaces the configured base.
+        let base = base.filter(|_| !literal.as_deref().is_some_and(absolute));
         // `Type.method`, naming the call in a runtime-base Gap.
         let entry = symbol
             .rsplit_once('#')
             .map(|(_, member)| member.split('(').next().unwrap_or(member).to_string());
         out.push(FetchSite {
             method: http_method,
-            url: match string_literal(cx, url) {
+            url: match literal {
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
