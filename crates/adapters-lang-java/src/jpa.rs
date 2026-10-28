@@ -330,22 +330,18 @@ fn cardinality(annotation: &str) -> Option<&'static str> {
 pub(crate) fn extract(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     imports: &Imports,
     package: Option<&str>,
     methods_by_start: &HashMap<usize, String>,
     out: &mut Extraction,
 ) {
     use streaming_iterator::StreamingIterator;
-    use tree_sitter::{Query, QueryCursor};
+    use tree_sitter::QueryCursor;
 
-    let query = Query::new(
-        language,
-        "[(class_declaration) @class (interface_declaration) @interface]",
-    )
-    .expect("static query");
+    let query =
+        crate::queries::query("[(class_declaration) @class (interface_declaration) @interface]");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     let mut classes = Vec::new();
     let mut interfaces = Vec::new();
     while let Some(found) = matches.next() {
@@ -362,7 +358,7 @@ pub(crate) fn extract(
     for interface in interfaces {
         repository(cx, interface, imports, package, out);
     }
-    repository_calls(cx, root, language, imports, package, methods_by_start, out);
+    repository_calls(cx, root, imports, package, methods_by_start, out);
 }
 
 fn qualified_name(cx: &FileCx<'_>, declaration: TsNode<'_>) -> Option<(String, String)> {
@@ -1048,18 +1044,17 @@ fn collect_fields(
 fn repository_calls(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     imports: &Imports,
     package: Option<&str>,
     methods_by_start: &HashMap<usize, String>,
     out: &mut Extraction,
 ) {
     use streaming_iterator::StreamingIterator;
-    use tree_sitter::{Query, QueryCursor};
+    use tree_sitter::QueryCursor;
 
-    let query = Query::new(language, "(method_invocation) @call").expect("static query");
+    let query = crate::queries::query("(method_invocation) @call");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, root, cx.source);
+    let mut matches = cursor.matches(query, root, cx.source);
     let mut patterns: HashMap<usize, BTreeSet<String>> = HashMap::new();
     let mut fields: HashMap<usize, HashMap<String, BTreeSet<String>>> = HashMap::new();
     while let Some(found) = matches.next() {
