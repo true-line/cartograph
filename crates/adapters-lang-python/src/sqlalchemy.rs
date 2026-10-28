@@ -14,7 +14,7 @@ use super::{
 };
 use std::path::{Path, PathBuf};
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::QueryCursor;
 
 /// Per-file SQLAlchemy declarations collected during the file parse and joined
 /// across the directory once every file is known.
@@ -868,7 +868,6 @@ fn module_rebound_names(
 pub(crate) fn extract(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
-    language: &tree_sitter::Language,
     bindings: &HashMap<String, ImportBinding>,
     out: &mut Extraction,
 ) {
@@ -904,13 +903,10 @@ pub(crate) fn extract(
         }
     }
 
-    let assign_query = Query::new(
-        language,
-        "(assignment left: (identifier) @lhs right: (_) @rhs) @assign",
-    )
-    .expect("static query");
+    let assign_query =
+        crate::queries::query("(assignment left: (identifier) @lhs right: (_) @rhs) @assign");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&assign_query, root, cx.source);
+    let mut matches = cursor.matches(assign_query, root, cx.source);
     while let Some(found) = matches.next() {
         let (mut assign, mut lhs, mut rhs) = (None, None, None);
         for capture in found.captures() {
@@ -1002,9 +998,9 @@ pub(crate) fn extract(
         }
     }
 
-    let class_query = Query::new(language, "(class_definition) @class").expect("static query");
+    let class_query = crate::queries::query("(class_definition) @class");
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&class_query, root, cx.source);
+    let mut matches = cursor.matches(class_query, root, cx.source);
     while let Some(found) = matches.next() {
         let class = found.captures()[0].node;
         let Some(name_node) = class.child_by_field_name("name") else {
@@ -1235,7 +1231,7 @@ pub(crate) fn extract(
         });
     }
 
-    sqlalchemy_writes::extract_functions(cx, root, language, &mut file);
+    sqlalchemy_writes::extract_functions(cx, root, &mut file);
     file.imports
         .retain(|name, _| !module_shadowed_imports.contains(name));
 
