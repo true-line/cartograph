@@ -1,5 +1,13 @@
 # cartograph
 
+## 0.43.0
+
+### Minor Changes
+
+- 0a25aa2: Add opt-in captured analyst @14 source-action schemas bound to admitted facts, with semantic rejection before source preparation and saved-task reopen support.
+- a79cfab: Prove Flask repository decorators and class-based decorator factories (such as SimpleLogin's concurrency lock) non-authenticating when their wrapper can only call the view or raise non-401/403 errors.
+- 199d477: Flask auth: a request hook that only ends requests with a literal 429 or 5xx status (except 511) (such as a maintenance-mode hook) no longer makes routes unknown.
+
 ## 0.42.0
 
 ### Minor Changes
