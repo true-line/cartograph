@@ -13,6 +13,12 @@ impl ContextSnapshot {
     ) -> Result<BTreeSet<FactReference>, ContextError> {
         let neighborhood = match scope {
             QueryScope::All => None,
+            QueryScope::Node { id } => {
+                if !self.node_ids.contains(&id) {
+                    return Err(ContextError::UnknownNode(id));
+                }
+                return Ok(BTreeSet::from([FactReference::Node { id }]));
+            }
             QueryScope::Neighborhood { anchor, hops } => {
                 validate_limit("hops", hops, MAX_NEIGHBORHOOD_HOPS)?;
                 if !self.node_ids.contains(&anchor) {
@@ -66,15 +72,22 @@ mod tests {
     }
 
     // AC-0328: exact membership parity includes induced and dangling edges.
+    // AC-0460: exact-node reads exclude every edge and agree with references.
     #[test]
     fn scope_references_match_query_pages_and_refuse_invalid_scope() {
         let snapshot = ContextSnapshot::new(
-            vec![node("a"), node("b"), node("c")],
-            vec![edge("a", "b"), edge("b", "c"), edge("a", "external")],
+            vec![node("a"), node("b"), node("c"), node("node:λ|a")],
+            vec![
+                edge("a", "a"),
+                edge("a", "b"),
+                edge("b", "c"),
+                edge("a", "external"),
+            ],
         )
         .unwrap();
         for scope in [
             QueryScope::All,
+            QueryScope::Node { id: "a".into() },
             QueryScope::Neighborhood {
                 anchor: "a".into(),
                 hops: 1,
@@ -109,9 +122,88 @@ mod tests {
                 FactReference::Edge {
                     source: "a".into(),
                     label: "CALLS".into(),
+                    destination: "a".into()
+                },
+                FactReference::Edge {
+                    source: "a".into(),
+                    label: "CALLS".into(),
                     destination: "b".into()
                 },
             ])
+        );
+        let exact = QueryRequest {
+            scope: QueryScope::Node { id: "a".into() },
+            ..QueryRequest::default()
+        };
+        let exact_page = snapshot.query(exact.clone()).unwrap();
+        assert_eq!(
+            exact_page
+                .facts
+                .iter()
+                .map(|fact| fact.reference.clone())
+                .collect::<Vec<_>>(),
+            vec![FactReference::Node { id: "a".into() }]
+        );
+        assert!(exact_page.next_cursor.is_none());
+        assert!(matches!(
+            snapshot.query(QueryRequest {
+                max_bytes: 1,
+                ..exact.clone()
+            }),
+            Err(ContextError::ResponseBudgetExceeded { max_bytes: 1, .. })
+        ));
+        assert!(
+            snapshot
+                .query(QueryRequest {
+                    kind: Some(crate::FactKind::Edge),
+                    ..exact.clone()
+                })
+                .unwrap()
+                .facts
+                .is_empty()
+        );
+        assert!(
+            snapshot
+                .query(QueryRequest {
+                    labels: vec!["Other".into()],
+                    ..exact
+                })
+                .unwrap()
+                .facts
+                .is_empty()
+        );
+        assert!(matches!(
+            snapshot.query(QueryRequest {
+                scope: QueryScope::Node { id: "missing".into() },
+                ..QueryRequest::default()
+            }),
+            Err(ContextError::UnknownNode(id)) if id == "missing"
+        ));
+        assert!(matches!(
+            snapshot.references_in_scope(QueryScope::Node { id: "missing".into() }),
+            Err(ContextError::UnknownNode(id)) if id == "missing"
+        ));
+        let unicode_query = QueryRequest {
+            scope: QueryScope::Node {
+                id: "node:λ|a".into(),
+            },
+            kind: Some(crate::FactKind::Node),
+            ..QueryRequest::default()
+        };
+        let wire = serde_json::to_vec(&unicode_query).unwrap();
+        let decoded: QueryRequest = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(decoded, unicode_query);
+        assert_eq!(
+            snapshot
+                .query(decoded)
+                .unwrap()
+                .facts
+                .into_iter()
+                .map(|fact| fact.reference)
+                .collect::<Vec<_>>(),
+            vec![FactReference::Node {
+                id: "node:λ|a".into()
+            }]
         );
         for hops in [0, MAX_NEIGHBORHOOD_HOPS + 1] {
             assert!(matches!(

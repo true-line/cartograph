@@ -166,7 +166,7 @@ fn duplicate_fact_identities_are_rejected() {
 
 #[test]
 fn cursors_bind_snapshot_and_normalized_selection() {
-    // AC-0101: paging can change budgets, never source content or selection.
+    // AC-0101/0460: paging budgets may change, but content and selection (including node ID) may not.
     let nodes = vec![
         node("a", "Module", json!({})),
         node("b", "Symbol", json!({})),
@@ -216,12 +216,46 @@ fn cursors_bind_snapshot_and_normalized_selection() {
             },
             ..continuation.clone()
         },
+        QueryRequest {
+            scope: QueryScope::Node { id: "a".into() },
+            ..continuation.clone()
+        },
     ] {
         assert!(matches!(
             snapshot.query(changed),
             Err(ContextError::CursorSelectionMismatch)
         ));
     }
+    let node_a_selection = Selection {
+        scope: QueryScope::Node { id: "a".into() },
+        kind: None,
+        labels: BTreeSet::new(),
+    };
+    let node_a_cursor = QueryCursor {
+        snapshot_id: snapshot.id().to_owned(),
+        selection_id: content_identity("selection-v1", &node_a_selection).unwrap(),
+        offset: 0,
+    };
+    assert_eq!(
+        references(
+            &snapshot
+                .query(QueryRequest {
+                    scope: node_a_selection.scope.clone(),
+                    cursor: Some(node_a_cursor.clone()),
+                    ..QueryRequest::default()
+                })
+                .unwrap()
+        ),
+        vec![node_ref("a")]
+    );
+    assert!(matches!(
+        snapshot.query(QueryRequest {
+            scope: QueryScope::Node { id: "b".into() },
+            cursor: Some(node_a_cursor),
+            ..QueryRequest::default()
+        }),
+        Err(ContextError::CursorSelectionMismatch)
+    ));
     let mut invalid_cursor = cursor.clone();
     invalid_cursor.offset = 4;
     assert!(matches!(
