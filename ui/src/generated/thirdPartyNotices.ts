@@ -4370,7 +4370,7 @@ export const THIRD_PARTY_NOTICES = [
   "- leb128 0.2.7 — https://github.com/gimli-rs/leb128",
   "- leb128fmt 0.1.0 — https://github.com/bluk/leb128fmt",
   "- libgit2-sys 0.18.5+1.9.4 — https://github.com/rust-lang/git2-rs",
-  "- libz-sys 1.1.29 — https://github.com/rust-lang/libz-sys",
+  "- libz-sys 1.1.31 — https://github.com/rust-lang/libz-sys",
   "- lock_api 0.4.14 — https://github.com/Amanieu/parking_lot",
   "- log 0.4.33 — https://github.com/rust-lang/log",
   "- markup5ever 0.39.0 — https://github.com/servo/html5ever",
