@@ -714,3 +714,74 @@ fn acceptance_observer_rejects_other_input_family_before_delegation() {
         assert!(observed.observations().unwrap().is_empty());
     }
 }
+
+// AC-0465: inventory details are bounded by tool actions, not completed attempts.
+#[test]
+fn acceptance_observer_inventory_count_matches_tool_action_bounds() {
+    use llm::bounded::{CallDirective, CompletionLimits};
+    use llm::{AnalysisTier, CompletionAction, CompletionPayload, EgressFirewall, EgressPolicy};
+    for (next, limit) in [(false, 8), (true, 56)] {
+        let inner = Arc::new(Scripted::new(Mode::CompletionSupported));
+        let observed = ObservedProvider {
+            inner: inner.clone(),
+            context_id: "inventory-boundary".into(),
+            observations: Mutex::new(vec![]),
+            next,
+        };
+        for count in [limit, limit + 1] {
+            let details = (0..count).map(|index| {
+                let body = format!("{{\"entry\":{index}}}");
+                serde_json::json!({"inventory_hash": content_hash(body.as_bytes()), "inventory_json": body})
+            }).collect::<Vec<_>>();
+            let action = CompletionAction {
+                action_id: "inventory-boundary".into(),
+                tier: AnalysisTier::Agentic,
+                payload: CompletionPayload {
+                    system: "Return a JSON action.".into(),
+                    prompt: serde_json::json!({
+                        "schema_version": if next { 9 } else { 6 },
+                        "input_ledger_hash": "a".repeat(64),
+                        "context_id": "inventory-boundary",
+                        "coverage_details": details,
+                        "prior_findings_as_t3_history": []
+                    })
+                    .to_string(),
+                    spans: vec![],
+                    response_schema: None,
+                },
+            };
+            let firewall = EgressFirewall::new(EgressPolicy::default());
+            let prepared = firewall
+                .prepare_bounded(inner.as_ref(), &action, &CompletionLimits::default())
+                .unwrap();
+            let authorized = firewall
+                .authorize_bounded(inner.as_ref(), &prepared, None)
+                .unwrap();
+            if count == limit {
+                assert_eq!(
+                    observation(&authorized, next)
+                        .unwrap()
+                        .inventory_hashes
+                        .len(),
+                    count
+                );
+            } else {
+                assert_eq!(
+                    observation(&authorized, next).unwrap_err(),
+                    "Too many actual inventories."
+                );
+                let control = CompletionControl {
+                    deadline: Instant::now() + std::time::Duration::from_secs(10),
+                    check: &|| CallDirective::Continue,
+                };
+                let error = observed
+                    .complete_bounded(&authorized, &control)
+                    .unwrap_err();
+                assert_eq!(error.code, FailureCode::InvalidInput);
+                assert_eq!(error.outcome, InvocationOutcome::NotDispatched);
+                assert!(observed.observations().unwrap().is_empty());
+            }
+            assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+}

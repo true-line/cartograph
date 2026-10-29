@@ -144,7 +144,7 @@ fn observation(
         .ok_or("Actual coverage details missing.")?;
     if inventories.len()
         > if next {
-            INVESTIGATION_V2_POLICY.max_completed_attempts()
+            INVESTIGATION_V2_POLICY.limits().tool_actions as usize
         } else {
             8
         }
