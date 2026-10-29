@@ -1453,6 +1453,8 @@ def f(client):
     computed.send_message(QueueUrl="q")
     client.send_message(QueueUrl="q")
     other.send_message(QueueUrl="q")
+    rebound.send_message(QueueUrl="q")
+    alias.send_message(QueueUrl="q")
     boto3.resource("sqs").send_message(QueueUrl="q")
     boto3.client("sqs").sendMessage(QueueUrl="q")
     kafka.KafkaProducer().produce("t")

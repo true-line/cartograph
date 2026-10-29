@@ -162,7 +162,9 @@ const JAVA_FEIGN: &str = "single-type-imported or fully qualified `@FeignClient`
 const JAVA_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a single-type-imported or fully qualified `WebClient` local, parameter or own-type field, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a field-held client's base is an undeclared runtime base, and a `uri` must be an exact literal";
 /// What the Java core client cell still lacks (AC-0435, AC-0437, AC-0441).
 const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces and Spring `RestTemplate` and `WebClient`";
-const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript and Python boto3/kafka-python";
+const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript, Python boto3/kafka-python and Java Spring Kafka";
+/// What the Java Spring Kafka cell reads (AC-0459).
+const JAVA_KAFKA: &str = "`send` on a single-type-imported or fully qualified `KafkaTemplate` local, parameter or own-type field, and method-level `@KafkaListener` `topics`; subclasses, `sendDefault`, wildcard imports and class-level listeners are not read, and a topic must be an exact literal with no placeholder";
 /// What the Python event SDK cells read (AC-0458).
 const PY_EVENTS: &str = "registry `pypi` entries: methods on a once-bound or inline selected factory call (`boto3.client(\"sqs\")`, `KafkaProducer(…)`) in their own scope, and constructors; instance attributes and passed-in clients are not read, an identity is followed only within its file, and qualifiers and batch keys are not applied";
 const NEXT_API: &str = "pages/api and app-router route handlers under a package declaring next; next.config basePath is not applied and wrapped or re-exported handlers stay Gaps";
@@ -300,7 +302,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         JAVA_WEBCLIENT,
     ),
     cell("Java", CORE, HttpClientCalls, Unsupported, NO_JAVA_CLIENT),
-    cell("Java", CORE, EventSites, Unsupported, NO_EVENTS),
+    cell("Java", "spring-kafka", EventSites, Partial, JAVA_KAFKA),
     cell("Kotlin", CORE, Types, Supported, ""),
     cell("Kotlin", CORE, Calls, Supported, ""),
     cell("Kotlin", "spring-web", HttpEndpoints, Supported, ""),
