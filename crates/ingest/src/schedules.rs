@@ -440,18 +440,16 @@ fn resolve_entry(
         let (absolute, cwd_span) = match (candidate.starts_with('/'), cwd) {
             (true, _) => (normalize(candidate), None),
             (false, Some((dir, span))) => (normalize(&format!("{dir}/{relative}")), Some(*span)),
-            (false, None) => match exists(relative) {
-                Some(rel) => {
-                    return Some(Entry::File {
-                        rel,
-                        confidence: ConfidenceTier::InferredStrong,
-                        marker: Some("entry_relative_to_repo_root"),
-                        dockerfile: Vec::new(),
-                        container_dir: None,
-                    });
-                }
-                None => return None,
-            },
+            (false, None) => {
+                let rel = exists(relative)?;
+                return Some(Entry::File {
+                    rel,
+                    confidence: ConfidenceTier::InferredStrong,
+                    marker: Some("entry_relative_to_repo_root"),
+                    dockerfile: Vec::new(),
+                    container_dir: None,
+                });
+            }
         };
         let container = container?;
         let rel = absolute
