@@ -53,8 +53,8 @@ pub struct Extraction {
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
-    /// Client calls that carry their own base (Spring `RestTemplate`), kept
-    /// out of the Retrofit base join.
+    /// Client calls that carry their own base (Spring `RestTemplate` and
+    /// `WebClient`), kept out of the Retrofit base join.
     unjoined_sites: Vec<adapters_fw::client::FetchSite>,
     /// Android Navigation 3 entries and back-stack navigations, resolved repo-wide.
     navigation3: navigation3::Pending,
@@ -1713,10 +1713,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     // directory join.
     out.fetch_sites
         .extend(retrofit::sites(&cx, &functions, &imports));
-    // Spring `RestTemplate` client calls (#1340), which no Retrofit base
-    // applies to.
+    // Spring `RestTemplate` client calls (#1340) and `WebClient` request
+    // chains (#1342), which no Retrofit base applies to.
     out.unjoined_sites
         .extend(rest_template::sites(&cx, root, &functions, &imports));
+    out.unjoined_sites
+        .extend(webclient::sites(&cx, root, &functions, &imports));
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
 
@@ -2462,6 +2464,7 @@ mod queries;
 mod receivers;
 mod rest_template;
 mod retrofit;
+mod webclient;
 
 #[cfg(test)]
 mod tests;

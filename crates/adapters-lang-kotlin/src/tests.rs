@@ -3955,6 +3955,25 @@ class Holder(private val rest: RestTemplate) {
     );
 }
 
+fn webclient_sites(source: &str) -> Vec<(String, String, Option<String>, Option<String>)> {
+    let show = |url: IdentityExpr| match url {
+        IdentityExpr::Literal(url) => format!("literal {url}"),
+        IdentityExpr::Computed(text) => format!("computed {text}"),
+        other => format!("{other:?}"),
+    };
+    retrofit_sites(&[("src/Client.kt", source)])
+        .into_iter()
+        .map(|site| {
+            (
+                site.method,
+                show(site.url),
+                site.base.map(|base| show(base.url)),
+                site.entry,
+            )
+        })
+        .collect()
+}
+
 // AC-0456 (#1341 review): a RestTemplate call carries no base, and a repo's
 // Retrofit base never joins it. (T-0456)
 #[test]
@@ -3978,4 +3997,261 @@ fun provide() = Retrofit.Builder().baseUrl("https://app.example.io").build()
     let single = extract_source(client.as_bytes(), "src/Client.kt", &id()).unwrap();
     assert_eq!(single.fetch_sites.len(), 1);
     assert!(single.fetch_sites[0].base.is_none());
+}
+
+// AC-0457: `<client>.<verb>().uri(…)` chains on a proven Spring `WebClient`
+// (a typed property or parameter, `this.x`, an inline `create` or builder)
+// become client calls with their method and base: a literal `create` or last
+// `baseUrl`, a runtime base for a held client or an opaque builder, and none
+// for an absolute request URL. (T-0457)
+#[test]
+fn webclient_chains_on_proven_clients_become_client_calls() {
+    let sites = webclient_sites(
+        r#"package io.demo
+
+import org.springframework.http.HttpMethod
+import org.springframework.web.reactive.function.client.WebClient
+
+class Orders(private val client: WebClient) {
+    fun get(id: String) = client.get().uri("/orders/{id}", id).retrieve()
+
+    fun this_held() = this.client.delete().uri("/orders/1").retrieve()
+
+    fun created() = WebClient.create("https://orders.example.com/").post().uri("/orders").retrieve()
+
+    fun built(path: String) =
+        WebClient.builder().baseUrl("https://a.example").baseUrl("https://b.example").build()
+            .put().uri(path).retrieve()
+
+    fun opaque() = WebClient.builder().baseUrl("https://a.example").apply { it }.build()
+        .patch().uri("/x").retrieve()
+
+    fun absolute() = client.get().uri("https://other.example/x").retrieve()
+
+    fun method(other: WebClient) = other.method(HttpMethod.OPTIONS).uri("/o").retrieve()
+
+    fun unknown(m: HttpMethod) = client.method(m).uri("/u").retrieve()
+}
+"#,
+    );
+    let entry = |name: &str| Some(format!("Orders.{name}"));
+    let s = |text: &str| text.to_string();
+    assert_eq!(
+        sites,
+        [
+            (
+                s("GET"),
+                s("literal /orders/{id}"),
+                Some(s("computed client")),
+                entry("get")
+            ),
+            (
+                s("DELETE"),
+                s("literal /orders/1"),
+                Some(s("computed this.client")),
+                entry("this_held")
+            ),
+            (
+                s("POST"),
+                s("literal /orders"),
+                Some(s("literal https://orders.example.com")),
+                entry("created")
+            ),
+            (
+                s("PUT"),
+                s("computed path"),
+                Some(s("literal https://b.example")),
+                entry("built")
+            ),
+            (
+                s("PATCH"),
+                s("literal /x"),
+                Some(s(
+                    "computed WebClient.builder().baseUrl(\"https://a.example\").apply { it }.build()"
+                )),
+                entry("opaque")
+            ),
+            (
+                s("GET"),
+                s("literal https://other.example/x"),
+                None,
+                entry("absolute")
+            ),
+            (
+                s("OPTIONS"),
+                s("literal /o"),
+                Some(s("computed other")),
+                entry("method")
+            ),
+            (
+                s("?"),
+                s("literal /u"),
+                Some(s("computed client")),
+                entry("unknown")
+            ),
+        ]
+    );
+}
+
+// AC-0457: no chain is read without a proven client: an untyped property, a
+// star import, another or a locally declared `WebClient`, a shadowed type
+// name, or named `uri` arguments. (T-0457)
+#[test]
+fn webclient_chains_need_a_proven_client() {
+    let unproven = [
+        r#"package io.demo
+import org.springframework.web.reactive.function.client.WebClient
+class A { private val client = WebClient.create("https://a.example")
+fun f() = client.get().uri("/x").retrieve() }
+"#,
+        r#"package io.demo
+import org.springframework.web.reactive.function.client.*
+fun f(client: WebClient) = client.get().uri("/x").retrieve()
+"#,
+        r#"package io.demo
+import com.other.WebClient
+fun f(client: WebClient) = client.get().uri("/x").retrieve()
+"#,
+        r#"package io.demo
+import org.springframework.web.reactive.function.client.WebClient
+interface WebClient
+fun f(client: WebClient) = client.get().uri("/x").retrieve()
+"#,
+        r#"package io.demo
+import org.springframework.web.reactive.function.client.WebClient
+fun f(WebClient: Factory) = WebClient.create("https://a.example").get().uri("/x").retrieve()
+"#,
+        r#"package io.demo
+import org.springframework.web.reactive.function.client.WebClient
+fun f(client: WebClient) = client.get().uri(uri = "/x").retrieve()
+"#,
+        r#"package io.demo
+fun f(org: Factory) =
+    org.springframework.web.reactive.function.client.WebClient.create().get().uri("/x").retrieve()
+"#,
+        r#"package io.demo
+import org.springframework.web.reactive.function.client.WebClient
+fun <WebClient> f(client: WebClient) = client.get().uri("/x").retrieve()
+"#,
+    ];
+    for source in unproven {
+        assert_eq!(webclient_sites(source), [], "{source}");
+    }
+    // The fully qualified `create` needs no import.
+    assert_eq!(
+        webclient_sites(
+            r#"package io.demo
+fun f() = org.springframework.web.reactive.function.client.WebClient.create().get().uri("/x").retrieve()
+"#
+        ),
+        [("GET".into(), "literal /x".into(), None, Some("f".into()))]
+    );
+}
+
+// AC-0457 (#1345 review): a builder link that is no `WebClient.Builder`
+// member may be an extension returning another type, so the chain proves no
+// client; a member link taking a lambda keeps the client with a runtime
+// base. A `uri` whose lone further argument is not a literal may be a
+// `Function<UriBuilder, URI>`, so its URL is computed; template variables
+// alongside it keep the literal. (T-0457)
+#[test]
+fn webclient_builders_need_member_links_and_uri_functions_are_computed() {
+    let head =
+        "package io.demo\nimport org.springframework.web.reactive.function.client.WebClient\n";
+    for chain in [
+        r#"WebClient.builder().fake().build()"#,
+        r#"WebClient.builder().baseUrl("https://a.example").configure { }.build()"#,
+        r#"WebClient.builder().configure().baseUrl("https://a.example").build()"#,
+        r#"WebClient.builder().clone("x").build()"#,
+        r#"WebClient.builder().clone { }.build()"#,
+        r#"WebClient.builder().baseUrl("https://a.example", "b").build()"#,
+        r#"WebClient.builder().baseUrl { "https://a.example" }.build()"#,
+        r#"WebClient.builder().baseUrl(7).build()"#,
+        r#"WebClient.builder().defaultHeader("a", true).build()"#,
+    ] {
+        let source = format!("{head}fun f() = {chain}.get().uri(\"/x\").retrieve()\n");
+        assert_eq!(webclient_sites(&source), [], "{chain}");
+    }
+    let sites = webclient_sites(&format!(
+        "{head}{}",
+        r#"fun f() = WebClient.builder().baseUrl("https://a.example").filters { }.build().get().uri("/x").retrieve()
+fun g() = WebClient.builder().baseUrl("https://a.example").exchangeFunction(exchange).build().get().uri("/x").retrieve()
+fun h(client: WebClient, fn: java.util.function.Function<UriBuilder, java.net.URI>) {
+    client.get().uri("/a", fn).retrieve()
+    client.get().uri("/b", { builder -> builder.build() }).retrieve()
+    client.get().uri("/c/{id}", 7).retrieve()
+    client.get().uri("/d/{a}/{b}", a, b).retrieve()
+}
+fun i(client: WebClient, id: Long, any: Any) {
+    client.get().uri("/e/{id}", id).retrieve()
+    client.get().uri("/f/{id}", any).retrieve()
+}
+class String
+fun j(client: WebClient, id: String) = client.get().uri("/g/{id}", id).retrieve()
+"#
+    ));
+    let urls: Vec<&str> = sites.iter().map(|(_, url, _, _)| url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "literal /x",
+            "literal /x",
+            "computed \"/a\"",
+            "computed \"/b\"",
+            "literal /c/{id}",
+            "literal /d/{a}/{b}",
+            "literal /e/{id}",
+            "computed \"/f/{id}\"",
+            "computed \"/g/{id}\"",
+        ]
+    );
+    assert!(sites[..2].iter().all(|(_, _, base, _)| {
+        base.as_deref()
+            .is_some_and(|base| base.starts_with("computed"))
+    }));
+
+    // A function of a member's name that the file declares or imports may be
+    // what a link calls, whatever its argument types.
+    for shadow in [
+        "fun WebClient.Builder.baseUrl(url: String): Fake = Fake()\n",
+        "import custom.baseUrl\n",
+    ] {
+        let source = format!(
+            "{head}{shadow}{}",
+            r#"fun f() = WebClient.builder().baseUrl("https://a.example").build().get().uri("/x").retrieve()"#
+        );
+        assert_eq!(webclient_sites(&source), [], "{shadow}");
+    }
+
+    // A zero-argument `clone()` is the member and keeps the literal base. A
+    // type parameter named `String` where the binding is declared may be a
+    // function type, while one declared by another function does not
+    // rebind `String` here.
+    let sites = webclient_sites(&format!(
+        "{head}{}",
+        r#"fun k() = WebClient.builder().baseUrl("https://a.example").clone().build().get().uri("/k").retrieve()
+fun q(url: String) = WebClient.builder().baseUrl(url).build().get().uri("/q").retrieve()
+fun <String : java.util.function.Function<UriBuilder, java.net.URI>> m(client: WebClient, fn: String) =
+    client.get().uri("/m", fn).retrieve()
+class Holder<String : java.util.function.Function<UriBuilder, java.net.URI>>(val client: WebClient) {
+    fun p(fn: String) = client.get().uri("/p", fn).retrieve()
+}
+fun <String> unrelated() {}
+fun o(client: WebClient, id: String) = client.get().uri("/o/{id}", id).retrieve()
+"#
+    ));
+    let rows: Vec<(&str, Option<&str>)> = sites
+        .iter()
+        .map(|(_, url, base, _)| (url.as_str(), base.as_deref()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("literal /k", Some("literal https://a.example")),
+            ("literal /q", Some("computed url")),
+            ("computed \"/m\"", Some("computed client")),
+            ("computed \"/p\"", Some("computed client")),
+            ("literal /o/{id}", Some("computed client")),
+        ]
+    );
 }
