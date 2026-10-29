@@ -1012,7 +1012,7 @@ pub(super) fn validate_input_candidate(
 ) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
     let policy = InvestigationPolicy::for_limits(&task.detail.limits)
         .ok_or(InvestigationStoreError::Invalid)?;
-    ledger.validate_with_policy(policy)?;
+    ledger.validate_for_specialist(task.detail.summary.specialist_id, policy)?;
     let archive = coverage::load(connection, &task.detail.summary.investigation_id)?;
     match (&ledger.coverage, archive.as_ref()) {
         (None, None) => {}

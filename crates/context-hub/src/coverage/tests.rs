@@ -491,7 +491,7 @@ fn qualified_query_is_bounded_and_continues_only_in_its_context() {
     ));
 }
 
-// AC-0239: qualifying an already-owned projection shares exactly that immutable
+// AC-0239/0460: qualifying an already-owned projection shares exactly that immutable
 // snapshot and preserves legacy query bytes, qualified pages, budgets and proof.
 #[test]
 fn shared_coverage_projection_preserves_owned_wire_identity_and_cursor_contract() {
@@ -563,6 +563,24 @@ fn shared_coverage_projection_preserves_owned_wire_identity_and_cursor_contract(
     assert_eq!(
         serde_json::to_vec(&scoped).unwrap(),
         serde_json::to_vec(&owned.query(neighborhood).unwrap()).unwrap()
+    );
+    let exact_node = QualifiedRequest {
+        request: QueryRequest {
+            scope: super::super::QueryScope::Node { id: "mod:0".into() },
+            ..QueryRequest::default()
+        },
+        context_id: None,
+    };
+    let exact_shared = shared.query(exact_node.clone()).unwrap();
+    let exact_owned = owned.query(exact_node).unwrap();
+    assert_eq!(exact_shared.response.facts.len(), 1);
+    assert_eq!(
+        exact_shared.response.facts[0].reference,
+        super::super::FactReference::Node { id: "mod:0".into() }
+    );
+    assert_eq!(
+        serde_json::to_vec(&exact_shared).unwrap(),
+        serde_json::to_vec(&exact_owned).unwrap()
     );
     for (max_bytes, context_id) in [(64, None), (4096, Some("wrong-context".into()))] {
         let request = QualifiedRequest {

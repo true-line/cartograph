@@ -648,7 +648,13 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
         .is_ok()
     );
     assert_eq!(
-        validate_proposal(&value, &finish_response, &f.ledger, &f.basis),
+        validate_proposal(
+            &value,
+            &finish_response,
+            &f.ledger,
+            &f.basis,
+            f.task.detail.summary.specialist_id
+        ),
         Err(InvestigationStoreError::Invalid)
     );
     let value = proposal(&f, 12);
@@ -656,7 +662,13 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
     let mut call = f.basis.clone();
     call.admission.mode = CompletionCallMode::FinishOnly;
     assert_eq!(
-        validate_proposal(&value, &response, &f.ledger, &call),
+        validate_proposal(
+            &value,
+            &response,
+            &f.ledger,
+            &call,
+            f.task.detail.summary.specialist_id
+        ),
         Err(InvestigationStoreError::Invalid)
     );
 }
@@ -756,4 +768,53 @@ fn admission_journal_saved_call_reopen_authenticates_nonzero_feedback_and_count(
         .unwrap()
         .action_hash = "f".repeat(64);
     assert!(changed.validate_saved(&tx, &task).is_err());
+}
+
+// AC-0461: a structurally valid new query does not widen a retained old task.
+#[test]
+fn exact_node_old_saved_ledger_is_rejected_by_persisted_role() {
+    let f = internal_next_prompt_fixture();
+    let mut ledger = f.ledger.clone();
+    ledger.revision += 1;
+    ledger.queries.push(InvestigationQueryManifest {
+        query: InvestigationQuery {
+            scope: InvestigationScope::Node {
+                id: "caller-node".into(),
+            },
+            kind: Some(InvestigationFactKind::Node),
+            labels: vec![],
+            max_facts: 1,
+            max_bytes: 32768,
+            cursor: None,
+        },
+        response_hash: core_prov::content_hash(b"{}"),
+        response_bytes: 2,
+        returned_facts: 0,
+        total_selected: 0,
+        has_more: false,
+    });
+    ledger
+        .validate_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    insert_body(
+        &tx,
+        "investigation_inputs",
+        &f.basis.task_id,
+        &signed(ledger.revision).unwrap(),
+        &ledger,
+        MAX_MANIFEST_BYTES,
+    )
+    .unwrap();
+    let mut task: StoredTask =
+        serde_json::from_slice(&encode(&f.task, MAX_RECORD_BYTES).unwrap()).unwrap();
+    task.ledger_revision = Some(ledger.revision);
+    task.ledger_hash = Some(
+        ledger
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap(),
+    );
+    assert!(storage::load_ledger(&tx, &task).is_err());
+    task.detail.summary.specialist_id = SpecialistId::DomainAnalystV17;
+    assert_eq!(storage::load_ledger(&tx, &task).unwrap(), Some(ledger));
 }

@@ -661,7 +661,7 @@ impl JobStore {
                 let ledger: InvestigationInputLedger =
                     read_body(&tx, "investigation_inputs", "revision", &id, &revision)?
                         .ok_or(InvestigationStoreError::Invalid)?;
-                ledger.validate_with_policy(policy)?;
+                ledger.validate_for_specialist(task.detail.summary.specialist_id, policy)?;
                 encode(&ledger, MAX_MANIFEST_BYTES)?;
                 if signed(ledger.revision)? != revision
                     || Some(&ledger.graph_snapshot_id)

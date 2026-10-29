@@ -84,6 +84,35 @@ it('loads only coherent generation4 detail/result pairs and rejects altered save
   expect(useInvestigationStore.getState().error).toContain('consistently');
 });
 
+it('reopens a saved @17 summary/result from its exact family without a catalog promotion (AC-0461)', async () => {
+  const { admissionDetail, admissionResult } = await import('./completionFixtures');
+  const { completionFamily, isCompletionSpecialist, isExpandedSpecialist } = await import('./investigationFamilies');
+  const detail = admissionDetail('saved-analyst-17');
+  detail.last_event_sequence = 0;
+  detail.specialist_id = 'domain-analyst@17';
+  detail.specialist = { ...detail.specialist, id: 'domain-analyst@17', version: 17,
+    prompt_fingerprint: 'fixture-domain-analyst@17' };
+  const result = admissionResult('saved-analyst-17');
+  mockIPC((command) => {
+    if (command === 'get_investigation') return detail;
+    if (command === 'investigation_result') return result;
+    if (command === 'investigation_consent') return null;
+    if (command === 'investigation_events') return { investigation_id: 'saved-analyst-17', items: [], next_sequence: 0, has_more: false };
+    return null;
+  });
+
+  const family = completionFamily(7);
+  expect(family?.specialistIds).toContain('domain-analyst@17');
+  expect(family).toMatchObject({ roleVersions: expect.arrayContaining([17]), requestVersion: 7, resultVersion: 7 });
+  expect(isCompletionSpecialist('domain-analyst@17')).toBe(true);
+  expect(isExpandedSpecialist('domain-analyst@17')).toBe(true);
+  await useInvestigationStore.getState().open('saved-analyst-17');
+  expect(useInvestigationStore.getState().catalog).toBeNull();
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().detail?.specialist).toMatchObject({ id: 'domain-analyst@17', version: 17 });
+  expect(useInvestigationStore.getState().result).toMatchObject({ schema_version: 7, result_id: `investigation-result-v7:${'7'.repeat(64)}` });
+});
+
 it('does not resurrect a source selection after the user clears or changes its context (AC-0266)', async () => {
   let release!: (value: typeof sourceObligation) => void;
   mockIPC((command) => command === 'resolve_investigation_source_obligation'

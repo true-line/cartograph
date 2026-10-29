@@ -231,3 +231,128 @@ fn check_admitted_source_schema(role: SpecialistId) {
         Some(response_schema::CHOICE.into())
     );
 }
+
+// AC-0461: the new query capability does not change task scopes or historical decoders.
+#[test]
+fn exact_node_analyst_capability_is_closed_for_historical_actions_and_replay() {
+    assert_eq!(
+        SpecialistId::DomainAnalystV15
+            .definition()
+            .unwrap()
+            .prompt_fingerprint,
+        "ec99aee7d993cae30220094c8afb31430ba33a95b77cd4389ae81fbe0ef0041c"
+    );
+    let role = SpecialistId::DomainAnalystV17;
+    let policy = &INVESTIGATION_V2_POLICY;
+    let (mut fixture, raw, target, _) = source_fixture(role, "ordinary source");
+    let crate::TaskFactKey::Node { id } = &target.fact else {
+        unreachable!()
+    };
+    let node = InvestigationScope::Node { id: id.clone() };
+    assert!(node.validate().is_err());
+    let mut request = fixture.request.clone();
+    request.scope = node.clone();
+    assert!(request.normalized_with_policy(policy).is_err());
+    fixture.ledger.queries[0].query.scope = node;
+    fixture.basis.input_ledger_hash = fixture.ledger.fingerprint_with_policy(policy).unwrap();
+    fixture
+        .ledger
+        .validate_for_specialist(role, policy)
+        .unwrap();
+    let input = build_source(&fixture, &raw, &[], role, CompletionCallMode::Choice);
+    let current = schema(&input);
+    assert!(
+        current["$defs"]["query_scope"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["properties"]["type"]["const"] == "node")
+    );
+    assert_eq!(
+        read_branch(&current).unwrap()["properties"]["fact"],
+        json!({"enum":[target.fact]})
+    );
+    let context = &fixture.request.expected_context_id;
+    let hash = &fixture.metadata.request_hash;
+    let query = json!({"type":"query_context","context_id":context,"query":fixture.ledger.queries[0].query});
+    let decode = |value: &Value, role| {
+        ProgressiveInvestigationAction::decode_resolved_for_specialist(
+            &value.to_string(),
+            context,
+            hash,
+            &fixture.ledger,
+            policy,
+            role,
+        )
+    };
+    assert!(decode(&query, role).is_ok());
+    assert!(QualifiedInvestigationAction::decode(&query.to_string(), context).is_err());
+    assert!(CompletionInvestigationAction::decode(&query.to_string(), context).is_err());
+    let mut legacy = query.clone();
+    legacy.as_object_mut().unwrap().remove("context_id");
+    assert!(InvestigationAction::decode(&legacy.to_string()).is_err());
+    for old in [
+        SpecialistId::DomainAnalystV10,
+        SpecialistId::DomainAnalystV12,
+        SpecialistId::DomainAnalystV14,
+        SpecialistId::DomainAnalystV15,
+        SpecialistId::EvidenceAuditorV11,
+    ] {
+        assert!(decode(&query, old).is_err());
+        assert!(fixture.ledger.validate_for_specialist(old, policy).is_err());
+        let mut mismatched = input.clone();
+        mismatched.payload.system = old.prompt();
+        assert!(mismatched.admission_reserve_basis(policy).is_err());
+    }
+    for (pointer, bad) in [
+        ("/query/scope/id", json!("")),
+        ("/query/scope/id", json!("x".repeat(1025))),
+        ("/context_id", json!("wrong")),
+        ("/query/max_facts", json!(0)),
+        ("/query/scope/extra", json!(1)),
+    ] {
+        let mut invalid = query.clone();
+        if pointer.ends_with("extra") {
+            invalid["query"]["scope"]["extra"] = bad;
+        } else {
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+        }
+        assert!(decode(&invalid, role).is_err());
+    }
+    let mut omitted = query.clone();
+    omitted["query"].as_object_mut().unwrap().remove("cursor");
+    assert!(decode(&omitted, role).is_err());
+    let duplicate = query
+        .to_string()
+        .replace("\"scope\":", "\"scope\":{},\"scope\":");
+    assert!(
+        ProgressiveInvestigationAction::decode_resolved_for_specialist(
+            &duplicate,
+            context,
+            hash,
+            &fixture.ledger,
+            policy,
+            role
+        )
+        .is_err()
+    );
+    let reference = QueryHistoryReference::from_ledger(hash, &fixture.ledger, 0, policy).unwrap();
+    let replay = json!({"type":"replay_query","context_id":context,"query_index":reference.query_index,"query_id":reference.query_id});
+    assert!(decode(&replay, role).is_ok());
+    assert!(decode(&replay, SpecialistId::DomainAnalystV15).is_err());
+    assert!(
+        ProgressiveInvestigationAction::decode_resolved(
+            &replay.to_string(),
+            context,
+            hash,
+            &fixture.ledger,
+            policy
+        )
+        .is_err()
+    );
+    assert_eq!(
+        response_schema::select_admitted(role, CompletionCallMode::FinishOnly, &fixture.ledger)
+            .unwrap(),
+        Some(response_schema::FINISH.into())
+    );
+}

@@ -150,7 +150,7 @@ impl InvestigationInput {
         if specialist.uses_policy_selection() != (policy.profile() == "investigation-v2") {
             return Err(InvestigationError::InvalidInput);
         }
-        ledger.validate_with_policy(policy)?;
+        ledger.validate_for_specialist(specialist, policy)?;
         // Qualified ledgers require their own preparation path; legacy prompts
         // must never silently discard mandatory coverage.
         if ledger.schema_version

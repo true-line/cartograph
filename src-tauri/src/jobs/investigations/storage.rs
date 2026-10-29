@@ -1555,7 +1555,7 @@ pub(super) fn load_ledger(
         &signed(revision)?,
     )?
     .ok_or(InvestigationStoreError::Invalid)?;
-    ledger.validate_with_policy(policy)?;
+    ledger.validate_for_specialist(task.detail.summary.specialist_id, policy)?;
     match (&task.detail.coverage_context, &ledger.coverage) {
         (None, None) => {}
         (Some(context), Some(proof))

@@ -28,12 +28,13 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .coverage
             .as_ref()
             .ok_or(HostError::InvalidInput)?;
-        let action = ProgressiveInvestigationAction::decode_resolved_detailed(
+        let action = ProgressiveInvestigationAction::decode_resolved_detailed_for_specialist(
             &completion.text,
             &coverage.context_id,
             &request.intent_hash_with_policy(policy)?,
             current.ledger(),
             policy,
+            self.detail.summary.specialist_id,
         )
         .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
         let CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(

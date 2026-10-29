@@ -14,6 +14,9 @@ use std::collections::BTreeSet;
 pub enum InvestigationScope {
     #[default]
     All,
+    Node {
+        id: String,
+    },
     Neighborhood {
         anchor: String,
         hops: u32,
@@ -62,6 +65,25 @@ pub struct InvestigationQuery {
 impl InvestigationQuery {
     pub fn validate(&self) -> Result<(), InvestigationError> {
         self.scope.validate()?;
+        self.validate_retained()
+    }
+
+    pub fn validate_for_specialist(
+        &self,
+        role: super::SpecialistId,
+    ) -> Result<(), InvestigationError> {
+        if role.uses_exact_node_queries() {
+            self.validate_retained()
+        } else {
+            self.validate()
+        }
+    }
+
+    pub(super) fn validate_retained(&self) -> Result<(), InvestigationError> {
+        match &self.scope {
+            InvestigationScope::Node { id } if text(id, 1024) => {}
+            scope => scope.validate()?,
+        }
         if !(1..=MAX_QUERY_FACTS).contains(&self.max_facts)
             || !(1..=MAX_QUERY_BYTES).contains(&self.max_bytes)
             || self.labels.len() > 16

@@ -117,13 +117,14 @@ impl JobStore {
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?
             .context_id;
-        let read = match ProgressiveInvestigationAction::decode_resolved(
+        let read = match ProgressiveInvestigationAction::decode_resolved_for_specialist(
             std::str::from_utf8(&authenticated.original)
                 .map_err(|_| InvestigationStoreError::Invalid)?,
             context_id,
             &call.request_hash,
             &core.ledger,
             policy,
+            task.detail.summary.specialist_id,
         )? {
             CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
                 InvestigationAction::ReadEvidence { fact, role, index },
