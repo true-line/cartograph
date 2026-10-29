@@ -1,5 +1,17 @@
 # cartograph
 
+## 0.45.0
+
+### Minor Changes
+
+- d9ff4bc: Java sources now recover Spring Kafka `KafkaTemplate` sends and `@KafkaListener` topics as event sites (#1347).
+- d8962f8: Kotlin sources now recover Spring `RestTemplate` client calls on proven receivers (#1340).
+- f539379: Python sources now recover boto3 SQS/SNS and kafka-python producer and consumer calls as event sites, and event SDK registry files can declare `pypi` entries in schema `@2` (#1343).
+
+### Patch Changes
+
+- 3220b98: Prefix routes now declare how they match (`prefix_kind`: node-http raw `startsWith`, Next.js one-or-more or zero-or-more catch-alls). Same-repo and cross-repo fetch stitching match by that kind and keep overlapping matches as ambiguity Gaps. Cross-repo joins also reach method-less `ALL`/`ANY` routes.
+
 ## 0.44.0
 
 ### Minor Changes
