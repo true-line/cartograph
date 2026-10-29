@@ -48,10 +48,13 @@ It makes no model, network, filesystem-evidence, or target-write calls.
 - Fact references are a tagged node id or a typed `(source, label, destination)`
   edge identity, not an ambiguous concatenated string. Responses identify the
   `recovered_graph` view; they do not claim to contain accepted proposals yet.
-- Queries select all facts or a bounded undirected neighborhood of a known node,
+- Queries select all facts, one exact node (`{"type":"node","id":"opaque node ID"}`),
+  or a bounded undirected neighborhood of a known node,
   and optionally filter by fact kind and exact labels. Nodes sort by id, edges by
   `(source, label, destination)`, with nodes preceding edges. A neighborhood
-  includes induced edges; missing anchors are errors, not fabricated facts.
+  includes induced edges; the exact-node scope excludes all edges, including self-loops.
+  Missing node IDs or anchors are errors, not fabricated facts. Exact-node support
+  in this core/direct-query contract does not alter historical specialist schemas.
 - A request has item and serialized-response byte budgets, with hard caps of
   500 facts, 1 MiB, and three neighborhood hops. Zero or excessive limits fail
   explicitly. The service never silently skips an oversized fact to fit later

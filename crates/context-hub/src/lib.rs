@@ -148,6 +148,11 @@ pub enum QueryScope {
     /// All stored graph facts.
     #[default]
     All,
+    /// One exact node, with no incident or self-loop edges.
+    Node {
+        /// Node identity within the snapshot.
+        id: String,
+    },
     /// Nodes within the undirected radius and edges induced by those nodes.
     Neighborhood {
         /// A node that must exist even if the output filters select no facts.
@@ -174,7 +179,7 @@ pub struct QueryCursor {
 /// Bounded query contract shared by UI and future agent transports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRequest {
-    /// Select all facts or a bounded neighborhood.
+    /// Select all facts, one exact node, or a bounded neighborhood.
     #[serde(default)]
     pub scope: QueryScope,
     /// Select nodes, edges, or both when omitted.
@@ -266,6 +271,9 @@ pub enum ContextError {
     /// A neighborhood anchor was not present in the snapshot.
     #[error("unknown neighborhood anchor: {0}")]
     UnknownAnchor(String),
+    /// An exact node selector did not name a node in the snapshot.
+    #[error("unknown node: {0}")]
+    UnknownNode(String),
     /// A cursor belongs to different source content.
     #[error("cursor belongs to a different snapshot")]
     CursorSnapshotMismatch,
@@ -397,7 +405,7 @@ impl ContextSnapshot {
             labels: request.labels.into_iter().collect(),
         };
         let neighborhood = match &selection.scope {
-            QueryScope::All => None,
+            QueryScope::All | QueryScope::Node { .. } => None,
             QueryScope::Neighborhood { anchor, hops } => {
                 if !self.node_ids.contains(anchor) {
                     return Err(ContextError::UnknownAnchor(anchor.clone()));
@@ -405,6 +413,11 @@ impl ContextSnapshot {
                 Some(self.neighborhood(anchor, *hops))
             }
         };
+        if let QueryScope::Node { id } = &selection.scope
+            && !self.node_ids.contains(id)
+        {
+            return Err(ContextError::UnknownNode(id.clone()));
+        }
         let selection_id = content_identity("selection-v1", &selection)?;
         let selected: Vec<&ContextFact> = self
             .facts
@@ -414,7 +427,16 @@ impl ContextSnapshot {
                     .kind
                     .is_none_or(|kind| fact.reference.kind() == kind)
                     && (selection.labels.is_empty() || selection.labels.contains(&fact.label))
-                    && scope_refs::contains(&fact.reference, neighborhood.as_ref())
+                    && match &selection.scope {
+                        QueryScope::All => true,
+                        QueryScope::Node { id } => matches!(
+                            &fact.reference,
+                            FactReference::Node { id: fact_id } if fact_id == id
+                        ),
+                        QueryScope::Neighborhood { .. } => {
+                            scope_refs::contains(&fact.reference, neighborhood.as_ref())
+                        }
+                    }
             })
             .collect();
         let offset = match request.cursor {
