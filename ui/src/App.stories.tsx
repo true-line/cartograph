@@ -1445,6 +1445,7 @@ export const ConfirmedQuickDispatchOpensExactAgentChat: Story = {
     await waitFor(() => expect(canvas.getByRole('heading', { name: 'Agent Chats' })).toBeVisible());
     await waitFor(() => expect(investigationRequests.filter((request) => request.command === 'get_investigation_chat')).toHaveLength(1));
     expect(useAgentChatDockStore.getState().docks).toHaveLength(0);
+    expect(investigationRequests.filter((request) => request.command === 'get_investigation_chat')).toHaveLength(1);
     releaseSavedNoticeChatRead?.();
     await waitFor(() => expect(useAgentChatDockStore.getState().docks.map((item) => item.chat.task_id)).toEqual(['inv-app-script']));
 
@@ -1456,8 +1457,8 @@ export const ConfirmedQuickDispatchOpensExactAgentChat: Story = {
     await expect(starts).toHaveLength(2);
     expect(starts[0]).toEqual(starts[1]);
     expect((starts[0].args as { request: StartInvestigationRequest }).request.request_nonce).toMatch(/^[0-9a-f-]{36}$/);
+    // Once the held handoff read settles, active-task polling may refresh the same chat.
     const chatReads = investigationRequests.filter((request) => request.command === 'get_investigation_chat');
-    expect(chatReads).toHaveLength(1);
     expect(chatReads.every((request) => (request.args as { investigationId: string }).investigationId === 'inv-app-script')).toBe(true);
     await expect(useInvestigationStore.getState().composer).toEqual(composer);
     await expect(useInvestigationStore.getState().pendingStart).toBeNull();
