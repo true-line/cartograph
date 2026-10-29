@@ -121,6 +121,32 @@ pub(super) enum PreparedContextReadKind {
     Inventory,
 }
 
+/// Next-family metadata preparation can identify the cumulative read-byte
+/// budget; other host limits retain their ordinary HostError classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContextReadPreparationError {
+    Host(HostError),
+    CumulativeQueryAndInventoryBytes,
+}
+impl ContextReadPreparationError {
+    pub(super) fn into_host_error(self) -> HostError {
+        match self {
+            Self::Host(error) => error,
+            Self::CumulativeQueryAndInventoryBytes => HostError::LimitExceeded,
+        }
+    }
+}
+impl From<HostError> for ContextReadPreparationError {
+    fn from(error: HostError) -> Self {
+        Self::Host(error)
+    }
+}
+impl From<InvestigationError> for ContextReadPreparationError {
+    fn from(error: InvestigationError) -> Self {
+        Self::Host(error.into())
+    }
+}
+
 impl PreparedContextRead {
     pub(super) fn base_ledger(&self) -> &InvestigationInputLedger {
         &self.base_ledger
@@ -609,6 +635,16 @@ impl FrozenContext {
         state: &AppState,
         query: InvestigationQuery,
     ) -> Result<PreparedContextRead, HostError> {
+        self.prepare_query_with_diagnostic(state, query)
+            .map_err(ContextReadPreparationError::into_host_error)
+    }
+
+    /// Next-family callers may retain the exact cumulative-read-budget cause.
+    pub(super) fn prepare_query_with_diagnostic(
+        &self,
+        state: &AppState,
+        query: InvestigationQuery,
+    ) -> Result<PreparedContextRead, ContextReadPreparationError> {
         query.validate()?;
         self.ledger.validate_with_policy(self.policy)?;
         match (
@@ -622,7 +658,7 @@ impl FrozenContext {
                     && qualified.coverage_id() == proof.qualification.coverage_id
                     && qualified.snapshot_id() == self.snapshot.id()
                     && proof == archive.proof() => {}
-            _ => return Err(HostError::InvalidInput),
+            _ => return Err(HostError::InvalidInput.into()),
         }
         let query_page = |max_facts| {
             let request = QueryRequest {
@@ -669,14 +705,14 @@ impl FrozenContext {
                 .map(|f| graph_reference(&f.reference)),
         );
         if keys.len() > self.policy.limits().selected_facts {
-            return Err(HostError::LimitExceeded);
+            return Err(HostError::LimitExceeded.into());
         }
         let keys = keys.into_iter().collect::<Vec<_>>();
         let preliminary = self.select(state, &keys)?;
         let guards = EvidenceGuards::acquire(state, &preliminary)?;
         let authoritative = self.select(state, &keys)?;
         if authoritative != preliminary {
-            return Err(HostError::InputChanged);
+            return Err(HostError::InputChanged.into());
         }
         drop(preliminary);
         drop(keys);
@@ -712,7 +748,7 @@ impl FrozenContext {
                         evidence_options,
                     };
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         };
         let mut returned_keys = prior_keys;
@@ -773,7 +809,9 @@ impl FrozenContext {
                 });
             }
         }
-        InvestigationQueryBudget::from_ledger(&ledger)?.admit(raw.len())?;
+        InvestigationQueryBudget::from_ledger(&ledger)
+            .and_then(|budget| budget.admit(raw.len()))
+            .map_err(|_| ContextReadPreparationError::CumulativeQueryAndInventoryBytes)?;
         ledger.queries.push(InvestigationQueryManifest {
             query,
             response_hash: content_hash(&raw),
@@ -814,6 +852,15 @@ impl FrozenContext {
         &self,
         request: InvestigationCoverageRead,
     ) -> Result<PreparedContextRead, HostError> {
+        self.prepare_inventory_with_diagnostic(request)
+            .map_err(ContextReadPreparationError::into_host_error)
+    }
+
+    /// Next-family callers may retain the exact cumulative-read-budget cause.
+    pub(super) fn prepare_inventory_with_diagnostic(
+        &self,
+        request: InvestigationCoverageRead,
+    ) -> Result<PreparedContextRead, ContextReadPreparationError> {
         self.ledger.validate_with_policy(self.policy)?;
         let archive = self
             .coverage_archive
@@ -830,11 +877,13 @@ impl FrozenContext {
                 .as_ref()
                 .is_none_or(|qualified| qualified.context_id() != proof.context_id)
         {
-            return Err(HostError::InvalidInput);
+            return Err(HostError::InvalidInput.into());
         }
         let detail = archive.read(&request)?;
         let raw = bounded_json(&detail, request.max_bytes)?;
-        InvestigationQueryBudget::from_ledger(&self.ledger)?.admit(raw.len())?;
+        InvestigationQueryBudget::from_ledger(&self.ledger)
+            .and_then(|budget| budget.admit(raw.len()))
+            .map_err(|_| ContextReadPreparationError::CumulativeQueryAndInventoryBytes)?;
         let mut ledger = self.ledger.clone();
         ledger.revision = ledger
             .revision

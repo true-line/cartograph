@@ -354,6 +354,12 @@ pub(crate) enum PreparationPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostLimitKind {
+    Unspecified,
+    CumulativeQueryAndInventoryBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InvestigationStopReason {
     Cancelled,
     PreparationFailed,
@@ -372,6 +378,10 @@ pub(crate) enum InvestigationStopReason {
     ProviderFailure,
     BoundedProvider(llm::bounded::BoundedCallError),
     HostLimit,
+    HostLimitAt {
+        phase: PreparationPhase,
+        limit: HostLimitKind,
+    },
     StoreCapacity,
     OutcomeUnknown,
     ConsentExpired,
@@ -399,7 +409,7 @@ impl InvestigationStopReason {
                 _ => Self::ProviderFailure,
             },
             Self::PreparationAt(_) => Self::PreparationFailed,
-            Self::HostLimit | Self::StoreCapacity => Self::LimitExceeded,
+            Self::HostLimit | Self::HostLimitAt { .. } | Self::StoreCapacity => Self::LimitExceeded,
             Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
             other => other,
         }
@@ -407,6 +417,46 @@ impl InvestigationStopReason {
     #[cfg(test)]
     pub(crate) fn test_message(self) -> &'static str {
         self.message()
+    }
+    #[cfg(test)]
+    pub(crate) fn is_host_limit_message(message: &str) -> bool {
+        use PreparationPhase as Phase;
+        let phases = [
+            Phase::Continuation,
+            Phase::Finish,
+            Phase::Metadata,
+            Phase::Query,
+            Phase::Inventory,
+            Phase::Candidate,
+            Phase::Certification,
+            Phase::Seal,
+            Phase::Publication,
+            Phase::Source,
+            Phase::SourcePrepare,
+            Phase::SourceCertification,
+            Phase::SourceReservation,
+        ];
+        message == Self::HostLimit.message()
+            || phases.into_iter().any(|phase| {
+                Self::HostLimitAt {
+                    phase,
+                    limit: HostLimitKind::Unspecified,
+                }
+                .message()
+                    == message
+            })
+            || Self::HostLimitAt {
+                phase: Phase::Query,
+                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+            }
+            .message()
+                == message
+            || Self::HostLimitAt {
+                phase: Phase::Inventory,
+                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+            }
+            .message()
+                == message
     }
     fn message(self) -> &'static str {
         match self {
@@ -553,6 +603,53 @@ impl InvestigationStopReason {
             }
             Self::LimitExceeded => "An investigation work or storage limit was reached.",
             Self::HostLimit => "Investigation limit reached: host_limit.",
+            Self::HostLimitAt { phase, limit } => match (phase, limit) {
+                (PreparationPhase::Query, HostLimitKind::CumulativeQueryAndInventoryBytes) => {
+                    "Investigation limit reached: host_limit; phase=metadata_query; limit=cumulative_query_and_inventory_bytes."
+                }
+                (PreparationPhase::Inventory, HostLimitKind::CumulativeQueryAndInventoryBytes) => {
+                    "Investigation limit reached: host_limit; phase=metadata_inventory; limit=cumulative_query_and_inventory_bytes."
+                }
+                (PreparationPhase::Continuation, _) => {
+                    "Investigation limit reached: host_limit; phase=continuation; limit=unspecified."
+                }
+                (PreparationPhase::Finish, _) => {
+                    "Investigation limit reached: host_limit; phase=finish; limit=unspecified."
+                }
+                (PreparationPhase::Metadata, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata; limit=unspecified."
+                }
+                (PreparationPhase::Query, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata_query; limit=unspecified."
+                }
+                (PreparationPhase::Inventory, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata_inventory; limit=unspecified."
+                }
+                (PreparationPhase::Candidate, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata_candidate; limit=unspecified."
+                }
+                (PreparationPhase::Certification, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata_certification; limit=unspecified."
+                }
+                (PreparationPhase::Seal, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata_seal; limit=unspecified."
+                }
+                (PreparationPhase::Publication, _) => {
+                    "Investigation limit reached: host_limit; phase=metadata_publication; limit=unspecified."
+                }
+                (PreparationPhase::Source, _) => {
+                    "Investigation limit reached: host_limit; phase=source; limit=unspecified."
+                }
+                (PreparationPhase::SourcePrepare, _) => {
+                    "Investigation limit reached: host_limit; phase=source_prepare; limit=unspecified."
+                }
+                (PreparationPhase::SourceCertification, _) => {
+                    "Investigation limit reached: host_limit; phase=source_certification; limit=unspecified."
+                }
+                (PreparationPhase::SourceReservation, _) => {
+                    "Investigation limit reached: host_limit; phase=source_reservation; limit=unspecified."
+                }
+            },
             Self::StoreCapacity => "Investigation limit reached: store_capacity.",
             Self::BoundedProvider(error) => {
                 use llm::bounded::{FailureCode as Code, InvocationOutcome};

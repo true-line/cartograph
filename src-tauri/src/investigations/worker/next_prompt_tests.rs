@@ -104,6 +104,7 @@ struct NextProvider {
     invalid_source_first: bool,
     metadata_order: Option<[bool; 2]>,
     metadata_query: Option<Value>,
+    repeat_metadata_query: bool,
     received_payloads: std::sync::Mutex<Vec<llm::CompletionPayload>>,
     inventory_max_bytes: usize,
     lose_metadata_ack: bool,
@@ -120,6 +121,7 @@ impl NextProvider {
             invalid_source_first: false,
             metadata_order: None,
             metadata_query: None,
+            repeat_metadata_query: false,
             received_payloads: std::sync::Mutex::new(Vec::new()),
             inventory_max_bytes: 32768,
             lose_metadata_ack: false,
@@ -264,6 +266,15 @@ impl LlmProvider for NextProvider {
                     "type":"finish","findings":findings,
                     "knowledge_completeness":"partial","limitations":["No complete business policy was established."]}}).to_string()
             }
+        } else if self.repeat_metadata_query {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            json!({"type":"query_context","context_id":prompt["context_id"],
+            "query":self.metadata_query.clone().unwrap_or_else(|| json!({
+                "scope":{"type":"all"},"kind":null,"labels":[],
+                "max_facts":12,"max_bytes":16384,"cursor":null
+            }))})
+            .to_string()
         } else if let Some(order) = self
             .metadata_order
             .filter(|_| call < if self.malformed { 1 } else { 2 })
@@ -1053,7 +1064,9 @@ fn next_prompt_worker_preserves_source_file_and_span_caps() {
             assert!(terminal(detail.summary.status));
             assert_eq!(
                 detail.error.as_deref(),
-                Some("Investigation limit reached: host_limit.")
+                Some(
+                    "Investigation limit reached: host_limit; phase=source_prepare; limit=unspecified."
+                )
             );
             assert_eq!(detail.usage.evidence_requests, 0);
             assert_eq!(detail.usage.captured_validation_bytes, 0);
@@ -1504,7 +1517,6 @@ fn next_prompt_preparation_phases_preserve_failures() {
     }
     for original in [
         Failure::AlreadyTerminal,
-        Failure::Host(HostError::LimitExceeded),
         Failure::Host(HostError::StoreCapacity),
         Failure::Host(HostError::Operational),
         Failure::Host(HostError::InputChanged),
@@ -1561,6 +1573,121 @@ fn next_prompt_preparation_phases_preserve_failures() {
         InvestigationStopReason::PreparationFailed.test_message(),
         "Investigation input preparation failed."
     );
+
+    let query_limit = Failure::Host(HostError::LimitExceeded)
+        .preparation_at(Query)
+        .reason()
+        .unwrap();
+    assert_eq!(
+        query_limit,
+        InvestigationStopReason::HostLimitAt {
+            phase: Query,
+            limit: HostLimitKind::Unspecified,
+        }
+    );
+    assert_eq!(
+        query_limit.terminal_class(),
+        InvestigationStopReason::LimitExceeded
+    );
+    let unspecified_inventory_limit = Failure::Host(HostError::LimitExceeded)
+        .preparation_at(Inventory)
+        .reason()
+        .unwrap();
+    assert_eq!(
+        unspecified_inventory_limit,
+        InvestigationStopReason::HostLimitAt {
+            phase: Inventory,
+            limit: HostLimitKind::Unspecified,
+        }
+    );
+    let typed_query_limit = Failure::Stop(InvestigationStopReason::HostLimitAt {
+        phase: Query,
+        limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+    })
+    .preparation_at(Metadata)
+    .preparation_after_call(SpecialistId::DomainAnalystV15, 1)
+    .reason()
+    .unwrap();
+    assert_eq!(
+        typed_query_limit,
+        InvestigationStopReason::HostLimitAt {
+            phase: Query,
+            limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+        }
+    );
+    assert_eq!(
+        typed_query_limit.terminal_class(),
+        InvestigationStopReason::LimitExceeded
+    );
+    assert_eq!(
+        Failure::Host(HostError::LimitExceeded)
+            .preparation_after_call(SpecialistId::DomainAnalystV4, 1)
+            .reason(),
+        Some(InvestigationStopReason::HostLimit)
+    );
+}
+
+// AC-0455/T-0455: the real next-family query budget refusal is phase- and cause-qualified.
+#[test]
+fn next_prompt_host_limit_phase_and_query_budget_refusal_are_durable() {
+    let mut scripted = NextProvider::new(false);
+    scripted.repeat_metadata_query = true;
+    scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+        "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+    let provider = Arc::new(scripted);
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV15);
+    f.run(provider.clone());
+
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.error.as_deref(),
+        Some(
+            "Investigation limit reached: host_limit; phase=metadata_query; limit=cumulative_query_and_inventory_bytes."
+        )
+    );
+    assert_eq!(
+        detail.usage.tool_actions as usize,
+        provider.observed.calls.load(Ordering::SeqCst) - 1
+    );
+    let ledger = jobs.investigation_ledger(&f.id).unwrap().unwrap();
+    assert_eq!(
+        provider.observed.calls.load(Ordering::SeqCst),
+        ledger.queries.len() + 1
+    );
+    assert!(ledger.queries.len() > 1);
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    assert_eq!(
+        events
+            .items
+            .iter()
+            .filter(|event| event.kind == InvestigationEventKind::ModelCompleted)
+            .count(),
+        ledger.queries.len()
+    );
+    assert_eq!(
+        events.items.last().unwrap().kind,
+        InvestigationEventKind::Failed
+    );
+    assert_eq!(
+        events.items.last().unwrap().summary,
+        detail.error.clone().unwrap()
+    );
+    assert!(
+        events
+            .items
+            .iter()
+            .rev()
+            .take(2)
+            .any(|event| { event.kind == InvestigationEventKind::ModelStarted })
+    );
+    drop(jobs);
+
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
 }
 
 // AC-0440: a syntactically valid cursor can fail at the host query boundary.

@@ -7,7 +7,7 @@ use super::{
     runtime::{LiveTask, RunClock, descriptor},
 };
 use crate::jobs::investigations::{
-    InvestigationResponseMeta, InvestigationStopReason, InvestigationStoreError,
+    HostLimitKind, InvestigationResponseMeta, InvestigationStopReason, InvestigationStoreError,
     InvestigationTransition, PendingInvestigationStep, PreparationPhase,
 };
 use crate::{AppState, job_execution::JobExecution, jobs::ExecutionCheck};
@@ -54,11 +54,17 @@ impl From<InvestigationError> for Failure {
 }
 
 impl Failure {
-    // Only the existing host InvalidInput is decorated; a prior phase wins.
+    // Host InvalidInput and limit failures get a fixed phase; the first phase wins.
     fn preparation_at(self, phase: PreparationPhase) -> Self {
         match self {
             Self::Host(HostError::InvalidInput) => {
                 Self::Stop(InvestigationStopReason::PreparationAt(phase))
+            }
+            Self::Host(HostError::LimitExceeded) => {
+                Self::Stop(InvestigationStopReason::HostLimitAt {
+                    phase,
+                    limit: HostLimitKind::Unspecified,
+                })
             }
             other => other,
         }
