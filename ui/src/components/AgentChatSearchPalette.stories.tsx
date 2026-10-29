@@ -37,7 +37,7 @@ export const KeyboardAndSharedQueryOwnership: Story = {
     await expect(args.onOpen).toHaveBeenCalledWith('found');
     await expect(args.onClose).toHaveBeenCalledOnce();
     useInvestigationStore.setState({ historySearch: 'other' });
-    await expect(await dialog.findByText(/Shared history selection changed/)).toBeVisible();
+    await waitFor(() => expect(dialog.getByText(/Shared history selection changed/)).toBeVisible());
     await expect(dialog.queryByRole('button', { name: /Needle saved question/ })).not.toBeInTheDocument();
     useInvestigationStore.setState({ historySearch: 'needle', historyError: 'Search refused' });
     await expect(await dialog.findByRole('alert')).toHaveTextContent('Search refused');
