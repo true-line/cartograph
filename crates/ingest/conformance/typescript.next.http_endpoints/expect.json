@@ -1,0 +1,34 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@ALL:/api/users/:id",
+      "props": {
+        "method": "ALL",
+        "path": "/api/users/:id",
+        "framework": "next"
+      }
+    },
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@GET:/api/items",
+      "props": {
+        "method": "GET",
+        "path": "/api/items",
+        "framework": "next"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@ALL:/api/users/:id",
+      "dst": "sym:local/p@pages/api/users/[id].ts#handler"
+    },
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@GET:/api/items",
+      "dst": "sym:local/p@app/api/items/route.ts#GET"
+    }
+  ]
+}

@@ -274,6 +274,24 @@ impl ResolutionIndex {
         Ok(index)
     }
 
+    /// The nearest manifest at or above `file` that declares `dependency`:
+    /// its directory, path and the declaring span (#1325).
+    pub(crate) fn declaring_manifest(
+        &self,
+        file: &str,
+        dependency: &str,
+    ) -> Option<(&str, &str, (u64, u64))> {
+        self.manifests
+            .iter()
+            .find(|manifest| {
+                manifest.dir.is_empty() || file.starts_with(&format!("{}/", manifest.dir))
+            })
+            .and_then(|manifest| {
+                let span = *manifest.dependencies.get(dependency)?;
+                Some((manifest.dir.as_str(), manifest.config_path.as_str(), span))
+            })
+    }
+
     fn is_empty(&self) -> bool {
         self.tsconfigs.is_empty() && self.packages.is_empty() && self.bundler_aliases.is_empty()
     }
