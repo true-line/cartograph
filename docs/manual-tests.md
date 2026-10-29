@@ -1481,3 +1481,9 @@ implicitly authorized by this procedure.
    mark token counts unknown rather than converting bytes to asserted tokens.
 4. Record uncovered cases separately. Byte savings are not evidence of model
    answer quality, completed investigation acceptance or activated H3 curation.
+
+### Captured auditor preparation (#1359, AC-0466)
+
+After independently authenticating the saved analyst review, freeze its receipt SHA256, parent task revision/result ID/body hash, original graph/context/scope, independent child obligations, compiled auditor@11 definition/provider descriptor and fresh child nonce. Reuse the parent preparation binding as lineage. Local JSON provides content binding only.
+
+The ignored `vendure_captured_local_auditor_prepare` entrypoint reopens the frozen analyst through existing `CARTOGRAPH_VENDURE_NATIVE_CONFIG`, `CARTOGRAPH_VENDURE_PREPARATION_RECEIPT`, `CARTOGRAPH_VENDURE_ANALYST_DEFINITION` and `CARTOGRAPH_VENDURE_ANALYST_PREPARATION_OUTPUT`. Supply separate `CARTOGRAPH_VENDURE_AUDITOR_DEFINITION`, `CARTOGRAPH_VENDURE_AUDITOR_REVIEW` and `CARTOGRAPH_VENDURE_AUDITOR_OUTPUT`. It constructs no provider and stages only one unexecuted child, preserving the existing whole-history bound. Changed or ambiguous output requires explicit recovery; never overwrite frozen files. Auditor execution/receipt/terminal reopen and semantic/native acceptance remain separate #1354 work.
