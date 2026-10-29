@@ -6,7 +6,14 @@ use super::*;
 use crate::investigations::worker::tests::{Mode, Scripted};
 use std::sync::atomic::Ordering;
 fn prepared(directory: &Path, provider: &dyn LlmProvider) -> PreparedState {
-    prepare::prepare(
+    prepared_family(directory, provider, prepare::Family::V7)
+}
+fn prepared_family(
+    directory: &Path,
+    provider: &dyn LlmProvider,
+    family: prepare::Family,
+) -> PreparedState {
+    prepare::prepare_family(
         directory,
         &descriptor(provider, InvestigationProviderMode::Local).unwrap(),
         PreparationBinding {
@@ -15,6 +22,7 @@ fn prepared(directory: &Path, provider: &dyn LlmProvider) -> PreparedState {
             source_commit: "b".repeat(40),
             source_tree: "c".repeat(40),
         },
+        family,
     )
     .unwrap()
 }
@@ -580,5 +588,129 @@ fn completion_execution_new_limit_messages_preserve_exhausted_and_unknown() {
         );
         assert!(evidence.result.is_none());
         evidence.receipt.validate().unwrap();
+    }
+}
+
+fn drive_observed(prepared: &PreparedState, provider: Arc<dyn LlmProvider>) {
+    let state = prepared.app.state::<crate::AppState>();
+    let mut jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&prepared.analyst_id).unwrap();
+    let plan = jobs
+        .claim_plan(detail.summary.job_id, ClaimMode::StartQueued)
+        .unwrap();
+    let lock = state
+        .job_execution_locks
+        .try_reserve(plan.lock_target())
+        .unwrap();
+    let (_, execution) = jobs.claim_execution(&plan, lock).unwrap();
+    drop(jobs);
+    let live = state.investigations.insert(&prepared.analyst_id).unwrap();
+    run_completion(
+        prepared.app.handle().clone(),
+        prepared.analyst_id.clone(),
+        prepared.analyst_request.clone(),
+        execution,
+        provider,
+        live,
+        Instant::now(),
+    );
+}
+// AC-0465: genuine supplied V2 source/inventory bodies bind to durable disclosure6.
+#[test]
+fn next_acceptance_observer_matches_disclosure_and_rejects_tampering() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider =
+        crate::investigations::worker::tests::completion_tests::expanded_scripted_provider(true);
+    let prepared = prepared_family(
+        directory.path(),
+        provider.as_ref(),
+        prepare::Family::Expanded,
+    );
+    let request = &prepared.analyst_request;
+    let observed = Arc::new(ObservedProvider::next(
+        provider,
+        request.expected_context_id.clone(),
+    ));
+    drive_observed(&prepared, observed.clone());
+    let jobs = JobStore::open(prepared.app_data.join("state.db")).unwrap();
+    let (detail, result, _, _) = read_expanded_state(&jobs, &prepared.analyst_id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::Supported)
+    );
+    assert_eq!(result.unwrap().schema_version, 7);
+    let db = prepared.app_data.join("state.db");
+    let policy = &INVESTIGATION_V2_POLICY;
+    let steps = rows(
+        &db,
+        &prepared.analyst_id,
+        "investigation_invocations",
+        policy.limits().model_invocations as usize,
+        2 * 1024 * 1024,
+    )
+    .unwrap();
+    let ledgers = rows(
+        &db,
+        &prepared.analyst_id,
+        "investigation_inputs",
+        policy.journal_events() as usize,
+        2 * 1024 * 1024,
+    )
+    .unwrap();
+    let observations = observed.observations().unwrap();
+    assert_eq!(observations.len(), 4);
+    let check = |observations: &[_]| {
+        sealed_checks_with_policy(request, &steps, &ledgers, observations, policy).unwrap()
+    };
+    assert_eq!(check(&observations), (true, true, true));
+    for field in [
+        "source",
+        "inventory",
+        "payload",
+        "context",
+        "ledger",
+        "history",
+    ] {
+        let mut tampered = observations.clone();
+        let last = tampered.last_mut().unwrap();
+        match field {
+            "source" => *last.source_hashes.values_mut().next().unwrap() = "f".repeat(64),
+            "inventory" => *last.inventory_hashes.values_mut().next().unwrap() = "f".repeat(64),
+            "payload" => last.payload_hash = "f".repeat(64),
+            "context" => last.context_id = "foreign-context".into(),
+            "ledger" => last.input_ledger_hash = "f".repeat(64),
+            "history" => last.history_hash = Some("f".repeat(64)),
+            _ => unreachable!(),
+        }
+        let (matching, bound, _) = check(&tampered);
+        assert!(!matching || !bound, "{field}");
+    }
+}
+// AC-0465: each schema-family mismatch is refused before the inner provider call.
+#[test]
+fn acceptance_observer_rejects_other_input_family_before_delegation() {
+    for next in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let inner = Arc::new(Scripted::new(Mode::CompletionSupported));
+        let family = if next {
+            prepare::Family::V7
+        } else {
+            prepare::Family::Expanded
+        };
+        let prepared = prepared_family(directory.path(), inner.as_ref(), family);
+        let observed = Arc::new(ObservedProvider {
+            inner: inner.clone(),
+            context_id: prepared.analyst_request.expected_context_id.clone(),
+            observations: Mutex::new(vec![]),
+            next,
+        });
+        drive_observed(&prepared, observed.clone());
+        let jobs = JobStore::open(prepared.app_data.join("state.db")).unwrap();
+        let detail = jobs.investigation(&prepared.analyst_id).unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.usage.model_invocations, 1);
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+        assert!(observed.observations().unwrap().is_empty());
     }
 }
