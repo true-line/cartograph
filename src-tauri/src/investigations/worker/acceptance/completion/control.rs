@@ -583,16 +583,33 @@ fn validate_gate(
     {
         return Err("Analyst mechanical/supported gate did not pass.".into());
     }
+    validate_review_attestation(
+        [
+            &definition.protocol_sha256,
+            &definition.run_id,
+            receipt_sha256,
+            &definition.rubric.content.sha256,
+        ],
+        652,
+        bytes,
+    )
+}
+/// Content binding only. Authentication/freshness is an external operator gate.
+pub(in super::super) fn validate_review_attestation(
+    expected: [&str; 4],
+    issue: u64,
+    bytes: &[u8],
+) -> Result<(), String> {
     let attestation: Attestation = decode(bytes)?;
     let binding = attestation.binding;
     let review = attestation.review;
     let comment = attestation.comment;
     let bound = |protocol: &str, run: &str, role: &str, receipt: &str, rubric: &str| {
-        protocol == definition.protocol_sha256
-            && run == definition.run_id
+        protocol == expected[0]
+            && run == expected[1]
             && role == "analyst"
-            && receipt == receipt_sha256
-            && rubric == definition.rubric.content.sha256
+            && receipt == expected[2]
+            && rubric == expected[3]
     };
     if attestation.schema != "cartograph-v7-semantic-review-attestation@1"
         || binding.schema != "cartograph-v7-semantic-review-binding@1"
@@ -622,7 +639,7 @@ fn validate_gate(
         || comment.database_id == 0
         || comment.url
             != format!(
-                "https://github.com/true-line/cartograph/issues/652#issuecomment-{}",
+                "https://github.com/true-line/cartograph/issues/{issue}#issuecomment-{}",
                 comment.database_id
             )
         || comment.created_at.is_empty()

@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 
 const REPO = 'true-line/cartograph';
 const ISSUE = 652;
+const validIssue = (issue) => assert.ok(Number.isSafeInteger(issue) && issue > 0, 'Invalid issue identity');
 const API_BYTES = 128 * 1024;
 const BODY_BYTES = 32 * 1024;
 const BINDING_BYTES = 8 * 1024;
@@ -117,14 +118,14 @@ function reviewBlock(body) {
 
 // Pure validation accepts API-shaped inputs for deterministic offline tests.
 // Authentication is established by verifyReview's live transport, not this JSON.
-export function validateSemanticReview({ binding, commentId, viewer, rest, graphql }) {
-  validateBinding(binding); validateViewer(viewer);
+export function validateSemanticReview({ binding, commentId, viewer, rest, graphql, issue = ISSUE }) {
+  validIssue(issue); validateBinding(binding); validateViewer(viewer);
   assert.ok(idValid(commentId), 'Invalid comment identity');
   for (const payload of [viewer, rest, graphql]) bounded(JSON.stringify(payload), API_BYTES);
   assert.ok(!graphql.errors, 'GitHub comment query failed');
   const node = graphql.data?.node;
   assert.equal(rest.id, commentId, 'REST comment mismatch');
-  assert.equal(rest.issue_url, `https://api.github.com/repos/${REPO}/issues/${ISSUE}`, 'Wrong issue/repository');
+  assert.equal(rest.issue_url, `https://api.github.com/repos/${REPO}/issues/${issue}`, 'Wrong issue/repository');
   assert.equal(rest.user?.login, 'trueline-claude-agent[bot]', 'Wrong REST reviewer');
   assert.equal(rest.user?.type, 'Bot', 'Reviewer is not a bot');
   assert.equal(rest.performed_via_github_app?.slug, 'trueline-claude-agent', 'Wrong reviewer App');
@@ -134,9 +135,9 @@ export function validateSemanticReview({ binding, commentId, viewer, rest, graph
   assert.equal(node.databaseId, rest.id, 'Comment database identity mismatch');
   assert.equal(node.author?.__typename, 'Bot', 'Wrong GraphQL author type');
   assert.equal(node.author?.login, 'trueline-claude-agent', 'Wrong GraphQL reviewer');
-  assert.equal(node.issue?.number, ISSUE, 'Wrong GraphQL issue');
+  assert.equal(node.issue?.number, issue, 'Wrong GraphQL issue');
   assert.equal(node.issue?.repository?.nameWithOwner, REPO, 'Wrong GraphQL repository');
-  const url = `https://github.com/${REPO}/issues/${ISSUE}#issuecomment-${commentId}`;
+  const url = `https://github.com/${REPO}/issues/${issue}#issuecomment-${commentId}`;
   assert.equal(rest.html_url, url, 'Wrong comment URL'); assert.equal(node.url, url, 'API URL disagreement');
   assert.ok(typeof rest.created_at === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(rest.created_at) &&
     Number.isFinite(Date.parse(rest.created_at)) && new Date(rest.created_at).toISOString().replace('.000Z', 'Z') === rest.created_at, 'Invalid creation timestamp');
@@ -164,8 +165,8 @@ function matchesBinding(review, binding) {
 
 // Corrections append new comments. A later matching verdict supersedes every
 // earlier verdict, including a favorable one; edited candidates cannot revive it.
-export function validateLatestReview({ binding, commentId, rest, comments }) {
-  validateBinding(binding);
+export function validateLatestReview({ binding, commentId, rest, comments, issue = ISSUE }) {
+  validIssue(issue); validateBinding(binding);
   assert.ok(Array.isArray(comments) && comments.length <= COMMENTS_PER_PAGE * MAX_COMMENT_PAGES, 'Comment listing exceeds count bound');
   bounded(JSON.stringify(comments), MAX_LISTING_BYTES);
   const ids = new Set();
@@ -180,7 +181,7 @@ export function validateLatestReview({ binding, commentId, rest, comments }) {
     let review;
     try { review = reviewBlock(comment.body); } catch { continue; }
     if (!matchesBinding(review, binding)) continue;
-    assert.equal(comment.issue_url, `https://api.github.com/repos/${REPO}/issues/${ISSUE}`, 'Listed review belongs to another issue');
+    assert.equal(comment.issue_url, `https://api.github.com/repos/${REPO}/issues/${issue}`, 'Listed review belongs to another issue');
     assert.ok(typeof comment.created_at === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(comment.created_at) &&
       Number.isFinite(Date.parse(comment.created_at)) && new Date(comment.created_at).toISOString().replace('.000Z', 'Z') === comment.created_at, 'Invalid listed review timestamp');
     if (!latest || comment.created_at > latest.created_at ||
@@ -192,11 +193,11 @@ export function validateLatestReview({ binding, commentId, rest, comments }) {
   assert.equal(latest?.id, commentId, 'Selected semantic review has been superseded');
 }
 
-async function listIssueComments(transport) {
+async function listIssueComments(transport, issue) {
   const comments = [];
   let bytes = 0;
   for (let page = 1; page <= MAX_COMMENT_PAGES; page += 1) {
-    const result = await transport([`repos/${REPO}/issues/${ISSUE}/comments?per_page=${COMMENTS_PER_PAGE}&page=${page}`]);
+    const result = await transport([`repos/${REPO}/issues/${issue}/comments?per_page=${COMMENTS_PER_PAGE}&page=${page}`]);
     const encoded = JSON.stringify(result);
     bounded(encoded, API_BYTES); bytes += Buffer.byteLength(encoded, 'utf8');
     assert.ok(bytes <= MAX_LISTING_BYTES, 'Comment listing exceeds aggregate byte bound');
@@ -207,8 +208,8 @@ async function listIssueComments(transport) {
   throw new Error('Comment listing exceeds pagination bound');
 }
 
-export async function verifyReview({ binding, commentId, transport }) {
-  binding = structuredClone(validateBinding(binding)); assert.ok(idValid(commentId), 'Invalid comment identity');
+export async function verifyReview({ binding, commentId, transport, issue = ISSUE }) {
+  validIssue(issue); binding = structuredClone(validateBinding(binding)); assert.ok(idValid(commentId), 'Invalid comment identity');
   const viewer = await transport(['graphql', '-f', `query=${VIEWER_QUERY}`]);
   bounded(JSON.stringify(viewer), API_BYTES);
   validateViewer(viewer); // Do not even fetch the review using an ambient human token.
@@ -216,9 +217,9 @@ export async function verifyReview({ binding, commentId, transport }) {
   bounded(JSON.stringify(rest), API_BYTES);
   assert.ok(typeof rest.node_id === 'string' && rest.node_id.length > 0 && rest.node_id.length <= 256, 'Missing REST node identity');
   const graphql = await transport(['graphql', '-f', `query=${COMMENT_QUERY}`, '-f', `id=${rest.node_id}`]);
-  const attestation = validateSemanticReview({ binding, commentId, viewer, rest, graphql });
-  const comments = await listIssueComments(transport);
-  validateLatestReview({ binding, commentId, rest, comments });
+  const attestation = validateSemanticReview({ binding, commentId, viewer, rest, graphql, issue });
+  const comments = await listIssueComments(transport, issue);
+  validateLatestReview({ binding, commentId, rest, comments, issue });
   return attestation;
 }
 
@@ -259,15 +260,19 @@ async function readBinding(file) {
 }
 
 export async function main(argv, { transport = githubTransport } = {}) {
-  assert.equal(argv.length, 6, 'Usage: --binding FILE --comment-id ID --output NEW_FILE');
+  assert.ok([6, 8].includes(argv.length), 'Usage: --binding FILE --comment-id ID --output NEW_FILE [--issue NUMBER]');
   const options = new Map();
   for (let i = 0; i < argv.length; i += 2) {
-    assert.ok(['--binding', '--comment-id', '--output'].includes(argv[i]) && !options.has(argv[i]), 'Unknown/duplicate CLI option');
+    assert.ok(['--binding', '--comment-id', '--output', '--issue'].includes(argv[i]) && !options.has(argv[i]), 'Unknown/duplicate CLI option');
     options.set(argv[i], argv[i + 1]);
   }
   assert.ok(/^[1-9]\d{0,15}$/u.test(options.get('--comment-id')), 'Invalid comment identity');
+  assert.ok(['--binding', '--comment-id', '--output'].every((key) => options.has(key)), 'Missing required option');
+  const rawIssue = options.get('--issue') ?? String(ISSUE);
+  assert.ok(/^[1-9]\d{0,15}$/u.test(rawIssue), 'Invalid issue identity');
+  const issue = Number(rawIssue); validIssue(issue);
   const binding = await readBinding(options.get('--binding'));
-  const attestation = await verifyReview({ binding, commentId: Number(options.get('--comment-id')), transport });
+  const attestation = await verifyReview({ binding, commentId: Number(options.get('--comment-id')), transport, issue });
   await writeFile(options.get('--output'), `${JSON.stringify(attestation, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
   return attestation;
 }

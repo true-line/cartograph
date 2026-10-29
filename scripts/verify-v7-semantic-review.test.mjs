@@ -224,3 +224,20 @@ test('AC-0267: paginated listings are complete and listing failures or bounds st
   const changed = structuredClone(f.rest); changed.body += '\n';
   assert.throws(() => validateLatestReview({ ...f, comments: [changed] }), /changed/u);
 });
+
+// AC-0464: explicit issue selection preserves all authenticated review checks.
+test('AC-0464: captured review selects issue598 and rejects foreign or malformed issue', async () => {
+  const f = fixture(); f.issue = 598;
+  f.rest.issue_url = f.rest.issue_url.replace('652', '598');
+  f.rest.html_url = f.rest.html_url.replace('652', '598');
+  f.graphql.data.node.url = f.rest.html_url; f.graphql.data.node.issue.number = 598;
+  const calls = []; const actual = await verifyReview({ ...f, transport: transportFor(f, calls) });
+  assert.equal(actual.comment.url, f.rest.html_url);
+  assert.ok(calls[3][0].includes('/598/comments?'));
+  assert.throws(() => validateSemanticReview({ ...f, issue: 652 }));
+  const newer = structuredClone(f.rest); newer.id += 1; newer.created_at = '2026-10-21T16:30:00Z';
+  newer.body = newer.body.replace('\"verdict\":\"pass\"', '\"verdict\":\"fail\"');
+  assert.throws(() => validateLatestReview({ ...f, comments: [f.rest, newer] }), /superseded/u);
+  for (const issue of [0, -1, 1.5, NaN, Infinity, '598'])
+    await assert.rejects(verifyReview({ ...f, issue, transport: async () => { throw new Error('must not fetch'); } }), /Invalid issue/u);
+});
