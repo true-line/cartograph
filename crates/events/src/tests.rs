@@ -397,6 +397,7 @@ fn head_fetches_bind_get_routes_only_where_the_framework_serves_head() {
         ],
         &endpoints,
         &serves_head,
+        &BTreeMap::new(),
         &cfg,
         &id,
     );
@@ -1714,4 +1715,204 @@ fn all_routes_match_every_fetch_method() {
             "no recovered endpoint matches GET /api/files/a",
         ]
     );
+}
+
+fn prefix_endpoint(id: &str, kind: &str) -> Node {
+    Node {
+        id: id.into(),
+        label: "Endpoint".into(),
+        props: serde_json::json!({"match": "prefix", "prefix_kind": kind}),
+    }
+}
+
+// AC-0453: a prefix route matches by the kind its producer declares: a raw
+// `startsWith` string, or a segment catch-all of one or more (Next
+// `[...x]`) or zero or more (`[[...x]]`) segments.
+#[test]
+fn prefix_routes_match_by_their_producer_kind() {
+    use PrefixKind::*;
+    let cases = [
+        (Raw, "/x/*", "/x/", true),
+        (Raw, "/x/*", "/x/a/", true),
+        (Raw, "/x/*", "/x", false),
+        (Raw, "/api*", "/apix", true),
+        (Raw, "/api*", "/api/v1", true),
+        (Raw, "/api", "/api", false),
+        (SegmentsPlus, "/api/files/*", "/api/files/a", true),
+        (SegmentsPlus, "/api/files/*", "/api/files/a/b", true),
+        (SegmentsPlus, "/api/files/*", "/api/files/a/", true),
+        (SegmentsPlus, "/api/files/*", "/api/files", false),
+        (SegmentsPlus, "/api/files/*", "/api/files/", false),
+        (SegmentsPlus, "/api/files/*", "/api/files//a", false),
+        (SegmentsPlus, "/api/files/*", "/api/filesx/a", false),
+        (SegmentsPlus, "/u/:id/*", "/u/7/a", true),
+        (SegmentsPlus, "/u/:id/*", "/u//a", false),
+        (SegmentsPlus, "/*", "/a", true),
+        (SegmentsPlus, "/*", "/", false),
+        (SegmentsStar, "/docs/*", "/docs", true),
+        (SegmentsStar, "/docs/*", "/docs/", true),
+        (SegmentsStar, "/docs/*", "/docs/a/b", true),
+        (SegmentsStar, "/docs/*", "/docsx", false),
+        (SegmentsStar, "/*", "/", true),
+        (SegmentsStar, "/docs", "/docs", false),
+        (Unsupported, "/u/:id/*", "/u/7/*", false),
+        (Unsupported, "/u/:id/*", "/u/7/a", false),
+    ];
+    for (kind, pattern, path, expected) in cases {
+        assert_eq!(
+            route_matches_kind(Some(kind), pattern, path),
+            expected,
+            "{kind:?} {pattern} {path}"
+        );
+    }
+
+    let nodes = [
+        prefix_endpoint("ep:test@ALL:/ui/*", "raw"),
+        prefix_endpoint("ep:test@ALL:/api/files/*", "segments+"),
+        prefix_endpoint("ep:test@GET:/docs/*", "segments*"),
+        prefix_endpoint("ep:test@GET:/odd/*", "regex"),
+        Node {
+            id: "ep:test@GET:/bare/*".into(),
+            label: "Endpoint".into(),
+            props: serde_json::json!({"match": "prefix"}),
+        },
+    ];
+    let kinds = prefix_kinds(&nodes);
+    // A missing or unknown kind is never guessed.
+    assert_eq!(
+        kinds.into_iter().collect::<Vec<_>>(),
+        [
+            ("ep:test@ALL:/api/files/*".to_string(), SegmentsPlus),
+            ("ep:test@ALL:/ui/*".to_string(), Raw),
+            ("ep:test@GET:/bare/*".to_string(), Unsupported),
+            ("ep:test@GET:/docs/*".to_string(), SegmentsStar),
+            ("ep:test@GET:/odd/*".to_string(), Unsupported),
+        ]
+    );
+    // Producers that disagree on one id's kind leave it unsupported, in
+    // either order.
+    let raw = prefix_endpoint("ep:test@GET:/both/*", "raw");
+    let plus = prefix_endpoint("ep:test@GET:/both/*", "segments+");
+    for pair in [[raw.clone(), plus.clone()], [plus, raw]] {
+        assert_eq!(prefix_kinds(&pair)["ep:test@GET:/both/*"], Unsupported);
+    }
+    let mut ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+    ids.push("ep:test@GET:/api/files/readme".into());
+    // An exact route whose literal path ends in `*` is not a prefix route.
+    ids.push("ep:test@GET:/lit/*".into());
+    let id = SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let out = stitch_fetches_with(
+        &[
+            fetch_site("GET", IdentityExpr::Literal("/ui/app.js".into())),
+            fetch_site("PUT", IdentityExpr::Literal("/api/files/a/b".into())),
+            fetch_site("GET", IdentityExpr::Literal("/docs".into())),
+            // An exact route and a catch-all both match: no precedence is
+            // assumed (#1329).
+            fetch_site("GET", IdentityExpr::Literal("/api/files/readme".into())),
+            fetch_site("GET", IdentityExpr::Literal("/odd/a".into())),
+            fetch_site("GET", IdentityExpr::Literal("/bare/a".into())),
+            // A literal `*` request does not match an unsupported prefix
+            // route as an exact one.
+            fetch_site("GET", IdentityExpr::Literal("/bare/*".into())),
+            fetch_site("GET", IdentityExpr::Literal("/lit/*".into())),
+        ],
+        &ids,
+        &BTreeSet::new(),
+        &prefix_kinds(&nodes),
+        &ConfigIndex::default(),
+        &id,
+    );
+    let bound: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "FETCHES" && e.dst.starts_with("ep:"))
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(
+        bound,
+        [
+            "ep:test@ALL:/ui/*",
+            "ep:test@ALL:/api/files/*",
+            "ep:test@GET:/docs/*",
+            "ep:test@GET:/lit/*",
+        ]
+    );
+    let mut reasons: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["reason"].as_str())
+        .collect();
+    reasons.sort();
+    assert_eq!(
+        reasons,
+        [
+            "ambiguous endpoint match for GET /api/files/readme (2 candidates)",
+            "no recovered endpoint matches GET /bare/*",
+            "no recovered endpoint matches GET /bare/a",
+            "no recovered endpoint matches GET /odd/a",
+        ]
+    );
+}
+
+// AC-0453: the cross-repo pass matches method-less and prefix routes the
+// same way as the same-repo pass.
+#[test]
+fn cross_repo_fetches_join_all_and_prefix_routes() {
+    let (gaps, edges) = web_gaps(
+        &[
+            fetch_site(
+                "DELETE",
+                IdentityExpr::Literal("https://orders.example.com/v1/orders/7".into()),
+            ),
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://orders.example.com/assets/app.js".into()),
+            ),
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://orders.example.com/blob/a".into()),
+            ),
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://orders.example.com/blob/*".into()),
+            ),
+            fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://orders.example.com/lit/*".into()),
+            ),
+        ],
+        &ConfigIndex::default(),
+    );
+    let nodes = [
+        prefix_endpoint("ep:api@GET:/assets/*", "segments+"),
+        prefix_endpoint("ep:api@GET:/blob/*", "bogus"),
+    ];
+    let out = stitch_cross_repo_with(
+        &gaps,
+        &edges,
+        &eps(&[
+            "ep:api@ALL:/v1/orders/:id",
+            "ep:api@GET:/assets/*",
+            "ep:api@GET:/blob/*",
+            "ep:api@GET:/lit/*",
+        ]),
+        &prefix_kinds(&nodes),
+        &[service("orders", "api", "https://orders.example.com/")],
+    );
+    let mut joined: Vec<&str> = out.joined.iter().map(|j| j.edge.dst.as_str()).collect();
+    joined.sort();
+    assert_eq!(
+        joined,
+        [
+            "ep:api@ALL:/v1/orders/:id",
+            "ep:api@GET:/assets/*",
+            "ep:api@GET:/lit/*"
+        ]
+    );
+    // Both `/blob/` requests stay gaps.
+    assert_eq!(out.kept_nodes.len(), 2, "{:?}", out.kept_nodes);
 }

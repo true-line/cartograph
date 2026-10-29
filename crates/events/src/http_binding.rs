@@ -8,7 +8,7 @@
 //! binding evidence, or with several equally supported targets, the call
 //! stays a Gap whose reason says why. No new tier, no network probing.
 
-use super::{route_matches, url_path};
+use super::{PrefixKind, route_matches_kind, url_path};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 use std::collections::BTreeMap;
@@ -199,6 +199,18 @@ pub fn stitch_cross_repo(
     endpoint_ids: &[String],
     bindings: &[HttpBinding],
 ) -> CrossRepoStitch {
+    stitch_cross_repo_with(gaps, fetch_edges, endpoint_ids, &BTreeMap::new(), bindings)
+}
+
+/// [`stitch_cross_repo`], where `prefix_kinds` ([`crate::prefix_kinds`])
+/// says how each prefix route matches (#1329).
+pub fn stitch_cross_repo_with(
+    gaps: &[Node],
+    fetch_edges: &[Edge],
+    endpoint_ids: &[String],
+    prefix_kinds: &BTreeMap<String, PrefixKind>,
+    bindings: &[HttpBinding],
+) -> CrossRepoStitch {
     let mut out = CrossRepoStitch::default();
     if bindings.is_empty() {
         return out;
@@ -262,12 +274,17 @@ pub fn stitch_cross_repo(
                 continue;
             }
             covering.push(*binding);
-            for (endpoint, route) in endpoints
-                .get(&(binding.repo.as_str(), method))
+            // A method-less route (`ANY` or `ALL`) serves every method.
+            for (endpoint, route) in [method, "ANY", "ALL"]
                 .into_iter()
+                .filter_map(|verb| endpoints.get(&(binding.repo.as_str(), verb)))
                 .flatten()
             {
-                if paths.iter().any(|path| route_matches(route, path)) {
+                let kind = prefix_kinds.get(*endpoint).copied();
+                if paths
+                    .iter()
+                    .any(|path| route_matches_kind(kind, route, path))
+                {
                     let supporting = targets.entry(endpoint).or_default();
                     if !supporting.contains(binding) {
                         supporting.push(binding);

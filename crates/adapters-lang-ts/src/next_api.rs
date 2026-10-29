@@ -18,7 +18,10 @@
 //! Each becomes an `Endpoint` (`framework: "next"`) that the handler
 //! `HANDLES`, citing the export and the manifest's `next` declaration.
 //! `index` collapses to its parent, `[id]` is `:id`, `[...x]`/`[[...x]]` is a
-//! prefix route (`/a/*`, `match: "prefix"`), app `(group)` segments drop, and
+//! prefix route (`/a/*`, `match: "prefix"`) whose `prefix_kind` is
+//! `segments+` (one or more segments) or `segments*` (zero or more, #1329)
+//! and is `conflict` where producers disagree on one endpoint, app `(group)`
+//! segments drop, and
 //! `_private`, `@slot` and `(.)` intercept segments are not routed. A method
 //! or default export bound any other way (a wrapper call, a re-export, or a
 //! binding written after its declaration, since Next reads its final value)
@@ -214,12 +217,12 @@ pub(crate) fn sites(cx: &FileCx<'_>, root: TsNode<'_>, bindings: &Bindings<'_>) 
 }
 
 /// The route a file serves, relative to its Next package directory:
-/// `(path, prefix)`, or `None` when the conventions do not route it.
+/// `(path, prefix_kind)`, or `None` when the conventions do not route it.
 /// A root `app/` makes `src/app` inactive and a root `pages/` makes
 /// `src/pages` inactive, each independently (Next 15 `findPagesDir`), so
 /// `root_router` (the package has this router at its root) declines the
 /// matching `src/` route.
-fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, bool)> {
+fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, Option<&'static str>)> {
     let rel = match rel.strip_prefix("src/") {
         Some(_) if root_router => return None,
         Some(inner) => inner,
@@ -251,7 +254,7 @@ fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, bool)> {
         segments.retain(|s| !(s.starts_with('(') && s.ends_with(')')));
     }
     let mut parts = Vec::new();
-    let mut prefix = false;
+    let mut prefix = None;
     for (i, segment) in segments.iter().enumerate() {
         let inner = segment
             .strip_prefix("[[")
@@ -261,7 +264,11 @@ fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, bool)> {
             Some(param) if param.starts_with("...") => {
                 // A catch-all must be the last segment.
                 (i + 1 == segments.len()).then_some(())?;
-                prefix = true;
+                prefix = Some(if segment.starts_with("[[") {
+                    "segments*"
+                } else {
+                    "segments+"
+                });
             }
             Some(param) if !param.is_empty() && !param.contains(['[', ']']) => {
                 parts.push(format!(":{param}"));
@@ -273,9 +280,9 @@ fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, bool)> {
     }
     let base = format!("/{}", parts.join("/"));
     Some(match (prefix, base.as_str()) {
-        (true, "/") => ("/*".into(), true),
-        (true, _) => (format!("{base}/*"), true),
-        (false, _) => (base, false),
+        (Some(kind), "/") => ("/*".into(), Some(kind)),
+        (Some(kind), _) => (format!("{base}/*"), Some(kind)),
+        (None, _) => (base, None),
     })
 }
 
@@ -378,14 +385,29 @@ pub(crate) fn complete(
                 "router": if app { "app" } else { "pages" },
                 "prov": prov(ConfidenceTier::Confirmed, &format!("Endpoint {method} {path}")),
             });
-            if prefix {
+            if let Some(kind) = prefix {
                 props["match"] = serde_json::json!("prefix");
+                props["prefix_kind"] = serde_json::json!(kind);
             }
             nodes.push(Node {
                 id: ep.clone(),
                 label: "Endpoint".into(),
                 props,
             });
+        } else if let Some(node) = nodes.iter_mut().find(|node| node.id == ep) {
+            // Producers that disagree on one endpoint's matching (overlapping
+            // catch-alls, or a node-http exact or prefix route) leave it
+            // matching nothing.
+            let kind = (node.props["match"] == "prefix").then(|| {
+                node.props["prefix_kind"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            });
+            if kind.as_deref() != prefix {
+                node.props["match"] = serde_json::json!("prefix");
+                node.props["prefix_kind"] = serde_json::json!("conflict");
+            }
         }
         edges.push(Edge {
             src: ep,
@@ -536,6 +558,94 @@ mod tests {
             .collect()
     }
 
+    // AC-0453: a catch-all declares how it matches: `[...x]` one or more
+    // segments, `[[...x]]` zero or more.
+    #[test]
+    fn next_catch_all_endpoints_carry_their_prefix_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "package.json",
+            r#"{ "dependencies": { "next": "15.0.0" } }"#,
+        );
+        write(
+            root,
+            "pages/api/files/[...path].ts",
+            "export default function files() {}\n",
+        );
+        write(
+            root,
+            "app/docs/[[...slug]]/route.ts",
+            "export function GET() {}\n",
+        );
+        let out = extract_dir(root, &id("abc123")).unwrap();
+        let kind = |ep: &str| {
+            let node = out.nodes.iter().find(|n| n.id == ep).unwrap();
+            assert_eq!(node.props["match"], "prefix", "{ep}");
+            node.props["prefix_kind"].as_str().unwrap().to_string()
+        };
+        assert_eq!(kind("ep:qwtm/example@ALL:/api/files/*"), "segments+");
+        assert_eq!(kind("ep:qwtm/example@GET:/docs/*"), "segments*");
+    }
+
+    // AC-0453 (#1339 review): overlapping catch-alls and a node-http prefix on
+    // one endpoint disagree on its kind, whichever is read first.
+    #[test]
+    fn overlapping_prefix_producers_conflict_in_any_order() {
+        for (first, second) in [("[...slug]", "[[...slug]]"), ("[[...slug]]", "[...slug]")] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            write(
+                root,
+                "package.json",
+                r#"{ "dependencies": { "next": "15.0.0" } }"#,
+            );
+            for (group, segment) in [("(a)", first), ("(b)", second)] {
+                write(
+                    root,
+                    &format!("app/{group}/docs/{segment}/route.ts"),
+                    "export function GET() {}\n",
+                );
+            }
+            write(
+                root,
+                "server.ts",
+                "import http from 'node:http';\n\
+                 http.createServer((req, res) => {\n\
+                   if (req.method === 'GET' && req.url.startsWith('/raw/')) { res.end('r'); }\n\
+                   if (req.method === 'GET' && req.url === '/exact/*') { res.end('e'); }\n\
+                   if (req.method === 'GET' && req.url === '/lit/*') { res.end('l'); }\n\
+                 }).listen(3000);\n",
+            );
+            for dir in ["raw", "exact"] {
+                write(
+                    root,
+                    &format!("app/{dir}/[...rest]/route.ts"),
+                    "export function GET() {}\n",
+                );
+            }
+            let out = extract_dir(root, &id("abc123")).unwrap();
+            let node = |ep: &str| {
+                let nodes: Vec<_> = out.nodes.iter().filter(|n| n.id == ep).collect();
+                assert_eq!(nodes.len(), 1, "{ep}");
+                nodes[0].props.clone()
+            };
+            for ep in [
+                "ep:qwtm/example@GET:/docs/*",
+                "ep:qwtm/example@GET:/raw/*",
+                "ep:qwtm/example@GET:/exact/*",
+            ] {
+                let props = node(ep);
+                assert_eq!(props["match"], "prefix", "{first} {ep}");
+                assert_eq!(props["prefix_kind"], "conflict", "{first} {ep}");
+            }
+            // A standalone exact route ending in `*` stays exact.
+            let props = node("ep:qwtm/example@GET:/lit/*");
+            assert!(props.get("match").is_none(), "{props}");
+        }
+    }
+
     // AC-0451 (#1326 review): a written exported binding is not proven, a root
     // router makes `src/` inactive, `.mjs` is not a default extension, and an
     // app route may sit under segments named `pages/api`.
@@ -641,36 +751,40 @@ mod tests {
     #[test]
     fn next_file_conventions_map_to_routes() {
         let cases = [
-            ("pages/api/users.ts", false, Some(("/api/users", false))),
+            ("pages/api/users.ts", false, Some(("/api/users", None))),
             (
                 "src/pages/api/users/index.js",
                 false,
-                Some(("/api/users", false)),
+                Some(("/api/users", None)),
             ),
-            ("pages/api/index.ts", false, Some(("/api", false))),
+            ("pages/api/index.ts", false, Some(("/api", None))),
             (
                 "pages/api/users/[id].ts",
                 false,
-                Some(("/api/users/:id", false)),
+                Some(("/api/users/:id", None)),
             ),
             (
                 "pages/api/files/[...slug].ts",
                 false,
-                Some(("/api/files/*", true)),
+                Some(("/api/files/*", Some("segments+"))),
             ),
-            ("pages/api/[[...all]].ts", false, Some(("/api/*", true))),
+            (
+                "pages/api/[[...all]].ts",
+                false,
+                Some(("/api/*", Some("segments*"))),
+            ),
             ("pages/users.tsx", false, None),
-            ("app/route.ts", true, Some(("/", false))),
-            ("app/api/users/route.ts", true, Some(("/api/users", false))),
+            ("app/route.ts", true, Some(("/", None))),
+            ("app/api/users/route.ts", true, Some(("/api/users", None))),
             (
                 "src/app/(admin)/api/[id]/route.js",
                 true,
-                Some(("/api/:id", false)),
+                Some(("/api/:id", None)),
             ),
             (
                 "app/docs/[[...slug]]/route.ts",
                 true,
-                Some(("/docs/*", true)),
+                Some(("/docs/*", Some("segments*"))),
             ),
             ("app/_lib/route.ts", true, None),
             ("app/@modal/x/route.ts", true, None),
@@ -678,7 +792,7 @@ mod tests {
             ("app/api/[...a]/b/route.ts", true, None),
             ("app/api/page.tsx", true, None),
             ("lib/app/api/route.ts", true, None),
-            ("app/pages/api/route.ts", true, Some(("/pages/api", false))),
+            ("app/pages/api/route.ts", true, Some(("/pages/api", None))),
             ("pages/api/x.mjs", false, None),
         ];
         for (rel, app, expected) in cases {

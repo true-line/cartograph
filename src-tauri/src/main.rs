@@ -1805,10 +1805,12 @@ fn extract_tree_with_registries(
         })
         .map(|n| n.id.clone())
         .collect();
+    let prefix_kinds = events::prefix_kinds(&extraction.nodes);
     let fetched = events::stitch_fetches_with(
         &extraction.fetch_sites,
         &endpoint_ids,
         &get_serves_head,
+        &prefix_kinds,
         &cfg,
         &ev_id,
     );
@@ -2563,13 +2565,13 @@ fn stitch_http_bindings(
     let fetch_edges = graph
         .edges_with_labels(&["FETCHES"])
         .map_err(|e| e.to_string())?;
-    let endpoint_ids: Vec<String> = graph
+    let endpoints = graph
         .nodes_with_label("Endpoint")
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|node| node.id)
-        .collect();
-    let outcome = events::stitch_cross_repo(&gaps, &fetch_edges, &endpoint_ids, bindings);
+        .map_err(|e| e.to_string())?;
+    let prefix_kinds = events::prefix_kinds(&endpoints);
+    let endpoint_ids: Vec<String> = endpoints.into_iter().map(|node| node.id).collect();
+    let outcome =
+        events::stitch_cross_repo_with(&gaps, &fetch_edges, &endpoint_ids, &prefix_kinds, bindings);
     for joined in &outcome.joined {
         for edge in fetch_edges.iter().filter(|edge| edge.dst == joined.gap_id) {
             facts.edges.remove(&edge_key(edge));

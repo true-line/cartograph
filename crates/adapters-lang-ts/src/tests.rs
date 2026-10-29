@@ -4545,6 +4545,7 @@ fn node_http_endpoint_shape_mirrors_express() {
         .find(|n| n.id == "ep:qwtm/example@ALL:/ui/*")
         .unwrap();
     assert_eq!(prefix.props["match"], "prefix");
+    assert_eq!(prefix.props["prefix_kind"], "raw");
     let handles = edge_pairs(&ex, "HANDLES");
     assert!(
         handles

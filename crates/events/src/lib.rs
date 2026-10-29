@@ -21,7 +21,7 @@ use std::path::Path;
 pub mod http_binding;
 pub use http_binding::{
     BindingKind, CrossRepoStitch, DEFERRED_REASON_PREFIX, HttpBinding, JoinedFetch,
-    binding_origins, stitch_cross_repo,
+    binding_origins, stitch_cross_repo, stitch_cross_repo_with,
 };
 
 /// Stitching errors.
@@ -362,6 +362,78 @@ fn url_path(url: &str) -> String {
     }
 }
 
+/// How a prefix endpoint's route matches a request path (#1329), as its
+/// producer declares it in `prefix_kind` beside `match: "prefix"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefixKind {
+    /// node-http `startsWith`: the raw string before `*` prefixes the path.
+    Raw,
+    /// Next `[...x]`: the segments before `/*`, then one or more segments.
+    SegmentsPlus,
+    /// Next `[[...x]]`: the segments before `/*`, then zero or more.
+    SegmentsStar,
+    /// No known kind, or producers disagree on one id: matches nothing, so
+    /// its semantics are never guessed.
+    Unsupported,
+}
+
+/// The [`PrefixKind`] of every prefix Endpoint among `nodes`. One without a
+/// known kind, or whose id carries differing kinds, is
+/// [`PrefixKind::Unsupported`].
+pub fn prefix_kinds(nodes: &[Node]) -> BTreeMap<String, PrefixKind> {
+    let mut kinds = BTreeMap::new();
+    for n in nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint" && n.props["match"] == "prefix")
+    {
+        let kind = match n.props["prefix_kind"].as_str() {
+            Some("raw") => PrefixKind::Raw,
+            Some("segments+") => PrefixKind::SegmentsPlus,
+            Some("segments*") => PrefixKind::SegmentsStar,
+            _ => PrefixKind::Unsupported,
+        };
+        kinds
+            .entry(n.id.clone())
+            .and_modify(|seen: &mut PrefixKind| {
+                if *seen != kind {
+                    *seen = PrefixKind::Unsupported;
+                }
+            })
+            .or_insert(kind);
+    }
+    kinds
+}
+
+/// True when a concrete request path matches an endpoint route of `kind`
+/// (`None` for a whole-path pattern, [`route_matches`]).
+fn route_matches_kind(kind: Option<PrefixKind>, pattern: &str, concrete: &str) -> bool {
+    let min = match kind {
+        None => return route_matches(pattern, concrete),
+        Some(PrefixKind::Raw) => {
+            return pattern
+                .strip_suffix('*')
+                .is_some_and(|raw| concrete.starts_with(raw));
+        }
+        Some(PrefixKind::SegmentsPlus) => 1,
+        Some(PrefixKind::SegmentsStar) => 0,
+        Some(PrefixKind::Unsupported) => return false,
+    };
+    let Some(base) = pattern.strip_suffix("/*") else {
+        return false;
+    };
+    let head = base.split('/').count();
+    let cs: Vec<&str> = concrete.split('/').collect();
+    if cs.len() < head {
+        return false;
+    }
+    let rest = &cs[head..];
+    // A trailing slash adds no segment.
+    let rest = rest.strip_suffix(&[""]).unwrap_or(rest);
+    route_matches(base, &cs[..head].join("/"))
+        && rest.len() >= min
+        && rest.iter().all(|segment| !segment.is_empty())
+}
+
 /// True when a concrete request path matches an endpoint's route pattern:
 /// exact segments, or parameter segments matching any single segment. A
 /// parameter is written `:id` (Express), `<id>`/`<int:id>` (Flask) or
@@ -443,15 +515,24 @@ pub fn stitch_fetches(
     cfg: &ConfigIndex,
     id: &SourceId,
 ) -> Extraction {
-    stitch_fetches_with(sites, endpoint_ids, &BTreeSet::new(), cfg, id)
+    stitch_fetches_with(
+        sites,
+        endpoint_ids,
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+        cfg,
+        id,
+    )
 }
 
 /// [`stitch_fetches`], where each id in `get_serves_head` is a GET route
-/// its framework also serves for HEAD (Go's `ServeMux`, AC-0434).
+/// its framework also serves for HEAD (Go's `ServeMux`, AC-0434), and
+/// `prefix_kinds` ([`prefix_kinds`]) says how each prefix route matches.
 pub fn stitch_fetches_with(
     sites: &[adapters_fw::client::FetchSite],
     endpoint_ids: &[String],
     get_serves_head: &BTreeSet<String>,
+    prefix_kinds: &BTreeMap<String, PrefixKind>,
     cfg: &ConfigIndex,
     id: &SourceId,
 ) -> Extraction {
@@ -516,7 +597,7 @@ pub fn stitch_fetches_with(
                             || *verb == "ANY"
                             || *verb == "ALL"
                             || (method == "HEAD" && get_serves_head.contains(*eid)))
-                            && route_matches(route, path)
+                            && route_matches_kind(prefix_kinds.get(*eid).copied(), route, path)
                     })
                     .map(|(eid, _, _)| *eid)
                     .collect();

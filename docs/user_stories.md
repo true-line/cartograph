@@ -151,9 +151,10 @@
 - **AC-0013** Given a React/Next repo, when ingested, then Screen/Component nodes and FETCHES edges to endpoints are created.
 - **AC-0014** Given a data-fetch call site, when the endpoint is resolvable, then FETCHES is Confirmed; otherwise it escalates.
 - **AC-0452** Given a fetch whose resolved path and method are known, when its repository's endpoints are stitched, then a method-less route serves every method, whether spelled `ANY` or Express-style `ALL` (Express `all`, an unguarded node-http route, a Next.js pages/api handler). A method route beside it on the same path keeps the match an ambiguity `Gap`. Prefix routes (`/x/*`) are not matched, because their match semantics differ by producer (#1327).
+- **AC-0453** Given a prefix route whose producer declares its `prefix_kind` (#1329), when same-repo fetches or cross-repo binding joins are stitched, then it matches by that kind: `raw` (node-http `startsWith`) when the raw string before `*` prefixes the request path, `segments+` (Next `[...x]`) when the segments before `/*` match followed by one or more non-empty segments, and `segments*` (Next `[[...x]]`) for zero or more. A prefix route with a missing or unknown kind, or whose producers disagree on its kind (`conflict`, including a node-http exact route of the same id as a Next catch-all), matches nothing, even a request whose literal path ends in `*`. A request that matches an exact route and a prefix route, or several prefix routes, stays an ambiguity `Gap`, with no precedence assumed. The cross-repo pass also lets a method-less `ANY`/`ALL` route serve every method.
 - **Security:** —
 - **Performance:** —
-- **Trace:** M4 · `adapters-lang-ts` (tsx), `adapters-fw`, `events` · — · T-0013..0014, T-0452
+- **Trace:** M4 · `adapters-lang-ts` (tsx), `adapters-fw`, `events` · — · T-0013..0014, T-0452..0453
 
 ### US-0006 — Deterministic end-to-end flow tracer
 - **Actor:** Engine

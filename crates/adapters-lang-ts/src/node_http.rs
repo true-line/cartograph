@@ -10,7 +10,8 @@
 //!
 //! - `pathname === '/x'`, optionally ANDed with `req.method === 'M'`
 //!   (no method guard is method `ALL`, as Express `all`);
-//! - `pathname.startsWith('/x/')`, a prefix route (`/x/*`, `match: "prefix"`);
+//! - `pathname.startsWith('/x/')`, a prefix route (`/x/*`, `match: "prefix"`,
+//!   `prefix_kind: "raw"`: the raw string before `*` prefixes the URL);
 //! - `/^\/x\/(a|b)$/.exec(pathname)` / `.test(pathname)` with only literal
 //!   alternatives, one path per alternative;
 //! - `['GET /a', 'POST /b'].includes(`${req.method} ${pathname}`)`.
@@ -901,6 +902,8 @@ pub(crate) fn extract<'t>(
                     });
                     if route.kind == Match::Prefix {
                         props["match"] = serde_json::json!("prefix");
+                        // A raw `startsWith` string prefix, not segments (#1329).
+                        props["prefix_kind"] = serde_json::json!("raw");
                     }
                     if new_endpoint {
                         out.nodes.push(Node {
