@@ -27,6 +27,15 @@ pub(super) fn admission_protected_values(
     if before["schema_version"] != 9 || original_system != redacted_system {
         return Err(InvestigationError::InvalidInput);
     }
+    if response_schema::schema_role(original_system) == Some(SpecialistId::DomainAnalystV16) {
+        if before.get("response_schema").is_none()
+            || before.get("response_schema") != after.get("response_schema")
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+    } else if before.get("response_schema").is_some() || after.get("response_schema").is_some() {
+        return Err(InvestigationError::InvalidInput);
+    }
     for name in [
         "schema_version",
         "policy",

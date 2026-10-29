@@ -355,16 +355,19 @@ fn validate_prompt_delta(
     // Compare every unchanged enclosing field, including complete history,
     // targets, question, system-facing policy and all public proof metadata.
     let changes = |name: &str| {
-        matches!(
-            name,
-            "input_ledger_hash"
-                | "compact_context"
-                | "citations"
-                | "consumed_budgets"
-                | "turn_progress"
-                | "completion_metadata"
-                | "coverage_details"
-        )
+        (name == "response_schema"
+            && response_schema::schema_role(&base.payload.system)
+                == Some(SpecialistId::DomainAnalystV16))
+            || matches!(
+                name,
+                "input_ledger_hash"
+                    | "compact_context"
+                    | "citations"
+                    | "consumed_budgets"
+                    | "turn_progress"
+                    | "completion_metadata"
+                    | "coverage_details"
+            )
     };
     let current_fields = current
         .as_object()

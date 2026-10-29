@@ -19,6 +19,9 @@ impl LlmProvider for DescriptorOnly {
             tool_use: false,
         }
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
     fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
         Ok(profile())
     }
@@ -59,6 +62,7 @@ fn source_preview_proves_actual_source_append_and_disclosure_in_both_modes() {
     for role in [
         SpecialistId::DomainAnalystV10,
         SpecialistId::EvidenceAuditorV10,
+        SpecialistId::DomainAnalystV16,
     ] {
         for text in [
             "é中🙂".to_string(),
@@ -71,16 +75,37 @@ fn source_preview_proves_actual_source_append_and_disclosure_in_both_modes() {
                 let current =
                     build_source(&fixture, &raw, &evidence, role, CompletionCallMode::Choice);
                 let prepared = prepare(&current);
-                let proof = current
-                    .certify_unread_source_v9_with_policy(
-                        &prepared,
-                        &target,
-                        &profile(),
-                        &limits,
-                        "next:2",
-                        policy,
-                    )
-                    .unwrap();
+                let proof = current.certify_unread_source_v9_with_policy(
+                    &prepared,
+                    &target,
+                    &profile(),
+                    &limits,
+                    "next:2",
+                    policy,
+                );
+                // AC-0454: the duplicated schema consumes real headroom. The
+                // second maximal escaped source cannot prove wire closure at
+                // unchanged limits; the first and all old-role cases still fit.
+                if role == SpecialistId::DomainAnalystV16
+                    && text == "\u{1}".repeat(8192)
+                    && evidence.len() == 1
+                {
+                    assert_eq!(proof.err(), Some(InvestigationError::LimitExceeded));
+                    assert_eq!(
+                        current
+                            .measure_unread_source_v9_with_policy(
+                                &target,
+                                &profile(),
+                                &limits,
+                                "next:2",
+                                policy
+                            )
+                            .err(),
+                        Some(InvestigationError::LimitExceeded)
+                    );
+                    break;
+                }
+                let proof = proof.unwrap();
                 proof
                     .verify_with_policy(
                         &current,

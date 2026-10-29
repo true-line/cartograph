@@ -68,6 +68,7 @@ fn captured_progress_guidance_role_is_explicit_and_reopen_bound() {
         "domain-analyst@13",
         "domain-analyst@14",
         "domain-analyst@15",
+        "domain-analyst@16",
     ] {
         captured_case(false, Some(role));
     }

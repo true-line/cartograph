@@ -41,7 +41,7 @@ it('accepts only the exact @10 summary7/result7/disclosure6 mapping', () => {
   expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@9' })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: 6 })).toBe(false);
   expect(validCompletionSummary({ ...detail, schema_version: '7' as unknown as 7 })).toBe(false);
-  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@16' as SpecialistId })).toBe(false);
+  expect(validCompletionSummary({ ...detail, specialist_id: 'domain-analyst@17' as SpecialistId })).toBe(false);
 });
 
 it.each(['domain-analyst@10', 'evidence-auditor@10'] as const)('requires advertised request7/envelope2/v2 for %s', async (specialist) => {
@@ -202,8 +202,8 @@ it.each(['domain-analyst@11', 'evidence-auditor@11', 'domain-analyst@12'] as con
   expect(useInvestigationStore.getState().detail).toEqual(original);
 });
 
-// AC-0445: synthetic saved-task recognition, not desktop availability.
-it.each([13, 14, 15] as const)('reopens saved @%i without advertising it for dispatch', async (version) => {
+// AC-0445, AC-0454: synthetic saved-task recognition, not desktop availability.
+it.each([13, 14, 15, 16] as const)('reopens saved @%i without advertising it for dispatch', async (version) => {
   const detail = structuredClone(terminalWire.detail) as unknown as InvestigationDetail;
   detail.specialist_id = `domain-analyst@${version}`;
   detail.specialist = { ...detail.specialist, id: `domain-analyst@${version}`, version };

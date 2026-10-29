@@ -23,11 +23,20 @@ pub(super) fn select_admitted(
 ) -> Result<Option<String>, InvestigationError> {
     if !matches!(
         role,
-        SpecialistId::DomainAnalystV14 | SpecialistId::DomainAnalystV15
+        SpecialistId::DomainAnalystV14
+            | SpecialistId::DomainAnalystV15
+            | SpecialistId::DomainAnalystV16
     ) {
         return Ok(select(role, mode).map(str::to_owned));
     }
     if mode == CompletionCallMode::FinishOnly {
+        if role == SpecialistId::DomainAnalystV16 {
+            let schema: Value =
+                serde_json::from_str(FINISH).map_err(|_| InvestigationError::InvalidInput)?;
+            return String::from_utf8(bounded_bytes(&schema, MAX_INPUT_BYTES)?)
+                .map(Some)
+                .map_err(|_| InvestigationError::InvalidInput);
+        }
         return Ok(Some(FINISH.to_owned()));
     }
     let facts: Vec<_> = ledger
@@ -66,22 +75,44 @@ pub(super) fn schema_role(system: &str) -> Option<SpecialistId> {
         SpecialistId::DomainAnalystV13,
         SpecialistId::DomainAnalystV14,
         SpecialistId::DomainAnalystV15,
+        SpecialistId::DomainAnalystV16,
     ]
     .into_iter()
     .find(|role| system == role.prompt())
+}
+
+/// One selection owns both transport and @16's model-visible schema object.
+pub(super) fn select_for_prompt(
+    role: SpecialistId,
+    mode: CompletionCallMode,
+    ledger: &InvestigationInputLedger,
+    prompt: &mut Value,
+) -> Result<Option<String>, InvestigationError> {
+    let selected = select_admitted(role, mode, ledger)?;
+    if role == SpecialistId::DomainAnalystV16 {
+        prompt["response_schema"] = serde_json::from_str(
+            selected
+                .as_deref()
+                .ok_or(InvestigationError::InvalidInput)?,
+        )
+        .map_err(|_| InvestigationError::InvalidInput)?;
+    }
+    Ok(selected)
 }
 
 /// Additional selector owners, including rejected growth before final wire admission.
 pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
     use context_hub::logical::{json_bytes, slots, sum};
     sum(&[
-        super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV15)?,
+        super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV16)?,
         slots::<&crate::TaskFactKey>(policy.limits().selected_facts)?,
         MAX_MANIFEST_BYTES,              // bounded borrowed-key encoding
         json_bytes(MAX_MANIFEST_BYTES)?, // decoded exact keys
         json_bytes(CHOICE.len())?,       // compiled template tree
+        json_bytes(MAX_INPUT_BYTES)?,    // visible selected-schema parse, also on rejection
         MAX_INPUT_BYTES,                 // bounded schema encoding (also on rejection)
-        slots::<Vec<u8>>(2)?,
+        MAX_INPUT_BYTES,                 // visible canonical encoding while selection lives
+        slots::<Vec<u8>>(3)?,
     ])
 }
 
@@ -92,7 +123,7 @@ pub(super) fn validate(
 ) -> Result<(), InvestigationError> {
     let Some(role) = schema_role(&payload.system) else {
         // Historical non-admission prompts need no mode and never gain a schema.
-        return if payload.response_schema.is_none() {
+        return if payload.response_schema.is_none() && prompt.get("response_schema").is_none() {
             Ok(())
         } else {
             Err(InvestigationError::InvalidInput)
@@ -100,7 +131,23 @@ pub(super) fn validate(
     };
     let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
         .map_err(|_| InvestigationError::InvalidInput)?;
-    if payload.response_schema != select_admitted(role, mode, ledger)? {
+    let selected = select_admitted(role, mode, ledger)?;
+    if payload.response_schema != selected {
+        return Err(InvestigationError::InvalidInput);
+    }
+    if role == SpecialistId::DomainAnalystV16 {
+        let visible = prompt
+            .get("response_schema")
+            .ok_or(InvestigationError::InvalidInput)?;
+        if bounded_bytes(visible, MAX_INPUT_BYTES)?
+            != selected
+                .as_deref()
+                .ok_or(InvestigationError::InvalidInput)?
+                .as_bytes()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+    } else if prompt.get("response_schema").is_some() {
         return Err(InvestigationError::InvalidInput);
     }
     Ok(())

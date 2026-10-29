@@ -1145,3 +1145,6 @@ fn analyst_schema_is_exact_for_role_mode_and_reserve() {
 
 #[path = "admitted_schema_tests.rs"]
 mod admitted_schema_tests;
+
+#[path = "visible_schema_tests.rs"]
+mod visible_schema_tests;

@@ -161,6 +161,12 @@ impl LlmProvider for NextProvider {
                 .push(request.payload().clone());
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        if request.payload().system == SpecialistId::DomainAnalystV16.prompt() {
+            assert_eq!(
+                prompt["response_schema"].to_string(),
+                request.payload().response_schema.as_deref().unwrap()
+            );
+        }
         if let Some(schema) = &request.payload().response_schema {
             let parsed: Value = serde_json::from_str(schema).unwrap();
             assert_eq!(
@@ -168,7 +174,8 @@ impl LlmProvider for NextProvider {
                 if prompt["turn_progress"]["admission_mode"] == "finish_only" {
                     2
                 } else if (request.payload().system == SpecialistId::DomainAnalystV14.prompt()
-                    || request.payload().system == SpecialistId::DomainAnalystV15.prompt())
+                    || request.payload().system == SpecialistId::DomainAnalystV15.prompt()
+                    || request.payload().system == SpecialistId::DomainAnalystV16.prompt())
                     && parsed["anyOf"]
                         .as_array()
                         .unwrap()
@@ -416,6 +423,7 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
         (SpecialistId::DomainAnalystV13, [true, false]),
         (SpecialistId::DomainAnalystV14, [true, false]),
         (SpecialistId::DomainAnalystV15, [true, false]),
+        (SpecialistId::DomainAnalystV16, [true, false]),
     ] {
         let mut scripted = NextProvider::new(false);
         scripted.metadata_order = Some(order);
@@ -425,6 +433,7 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
                 | SpecialistId::DomainAnalystV13
                 | SpecialistId::DomainAnalystV14
                 | SpecialistId::DomainAnalystV15
+                | SpecialistId::DomainAnalystV16
         ) {
             scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
                 "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
@@ -518,6 +527,7 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
                     | SpecialistId::DomainAnalystV13
                     | SpecialistId::DomainAnalystV14
                     | SpecialistId::DomainAnalystV15
+                    | SpecialistId::DomainAnalystV16
             ) {
                 assert_canonical_query_continuation(
                     &provider.received_payloads.lock().unwrap()[1],
@@ -1610,6 +1620,7 @@ fn next_prompt_unadmitted_source_fact_stops_before_preparation() {
     for role in [
         SpecialistId::DomainAnalystV14,
         SpecialistId::DomainAnalystV15,
+        SpecialistId::DomainAnalystV16,
     ] {
         let mut provider = NextProvider::new(false);
         provider.invalid_source_first = true;

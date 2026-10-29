@@ -108,7 +108,7 @@ impl InvestigationInput {
             &capacity_feedback,
         )?;
         input.payload.response_schema =
-            response_schema::select_admitted(specialist, mode, &input.ledger)?;
+            response_schema::select_for_prompt(specialist, mode, &input.ledger, &mut prompt)?;
         input.finish_progressive_input(&prompt, coverage_details)
     }
 }
@@ -285,16 +285,16 @@ impl InvestigationInput {
                 policy.limits().model_invocations,
                 &Some(&feedback),
             )?;
+            action.payload.response_schema = if let Some(role) = schema_role {
+                response_schema::select_for_prompt(role, mode, &self.ledger, &mut prompt)?
+            } else {
+                None
+            };
             #[cfg(test)]
             assert!(
                 context_hub::logical::count(&prompt).unwrap()
                     <= reserve_projection_bytes(policy).unwrap()
             );
-            action.payload.response_schema = if let Some(role) = schema_role {
-                response_schema::select_admitted(role, mode, &self.ledger)?
-            } else {
-                None
-            };
             wire::replace_prompt(&mut action.payload, &prompt, MAX_INPUT_BYTES)?;
             if protect {
                 let inspected = llm::bounded::inspect_bounded_action(profile, &action, limits)
@@ -652,6 +652,7 @@ impl InvestigationInput {
                 SpecialistId::DomainAnalystV13,
                 SpecialistId::DomainAnalystV14,
                 SpecialistId::DomainAnalystV15,
+                SpecialistId::DomainAnalystV16,
                 SpecialistId::EvidenceAuditorV11,
             ]
             .iter()
@@ -859,7 +860,11 @@ impl InvestigationInput {
     ) -> Result<(), ActionDecodeFailure> {
         if matches!(
             response_schema::schema_role(&self.payload.system),
-            Some(SpecialistId::DomainAnalystV14 | SpecialistId::DomainAnalystV15)
+            Some(
+                SpecialistId::DomainAnalystV14
+                    | SpecialistId::DomainAnalystV15
+                    | SpecialistId::DomainAnalystV16
+            )
         ) && !self
             .ledger
             .selected_facts
