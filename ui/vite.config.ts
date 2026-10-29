@@ -52,9 +52,11 @@ export default defineConfig(({ mode }) => ({
       })],
       test: {
         name: 'storybook',
-        // The shared Linux host can be busy with other CI jobs; cap only the
-        // CI browser page budget instead of relaxing story timeouts.
+        // The shared Linux host can be busy with other CI jobs: cap the CI
+        // browser page budget, and on CI give a starved story 30 s instead
+        // of 15 s. A one-worker run still timed out under host load (#1094).
         maxWorkers: process.env.CI ? 1 : undefined,
+        testTimeout: process.env.CI ? 30_000 : undefined,
         browser: {
           enabled: true,
           headless: true,
