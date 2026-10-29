@@ -1,4 +1,6 @@
-use super::super::expanded::vendure_prepare::{Definition, Selection, prepare_bound};
+use super::super::expanded::vendure_prepare::{
+    Definition, Selection, prepare_bound, prepare_fixture_bound,
+};
 use super::tests::Case;
 use super::*;
 use agents::investigation::*;
@@ -71,7 +73,12 @@ fn captured_progress_guidance_role_is_explicit_and_reopen_bound() {
 }
 fn captured_case(execute: bool, specialist: Option<&str>) {
     let case = Case::new();
-    let prepared = case.prepare().unwrap();
+    let prepared = if execute {
+        case.prepare()
+    } else {
+        case.prepare_fixture()
+    }
+    .unwrap();
     let base = case.root.parent().unwrap();
     let receipt = base.join("preparation.json");
     let definition_path = base.join("analyst-definition.json");
@@ -129,6 +136,12 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
     };
     let baseline_jobs = job_ids(); // captured ingest already owns a durable job
     let run = |definition: &Definition| {
+        if !execute {
+            return prepare_fixture_bound(
+                [&case.config, &receipt, &definition_path, &output],
+                definition,
+            );
+        }
         prepare_bound(
             &case.config,
             &receipt,
@@ -302,13 +315,9 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
     let second_output = base.join("preconsumed-output");
     for _ in 0..2 {
         assert!(
-            prepare_bound(
-                &case.config,
-                &receipt,
-                &definition_path,
-                &second_output,
-                &expected,
-                InputPolicy::OfflineFixture
+            prepare_fixture_bound(
+                [&case.config, &receipt, &definition_path, &second_output],
+                &expected
             )
             .is_err()
         );
@@ -316,31 +325,15 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
     std::fs::remove_file(output.join("start.json")).unwrap();
     assert!(run(&expected).is_err()); // committed task without sealed start is never adopted
 
-    let app = prepared.profile.app().unwrap();
-    let state = app.state::<AppState>();
-    let jobs = state.jobs.lock().unwrap();
-    let task = jobs
-        .investigation(manifest["analyst_id"].as_str().unwrap())
+    let snapshot = PreparationApp::new(&prepared.profile)
+        .unwrap()
+        .snapshot(manifest["analyst_id"].as_str().unwrap())
         .unwrap();
-    assert_eq!(task.summary.status, InvestigationStatus::Queued);
-    assert_eq!(task.usage.model_invocations, 0);
-    assert_eq!(
-        jobs.list()
-            .unwrap()
-            .iter()
-            .filter(|job| job.investigation_id.is_some())
-            .count(),
-        1
-    );
-    let db = rusqlite::Connection::open(prepared.profile.data().join("state.db")).unwrap();
-    for table in ["investigation_invocations", "completion_attempts"] {
-        assert_eq!(
-            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
+    assert_eq!(snapshot.task.summary.status, InvestigationStatus::Queued);
+    assert_eq!(snapshot.task.usage.model_invocations, 0);
+    assert_eq!(snapshot.analyst_jobs, 1);
+    assert_eq!(snapshot.invocations, 0);
+    assert_eq!(snapshot.attempts, 0);
     std::fs::write(&case.config, b"{}").unwrap();
     assert!(run(&expected).is_err());
 }

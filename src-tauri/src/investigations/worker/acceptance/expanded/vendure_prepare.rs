@@ -139,7 +139,22 @@ fn bound<T>(
         &Path,
     ) -> Result<T, String>,
 ) -> Result<T, String> {
-    let [config, preparation, definition_path, output] = paths;
+    let validated = validate_bound(paths, expected, preparing)?;
+    bound_with_scope(
+        paths, expected, policy, preparing, None, validated, use_task,
+    )
+}
+
+pub(in super::super) struct BoundDefinition<'a> {
+    definition: Vec<u8>,
+    specialist: &'a str,
+}
+fn validate_bound<'a>(
+    paths: [&Path; 4],
+    expected: &'a Definition,
+    preparing: bool,
+) -> Result<BoundDefinition<'a>, String> {
+    let [_, _, definition_path, output] = paths;
     if !preparing && !output.is_dir() {
         return Err("Captured output missing.".into());
     }
@@ -167,8 +182,105 @@ fn bound<T>(
     {
         return Err("independent capture definition required".into());
     }
+    Ok(BoundDefinition {
+        definition,
+        specialist,
+    })
+}
+
+/// No external callback enters this concrete fixture owner.
+pub(in super::super) fn prepare_fixture_bound(
+    paths: [&Path; 4],
+    expected: &Definition,
+) -> Result<serde_json::Value, String> {
+    let validated = validate_bound(paths, expected, true)?;
+    let basis = vendure::reopen_basis(
+        paths[0],
+        paths[1],
+        paths[2],
+        paths[3],
+        vendure::InputPolicy::OfflineFixture,
+    )?;
+    let owner = vendure::PreparationApp::for_reopen(&basis)?;
+    owner.bound(&basis, paths, expected, validated)
+}
+
+pub(in super::super) fn prepare_fixture_on_app(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    basis: &vendure::ReopenPreparation<'_>,
+    paths: [&Path; 4],
+    expected: &Definition,
+    validated: BoundDefinition<'_>,
+) -> Result<serde_json::Value, String> {
+    bound_with_scope(
+        paths,
+        expected,
+        vendure::InputPolicy::OfflineFixture,
+        true,
+        Some((basis, app)),
+        validated,
+        |_, _, _, manifest, _| Ok(manifest.clone()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reopen_with_scope<T>(
+    scoped: Option<(
+        &vendure::ReopenPreparation<'_>,
+        &tauri::App<tauri::test::MockRuntime>,
+    )>,
+    config: &Path,
+    preparation: &Path,
+    proposal: &Path,
+    output: &Path,
+    policy: vendure::InputPolicy,
+    use_preparation: impl FnOnce(
+        &tauri::App<tauri::test::MockRuntime>,
+        &vendure::report::GraphPreparation,
+        &serde_json::Value,
+        &[u8],
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    match scoped {
+        Some((basis, app)) => vendure::use_reopen_app(basis, app, use_preparation),
+        None => vendure::reopen_preparation(
+            config,
+            preparation,
+            proposal,
+            output,
+            policy,
+            use_preparation,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bound_with_scope<T>(
+    paths: [&Path; 4],
+    expected: &Definition,
+    policy: vendure::InputPolicy,
+    preparing: bool,
+    scoped: Option<(
+        &vendure::ReopenPreparation<'_>,
+        &tauri::App<tauri::test::MockRuntime>,
+    )>,
+    validated: BoundDefinition<'_>,
+    use_task: impl FnOnce(
+        &tauri::App<tauri::test::MockRuntime>,
+        &StagedObligationRequest,
+        &str,
+        &serde_json::Value,
+        &Path,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    let [config, preparation, definition_path, output] = paths;
+    let BoundDefinition {
+        definition,
+        specialist,
+    } = validated;
     let mut unsealed_manifest = None;
-    let result = vendure::reopen_preparation(
+    let result = reopen_with_scope(
+        scoped,
         config,
         preparation,
         definition_path,

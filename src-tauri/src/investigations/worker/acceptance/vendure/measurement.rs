@@ -124,6 +124,29 @@ pub(in super::super) fn reopen_preparation<T>(
         &[u8],
     ) -> Result<T, String>,
 ) -> Result<T, String> {
+    let basis = reopen_basis(config, preparation, proposal, output, input_policy)?;
+    let app = basis.profile.app()?;
+    use_reopen_app(&basis, &app, use_preparation)
+}
+
+pub(in super::super) struct ReopenPreparation<'a> {
+    config: &'a Path,
+    preparation: &'a Path,
+    proposal: &'a Path,
+    saved: Vec<u8>,
+    expected: Value,
+    proposal_bytes: Vec<u8>,
+    pub(super) profile: profile::NativeProfile,
+    config_hash: String,
+    input: input::VerifiedInput,
+}
+pub(in super::super) fn reopen_basis<'a>(
+    config: &'a Path,
+    preparation: &'a Path,
+    proposal: &'a Path,
+    output: &'a Path,
+    input_policy: InputPolicy,
+) -> Result<ReopenPreparation<'a>, String> {
     let saved = input::read_bounded(preparation, 16 * 1024 * 1024)?;
     let expected: Value =
         serde_json::from_slice(&saved).map_err(|_| "invalid preparation receipt")?;
@@ -166,11 +189,51 @@ pub(in super::super) fn reopen_preparation<T>(
     if matches!(input_policy, InputPolicy::FrozenVendure) {
         verify_frozen_input(&input)?;
     }
-    let source_id = expected["graph"]["source_id"]
+    expected["graph"]["source_id"]
         .as_str()
         .ok_or("missing source binding")?;
     verify_config(config, &config_hash)?;
-    let app = profile.app()?;
+    Ok(ReopenPreparation {
+        config,
+        preparation,
+        proposal,
+        saved,
+        expected,
+        proposal_bytes,
+        profile,
+        config_hash,
+        input,
+    })
+}
+pub(in super::super) fn use_reopen_app<T>(
+    basis: &ReopenPreparation<'_>,
+    app: &tauri::App<tauri::test::MockRuntime>,
+    use_preparation: impl FnOnce(
+        &tauri::App<tauri::test::MockRuntime>,
+        &report::GraphPreparation,
+        &Value,
+        &[u8],
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    let ReopenPreparation {
+        config,
+        preparation,
+        proposal,
+        saved,
+        expected,
+        proposal_bytes,
+        profile,
+        config_hash,
+        input,
+    } = basis;
+    let source_root = Path::new(
+        expected["source_root"]
+            .as_str()
+            .ok_or("missing source root")?,
+    );
+    let source_id = expected["graph"]["source_id"]
+        .as_str()
+        .ok_or("missing source binding")?;
     let state = app.state::<AppState>();
     let source = state
         .sources
@@ -186,20 +249,20 @@ pub(in super::super) fn reopen_preparation<T>(
         .primary_sources
         .task_guard(source_id)
         .map_err(|_| "source guard unavailable")?;
-    let recovered = report::collect(&state, &source, &input, profile.data())?;
+    let recovered = report::collect(&state, &source, input, profile.data())?;
     if serde_json::to_value(&recovered).map_err(|_| "invalid recovered preparation")?
         != expected["graph"]
     {
         return Err("prepared graph, source, capture or coverage drift".into());
     }
-    let result = use_preparation(&app, &recovered, &expected, &saved)?;
-    let after = report::collect(&state, &source, &input, profile.data())?;
+    let result = use_preparation(app, &recovered, expected, saved)?;
+    let after = report::collect(&state, &source, input, profile.data())?;
     if bytes(&recovered)? != bytes(&after)? {
         return Err("preparation changed during measurement".into());
     }
-    verify_config(config, &config_hash)?;
-    if input::read_bounded(preparation, 16 * 1024 * 1024)? != saved
-        || input::read_bounded(proposal, MAX_SELECTION_BYTES)? != proposal_bytes
+    verify_config(config, config_hash)?;
+    if input::read_bounded(preparation, 16 * 1024 * 1024)? != *saved
+        || input::read_bounded(proposal, MAX_SELECTION_BYTES)? != *proposal_bytes
     {
         return Err("external measurement bindings changed".into());
     }
