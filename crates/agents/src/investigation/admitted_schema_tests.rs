@@ -15,7 +15,58 @@ fn read_branch(schema: &Value) -> Option<&Value> {
 
 #[test]
 fn admitted_source_schema_tracks_bound_facts_and_exact_preparation() {
-    let role = SpecialistId::DomainAnalystV14;
+    check_admitted_source_schema(SpecialistId::DomainAnalystV14);
+}
+
+// AC-0449: prompt identity and local admission mechanics, not model acceptance.
+#[test]
+fn analyst_phase_discovery_preserves_history_and_schema() {
+    let old = SpecialistId::DomainAnalystV14;
+    let new = SpecialistId::DomainAnalystV15;
+    assert_eq!(
+        old.definition().unwrap().prompt_fingerprint,
+        "b1634f6fb40d19c2ddc58fb8845e1f7f66bd6133d04c8a7e491df5910c857ffd"
+    );
+    assert_eq!(
+        new.definition().unwrap().operations,
+        old.definition().unwrap().operations
+    );
+    let prompt = new.prompt();
+    assert!(prompt.len() >= old.prompt().len()); // retained @14 fits the @15 workspace owner
+    assert!(old.prompt().contains("Query first to discover facts;"));
+    assert!(!prompt.contains("Query first to discover facts;"));
+    assert!(
+        old.prompt()
+            .contains(r#""max_facts":12,"max_bytes":16384,"cursor":null"#)
+    );
+    assert!(!prompt.contains(
+        r#"{"type":"query_context","context_id":"the exact context_id supplied by the host","query"#
+    ));
+    for instruction in [
+        "No query selector is a default",
+        "Only turn_progress.phase initial",
+        "an exact returned continuation",
+        "a different useful query",
+        "coverage inventory",
+        "an admissible finish",
+        "unchanged no-progress query",
+        "not acquired source",
+        "per-call schema specializes the compiled templates",
+        "You choose the next action",
+    ] {
+        assert!(prompt.contains(instruction), "{instruction}");
+    }
+    let ledger = Fixture::new(new, 7).ledger;
+    for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+        assert_eq!(
+            response_schema::select_admitted(new, mode, &ledger).unwrap(),
+            response_schema::select_admitted(old, mode, &ledger).unwrap()
+        );
+    }
+    check_admitted_source_schema(new);
+}
+
+fn check_admitted_source_schema(role: SpecialistId) {
     let policy = &INVESTIGATION_V2_POLICY;
     let mode = CompletionCallMode::Choice;
     let fresh = Fixture::new(role, 7)

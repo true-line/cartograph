@@ -14,14 +14,17 @@ pub(super) fn select(role: SpecialistId, mode: CompletionCallMode) -> Option<&'s
     })
 }
 
-/// @14 specializes only source fact identity; receipt guards still own ranges.
+/// @14/@15 specialize only source fact identity; receipt guards still own ranges.
 /// All callers supply the validated private ledger, never a prompt projection.
 pub(super) fn select_admitted(
     role: SpecialistId,
     mode: CompletionCallMode,
     ledger: &InvestigationInputLedger,
 ) -> Result<Option<String>, InvestigationError> {
-    if role != SpecialistId::DomainAnalystV14 {
+    if !matches!(
+        role,
+        SpecialistId::DomainAnalystV14 | SpecialistId::DomainAnalystV15
+    ) {
         return Ok(select(role, mode).map(str::to_owned));
     }
     if mode == CompletionCallMode::FinishOnly {
@@ -62,6 +65,7 @@ pub(super) fn schema_role(system: &str) -> Option<SpecialistId> {
     [
         SpecialistId::DomainAnalystV13,
         SpecialistId::DomainAnalystV14,
+        SpecialistId::DomainAnalystV15,
     ]
     .into_iter()
     .find(|role| system == role.prompt())
@@ -71,7 +75,7 @@ pub(super) fn schema_role(system: &str) -> Option<SpecialistId> {
 pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
     use context_hub::logical::{json_bytes, slots, sum};
     sum(&[
-        super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV14)?,
+        super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV15)?,
         slots::<&crate::TaskFactKey>(policy.limits().selected_facts)?,
         MAX_MANIFEST_BYTES,              // bounded borrowed-key encoding
         json_bytes(MAX_MANIFEST_BYTES)?, // decoded exact keys
