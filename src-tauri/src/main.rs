@@ -1626,6 +1626,7 @@ fn extract_tree_with_registries(
         extraction.nodes.extend(go.nodes);
         extraction.edges.extend(go.edges);
         extraction.fetch_sites.extend(go.fetch_sites);
+        extraction.event_sites.extend(go.event_sites);
     }
     // Rust carries server routes (axum, actix-web) and client calls
     // (reqwest), so a client-only Rust repository runs it too, as Java does.

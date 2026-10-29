@@ -744,3 +744,127 @@ fn directory_extraction_keeps_fetch_sites_across_incremental_reuse() {
     assert_eq!(fetches(&first), fetches(&second));
     assert_eq!(fetches(&second).len(), 1);
 }
+
+fn event_rows(source: &[u8]) -> Vec<String> {
+    use adapters_fw::events::IdentityExpr;
+    extract_source(source, "queue.go", &id())
+        .unwrap()
+        .event_sites
+        .iter()
+        .map(|site| {
+            assert!(site.registries.is_empty());
+            let identity = match &site.identity {
+                IdentityExpr::Literal(value) => format!("lit:{value}"),
+                IdentityExpr::EnvRef(key) => format!("env:{key}"),
+                IdentityExpr::Computed(text) => format!("computed:{text}"),
+            };
+            let owner = site.symbol.as_deref().unwrap_or("-");
+            let owner = owner.rsplit_once('#').map_or(owner, |(_, name)| name);
+            format!("{} {:?} {identity} {owner}", site.kind, site.role)
+        })
+        .collect()
+}
+
+// AC-0462: keyed AWS SDK v1/v2 `SendMessageInput`, `ReceiveMessageInput`
+// and `PublishInput` literals and kafka-go `Writer`, `WriterConfig` and
+// `ReaderConfig` literals on the file's import of the exact path are event
+// sites: `aws.String("…")` and string literals are literal identities,
+// anything else or a missing field is computed. (T-0462)
+#[test]
+fn sdk_request_and_config_structs_become_event_sites() {
+    let rows = event_rows(
+        br#"
+package queue
+
+import (
+    "os"
+
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/service/sqs"
+    snsv1 "github.com/aws/aws-sdk-go/service/sns"
+    kafka "github.com/segmentio/kafka-go"
+)
+
+func Send(ctx context.Context, client *sqs.Client) {
+    client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String("https://sqs.eu-west-1.amazonaws.com/1/orders"), MessageBody: aws.String("b")})
+    client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(os.Getenv("Q"))})
+}
+
+func Notify() {
+    _ = snsv1.PublishInput{TopicArn: aws.String(`arn:aws:sns:eu-west-1:1:sent`)}
+}
+
+func Stream() {
+    w := &kafka.Writer{Addr: kafka.TCP("k:9092"), Topic: "orders"}
+    perMessage := kafka.Writer{Addr: kafka.TCP("k:9092")}
+    r := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{"k:9092"}, Topic: "orders", GroupID: "g"})
+    old := kafka.NewWriter(kafka.WriterConfig{Topic: topicName()})
+    _, _, _, _ = w, perMessage, r, old
+}
+"#,
+    );
+    assert_eq!(
+        rows,
+        [
+            "sqs-queue Produces lit:https://sqs.eu-west-1.amazonaws.com/1/orders Send",
+            "sqs-queue Consumes computed:aws.String(os.Getenv(\"Q\")) Send",
+            "sns-topic Produces lit:arn:aws:sns:eu-west-1:1:sent Notify",
+            "kafka-topic Produces lit:orders Stream",
+            "kafka-topic Produces computed:kafka.Writer{Addr: kafka.TCP(\"k:9092\")} Stream",
+            "kafka-topic Consumes lit:orders Stream",
+            "kafka-topic Produces computed:topicName() Stream",
+        ]
+    );
+}
+
+// AC-0462 (#1361 review): kafka-go declares package `kafka`, so an
+// unaliased import binds `kafka`, not the last path segment. (T-0462)
+#[test]
+fn unaliased_kafka_go_import_binds_its_package_name() {
+    let rows = event_rows(
+        br#"
+package stream
+
+import "github.com/segmentio/kafka-go"
+
+func Stream() {
+    _ = kafka.Writer{Topic: "orders"}
+}
+"#,
+    );
+    assert_eq!(rows, ["kafka-topic Produces lit:orders Stream"]);
+}
+
+// AC-0462: another package of the same name, a shadowed qualifier, an
+// unkeyed literal, a bare string for a `*string` field, a lookalike `aws`
+// helper and other types yield no literal site. (T-0462)
+#[test]
+fn unproven_sdk_structs_are_not_event_sites() {
+    let rows = event_rows(
+        br#"
+package queue
+
+import (
+    aws "example.com/fake/aws"
+    "example.com/other/sqs"
+    kafka "github.com/segmentio/kafka-go"
+    realsqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+)
+
+func A() {
+    _ = sqs.SendMessageInput{QueueUrl: "q"}
+    _ = kafka.Message{Topic: "t"}
+    _ = kafka.Writer{nil, "t"}
+}
+
+func B(kafka Factory) {
+    _ = kafka.Writer{Topic: "t"}
+}
+
+func C() {
+    _ = realsqs.SendMessageInput{QueueUrl: aws.String("q")}
+}
+"#,
+    );
+    assert_eq!(rows, ["sqs-queue Produces computed:aws.String(\"q\") C"]);
+}

@@ -47,6 +47,9 @@ pub struct Extraction {
     pub edges: Vec<Edge>,
     /// `net/http` client calls, stitched to endpoints by the caller.
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
+    /// AWS SDK and kafka-go event sites (AC-0462), stitched by the
+    /// `events` crate.
+    pub event_sites: Vec<adapters_fw::events::EventSite>,
     pending_calls: Vec<PendingCall>,
     pending_endpoints: Vec<PendingEndpoint>,
 }
@@ -194,6 +197,7 @@ fn default_import_name(import_path: &str) -> &str {
         "net/http" => "http",
         "github.com/go-chi/chi" | "github.com/go-chi/chi/v5" => "chi",
         "github.com/gin-gonic/gin" => "gin",
+        "github.com/segmentio/kafka-go" => "kafka",
         _ => import_path.rsplit('/').next().unwrap_or(import_path),
     }
 }
@@ -673,6 +677,17 @@ fn extract_source_with_module(
         });
     }
 
+    // SDK request and config structs (AC-0462).
+    let literal_query = crate::queries::query("(composite_literal) @literal");
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(literal_query, root, source);
+    while let Some(found) = matches.next() {
+        let literal = found.captures()[0].node;
+        let owner = enclosing_function(literal, &functions_by_start);
+        out.event_sites
+            .extend(events::site(&cx, &bindings, literal, owner));
+    }
+
     let call_query = crate::queries::query("(call_expression) @call");
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(call_query, root, source);
@@ -1072,6 +1087,7 @@ pub fn extract_dir_incremental_with_progress(
             out.nodes.extend(extraction.nodes);
             out.edges.extend(extraction.edges);
             out.fetch_sites.extend(extraction.fetch_sites);
+            out.event_sites.extend(extraction.event_sites);
             out.pending_calls.extend(extraction.pending_calls);
             out.pending_endpoints.extend(extraction.pending_endpoints);
             Ok(())
@@ -1137,6 +1153,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 }
 
 mod client;
+mod events;
 mod queries;
 
 #[cfg(test)]

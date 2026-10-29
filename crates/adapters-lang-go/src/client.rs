@@ -44,7 +44,7 @@ fn method_constant(name: &str) -> Option<&'static str> {
 }
 
 /// The top-level declaration `node` sits in.
-fn top_level(mut node: TsNode<'_>) -> TsNode<'_> {
+pub(super) fn top_level(mut node: TsNode<'_>) -> TsNode<'_> {
     while let Some(parent) = node.parent() {
         if parent.kind() == "source_file" {
             break;
@@ -56,7 +56,7 @@ fn top_level(mut node: TsNode<'_>) -> TsNode<'_> {
 
 /// Whether `name` is used in `scope` as anything but the operand of a
 /// selector, which only a local value or type of that name can be.
-fn shadowed(cx: &FileCx<'_>, scope: TsNode<'_>, name: &str) -> bool {
+pub(super) fn shadowed(cx: &FileCx<'_>, scope: TsNode<'_>, name: &str) -> bool {
     let mut stack = vec![scope];
     while let Some(node) = stack.pop() {
         if matches!(node.kind(), "identifier" | "type_identifier") && cx.text(&node) == name {
