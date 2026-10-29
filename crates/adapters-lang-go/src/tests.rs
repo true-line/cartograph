@@ -835,6 +835,30 @@ func Stream() {
     assert_eq!(rows, ["kafka-topic Produces lit:orders Stream"]);
 }
 
+// AC-0462 (#1361 review): a comment inside `aws.String(…)` is not an
+// argument, so the literal stays a literal identity. (T-0462)
+#[test]
+fn comments_in_aws_string_keep_the_literal_identity() {
+    let rows = event_rows(
+        br#"
+package queue
+
+import (
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/service/sqs"
+)
+
+func Send(ctx context.Context, client *sqs.Client) {
+    client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(/* queue URL */ "https://sqs.eu-west-1.amazonaws.com/1/orders")})
+}
+"#,
+    );
+    assert_eq!(
+        rows,
+        ["sqs-queue Produces lit:https://sqs.eu-west-1.amazonaws.com/1/orders Send"]
+    );
+}
+
 // AC-0462: another package of the same name, a shadowed qualifier, an
 // unkeyed literal, a bare string for a `*string` field, a lookalike `aws`
 // helper and other types yield no literal site. (T-0462)

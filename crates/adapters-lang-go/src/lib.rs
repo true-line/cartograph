@@ -282,12 +282,16 @@ fn enclosing_function(mut node: TsNode<'_>, functions: &HashMap<usize, String>) 
     None
 }
 
+/// The call's arguments; comments between them are not arguments.
 fn call_arguments(call: TsNode<'_>) -> Vec<TsNode<'_>> {
     let Some(arguments) = call.child_by_field_name("arguments") else {
         return Vec::new();
     };
     let mut walk = arguments.walk();
-    arguments.named_children(&mut walk).collect()
+    arguments
+        .named_children(&mut walk)
+        .filter(|argument| argument.kind() != "comment")
+        .collect()
 }
 
 fn literal_string(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
