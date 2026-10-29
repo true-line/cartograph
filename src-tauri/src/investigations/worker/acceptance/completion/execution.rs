@@ -31,7 +31,7 @@ use tauri::Manager;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct InvocationObservation {
+pub(in super::super) struct InvocationObservation {
     pub payload_hash: String,
     pub input_ledger_hash: String,
     pub context_id: String,
@@ -77,17 +77,42 @@ impl std::fmt::Display for RoleRunError {
     }
 }
 impl std::error::Error for RoleRunError {}
-struct ObservedProvider {
+pub(in super::super) struct ObservedProvider {
     inner: Arc<dyn LlmProvider>,
     context_id: String,
     observations: Mutex<Vec<InvocationObservation>>,
+    next: bool,
 }
-fn observation(request: &AuthorizedBoundedCompletion) -> Result<InvocationObservation, String> {
+impl ObservedProvider {
+    pub(in super::super) fn next(inner: Arc<dyn LlmProvider>, context_id: String) -> Self {
+        Self {
+            inner,
+            context_id,
+            observations: Mutex::new(vec![]),
+            next: true,
+        }
+    }
+    pub(in super::super) fn observations(&self) -> Result<Vec<InvocationObservation>, String> {
+        self.observations
+            .lock()
+            .map(|v| v.clone())
+            .map_err(|_| "Invocation observations unavailable.".into())
+    }
+}
+fn observation(
+    request: &AuthorizedBoundedCompletion,
+    next: bool,
+) -> Result<InvocationObservation, String> {
     let payload = request.payload();
     let prompt: Value =
         serde_json::from_str(&payload.prompt).map_err(|_| "Actual input is not JSON.")?;
-    if prompt["schema_version"] != 6 {
-        return Err("Actual invocation is not input6.".into());
+    if prompt["schema_version"] != if next { 9 } else { 6 } {
+        return Err(if next {
+            "Actual invocation is not input9."
+        } else {
+            "Actual invocation is not input6."
+        }
+        .into());
     }
     let string = |key: &str| {
         prompt[key]
@@ -96,7 +121,13 @@ fn observation(request: &AuthorizedBoundedCompletion) -> Result<InvocationObserv
             .ok_or_else(|| format!("Actual input lacks {key}."))
     };
     let mut source_hashes = BTreeMap::new();
-    if payload.spans.len() > 12 {
+    if payload.spans.len()
+        > if next {
+            INVESTIGATION_V2_POLICY.limits().evidence_items
+        } else {
+            12
+        }
+    {
         return Err("Too many actual source spans.".into());
     }
     for span in &payload.spans {
@@ -111,7 +142,13 @@ fn observation(request: &AuthorizedBoundedCompletion) -> Result<InvocationObserv
     let inventories = prompt["coverage_details"]
         .as_array()
         .ok_or("Actual coverage details missing.")?;
-    if inventories.len() > 8 {
+    if inventories.len()
+        > if next {
+            INVESTIGATION_V2_POLICY.limits().tool_actions as usize
+        } else {
+            8
+        }
+    {
         return Err("Too many actual inventories.".into());
     }
     for detail in inventories {
@@ -193,13 +230,19 @@ impl LlmProvider for ObservedProvider {
             code: FailureCode::InvalidInput,
             outcome: InvocationOutcome::NotDispatched,
         };
-        let observed = observation(request).map_err(|_| fail())?;
+        let observed = observation(request, self.next).map_err(|_| fail())?;
         if observed.context_id != self.context_id {
             return Err(fail());
         }
         {
             let mut observations = self.observations.lock().map_err(|_| fail())?;
-            if observations.len() >= 8 {
+            if observations.len()
+                >= if self.next {
+                    INVESTIGATION_V2_POLICY.limits().model_invocations as usize
+                } else {
+                    8
+                }
+            {
                 return Err(fail());
             }
             observations.push(observed);
@@ -224,7 +267,7 @@ fn unknown(name: &str) -> MechanicalCheck {
         status: CheckStatus::Unknown,
     }
 }
-fn rows<T: DeserializeOwned + Serialize>(
+pub(in super::super) fn rows<T: DeserializeOwned + Serialize>(
     path: &Path,
     id: &str,
     table: &str,
@@ -440,6 +483,7 @@ pub(super) fn run_role(
         inner: provider,
         context_id: request.expected_context_id.clone(),
         observations: Mutex::new(vec![]),
+        next: false,
     });
     run_completion(
         prepared.app.handle().clone(),
@@ -676,22 +720,42 @@ fn sealed_checks(
     ledgers: &[InvestigationInputLedger],
     observations: &[InvocationObservation],
 ) -> Result<(bool, bool, bool), String> {
+    sealed_checks_with_policy(
+        request,
+        steps,
+        ledgers,
+        observations,
+        &INVESTIGATION_V1_POLICY,
+    )
+}
+pub(in super::super) fn sealed_checks_with_policy(
+    request: &StagedObligationRequest,
+    steps: &[PendingInvestigationStep],
+    ledgers: &[InvestigationInputLedger],
+    observations: &[InvocationObservation],
+    policy: &InvestigationPolicy,
+) -> Result<(bool, bool, bool), String> {
     let contract = InvestigationCompletionContract {
         schema_version: 1,
-        request_hash: request.intent_hash().map_err(|error| error.to_string())?,
+        request_hash: request
+            .intent_hash_with_policy(policy)
+            .map_err(|error| error.to_string())?,
         obligations_hash: request
             .obligations
-            .fingerprint()
+            .fingerprint_with_policy(policy)
             .map_err(|error| error.to_string())?,
         obligations: request.obligations.clone(),
     };
-    let contract_hash = contract.fingerprint().map_err(|error| error.to_string())?;
+    let contract_hash = contract
+        .fingerprint_with_policy(policy)
+        .map_err(|error| error.to_string())?;
     let mut matching = !steps.is_empty() && steps.len() == observations.len();
     let mut bound = matching;
     let mut reviewable = true;
     for (step, observed) in steps.iter().zip(observations) {
         let Some(ledger) = ledgers.iter().find(|ledger| {
-            ledger.fingerprint().ok().as_deref() == Some(step.input_ledger_hash.as_str())
+            ledger.fingerprint_with_policy(policy).ok().as_deref()
+                == Some(step.input_ledger_hash.as_str())
         }) else {
             return Err("Invocation ledger missing.".into());
         };
@@ -699,9 +763,9 @@ fn sealed_checks(
             return Err("Invocation disclosure missing.".into());
         };
         disclosure
-            .validate(ledger)
+            .validate_with_policy(ledger, policy)
             .map_err(|error| error.to_string())?;
-        bound &= disclosure.schema_version == 4
+        bound &= disclosure.schema_version == if request.schema_version == 7 { 6 } else { 4 }
             && disclosure.completion_contract_hash.as_ref() == Some(&contract_hash)
             && disclosure.completion_metadata_hash.is_some()
             && observed.context_id == request.expected_context_id

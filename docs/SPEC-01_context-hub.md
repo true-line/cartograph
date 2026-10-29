@@ -238,3 +238,7 @@ explains that installation and removal use the chosen client's supported workflo
 and require a separate user request. Cartograph neither writes client settings
 nor installs files into global skill locations. This delivery does not establish
 Windows MCP transport support or authorize provider execution.
+
+### Next-family acceptance observations (#1358, AC-0465)
+
+An opt-in acceptance observer records actual prompt9 source, inventory and parent-history hashes, and compares them with saved disclosure6 and policy-qualified request/ledger/contract hashes. Schema-family mismatches fail before delegation. Legacy input6/disclosure4 behavior remains unchanged; all bounds come from the existing family policy. Coverage-detail counts use the tool-action bound (56 for V2, 8 for legacy), rather than the larger completed-attempt bound. The parent-free regression rejects a foreign history hash; actual nonempty saved-parent history observation belongs to the #1354 end-to-end auditor test. This prerequisite neither stages an auditor nor establishes captured-model or semantic acceptance.
