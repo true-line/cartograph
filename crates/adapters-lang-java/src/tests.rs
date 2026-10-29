@@ -4159,3 +4159,172 @@ fn unproven_webclient_chains_yield_no_fetch_sites() {
         assert!(sites.is_empty(), "{path}: {:?}", webclient_rows(&sites));
     }
 }
+
+fn kafka_rows(files: &[(&str, &str)]) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    for (rel, content) in files {
+        write(dir.path(), rel, content);
+    }
+    extract_dir(dir.path(), &id())
+        .unwrap()
+        .event_sites
+        .iter()
+        .map(|site| {
+            assert_eq!(site.kind, "kafka-topic");
+            assert!(site.registries.is_empty());
+            let identity = match &site.identity {
+                IdentityExpr::Literal(topic) => format!("lit:{topic}"),
+                IdentityExpr::EnvRef(key) => format!("env:{key}"),
+                IdentityExpr::Computed(text) => format!("computed:{text}"),
+            };
+            let owner = site.symbol.as_deref().unwrap_or("-");
+            // The method name, without owner or signature.
+            let owner = owner.split('(').next().unwrap_or(owner);
+            let owner = owner.rsplit('.').next().unwrap_or(owner);
+            format!("{:?} {identity} {owner}", site.role)
+        })
+        .collect()
+}
+
+// AC-0459: `send` on a proven `KafkaTemplate` field, `this.` field,
+// parameter or local is a produces site whose topic is the first of two or
+// more arguments, and each `topics` element of a proven `@KafkaListener`
+// method is a consumes site; placeholders, expressions, non-literals, a
+// record or message argument, a pattern and partitions are computed.
+// (T-0459)
+#[test]
+fn spring_kafka_templates_and_listeners_become_event_sites() {
+    let rows = kafka_rows(&[(
+        "src/main/java/io/demo/Orders.java",
+        r##"package io.demo;
+
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
+
+public class Orders {
+    static final String AUDIT = "audit";
+    private final KafkaTemplate<String, String> template;
+
+    void publish(String body, ProducerRecord<String, String> record) {
+        template.send("orders", body);
+        this.template.send("orders", 0, "k", body);
+        template.send(AUDIT, body);
+        template.send(record);
+    }
+
+    void relay(org.springframework.kafka.core.KafkaTemplate<String, String> given) {
+        KafkaTemplate<String, String> local = given;
+        local.send("relayed", "x");
+    }
+
+    @KafkaListener(topics = "orders", groupId = "billing")
+    void onOrder(String body) {}
+
+    @KafkaListener(topics = {"a", "${topic.b}", "#{'c'}"})
+    void onMany(String body) {}
+
+    @org.springframework.kafka.annotation.KafkaListener(topicPattern = "audit.*")
+    void onPattern(String body) {}
+}
+"##,
+    )]);
+    assert_eq!(
+        rows,
+        [
+            "Produces lit:orders publish",
+            "Produces lit:orders publish",
+            "Produces computed:AUDIT publish",
+            "Produces computed:template.send(record) publish",
+            "Produces lit:relayed relay",
+            "Consumes lit:orders onOrder",
+            "Consumes lit:a onMany",
+            "Consumes computed:\"${topic.b}\" onMany",
+            "Consumes computed:\"#{'c'}\" onMany",
+            "Consumes computed:topicPattern = \"audit.*\" onPattern",
+        ]
+    );
+}
+
+// AC-0459: an unproven receiver (untyped, other type, wildcard-imported,
+// shadowed by a declared type, an inherited field, `var`), a lookalike or
+// wildcard-imported listener annotation, `sendDefault`, a class-level
+// listener and test sources yield no event site. (T-0459)
+#[test]
+fn spring_kafka_sites_need_a_proven_template_or_listener() {
+    let quiet = |rel: &str, source: &str| {
+        let rows = kafka_rows(&[(rel, source)]);
+        assert!(rows.is_empty(), "{rel}: {rows:?}");
+    };
+    quiet(
+        "src/main/java/io/demo/A.java",
+        r#"package io.demo;
+
+import org.springframework.kafka.core.*;
+import org.springframework.kafka.annotation.*;
+
+class A {
+    private final KafkaTemplate<String, String> template;
+    void f() { template.send("t", "x"); }
+    @KafkaListener(topics = "t")
+    void g(String body) {}
+}
+"#,
+    );
+    quiet(
+        "src/main/java/io/demo/B.java",
+        r#"package io.demo;
+
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
+
+@KafkaListener(topics = "class-level")
+class B extends Base {
+    private final Other template;
+    void f(Object raw, KafkaProducer producer) {
+        template.send("t", "x");
+        raw.send("t", "x");
+        producer.send("t", "x");
+        inherited.send("t", "x");
+        var local = new KafkaTemplate<String, String>(factory);
+        local.send("t", "x");
+        Base.this.template.send("t", "x");
+    }
+    void g(KafkaTemplate<String, String> given) { given.sendDefault("x"); }
+    @KafkaHandler
+    void h(String body) {}
+    @io.other.KafkaListener(topics = "t")
+    void i(String body) {}
+}
+"#,
+    );
+    quiet(
+        "src/main/java/io/demo/C.java",
+        r#"package io.demo;
+
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
+
+class C {
+    class KafkaTemplate {}
+    @interface KafkaListener { String[] topics(); }
+    void f(KafkaTemplate template) { template.send("t", "x"); }
+    @KafkaListener(topics = "t")
+    void g(String body) {}
+}
+"#,
+    );
+    let product = r#"package io.demo;
+
+import org.springframework.kafka.core.KafkaTemplate;
+
+class D {
+    void f(KafkaTemplate<String, String> template) { template.send("t", "x"); }
+}
+"#;
+    quiet("src/test/java/io/demo/D.java", product);
+    // Control: the same source in a product source set is a site.
+    assert_eq!(
+        kafka_rows(&[("src/main/java/io/demo/D.java", product)]).len(),
+        1
+    );
+}

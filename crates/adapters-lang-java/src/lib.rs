@@ -65,6 +65,9 @@ pub struct Extraction {
     /// RestTemplate (AC-0435) and WebClient (AC-0441) calls: kept out of the
     /// Retrofit base join and appended to `fetch_sites` after it.
     unjoined_sites: Vec<adapters_fw::client::FetchSite>,
+    /// Spring Kafka producer and listener sites (AC-0459), stitched by the
+    /// `events` crate.
+    pub event_sites: Vec<adapters_fw::events::EventSite>,
     pending_calls: Vec<PendingCall>,
     declared_types: Vec<DeclaredType>,
     /// Package declarations, one per file that has one.
@@ -985,6 +988,14 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             .extend(rest_template::sites(&cx, root, &imports, &methods_by_start));
         out.unjoined_sites
             .extend(webclient::sites(&cx, root, &imports, &methods_by_start));
+        // Spring Kafka producers and listeners (AC-0459).
+        out.event_sites.extend(spring_kafka::sites(
+            &cx,
+            root,
+            &imports,
+            &methods,
+            &methods_by_start,
+        ));
         // OpenFeign clients (AC-0437) wait for the same-package check.
         out.pending_feign.extend(feign::sites(
             &cx,
@@ -1515,6 +1526,7 @@ pub fn extract_dir_incremental_with_progress(
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
             out.unjoined_sites.extend(extraction.unjoined_sites);
+            out.event_sites.extend(extraction.event_sites);
             out.method_index.extend(extraction.method_index);
             out.entity_index.extend(extraction.entity_index);
             out.repository_index.extend(extraction.repository_index);
@@ -1681,6 +1693,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 mod feign;
 mod rest_template;
 mod retrofit;
+mod spring_kafka;
 mod webclient;
 
 #[cfg(test)]

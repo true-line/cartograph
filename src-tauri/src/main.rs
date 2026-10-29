@@ -1686,6 +1686,7 @@ fn extract_tree_with_registries(
         extraction.nodes.extend(java.nodes);
         extraction.edges.extend(java.edges);
         extraction.fetch_sites.extend(java.fetch_sites);
+        extraction.event_sites.extend(java.event_sites);
 
         let kotlin_id = adapters_lang_kotlin::SourceId { repo, commit };
         let mut kotlin_progress = |path: &str| on_file(&format!("Reading Kotlin sources — {path}"));
