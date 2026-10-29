@@ -82,6 +82,16 @@ impl Case {
             profile,
         }
     }
+    pub(super) fn prepare_fixture(&self) -> Result<Preparation, String> {
+        prepare_fixture(
+            &self.root,
+            &self.manifest,
+            &self.proof,
+            &self.config,
+            "a".repeat(40),
+            &self.root.parent().unwrap().join("report"),
+        )
+    }
     pub(super) fn prepare(&self) -> Result<Preparation, String> {
         prepare(
             &self.root,

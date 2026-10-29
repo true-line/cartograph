@@ -10,6 +10,8 @@ use tauri::Manager;
 mod input;
 #[path = "vendure/measurement.rs"]
 mod measurement;
+#[path = "vendure/preparation_app.rs"]
+mod preparation_app;
 #[path = "vendure/profile.rs"]
 mod profile;
 #[path = "vendure/report.rs"]
@@ -230,6 +232,53 @@ fn prepare(
     output: &Path,
     frozen_vendure: bool,
 ) -> Result<Preparation, String> {
+    let basis = capture_basis(
+        source,
+        manifest,
+        proof,
+        config,
+        revision,
+        output,
+        frozen_vendure,
+    )?;
+    let app = basis.profile.app()?;
+    complete_capture(basis, &app)
+}
+
+fn prepare_fixture(
+    source: &Path,
+    manifest: &Path,
+    proof: &Path,
+    config: &Path,
+    revision: String,
+    output: &Path,
+) -> Result<Preparation, String> {
+    let basis = capture_basis(source, manifest, proof, config, revision, output, false)?;
+    let owner = preparation_app::PreparationApp::new(&basis.profile)?;
+    owner.capture(basis)
+}
+
+struct CapturePreparation<'a> {
+    source: &'a Path,
+    manifest: &'a Path,
+    proof: &'a Path,
+    config: &'a Path,
+    output: &'a Path,
+    revision: String,
+    input: input::VerifiedInput,
+    profile: profile::NativeProfile,
+    native_config_sha256: String,
+}
+#[allow(clippy::too_many_arguments)]
+fn capture_basis<'a>(
+    source: &'a Path,
+    manifest: &'a Path,
+    proof: &'a Path,
+    config: &'a Path,
+    revision: String,
+    output: &'a Path,
+    frozen_vendure: bool,
+) -> Result<CapturePreparation<'a>, String> {
     let input = input::verify(source, manifest, proof)?;
     if frozen_vendure {
         verify_frozen_input(&input)?;
@@ -238,7 +287,33 @@ fn prepare(
     validate_paths(source, manifest, proof, config, &profile, output)?;
     verify_config(config, &native_config_sha256)?;
     profile.create_fresh(source)?;
-    let app = profile.app()?;
+    Ok(CapturePreparation {
+        source,
+        manifest,
+        proof,
+        config,
+        output,
+        revision,
+        input,
+        profile,
+        native_config_sha256,
+    })
+}
+fn complete_capture(
+    basis: CapturePreparation<'_>,
+    app: &tauri::App<tauri::test::MockRuntime>,
+) -> Result<Preparation, String> {
+    let CapturePreparation {
+        source,
+        manifest,
+        proof,
+        config,
+        output,
+        revision,
+        input,
+        profile,
+        native_config_sha256,
+    } = basis;
     let state = app.state::<AppState>();
     let registered = register_local_source(&state, source)?;
     let operation = source_operation(&state, vec![(registered.clone(), false)])?;
@@ -323,7 +398,10 @@ fn vendure_capture_preparation() {
     }
 }
 
-pub(super) use measurement::{InputPolicy, reopen_preparation};
+pub(super) use measurement::{
+    InputPolicy, ReopenPreparation, reopen_basis, reopen_preparation, use_reopen_app,
+};
+pub(super) use preparation_app::PreparationApp;
 pub(super) fn write_preparation_artifact(
     path: &Path,
     value: &impl Serialize,
