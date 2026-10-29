@@ -123,7 +123,7 @@ test('heavy Rust jobs hold one of two shared-host slots and release it (#1242)',
   const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
   const [, when, codeqlWait] = codeql.match(take) ?? [];
   assert.equal(when, "matrix.language == 'rust'");
-  assert.match(codeql, /^ {4}timeout-minutes: \$\{\{ matrix\.language == 'rust' && 120 \|\| 45 \}\}$/mu);
+  assert.match(codeql, /^ {4}timeout-minutes: 120$/mu);
   assert.ok(120 * 60 - Number(codeqlWait) >= 90 * 60);
   // One Rust extraction at a time repo-wide; other languages per run.
   assert.match(codeql, /group: codeql-\$\{\{ matrix\.language == 'rust' && 'rust' \|\| github\.run_id \}\}-\$\{\{ matrix\.language \}\}\n +cancel-in-progress: false\n/u);
