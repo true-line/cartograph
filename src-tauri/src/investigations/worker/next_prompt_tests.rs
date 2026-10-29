@@ -120,6 +120,7 @@ struct NextProvider {
     extra_inventory: bool,
     large_finish: bool,
     exact_targets: bool,
+    auditor_finish: bool,
 }
 impl NextProvider {
     fn new(malformed: bool) -> Self {
@@ -138,6 +139,7 @@ impl NextProvider {
             extra_inventory: false,
             large_finish: false,
             exact_targets: false,
+            auditor_finish: false,
         }
     }
 }
@@ -271,14 +273,16 @@ impl LlmProvider for NextProvider {
                     .iter()
                     .find(|citation| citation["origin"]["kind"] == "captured_primary_source")
                     .unwrap();
+                // A child audits independently; copying saved parent prose is correctly refused.
+                let audit = self.auditor_finish;
                 let findings = (0..if self.large_finish { 12 } else { 1 }).map(|index| json!({
-                    "claim_kind":"inferred_interpretation", "title":format!("Observed bounded guard {index}"),
-                    "statement":if self.large_finish { "Observed source evidence. ".repeat(72) } else { "The acquired callable includes a conditional exit.".into() },
-                    "citation_ids":[citation["citation_id"]],"limitations":["Runtime inputs remain unknown."]
+                    "claim_kind":"inferred_interpretation", "title":if audit { format!("Independent source check {index}") } else { format!("Observed bounded guard {index}") },
+                    "statement":if audit { "Separate inspection supports only this selected guard; surrounding paths were not acquired.".into() } else if self.large_finish { "Observed source evidence. ".repeat(72) } else { "The acquired callable includes a conditional exit.".into() },
+                    "citation_ids":[citation["citation_id"]],"limitations":if audit { json!(["Execution conditions were not exercised by this audit."]) } else { json!(["Runtime inputs remain unknown."]) }
                 })).collect::<Vec<_>>();
                 json!({"schema_version":1,"outcome":"supported","action":{
                     "type":"finish","findings":findings,
-                    "knowledge_completeness":"partial","limitations":["No complete business policy was established."]}}).to_string()
+                    "knowledge_completeness":"partial","limitations":if audit { json!(["This review leaves broader behavior unresolved."]) } else { json!(["No complete business policy was established."]) }}}).to_string()
             }
         } else if self.repeat_metadata_query {
             let prompts = self.observed.prompts.lock().unwrap();
@@ -1097,6 +1101,15 @@ pub(in crate::investigations) fn expanded_scripted_provider(partial: bool) -> Ar
         provider.source_scenario = Some(SourceScenario::Acquired);
         provider.extra_inventory = true;
     }
+    Arc::new(provider)
+}
+
+// Explicit opt-in; historical parent/child/large-finish scripts retain their bytes.
+pub(in crate::investigations) fn expanded_auditor_scripted_provider() -> Arc<dyn LlmProvider> {
+    let mut provider = NextProvider::new(false);
+    provider.source_scenario = Some(SourceScenario::Acquired);
+    provider.extra_inventory = true;
+    provider.auditor_finish = true;
     Arc::new(provider)
 }
 

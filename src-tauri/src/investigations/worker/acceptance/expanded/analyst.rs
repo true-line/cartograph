@@ -103,6 +103,9 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
     collect_bound(&Authority::synthetic(prepared))
 }
 pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> {
+    collect_role(authority, "analyst")
+}
+pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Value, String> {
     let database = authority.app_data.join("state.db");
     let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
     // This production reader authenticates task3 and historical @10 metadata.
@@ -155,7 +158,7 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
         })
         .count();
     Ok(
-        json!({"schema_version":1,"family":"request7-specialist10-prompt9-disclosure6-result7","role":"analyst",
+        json!({"schema_version":1,"family":"request7-specialist10-prompt9-disclosure6-result7","role":role,
         "binding":authority.binding,"manifest_hash":authority.manifest_hash,
         "request_hash":authority.request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
         "obligations_hash":authority.request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
@@ -215,6 +218,17 @@ pub(super) fn execute_bound(
     authority: &Authority<'_>,
     provider: Arc<dyn LlmProvider>,
 ) -> Result<Value, String> {
+    execute_role(directory, authority, provider, "analyst")?;
+    let receipt = collect_bound(authority)?;
+    exclusive(&directory.join("analyst-receipt.json"), &bytes(&receipt)?)?;
+    Ok(receipt)
+}
+pub(super) fn execute_role(
+    directory: &Path,
+    authority: &Authority<'_>,
+    provider: Arc<dyn LlmProvider>,
+    role: &str,
+) -> Result<(), String> {
     if descriptor(provider.as_ref(), InvestigationProviderMode::Local).map_err(|e| e.to_string())?
         != *authority.provider
     {
@@ -223,7 +237,7 @@ pub(super) fn execute_bound(
     // Durable exclusive marker precedes every dispatch capability. Any later
     // error, unknown acknowledgement or receipt failure keeps it consumed.
     exclusive(
-        &directory.join("analyst-attempt.json"),
+        &directory.join(format!("{role}-attempt.json")),
         &bytes(&json!({"binding":authority.binding,"manifest_hash":authority.manifest_hash}))?,
     )?;
     let state = authority.app.state::<crate::AppState>();
@@ -258,9 +272,7 @@ pub(super) fn execute_bound(
         live,
         Instant::now(),
     );
-    let receipt = collect_bound(authority)?;
-    exclusive(&directory.join("analyst-receipt.json"), &bytes(&receipt)?)?;
-    Ok(receipt)
+    Ok(())
 }
 
 #[cfg(test)]
