@@ -268,3 +268,31 @@ fn completion_control_post_dispatch_recording_failure_preserves_run_and_observat
         assert!(write_new(&run_dir.join("analyst-invalid-run.json"), b"replacement").is_err());
     }
 }
+
+// AC-0464: content binding is issue-specific; local bytes are not authentication.
+#[test]
+fn completion_review_issue_binding_preserves_legacy_gate() {
+    let (_directory, _run_dir, definition, _digest) = setup();
+    let receipt = receipt(&definition);
+    let hash = "e".repeat(64);
+    let mut review = attestation(&definition, &hash);
+    let expected = [
+        definition.protocol_sha256.as_str(),
+        definition.run_id.as_str(),
+        hash.as_str(),
+        definition.rubric.content.sha256.as_str(),
+    ];
+    validate_gate(&definition, &receipt, &hash, &json(&review).unwrap()).unwrap();
+    review["comment"]["url"] =
+        json!("https://github.com/true-line/cartograph/issues/598#issuecomment-123");
+    validate_review_attestation(expected, 598, &json(&review).unwrap()).unwrap();
+    assert!(validate_review_attestation(expected, 652, &json(&review).unwrap()).is_err());
+    assert!(validate_gate(&definition, &receipt, &hash, &json(&review).unwrap()).is_err());
+    let mut changed = review.clone();
+    changed["binding"]["receipt_sha256"] = json!("f".repeat(64));
+    assert!(validate_review_attestation(expected, 598, &json(&changed).unwrap()).is_err());
+    for verdict in ["fail", "unreviewable"] {
+        review["review"]["verdict"] = json!(verdict);
+        assert!(validate_review_attestation(expected, 598, &json(&review).unwrap()).is_err());
+    }
+}
