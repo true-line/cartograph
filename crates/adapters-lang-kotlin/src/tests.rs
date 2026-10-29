@@ -3618,3 +3618,364 @@ fn block_comments_keep_the_next_declaration() {
     assert!(masked.contains("    fun y() = 1"));
     assert_eq!(masked.matches('\n').count(), source.matches('\n').count());
 }
+
+fn rest_sites(source: &str) -> Vec<(String, String, Option<String>)> {
+    retrofit_sites(&[("src/Client.kt", source)])
+        .into_iter()
+        .map(|site| {
+            let url = match site.url {
+                IdentityExpr::Literal(url) => format!("literal {url}"),
+                IdentityExpr::Computed(text) => format!("computed {text}"),
+                other => format!("{other:?}"),
+            };
+            (site.method, url, site.symbol)
+        })
+        .collect()
+}
+
+// AC-0456 (#1341 review): an untyped local or property initialized by the
+// fully qualified constructor is proven, unless a binding of its first
+// segment's name is visible where it is declared. (T-0456)
+#[test]
+fn rest_template_fully_qualified_constructed_bindings_are_proven() {
+    let sites = rest_sites(
+        r#"package io.demo
+
+class Client {
+    private val prop = org.springframework.web.client.RestTemplate()
+
+    fun a() {
+        val local = org.springframework.web.client.RestTemplate()
+        local.delete("https://a.example/local")
+        prop.delete("https://a.example/prop")
+    }
+
+    fun obscured(org: Factory) {
+        val shadowed = org.springframework.web.client.RestTemplate()
+        shadowed.delete("https://a.example/obscured")
+    }
+
+    fun other() {
+        val wrong = org.example.RestTemplate()
+        wrong.delete("https://a.example/wrong")
+    }
+
+    fun earlier() {
+        val org = Factory()
+        val local = org.springframework.web.client.RestTemplate()
+        local.delete("https://a.example/earlier")
+    }
+}
+
+class Holder(private val org: Factory) {
+    private val held = org.springframework.web.client.RestTemplate()
+
+    fun b() = held.delete("https://a.example/held")
+}
+
+class SelfNamed {
+    private val org = org.springframework.web.client.RestTemplate()
+
+    fun c() = org.delete("https://a.example/self")
+}
+"#,
+    );
+    let urls: Vec<_> = sites.into_iter().map(|(_, url, _)| url).collect();
+    assert_eq!(
+        urls,
+        [
+            "literal https://a.example/local",
+            "literal https://a.example/prop"
+        ]
+    );
+}
+
+// AC-0456 (#1341 review): a property named like its own qualified
+// constructor's first segment, or properties initialized through each other,
+// terminate and prove nothing. (T-0456)
+#[test]
+fn rest_template_self_and_cyclic_qualified_initializers_terminate() {
+    let sites = rest_sites(
+        r#"package io.demo
+
+val org = org.springframework.web.client.RestTemplate()
+val a = b.springframework.web.client.RestTemplate()
+val b = a.springframework.web.client.RestTemplate()
+
+fun f() {
+    org.delete("https://a.example/top")
+    a.delete("https://a.example/a")
+    b.delete("https://a.example/b")
+}
+"#,
+    );
+    assert_eq!(sites, []);
+}
+
+// AC-0456 (#1341 review): a type-argument call is Spring's reified extension
+// only under its import, and a file declaring a verb-named function reads no
+// call of that name. (T-0456)
+#[test]
+fn rest_template_extension_calls_need_spring_extension_proof() {
+    let source = |imports: &str, extra: &str| {
+        format!(
+            r#"package io.demo
+
+import org.springframework.web.client.RestTemplate
+{imports}
+
+class Client(private val rest: RestTemplate) {{
+    fun typed(): User = rest.getForObject<User>("https://api.example.com/me/{{v}}", 2)
+
+    fun member(): User = rest.getForObject("https://api.example.com/users/1", User::class.java)
+
+    fun remove() = rest.delete("https://api.example.com/users/1")
+}}
+{extra}
+"#
+        )
+    };
+    let methods = |source: String| {
+        rest_sites(&source)
+            .into_iter()
+            .map(|(method, url, _)| format!("{method} {url}"))
+            .collect::<Vec<_>>()
+    };
+    let me = "GET literal https://api.example.com/me/{v}";
+    let member = "GET literal https://api.example.com/users/1";
+    let remove = "DELETE literal https://api.example.com/users/1";
+    assert_eq!(methods(source("", "")), [member, remove]);
+    assert_eq!(
+        methods(source(
+            "import org.springframework.web.client.getForObject",
+            ""
+        )),
+        [me, member, remove]
+    );
+    assert_eq!(
+        methods(source("import org.springframework.web.client.*", "")),
+        [me, member, remove]
+    );
+    // A named import of another extension beats Spring's wildcard.
+    assert_eq!(
+        methods(source(
+            "import org.springframework.web.client.*\nimport custom.getForObject",
+            ""
+        )),
+        [member, remove]
+    );
+    assert_eq!(
+        methods(source(
+            "import org.springframework.web.client.getForObject",
+            "inline fun <reified T> RestTemplate.getForObject(url: String, marker: Int): T = TODO()",
+        )),
+        [remove]
+    );
+}
+
+// AC-0456: calls on a proven Spring `RestTemplate` (a typed constructor or
+// class property, `this.x`, a typed or constructed local, or an inline
+// `RestTemplate()`) become client calls. Verb methods give their method,
+// `exchange` an import-proven `HttpMethod` or `?` with four or more
+// arguments, and a non-literal URL is Computed. (T-0456)
+#[test]
+fn rest_template_calls_on_proven_receivers_become_client_calls() {
+    let sites = rest_sites(
+        r#"package io.demo
+
+import org.springframework.http.HttpMethod
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.client.getForObject
+
+class Client(private val rest: RestTemplate) {
+    private val other: RestTemplate = RestTemplate()
+
+    fun user(id: Int): User = rest.getForObject("https://api.example.com/users/{id}", User::class.java, id)
+
+    fun reified(): User = rest.getForObject<User>("https://api.example.com/me/{v}", 2)
+
+    // The grammar reads a one-argument `f<T>(x)` as comparisons.
+    fun comparison(): User = rest.getForObject<User>("https://api.example.com/me")
+
+    fun remove() = this.rest.delete("https://api.example.com/users/1")
+
+    fun create(base: String, body: User) {
+        val local = RestTemplate()
+        local.postForEntity("$base/users", body, User::class.java)
+        other.put(base + "/users", body)
+    }
+
+    fun inline() = RestTemplate().headForHeaders("https://api.example.com/health")
+
+    fun patch(entity: HttpEntity<User>) =
+        rest.exchange("https://api.example.com/users/1", HttpMethod.PATCH, entity, User::class.java)
+
+    fun unknown(method: HttpMethod, entity: HttpEntity<User>) =
+        rest.exchange("https://api.example.com/users/2", method, entity, User::class.java)
+}
+"#,
+    );
+    let symbol = |name: &str| Some(format!("sym:local/demo@src/Client.kt#Client.{name}"));
+    assert_eq!(
+        sites,
+        [
+            (
+                "GET".into(),
+                "literal https://api.example.com/users/{id}".into(),
+                symbol("user")
+            ),
+            (
+                "GET".into(),
+                "literal https://api.example.com/me/{v}".into(),
+                symbol("reified")
+            ),
+            (
+                "DELETE".into(),
+                "literal https://api.example.com/users/1".into(),
+                symbol("remove")
+            ),
+            (
+                "POST".into(),
+                "computed \"$base/users\"".into(),
+                symbol("create")
+            ),
+            (
+                "PUT".into(),
+                "computed base + \"/users\"".into(),
+                symbol("create")
+            ),
+            (
+                "HEAD".into(),
+                "literal https://api.example.com/health".into(),
+                symbol("inline")
+            ),
+            (
+                "PATCH".into(),
+                "literal https://api.example.com/users/1".into(),
+                symbol("patch")
+            ),
+            (
+                "?".into(),
+                "literal https://api.example.com/users/2".into(),
+                symbol("unknown")
+            ),
+        ]
+    );
+}
+
+// AC-0456: no call is read without proof: a receiver of another, star-imported
+// or locally declared `RestTemplate`, an untyped or shadowing binding, a
+// two-argument `exchange(RequestEntity, …)`, named arguments or a trailing
+// lambda. (T-0456)
+#[test]
+fn rest_template_calls_need_a_proven_receiver_and_shape() {
+    let unproven = [
+        r#"package io.demo
+import com.other.RestTemplate
+fun f(rest: RestTemplate) = rest.getForObject("https://a.example/x", String::class.java)
+"#,
+        r#"package io.demo
+import org.springframework.web.client.*
+fun f(rest: RestTemplate) = rest.getForObject("https://a.example/x", String::class.java)
+"#,
+        r#"package io.demo
+import org.springframework.web.client.RestTemplate
+class RestTemplate
+fun f(rest: RestTemplate) = rest.getForObject("https://a.example/x", String::class.java)
+"#,
+        r#"package io.demo
+import org.springframework.web.client.RestTemplate
+fun f(rest: RestTemplate) {
+    val rest = make()
+    rest.getForObject("https://a.example/x", String::class.java)
+}
+"#,
+        r#"package io.demo
+import org.springframework.web.client.RestTemplate
+fun f(rest: RestTemplate, request: RequestEntity<String>) {
+    rest.exchange(request, String::class.java)
+    rest.getForObject(url = "https://a.example/x", responseType = String::class.java)
+    rest.execute("https://a.example/x", method, null) { it }
+}
+"#,
+        // A binding of the qualifier's first segment wins over the package.
+        r#"package io.demo
+fun f(org: Factory) = org.springframework.web.client.RestTemplate().delete("https://a.example/x")
+"#,
+        // A type parameter of the imported name wins over the import.
+        r#"package io.demo
+import org.springframework.web.client.RestTemplate
+fun <RestTemplate> f(rest: RestTemplate) = rest.delete("https://a.example/x")
+class C<RestTemplate>(private val rest: RestTemplate) {
+    fun g() = rest.delete("https://a.example/x")
+}
+"#,
+    ];
+    for source in unproven {
+        assert_eq!(rest_sites(source), [], "{source}");
+    }
+    // The fully qualified name needs no import, and an unrelated type
+    // parameter or binding obscures nothing.
+    let symbol = |name: &str| Some(format!("sym:local/demo@src/Client.kt#{name}"));
+    assert_eq!(
+        rest_sites(
+            r#"package io.demo
+import org.springframework.web.client.RestTemplate
+fun f(rest: org.springframework.web.client.RestTemplate) = rest.delete("https://a.example/x")
+fun g(net: Factory) = org.springframework.web.client.RestTemplate().delete("https://a.example/y")
+fun <T> h(rest: RestTemplate, value: T) = rest.delete("https://a.example/z")
+class Holder(private val rest: RestTemplate) {
+    // A member's own type parameter does not reach the property's type.
+    fun <RestTemplate> remove(value: RestTemplate) = rest.delete("https://a.example/w")
+}
+"#
+        ),
+        [
+            (
+                "DELETE".into(),
+                "literal https://a.example/x".into(),
+                symbol("f")
+            ),
+            (
+                "DELETE".into(),
+                "literal https://a.example/y".into(),
+                symbol("g")
+            ),
+            (
+                "DELETE".into(),
+                "literal https://a.example/z".into(),
+                symbol("h")
+            ),
+            (
+                "DELETE".into(),
+                "literal https://a.example/w".into(),
+                symbol("Holder.remove")
+            ),
+        ]
+    );
+}
+
+// AC-0456 (#1341 review): a RestTemplate call carries no base, and a repo's
+// Retrofit base never joins it. (T-0456)
+#[test]
+fn rest_template_calls_join_no_retrofit_base() {
+    let client = r#"package io.demo
+import org.springframework.web.client.RestTemplate
+fun f(rest: RestTemplate) = rest.delete("/users/1")
+"#;
+    let module = r#"package io.demo
+import retrofit2.Retrofit
+fun provide() = Retrofit.Builder().baseUrl("https://app.example.io").build()
+"#;
+    for files in [
+        vec![("src/Client.kt", client)],
+        vec![("src/Client.kt", client), ("src/Net.kt", module)],
+    ] {
+        let sites = retrofit_sites(&files);
+        assert_eq!(sites.len(), 1);
+        assert!(sites[0].base.is_none());
+    }
+    let single = extract_source(client.as_bytes(), "src/Client.kt", &id()).unwrap();
+    assert_eq!(single.fetch_sites.len(), 1);
+    assert!(single.fetch_sites[0].base.is_none());
+}
