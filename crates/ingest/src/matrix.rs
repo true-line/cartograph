@@ -162,9 +162,11 @@ const JAVA_FEIGN: &str = "single-type-imported or fully qualified `@FeignClient`
 const JAVA_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a single-type-imported or fully qualified `WebClient` local, parameter or own-type field, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a field-held client's base is an undeclared runtime base, and a `uri` must be an exact literal";
 /// What the Java core client cell still lacks (AC-0435, AC-0437, AC-0441).
 const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces and Spring `RestTemplate` and `WebClient`";
-const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript, Python boto3/kafka-python, Java Spring Kafka and Go AWS SDK/kafka-go";
+const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript, Python boto3/kafka-python, Java Spring Kafka, Go AWS SDK/kafka-go and Rust rdkafka";
 /// What the Go event SDK cells read (AC-0462).
 const GO_EVENTS: &str = "keyed AWS SDK `SendMessageInput`/`ReceiveMessageInput`/`PublishInput` and kafka-go `Writer`/`WriterConfig`/`ReaderConfig` literals on the file's import of the exact path; the client a request is sent through is not read, unkeyed literals are not read, and an identity must be an exact literal (through `aws.String` for AWS)";
+/// What the Rust rdkafka cell reads (AC-0469).
+const RUST_KAFKA: &str = "import-proven `FutureRecord::to`/`BaseRecord::to` records, and `subscribe` on a `StreamConsumer`/`BaseConsumer` local, parameter or own-struct field whose type is written; an inferred `create()` consumer, turbofish records and `assign` are not read, and a topic must be a string literal";
 /// What the Java Spring Kafka cell reads (AC-0459).
 const JAVA_KAFKA: &str = "`send` on a single-type-imported or fully qualified `KafkaTemplate` local, parameter or own-type field, and method-level `@KafkaListener` `topics`; subclasses, `sendDefault`, wildcard imports and class-level listeners are not read, and a topic must be an exact literal with no placeholder";
 /// What the Python event SDK cells read (AC-0458).
@@ -274,6 +276,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Rust", "axum", HttpEndpoints, Supported, ""),
     cell("Rust", "actix-web", HttpEndpoints, Supported, ""),
     cell("Rust", "reqwest", HttpClientCalls, Supported, ""),
+    cell("Rust", "rdkafka", EventSites, Partial, RUST_KAFKA),
     cell("Java", CORE, Types, Supported, ""),
     cell("Java", CORE, Imports, Supported, ""),
     cell("Java", CORE, Calls, Supported, ""),

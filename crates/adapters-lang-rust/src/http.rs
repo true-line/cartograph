@@ -187,7 +187,7 @@ pub(super) fn resolve_external_paths(
     }
     if matches!(
         name.as_str(),
-        "axum" | "actix_web" | "reqwest" | "http" | "std" | "alloc"
+        "axum" | "actix_web" | "reqwest" | "rdkafka" | "http" | "std" | "alloc"
     ) && !cx.workspace_crates.contains(name)
         && !cx.declared_mods.contains(name)
     {

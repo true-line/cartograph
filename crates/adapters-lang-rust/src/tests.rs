@@ -1532,3 +1532,176 @@ impl Carrier { pub fn real(&self) { self.http.get("/carrier"); } }
         ]
     );
 }
+
+// rdkafka records and subscriptions on proven consumers become kafka-topic
+// event sites as (role, identity, owner). (T-0469)
+fn rdkafka_sites(lib: &str) -> Vec<(String, String, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    write(dir.path(), "src/lib.rs", lib);
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    x.event_sites
+        .iter()
+        .map(|site| {
+            assert_eq!(site.kind, "kafka-topic");
+            let identity = match &site.identity {
+                adapters_fw::events::IdentityExpr::Literal(t) => format!("lit {t}"),
+                adapters_fw::events::IdentityExpr::Computed(t) => format!("computed {t}"),
+                adapters_fw::events::IdentityExpr::EnvRef(k) => format!("env {k}"),
+            };
+            let owner = site.symbol.clone().unwrap_or_default();
+            let owner = owner.rsplit('#').next().unwrap().to_string();
+            (format!("{:?}", site.role), identity, owner)
+        })
+        .collect()
+}
+
+#[test]
+fn rdkafka_records_and_subscriptions_become_event_sites() {
+    let sites = rdkafka_sites(
+        r#"
+use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
+use rdkafka::producer::{BaseRecord, FutureProducer, FutureRecord};
+use std::sync::Arc;
+
+pub struct Worker { consumer: StreamConsumer<Ctx> }
+
+pub async fn place(producer: &FutureProducer, topic: &str) {
+    producer.send(FutureRecord::to("orders").payload("p").key("k"), T).await;
+    producer.send(FutureRecord::to(&topic).payload("p"), T).await;
+}
+pub fn base(producer: &P) {
+    producer.send(BaseRecord::to("audit").payload("p"));
+    producer.send(rdkafka::producer::future_producer::FutureRecord::to("full"));
+}
+pub fn listen(config: &ClientConfig, topics: &[&str]) {
+    let consumer: StreamConsumer = config.create().unwrap();
+    consumer.subscribe(&["orders", "payments"]).unwrap();
+    consumer.subscribe(&["phantom"; 0]).unwrap();
+}
+pub fn shared(consumer: Arc<BaseConsumer>, topics: &[&str]) {
+    consumer.subscribe(topics).unwrap();
+}
+impl Worker {
+    pub fn run(&self) { self.consumer.subscribe(&[TOPIC]).unwrap(); }
+}
+"#,
+    );
+    let site = |role: &str, identity: &str, owner: &str| {
+        (role.to_string(), identity.to_string(), owner.to_string())
+    };
+    assert_eq!(
+        sites,
+        vec![
+            site("Produces", "lit orders", "place"),
+            site("Produces", "computed topic", "place"),
+            site("Produces", "lit audit", "base"),
+            site("Produces", "lit full", "base"),
+            site("Consumes", "lit orders", "listen"),
+            site("Consumes", "lit payments", "listen"),
+            site("Consumes", "computed [\"phantom\"; 0]", "listen"),
+            site("Consumes", "computed topics", "shared"),
+            site("Consumes", "computed TOPIC", "Worker.run"),
+        ]
+    );
+}
+
+// AC-0469 (#1372 review): a reference that names its lifetime still proves
+// its consumer or client; an unknown type behind one still proves nothing.
+// (T-0469)
+#[test]
+fn lifetime_references_still_prove_consumers_and_clients() {
+    let sites = rdkafka_sites(
+        r#"
+use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
+
+pub struct Worker<'a> { consumer: &'a StreamConsumer }
+
+pub fn named<'a>(consumer: &'a StreamConsumer) { consumer.subscribe(&["named"]).unwrap(); }
+pub fn placeholder(consumer: &'_ mut BaseConsumer) { consumer.subscribe(&["placeholder"]).unwrap(); }
+pub fn forever(consumer: &'static StreamConsumer) { consumer.subscribe(&["forever"]).unwrap(); }
+pub fn other<'a>(consumer: &'a Other) { consumer.subscribe(&["other"]).unwrap(); }
+impl<'a> Worker<'a> {
+    pub fn run(&self) { self.consumer.subscribe(&["field"]).unwrap(); }
+}
+"#,
+    );
+    let consumes = |identity: &str, owner: &str| {
+        (
+            "Consumes".to_string(),
+            identity.to_string(),
+            owner.to_string(),
+        )
+    };
+    assert_eq!(
+        sites,
+        vec![
+            consumes("lit named", "named"),
+            consumes("lit placeholder", "placeholder"),
+            consumes("lit forever", "forever"),
+            consumes("lit field", "Worker.run"),
+        ]
+    );
+    let fetches = reqwest_sites(
+        r#"
+use reqwest::Client;
+
+pub async fn param<'a>(client: &'a Client) { client.get("/lifetime").send().await; }
+pub async fn other<'a>(client: &'a Other) { client.get("/other").send().await; }
+"#,
+    );
+    assert_eq!(fetches, vec![site("GET", "lit /lifetime", "param")]);
+}
+
+// Unimported or lookalike records, a turbofish record, an inferred
+// `create()` consumer, other types, a shadowing generic, `assign`, a local
+// trait's `unwrap`/`expect` on a consumer and a locally declared
+// `FutureRecord` yield no site. (T-0469)
+#[test]
+fn unproven_rdkafka_calls_are_not_event_sites() {
+    let sites = rdkafka_sites(
+        r#"
+use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::producer::FutureRecord;
+use other::BaseRecord;
+
+pub fn records() {
+    BaseRecord::to("lookalike");
+    FutureRecord::<(), str>::to("turbofish");
+    Record::to("unimported");
+    FutureRecord::new("ctor");
+}
+pub fn inferred(config: &ClientConfig) {
+    let consumer = config.create::<StreamConsumer>().unwrap();
+    consumer.subscribe(&["inferred"]).unwrap();
+    let other: Other = make();
+    other.subscribe(&["other"]).unwrap();
+}
+pub fn generic<StreamConsumer: Consumer>(consumer: &StreamConsumer) {
+    consumer.subscribe(&["generic"]).unwrap();
+}
+pub fn assigned(consumer: &StreamConsumer) {
+    consumer.assign(&list).unwrap();
+}
+trait Unwrap { fn unwrap(&self) -> Fake; fn expect(&self, _: &str) -> Fake; }
+impl Unwrap for StreamConsumer {
+    fn unwrap(&self) -> Fake { Fake }
+    fn expect(&self, _: &str) -> Fake { Fake }
+}
+pub fn wrapped(consumer: &StreamConsumer) {
+    consumer.unwrap().subscribe(&["not-kafka"]);
+    consumer.expect("x").subscribe(&["not-kafka"]);
+}
+mod local {
+    struct FutureRecord;
+    impl FutureRecord { fn to(_: &str) {} }
+    pub fn own() { FutureRecord::to("own"); }
+}
+"#,
+    );
+    assert_eq!(sites, Vec::<(String, String, String)>::new());
+}
