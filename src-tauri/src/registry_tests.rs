@@ -28,6 +28,7 @@ fn extension_registries_load_bounded_and_bind_the_coverage_identity() {
         names,
         [
             "builtin:event-sdks.json",
+            "builtin:event-sdks-pypi.json",
             "builtin:channel-backings.json",
             "builtin:observed-clients.json",
             "extension:nats.json"
@@ -88,7 +89,7 @@ fn non_regular_registry_entries_never_consume_an_extension_slot() {
     let loaded = event_registries_in(dir.path());
     let rejected: Vec<&str> = loaded.rejected.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(rejected, ["extension:0-directory.json"]);
-    assert_eq!(loaded.sources.len(), 3 + MAX_EXTENSION_FILES);
+    assert_eq!(loaded.sources.len(), 4 + MAX_EXTENSION_FILES);
 }
 
 #[cfg(unix)]
@@ -105,7 +106,11 @@ fn non_utf8_registry_names_are_refused_before_they_can_alias() {
         }
     }
     let loaded = event_registries_in(dir.path());
-    assert_eq!(loaded.sources.len(), 3, "only the built-in files apply");
+    assert_eq!(
+        loaded.sources.len(),
+        Registries::builtin().sources.len(),
+        "only the built-in files apply"
+    );
     assert_eq!(loaded.rejected.len(), 2);
     assert!(
         loaded

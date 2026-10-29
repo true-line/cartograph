@@ -1421,9 +1421,8 @@ fn extract_tree_with_registries(
     // The TS pass covers server/events/client plus Pulumi infra/cloud; the HCL
     // pass covers Terraform infra/cloud.
     // The coverage inventory reads the same gates (AC-0238).
-    use ingest::coverage::{APPLICATION_LAYERS, INFRA_LAYERS, SERVER_LAYERS, wants};
+    use ingest::coverage::{APPLICATION_LAYERS, INFRA_LAYERS, wants};
     let wants_application = wants(layers, APPLICATION_LAYERS);
-    let wants_server = wants(layers, SERVER_LAYERS);
     let wants_infra = wants(layers, INFRA_LAYERS);
     let ts_id = adapters_lang_ts::SourceId { repo, commit };
     let mut layers = LayerBreakdown::default();
@@ -1554,7 +1553,10 @@ fn extract_tree_with_registries(
         extraction.nodes.extend(observed.nodes);
         extraction.edges.extend(observed.edges);
     }
-    if wants_server {
+    // Python carries server routes, `requests`/`httpx` client calls and
+    // boto3/kafka-python event sites, so a client- or events-only Python
+    // repository runs it too.
+    if wants_application {
         let python_id = adapters_lang_python::SourceId { repo, commit };
         let mut python_progress = |path: &str| on_file(&format!("Reading Python sources — {path}"));
         let (python, stats) = adapters_lang_python::extract_dir_incremental_with_progress(
@@ -1582,17 +1584,18 @@ fn extract_tree_with_registries(
         extraction.edges.extend(python.edges);
         // Observed infrastructure from Python (#734): registry clients the
         // code proves it talks to (boto3, redis, smtplib, SQLAlchemy), and
-        // `requests`/`httpx` calls as fetch sites (AC-0424).
-        let (observed_nodes, observed_edges, python_fetches) =
-            adapters_lang_python::observed_infra::extract_dir_with_fetches(
-                root, &python_id, registries,
-            )
-            .map_err(|error| error.to_string())?;
-        extraction.fetch_sites.extend(python_fetches);
-        layers.python.nodes += distinct_node_count(&observed_nodes);
-        layers.python.edges += distinct_edge_count(&observed_edges);
-        extraction.nodes.extend(observed_nodes);
-        extraction.edges.extend(observed_edges);
+        // `requests`/`httpx` calls as fetch sites (AC-0424), and boto3 /
+        // kafka-python calls as event sites (AC-0458).
+        let observed = adapters_lang_python::observed_infra::extract_dir_with_sites(
+            root, &python_id, registries,
+        )
+        .map_err(|error| error.to_string())?;
+        extraction.fetch_sites.extend(observed.fetch_sites);
+        extraction.event_sites.extend(observed.event_sites);
+        layers.python.nodes += distinct_node_count(&observed.nodes);
+        layers.python.edges += distinct_edge_count(&observed.edges);
+        extraction.nodes.extend(observed.nodes);
+        extraction.edges.extend(observed.edges);
     }
     // Go carries server routes and `net/http` client calls (AC-0434), so a
     // client-only Go repository runs it too.
@@ -8412,12 +8415,39 @@ export function queueOrder() {
             &[],
         )
         .unwrap();
-        assert_eq!(client_summary.python, crate::LayerSummary::default());
+        // AC-0458: Python also carries client fetch sites and event sites,
+        // so client- and events-only hints run it, as they do Java and Go.
+        assert_eq!(client_summary.python.files, 1);
         assert!(
             client_only
                 .nodes
                 .iter()
-                .all(|node| node.props["language"] != "python")
+                .any(|node| node.id == "ep:local/python-app@GET:/orders")
+        );
+        std::fs::write(
+            dir.path().join("produce.py"),
+            "from kafka import KafkaProducer\n\nproducer = KafkaProducer()\n\ndef publish():\n    producer.send('orders', b'1')\n",
+        )
+        .unwrap();
+        let (events_only, events_summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/python-app",
+            "workdir",
+            &["events".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(events_summary.python.files, 2);
+        assert!(
+            events_only
+                .event_sites
+                .iter()
+                .any(|site| site.kind == "kafka-topic"
+                    && site.identity
+                        == adapters_fw::events::IdentityExpr::Literal("orders".into()))
         );
     }
 

@@ -215,6 +215,29 @@ fn inventory_is_limited_only_by_recorded_exclusions_missing_inputs_or_unsupporte
     assert!(RepoCoverage::from_facts(&excluded).limited);
 }
 
+// AC-0458: Python emits client fetch sites and event sites as well as server
+// routes, so client- or events-only hints still select its adapter.
+#[test]
+fn python_adapter_is_selected_by_every_application_layer() {
+    for layer in ["server", "events", "client"] {
+        let hints = vec![layer.to_string()];
+        let facts = CoverageFacts {
+            repo: "local/app",
+            commit: "workdir",
+            commit_note: None,
+            layer_hints: &hints,
+            deterministic: vec![("t0.adapter-python", count(2))],
+            plugins: Vec::new(),
+            observations: Vec::new(),
+        };
+        assert_ne!(
+            state_of(&RepoCoverage::from_facts(&facts), "t0.adapter-python").0,
+            &ProducerState::NotSelected,
+            "{layer}"
+        );
+    }
+}
+
 // AC-0238: an input whose layer the hints exclude is reported as not
 // selected, never as applied, even when the manifest declares it. (T-0238)
 #[test]

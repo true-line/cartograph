@@ -119,8 +119,15 @@ pub struct EventSdk {
     pub role: ChannelRole,
     /// How the call site is recognized (receiver proof included).
     pub pattern: SdkPattern,
-    /// Where the channel identity lives.
+    /// Where the channel identity lives. For a `pypi` entry, `First` is the
+    /// first positional argument and `Key` a keyword argument.
     pub identity: IdentityArg,
+    /// Ecosystem the module belongs to (#1343): npm unless declared, in a
+    /// `@2` file. Each adapter reads only its own ecosystem's entries.
+    pub ecosystem: Ecosystem,
+    /// For a `pypi` method entry, the literal first argument the receiver's
+    /// factory call must carry (`boto3.client("sqs")`).
+    pub select: Option<ClientSelect>,
     /// The file that declared this entry.
     pub registry: RegistryIdentity,
 }
@@ -316,9 +323,14 @@ pub const MAX_EXTENSION_FILES: usize = 32;
 const MAX_ENTRIES: usize = 256;
 const MAX_VERSION_BYTES: usize = 64;
 const SDK_SCHEMA: &str = "cartograph-event-sdk-registry@1";
+/// `@1` plus per-entry `ecosystem` and `select` (#1343). An `@1` file may
+/// not carry them, so its entries keep their npm meaning, and a reader that
+/// predates `@2` rejects a `@2` file whole rather than misreading it.
+const SDK_SCHEMA_V2: &str = "cartograph-event-sdk-registry@2";
 const BACKING_SCHEMA: &str = "cartograph-channel-backing-registry@1";
 const CLIENT_SCHEMA: &str = "cartograph-observed-client-registry@1";
 const BUILTIN_SDKS: &str = include_str!("../registries/event-sdks.json");
+const BUILTIN_PYPI_SDKS: &str = include_str!("../registries/event-sdks-pypi.json");
 const BUILTIN_BACKINGS: &str = include_str!("../registries/channel-backings.json");
 const BUILTIN_CLIENTS: &str = include_str!("../registries/observed-clients.json");
 
@@ -329,6 +341,10 @@ struct SdkEntry {
     role: ChannelRole,
     pattern: SdkPattern,
     identity: IdentityArg,
+    #[serde(default)]
+    ecosystem: Option<Ecosystem>,
+    #[serde(default)]
+    select: Option<ClientSelect>,
 }
 
 #[derive(Deserialize)]
@@ -372,6 +388,7 @@ static BUILTIN: LazyLock<Registries> = LazyLock::new(|| {
     let mut registries = Registries::default();
     for (name, bytes) in [
         ("builtin:event-sdks.json", BUILTIN_SDKS),
+        ("builtin:event-sdks-pypi.json", BUILTIN_PYPI_SDKS),
         ("builtin:channel-backings.json", BUILTIN_BACKINGS),
         ("builtin:observed-clients.json", BUILTIN_CLIENTS),
     ] {
@@ -451,10 +468,10 @@ impl Registries {
         }
         let event_entries = file.sdks.len() + file.qualifiers.len() + file.batch_keys.len();
         match file.schema.as_str() {
-            SDK_SCHEMA if file.backings.is_empty() && file.clients.is_empty() => {}
+            SDK_SCHEMA | SDK_SCHEMA_V2 if file.backings.is_empty() && file.clients.is_empty() => {}
             BACKING_SCHEMA if event_entries == 0 && file.clients.is_empty() => {}
             CLIENT_SCHEMA if event_entries == 0 && file.backings.is_empty() => {}
-            SDK_SCHEMA | BACKING_SCHEMA | CLIENT_SCHEMA => {
+            SDK_SCHEMA | SDK_SCHEMA_V2 | BACKING_SCHEMA | CLIENT_SCHEMA => {
                 return Err("entries outside its schema".into());
             }
             _ => return Err("unknown schema".into()),
@@ -472,10 +489,32 @@ impl Registries {
                     IdentityArg::Key(key) => valid_name(key),
                     IdentityArg::First => true,
                 };
-            if !valid_kind(&entry.kind) || !names_valid {
+            // `ecosystem`/`select` exist only from `@2`; a `pypi` entry is a
+            // module call or a method on a receiver bound to one, and only a
+            // method's receiver factory has a literal selector.
+            let v2 = file.schema == SDK_SCHEMA_V2;
+            let ecosystem = entry.ecosystem.unwrap_or_default();
+            let shape_valid = match (ecosystem, &entry.pattern) {
+                (Ecosystem::Npm, _) => entry.select.is_none(),
+                (Ecosystem::Pypi, SdkPattern::Constructor { .. }) => entry.select.is_none(),
+                (Ecosystem::Pypi, SdkPattern::Method { .. }) => true,
+                (Ecosystem::Pypi, SdkPattern::FactoryMethod { .. }) => false,
+            } && (v2 || (entry.ecosystem.is_none() && entry.select.is_none()))
+                && entry
+                    .select
+                    .as_ref()
+                    .is_none_or(|select| valid_name(&select.first));
+            if !valid_kind(&entry.kind) || !names_valid || !shape_valid {
                 return Err(format!("invalid sdk entry for kind {:?}", entry.kind));
             }
-            if sdks.iter().any(|sdk| sdk.pattern == entry.pattern) {
+            // An unselected method overlaps every selected one.
+            if sdks.iter().any(|sdk| {
+                sdk.pattern == entry.pattern
+                    && sdk.ecosystem == ecosystem
+                    && (sdk.select.is_none()
+                        || entry.select.is_none()
+                        || sdk.select == entry.select)
+            }) {
                 return Err(format!(
                     "call shape {:?} is already registered",
                     entry.pattern
@@ -486,6 +525,8 @@ impl Registries {
                 role: entry.role,
                 pattern: entry.pattern,
                 identity: entry.identity,
+                ecosystem,
+                select: entry.select,
                 registry: registry.clone(),
             });
         }
@@ -720,10 +761,117 @@ mod tests {
             names,
             [
                 "builtin:event-sdks.json",
+                "builtin:event-sdks-pypi.json",
                 "builtin:channel-backings.json",
                 "builtin:observed-clients.json"
             ]
         );
+    }
+
+    // AC-0458: event SDK entries carry an ecosystem from schema `@2` (npm
+    // unless declared, the only meaning `@1` has). A `pypi` entry is a
+    // module call or a selected receiver method, and its call shape is
+    // distinct from an npm one of the same names. An `@1` file declaring
+    // either field, an unsupported combination or a duplicate shape rejects
+    // the file whole. Qualifiers and batch keys shape TypeScript
+    // sites only. (T-0458)
+    #[test]
+    fn pypi_event_sdks_need_schema_two_and_a_supported_shape() {
+        let builtin = Registries::builtin();
+        let pypi: Vec<&EventSdk> = builtin
+            .sdks
+            .iter()
+            .filter(|sdk| sdk.ecosystem == Ecosystem::Pypi)
+            .collect();
+        assert!(!pypi.is_empty());
+        assert!(
+            pypi.iter()
+                .all(|sdk| sdk.registry.name == "builtin:event-sdks-pypi.json")
+        );
+        let sqs = pypi
+            .iter()
+            .find(|sdk| sdk.kind == "sqs-queue" && sdk.role == ChannelRole::Produces)
+            .unwrap();
+        assert_eq!(sqs.select.as_ref().unwrap().first, "sqs");
+        assert!(
+            builtin
+                .sdks
+                .iter()
+                .filter(|sdk| sdk.ecosystem == Ecosystem::Npm)
+                .all(|sdk| sdk.select.is_none())
+        );
+
+        let sdk = |schema: &str, entry: &str| {
+            format!(
+                r#"{{"schema":"cartograph-event-sdk-registry@{schema}","version":"x","sdks":[{entry}]}}"#
+            )
+        };
+        let nats = r#"{"kind":"nats-subject","role":"produces","ecosystem":"pypi",
+            "pattern":{"method":{"module":"nats","ctor":"connect","method":"publish"}},
+            "identity":"first"}"#;
+        let accepted = Registries::layered(&[file("a.json", &sdk("2", nats))]);
+        assert!(accepted.rejected.is_empty(), "{:?}", accepted.rejected);
+        let added = accepted.sdks.last().unwrap();
+        assert_eq!(added.ecosystem, Ecosystem::Pypi);
+        // The same names under npm are another call shape.
+        let npm = nats.replace(r#""ecosystem":"pypi","#, "");
+        let both = Registries::layered(&[
+            file("a.json", &sdk("2", nats)),
+            file("b.json", &sdk("1", &npm)),
+        ]);
+        assert!(both.rejected.is_empty(), "{:?}", both.rejected);
+
+        let rejected = [
+            // `@1` carries neither field.
+            sdk("1", nats),
+            sdk(
+                "1",
+                &npm.replace(r#""identity""#, r#""select":{"first":"x"},"identity""#),
+            ),
+            // A selector only for a pypi method; no pypi factory method.
+            sdk(
+                "2",
+                &npm.replace(r#""identity""#, r#""select":{"first":"x"},"identity""#),
+            ),
+            sdk(
+                "2",
+                r#"{"kind":"nats-subject","role":"consumes","ecosystem":"pypi",
+                "pattern":{"constructor":{"module":"nats","ctor":"Sub"}},
+                "select":{"first":"x"},"identity":"first"}"#,
+            ),
+            sdk(
+                "2",
+                r#"{"kind":"nats-subject","role":"consumes","ecosystem":"pypi",
+                "pattern":{"factory_method":{"module":"nats","factory":"f","method":"m"}},
+                "identity":"first"}"#,
+            ),
+            sdk("2", &nats.replace("pypi", "cargo")),
+            // A duplicate pypi shape, or one overlapping a selected shape.
+            sdk(
+                "2",
+                r#"{"kind":"sqs-queue","role":"produces","ecosystem":"pypi",
+                "pattern":{"method":{"module":"boto3","ctor":"client","method":"send_message"}},
+                "identity":{"key":"QueueUrl"}}"#,
+            ),
+            sdk(
+                "2",
+                r#"{"kind":"sqs-queue","role":"produces","ecosystem":"pypi",
+                "pattern":{"method":{"module":"boto3","ctor":"client","method":"send_message"}},
+                "select":{"first":"sqs"},"identity":{"key":"QueueUrl"}}"#,
+            ),
+        ];
+        for bytes in &rejected {
+            let layered = Registries::layered(&[file("x.json", bytes)]);
+            assert_eq!(layered.rejected.len(), 1, "{bytes}");
+            assert_eq!(layered.identity(), builtin.identity(), "{bytes}");
+        }
+        // Qualifiers and batch keys stay keyed by kind: a pypi entry of a
+        // qualified kind is accepted, and the Python reader applies neither.
+        let qualifier = r#"{"schema":"cartograph-event-sdk-registry@1","version":"x",
+            "qualifiers":[{"kind":"nats-subject","component":"server","key":"servers"}]}"#;
+        let layered =
+            Registries::layered(&[file("a.json", &sdk("2", nats)), file("b.json", qualifier)]);
+        assert!(layered.rejected.is_empty(), "{:?}", layered.rejected);
     }
 
     // AC-0316: observed clients are registry data like event SDKs: the
@@ -953,6 +1101,6 @@ mod tests {
             .collect();
         let layered = Registries::layered(&files);
         assert_eq!(layered.rejected.len(), 1);
-        assert_eq!(layered.sources.len(), 3 + MAX_EXTENSION_FILES);
+        assert_eq!(layered.sources.len(), 4 + MAX_EXTENSION_FILES);
     }
 }

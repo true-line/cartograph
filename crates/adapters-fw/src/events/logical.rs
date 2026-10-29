@@ -45,6 +45,7 @@ fn builtin_bytes() -> Option<usize> {
                 .iter()
                 .try_fold(0usize, |a, b| a.checked_add(b.len()))?,
             key,
+            row.select.as_ref().map_or(0, |select| select.first.len()),
             identity_bytes(&row.registry)?,
         ])?;
     }

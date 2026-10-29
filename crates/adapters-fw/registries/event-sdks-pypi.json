@@ -1,0 +1,44 @@
+{
+  "schema": "cartograph-event-sdk-registry@2",
+  "version": "py-2026.10",
+  "sdks": [
+    {
+      "kind": "sqs-queue",
+      "role": "produces",
+      "ecosystem": "pypi",
+      "pattern": { "method": { "module": "boto3", "ctor": "client", "method": "send_message" } },
+      "select": { "first": "sqs" },
+      "identity": { "key": "QueueUrl" }
+    },
+    {
+      "kind": "sqs-queue",
+      "role": "consumes",
+      "ecosystem": "pypi",
+      "pattern": { "method": { "module": "boto3", "ctor": "client", "method": "receive_message" } },
+      "select": { "first": "sqs" },
+      "identity": { "key": "QueueUrl" }
+    },
+    {
+      "kind": "sns-topic",
+      "role": "produces",
+      "ecosystem": "pypi",
+      "pattern": { "method": { "module": "boto3", "ctor": "client", "method": "publish" } },
+      "select": { "first": "sns" },
+      "identity": { "key": "TopicArn" }
+    },
+    {
+      "kind": "kafka-topic",
+      "role": "produces",
+      "ecosystem": "pypi",
+      "pattern": { "method": { "module": "kafka", "ctor": "KafkaProducer", "method": "send" } },
+      "identity": "first"
+    },
+    {
+      "kind": "kafka-topic",
+      "role": "consumes",
+      "ecosystem": "pypi",
+      "pattern": { "constructor": { "module": "kafka", "ctor": "KafkaConsumer" } },
+      "identity": "first"
+    }
+  ]
+}

@@ -24,9 +24,21 @@
 //! function of `requests` or `httpx` (`get`, `post`, … or `request(method,
 //! url)`) becomes a [`FetchSite`] with its URL classified as above, but
 //! followed only within the file.
+//!
+//! The same proof admits event SDK calls (#1343, AC-0458): a `pypi` entry
+//! of the event SDK registry is a method called on a proven receiver
+//! (`sqs = boto3.client("sqs")`, bound as an HTTP client receiver is, or
+//! inline `boto3.client("sqs").send_message(…)`), its factory's literal
+//! first argument matching the entry's selector, or a constructor call
+//! (`KafkaConsumer("orders")`). The identity is the first positional or the
+//! named keyword argument, classified as exact text and followed only within
+//! the file; a missing one is the call's computed text. Qualifiers and batch
+//! keys shape TypeScript sites only.
 
 use adapters_fw::client::{BaseJoin, FetchBase, FetchSite};
-use adapters_fw::events::{ClientForm, Ecosystem, IdentityArg, IdentityExpr, Registries};
+use adapters_fw::events::{
+    ClientForm, Ecosystem, EventSite, IdentityArg, IdentityExpr, Registries, SdkPattern,
+};
 use adapters_fw::observed::{ObservedSite, ObservedSource, assemble};
 use core_graph::{Edge, Node};
 use std::collections::{HashMap, HashSet};
@@ -132,16 +144,20 @@ fn escapes(cx: &FileCx, root: TsNode, name: &str) -> bool {
     false
 }
 
-/// Names bound exactly once, by `x = <client>()` or `with <client>() as x`,
-/// to a proven client constructor, never otherwise written and never read
-/// except through a member.
-fn receivers(
-    cx: &FileCx,
-    root: TsNode,
-    scope: &Scope,
-    clients: &[&str],
-) -> HashMap<String, Receiver> {
-    let mut out = HashMap::new();
+/// A name bound exactly once, by `x = <call>` or `with <call> as x`, to a
+/// proven module export, never otherwise written and never read except
+/// through a member, in a function or at module level.
+struct OnceBound<'t> {
+    name: String,
+    callee: TsNode<'t>,
+    args: TsNode<'t>,
+    module: String,
+    export: String,
+    function: Option<usize>,
+}
+
+fn once_bound<'t>(cx: &FileCx, root: TsNode<'t>, scope: &Scope) -> Vec<OnceBound<'t>> {
+    let mut out = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -183,11 +199,6 @@ fn receivers(
         let Some((module, export)) = callee_export(cx, callee, scope) else {
             continue;
         };
-        if !clients.contains(&module.as_str())
-            || !HTTP_CONSTRUCTORS.contains(&(module.as_str(), export.as_str()))
-        {
-            continue;
-        }
         let Some(function) = binding_scope(node) else {
             continue;
         };
@@ -199,8 +210,33 @@ fn receivers(
         {
             continue;
         }
+        out.push(OnceBound {
+            name: text.to_string(),
+            callee,
+            args,
+            module,
+            export,
+            function,
+        });
+    }
+    out
+}
+
+/// Names bound once ([`once_bound`]) to a proven HTTP client constructor.
+fn receivers(
+    cx: &FileCx,
+    root: TsNode,
+    scope: &Scope,
+    clients: &[&str],
+) -> HashMap<String, Receiver> {
+    let mut out = HashMap::new();
+    for bound in once_bound(cx, root, scope) {
+        let (module, export) = (bound.module.as_str(), bound.export.as_str());
+        if !clients.contains(&module) || !HTTP_CONSTRUCTORS.contains(&(module, export)) {
+            continue;
+        }
         let base = (module == "httpx")
-            .then(|| keyword(cx, args, "base_url"))
+            .then(|| keyword(cx, bound.args, "base_url"))
             .flatten()
             .map(|base| FetchBase {
                 url: classify_with(cx, root, base, scope, true, exact_string),
@@ -209,11 +245,11 @@ fn receivers(
                 byte_start: base.start_byte() as u64,
             });
         out.insert(
-            text.to_string(),
+            bound.name,
             Receiver {
                 constructor: format!("{module}.{export}"),
-                spelling: cx.text(&callee).to_string(),
-                function,
+                spelling: cx.text(&bound.callee).to_string(),
+                function: bound.function,
                 base,
             },
         );
@@ -221,27 +257,190 @@ fn receivers(
     out
 }
 
-/// The client modules no repository module or package of the same name
-/// may shadow: any `requests.py` or `requests/` anywhere refuses `requests`.
-fn unshadowed_clients(files: &[String]) -> Vec<&'static str> {
-    HTTP_MODULES
-        .iter()
-        .copied()
-        .filter(|module| {
-            let file_name = format!("{module}.py");
-            !files.iter().any(|file| {
-                let parts: Vec<&str> = file.split('/').collect();
-                let (name, dirs) = parts.split_last().expect("split yields one part");
-                *name == file_name || dirs.contains(module)
-            })
-        })
-        .collect()
+/// A name bound once ([`once_bound`]) to the factory of a `pypi` event SDK
+/// method entry (AC-0458).
+struct EventReceiver {
+    /// The factory's proven module and export (`boto3`, `client`).
+    module: String,
+    export: String,
+    /// The factory's literal first argument, matched to a selector.
+    select: Option<String>,
+    /// The factory as this file spells it, for patches of the local name.
+    spelling: String,
+    function: Option<usize>,
 }
 
-/// The fetch sites of a pass and the client modules it may read.
+fn event_receivers(
+    cx: &FileCx,
+    root: TsNode,
+    scope: &Scope,
+    registries: &Registries,
+    modules: &[String],
+) -> HashMap<String, EventReceiver> {
+    let mut out = HashMap::new();
+    for bound in once_bound(cx, root, scope) {
+        let factory = registries.sdks.iter().any(|sdk| {
+            sdk.ecosystem == Ecosystem::Pypi
+                && matches!(&sdk.pattern, SdkPattern::Method { module, ctor, .. }
+                    if *module == bound.module && *ctor == bound.export)
+        });
+        if !factory || !modules.contains(&bound.module) {
+            continue;
+        }
+        out.insert(
+            bound.name,
+            EventReceiver {
+                select: positional(bound.args)
+                    .first()
+                    .and_then(|first| exact_string(cx, *first)),
+                spelling: cx.text(&bound.callee).to_string(),
+                module: bound.module,
+                export: bound.export,
+                function: bound.function,
+            },
+        );
+    }
+    out
+}
+
+/// The event site (AC-0458) a call is, if any: a `pypi` constructor entry's
+/// proven `<module>.<ctor>(…)`, or a method entry's `x.<method>(…)` on a
+/// proven receiver in scope or on an inline factory call. A patch of the
+/// factory, constructor or method refuses it.
+#[allow(clippy::too_many_arguments)]
+fn event_site(
+    cx: &FileCx,
+    root: TsNode,
+    scope: &Scope,
+    registries: &Registries,
+    modules: &[String],
+    receivers: &HashMap<String, EventReceiver>,
+    node: TsNode,
+    callee: TsNode,
+    args: TsNode,
+) -> Option<EventSite> {
+    let pypi = || {
+        registries
+            .sdks
+            .iter()
+            .filter(|sdk| sdk.ecosystem == Ecosystem::Pypi)
+    };
+    let constructed = callee_export(cx, callee, scope).and_then(|(module, export)| {
+        pypi()
+            .find(|sdk| {
+                matches!(&sdk.pattern, SdkPattern::Constructor { module: m, ctor }
+                    if *m == module && *ctor == export)
+            })
+            .filter(|_| {
+                modules.contains(&module) && !patched(scope, &module, &export, cx.text(&callee))
+            })
+    });
+    let sdk = match constructed {
+        Some(sdk) => sdk,
+        None => {
+            let (Some(object), Some(attribute)) = (
+                callee.child_by_field_name("object"),
+                callee.child_by_field_name("attribute"),
+            ) else {
+                return None;
+            };
+            if callee.kind() != "attribute" {
+                return None;
+            }
+            let (module, export, select, spelling) = match receivers.get(cx.text(&object)) {
+                Some(receiver)
+                    if binding_scope(node).is_some_and(|function| {
+                        receiver.function.is_none() || function == receiver.function
+                    }) =>
+                {
+                    (
+                        receiver.module.clone(),
+                        receiver.export.clone(),
+                        receiver.select.clone(),
+                        receiver.spelling.clone(),
+                    )
+                }
+                Some(_) => return None,
+                None => {
+                    let (Some(factory), Some(factory_args)) = (
+                        object.child_by_field_name("function"),
+                        object.child_by_field_name("arguments"),
+                    ) else {
+                        return None;
+                    };
+                    if object.kind() != "call" {
+                        return None;
+                    }
+                    let (module, export) = callee_export(cx, factory, scope)?;
+                    if !modules.contains(&module) {
+                        return None;
+                    }
+                    let select = positional(factory_args)
+                        .first()
+                        .and_then(|first| exact_string(cx, *first));
+                    (module, export, select, cx.text(&factory).to_string())
+                }
+            };
+            let method = cx.text(&attribute);
+            let sdk = pypi().find(|sdk| {
+                matches!(&sdk.pattern, SdkPattern::Method { module: m, ctor, method: called }
+                    if *m == module && *ctor == export && called == method)
+                    && sdk
+                        .select
+                        .as_ref()
+                        .is_none_or(|wanted| select.as_deref() == Some(wanted.first.as_str()))
+            })?;
+            let factory = format!("{module}.{export}");
+            if patched(scope, &factory, method, cx.text(&callee))
+                || patched(scope, &factory, method, &spelling)
+            {
+                return None;
+            }
+            sdk
+        }
+    };
+    let value = match &sdk.identity {
+        IdentityArg::First => positional(args).first().copied(),
+        IdentityArg::Key(key) => keyword(cx, args, key),
+    };
+    Some(EventSite {
+        kind: sdk.kind.clone(),
+        role: sdk.role,
+        identity: value.map_or_else(
+            || IdentityExpr::Computed(cx.text(&node).to_string()),
+            |value| classify_with(cx, root, value, scope, true, exact_string),
+        ),
+        symbol: enclosing_function_node(node)
+            .and_then(|function| qualified_function_name(cx, function))
+            .map(|name| symbol_id(cx.id.repo, cx.path, &name)),
+        path: cx.path.to_string(),
+        byte_start: node.start_byte() as u64,
+        byte_end: node.end_byte() as u64,
+        components: Default::default(),
+        batch: None,
+        registries: vec![sdk.registry.clone()],
+    })
+}
+
+/// Whether no repository module or package shadows `module`'s top-level
+/// package: any `requests.py` or `requests/` anywhere refuses `requests`.
+fn unshadowed(files: &[String], module: &str) -> bool {
+    let top = module.split('.').next().unwrap_or(module);
+    let file_name = format!("{top}.py");
+    !files.iter().any(|file| {
+        let parts: Vec<&str> = file.split('/').collect();
+        let (name, dirs) = parts.split_last().expect("split yields one part");
+        *name == file_name || dirs.contains(&top)
+    })
+}
+
+/// The fetch and event sites of a pass and the client and event SDK
+/// modules it may read.
 struct Fetches {
     clients: Vec<&'static str>,
     sites: Vec<FetchSite>,
+    event_modules: Vec<String>,
+    events: Vec<EventSite>,
 }
 
 /// Whether a file's `patch("…")`/`monkeypatch.setattr("…")` targets may
@@ -1282,6 +1481,7 @@ fn extract_file(
     }
     collect_references(&cx, root, &scope, follows);
     let receivers = receivers(&cx, root, &scope, &fetches.clients);
+    let event_receivers = event_receivers(&cx, root, &scope, registries, &fetches.event_modules);
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -1295,6 +1495,17 @@ fn extract_file(
         ) else {
             continue;
         };
+        fetches.events.extend(event_site(
+            &cx,
+            root,
+            &scope,
+            registries,
+            &fetches.event_modules,
+            &event_receivers,
+            node,
+            callee,
+            args,
+        ));
         // `x.get(url)` on a proven client instance (AC-0425): only where the
         // binding is in scope, never inside a nested function or class.
         if callee.kind() == "attribute"
@@ -1691,31 +1902,61 @@ pub fn extract_dir(
     id: &SourceId,
     registries: &Registries,
 ) -> Result<(Vec<Node>, Vec<Edge>), ExtractError> {
-    extract_dir_with_fetches(root, id, registries).map(|(nodes, edges, _)| (nodes, edges))
+    extract_dir_with_sites(root, id, registries).map(|observed| (observed.nodes, observed.edges))
 }
 
-/// Observed nodes and edges, and the fetch sites of the same pass.
-pub type ObservedWithFetches = (Vec<Node>, Vec<Edge>, Vec<FetchSite>);
+/// Observed nodes and edges, and the fetch and event sites of the same pass.
+#[derive(Debug)]
+pub struct ObservedWithSites {
+    /// Observed `Resource` nodes and the Gaps of unresolved sites.
+    pub nodes: Vec<Node>,
+    /// `USES` edges to the observed resources.
+    pub edges: Vec<Edge>,
+    /// `requests`/`httpx` calls (AC-0424, AC-0425).
+    pub fetch_sites: Vec<FetchSite>,
+    /// `pypi` event SDK calls (AC-0458).
+    pub event_sites: Vec<EventSite>,
+}
 
-/// [`extract_dir`] plus the `requests`/`httpx` fetch sites the same import
-/// proofs admit (AC-0424), in file then call order.
-pub fn extract_dir_with_fetches(
+/// [`extract_dir`] plus the fetch and event sites the same import proofs
+/// admit, each in file then call order.
+pub fn extract_dir_with_sites(
     root: &Path,
     id: &SourceId,
     registries: &Registries,
-) -> Result<ObservedWithFetches, ExtractError> {
+) -> Result<ObservedWithSites, ExtractError> {
     let mut files = Vec::new();
     collect_python_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
     let mut follows = Follows::default();
+    let mut event_modules: Vec<String> = Vec::new();
+    for sdk in &registries.sdks {
+        let module = match &sdk.pattern {
+            SdkPattern::Constructor { module, .. } | SdkPattern::Method { module, .. } => module,
+            SdkPattern::FactoryMethod { module, .. } => module,
+        };
+        if sdk.ecosystem == Ecosystem::Pypi
+            && unshadowed(&files, module)
+            && !event_modules.contains(module)
+        {
+            event_modules.push(module.clone());
+        }
+    }
     let mut fetches = Fetches {
-        clients: unshadowed_clients(&files),
+        clients: HTTP_MODULES
+            .iter()
+            .copied()
+            .filter(|module| unshadowed(&files, module))
+            .collect(),
         sites: Vec::new(),
+        event_modules,
+        events: Vec::new(),
     };
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
         let first = fetches.sites.len();
+        let first_event = fetches.events.len();
         extract_file(
             &source,
             rel,
@@ -1726,6 +1967,7 @@ pub fn extract_dir_with_fetches(
             &mut fetches,
         )?;
         fetches.sites[first..].sort_by_key(|site: &FetchSite| site.byte_start);
+        fetches.events[first_event..].sort_by_key(|site: &EventSite| site.byte_start);
     }
     let known: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut modules: HashMap<String, Option<ModuleFile>> = HashMap::new();
@@ -1766,7 +2008,12 @@ pub fn extract_dir_with_fetches(
         },
         &sites,
     );
-    Ok((nodes, edges, fetches.sites))
+    Ok(ObservedWithSites {
+        nodes,
+        edges,
+        fetch_sites: fetches.sites,
+        event_sites: fetches.events,
+    })
 }
 
 #[cfg(test)]

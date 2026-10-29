@@ -20,7 +20,8 @@
 
 use adapters_fw::client::{FetchSite, NEXT_PAGES_DIR, REACT_ROUTER};
 use adapters_fw::events::{
-    EventSdk, EventSite, IdentityArg, IdentityExpr, Registries, RegistryIdentity, SdkPattern,
+    Ecosystem, EventSdk, EventSite, IdentityArg, IdentityExpr, Registries, RegistryIdentity,
+    SdkPattern,
 };
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::{Edge, Node};
@@ -2417,7 +2418,12 @@ fn extract_source_recording(
             continue;
         };
         let from = import_modules.get(&ctor).map(|m| norm_module(m));
-        for sdk in &registries.sdks {
+        // Only npm entries name modules this adapter imports (#1343).
+        for sdk in registries
+            .sdks
+            .iter()
+            .filter(|sdk| sdk.ecosystem == Ecosystem::Npm)
+        {
             let SdkPattern::Constructor { module, ctor: c } = &sdk.pattern else {
                 continue;
             };
@@ -2454,7 +2460,12 @@ fn extract_source_recording(
         let (Some(recv), Some(method), Some(args), Some(site)) = (recv, method, args, site) else {
             continue;
         };
-        for sdk in &registries.sdks {
+        // Only npm entries name modules this adapter imports (#1343).
+        for sdk in registries
+            .sdks
+            .iter()
+            .filter(|sdk| sdk.ecosystem == Ecosystem::Npm)
+        {
             let matched = match &sdk.pattern {
                 SdkPattern::Method {
                     module,

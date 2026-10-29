@@ -88,8 +88,6 @@ impl ReceiptOmission {
 
 /// Layer hints that select application producers (SPEC-00 §3).
 pub const APPLICATION_LAYERS: &[&str] = &["server", "events", "client"];
-/// Layer hints that select server-language producers.
-pub const SERVER_LAYERS: &[&str] = &["server"];
 /// Layer hints that select infrastructure producers.
 pub const INFRA_LAYERS: &[&str] = &["infra", "cloud"];
 
@@ -258,7 +256,7 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         "WebExtension manifests",
         Some(APPLICATION_LAYERS),
     ),
-    ("t0.adapter-python", "Python", Some(SERVER_LAYERS)),
+    ("t0.adapter-python", "Python", Some(APPLICATION_LAYERS)),
     // Go, Rust and JVM sources carry client calls (net/http, reqwest,
     // Retrofit) as well as server routes.
     ("t0.adapter-go", "Go", Some(APPLICATION_LAYERS)),

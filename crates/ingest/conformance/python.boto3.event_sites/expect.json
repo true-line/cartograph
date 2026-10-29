@@ -1,0 +1,19 @@
+{
+  "event_sites": [
+    {
+      "kind": "sqs-queue",
+      "role": "Produces",
+      "identity": "https://sqs.eu-west-1.amazonaws.com/1/orders"
+    },
+    {
+      "kind": "sqs-queue",
+      "role": "Consumes",
+      "identity": "https://sqs.eu-west-1.amazonaws.com/1/orders"
+    },
+    {
+      "kind": "sns-topic",
+      "role": "Produces",
+      "identity": "arn:aws:sns:eu-west-1:1:sent"
+    }
+  ]
+}
