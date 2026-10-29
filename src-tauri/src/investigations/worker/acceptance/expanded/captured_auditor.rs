@@ -307,6 +307,26 @@ pub(super) fn reopen(
     let id = stage(parent, artifacts, expected, false)?;
     let output = artifacts.output;
     let fresh = collect(parent, expected, &id, output)?;
+    let invocations = fresh["invocations"]
+        .as_array()
+        .ok_or("Auditor invocation journal missing.")?;
+    let observations = fresh["observations"]
+        .as_array()
+        .ok_or("Auditor observations missing.")?;
+    // Quality/acquisition checks may honestly fail for incomplete outcomes. Binding cannot.
+    // Before any invocation, there is no supplied payload or parent observation to bind.
+    if invocations.len() != observations.len()
+        || (!invocations.is_empty()
+            && [
+                "payload_disclosure_match",
+                "request_context_bound",
+                "exact_saved_parent",
+            ]
+            .iter()
+            .any(|key| fresh["mechanical_checks"][*key] != true))
+    {
+        return Err("Auditor observation binding changed.".into());
+    }
     if read(&output.join("auditor-receipt.json"))? != analyst::bytes(&fresh)? {
         return Err("Auditor durable receipt changed.".into());
     }
@@ -326,6 +346,7 @@ mod tests {
         Stage,
         Supported,
         Unknown,
+        Refused,
     }
 
     // AC-0466: synthetic authentication-shaped bytes prove content gates only.
@@ -339,6 +360,11 @@ mod tests {
         for scenario in [Scenario::Supported, Scenario::Unknown] {
             exercise_auditor(scenario);
         }
+    }
+    // AC-0463: unacquired evidence and refused finish remain honest, reopenable outcomes.
+    #[test]
+    fn captured_auditor_refused_observations_reopen_and_reject_paired_rewrites() {
+        exercise_auditor(Scenario::Refused);
     }
     fn exercise_auditor(scenario: Scenario) {
         let directory = tempfile::tempdir().unwrap();
@@ -449,8 +475,11 @@ mod tests {
         assert_eq!(read_task(), first);
         if !matches!(scenario, Scenario::Stage) {
             let unknown = matches!(scenario, Scenario::Unknown);
+            let refused = matches!(scenario, Scenario::Refused);
             let raw: Arc<dyn LlmProvider> = if unknown {
                 Arc::new(Scripted::new(Mode::Unknown))
+            } else if refused {
+                expanded_scripted_provider(false)
             } else {
                 expanded_auditor_scripted_provider()
             };
@@ -464,14 +493,19 @@ mod tests {
                 actual["detail"]["status"],
                 if unknown {
                     "outcome_unknown"
+                } else if refused {
+                    "failed"
                 } else {
                     "completed"
                 },
                 "{}",
                 actual["detail"]["error"]
             );
-            if unknown {
+            if unknown || refused {
                 assert!(actual["result"].is_null());
+                if refused {
+                    assert_eq!(actual["finish_refusal_count"], 2);
+                }
                 assert_eq!(actual["mechanical_checks"]["own_source_observed"], false);
                 assert_eq!(actual["mechanical_checks"]["own_inventory_observed"], false);
                 assert_eq!(actual["mechanical_checks"]["exact_saved_parent"], true);
@@ -485,11 +519,20 @@ mod tests {
             assert_eq!(actual["detail"]["specialist_id"], "evidence-auditor@11");
             assert_eq!(actual["detail"]["parent_id"], prepared.analyst_id);
             let observations = provider.observations().unwrap();
-            assert_eq!(observations.len(), if unknown { 1 } else { 4 });
+            assert_eq!(
+                observations.len(),
+                if unknown {
+                    1
+                } else if refused {
+                    2
+                } else {
+                    4
+                }
+            );
             assert!(observations.iter().all(|o| o.history_hash.is_some()
                 && o.parent_result_hashes.get(&expected.parent_result_id)
                     == Some(&expected.parent_result_hash)));
-            if !unknown {
+            if !unknown && !refused {
                 assert!(observations.iter().any(|o| !o.source_hashes.is_empty()));
                 assert!(observations.iter().any(|o| !o.inventory_hashes.is_empty()));
             }
@@ -497,6 +540,65 @@ mod tests {
             assert!(execute(&parent, &expected, &artifacts, provider.clone()).is_err());
             assert_eq!(provider.observations().unwrap(), observations);
             assert_eq!(reopen(&parent, &expected, &artifacts).unwrap(), actual);
+            let saved_observations = read(&output.join("auditor-observations.json")).unwrap();
+            let saved_receipt = read(&output.join("auditor-receipt.json")).unwrap();
+            for field in [
+                "empty",
+                "payload",
+                "context",
+                "ledger",
+                "source",
+                "inventory",
+                "history",
+                "parent",
+            ] {
+                let mut changed = observations.clone();
+                if field == "empty" {
+                    changed.clear();
+                } else {
+                    let last = changed.last_mut().unwrap();
+                    match field {
+                        "payload" => last.payload_hash = "f".repeat(64),
+                        "context" => last.context_id = "foreign-context".into(),
+                        "ledger" => last.input_ledger_hash = "f".repeat(64),
+                        "source" => {
+                            last.source_hashes
+                                .insert("foreign-source".into(), "f".repeat(64));
+                        }
+                        "inventory" => {
+                            last.inventory_hashes
+                                .insert("foreign-inventory".into(), "f".repeat(64));
+                        }
+                        "history" => last.history_hash = Some("f".repeat(64)),
+                        "parent" => {
+                            last.parent_result_hashes
+                                .insert("foreign-parent".into(), "f".repeat(64));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                std::fs::write(
+                    output.join("auditor-observations.json"),
+                    wire(&changed).unwrap(),
+                )
+                .unwrap();
+                // Forge the matching receipt too: byte equality alone previously accepted this pair.
+                let forged = collect(&parent, &expected, &id, &output).unwrap();
+                std::fs::write(
+                    output.join("auditor-receipt.json"),
+                    analyst::bytes(&forged).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    reopen(&parent, &expected, &artifacts).unwrap_err(),
+                    "Auditor observation binding changed.",
+                    "{field}"
+                );
+            }
+            std::fs::write(output.join("auditor-observations.json"), saved_observations).unwrap();
+            std::fs::write(output.join("auditor-receipt.json"), saved_receipt).unwrap();
+            assert_eq!(reopen(&parent, &expected, &artifacts).unwrap(), actual);
+            assert_eq!(provider.observations().unwrap(), observations);
             return;
         }
         std::fs::write(output.join("definition.json"), b"{}").unwrap();
