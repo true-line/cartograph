@@ -1,5 +1,17 @@
 # cartograph
 
+## 0.44.0
+
+### Minor Changes
+
+- 65fd067: Add opt-in captured analyst @15 phase-aware discovery guidance while preserving historical definitions, source admission and investigation limits.
+- 4aaccb3: Recover Next.js API routes: `pages/api` default exports and app-router `route.ts` method exports under a package that declares `next` become cited endpoints, so client fetches can stitch to them.
+
+### Patch Changes
+
+- 6bba3f1: Client fetches now stitch to method-less `ALL` routes (Express `all`, node-http, Next.js pages/api), as they already did to `ANY`.
+- 3223a43: Persist the first next-prompt host-limit preparation phase and identify the cumulative query-and-inventory byte budget only when that typed check refuses.
+
 ## 0.43.0
 
 ### Minor Changes
