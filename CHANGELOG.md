@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.46.0
+
+### Minor Changes
+
+- 885e020: Add an explicitly selected analyst family with exact-node retrieval while preserving historical task behavior and existing resource limits.
+- 885e020: Allow direct context queries to retrieve one exact graph node without neighboring facts or edges. Existing query limits and specialist protocols remain unchanged.
+
+### Patch Changes
+
+- 48e527e: Bump libz-sys to 1.1.31 for RUSTSEC-2026-0418 (#1368).
+
 ## 0.45.0
 
 ### Minor Changes
