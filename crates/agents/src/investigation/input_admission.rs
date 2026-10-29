@@ -651,6 +651,7 @@ impl InvestigationInput {
                 SpecialistId::DomainAnalystV12,
                 SpecialistId::DomainAnalystV13,
                 SpecialistId::DomainAnalystV14,
+                SpecialistId::DomainAnalystV15,
                 SpecialistId::EvidenceAuditorV11,
             ]
             .iter()
@@ -850,18 +851,20 @@ pub(super) fn apply_admission_progress(
 mod tests;
 
 impl InvestigationInput {
-    /// Defense against responses that bypass @14 transport hints. This grants
+    /// Defense against responses that bypass @14/@15 transport hints. This grants
     /// no source access; guarded frozen receipts still authenticate ranges.
     pub fn validate_admitted_source_fact(
         &self,
         fact: &crate::TaskFactKey,
     ) -> Result<(), ActionDecodeFailure> {
-        if self.payload.system == SpecialistId::DomainAnalystV14.prompt()
-            && !self
-                .ledger
-                .selected_facts
-                .iter()
-                .any(|selection| &selection.fact == fact && selection.binding.is_some())
+        if matches!(
+            response_schema::schema_role(&self.payload.system),
+            Some(SpecialistId::DomainAnalystV14 | SpecialistId::DomainAnalystV15)
+        ) && !self
+            .ledger
+            .selected_facts
+            .iter()
+            .any(|selection| &selection.fact == fact && selection.binding.is_some())
         {
             return Err(ActionSemanticRule::EvidenceShape.invalid());
         }

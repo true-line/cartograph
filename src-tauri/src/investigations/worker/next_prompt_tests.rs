@@ -167,7 +167,8 @@ impl LlmProvider for NextProvider {
                 parsed["anyOf"].as_array().unwrap().len(),
                 if prompt["turn_progress"]["admission_mode"] == "finish_only" {
                     2
-                } else if request.payload().system == SpecialistId::DomainAnalystV14.prompt()
+                } else if (request.payload().system == SpecialistId::DomainAnalystV14.prompt()
+                    || request.payload().system == SpecialistId::DomainAnalystV15.prompt())
                     && parsed["anyOf"]
                         .as_array()
                         .unwrap()
@@ -414,6 +415,7 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
         (SpecialistId::DomainAnalystV12, [true, false]),
         (SpecialistId::DomainAnalystV13, [true, false]),
         (SpecialistId::DomainAnalystV14, [true, false]),
+        (SpecialistId::DomainAnalystV15, [true, false]),
     ] {
         let mut scripted = NextProvider::new(false);
         scripted.metadata_order = Some(order);
@@ -422,6 +424,7 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
             SpecialistId::DomainAnalystV12
                 | SpecialistId::DomainAnalystV13
                 | SpecialistId::DomainAnalystV14
+                | SpecialistId::DomainAnalystV15
         ) {
             scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
                 "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
@@ -514,6 +517,7 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
                 SpecialistId::DomainAnalystV12
                     | SpecialistId::DomainAnalystV13
                     | SpecialistId::DomainAnalystV14
+                    | SpecialistId::DomainAnalystV15
             ) {
                 assert_canonical_query_continuation(
                     &provider.received_payloads.lock().unwrap()[1],
@@ -1603,25 +1607,30 @@ fn next_prompt_foreign_cursor_preparation_phase_is_durable() {
 // AC-0447: a scripted schema bypass stops semantically before captured-source preparation.
 #[test]
 fn next_prompt_unadmitted_source_fact_stops_before_preparation() {
-    let mut provider = NextProvider::new(false);
-    provider.invalid_source_first = true;
-    let provider = Arc::new(provider);
-    let fixture = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV14);
-    fixture.run(provider.clone());
-    let state = fixture.base.base.app.state::<AppState>();
-    let detail = state
-        .jobs
-        .lock()
-        .unwrap()
-        .investigation_owned_detail(&fixture.execution, &fixture.id)
-        .unwrap();
-    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
-    let expected = InvestigationStopReason::ActionDecode(ActionDecodeFailure {
-        stage: ActionDecodeStage::SemanticRule(ActionSemanticRule::EvidenceShape),
-        error: InvestigationError::InvalidAction,
-    })
-    .test_message();
-    assert_eq!(detail.error.as_deref(), Some(expected));
-    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(detail.usage.tool_actions, 0);
+    for role in [
+        SpecialistId::DomainAnalystV14,
+        SpecialistId::DomainAnalystV15,
+    ] {
+        let mut provider = NextProvider::new(false);
+        provider.invalid_source_first = true;
+        let provider = Arc::new(provider);
+        let fixture = NextFixture::new(provider.as_ref(), role);
+        fixture.run(provider.clone());
+        let state = fixture.base.base.app.state::<AppState>();
+        let detail = state
+            .jobs
+            .lock()
+            .unwrap()
+            .investigation_owned_detail(&fixture.execution, &fixture.id)
+            .unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        let expected = InvestigationStopReason::ActionDecode(ActionDecodeFailure {
+            stage: ActionDecodeStage::SemanticRule(ActionSemanticRule::EvidenceShape),
+            error: InvestigationError::InvalidAction,
+        })
+        .test_message();
+        assert_eq!(detail.error.as_deref(), Some(expected));
+        assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(detail.usage.tool_actions, 0);
+    }
 }

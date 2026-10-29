@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Task ownership, bounded row decoding, saved-call/ledger/result replay and
 /// host encodings are separate. Regex/native allocations are not modeled.
 pub fn next_prompt_validation_workspace() -> Option<usize> {
-    let definition = definition_workspace(SpecialistId::DomainAnalystV14)?
+    let definition = definition_workspace(SpecialistId::DomainAnalystV15)?
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
@@ -35,10 +35,11 @@ pub(super) fn definition_workspace(role: SpecialistId) -> Option<usize> {
     // retained pre-message common, message common, discovery and final prompt
     // stay within seven owners. @13 and @14 each add one formatted prompt
     // while retaining their preceding version. No resource ceiling is increased.
-    // Account all nine even though some lifetimes do not overlap.
+    // @15 adds two replacement outputs, with @14 shorter than its result.
+    // Account all eleven even though some lifetimes do not overlap.
     sum(&[
-        prompt.len().checked_mul(9)?,
-        slots::<String>(9)?,
+        prompt.len().checked_mul(11)?,
+        slots::<String>(11)?,
         wire,
         wire,
         b"cartograph:specialist-definition:v1\0".len(),
@@ -99,7 +100,7 @@ mod tests {
     // Pin the definition component independently, not the much larger total.
     #[test]
     fn saved_family_definitions_fit_admitted_definition_workspace() {
-        let admitted = definition_workspace(SpecialistId::DomainAnalystV14)
+        let admitted = definition_workspace(SpecialistId::DomainAnalystV15)
             .unwrap()
             .max(definition_workspace(SpecialistId::EvidenceAuditorV11).unwrap());
         for role in [
@@ -127,6 +128,7 @@ mod tests {
             SpecialistId::DomainAnalystV12,
             SpecialistId::DomainAnalystV13,
             SpecialistId::DomainAnalystV14,
+            SpecialistId::DomainAnalystV15,
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::SpecWriterV1,
             SpecialistId::SpecWriterV2,
@@ -149,10 +151,11 @@ mod tests {
             SpecialistId::DomainAnalystV12,
             SpecialistId::DomainAnalystV13,
             SpecialistId::DomainAnalystV14,
+            SpecialistId::DomainAnalystV15,
             SpecialistId::EvidenceAuditorV11,
         ] {
             let definition = role.definition().unwrap();
-            assert!(matches!(definition.version, 10..=14));
+            assert!(matches!(definition.version, 10..=15));
             assert!(
                 definition_workspace(role).unwrap()
                     >= role.prompt().len() + count(&definition).unwrap()

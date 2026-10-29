@@ -62,6 +62,7 @@ pub(super) fn seal_with_admission_policy(
             SpecialistId::DomainAnalystV12,
             SpecialistId::DomainAnalystV13,
             SpecialistId::DomainAnalystV14,
+            SpecialistId::DomainAnalystV15,
             SpecialistId::EvidenceAuditorV11,
         ]
         .iter()
