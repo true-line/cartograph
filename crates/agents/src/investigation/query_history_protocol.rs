@@ -70,6 +70,15 @@ enum ReplayAction {
     },
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ExactNodeQuery {
+    QueryContext {
+        context_id: String,
+        query: InvestigationQuery,
+    },
+}
+
 impl ProgressiveInvestigationAction {
     pub fn decode_resolved(
         raw: &str,
@@ -88,6 +97,41 @@ impl ProgressiveInvestigationAction {
         ledger: &InvestigationInputLedger,
         policy: &InvestigationPolicy,
     ) -> Result<CompletionInvestigationAction, ActionDecodeFailure> {
+        Self::decode_resolved_detailed_for_specialist(
+            raw,
+            context_id,
+            request_hash,
+            ledger,
+            policy,
+            SpecialistId::DomainAnalystV9,
+        )
+    }
+    pub fn decode_resolved_for_specialist(
+        raw: &str,
+        context_id: &str,
+        request_hash: &str,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        role: SpecialistId,
+    ) -> Result<CompletionInvestigationAction, InvestigationError> {
+        Self::decode_resolved_detailed_for_specialist(
+            raw,
+            context_id,
+            request_hash,
+            ledger,
+            policy,
+            role,
+        )
+        .map_err(|failure| failure.error)
+    }
+    pub fn decode_resolved_detailed_for_specialist(
+        raw: &str,
+        context_id: &str,
+        request_hash: &str,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        role: SpecialistId,
+    ) -> Result<CompletionInvestigationAction, ActionDecodeFailure> {
         if policy.profile() != INVESTIGATION_V2_POLICY.profile()
             || ledger
                 .coverage
@@ -101,6 +145,33 @@ impl ProgressiveInvestigationAction {
             .map_err(|error| Stage::Preflight.failure(error))?;
         let value: serde_json::Value =
             serde_json::from_str(raw).map_err(|_| Stage::TypedEnvelope.invalid())?;
+        if role.uses_exact_node_queries()
+            && value["type"] == "query_context"
+            && value["query"]["scope"]["type"] == "node"
+        {
+            let action: ExactNodeQuery =
+                serde_json::from_str(raw).map_err(|_| Stage::TypedCoverageRead.invalid())?;
+            if serde_json::to_value(&action).map_err(|_| Stage::CanonicalFields.invalid())? != value
+            {
+                return Err(Stage::CanonicalFields.invalid());
+            }
+            let ExactNodeQuery::QueryContext {
+                context_id: actual,
+                query,
+            } = action;
+            if actual != context_id {
+                return Err(ActionSemanticRule::QueryContext.invalid());
+            }
+            query
+                .validate_for_specialist(role)
+                .map_err(|e| ActionSemanticRule::QueryShape.failure(e))?;
+            return Ok(CompletionInvestigationAction::Read(
+                QualifiedInvestigationAction::QueryContext {
+                    context_id: actual,
+                    query,
+                },
+            ));
+        }
         if value["type"] != "replay_query" {
             return CompletionInvestigationAction::decode_detailed(raw, context_id);
         }
@@ -123,6 +194,9 @@ impl ProgressiveInvestigationAction {
         }
         .resolve(request_hash, ledger, policy)
         .map_err(|_| ActionSemanticRule::ReplayReference.invalid())?;
+        query
+            .validate_for_specialist(role)
+            .map_err(|e| ActionSemanticRule::QueryShape.failure(e))?;
         Ok(CompletionInvestigationAction::Read(
             QualifiedInvestigationAction::QueryContext {
                 context_id: actual,

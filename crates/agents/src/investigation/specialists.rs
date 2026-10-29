@@ -57,6 +57,8 @@ pub enum SpecialistId {
     DomainAnalystV14,
     #[serde(rename = "domain-analyst@15")]
     DomainAnalystV15,
+    #[serde(rename = "domain-analyst@17")]
+    DomainAnalystV17,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -222,6 +224,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -252,6 +255,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -283,6 +287,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -307,6 +312,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -325,6 +331,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -343,6 +350,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -358,6 +366,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
                 | Self::EvidenceAuditorV11
         )
     }
@@ -390,6 +399,7 @@ impl SpecialistId {
             Self::DomainAnalystV13 => 13,
             Self::DomainAnalystV14 => 14,
             Self::DomainAnalystV15 => 15,
+            Self::DomainAnalystV17 => 17,
         }
     }
 
@@ -404,6 +414,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
         ) {
             return 10;
         }
@@ -417,7 +428,17 @@ impl SpecialistId {
         }
     }
 
+    pub fn uses_exact_node_queries(self) -> bool {
+        self == Self::DomainAnalystV17
+    }
+
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV17 {
+            return format!(
+                "{}\nExact-node queries@1: query_context may select scope {{\"type\":\"node\",\"id\":\"exact node ID\"}} to retrieve only that node. For an exact caller source target, use its fact.id before selecting its admitted role/index. Use neighborhoods when relationships are needed. Task scope and all acquisition and finish requirements remain unchanged.",
+                Self::DomainAnalystV15.prompt()
+            );
+        }
         if self == Self::DomainAnalystV15 {
             let prompt = Self::DomainAnalystV14.prompt().replace(
                 r#"{"type":"query_context","context_id":"the exact context_id supplied by the host","query":{"scope":{"type":"all"},"kind":null,"labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}}"#,
@@ -464,7 +485,8 @@ impl SpecialistId {
             | Self::DomainAnalystV12
             | Self::DomainAnalystV13
             | Self::DomainAnalystV14
-            | Self::DomainAnalystV15 => {
+            | Self::DomainAnalystV15
+            | Self::DomainAnalystV17 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -576,6 +598,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
+                | Self::DomainAnalystV17
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -621,7 +644,8 @@ impl SpecialistId {
             | Self::DomainAnalystV12
             | Self::DomainAnalystV13
             | Self::DomainAnalystV14
-            | Self::DomainAnalystV15 => (
+            | Self::DomainAnalystV15
+            | Self::DomainAnalystV17 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),

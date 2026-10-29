@@ -217,6 +217,8 @@ impl SavedCallBasis {
         metadata: &ProtectedCompletionMetadata,
     ) -> Result<(), InvestigationStoreError> {
         validate_pairing(task)?;
+        ledger
+            .validate_for_specialist(task.detail.summary.specialist_id, &INVESTIGATION_V2_POLICY)?;
         self.validate_shape()?;
         let policy = &INVESTIGATION_V2_POLICY;
         let intent = task

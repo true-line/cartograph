@@ -307,7 +307,9 @@ impl StagedObligationRequest {
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         let request = self.normalized_with_policy(policy)?;
-        ledger.validate_with_policy(policy)?;
+        let role = serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
+            .map_err(|_| InvestigationError::InvalidRequest)?;
+        ledger.validate_for_specialist(role, policy)?;
         let proof = ledger
             .coverage
             .as_ref()
@@ -404,9 +406,9 @@ fn request_family(
             &["domain-analyst@11", "evidence-auditor@11"],
             b"cartograph:investigation-client-intent:v7\0",
         )),
-        ("investigation-v2", 7, "domain-analyst@15") => Ok((
+        ("investigation-v2", 7, "domain-analyst@15" | "domain-analyst@17") => Ok((
             7,
-            &["domain-analyst@15"],
+            &["domain-analyst@15", "domain-analyst@17"],
             b"cartograph:investigation-client-intent:v7\0",
         )),
         ("investigation-v2", 7, "domain-analyst@14") => Ok((

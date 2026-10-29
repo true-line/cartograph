@@ -642,23 +642,24 @@ impl InvestigationInput {
         &self,
         policy: &InvestigationPolicy,
     ) -> Result<(Value, InvestigationCompletionContract), InvestigationError> {
-        self.ledger.validate_with_policy(policy)?;
-        if policy.profile() != INVESTIGATION_V2_POLICY.profile()
-            || ![
-                SpecialistId::DomainAnalystV10,
-                SpecialistId::EvidenceAuditorV10,
-                SpecialistId::DomainAnalystV11,
-                SpecialistId::DomainAnalystV12,
-                SpecialistId::DomainAnalystV13,
-                SpecialistId::DomainAnalystV14,
-                SpecialistId::DomainAnalystV15,
-                SpecialistId::EvidenceAuditorV11,
-            ]
-            .iter()
-            .any(|role| self.payload.system == role.prompt())
-        {
+        if policy.profile() != INVESTIGATION_V2_POLICY.profile() {
             return Err(InvestigationError::InvalidInput);
         }
+        let role = [
+            SpecialistId::DomainAnalystV10,
+            SpecialistId::EvidenceAuditorV10,
+            SpecialistId::DomainAnalystV11,
+            SpecialistId::DomainAnalystV12,
+            SpecialistId::DomainAnalystV13,
+            SpecialistId::DomainAnalystV14,
+            SpecialistId::DomainAnalystV15,
+            SpecialistId::DomainAnalystV17,
+            SpecialistId::EvidenceAuditorV11,
+        ]
+        .into_iter()
+        .find(|role| self.payload.system == role.prompt())
+        .ok_or(InvestigationError::InvalidInput)?;
+        self.ledger.validate_for_specialist(role, policy)?;
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
         response_schema::validate(&self.ledger, &self.payload, &prompt)?;
@@ -859,7 +860,11 @@ impl InvestigationInput {
     ) -> Result<(), ActionDecodeFailure> {
         if matches!(
             response_schema::schema_role(&self.payload.system),
-            Some(SpecialistId::DomainAnalystV14 | SpecialistId::DomainAnalystV15)
+            Some(
+                SpecialistId::DomainAnalystV14
+                    | SpecialistId::DomainAnalystV15
+                    | SpecialistId::DomainAnalystV17
+            )
         ) && !self
             .ledger
             .selected_facts
