@@ -1662,3 +1662,56 @@ fn route_parameters_match_in_every_framework_spelling() {
     }
     assert!(!route_matches("/api/<>/x", "/api/a/x"));
 }
+
+// AC-0452: an Express-style `ALL` route serves every method, as `ANY` does;
+// a method route beside it on the same path stays ambiguous, and prefix
+// routes (`/x/*`) are not matched (#1327).
+#[test]
+fn all_routes_match_every_fetch_method() {
+    let endpoints = eps(&[
+        "ep:test@ALL:/api/users/:id",
+        "ep:test@ALL:/api/orders",
+        "ep:test@POST:/api/orders",
+        "ep:test@ALL:/api/files/*",
+    ]);
+    let cfg = ConfigIndex::default();
+    let id = SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let out = stitch_fetches(
+        &[
+            fetch_site("DELETE", IdentityExpr::Literal("/api/users/7".into())),
+            fetch_site("GET", IdentityExpr::Literal("/api/users/8".into())),
+            fetch_site("POST", IdentityExpr::Literal("/api/orders".into())),
+            fetch_site("GET", IdentityExpr::Literal("/api/files/a".into())),
+        ],
+        &endpoints,
+        &cfg,
+        &id,
+    );
+    let bound: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "FETCHES" && e.dst.starts_with("ep:"))
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(
+        bound,
+        ["ep:test@ALL:/api/users/:id", "ep:test@ALL:/api/users/:id"]
+    );
+    let mut reasons: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["reason"].as_str())
+        .collect();
+    reasons.sort();
+    assert_eq!(
+        reasons,
+        [
+            "ambiguous endpoint match for POST /api/orders (2 candidates)",
+            "no recovered endpoint matches GET /api/files/a",
+        ]
+    );
+}

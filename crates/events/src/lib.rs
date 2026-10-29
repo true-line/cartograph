@@ -509,10 +509,12 @@ pub fn stitch_fetches_with(
             (Some((path, resolver)), method) => {
                 let hits: Vec<&str> = endpoints
                     .iter()
-                    // A method-less route (`ANY`) serves every method.
+                    // A method-less route (`ANY`, or Express-style `ALL`,
+                    // #1327) serves every method.
                     .filter(|(eid, verb, route)| {
                         (*verb == method
                             || *verb == "ANY"
+                            || *verb == "ALL"
                             || (method == "HEAD" && get_serves_head.contains(*eid)))
                             && route_matches(route, path)
                     })
