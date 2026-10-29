@@ -87,6 +87,9 @@ pub struct Extraction {
     /// Literal `navigator.serviceWorker.register(…)` paths, resolved against
     /// the walk's files at directory completion (#1078).
     service_worker_registrations: Vec<service_worker::Registration>,
+    /// Next.js API route exports (#1325), proven against the nearest
+    /// `package.json` at directory completion.
+    next_routes: Vec<next_api::Site>,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -266,6 +269,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for registration in &mut extraction.service_worker_registrations {
         registration.retarget(commit);
     }
+    for site in &mut extraction.next_routes {
+        site.retarget(commit);
+    }
 }
 
 impl Extraction {
@@ -297,6 +303,7 @@ impl Extraction {
         self.client_routes = client_routes::Pending::default();
         self.client_navigation = client_navigation::Pending::default();
         self.service_worker_registrations.clear();
+        self.next_routes.clear();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -1451,6 +1458,7 @@ fn extract_source_recording(
     let service_worker = service_worker::proves_worker(&cx, &syntax_nodes, &bindings);
     out.service_worker_registrations =
         service_worker::registered_paths(&cx, &syntax_nodes, &bindings);
+    out.next_routes = next_api::sites(&cx, root, &bindings);
     let mut methods: HashMap<(String, String), String> = HashMap::new();
     for function in syntax_nodes
         .iter()
@@ -3185,6 +3193,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.client_navigation.extend(ex.client_navigation);
     out.service_worker_registrations
         .extend(ex.service_worker_registrations);
+    out.next_routes.extend(ex.next_routes);
 }
 
 /// Shared directory completion. Its live configuration inputs are deliberately
@@ -3269,6 +3278,13 @@ fn complete_directory(
     let navigation = std::mem::take(&mut out.client_navigation);
     client_navigation::complete(navigation, &files, id.repo, &mut out.nodes, &mut out.edges);
     next_pages_screens(out, id);
+    next_api::complete(
+        std::mem::take(&mut out.next_routes),
+        &index,
+        id,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     let registrations = std::mem::take(&mut out.service_worker_registrations);
     service_worker::mark_registered(
         &registrations,
@@ -3479,6 +3495,7 @@ mod grammar;
 pub mod graphql_resolvers;
 pub mod indexeddb;
 mod local_definitions;
+pub mod next_api;
 pub mod node_http;
 pub mod observed_infra;
 pub(crate) mod resolution;

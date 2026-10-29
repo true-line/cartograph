@@ -162,6 +162,7 @@ const JAVA_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(
 /// What the Java core client cell still lacks (AC-0435, AC-0437, AC-0441).
 const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces and Spring `RestTemplate` and `WebClient`";
 const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript";
+const NEXT_API: &str = "pages/api and app-router route handlers under a package declaring next; next.config basePath is not applied and wrapped or re-exported handlers stay Gaps";
 const TSX_ONLY: &str = "recorded in .tsx/.js/.jsx files; plain .ts modules are not scanned";
 
 /// Every cell this build reports, compiled-in adapters only.
@@ -171,13 +172,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("TypeScript", "express", HttpEndpoints, Supported, ""),
     cell("TypeScript", "node-http", HttpEndpoints, Supported, ""),
     cell("TypeScript", "next", ClientRoutes, Supported, ""),
-    cell(
-        "TypeScript",
-        "next",
-        HttpEndpoints,
-        Unsupported,
-        "pages/api and app-router route handlers are not recognized",
-    ),
+    cell("TypeScript", "next", HttpEndpoints, Partial, NEXT_API),
     cell("TypeScript", "react-router", ClientRoutes, Supported, ""),
     cell("TypeScript", "vue-router", ClientRoutes, Supported, ""),
     cell("TypeScript", "fetch", HttpClientCalls, Partial, TSX_ONLY),
@@ -220,6 +215,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("JavaScript", "node-http", HttpEndpoints, Supported, ""),
     cell("JavaScript", "next", ClientRoutes, Supported, ""),
+    cell("JavaScript", "next", HttpEndpoints, Partial, NEXT_API),
     cell("JavaScript", "react-router", ClientRoutes, Supported, ""),
     cell("JavaScript", "vue-router", ClientRoutes, Supported, ""),
     cell("JavaScript", "fetch", HttpClientCalls, Supported, ""),
