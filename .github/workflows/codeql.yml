@@ -14,7 +14,14 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
-    timeout-minutes: 45
+    # Rust extraction outlived 45 minutes on every main push, so it never
+    # produced an analysis while holding a heavy slot (#1373). It gets its own
+    # budget and runs one at a time, the newest pending commit replacing an
+    # older pending one; the other languages keep a per-run group.
+    timeout-minutes: ${{ matrix.language == 'rust' && 120 || 45 }}
+    concurrency:
+      group: codeql-${{ matrix.language == 'rust' && 'rust' || github.run_id }}-${{ matrix.language }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: read
