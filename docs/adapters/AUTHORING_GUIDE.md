@@ -346,7 +346,16 @@ also reads `<app_data>/registries/*.json` in name order.
   accepted files is part of the coverage basis and the parse cache key, so
   adding or editing a file re-extracts instead of reusing stale facts.
 
-The TypeScript adapter is the one that consults the event registry today.
+A `cartograph-event-sdk-registry@2` file may give an entry `"ecosystem":
+"pypi"` (npm otherwise) for the Python adapter: a `constructor` is a
+`<module>.<ctor>(…)` call, a `method` is called on a receiver bound once to
+`<module>.<ctor>(…)` or on that call inline, and `"select": {"first":
+"<literal>"}` requires the factory's first argument (`boto3.client("sqs")`,
+in `crates/adapters-fw/registries/event-sdks-pypi.json`); `identity`
+`"first"` is the first positional argument and `{"key": …}` a keyword.
+`factory_method` is npm-only, and qualifiers and batch keys shape TypeScript
+sites only. The TypeScript and Python adapters consult the event registry,
+each reading only its own ecosystem's entries.
 
 ## Traceability — required either way
 

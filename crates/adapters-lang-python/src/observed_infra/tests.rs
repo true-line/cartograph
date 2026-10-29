@@ -915,7 +915,7 @@ fn fetches(files: &[(&str, &str)]) -> Vec<FetchSite> {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     }
-    extract_dir_with_fetches(
+    extract_dir_with_sites(
         dir.path(),
         &SourceId {
             repo: REPO,
@@ -924,7 +924,7 @@ fn fetches(files: &[(&str, &str)]) -> Vec<FetchSite> {
         Registries::builtin(),
     )
     .unwrap()
-    .2
+    .fetch_sites
 }
 
 fn shown(site: &FetchSite) -> String {
@@ -1307,4 +1307,201 @@ def parameter(captured):
         "{:?}",
         sites.iter().map(shown_base).collect::<Vec<_>>()
     );
+}
+
+fn events(files: &[(&str, &str)]) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, body) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let observed = extract_dir_with_sites(
+        dir.path(),
+        &SourceId {
+            repo: REPO,
+            commit: "workdir",
+        },
+        Registries::builtin(),
+    )
+    .unwrap();
+    observed
+        .event_sites
+        .iter()
+        .map(|site| {
+            let identity = match &site.identity {
+                IdentityExpr::Literal(value) => format!("lit:{value}"),
+                IdentityExpr::EnvRef(key) => format!("env:{key}"),
+                IdentityExpr::Computed(text) => format!("computed:{text}"),
+            };
+            assert!(site.components.is_empty() && site.batch.is_none());
+            let registries: Vec<&str> = site.registries.iter().map(|r| r.name.as_str()).collect();
+            assert_eq!(registries, ["builtin:event-sdks-pypi.json"]);
+            format!(
+                "{} {} {:?} {} {}",
+                site.path,
+                site.kind,
+                site.role,
+                identity,
+                site.symbol.as_deref().unwrap_or("-")
+            )
+        })
+        .collect()
+}
+
+// AC-0458: boto3 SQS and SNS calls on a receiver bound once to a selected
+// `boto3.client(…)`, or on the factory call inline, and kafka-python
+// producer sends and consumer constructors are event sites: the identity is
+// the named keyword or first positional argument, exact, followed within the
+// file, and computed when absent. (T-0458)
+#[test]
+fn proven_boto3_and_kafka_python_calls_become_event_sites() {
+    let sites = events(&[(
+        "app/jobs.py",
+        r#"
+import os
+import boto3
+from kafka import KafkaConsumer, KafkaProducer as P
+
+QUEUE = "https://sqs.eu-west-1.amazonaws.com/1/orders"
+sqs = boto3.client("sqs")
+
+def enqueue(body):
+    sqs.send_message(QueueUrl=QUEUE, MessageBody=body)
+
+def drain():
+    sqs.receive_message(QueueUrl=os.environ["ORDERS_QUEUE"])
+
+def notify():
+    boto3.client("sns").publish(TopicArn="arn:aws:sns:eu-west-1:1:sent", Message="m")
+
+def emit(event):
+    producer = P(bootstrap_servers="k:9092")
+    producer.send("orders", event)
+
+def emit_named(event, topic):
+    named = P()
+    named.send(topic, event)
+
+def unnamed(params):
+    sqs.send_message(**params)
+
+consumer = KafkaConsumer("orders", group_id="g")
+"#,
+    )]);
+    let owner = |name: &str| format!("sym:{REPO}@app/jobs.py#{name}");
+    assert_eq!(
+        sites,
+        vec![
+            format!(
+                "app/jobs.py sqs-queue Produces lit:https://sqs.eu-west-1.amazonaws.com/1/orders {}",
+                owner("enqueue")
+            ),
+            format!(
+                "app/jobs.py sqs-queue Consumes env:ORDERS_QUEUE {}",
+                owner("drain")
+            ),
+            format!(
+                "app/jobs.py sns-topic Produces lit:arn:aws:sns:eu-west-1:1:sent {}",
+                owner("notify")
+            ),
+            format!(
+                "app/jobs.py kafka-topic Produces lit:orders {}",
+                owner("emit")
+            ),
+            format!(
+                "app/jobs.py kafka-topic Produces computed:topic {}",
+                owner("emit_named")
+            ),
+            format!(
+                "app/jobs.py sqs-queue Produces computed:sqs.send_message(**params) {}",
+                owner("unnamed")
+            ),
+            "app/jobs.py kafka-topic Consumes lit:orders -".to_string(),
+        ]
+    );
+}
+
+// AC-0458: a client of another service, an unselected or computed factory
+// argument, a rebound, escaping, parameter or out-of-scope receiver, a local
+// module shadowing the SDK, a patched factory or method, an unimported or
+// wildcard-imported name, and npm-only shapes yield no event site. (T-0458)
+#[test]
+fn unproven_event_sdk_calls_are_not_event_sites() {
+    let quiet = |files: &[(&str, &str)]| {
+        let sites = events(files);
+        assert!(sites.is_empty(), "{sites:?}");
+    };
+    quiet(&[(
+        "app/a.py",
+        r#"
+import boto3
+import kafka
+
+s3 = boto3.client("s3")
+named = boto3.client(service_name="sqs")
+kind = "sqs"
+computed = boto3.client(kind)
+rebound = boto3.client("sqs")
+rebound = None
+alias = boto3.client("sqs")
+other = alias
+
+def f(client):
+    s3.send_message(QueueUrl="q")
+    named.send_message(QueueUrl="q")
+    computed.send_message(QueueUrl="q")
+    client.send_message(QueueUrl="q")
+    other.send_message(QueueUrl="q")
+    boto3.resource("sqs").send_message(QueueUrl="q")
+    boto3.client("sqs").sendMessage(QueueUrl="q")
+    kafka.KafkaProducer().produce("t")
+    kafka.producer().send("t")
+
+def g():
+    inner = boto3.client("sqs")
+
+def h():
+    inner.send_message(QueueUrl="q")
+"#,
+    )]);
+    // Controls: each refused file below yields a site without its refusal.
+    let inline = "import boto3\nboto3.client(\"sqs\").send_message(QueueUrl=\"q\")\n";
+    assert_eq!(events(&[("app/b.py", inline)]).len(), 1);
+    assert_eq!(
+        events(&[(
+            "app/d.py",
+            "from kafka import KafkaConsumer\nKafkaConsumer(\"t\")\n"
+        )])
+        .len(),
+        1
+    );
+    let kept = "import boto3\nkept = boto3.client(\"sqs\")\ndef f():\n    kept.send_message(QueueUrl=\"q\")\n";
+    assert_eq!(events(&[("app/e.py", kept)]).len(), 1);
+    quiet(&[
+        (
+            "app/b.py",
+            "import boto3\nboto3.client(\"sqs\").send_message(QueueUrl=\"q\")\n",
+        ),
+        ("boto3.py", ""),
+    ]);
+    quiet(&[(
+        "app/c.py",
+        r#"
+import boto3
+from unittest.mock import patch
+
+patch("boto3.client")
+boto3.client("sqs").send_message(QueueUrl="q")
+"#,
+    )]);
+    quiet(&[(
+        "app/d.py",
+        r#"
+from kafka import *
+from .kafka import KafkaConsumer
+KafkaProducer().send("t")
+KafkaConsumer("t")
+"#,
+    )]);
 }

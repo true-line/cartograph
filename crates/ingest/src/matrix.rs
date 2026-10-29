@@ -161,7 +161,9 @@ const JAVA_FEIGN: &str = "single-type-imported or fully qualified `@FeignClient`
 const JAVA_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a single-type-imported or fully qualified `WebClient` local, parameter or own-type field, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a field-held client's base is an undeclared runtime base, and a `uri` must be an exact literal";
 /// What the Java core client cell still lacks (AC-0435, AC-0437, AC-0441).
 const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces and Spring `RestTemplate` and `WebClient`";
-const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript";
+const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript and Python boto3/kafka-python";
+/// What the Python event SDK cells read (AC-0458).
+const PY_EVENTS: &str = "registry `pypi` entries: methods on a once-bound or inline selected factory call (`boto3.client(\"sqs\")`, `KafkaProducer(…)`) in their own scope, and constructors; instance attributes and passed-in clients are not read, an identity is followed only within its file, and qualifiers and batch keys are not applied";
 const NEXT_API: &str = "pages/api and app-router route handlers under a package declaring next; next.config basePath is not applied and wrapped or re-exported handlers stay Gaps";
 const TSX_ONLY: &str = "recorded in .tsx/.js/.jsx files; plain .ts modules are not scanned";
 
@@ -252,7 +254,8 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("Python", "requests", HttpClientCalls, Partial, PY_CLIENT),
     cell("Python", "httpx", HttpClientCalls, Partial, PY_CLIENT),
-    cell("Python", CORE, EventSites, Unsupported, NO_EVENTS),
+    cell("Python", "boto3", EventSites, Partial, PY_EVENTS),
+    cell("Python", "kafka-python", EventSites, Partial, PY_EVENTS),
     cell("Go", CORE, Imports, Supported, ""),
     cell("Go", CORE, Calls, Supported, ""),
     cell("Go", "net-http", HttpEndpoints, Supported, ""),
