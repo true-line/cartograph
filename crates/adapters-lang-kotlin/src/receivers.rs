@@ -18,7 +18,8 @@ pub(crate) enum Binding {
     /// The declaration states this type (dotted, without type arguments or
     /// nullability).
     Typed(String),
-    /// Initialized by `T(…)`: proves `T` only if `T` is a constructible class.
+    /// Initialized by `T(…)` or `a.b.T(…)`: proves `T` only if `T` is a
+    /// constructible class.
     Constructed(String),
     /// `hiltViewModel(…) { f: F -> f.method(…) }`: the declared return type
     /// of `F.method`, resolved at the directory join.
@@ -166,7 +167,8 @@ fn declaration_binding(cx: &FileCx<'_>, decl: TsNode<'_>, name: &str) -> Option<
 }
 
 /// A `property_declaration` binding `name`: its stated type, else a
-/// `T(…)` initializer, else untyped (delegates and other initializers).
+/// `T(…)` or qualified `a.b.T(…)` initializer, else untyped (delegates and
+/// other initializers).
 fn property_binding(
     cx: &FileCx<'_>,
     prop: TsNode<'_>,
@@ -208,11 +210,54 @@ fn property_binding(
         .filter(|child| child.kind() == "call_expression")
         .find_map(|call| {
             let callee = call.named_child(0)?;
-            let text = cx.text(&callee);
-            (callee.kind() == "identifier" && text.starts_with(|c: char| c.is_ascii_uppercase()))
-                .then(|| text.to_string())
+            // `T(…)` or a qualified `a.b.T(…)`.
+            let text: String = cx
+                .text(&callee)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let segments = || text.split('.');
+            (matches!(callee.kind(), "identifier" | "navigation_expression")
+                && segments().all(|segment| {
+                    segment.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                        && segment.chars().all(|c| c.is_alphanumeric() || c == '_')
+                })
+                && segments()
+                    .next_back()
+                    .is_some_and(|last| last.starts_with(|c: char| c.is_ascii_uppercase()))
+                // A qualified spelling's first segment is an expression: a
+                // binding of that name visible at the declaration wins.
+                && (callee.kind() == "identifier"
+                    || segments()
+                        .next()
+                        .is_none_or(|first| !first_segment_bound(cx, prop, first, hilt))))
+            .then(|| text.clone())
         });
     Some(constructed.map_or(Binding::Untyped, Binding::Constructed))
+}
+
+thread_local! {
+    /// Declarations whose qualified initializer is being checked.
+    static CHECKING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether `first` is bound where `prop` is declared. A lookup that reaches
+/// a declaration already being checked (`val org = org.a.T()` as a property,
+/// or two properties initialized through each other) counts as bound, so the
+/// check terminates and proves nothing.
+fn first_segment_bound(
+    cx: &FileCx<'_>,
+    prop: TsNode<'_>,
+    first: &str,
+    hilt: &HashSet<String>,
+) -> bool {
+    if CHECKING.with(|active| active.borrow().contains(&prop.id())) {
+        return true;
+    }
+    CHECKING.with(|active| active.borrow_mut().push(prop.id()));
+    let bound = lexical_binding(cx, prop, first, hilt).is_some();
+    CHECKING.with(|active| active.borrow_mut().pop());
+    bound
 }
 
 /// Instance properties a class or object declares: primary-constructor
@@ -279,6 +324,18 @@ pub(crate) fn lexical_binding(
     name: &str,
     hilt: &HashSet<String>,
 ) -> Option<Binding> {
+    lexical_binding_scope(cx, use_site, name, hilt).map(|(binding, _)| binding)
+}
+
+/// [`lexical_binding`] and the scope node it was declared in (a block,
+/// function, lambda, class or the file), where the type names of its
+/// declaration resolve.
+pub(crate) fn lexical_binding_scope<'t>(
+    cx: &FileCx<'_>,
+    use_site: TsNode<'t>,
+    name: &str,
+    hilt: &HashSet<String>,
+) -> Option<(Binding, TsNode<'t>)> {
     let mut child = use_site;
     let mut in_function = false;
     while let Some(scope) = child.parent() {
@@ -292,8 +349,8 @@ pub(crate) fn lexical_binding(
                     .filter(|stmt| stmt.kind() == "property_declaration")
                     .filter_map(|stmt| property_binding(cx, stmt, name, hilt))
                     .next_back();
-                if found.is_some() {
-                    return found;
+                if let Some(found) = found {
+                    return Some((found, scope));
                 }
             }
             // A loop variable is in scope only in the body, not the iterable.
@@ -307,14 +364,14 @@ pub(crate) fn lexical_binding(
                     if matches!(decl.kind(), "variable_declaration" | "parameter")
                         && let Some(binding) = declaration_binding(cx, decl, name)
                     {
-                        return Some(binding);
+                        return Some((binding, scope));
                     }
                     if decl.kind() == "multi_variable_declaration"
                         && named_children(decl)
                             .into_iter()
                             .any(|inner| declaration_binding(cx, inner, name).is_some())
                     {
-                        return Some(Binding::Untyped);
+                        return Some((Binding::Untyped, scope));
                     }
                 }
             }
@@ -326,8 +383,8 @@ pub(crate) fn lexical_binding(
                     .filter(|stmt| stmt.kind() == "property_declaration")
                     .filter_map(|stmt| property_binding(cx, stmt, name, hilt))
                     .next_back();
-                if local.is_some() {
-                    return local;
+                if let Some(local) = local {
+                    return Some((local, scope));
                 }
                 let params = named_children(scope)
                     .into_iter()
@@ -338,18 +395,18 @@ pub(crate) fn lexical_binding(
                             if decl.kind() == "variable_declaration"
                                 && let Some(binding) = declaration_binding(cx, decl, name)
                             {
-                                return Some(binding);
+                                return Some((binding, scope));
                             }
                             if decl.kind() == "multi_variable_declaration"
                                 && named_children(decl)
                                     .into_iter()
                                     .any(|inner| declaration_binding(cx, inner, name).is_some())
                             {
-                                return Some(Binding::Untyped);
+                                return Some((Binding::Untyped, scope));
                             }
                         }
                     }
-                    None if name == "it" => return Some(Binding::Untyped),
+                    None if name == "it" => return Some((Binding::Untyped, scope)),
                     None => {}
                 }
             }
@@ -363,7 +420,7 @@ pub(crate) fn lexical_binding(
                         if param.kind() == "parameter"
                             && let Some(binding) = declaration_binding(cx, param, name)
                         {
-                            return Some(binding);
+                            return Some((binding, scope));
                         }
                     }
                 }
@@ -371,7 +428,7 @@ pub(crate) fn lexical_binding(
             "getter" | "setter" => in_function = true,
             "class_declaration" | "object_declaration" | "companion_object" => {
                 if let Some(binding) = class_binding(cx, scope, name, in_function, hilt) {
-                    return Some(binding);
+                    return Some((binding, scope));
                 }
                 // A local class captures its enclosing function's bindings
                 // and an inner class reaches outer instance state; member
@@ -381,16 +438,27 @@ pub(crate) fn lexical_binding(
                     .is_some_and(|parent| !matches!(parent.kind(), "class_body" | "source_file"));
                 let inner = scope.kind() == "class_declaration" && is_inner(cx, scope);
                 if !local && !inner {
-                    return top_level_binding(cx, scope, name, hilt);
+                    return top_level_binding(cx, scope, name, hilt).map(|b| (b, root_of(scope)));
                 }
                 in_function = true;
             }
-            "source_file" => return top_level_binding(cx, scope, name, hilt),
+            "source_file" => {
+                return top_level_binding(cx, scope, name, hilt).map(|b| (b, scope));
+            }
             _ => {}
         }
         child = scope;
     }
     None
+}
+
+/// The file node above `node`.
+fn root_of(node: TsNode<'_>) -> TsNode<'_> {
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    root
 }
 
 /// A top-level property of this file.
@@ -417,13 +485,23 @@ pub(crate) fn this_property_binding(
     name: &str,
     hilt: &HashSet<String>,
 ) -> Option<Binding> {
+    this_property_binding_scope(cx, use_site, name, hilt).map(|(binding, _)| binding)
+}
+
+/// [`this_property_binding`] and the class that declares it.
+pub(crate) fn this_property_binding_scope<'t>(
+    cx: &FileCx<'_>,
+    use_site: TsNode<'t>,
+    name: &str,
+    hilt: &HashSet<String>,
+) -> Option<(Binding, TsNode<'t>)> {
     let mut node = use_site;
     while let Some(parent) = node.parent() {
         if matches!(
             parent.kind(),
             "class_declaration" | "object_declaration" | "companion_object"
         ) {
-            return class_binding(cx, parent, name, true, hilt);
+            return class_binding(cx, parent, name, true, hilt).map(|b| (b, parent));
         }
         node = parent;
     }
@@ -459,31 +537,27 @@ pub(crate) fn declares_name(cx: &FileCx<'_>, root: TsNode<'_>, name: &str) -> bo
 /// Whether `name` is a type parameter of a declaration enclosing `site`:
 /// `fun <T> f(x: T)` or `class C<T>` (W11c-1). Such a type proves no target.
 pub(crate) fn is_type_parameter(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> bool {
-    let mut node = site;
-    while let Some(parent) = node.parent() {
-        node = parent;
-        if !matches!(
-            parent.kind(),
-            "function_declaration" | "class_declaration" | "anonymous_function"
-        ) {
-            continue;
-        }
-        let declares = named_children(parent)
-            .into_iter()
-            .filter(|part| part.kind() == "type_parameters")
-            .flat_map(named_children)
-            .filter(|param| param.kind() == "type_parameter")
-            .any(|param| {
-                named_children(param)
-                    .into_iter()
-                    .find(|part| part.kind() == "identifier")
-                    .is_some_and(|ident| cx.text(&ident) == name)
-            });
-        if declares {
-            return true;
-        }
-    }
-    false
+    std::iter::successors(site.parent(), |node| node.parent())
+        .any(|scope| declares_type_parameter(cx, scope, name))
+}
+
+/// Whether `scope` itself (a function, class or anonymous function)
+/// declares a type parameter `name`.
+pub(crate) fn declares_type_parameter(cx: &FileCx<'_>, scope: TsNode<'_>, name: &str) -> bool {
+    matches!(
+        scope.kind(),
+        "function_declaration" | "class_declaration" | "anonymous_function"
+    ) && named_children(scope)
+        .into_iter()
+        .filter(|part| part.kind() == "type_parameters")
+        .flat_map(named_children)
+        .filter(|param| param.kind() == "type_parameter")
+        .any(|param| {
+            named_children(param)
+                .into_iter()
+                .find(|part| part.kind() == "identifier")
+                .is_some_and(|ident| cx.text(&ident) == name)
+        })
 }
 
 /// The receiver of the nearest enclosing `with(x) { … }` lambda: `x`'s

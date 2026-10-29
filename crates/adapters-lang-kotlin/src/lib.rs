@@ -53,6 +53,9 @@ pub struct Extraction {
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
+    /// Client calls that carry their own base (Spring `RestTemplate`), kept
+    /// out of the Retrofit base join.
+    unjoined_sites: Vec<adapters_fw::client::FetchSite>,
     /// Android Navigation 3 entries and back-stack navigations, resolved repo-wide.
     navigation3: navigation3::Pending,
     /// Hilt `@Binds` declarations, resolved repo-wide at the directory join.
@@ -1295,6 +1298,8 @@ pub fn extract_source(
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
+    let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
+    out.fetch_sites.extend(unjoined_sites);
     let names = out.shadow_names.clone();
     for pending in std::mem::take(&mut out.pending_endpoints) {
         pending.settle(
@@ -1708,6 +1713,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     // directory join.
     out.fetch_sites
         .extend(retrofit::sites(&cx, &functions, &imports));
+    // Spring `RestTemplate` client calls (#1340), which no Retrofit base
+    // applies to.
+    out.unjoined_sites
+        .extend(rest_template::sites(&cx, root, &functions, &imports));
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
 
@@ -2180,6 +2189,7 @@ pub fn extract_dir_incremental_with_progress(
             out.packages.extend(extraction.packages);
             out.fetch_sites.extend(extraction.fetch_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
+            out.unjoined_sites.extend(extraction.unjoined_sites);
             out.navigation3.extend(extraction.navigation3);
             out.hilt_binds.extend(extraction.hilt_binds);
             out.pending_endpoints.extend(extraction.pending_endpoints);
@@ -2193,6 +2203,8 @@ pub fn extract_dir_incremental_with_progress(
         &out.retrofit_bases,
         retrofit::LIBRARY,
     );
+    let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
+    out.fetch_sites.extend(unjoined_sites);
 
     // Directory join: an imported FQN resolves only to a declaration this
     // repo makes exactly once — a duplicate FQN (the same class in two
@@ -2448,6 +2460,7 @@ mod hilt_binds;
 pub mod navigation3;
 mod queries;
 mod receivers;
+mod rest_template;
 mod retrofit;
 
 #[cfg(test)]

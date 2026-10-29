@@ -153,8 +153,9 @@ use Support::*;
 const GO_CLIENT: &str = "`net/http` package functions, `http.DefaultClient` verbs and `NewRequest` sites; a constructed `http.Client` is read only through its `NewRequest`, and a URL must be an exact literal";
 /// What the Python HTTP client cells read (AC-0424).
 const PY_CLIENT: &str = "module functions and once-bound `Session`/`Client` receivers in their own scope; instance attributes and passed-in clients are not read, and a URL is followed only within its file";
-const NO_JVM_CLIENT: &str =
-    "outbound HTTP client calls are recognized only through Retrofit interfaces";
+const NO_JVM_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit interfaces and Spring `RestTemplate`";
+/// What the Kotlin RestTemplate client cell reads (AC-0456).
+const KT_REST: &str = "named-imported or fully qualified `RestTemplate` receivers: a typed local, parameter or property, `this.x`, or an inline `RestTemplate()`; star imports, `RestTemplateBuilder` results, named arguments and a one-argument `getForObject<T>(url)` are not read, and a URL must be a pure string literal";
 /// What the Java RestTemplate client cell reads (AC-0435).
 const JAVA_REST: &str = "single-type-imported or fully qualified `RestTemplate` receivers: a local, parameter or own-type field, or `new RestTemplate()`; wildcard imports, inherited or outer-class fields and `RestTemplateBuilder` results are not read, and a URL must be an exact literal";
 const JAVA_FEIGN: &str = "single-type-imported or fully qualified `@FeignClient` interfaces with Spring mapping annotations; `Feign.builder()` clients, inherited interface methods and `@RequestLine` contracts are not read, and a service-name or placeholder base resolves only through the system manifest";
@@ -312,6 +313,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
          and only same-class back-stack helpers are read",
     ),
     cell("Kotlin", "retrofit", HttpClientCalls, Supported, ""),
+    cell("Kotlin", "rest-template", HttpClientCalls, Partial, KT_REST),
     cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Kotlin", CORE, EventSites, Unsupported, NO_EVENTS),
     cell(
