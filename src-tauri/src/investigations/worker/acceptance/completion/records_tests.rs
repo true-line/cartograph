@@ -442,16 +442,46 @@ fn completion_acceptance_exhaustion_requires_matching_closed_limit_messages() {
     use crate::jobs::investigations::InvestigationStopReason as Stop;
     use llm::bounded::{BoundedCallError, FailureCode, InvocationOutcome};
     let host = Stop::HostLimit.test_message();
+    let query_host = Stop::HostLimitAt {
+        phase: crate::jobs::investigations::PreparationPhase::Query,
+        limit: crate::jobs::investigations::HostLimitKind::CumulativeQueryAndInventoryBytes,
+    }
+    .test_message();
+    let inventory_host = Stop::HostLimitAt {
+        phase: crate::jobs::investigations::PreparationPhase::Inventory,
+        limit: crate::jobs::investigations::HostLimitKind::CumulativeQueryAndInventoryBytes,
+    }
+    .test_message();
     let store = Stop::StoreCapacity.test_message();
     let unknown = Stop::BoundedProvider(BoundedCallError {
         code: FailureCode::ResponseTooLarge,
         outcome: InvocationOutcome::Unknown,
     })
     .test_message();
+    let unrecognized_host =
+        "Investigation limit reached: host_limit; phase=metadata_query; limit=some_other_budget.";
+    let unrecognized_phase = "Investigation limit reached: host_limit; phase=untrusted; limit=cumulative_query_and_inventory_bytes.";
     for (detail_reason, event_reason, classification) in [
         (host, host, ControlClassification::Exhausted),
+        (query_host, query_host, ControlClassification::Exhausted),
+        (
+            inventory_host,
+            inventory_host,
+            ControlClassification::Exhausted,
+        ),
+        (query_host, host, ControlClassification::Failed),
         (store, store, ControlClassification::Exhausted),
         (host, store, ControlClassification::Failed),
+        (
+            unrecognized_host,
+            unrecognized_host,
+            ControlClassification::Failed,
+        ),
+        (
+            unrecognized_phase,
+            unrecognized_phase,
+            ControlClassification::Failed,
+        ),
         (unknown, unknown, ControlClassification::Failed),
     ] {
         let (mut detail, _, mut events, binding) = fixture("terminal");

@@ -17,9 +17,8 @@ fn exhaustion_reason(message: &str) -> bool {
     use crate::jobs::investigations::InvestigationStopReason as Stop;
     use llm::bounded::{BoundedCallError, FailureCode, InvocationOutcome};
     message == EXHAUSTION_REASON
-        || [Stop::HostLimit, Stop::StoreCapacity]
-            .iter()
-            .any(|reason| message == reason.test_message())
+        || Stop::is_host_limit_message(message)
+        || message == Stop::StoreCapacity.test_message()
         || [
             FailureCode::DeadlineExceeded,
             FailureCode::InputTooLarge,

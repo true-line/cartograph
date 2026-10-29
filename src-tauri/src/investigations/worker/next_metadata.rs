@@ -1,4 +1,5 @@
 //! Internal Choice metadata reads use exact previews and one atomic publication.
+use super::super::context::ContextReadPreparationError;
 use super::*;
 use crate::investigations::context::metadata_admission::MetadataPublicationError;
 use crate::jobs::investigations::{MetadataAdmission, MetadataContinuationRead};
@@ -38,17 +39,37 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 query,
                 ..
             }) => (
-                context.prepare_query(self.state, query).map_err(|error| {
-                    Failure::from(error).preparation_at(PreparationPhase::Query)
-                })?,
+                context
+                    .prepare_query_with_diagnostic(self.state, query)
+                    .map_err(|error| match error {
+                        ContextReadPreparationError::CumulativeQueryAndInventoryBytes => {
+                            Failure::Stop(InvestigationStopReason::HostLimitAt {
+                                phase: PreparationPhase::Query,
+                                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+                            })
+                        }
+                        ContextReadPreparationError::Host(error) => {
+                            Failure::from(error).preparation_at(PreparationPhase::Query)
+                        }
+                    })?,
                 ContextPreviewKind::Query,
             ),
             CompletionInvestigationAction::Read(
                 QualifiedInvestigationAction::ReadCoverageInventory(read),
             ) => (
-                context.prepare_inventory(read).map_err(|error| {
-                    Failure::from(error).preparation_at(PreparationPhase::Inventory)
-                })?,
+                context
+                    .prepare_inventory_with_diagnostic(read)
+                    .map_err(|error| match error {
+                        ContextReadPreparationError::CumulativeQueryAndInventoryBytes => {
+                            Failure::Stop(InvestigationStopReason::HostLimitAt {
+                                phase: PreparationPhase::Inventory,
+                                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+                            })
+                        }
+                        ContextReadPreparationError::Host(error) => {
+                            Failure::from(error).preparation_at(PreparationPhase::Inventory)
+                        }
+                    })?,
                 ContextPreviewKind::Inventory,
             ),
             CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
