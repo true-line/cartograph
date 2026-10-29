@@ -1663,16 +1663,16 @@ fn route_parameters_match_in_every_framework_spelling() {
     assert!(!route_matches("/api/<>/x", "/api/a/x"));
 }
 
-// AC-0452: an Express-style `ALL` route serves every method, and a prefix
-// route (`/x/*`) matches paths under it only when no exact or parametric
-// route does (#1327).
+// AC-0452: an Express-style `ALL` route serves every method, as `ANY` does;
+// a method route beside it on the same path stays ambiguous, and prefix
+// routes (`/x/*`) are not matched (#1327).
 #[test]
-fn all_and_prefix_routes_match_fetches_by_specificity() {
+fn all_routes_match_every_fetch_method() {
     let endpoints = eps(&[
         "ep:test@ALL:/api/users/:id",
+        "ep:test@ALL:/api/orders",
+        "ep:test@POST:/api/orders",
         "ep:test@ALL:/api/files/*",
-        "ep:test@GET:/api/files/latest",
-        "ep:test@ALL:/*",
     ]);
     let cfg = ConfigIndex::default();
     let id = SourceId {
@@ -1682,9 +1682,9 @@ fn all_and_prefix_routes_match_fetches_by_specificity() {
     let out = stitch_fetches(
         &[
             fetch_site("DELETE", IdentityExpr::Literal("/api/users/7".into())),
-            fetch_site("GET", IdentityExpr::Literal("/api/files/a/b.txt".into())),
-            fetch_site("GET", IdentityExpr::Literal("/api/files/latest".into())),
-            fetch_site("POST", IdentityExpr::Literal("/health".into())),
+            fetch_site("GET", IdentityExpr::Literal("/api/users/8".into())),
+            fetch_site("POST", IdentityExpr::Literal("/api/orders".into())),
+            fetch_site("GET", IdentityExpr::Literal("/api/files/a".into())),
         ],
         &endpoints,
         &cfg,
@@ -1693,32 +1693,25 @@ fn all_and_prefix_routes_match_fetches_by_specificity() {
     let bound: Vec<&str> = out
         .edges
         .iter()
-        .filter(|e| e.label == "FETCHES")
+        .filter(|e| e.label == "FETCHES" && e.dst.starts_with("ep:"))
         .map(|e| e.dst.as_str())
         .collect();
     assert_eq!(
         bound,
+        ["ep:test@ALL:/api/users/:id", "ep:test@ALL:/api/users/:id"]
+    );
+    let mut reasons: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["reason"].as_str())
+        .collect();
+    reasons.sort();
+    assert_eq!(
+        reasons,
         [
-            "ep:test@ALL:/api/users/:id",
-            "ep:test@ALL:/api/files/*",
-            "ep:test@GET:/api/files/latest",
-            "ep:test@ALL:/*",
+            "ambiguous endpoint match for POST /api/orders (2 candidates)",
+            "no recovered endpoint matches GET /api/files/a",
         ]
     );
-    assert!(out.nodes.iter().all(|n| n.label != "Gap"));
-
-    // Two prefix routes at the same depth both match: ambiguous, not picked.
-    let two = eps(&["ep:test@ALL:/api/*", "ep:test@GET:/api/*"]);
-    let out = stitch_fetches(
-        &[fetch_site("GET", IdentityExpr::Literal("/api/x".into()))],
-        &two,
-        &cfg,
-        &id,
-    );
-    assert!(out.edges.iter().all(|e| !e.dst.starts_with("ep:")));
-    assert!(out.nodes.iter().any(|n| {
-        n.props["reason"]
-            .as_str()
-            .is_some_and(|r| r.starts_with("ambiguous endpoint match"))
-    }));
 }

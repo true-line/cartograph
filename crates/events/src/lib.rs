@@ -374,14 +374,11 @@ fn route_matches(pattern: &str, concrete: &str) -> bool {
     };
     let ps: Vec<&str> = pattern.split('/').collect();
     let cs: Vec<&str> = concrete.split('/').collect();
-    let segment = |(p, c): (&&str, &&str)| *p == *c || (param(p) && !c.is_empty());
-    // A prefix route (`/x/*`, #1327) matches one or more segments under `/x/`.
-    if let Some((&"*", head)) = ps.split_last() {
-        return cs.len() > head.len()
-            && cs[head.len()..].iter().all(|c| !c.is_empty())
-            && head.iter().zip(&cs).all(segment);
-    }
-    ps.len() == cs.len() && ps.iter().zip(&cs).all(segment)
+    ps.len() == cs.len()
+        && ps
+            .iter()
+            .zip(&cs)
+            .all(|(p, c)| p == c || (param(p) && !c.is_empty()))
 }
 
 /// The request URL of a fetch site and how it resolved, or why it did not.
@@ -510,32 +507,19 @@ pub fn stitch_fetches_with(
             (None, _) => Err(unresolved.unwrap_or_else(|| "runtime-computed fetch URL".into())),
             (Some(_), "?") => Err("runtime-computed HTTP method".to_string()),
             (Some((path, resolver)), method) => {
-                // A method-less route (`ANY`, or Express-style `ALL`, #1327)
-                // serves every method. A prefix route (`/x/*`) applies only
-                // when no exact or parametric route matches.
-                let matching = |prefix: bool| -> Vec<&str> {
-                    endpoints
-                        .iter()
-                        .filter(|(eid, verb, route)| {
-                            route.ends_with("/*") == prefix
-                                && (*verb == method
-                                    || *verb == "ANY"
-                                    || *verb == "ALL"
-                                    || (method == "HEAD" && get_serves_head.contains(*eid)))
-                                && route_matches(route, path)
-                        })
-                        .map(|(eid, _, _)| *eid)
-                        .collect()
-                };
-                let mut hits = matching(false);
-                if hits.is_empty() {
-                    // The deepest prefix is the most specific (`/api/files/*`
-                    // before `/*`); equally deep ones stay ambiguous.
-                    hits = matching(true);
-                    let depth = |eid: &str| eid.matches('/').count();
-                    let deepest = hits.iter().map(|eid| depth(eid)).max().unwrap_or(0);
-                    hits.retain(|eid| depth(eid) == deepest);
-                }
+                let hits: Vec<&str> = endpoints
+                    .iter()
+                    // A method-less route (`ANY`, or Express-style `ALL`,
+                    // #1327) serves every method.
+                    .filter(|(eid, verb, route)| {
+                        (*verb == method
+                            || *verb == "ANY"
+                            || *verb == "ALL"
+                            || (method == "HEAD" && get_serves_head.contains(*eid)))
+                            && route_matches(route, path)
+                    })
+                    .map(|(eid, _, _)| *eid)
+                    .collect();
                 match hits.as_slice() {
                     [one] => Ok((one, resolver.clone())),
                     [] => Err(format!("no recovered endpoint matches {method} {path}")),

@@ -149,7 +149,7 @@
 - **Priority:** Must · **Status:** Done
 - **AC-0013** Given a React/Next repo, when ingested, then Screen/Component nodes and FETCHES edges to endpoints are created.
 - **AC-0014** Given a data-fetch call site, when the endpoint is resolvable, then FETCHES is Confirmed; otherwise it escalates.
-- **AC-0452** Given a fetch whose resolved path and method are known, when its repository's endpoints are stitched, then a method-less route serves every method, whether spelled `ANY` or Express-style `ALL` (Express `all`, an unguarded node-http route, a Next.js pages/api handler). A prefix route `/x/*` matches a path of one or more segments under `/x/`, but only when no exact or parametric route matches. The deepest matching prefix wins, and equally deep prefixes stay an ambiguity `Gap` (#1327).
+- **AC-0452** Given a fetch whose resolved path and method are known, when its repository's endpoints are stitched, then a method-less route serves every method, whether spelled `ANY` or Express-style `ALL` (Express `all`, an unguarded node-http route, a Next.js pages/api handler). A method route beside it on the same path keeps the match an ambiguity `Gap`. Prefix routes (`/x/*`) are not matched, because their match semantics differ by producer (#1327).
 - **Security:** —
 - **Performance:** —
 - **Trace:** M4 · `adapters-lang-ts` (tsx), `adapters-fw`, `events` · — · T-0013..0014, T-0452
