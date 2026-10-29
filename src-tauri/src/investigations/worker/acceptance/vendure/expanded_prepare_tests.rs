@@ -520,3 +520,98 @@ fn captured_v12_canonical_query_continuation_repro() {
     );
     assert!(result["result"].is_null());
 }
+
+// AC-0466: the captured manual path validates roots before entering any side effects.
+#[test]
+fn captured_auditor_output_preflight_rejects_overlaps_before_side_effects() {
+    use super::super::expanded::captured_local::with_auditor_output;
+    use std::{cell::Cell, collections::BTreeMap, path::PathBuf};
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, String> {
+        let mut result = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            let value = if metadata.is_symlink() {
+                format!("link:{:?}", std::fs::read_link(&path).unwrap())
+            } else if metadata.is_dir() {
+                pending.extend(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+                "directory".into()
+            } else {
+                sha(&std::fs::read(&path).unwrap())
+            };
+            result.insert(path, value);
+        }
+        result
+    }
+    let case = Case::new();
+    let prepared = case.prepare_fixture().unwrap();
+    let base = case.root.parent().unwrap();
+    let receipt = base.join("preparation.json");
+    let definition = base.join("auditor-definition.json");
+    std::fs::write(&receipt, serde_json::to_vec(&prepared).unwrap()).unwrap();
+    // reopen_basis reads this as a bounded proposal; stage separately authenticates its contents.
+    std::fs::write(&definition, b"{}").unwrap();
+    let code = crate::paths::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .unwrap();
+    let mut invalid = vec![
+        case.root.join("auditor-output"),
+        prepared
+            .profile
+            .data()
+            .parent()
+            .unwrap()
+            .join("auditor-output"),
+        code.join("captured-auditor-output-must-not-create"),
+        base.join("missing").join("..").join("auditor-output"),
+    ];
+    #[cfg(unix)]
+    {
+        let alias = base.join("source-alias");
+        std::os::unix::fs::symlink(&case.root, &alias).unwrap();
+        invalid.push(alias.join("auditor-output"));
+    }
+    let before = snapshot(base);
+    let entered = Cell::new(0);
+    for output in invalid {
+        assert!(!output.exists());
+        assert!(
+            with_auditor_output(
+                [&case.config, &receipt, &definition],
+                &output,
+                InputPolicy::OfflineFixture,
+                || {
+                    entered.set(entered.get() + 1);
+                    Ok(())
+                },
+            )
+            .is_err(),
+            "{}",
+            output.display()
+        );
+        assert_eq!(entered.get(), 0);
+        assert!(!output.exists());
+        assert_eq!(snapshot(base), before);
+    }
+    let output = base.join("auditor-output");
+    with_auditor_output(
+        [&case.config, &receipt, &definition],
+        &output,
+        InputPolicy::OfflineFixture,
+        || {
+            entered.set(entered.get() + 1);
+            std::fs::create_dir(&output).unwrap();
+            std::fs::write(output.join("external-output"), b"retained").unwrap();
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(entered.get(), 1);
+    assert_eq!(
+        std::fs::read(output.join("external-output")).unwrap(),
+        b"retained"
+    );
+}

@@ -87,7 +87,7 @@ pub(super) struct Authority<'a> {
     pub provider: &'a InvestigationProvider,
 }
 impl<'a> Authority<'a> {
-    fn synthetic(prepared: &'a PreparedState) -> Self {
+    pub(super) fn synthetic(prepared: &'a PreparedState) -> Self {
         Self {
             app: &prepared.app,
             app_data: &prepared.app_data,

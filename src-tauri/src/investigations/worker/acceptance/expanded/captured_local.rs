@@ -69,6 +69,17 @@ pub(in super::super) fn run(
         },
     )
 }
+// Reuse the authenticated preparation roots before any auditor output/task writes.
+// `definition` is the bounded proposal artifact in reopen_basis; stage validates its contents.
+pub(in super::super) fn with_auditor_output<T>(
+    [config, preparation, definition]: [&Path; 3],
+    output: &Path,
+    policy: vendure::InputPolicy,
+    use_output: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _basis = vendure::reopen_basis(config, preparation, definition, output, policy)?;
+    use_output()
+}
 // Same explicit loopback constructor as the existing manual local acceptance.
 // Construction performs no model call; the frozen descriptor remains authority.
 fn configured_provider(
@@ -179,6 +190,80 @@ fn vendure_captured_local_analyst() {
                 &output,
                 &expected,
                 execute,
+            )
+        },
+    )
+    .unwrap();
+}
+
+// External orchestration must freshly authenticate review before preparation.
+// Local attestation bytes bind content, never reviewer identity.
+#[test]
+#[ignore = "manual captured auditor; requires independent definition, independent frozen reviewed-parent authority; stages only"]
+fn vendure_captured_local_auditor_prepare() {
+    use super::captured_auditor::{self, Artifacts};
+    let path = |name| std::path::PathBuf::from(super::super::required(name));
+    let parent_definition_path = path("CARTOGRAPH_VENDURE_ANALYST_DEFINITION");
+    let parent_definition: Definition = decode_record(
+        std::str::from_utf8(
+            &vendure::read_preparation_artifact(&parent_definition_path, 128 * 1024).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let definition_path = path("CARTOGRAPH_VENDURE_AUDITOR_DEFINITION");
+    let expected: captured_auditor::Definition = decode_record(
+        std::str::from_utf8(
+            &vendure::read_preparation_artifact(&definition_path, 128 * 1024).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let review =
+        vendure::read_preparation_artifact(&path("CARTOGRAPH_VENDURE_AUDITOR_REVIEW"), 128 * 1024)
+            .unwrap();
+    let parent_output = path("CARTOGRAPH_VENDURE_ANALYST_PREPARATION_OUTPUT");
+    let output = path("CARTOGRAPH_VENDURE_AUDITOR_OUTPUT");
+    with_auditor_output(
+        [
+            &path("CARTOGRAPH_VENDURE_NATIVE_CONFIG"),
+            &path("CARTOGRAPH_VENDURE_PREPARATION_RECEIPT"),
+            &definition_path,
+        ],
+        &output,
+        vendure::InputPolicy::FrozenVendure,
+        || {
+            vendure_prepare::reopen_bound(
+                [
+                    &path("CARTOGRAPH_VENDURE_NATIVE_CONFIG"),
+                    &path("CARTOGRAPH_VENDURE_PREPARATION_RECEIPT"),
+                    &parent_definition_path,
+                    &parent_output,
+                ],
+                &parent_definition,
+                vendure::InputPolicy::FrozenVendure,
+                |app, request, id, manifest, data| {
+                    let hash = core_prov::content_hash(
+                        &serde_json::to_vec(manifest).map_err(|e| e.to_string())?,
+                    );
+                    let parent = analyst::Authority {
+                        app,
+                        app_data: data,
+                        analyst_id: id,
+                        request,
+                        binding: &parent_definition.binding,
+                        manifest_hash: &hash,
+                        provider: &parent_definition.provider,
+                    };
+                    let artifacts = Artifacts {
+                        parent_output: &parent_output,
+                        output: &output,
+                        definition_path: &definition_path,
+                        review: &review,
+                    };
+                    captured_auditor::stage(&parent, &artifacts, &expected, true)
+                        .map(|id| serde_json::json!({"auditor_id":id,"provider_calls":0}))
+                },
             )
         },
     )
