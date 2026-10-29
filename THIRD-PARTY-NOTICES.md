@@ -684,24 +684,24 @@ Used by:
 ## Apache License 2.0
 
 Used by:
-- cranelift-bforest 0.136.4 — https://github.com/bytecodealliance/wasmtime
-- cranelift-codegen-shared 0.136.4 — https://github.com/bytecodealliance/wasmtime
-- cranelift-codegen 0.136.4 — https://github.com/bytecodealliance/wasmtime
-- cranelift-control 0.136.4 — https://github.com/bytecodealliance/wasmtime
-- cranelift-entity 0.136.4 — https://github.com/bytecodealliance/wasmtime
-- cranelift-frontend 0.136.4 — https://github.com/bytecodealliance/wasmtime
-- cranelift-native 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-bforest 0.137.1 — https://github.com/bytecodealliance/wasmtime
+- cranelift-codegen-shared 0.137.1 — https://github.com/bytecodealliance/wasmtime
+- cranelift-codegen 0.137.1 — https://github.com/bytecodealliance/wasmtime
+- cranelift-control 0.137.1 — https://github.com/bytecodealliance/wasmtime
+- cranelift-entity 0.137.1 — https://github.com/bytecodealliance/wasmtime
+- cranelift-frontend 0.137.1 — https://github.com/bytecodealliance/wasmtime
+- cranelift-native 0.137.1 — https://github.com/bytecodealliance/wasmtime
 - regalloc2 0.15.2 — https://github.com/bytecodealliance/regalloc2
 - target-lexicon 0.13.5 — https://github.com/bytecodealliance/target-lexicon
-- wasmtime-environ 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-cranelift 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-fiber 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-unwinder 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-wasi 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wiggle-generate 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wiggle-macro 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wiggle 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-environ 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-cranelift 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-fiber 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-unwinder 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-wasi 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wiggle-generate 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wiggle-macro 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wiggle 50.0.1 — https://github.com/bytecodealliance/wasmtime
 
 ```
 
@@ -4405,18 +4405,18 @@ Used by:
 - unicode-width 0.2.2 — https://github.com/unicode-rs/unicode-width
 - url 2.5.8 — https://github.com/servo/rust-url
 - uuid 1.23.4 — https://github.com/uuid-rs/uuid
-- wasm-compose 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-compose
-- wasm-encoder 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder
+- wasm-compose 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-compose
+- wasm-encoder 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder
 - wasm-encoder 0.262.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder
-- wasm-metadata 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-metadata
-- wasmparser 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser
-- wasmprinter 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmprinter
+- wasm-metadata 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-metadata
+- wasmparser 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser
+- wasmprinter 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmprinter
 - wast 262.0.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wast
 - wat 1.262.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wat
 - web_atoms 0.2.5 — https://github.com/servo/html5ever
 - window-vibrancy 0.8.1 — https://github.com/tauri-apps/tauri-plugin-vibrancy
-- wit-component 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wit-component
-- wit-parser 0.258.3 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wit-parser
+- wit-component 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wit-component
+- wit-parser 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wit-parser
 - wry 0.57.0 — https://github.com/tauri-apps/wry
 
 ```
@@ -6312,8 +6312,8 @@ Used by:
 - aws-lc-sys 0.45.0 — https://github.com/aws/aws-lc-rs
 - blake3 1.8.7 — https://github.com/BLAKE3-team/BLAKE3
 - constant_time_eq 0.4.2 — https://github.com/cesarb/constant_time_eq
-- cranelift-assembler-x64 0.136.4
-- cranelift-bitset 0.136.4 — https://github.com/bytecodealliance/wasmtime
+- cranelift-assembler-x64 0.137.1
+- cranelift-bitset 0.137.1 — https://github.com/bytecodealliance/wasmtime
 - cxx 1.0.197 — https://github.com/dtolnay/cxx
 - cxxbridge-macro 1.0.197 — https://github.com/dtolnay/cxx
 - dirs-sys 0.5.0 — https://github.com/dirs-dev/dirs-sys-rs
@@ -6341,8 +6341,8 @@ Used by:
 - objc2-web-kit 0.3.2 — https://github.com/madsmtm/objc2
 - pin-project-lite 0.2.17 — https://github.com/taiki-e/pin-project-lite
 - proc-macro2 1.0.106 — https://github.com/dtolnay/proc-macro2
-- pulley-interpreter 49.0.4 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley
-- pulley-macros 49.0.4 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley/macros
+- pulley-interpreter 50.0.1 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley
+- pulley-macros 50.0.1 — https://github.com/bytecodealliance/wasmtime/tree/main/pulley/macros
 - quote 1.0.46 — https://github.com/dtolnay/quote
 - rand 0.10.2 — https://github.com/rust-random/rand
 - raw-window-handle 0.6.2 — https://github.com/rust-windowing/raw-window-handle
@@ -6358,7 +6358,7 @@ Used by:
 - serde_repr 0.1.20 — https://github.com/dtolnay/serde-repr
 - siphasher 1.0.3 — https://github.com/jedisct1/rust-siphash
 - syn 2.0.118 — https://github.com/dtolnay/syn
-- syn 3.0.0 — https://github.com/dtolnay/syn
+- syn 3.0.9 — https://github.com/dtolnay/syn
 - sync_wrapper 1.0.2 — https://github.com/Actyx/sync_wrapper
 - tauri-codegen 2.7.4 — https://github.com/tauri-apps/tauri
 - tauri-macros 2.7.4 — https://github.com/tauri-apps/tauri
@@ -6378,14 +6378,14 @@ Used by:
 - usearch 2.26.6 — https://github.com/unum-cloud/USearch
 - utf-8 0.7.6 — https://github.com/SimonSapin/rust-utf8
 - vecmap-rs 0.2.5 — https://github.com/martinohmann/vecmap-rs
-- wasmtime-internal-component-macro 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-component-util 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-core 49.0.4
-- wasmtime-internal-jit-debug 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-jit-icache-coherence 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-versioned-export-macros 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-internal-wit-bindgen 49.0.4 — https://github.com/bytecodealliance/wasmtime
-- wasmtime-wasi-io 49.0.4 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-component-macro 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-component-util 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-core 50.0.1
+- wasmtime-internal-jit-debug 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-jit-icache-coherence 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-versioned-export-macros 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-internal-wit-bindgen 50.0.1 — https://github.com/bytecodealliance/wasmtime
+- wasmtime-wasi-io 50.0.1 — https://github.com/bytecodealliance/wasmtime
 - wast 35.0.2 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wast
 - witx 0.9.1 — https://github.com/WebAssembly/WASI
 

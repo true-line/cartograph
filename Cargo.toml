@@ -40,16 +40,16 @@ blake3 = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 usearch = { version = "2.26", default-features = false }
 regex = "1"
-# Every wasmtime 49 default feature except `cache`: the host never configures the
+# Every wasmtime 50 default feature except `cache`: the host never configures the
 # on-disk compilation cache, and that feature alone pulls the zstd chain.
-wasmtime = { version = "49.0.4", default-features = false, features = [
+wasmtime = { version = "50.0.1", default-features = false, features = [
   "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat",
   "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle",
   "addr2line", "coredump", "debug-builtins", "runtime", "component-model",
   "component-model-async", "threads", "stack-switching", "std", "debug",
   "compile-time-builtins", "wit-parser",
 ] }
-wasmtime-wasi = "49.0.4"
+wasmtime-wasi = "50.0.1"
 
 # Internal crates (SPEC-00 §8.1 crate map)
 core-graph = { path = "crates/core-graph" }
