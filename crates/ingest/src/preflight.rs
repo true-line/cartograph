@@ -977,8 +977,8 @@ mod tests {
             go.coverage
                 .iter()
                 .any(|cell| (cell.framework.as_str(), cell.capability.as_str())
-                    == ("core", "event_sites")
-                    && cell.support == crate::matrix::Support::Unsupported
+                    == ("kafka-go", "event_sites")
+                    && cell.support == crate::matrix::Support::Partial
                     && !cell.note.is_empty())
         );
         let rust = report

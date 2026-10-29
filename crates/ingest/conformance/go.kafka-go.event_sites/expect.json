@@ -1,0 +1,14 @@
+{
+  "event_sites": [
+    {
+      "kind": "kafka-topic",
+      "role": "Produces",
+      "identity": "orders"
+    },
+    {
+      "kind": "kafka-topic",
+      "role": "Consumes",
+      "identity": "orders"
+    }
+  ]
+}
