@@ -134,13 +134,14 @@ pub(super) fn derive(
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?
         .context_id;
-    let action = ProgressiveInvestigationAction::decode_resolved(
+    let action = ProgressiveInvestigationAction::decode_resolved_for_specialist(
         std::str::from_utf8(&authenticated.original)
             .map_err(|_| InvestigationStoreError::Invalid)?,
         context_id,
         &call.request_hash,
         prior,
         policy,
+        task.detail.summary.specialist_id,
     )?;
     let (tool, read, hash, bytes, maximum) = match (kind, action) {
         (

@@ -5,6 +5,7 @@ use llm::CompletionPayload;
 use serde_json::Value;
 
 pub(super) const CHOICE: &str = include_str!("data/analyst-v13-choice.json");
+const EXACT_NODE_SCOPE: &str = r#"{"type":"object","properties":{"type":{"const":"node"},"id":{"type":"string","minLength":1,"maxLength":1024}},"required":["type","id"],"additionalProperties":false}"#;
 pub(super) const FINISH: &str = include_str!("data/analyst-v13-finish-only.json");
 
 pub(super) fn select(role: SpecialistId, mode: CompletionCallMode) -> Option<&'static str> {
@@ -23,7 +24,9 @@ pub(super) fn select_admitted(
 ) -> Result<Option<String>, InvestigationError> {
     if !matches!(
         role,
-        SpecialistId::DomainAnalystV14 | SpecialistId::DomainAnalystV15
+        SpecialistId::DomainAnalystV14
+            | SpecialistId::DomainAnalystV15
+            | SpecialistId::DomainAnalystV17
     ) {
         return Ok(select(role, mode).map(str::to_owned));
     }
@@ -39,6 +42,15 @@ pub(super) fn select_admitted(
     let keys = bounded_bytes(&facts, MAX_MANIFEST_BYTES)?;
     let mut schema: Value =
         serde_json::from_str(CHOICE).map_err(|_| InvestigationError::InvalidInput)?;
+    if role.uses_exact_node_queries() {
+        schema["$defs"]["query_scope"]["anyOf"]
+            .as_array_mut()
+            .ok_or(InvestigationError::InvalidInput)?
+            .push(
+                serde_json::from_str(EXACT_NODE_SCOPE)
+                    .map_err(|_| InvestigationError::InvalidInput)?,
+            );
+    }
     let actions = schema["anyOf"]
         .as_array_mut()
         .ok_or(InvestigationError::InvalidInput)?;
@@ -66,6 +78,7 @@ pub(super) fn schema_role(system: &str) -> Option<SpecialistId> {
         SpecialistId::DomainAnalystV13,
         SpecialistId::DomainAnalystV14,
         SpecialistId::DomainAnalystV15,
+        SpecialistId::DomainAnalystV17,
     ]
     .into_iter()
     .find(|role| system == role.prompt())
@@ -75,11 +88,11 @@ pub(super) fn schema_role(system: &str) -> Option<SpecialistId> {
 pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
     use context_hub::logical::{json_bytes, slots, sum};
     sum(&[
-        super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV15)?,
+        super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV17)?,
         slots::<&crate::TaskFactKey>(policy.limits().selected_facts)?,
         MAX_MANIFEST_BYTES,              // bounded borrowed-key encoding
         json_bytes(MAX_MANIFEST_BYTES)?, // decoded exact keys
-        json_bytes(CHOICE.len())?,       // compiled template tree
+        json_bytes(CHOICE.len().checked_add(EXACT_NODE_SCOPE.len())?)?, // compiled template tree
         MAX_INPUT_BYTES,                 // bounded schema encoding (also on rejection)
         slots::<Vec<u8>>(2)?,
     ])
@@ -98,6 +111,7 @@ pub(super) fn validate(
             Err(InvestigationError::InvalidInput)
         };
     };
+    ledger.validate_for_specialist(role, &INVESTIGATION_V2_POLICY)?;
     let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
         .map_err(|_| InvestigationError::InvalidInput)?;
     if payload.response_schema != select_admitted(role, mode, ledger)? {

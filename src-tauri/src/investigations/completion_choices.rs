@@ -69,6 +69,7 @@ fn choices(
     // Keep membership from this exact authorized projection, not merely its
     // full-graph identity. This metadata never enters the selection wire.
     let scoped_facts = match scope {
+        InvestigationScope::Node { .. } => return Err("Invalid task scope.".into()),
         // Full-graph source existence is already checked by inspection::resolve
         // before start. Only a narrower scope needs its own membership index.
         InvestigationScope::All => None,

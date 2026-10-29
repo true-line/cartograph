@@ -26,6 +26,18 @@ fn path(value: &str) -> bool {
 }
 
 impl InvestigationInputLedger {
+    /// Structural hashes do not grant a specialist new query capabilities.
+    pub fn validate_for_specialist(
+        &self,
+        role: SpecialistId,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        self.validate_with_policy(policy)?;
+        for manifest in &self.queries {
+            manifest.query.validate_for_specialist(role)?;
+        }
+        Ok(())
+    }
     /// Enforce bounded, complete metadata before publication or use as a saved
     /// historical basis. This does not certify source bytes or current freshness.
     pub fn validate(&self) -> Result<(), InvestigationError> {
@@ -240,7 +252,7 @@ impl InvestigationInputLedger {
         let mut query_bytes = 0usize;
         let mut returned_facts = 0usize;
         for query in &self.queries {
-            query.query.validate()?;
+            query.query.validate_retained()?;
             if !hash(&query.response_hash)
                 || query.response_bytes > query.query.max_bytes
                 || query.response_bytes == 0

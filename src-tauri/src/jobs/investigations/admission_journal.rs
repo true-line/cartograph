@@ -591,6 +591,7 @@ fn read_entries(
                 &entry.response,
                 &witness.core.ledger,
                 &entry.call,
+                task.detail.summary.specialist_id,
             )?;
             let response: InvestigationResponseMeta = read_body(
                 connection,
@@ -661,6 +662,7 @@ fn validate_proposal(
     response: &InvestigationResponseMeta,
     ledger: &InvestigationInputLedger,
     call: &SavedCallBasis,
+    role: SpecialistId,
 ) -> Result<(), InvestigationStoreError> {
     // Capacity refusals are read proposals only. Exclude the broader finish
     // decoder before it can acquire findings that this journal always rejects.
@@ -679,12 +681,13 @@ fn validate_proposal(
         .ok_or(InvestigationStoreError::Invalid)?
         .context_id
         .as_str();
-    let action = ProgressiveInvestigationAction::decode_resolved(
+    let action = ProgressiveInvestigationAction::decode_resolved_for_specialist(
         std::str::from_utf8(&raw).map_err(|_| InvestigationStoreError::Invalid)?,
         context,
         &call.request_hash,
         ledger,
         &INVESTIGATION_V2_POLICY,
+        role,
     )?;
     if !matches!(action, CompletionInvestigationAction::Read(_))
         || call.mode() != CompletionCallMode::Choice
@@ -793,7 +796,13 @@ pub(super) fn append(
     if pending != core.step {
         return Err(InvestigationStoreError::Invalid);
     }
-    validate_proposal(proposal, response, &core.ledger, call)?;
+    validate_proposal(
+        proposal,
+        response,
+        &core.ledger,
+        call,
+        task.detail.summary.specialist_id,
+    )?;
     let sequence = current
         .count
         .checked_add(1)

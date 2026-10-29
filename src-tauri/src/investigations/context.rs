@@ -80,6 +80,7 @@ pub(super) struct FrozenContext {
     pub(super) inventory_details: Vec<String>,
     qualified: Option<CoverageContext>,
     pub(super) policy: &'static InvestigationPolicy,
+    specialist: SpecialistId,
 }
 
 /// Owned local preparation, never a deserialized or cloneable publication token.
@@ -579,6 +580,7 @@ impl FrozenContext {
             inventory_details: vec![],
             qualified: None,
             policy: request.policy,
+            specialist: request.specialist_id,
         })
     }
 
@@ -588,6 +590,7 @@ impl FrozenContext {
         complete: ContextSnapshot,
     ) -> Result<ContextSnapshot, HostError> {
         Ok(match requested {
+            InvestigationScope::Node { .. } => return Err(HostError::InvalidInput),
             InvestigationScope::All => complete,
             InvestigationScope::Neighborhood { .. } => {
                 // Reuse the service's actual scope selection rather than a
@@ -645,7 +648,7 @@ impl FrozenContext {
         state: &AppState,
         query: InvestigationQuery,
     ) -> Result<PreparedContextRead, ContextReadPreparationError> {
-        query.validate()?;
+        query.validate_for_specialist(self.specialist)?;
         self.ledger.validate_with_policy(self.policy)?;
         match (
             &self.qualified,
@@ -1103,6 +1106,7 @@ fn graph_reference(reference: &FactReference) -> FactKey {
 }
 fn scope(value: &InvestigationScope) -> QueryScope {
     match value {
+        InvestigationScope::Node { id } => QueryScope::Node { id: id.clone() },
         InvestigationScope::All => QueryScope::All,
         InvestigationScope::Neighborhood { anchor, hops } => QueryScope::Neighborhood {
             anchor: anchor.clone(),

@@ -164,6 +164,25 @@ impl CompletionFixture {
         inventory: bool,
         redacted: bool,
     ) -> Self {
+        Self::with_original(
+            provider,
+            specialist,
+            source,
+            inventory,
+            if redacted {
+                "export function enabled(ok: boolean) { const limited = ok /* password=syntheticsecret123 */ === false; if (limited) return false; }\n"
+            } else {
+                ORIGINAL
+            },
+        )
+    }
+    fn with_original(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        source: bool,
+        inventory: bool,
+        original: &str,
+    ) -> Self {
         // Reuse real parser/receipt/context setup, then retire its unused legacy
         // task before creating the genuine request4 task under test.
         let base = Fixture::with_contract(
@@ -172,11 +191,7 @@ impl CompletionFixture {
             "Inspect selected source and recorded analysis limits.",
             SpecialistId::DomainAnalystV6,
             source.then_some(agents::TaskRangeRole::DefinitionInitializer),
-            if redacted {
-                "export function enabled(ok: boolean) { const limited = ok /* password=syntheticsecret123 */ === false; if (limited) return false; }\n"
-            } else {
-                ORIGINAL
-            },
+            original,
         );
         let state = base.app.state::<AppState>();
         {

@@ -25,6 +25,15 @@ impl NextFixture {
             !pinned,
             false,
         );
+        let request = base.request.clone();
+        Self::from_completion_base(provider, specialist, base, request)
+    }
+    fn from_completion_base(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        base: CompletionFixture,
+        mut request: StagedObligationRequest,
+    ) -> Self {
         let state = base.base.app.state::<AppState>();
         let mut jobs = state.jobs.lock().unwrap();
         // Reuse the real retained TS capture and qualification, retiring only
@@ -41,7 +50,6 @@ impl NextFixture {
         )
         .unwrap();
         state.investigations.remove(&base.id);
-        let mut request = base.request.clone();
         request.schema_version = 7;
         request.request_nonce = "next-prompt-worker-fixture".into();
         request.specialist_id = serde_json::to_value(specialist)
@@ -111,6 +119,7 @@ struct NextProvider {
     source_scenario: Option<SourceScenario>,
     extra_inventory: bool,
     large_finish: bool,
+    exact_targets: bool,
 }
 impl NextProvider {
     fn new(malformed: bool) -> Self {
@@ -128,6 +137,7 @@ impl NextProvider {
             source_scenario: None,
             extra_inventory: false,
             large_finish: false,
+            exact_targets: false,
         }
     }
 }
@@ -170,7 +180,8 @@ impl LlmProvider for NextProvider {
                 if prompt["turn_progress"]["admission_mode"] == "finish_only" {
                     2
                 } else if (request.payload().system == SpecialistId::DomainAnalystV14.prompt()
-                    || request.payload().system == SpecialistId::DomainAnalystV15.prompt())
+                    || request.payload().system == SpecialistId::DomainAnalystV15.prompt()
+                    || request.payload().system == SpecialistId::DomainAnalystV17.prompt())
                     && parsed["anyOf"]
                         .as_array()
                         .unwrap()
@@ -198,7 +209,10 @@ impl LlmProvider for NextProvider {
         if call == 0 && self.lose_metadata_ack {
             crate::jobs::investigations::metadata_host_fixture::lose_next_ack();
         }
-        let text = if self.invalid_source_first && call == 0 {
+        let text = if self.exact_targets {
+            let prompts = self.observed.prompts.lock().unwrap();
+            exact_node_tests::next_action(prompts.last().unwrap()).to_string()
+        } else if self.invalid_source_first && call == 0 {
             json!({"type":"read_evidence","fact":{"kind":"node","id":"not-admitted"},
                 "role":"provenance","index":0})
             .to_string()
@@ -1761,3 +1775,6 @@ fn next_prompt_unadmitted_source_fact_stops_before_preparation() {
         assert_eq!(detail.usage.tool_actions, 0);
     }
 }
+
+#[path = "exact_node_tests.rs"]
+mod exact_node_tests;
