@@ -114,13 +114,19 @@ test('heavy Rust jobs hold one of two shared-host slots and release it (#1242)',
   const ci = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
   const rust = ci.match(/^ {2}rust:\n(?: {4}.*\n| *\n)+/mu)?.[0] ?? '';
   const [, , rustWait] = rust.match(take) ?? [];
-  assert.ok(Number(rustWait) < 59 * 60);
+  // A job's timeout counts its slot wait, so it leaves the work its own
+  // budget beyond the longest wait (#1373).
+  assert.match(rust, /^ {4}timeout-minutes: 89$/mu);
+  assert.ok(89 * 60 - Number(rustWait) >= 45 * 60);
   assert.ok(rust.indexOf('Take a host heavy-build slot') < rust.indexOf('cargo clippy'));
   assert.ok(rust.indexOf('cargo test --workspace') < rust.search(release));
   const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
   const [, when, codeqlWait] = codeql.match(take) ?? [];
   assert.equal(when, "matrix.language == 'rust'");
-  assert.ok(Number(codeqlWait) < 45 * 60);
+  assert.match(codeql, /^ {4}timeout-minutes: 120$/mu);
+  assert.ok(120 * 60 - Number(codeqlWait) >= 90 * 60);
+  // One Rust extraction at a time repo-wide; other languages per run.
+  assert.match(codeql, /group: codeql-\$\{\{ matrix\.language == 'rust' && 'rust' \|\| github\.run_id \}\}-\$\{\{ matrix\.language \}\}\n +cancel-in-progress: false\n/u);
   assert.ok(codeql.indexOf('Take a host heavy-build slot') < codeql.indexOf('codeql-action/init@'));
   assert.equal(codeql.match(release)?.[1], " && matrix.language == 'rust'");
   assert.ok(codeql.indexOf('codeql-action/analyze@') < codeql.search(release));
