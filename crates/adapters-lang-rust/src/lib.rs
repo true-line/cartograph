@@ -55,6 +55,8 @@ pub struct Extraction {
     pending_endpoints: Vec<PendingDirectEndpoint>,
     /// reqwest client calls, stitched to endpoints by the host (#999).
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
+    /// rdkafka producer and consumer sites (#1371).
+    pub event_sites: Vec<adapters_fw::events::EventSite>,
 }
 
 /// How a pending call resolves once every file is known.
@@ -879,10 +881,19 @@ fn extract_source_inner(
     }
 
     let client_fields = reqwest::client_fields(&cx, root, &bindings);
+    let consumer_fields = rdkafka::consumer_fields(&cx, root, &bindings);
     for (fn_node, fn_sym) in &function_items {
         http::extract_actix_fn_attrs(&cx, *fn_node, fn_sym, &bindings, &mut out);
         http::extract_function_routes(&cx, *fn_node, fn_sym, &bindings, &locals, &mut out);
         reqwest::extract_function_calls(&cx, *fn_node, fn_sym, &bindings, &client_fields, &mut out);
+        rdkafka::extract_function_sites(
+            &cx,
+            *fn_node,
+            fn_sym,
+            &bindings,
+            &consumer_fields,
+            &mut out,
+        );
     }
 
     // Calls.
@@ -1479,6 +1490,7 @@ pub fn extract_dir_incremental_with_progress(
             .extend(extraction.actix_service_mounts);
         out.pending_endpoints.extend(extraction.pending_endpoints);
         out.fetch_sites.extend(extraction.fetch_sites);
+        out.event_sites.extend(extraction.event_sites);
     }
     let index = SymbolIndex::build(&out);
     for pending in std::mem::take(&mut out.pending_calls) {
@@ -1496,6 +1508,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 }
 
 mod http;
+mod rdkafka;
 mod reqwest;
 
 #[cfg(test)]

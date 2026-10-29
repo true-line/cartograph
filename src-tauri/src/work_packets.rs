@@ -1578,7 +1578,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let data = directory.path().join("app");
         let ruby_dir = directory.path().join("ruby");
-        let rust_dir = directory.path().join("rust");
+        let terraform_dir = directory.path().join("terraform");
         let unrecovered_dir = directory.path().join("unrecovered");
         std::fs::create_dir_all(&data).unwrap();
 
@@ -1608,8 +1608,11 @@ mod tests {
         );
         write_file(&ruby_dir, "vendor/ignored.rb", "puts 'vendored'\n");
         crate::local_commit::tests::init_clean_repo(
-            &rust_dir,
-            &[("src/lib.rs", b"pub fn answer() -> i32 {\n    42\n}\n")],
+            &terraform_dir,
+            &[(
+                "main.tf",
+                b"resource \"aws_s3_bucket\" \"logs\" {\n  bucket = \"logs\"\n}\n",
+            )],
         );
         write_file(&unrecovered_dir, "lib/only.rb", "puts 'hi'\n");
 
@@ -1747,16 +1750,16 @@ mod tests {
                 .is_empty()
         );
 
-        // A recovered repo whose compiled-in cells are all supported also
-        // returns an empty list.
-        let rust_source = crate::register_local_source(&state, &rust_dir).unwrap();
+        // A recovered repo whose compiled-in cells are all supported (Terraform;
+        // every code language now has a partial cell) also returns an empty list.
+        let terraform_source = crate::register_local_source(&state, &terraform_dir).unwrap();
         let operation =
-            crate::source_operation(&state, vec![(rust_source.clone(), false)]).unwrap();
-        let (_, execution) = crate::start_job(&state, &rust_source.ingest_job_kind()).unwrap();
-        crate::run_ingest(&rust_source, &operation, &execution, handle, &state).unwrap();
+            crate::source_operation(&state, vec![(terraform_source.clone(), false)]).unwrap();
+        let (_, execution) = crate::start_job(&state, &terraform_source.ingest_job_kind()).unwrap();
+        crate::run_ingest(&terraform_source, &operation, &execution, handle, &state).unwrap();
         drop(operation);
         assert!(
-            draft_adapter_packets(&rust_source.repo_key, handle, &state)
+            draft_adapter_packets(&terraform_source.repo_key, handle, &state)
                 .unwrap()
                 .is_empty()
         );

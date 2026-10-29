@@ -27,21 +27,44 @@ const VERBS: [(&str, &str); 6] = [
     ("head", "HEAD"),
 ];
 
-/// Per-function proof context.
-struct Proof<'a, 't> {
+/// Per-function proof context. It proves a receiver of the type
+/// `is_type` names; rdkafka reuses it for consumers (#1371).
+pub(super) struct Proof<'a, 't> {
     cx: &'a FileCx<'a>,
     bindings: &'a Bindings,
     function: TsNode<'t>,
     shadows: BTreeSet<String>,
-    /// Fields typed reqwest Client, per (module scope, struct name).
+    /// Fields of the proven type, per (module scope, struct name).
     client_fields: &'a ClientFields,
+    is_type: fn(&[String]) -> bool,
+    /// Whether `T::new()` / `T::default()` and reqwest builders prove it.
+    constructible: bool,
 }
 
-impl<'t> Proof<'_, 't> {
+impl<'a, 't> Proof<'a, 't> {
+    pub(super) fn new(
+        cx: &'a FileCx<'a>,
+        bindings: &'a Bindings,
+        function: TsNode<'t>,
+        client_fields: &'a ClientFields,
+        is_type: fn(&[String]) -> bool,
+        constructible: bool,
+    ) -> Self {
+        Proof {
+            cx,
+            bindings,
+            function,
+            shadows: value_bindings(cx, function),
+            client_fields,
+            is_type,
+            constructible,
+        }
+    }
+
     /// The single external path `text` resolves to at `node`, if exactly one.
     /// A generic parameter in scope named like its first segment shadows
     /// any import, so such a path resolves to nothing.
-    fn path(&self, node: TsNode<'_>, text: &str) -> Option<Vec<String>> {
+    pub(super) fn path(&self, node: TsNode<'_>, text: &str) -> Option<Vec<String>> {
         let head = text.split('<').next().unwrap_or(text);
         let first = head.split("::").next().unwrap_or(head).trim();
         if generic_names(self.cx, node).contains(first) {
@@ -57,15 +80,28 @@ impl<'t> Proof<'_, 't> {
         self.is_client_type_text(node, self.cx.text(&node))
     }
 
-    /// A type spelling written at `node` that names a reqwest `Client`,
-    /// behind `&`, `&mut` and the standard `Arc` / `Rc` only.
+    /// A type spelling written at `node` that names the proven type
+    /// (generic arguments aside), behind `&`, `&mut` and the standard
+    /// `Arc` / `Rc` only.
     fn is_client_type_text(&self, node: TsNode<'_>, text: &str) -> bool {
         let mut text = text.trim();
         while let Some(rest) = text.strip_prefix('&') {
-            let rest = rest.trim_start();
+            let mut rest = rest.trim_start();
+            // A reference may name its lifetime: `&'a T`, `&'_ mut T`.
+            if let Some(lifetime) = rest.strip_prefix('\'') {
+                rest = lifetime
+                    .trim_start_matches(|c: char| c == '_' || c.is_alphanumeric())
+                    .trim_start();
+            }
             text = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
         }
         let head = text.split('<').next().unwrap_or(text).trim();
+        if self
+            .path(node, head)
+            .is_some_and(|path| (self.is_type)(&path))
+        {
+            return true;
+        }
         if let Some(inner) = text
             .strip_suffix('>')
             .and_then(|t| t.split_once('<'))
@@ -76,12 +112,11 @@ impl<'t> Proof<'_, 't> {
                 .is_some_and(|path| is_shared_pointer(&path))
                 && self.is_client_type_text(node, inner);
         }
-        self.path(node, text)
-            .is_some_and(|path| is_client_path(&path))
+        false
     }
 
-    /// Whether `expr` evaluates to a reqwest `Client`.
-    fn is_client_expr(&self, expr: TsNode<'_>) -> bool {
+    /// Whether `expr` evaluates to the proven type.
+    pub(super) fn is_client_expr(&self, expr: TsNode<'_>) -> bool {
         match expr.kind() {
             "parenthesized_expression" | "try_expression" => expr
                 .named_child(0)
@@ -99,18 +134,26 @@ impl<'t> Proof<'_, 't> {
                             return false;
                         };
                         match self.cx.text(&method) {
-                            "unwrap" | "expect" => self.is_client_expr(receiver),
-                            "build" => self.is_builder_expr(receiver),
+                            // Only reqwest's own `Result<Client>` is forwarded: a
+                            // proven type may carry a local trait's `unwrap`.
+                            "unwrap" | "expect" => {
+                                self.constructible && self.is_client_expr(receiver)
+                            }
+                            "build" => self.constructible && self.is_builder_expr(receiver),
                             _ => false,
                         }
                     }
-                    "scoped_identifier" | "identifier" => self
-                        .path(callee, self.cx.text(&callee))
-                        .is_some_and(|path| {
-                            path.split_last().is_some_and(|(last, ty)| {
-                                matches!(last.as_str(), "new" | "default") && is_client_path(ty)
-                            })
-                        }),
+                    "scoped_identifier" | "identifier" => {
+                        self.constructible
+                            && self
+                                .path(callee, self.cx.text(&callee))
+                                .is_some_and(|path| {
+                                    path.split_last().is_some_and(|(last, ty)| {
+                                        matches!(last.as_str(), "new" | "default")
+                                            && (self.is_type)(ty)
+                                    })
+                                })
+                    }
                     _ => false,
                 }
             }
@@ -198,7 +241,7 @@ impl<'t> Proof<'_, 't> {
 
     /// `self.<field>` inside a module-level `impl` of a module-level struct
     /// declared in the same module whose field of that name is typed
-    /// reqwest `Client`. Items declared inside a block fail closed: a
+    /// the proven type. Items declared inside a block fail closed: a
     /// module scope cannot tell same-named block-local structs apart.
     fn is_client_field(&self, expr: TsNode<'_>) -> bool {
         let (Some(value), Some(field)) = (
@@ -388,7 +431,7 @@ fn pattern_names(cx: &FileCx<'_>, node: TsNode<'_>) -> Vec<String> {
     out
 }
 
-/// (module scope, struct name) -> field name -> typed reqwest `Client`.
+/// (module scope, struct name) -> field name -> typed as the proven type.
 pub(super) type ClientFields = BTreeMap<(String, String), BTreeMap<String, bool>>;
 
 /// The named fields of every struct in the file, and whether each is typed
@@ -397,6 +440,17 @@ pub(super) fn client_fields(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     bindings: &Bindings,
+) -> ClientFields {
+    typed_fields(cx, root, bindings, is_client_path)
+}
+
+/// The named fields of every struct in the file, and whether each is typed
+/// as the type `is_type` names.
+pub(super) fn typed_fields(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    bindings: &Bindings,
+    is_type: fn(&[String]) -> bool,
 ) -> ClientFields {
     let empty = ClientFields::new();
     let mut out = ClientFields::new();
@@ -428,6 +482,8 @@ pub(super) fn client_fields(
                     function: field,
                     shadows: BTreeSet::new(),
                     client_fields: &empty,
+                    is_type,
+                    constructible: false,
                 };
                 fields.insert(cx.text(&field_name).to_string(), proof.is_client_type(ty));
             }
@@ -447,13 +503,7 @@ pub(super) fn extract_function_calls(
     client_fields: &ClientFields,
     out: &mut Extraction,
 ) {
-    let proof = Proof {
-        cx,
-        bindings,
-        function,
-        shadows: value_bindings(cx, function),
-        client_fields,
-    };
+    let proof = Proof::new(cx, bindings, function, client_fields, is_client_path, true);
     let mut calls = Vec::new();
     let mut stack = vec![function];
     while let Some(node) = stack.pop() {
