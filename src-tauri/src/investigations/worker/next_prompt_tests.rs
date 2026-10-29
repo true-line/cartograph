@@ -101,6 +101,7 @@ struct NextProvider {
     capacity_control: bool,
     observed: Scripted,
     malformed: bool,
+    invalid_source_first: bool,
     metadata_order: Option<[bool; 2]>,
     metadata_query: Option<Value>,
     received_payloads: std::sync::Mutex<Vec<llm::CompletionPayload>>,
@@ -116,6 +117,7 @@ impl NextProvider {
             capacity_control: false,
             observed: Scripted::new(Mode::CompletionNoAttempt),
             malformed,
+            invalid_source_first: false,
             metadata_order: None,
             metadata_query: None,
             received_payloads: std::sync::Mutex::new(Vec::new()),
@@ -165,6 +167,14 @@ impl LlmProvider for NextProvider {
                 parsed["anyOf"].as_array().unwrap().len(),
                 if prompt["turn_progress"]["admission_mode"] == "finish_only" {
                     2
+                } else if request.payload().system == SpecialistId::DomainAnalystV14.prompt()
+                    && parsed["anyOf"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|action| action["properties"]["type"]["const"] != "read_evidence")
+                {
+                    5
                 } else {
                     6
                 }
@@ -185,7 +195,11 @@ impl LlmProvider for NextProvider {
         if call == 0 && self.lose_metadata_ack {
             crate::jobs::investigations::metadata_host_fixture::lose_next_ack();
         }
-        let text = if self.capacity_control {
+        let text = if self.invalid_source_first && call == 0 {
+            json!({"type":"read_evidence","fact":{"kind":"node","id":"not-admitted"},
+                "role":"provenance","index":0})
+            .to_string()
+        } else if self.capacity_control {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
             if call == 0 {
@@ -399,12 +413,15 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
         (SpecialistId::DomainAnalystV10, [false, false]),
         (SpecialistId::DomainAnalystV12, [true, false]),
         (SpecialistId::DomainAnalystV13, [true, false]),
+        (SpecialistId::DomainAnalystV14, [true, false]),
     ] {
         let mut scripted = NextProvider::new(false);
         scripted.metadata_order = Some(order);
         if matches!(
             role,
-            SpecialistId::DomainAnalystV12 | SpecialistId::DomainAnalystV13
+            SpecialistId::DomainAnalystV12
+                | SpecialistId::DomainAnalystV13
+                | SpecialistId::DomainAnalystV14
         ) {
             scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
                 "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
@@ -494,7 +511,9 @@ fn next_prompt_worker_metadata_query_inventory_atomic_continuation_and_result7()
             let second: Value = serde_json::from_slice(&second).unwrap();
             if matches!(
                 role,
-                SpecialistId::DomainAnalystV12 | SpecialistId::DomainAnalystV13
+                SpecialistId::DomainAnalystV12
+                    | SpecialistId::DomainAnalystV13
+                    | SpecialistId::DomainAnalystV14
             ) {
                 assert_canonical_query_continuation(
                     &provider.received_payloads.lock().unwrap()[1],
@@ -1579,4 +1598,30 @@ fn next_prompt_foreign_cursor_preparation_phase_is_durable() {
             );
         }
     }
+}
+
+// AC-0447: a scripted schema bypass stops semantically before captured-source preparation.
+#[test]
+fn next_prompt_unadmitted_source_fact_stops_before_preparation() {
+    let mut provider = NextProvider::new(false);
+    provider.invalid_source_first = true;
+    let provider = Arc::new(provider);
+    let fixture = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV14);
+    fixture.run(provider.clone());
+    let state = fixture.base.base.app.state::<AppState>();
+    let detail = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_owned_detail(&fixture.execution, &fixture.id)
+        .unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    let expected = InvestigationStopReason::ActionDecode(ActionDecodeFailure {
+        stage: ActionDecodeStage::SemanticRule(ActionSemanticRule::EvidenceShape),
+        error: InvestigationError::InvalidAction,
+    })
+    .test_message();
+    assert_eq!(detail.error.as_deref(), Some(expected));
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(detail.usage.tool_actions, 0);
 }

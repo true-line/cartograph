@@ -53,6 +53,8 @@ pub enum SpecialistId {
     DomainAnalystV12,
     #[serde(rename = "domain-analyst@13")]
     DomainAnalystV13,
+    #[serde(rename = "domain-analyst@14")]
+    DomainAnalystV14,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -216,6 +218,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -244,6 +247,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -273,6 +277,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -295,6 +300,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -311,6 +317,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -327,6 +334,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -340,6 +348,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
                 | Self::EvidenceAuditorV11
         )
     }
@@ -370,6 +379,7 @@ impl SpecialistId {
             Self::DomainAnalystV11 | Self::EvidenceAuditorV11 => 11,
             Self::DomainAnalystV12 => 12,
             Self::DomainAnalystV13 => 13,
+            Self::DomainAnalystV14 => 14,
         }
     }
 
@@ -382,6 +392,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
         ) {
             return 10;
         }
@@ -396,6 +407,13 @@ impl SpecialistId {
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV14 {
+            return format!(
+                "{}\nAdmitted source schema selector@1: Choice permits read_evidence only for exact selected facts with a frozen source binding in the authenticated ledger. No such fact means no source read. Query first to discover facts; receipt guards still validate role and index. FinishOnly uses the compiled finish schema.",
+                Self::DomainAnalystV13.prompt()
+            );
+        }
+
         if self == Self::DomainAnalystV13 {
             return format!(
                 "{}\nCompiled analyst response schemas: choice={} finish_only={}. Host validation remains authoritative.",
@@ -422,7 +440,8 @@ impl SpecialistId {
             | Self::DomainAnalystV10
             | Self::DomainAnalystV11
             | Self::DomainAnalystV12
-            | Self::DomainAnalystV13 => {
+            | Self::DomainAnalystV13
+            | Self::DomainAnalystV14 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -532,6 +551,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV11
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
+                | Self::DomainAnalystV14
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -575,7 +595,8 @@ impl SpecialistId {
             | Self::DomainAnalystV10
             | Self::DomainAnalystV11
             | Self::DomainAnalystV12
-            | Self::DomainAnalystV13 => (
+            | Self::DomainAnalystV13
+            | Self::DomainAnalystV14 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),

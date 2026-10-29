@@ -801,6 +801,7 @@ mod policy_catalog_tests {
             );
         }
         assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV13));
+        assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV14));
         assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV9));
         assert!(!available_specialists().contains(&SpecialistId::EvidenceAuditorV9));
     }

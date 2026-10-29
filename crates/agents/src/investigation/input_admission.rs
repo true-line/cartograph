@@ -108,7 +108,7 @@ impl InvestigationInput {
             &capacity_feedback,
         )?;
         input.payload.response_schema =
-            response_schema::select(specialist, mode).map(str::to_owned);
+            response_schema::select_admitted(specialist, mode, &input.ledger)?;
         input.finish_progressive_input(&prompt, coverage_details)
     }
 }
@@ -144,7 +144,7 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         let (prompt, contract) = self.admission_reserve_basis(policy)?;
-        Self::measure_reserved_projection(
+        self.measure_reserved_projection(
             prompt,
             contract,
             self.action(action_id.into())?,
@@ -164,7 +164,7 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         let (prompt, contract) = self.admission_reserve_basis(policy)?;
-        Self::measure_reserved_projection(
+        self.measure_reserved_projection(
             prompt,
             contract,
             self.action(action_id.into())?,
@@ -178,6 +178,7 @@ impl InvestigationInput {
 
     #[allow(clippy::too_many_arguments)]
     fn measure_reserved_projection(
+        &self,
         prompt: Value,
         contract: InvestigationCompletionContract,
         mut action: CompletionAction,
@@ -275,7 +276,7 @@ impl InvestigationInput {
             reason: CapacityRefusalReason::UnprovenContribution,
         };
         // admission_reserve_basis already authenticated exact role/schema.
-        let schema_role = action.payload.response_schema.is_some();
+        let schema_role = response_schema::schema_role(&action.payload.system);
         let mut measure = |mode| -> Result<_, InvestigationError> {
             let mut prompt = reserved.clone();
             apply_admission_progress(
@@ -289,8 +290,8 @@ impl InvestigationInput {
                 context_hub::logical::count(&prompt).unwrap()
                     <= reserve_projection_bytes(policy).unwrap()
             );
-            action.payload.response_schema = if schema_role {
-                response_schema::select(SpecialistId::DomainAnalystV13, mode).map(str::to_owned)
+            action.payload.response_schema = if let Some(role) = schema_role {
+                response_schema::select_admitted(role, mode, &self.ledger)?
             } else {
                 None
             };
@@ -305,6 +306,7 @@ impl InvestigationInput {
                         }
                     })?;
                 super::source_preview::protected_representation(
+                    &self.ledger,
                     &action.payload,
                     inspected.payload(),
                 )?;
@@ -596,7 +598,7 @@ impl InvestigationInput {
         // and the final wire check, including source-preview rejection fixtures.
         #[cfg(test)]
         assert!(context_hub::logical::count(&prompt).unwrap() <= MAX_INPUT_BYTES + 4 * 8 * 1024);
-        Self::measure_reserved_projection(
+        self.measure_reserved_projection(
             prompt,
             contract,
             action,
@@ -648,6 +650,7 @@ impl InvestigationInput {
                 SpecialistId::DomainAnalystV11,
                 SpecialistId::DomainAnalystV12,
                 SpecialistId::DomainAnalystV13,
+                SpecialistId::DomainAnalystV14,
                 SpecialistId::EvidenceAuditorV11,
             ]
             .iter()
@@ -657,7 +660,7 @@ impl InvestigationInput {
         }
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        response_schema::validate(&self.payload, &prompt)?;
+        response_schema::validate(&self.ledger, &self.payload, &prompt)?;
         let proof = self
             .ledger
             .coverage
@@ -845,3 +848,23 @@ pub(super) fn apply_admission_progress(
 #[cfg(test)]
 #[path = "input_admission_tests.rs"]
 mod tests;
+
+impl InvestigationInput {
+    /// Defense against responses that bypass @14 transport hints. This grants
+    /// no source access; guarded frozen receipts still authenticate ranges.
+    pub fn validate_admitted_source_fact(
+        &self,
+        fact: &crate::TaskFactKey,
+    ) -> Result<(), ActionDecodeFailure> {
+        if self.payload.system == SpecialistId::DomainAnalystV14.prompt()
+            && !self
+                .ledger
+                .selected_facts
+                .iter()
+                .any(|selection| &selection.fact == fact && selection.binding.is_some())
+        {
+            return Err(ActionSemanticRule::EvidenceShape.invalid());
+        }
+        Ok(())
+    }
+}
