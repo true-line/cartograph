@@ -196,11 +196,35 @@ fn vendure_captured_local_analyst() {
     .unwrap();
 }
 
-// External orchestration must freshly authenticate review before preparation.
-// Local attestation bytes bind content, never reviewer identity.
+// AC-0463: the closed action is selected before files or provider construction.
+fn auditor_action(value: &str) -> Result<&str, String> {
+    match value {
+        "prepare" | "execute" | "reopen" => Ok(value),
+        _ => Err("Explicit auditor prepare, execute or reopen required.".into()),
+    }
+}
 #[test]
-#[ignore = "manual captured auditor; requires independent definition, independent frozen reviewed-parent authority; stages only"]
+fn captured_auditor_requires_explicit_single_action() {
+    for value in ["", "run", "execute,reopen", "Execute"] {
+        assert!(auditor_action(value).is_err());
+    }
+    for value in ["prepare", "execute", "reopen"] {
+        assert_eq!(auditor_action(value).unwrap(), value);
+    }
+}
+// External orchestration must freshly authenticate review; local bytes bind content only.
+#[test]
+#[ignore = "manual captured auditor preparation; no provider construction or dispatch"]
 fn vendure_captured_local_auditor_prepare() {
+    run_captured_auditor("prepare");
+}
+#[test]
+#[ignore = "manual captured auditor; requires independent frozen authority and fresh authenticated review before execute"]
+fn vendure_captured_local_auditor_action() {
+    run_captured_auditor(&super::super::required("CARTOGRAPH_VENDURE_AUDITOR_ACTION"));
+}
+fn run_captured_auditor(action: &str) {
+    let action = auditor_action(action).unwrap();
     use super::captured_auditor::{self, Artifacts};
     let path = |name| std::path::PathBuf::from(super::super::required(name));
     let parent_definition_path = path("CARTOGRAPH_VENDURE_ANALYST_DEFINITION");
@@ -261,8 +285,21 @@ fn vendure_captured_local_auditor_prepare() {
                         definition_path: &definition_path,
                         review: &review,
                     };
-                    captured_auditor::stage(&parent, &artifacts, &expected, true)
-                        .map(|id| serde_json::json!({"auditor_id":id,"provider_calls":0}))
+                    match action {
+                        "prepare" => captured_auditor::stage(&parent, &artifacts, &expected, true)
+                            .map(|id| serde_json::json!({"auditor_id":id,"provider_calls":0})),
+                        "reopen" => captured_auditor::reopen(&parent, &expected, &artifacts),
+                        "execute" => {
+                            captured_auditor::stage(&parent, &artifacts, &expected, false)?;
+                            let provider = configured_provider(
+                                &super::super::required("CARTOGRAPH_ACCEPTANCE_URL"),
+                                &super::super::required("CARTOGRAPH_ACCEPTANCE_MODEL"),
+                                &expected.provider,
+                            )?;
+                            captured_auditor::execute(&parent, &expected, &artifacts, provider)
+                        }
+                        _ => unreachable!("validated before opening profile"),
+                    }
                 },
             )
         },
