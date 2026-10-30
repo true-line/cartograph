@@ -24,7 +24,10 @@ pub(crate) fn next_prompt_capacity_replay_workspace() -> Option<(usize, usize)> 
         slots::<Vec<&Entry>>(1)?,
         slots::<&Entry>(calls)?,
         size_of::<CapacityState>(),
-        64, // feedback clones only a previously validated action hash
+        64,  // capacity feedback action hash
+        128, // semantic feedback action + choices hashes
+        64,
+        slots::<String>(1)?, // writer's expected canonical feedback hash
     ])?;
     let acquisition = sum(&[
         record_decode_scratch_bytes()?,
@@ -45,6 +48,7 @@ pub(crate) fn next_prompt_capacity_replay_workspace() -> Option<(usize, usize)> 
     let replay = sum(&[
         next_prompt_record_workspace(MAX_RECORD_BYTES)?.0, // caller task remains live
         timeline,
+        next_prompt_metadata_workspace()?.0, // shared history survives read_entries
         retained,
         keys,
         row, // acquiring/validating next entry before pushing it
@@ -56,7 +60,10 @@ pub(crate) fn next_prompt_capacity_replay_workspace() -> Option<(usize, usize)> 
         slots::<String>(1)?, // cloned previous_entry_id
         acquisition
             .max(identity)
-            .max(proposal_workspace()?)
+            .max(
+                proposal_workspace()?
+                    .checked_add(metadata_history_workspace::acquisition_choices_workspace()?)?,
+            )
             .max(next_prompt_contract_workspace()?) // includes 256-byte response redaction
             .max(MAX_INVOCATION_BYTES.checked_add(slots::<Vec<u8>>(1)?)?),
     ])?;

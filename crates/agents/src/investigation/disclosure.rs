@@ -468,4 +468,6 @@ impl InvestigationDisclosure {
 
 #[path = "disclosure_admission.rs"]
 mod admission;
-pub use admission::{AcquisitionAdmission, DisclosedAdmissionState};
+pub use admission::{
+    AcquisitionAdmission, ActionRefusalFeedback, ActionRefusalReason, DisclosedAdmissionState,
+};

@@ -37,6 +37,33 @@ impl AcquisitionAdmission {
         Ok(())
     }
 }
+/// Canonical journal feedback; input publication remains separately gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRefusalReason {
+    ActionNotOffered,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActionRefusalFeedback {
+    pub reason: ActionRefusalReason,
+    pub invocation_ordinal: u32,
+    pub action_hash: String,
+    pub choices_hash: String,
+}
+impl ActionRefusalFeedback {
+    pub fn stamp_hash(&self) -> Result<String, InvestigationError> {
+        if self.invocation_ordinal == 0
+            || !crate::source_basis::hash(&self.action_hash)
+            || !crate::source_basis::hash(&self.choices_hash)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(core_prov::content_hash(&bounded_bytes(
+            self,
+            MAX_ACTION_BYTES,
+        )?))
+    }
+}
 fn required_feedback<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<AdmissionCapacityFeedback>, D::Error> {

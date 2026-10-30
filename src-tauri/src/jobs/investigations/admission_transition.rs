@@ -24,6 +24,22 @@ impl JobStore {
         proposal: &Value,
         reason: CapacityRefusalReason,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.refuse_next_prompt(
+            execution,
+            expected_revision,
+            response,
+            proposal,
+            admission_journal::RefusalReason::Capacity(reason),
+        )
+    }
+    pub(crate) fn refuse_next_prompt(
+        &mut self,
+        execution: &JobExecution,
+        expected_revision: u64,
+        response: &InvestigationResponseMeta,
+        proposal: &Value,
+        reason: admission_journal::RefusalReason,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
@@ -40,7 +56,12 @@ impl JobStore {
             return Err(InvestigationStoreError::Stale);
         }
         transitions::check_job(&tx, execution, false)?;
-        let next = refuse_capacity(&tx, &task, response, proposal, reason)?;
+        let next = match reason {
+            admission_journal::RefusalReason::Capacity(reason) => {
+                refuse_capacity(&tx, &task, response, proposal, reason)?
+            }
+            reason => refuse(&tx, &task, response, proposal, reason)?,
+        };
         tx.commit()?;
         // No in-memory acknowledgement is returned before durable commit.
         Ok(next.detail)
@@ -53,6 +74,21 @@ pub(super) fn refuse_capacity(
     response: &InvestigationResponseMeta,
     proposal: &Value,
     reason: CapacityRefusalReason,
+) -> Result<StoredTask, InvestigationStoreError> {
+    refuse(
+        tx,
+        task,
+        response,
+        proposal,
+        admission_journal::RefusalReason::Capacity(reason),
+    )
+}
+fn refuse(
+    tx: &Transaction<'_>,
+    task: &StoredTask,
+    response: &InvestigationResponseMeta,
+    proposal: &Value,
+    reason: admission_journal::RefusalReason,
 ) -> Result<StoredTask, InvestigationStoreError> {
     storage::validate_next_prompt_task(task)?;
     if task.phase != Phase::Invocation {
@@ -89,7 +125,17 @@ pub(super) fn refuse_capacity(
         response,
         4096,
     )?;
-    admission_journal::append(tx, task, call, response, proposal, reason)?;
+    let entry = match reason {
+        admission_journal::RefusalReason::Capacity(reason) => {
+            admission_journal::append(tx, task, call, response, proposal, reason)?
+        }
+        reason => admission_journal::append_reason(tx, task, call, response, proposal, reason)?,
+    };
+    let expected_feedback = entry
+        .action_feedback()
+        .map(|feedback| feedback.stamp_hash())
+        .transpose()?;
+    drop(entry);
     // Clone through the bounded canonical record so any failure leaves the
     // caller's last acknowledged memory untouched as its Tx rolls back.
     let mut next: StoredTask =
@@ -112,17 +158,30 @@ pub(super) fn refuse_capacity(
         None,
         "A complete provider response was recorded; no tool was started.",
     )?;
-    event(
-        tx,
-        &mut next,
-        InvestigationEventKind::CapacityRefused,
-        Some(&response.step_id),
-        None,
-        "The proposed acquisition could not be admitted within the proven continuation capacity.",
-    )?;
+    let (kind, summary) = match reason {
+        admission_journal::RefusalReason::Capacity(_) => (
+            InvestigationEventKind::CapacityRefused,
+            "The proposed acquisition could not be admitted within the proven continuation capacity.",
+        ),
+        admission_journal::RefusalReason::Action(_) => (
+            InvestigationEventKind::ActionRefused,
+            "The proposed acquisition was not offered in this saved call.",
+        ),
+    };
+    event(tx, &mut next, kind, Some(&response.step_id), None, summary)?;
     // Journal replay validates that no tool event, attempt, or input publication
     // was invented, and derives the count/feedback rather than trusting a slot.
-    admission_journal::derive_current(tx, &next)?;
+    let state = admission_journal::derive_current(tx, &next)?;
+    if let Some(expected) = expected_feedback
+        && state
+            .action_feedback
+            .as_ref()
+            .map(|feedback| feedback.stamp_hash())
+            .transpose()?
+            != Some(expected)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
     storage::save_next_prompt_task(tx, &next, task.detail.summary.revision, false)?;
     #[cfg(test)]
     if FAIL_AFTER_REFUSAL_WRITE.with(|failure| failure.replace(false)) {

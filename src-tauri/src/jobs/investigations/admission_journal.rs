@@ -4,9 +4,10 @@
 use super::admission_contract::{SavedCallBasis, SavedCallCore};
 use super::*;
 use agents::investigation::staged_refusal::CompletionCallMode;
+use agents::investigation::{ActionRefusalFeedback as ActionFeedback, ActionRefusalReason};
 use rusqlite::Transaction;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const TABLE: &str = "investigation_admission_refusals";
 const OWNED: &str = "name GLOB 'investigation_admission_*' OR (tbl_name GLOB 'investigation_admission_*' AND name NOT GLOB 'sqlite_*')";
@@ -123,6 +124,12 @@ fn preflight(connection: &Connection) -> Result<bool, InvestigationStoreError> {
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RefusalReason {
+    Capacity(CapacityRefusalReason),
+    Action(ActionRefusalReason),
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Entry {
@@ -136,7 +143,7 @@ pub(super) struct Entry {
     /// Original decoded proposal, including a replay_query's original identity,
     /// never a differently resolved action. Its canonical bytes bind action_hash.
     pub proposal: Value,
-    pub reason: CapacityRefusalReason,
+    pub reason: RefusalReason,
     pub previous_entry_id: Option<String>,
 }
 impl Entry {
@@ -157,18 +164,39 @@ impl Entry {
             .and_then(|bytes| bytes.checked_add(self.call.step_id.len()))
             .ok_or(InvestigationStoreError::Capacity)
     }
-    fn feedback(&self) -> AdmissionCapacityFeedback {
-        AdmissionCapacityFeedback {
+    fn feedback(&self) -> Option<AdmissionCapacityFeedback> {
+        let RefusalReason::Capacity(reason) = self.reason else {
+            return None;
+        };
+        Some(AdmissionCapacityFeedback {
             schema_version: 1,
             action_hash: self.response.action_hash.clone(),
-            reason: self.reason,
-        }
+            reason,
+        })
+    }
+    pub(super) fn action_feedback(&self) -> Option<ActionFeedback> {
+        let RefusalReason::Action(reason) = self.reason else {
+            return None;
+        };
+        Some(ActionFeedback {
+            reason,
+            invocation_ordinal: self.call.invocation_ordinal,
+            action_hash: self.response.action_hash.clone(),
+            choices_hash: self
+                .call
+                .admission
+                .acquisition
+                .as_ref()?
+                .choices_hash
+                .clone(),
+        })
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct CapacityState {
     pub count: u32,
     pub feedback: Option<AdmissionCapacityFeedback>,
+    pub action_feedback: Option<ActionFeedback>,
 }
 struct CallWitness {
     call: SavedCallBasis,
@@ -181,6 +209,7 @@ struct Publication {
 struct Timeline {
     calls: BTreeMap<u32, CallWitness>,
     publications: Vec<Publication>,
+    action_refusals: BTreeSet<u32>,
 }
 
 /// All ordering is through explicit within-task invocation ordinals from sealed
@@ -190,6 +219,7 @@ struct Timeline {
 fn timeline(
     connection: &Connection,
     task: &StoredTask,
+    history: &completion::SavedMetadataHistory<'_>,
 ) -> Result<Timeline, InvestigationStoreError> {
     require_transaction(connection)?;
     admission_contract::validate_pairing(task)?;
@@ -228,13 +258,14 @@ fn timeline(
     }
     // Local read-only replay epoch: all named invocation/attempt/refusal bodies
     // and the retained archive are validated once, then reused at exact cutoffs.
-    let history = completion::SavedMetadataHistory::load(connection, task)?;
     let mut result = Timeline {
         calls: BTreeMap::new(),
         publications: vec![],
+        action_refusals: BTreeSet::new(),
     };
     let mut current: Option<InvestigationInputLedger> = None;
     let mut active: Option<u32> = None;
+    let mut completed = None;
     let mut accepted: Option<(u32, InvestigationTool, bool)> = None;
     let mut last_revision = 0;
     for sequence in 1..=count {
@@ -334,6 +365,38 @@ fn timeline(
                     },
                 );
                 active = Some(ordinal);
+                completed = None;
+            }
+            InvestigationEventKind::ModelCompleted => {
+                if let Some(ordinal) = active {
+                    completed = Some(
+                        if completed.is_none()
+                            && event.tool.is_none()
+                            && event.step_id.as_deref()
+                                == Some(result.calls[&ordinal].call.step_id.as_str())
+                        {
+                            ordinal
+                        } else {
+                            0
+                        },
+                    );
+                }
+            }
+            InvestigationEventKind::ActionRefused => {
+                let ordinal = active.ok_or(InvestigationStoreError::Invalid)?;
+                let witness = &result.calls[&ordinal];
+                if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18
+                    || event.step_id.as_deref() != Some(witness.call.step_id.as_str())
+                    || event.tool.is_some()
+                    || completed != Some(ordinal)
+                    || witness.action_admitted
+                    || accepted.is_some()
+                    || event.summary
+                        != "The proposed acquisition was not offered in this saved call."
+                    || !result.action_refusals.insert(ordinal)
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
             }
             InvestigationEventKind::ActionAdmitted => {
                 let ordinal = active.ok_or(InvestigationStoreError::Invalid)?;
@@ -539,6 +602,7 @@ fn read_entries(
     connection: &Connection,
     task: &StoredTask,
     line: &Timeline,
+    history: &completion::SavedMetadataHistory<'_>,
 ) -> Result<Vec<Entry>, InvestigationStoreError> {
     let present = preflight(connection)?;
     let id = &task.detail.summary.investigation_id;
@@ -561,7 +625,8 @@ fn read_entries(
             let before = project(&entries, line, Some(ordinal));
             if sequence != index as u32 + 1
                 || entry.sequence != sequence
-                || entry.count != sequence
+                || entry.count
+                    != before.count + u32::from(matches!(entry.reason, RefusalReason::Capacity(_)))
                 || entry.schema_version != 1
                 || entry.call != witness.call
                 || entry.call.step_id != step_id
@@ -586,13 +651,20 @@ fn read_entries(
             {
                 return Err(InvestigationStoreError::Invalid);
             }
-            validate_proposal(
+            validate_reason(
+                task,
+                &entry.call,
+                &witness.core.ledger,
                 &entry.proposal,
                 &entry.response,
-                &witness.core.ledger,
-                &entry.call,
-                task.detail.summary.specialist_id,
+                entry.reason,
+                history,
             )?;
+            if matches!(entry.reason, RefusalReason::Action(_))
+                != line.action_refusals.contains(&ordinal)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
             let response: InvestigationResponseMeta = read_body(
                 connection,
                 "investigation_responses",
@@ -608,6 +680,14 @@ fn read_entries(
             entry.byte_charge()?;
             entries.push(entry);
         }
+    }
+    if line.action_refusals.len()
+        != entries
+            .iter()
+            .filter(|entry| matches!(entry.reason, RefusalReason::Action(_)))
+            .count()
+    {
+        return Err(InvestigationStoreError::Invalid);
     }
     // Validate EVERY saved call against its historical prefix, not only refusal
     // rows: deleting a refusal cannot silently restore count/visible feedback.
@@ -627,15 +707,30 @@ fn project(entries: &[Entry], line: &Timeline, cutoff: Option<u32>) -> CapacityS
         .iter()
         .filter(|entry| before(entry.call.invocation_ordinal))
         .collect::<Vec<_>>();
-    let latest = prior.last();
-    let cleared = latest.is_some_and(|entry| {
-        line.publications.iter().any(|publication| {
+    let uncleared = |entry: &&Entry| {
+        !line.publications.iter().any(|publication| {
             publication.ordinal > entry.call.invocation_ordinal && before(publication.ordinal)
         })
-    });
+    };
     CapacityState {
-        count: prior.len() as u32,
-        feedback: latest.filter(|_| !cleared).map(|entry| entry.feedback()),
+        count: prior
+            .iter()
+            .filter(|entry| matches!(entry.reason, RefusalReason::Capacity(_)))
+            .count() as u32,
+        feedback: prior
+            .iter()
+            .rev()
+            .copied()
+            .find(|entry| matches!(entry.reason, RefusalReason::Capacity(_)))
+            .filter(uncleared)
+            .and_then(Entry::feedback),
+        action_feedback: prior
+            .iter()
+            .rev()
+            .copied()
+            .find(|entry| matches!(entry.reason, RefusalReason::Action(_)))
+            .filter(uncleared)
+            .and_then(Entry::action_feedback),
     }
 }
 fn validate_response_shape(
@@ -663,7 +758,7 @@ fn validate_proposal(
     ledger: &InvestigationInputLedger,
     call: &SavedCallBasis,
     role: SpecialistId,
-) -> Result<(), InvestigationStoreError> {
+) -> Result<CompletionInvestigationAction, InvestigationStoreError> {
     // Capacity refusals are read proposals only. Exclude the broader finish
     // decoder before it can acquire findings that this journal always rejects.
     if proposal.get("schema_version").is_some()
@@ -695,6 +790,36 @@ fn validate_proposal(
     {
         return Err(InvestigationStoreError::Invalid);
     }
+    Ok(action)
+}
+
+fn validate_reason(
+    task: &StoredTask,
+    call: &SavedCallBasis,
+    ledger: &InvestigationInputLedger,
+    proposal: &Value,
+    response: &InvestigationResponseMeta,
+    reason: RefusalReason,
+    history: &completion::SavedMetadataHistory<'_>,
+) -> Result<(), InvestigationStoreError> {
+    let action = validate_proposal(
+        proposal,
+        response,
+        ledger,
+        call,
+        task.detail.summary.specialist_id,
+    )?;
+    if let RefusalReason::Action(_) = reason {
+        let choices = history
+            .acquisition_choices_at(call, ledger)?
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let CompletionInvestigationAction::Read(action) = action else {
+            return Err(InvestigationStoreError::Invalid);
+        };
+        if choices.permits_acquisition(&action) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
     Ok(())
 }
 
@@ -706,22 +831,24 @@ pub(super) fn derive_at(
     task: &StoredTask,
     step_id: &str,
 ) -> Result<CapacityState, InvestigationStoreError> {
-    let line = timeline(connection, task)?;
+    let history = completion::SavedMetadataHistory::load(connection, task)?;
+    let line = timeline(connection, task, &history)?;
     let cutoff = line
         .calls
         .iter()
         .find(|(_, witness)| witness.call.step_id == step_id)
         .map(|(ordinal, _)| *ordinal)
         .ok_or(InvestigationStoreError::Missing)?;
-    let entries = read_entries(connection, task, &line)?;
+    let entries = read_entries(connection, task, &line, &history)?;
     Ok(project(&entries, &line, Some(cutoff)))
 }
 pub(super) fn derive_current(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<CapacityState, InvestigationStoreError> {
-    let line = timeline(connection, task)?;
-    let entries = read_entries(connection, task, &line)?;
+    let history = completion::SavedMetadataHistory::load(connection, task)?;
+    let line = timeline(connection, task, &history)?;
+    let entries = read_entries(connection, task, &line, &history)?;
     Ok(project(&entries, &line, None))
 }
 
@@ -736,6 +863,23 @@ pub(super) fn append(
     response: &InvestigationResponseMeta,
     proposal: &Value,
     reason: CapacityRefusalReason,
+) -> Result<Entry, InvestigationStoreError> {
+    append_reason(
+        tx,
+        task,
+        call,
+        response,
+        proposal,
+        RefusalReason::Capacity(reason),
+    )
+}
+pub(super) fn append_reason(
+    tx: &Transaction<'_>,
+    task: &StoredTask,
+    call: &SavedCallBasis,
+    response: &InvestigationResponseMeta,
+    proposal: &Value,
+    reason: RefusalReason,
 ) -> Result<Entry, InvestigationStoreError> {
     require_transaction(tx)?;
     if !preflight(tx)? {
@@ -755,8 +899,9 @@ pub(super) fn append(
     {
         return Err(InvestigationStoreError::Stale);
     }
-    let line = timeline(tx, task)?;
-    let entries = read_entries(tx, task, &line)?;
+    let history = completion::SavedMetadataHistory::load(tx, task)?;
+    let line = timeline(tx, task, &history)?;
+    let entries = read_entries(tx, task, &line, &history)?;
     let witness = line
         .calls
         .get(&call.invocation_ordinal)
@@ -796,15 +941,17 @@ pub(super) fn append(
     if pending != core.step {
         return Err(InvestigationStoreError::Invalid);
     }
-    validate_proposal(
+    validate_reason(
+        task,
+        call,
+        &core.ledger,
         proposal,
         response,
-        &core.ledger,
-        call,
-        task.detail.summary.specialist_id,
+        reason,
+        &history,
     )?;
-    let sequence = current
-        .count
+    let sequence = u32::try_from(entries.len())
+        .map_err(|_| InvestigationStoreError::Capacity)?
         .checked_add(1)
         .filter(|count| *count <= INVESTIGATION_V2_POLICY.limits().model_invocations)
         .ok_or(InvestigationStoreError::Capacity)?;
@@ -812,7 +959,7 @@ pub(super) fn append(
         schema_version: 1,
         entry_id: String::new(),
         sequence,
-        count: sequence,
+        count: current.count + u32::from(matches!(reason, RefusalReason::Capacity(_))),
         call: call.clone(),
         invocation_hash: core_prov::content_hash(&encode(&core.step, MAX_INVOCATION_BYTES)?),
         response: response.clone(),

@@ -293,6 +293,7 @@ fn next_prompt_contract_pre_call_mode_survives_charge_and_serialized_reopen() {
             &fixture.ledger,
             &fixture.metadata,
             &admission_journal::CapacityState {
+                action_feedback: None,
                 count: 0,
                 feedback: None,
             },
