@@ -106,6 +106,82 @@ impl<'a> SavedMetadataHistory<'a> {
             .collect::<Vec<_>>();
         derive_protected_metadata(self.task, records, &refusals)
     }
+    pub(in super::super) fn acquisition_choices_at(
+        &self,
+        basis: &admission_contract::SavedCallBasis,
+        ledger: &InvestigationInputLedger,
+    ) -> Result<
+        Option<agents::investigation::acquisition_choices::AcquisitionChoices>,
+        InvestigationStoreError,
+    > {
+        self.check_epoch()?;
+        if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+            return Ok(None);
+        }
+        let cutoff = self.ordinal(&basis.step_id)?;
+        if basis.task_id != self.task.detail.summary.investigation_id
+            || basis.invocation_ordinal != cutoff
+            || basis
+                .admission
+                .acquisition
+                .as_ref()
+                .is_none_or(|stamp| stamp.action_feedback_hash.is_some())
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let records = self
+            .attempts
+            .iter()
+            .filter(|entry| self.ordinals[&entry.record.step_id] < cutoff)
+            .collect::<Vec<_>>();
+        let mut ledgers = BTreeMap::new();
+        for entry in &records {
+            let revision = entry.record.input_revision;
+            if let std::collections::btree_map::Entry::Vacant(slot) = ledgers.entry(revision) {
+                let value = ledger_at(self.connection, &basis.task_id, revision)?;
+                if value.revision != revision
+                    || value.coverage.as_ref()
+                        != self.archive.as_ref().map(|archive| archive.proof())
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                slot.insert(value);
+            }
+        }
+        let evidence = records
+            .iter()
+            .map(
+                |entry| agents::investigation::staged_attempt::AttemptEvidence {
+                    record: &entry.record,
+                    ledger: &ledgers[&entry.record.input_revision],
+                },
+            )
+            .collect::<Vec<_>>();
+        let choices = agents::investigation::acquisition_choices::AcquisitionChoices::derive(
+            &self
+                .task
+                .completion_intent
+                .as_ref()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .contract(),
+            &self.metadata_at(&basis.step_id)?,
+            &basis.task_id,
+            ledger,
+            &evidence,
+            &INVESTIGATION_V2_POLICY,
+        )?;
+        if basis
+            .admission
+            .acquisition
+            .as_ref()
+            .map(|stamp| stamp.choices_hash.as_str())
+            != Some(core_prov::content_hash(&encode(&choices, MAX_ACTION_BYTES)?).as_str())
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(Some(choices))
+    }
+
     /// Ledger is the exact canonical row already associated with this ModelStarted
     /// event by the private timeline. This does not replace that event association.
     pub(in super::super) fn validate_timeline_call(
@@ -120,6 +196,7 @@ impl<'a> SavedMetadataHistory<'a> {
         }
         let metadata = self.metadata_at(&basis.step_id)?;
         basis.validate_core(self.task, step, ledger, &metadata)?;
+        self.acquisition_choices_at(basis, ledger)?;
         Ok(admission_contract::SavedCallCore {
             step: step.clone(),
             ledger: ledger.clone(),

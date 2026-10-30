@@ -1238,7 +1238,7 @@ pub(super) fn next_prompt_invocations(
             .admission
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
-        admission.validate_with_policy(policy)?;
+        admission.validate_saved_role_shape(task.detail.summary.specialist_id, policy)?;
         let ordinal = admission
             .consumed_budgets
             .model_invocations

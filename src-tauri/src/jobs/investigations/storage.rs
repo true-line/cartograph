@@ -734,7 +734,7 @@ pub(super) fn validate_step_basis(
     }
     if let Some(disclosure) = &step.disclosure {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
-        disclosure.validate_with_policy(&ledger, policy)?;
+        disclosure.validate_saved_role_shape(&ledger, policy, task.detail.summary.specialist_id)?;
         let completion_sources = task
             .completion_intent
             .as_ref()
