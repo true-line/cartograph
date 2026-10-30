@@ -4093,6 +4093,45 @@ class Orders(private val client: WebClient) {
     );
 }
 
+// AC-0457 (#1345 review): a literal base keeps its trailing `/` before a
+// relative request path, as Spring joins `/api/` + `orders` to
+// `/api/orders`; before a rooted or computed path the doubled `/` collapses,
+// and a base without the slash concatenates as Spring does. (T-0457)
+#[test]
+fn webclient_bases_keep_their_slash_before_relative_paths() {
+    let sites = webclient_sites(
+        r#"package io.demo
+
+import org.springframework.web.reactive.function.client.WebClient
+
+class Orders {
+    fun relative() = WebClient.create("https://host/api/").get().uri("orders").retrieve()
+
+    fun rooted() = WebClient.create("https://host/api/").get().uri("/orders").retrieve()
+
+    fun computed(path: String) =
+        WebClient.builder().baseUrl("https://host/api/").build().get().uri(path).retrieve()
+
+    fun bare() = WebClient.create("https://host/api").get().uri("orders").retrieve()
+}
+"#,
+    );
+    let bases: Vec<_> = sites
+        .into_iter()
+        .map(|(_, _, base, entry)| (entry.unwrap(), base.unwrap()))
+        .collect();
+    let s = |text: &str| text.to_string();
+    assert_eq!(
+        bases,
+        [
+            (s("Orders.relative"), s("literal https://host/api/")),
+            (s("Orders.rooted"), s("literal https://host/api")),
+            (s("Orders.computed"), s("literal https://host/api")),
+            (s("Orders.bare"), s("literal https://host/api")),
+        ]
+    );
+}
+
 // AC-0457: no chain is read without a proven client: an untyped property, a
 // star import, another or a locally declared `WebClient`, a shadowed type
 // name, or named `uri` arguments. (T-0457)

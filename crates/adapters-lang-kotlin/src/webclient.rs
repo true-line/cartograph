@@ -158,7 +158,7 @@ fn static_call<'t>(
 /// The base a literal argument gives, or a computed base spelled by `text`.
 fn literal_base(cx: &FileCx<'_>, argument: TsNode<'_>) -> IdentityExpr {
     match pure_string_literal(cx, argument) {
-        Some(url) => IdentityExpr::Literal(url.trim_end_matches('/').to_string()),
+        Some(url) => IdentityExpr::Literal(url),
         None => IdentityExpr::Computed(cx.text(&argument).to_string()),
     }
 }
@@ -303,6 +303,19 @@ pub(crate) fn sites(
         let literal = pure_string_literal(cx, url).filter(|_| !rewritten);
         // An absolute request URL replaces the configured base.
         let base = base.filter(|_| !literal.as_deref().is_some_and(absolute));
+        // Spring appends the request path to the base path and collapses a
+        // doubled `/`: `/api/` + `orders` and `/api/` + `/orders` both give
+        // `/api/orders`, while `/api` + `orders` gives `/apiorders`. The
+        // base keeps its trailing `/` only before a relative literal path.
+        let relative = literal
+            .as_deref()
+            .is_some_and(|path| !path.starts_with('/'));
+        let base = base.map(|base| match base {
+            IdentityExpr::Literal(url) if !relative => {
+                IdentityExpr::Literal(url.trim_end_matches('/').to_string())
+            }
+            base => base,
+        });
         // `Type.function`, naming the call in a runtime-base Gap.
         let entry = symbol
             .rsplit_once('#')
