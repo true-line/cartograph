@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.52.1
+
+### Patch Changes
+
+- a4a7e25: Adds the knowledge-layer embedding phase from ADR-0051 as a library step. It picks graph nodes by a versioned recipe, redacts their text before it reaches the local embedding model, and reuses cached vectors for unchanged nodes. With no embedding model it reports a named omission and leaves the base graph untouched (#1441).
+- a357733: Adds the knowledge overlay store from ADR-0051. Derived knowledge-layer facts live in a separate, disposable file, and each fact cites the base facts it rests on. Facts are read back only at the base revision they were derived from. The overlay is discarded together with cached vectors whenever the graph is cleared or a retained source is forgotten (#1440).
+
 ## 0.52.0
 
 ### Minor Changes
