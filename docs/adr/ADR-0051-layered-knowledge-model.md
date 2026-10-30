@@ -133,8 +133,9 @@ service dependency, while keeping the base authoritative.
   community detection). When a measured need appears, an in-memory graph
   engine loads a derived copy at query time. The `GraphStore` trait keeps
   the Kuzu-fork escape hatch from ADR-0008.
-- Embedding cost and provider identity follow ADR-0037; until it is accepted,
-  the ingest phase is built behind it and stays opt-in.
+- Embedding cost and provider identity follow ADR-0037. Its acceptance
+  (2026-10-30) lifts the earlier condition that the ingest phase be built
+  behind it; the phase still runs only with a configured embedding provider.
 
 ## Alternatives
 
