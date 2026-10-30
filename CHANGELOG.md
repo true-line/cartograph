@@ -1,5 +1,20 @@
 # cartograph
 
+## 0.50.0
+
+### Minor Changes
+
+- 02979d5: Java sources now recover Apache HttpClient 4 and 5 request constructors (`new HttpGet(…)` and siblings) as client calls (#1411).
+- 53a10b4: Java sources now recover OkHttp `Request.Builder` chains as client calls (#1405).
+- f754460: Kotlin sources now recover Apache HttpClient request constructors (`HttpGet(url)` and siblings) as client calls (#1420).
+- 84f8765: Kotlin sources now recover Ktor client requests (`client.get("…")` and the other `io.ktor.client.request` verbs) as client calls (#1416).
+- cbe6696: Kotlin sources now recover OkHttp `Request.Builder` chains as client calls (#1409).
+
+### Patch Changes
+
+- 88f85fc: Java and Kotlin adapters now treat Kotlin Multiplatform and Android test source sets (`jvmTest`, `commonTest`, `androidUnitTest`, variant `testDebug`, …) as test code (#1424).
+- 4cc7e65: Kotlin: a `suspend` declaration directly after a wildcard import is no longer dropped by the soft-keyword pass (#1417).
+
 ## 0.49.0
 
 ### Minor Changes
