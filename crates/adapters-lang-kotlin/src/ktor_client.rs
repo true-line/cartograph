@@ -154,6 +154,9 @@ pub(crate) fn sites(
         // A request outside any function (a property or top-level
         // initializer) is owned by its file (#1426).
         let symbol = rest_template::enclosing(functions, call);
+        if symbol.is_none() && !rest_template::initializer(call) {
+            continue;
+        }
         let block_names = |word| lambda.is_some_and(|lambda| names(cx, lambda, word));
         let method = match fixed {
             _ if block_names("method") => "?",

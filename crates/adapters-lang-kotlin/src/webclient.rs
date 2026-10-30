@@ -281,6 +281,9 @@ pub(crate) fn sites(
         // A request outside any function (a property or top-level
         // initializer) is owned by its file (#1426).
         let symbol = rest_template::enclosing(functions, uri);
+        if symbol.is_none() && !rest_template::initializer(uri) {
+            continue;
+        }
         let Some(base) = client_base(&proof, call, client) else {
             continue;
         };

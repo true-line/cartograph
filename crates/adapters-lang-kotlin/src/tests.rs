@@ -5174,3 +5174,68 @@ class Holder(private val client: HttpClient, private val web: WebClient) {
         ]
     );
 }
+
+/// AC-0495: only property and top-level initializers of product sources are
+/// file-owned; accessors, `init` blocks, constructor defaults, delegates and
+/// test sources own no file-level request, while a test function keeps its
+/// own.
+#[test]
+fn client_requests_outside_initializers_are_not_file_owned() {
+    let sites = retrofit_sites(&[
+        (
+            "src/main/kotlin/io/demo/Lazy.kt",
+            r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import okhttp3.Request
+import org.apache.http.client.methods.HttpGet
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.reactive.function.client.WebClient
+
+class Lazy(
+    private val client: HttpClient,
+    private val web: WebClient,
+    val request: Request = Request.Builder().url("https://host/default").build(),
+) {
+    val reactive get() = web.get().uri("https://host/getter").retrieve()
+    val apache by lazy { HttpGet("https://host/delegate") }
+    val ktor get() = scope.async { client.get("https://host/ktor-getter") }
+
+    init {
+        val local = RestTemplate().getForObject("https://host/init", String::class.java)
+    }
+}
+"#,
+        ),
+        (
+            "src/test/kotlin/io/demo/HolderTest.kt",
+            r#"package io.demo
+
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.reactive.function.client.WebClient
+
+val top = RestTemplate().getForObject("https://host/test-top", String::class.java)
+
+class HolderTest(private val web: WebClient) {
+    val reactive = web.get().uri("https://host/test-w").retrieve()
+
+    fun call() = RestTemplate().getForObject("https://host/test-fn", String::class.java)
+}
+"#,
+        ),
+    ]);
+    let rows: Vec<(String, Option<String>)> = sites
+        .into_iter()
+        .map(|site| (format!("{:?}", site.url), site.symbol))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].0.contains("https://host/test-fn"), "{rows:?}");
+    assert!(
+        rows[0]
+            .1
+            .as_deref()
+            .is_some_and(|s| s.ends_with("#HolderTest.call")),
+        "{rows:?}"
+    );
+}

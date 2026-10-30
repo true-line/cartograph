@@ -120,6 +120,9 @@ pub(crate) fn sites(
         // A request outside any function (a property or top-level
         // initializer) is owned by its file (#1426).
         let symbol = rest_template::enclosing(functions, call);
+        if symbol.is_none() && !rest_template::initializer(call) {
+            continue;
+        }
         // `Type.function`, naming the call in a computed-URL Gap.
         let entry = symbol
             .and_then(|symbol| symbol.rsplit_once('#'))

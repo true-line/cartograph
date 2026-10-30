@@ -1729,10 +1729,14 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         .extend(retrofit::sites(&cx, &functions, &imports));
     // Spring `RestTemplate` client calls (#1340) and `WebClient` request
     // chains (#1342), which no Retrofit base applies to.
-    out.unjoined_sites
-        .extend(rest_template::sites(&cx, root, &functions, &imports));
-    out.unjoined_sites
-        .extend(webclient::sites(&cx, root, &functions, &imports));
+    // A test source set keeps its function-owned Spring sites but owns no
+    // file-level ones (#1426).
+    out.unjoined_sites.extend(
+        rest_template::sites(&cx, root, &functions, &imports)
+            .into_iter()
+            .chain(webclient::sites(&cx, root, &functions, &imports))
+            .filter(|site| product || site.symbol.is_some()),
+    );
     // Square OkHttp request builders (AC-0477), Apache HttpClient request
     // constructors (AC-0471) and Ktor client requests (AC-0479), product
     // sources only.

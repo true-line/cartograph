@@ -122,6 +122,9 @@ pub(crate) fn sites(
         // A request outside any function (a property or top-level
         // initializer) is owned by its file (#1426).
         let symbol = rest_template::enclosing(functions, build);
+        if symbol.is_none() && !rest_template::initializer(build) {
+            continue;
+        }
         // Walk back to `Request.Builder()`; links seen first are the last
         // called, so the first method and `url` found are the ones that apply.
         let mut verb = None;
