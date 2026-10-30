@@ -1,0 +1,6 @@
+{
+  "fetch_sites": [
+    { "method": "GET", "url": "https://api.example.com/orders" },
+    { "method": "POST", "url": "https://api.example.com/orders" }
+  ]
+}
