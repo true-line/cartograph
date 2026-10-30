@@ -38,6 +38,9 @@ pub enum OverlayError {
     /// The store's schema or lifecycle metadata is not the admitted shape.
     #[error("overlay schema: {0}")]
     Schema(&'static str),
+    /// The verified Capability selection exceeded caller admission; no facts returned.
+    #[error("overlay Capability selection limit")]
+    SelectionLimit,
     /// A publication broke an admission rule; nothing was written.
     #[error("overlay rejected: {0}")]
     Rejected(&'static str),
@@ -359,6 +362,102 @@ impl OverlayStore {
         self.read_within(current, MAX_FACTS, MAX_BYTES)
     }
 
+    /// Verify the entire current overlay, retaining only Capability nodes.
+    /// `max_facts` and `max_bytes` admit selected count and stored JSON bytes
+    /// (including citations), not heap/RSS. One decoded row, its temporary key,
+    /// and bounded metadata coexist with retained facts and need host admission.
+    /// After selection overflow, discard selection and finish integrity checks:
+    /// corruption takes precedence over SelectionLimit. Absent/Stale do not scan.
+    /// As with `read`, citations are shape-checked, not re-resolved against base.
+    pub fn read_capabilities_bounded(
+        &self,
+        current: &StoreRevision,
+        max_facts: usize,
+        max_bytes: usize,
+    ) -> Result<OverlayRead, OverlayError> {
+        let tx = self.connection.unchecked_transaction()?;
+        let meta: Option<(Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT CASE WHEN length(CAST(basis AS BLOB)) <= ?1 THEN basis END, CASE WHEN length(CAST(identity AS BLOB)) = 64 THEN identity END FROM overlay_meta WHERE singleton = 1 AND basis IS NOT NULL",
+                [MAX_BASIS_BYTES as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((basis, stored)) = meta else {
+            return Ok(OverlayRead::Absent);
+        };
+        let basis = basis.ok_or(OverlayError::Schema("overlay basis bytes"))?;
+        let basis: OverlayBasis = serde_json::from_str(&basis)?;
+        if &basis.base != current {
+            return Ok(OverlayRead::Stale { base: basis.base });
+        }
+        let stored = stored.ok_or(OverlayError::Schema("overlay identity bytes"))?;
+        let mut hash = IdentityHash::new(&basis)?;
+        let mut selected = Vec::new();
+        let (mut count, mut fact_bytes, mut key_bytes, mut selected_bytes) =
+            (0usize, 0usize, 0usize, 0usize);
+        let mut limited = false;
+        {
+            let mut statement = tx.prepare("SELECT key, fact FROM overlay_facts ORDER BY key")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                // SQLite-owned text is borrowed, so check each row before copying
+                // keys or decoding JSON. Publication maxima still apply globally.
+                let key = row
+                    .get_ref(0)?
+                    .as_str()
+                    .map_err(|_| OverlayError::Schema("overlay key text"))?;
+                let json = row
+                    .get_ref(1)?
+                    .as_str()
+                    .map_err(|_| OverlayError::Schema("overlay fact text"))?;
+                if key.len() > MAX_FACT_BYTES || json.len() > MAX_FACT_BYTES {
+                    return Err(OverlayError::Schema("overlay row bytes"));
+                }
+                count += 1;
+                fact_bytes += json.len();
+                key_bytes += key.len();
+                if count > MAX_FACTS || fact_bytes > MAX_BYTES || key_bytes > MAX_BYTES {
+                    return Err(OverlayError::Schema("overlay rows exceed their bounds"));
+                }
+                hash.row(key, json);
+                let fact: OverlayFact = serde_json::from_str(json)?;
+                if fact.key() != key {
+                    return Err(OverlayError::Schema("overlay fact key"));
+                }
+                if fact.cites.is_empty() || check_provenance(&fact.item).is_err() {
+                    return Err(OverlayError::Schema("overlay fact shape"));
+                }
+                if !limited && matches!(&fact.item, OverlayItem::Node(n) if n.label == "Capability")
+                {
+                    if selected.len() >= max_facts
+                        || json.len() > max_bytes.saturating_sub(selected_bytes)
+                    {
+                        limited = true;
+                        selected = Vec::new();
+                    } else {
+                        selected_bytes += json.len();
+                        selected.push(fact);
+                    }
+                }
+            }
+        }
+        if hash.finish().0 != stored {
+            return Err(OverlayError::Schema(
+                "overlay rows do not match their identity",
+            ));
+        }
+        tx.commit()?;
+        if limited {
+            return Err(OverlayError::SelectionLimit);
+        }
+        Ok(OverlayRead::Current {
+            identity: OverlayIdentity(stored),
+            basis,
+            facts: selected,
+        })
+    }
+
     fn read_within(
         &self,
         current: &StoreRevision,
@@ -547,18 +646,33 @@ fn identity(
     basis: &OverlayBasis,
     rows: &[(String, String)],
 ) -> Result<OverlayIdentity, OverlayError> {
-    let mut bytes = Vec::new();
-    let mut part = |value: &[u8]| {
-        bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(value);
-    };
-    part(b"cartograph-knowledge-overlay@1");
-    part(serde_json::to_string(basis)?.as_bytes());
+    let mut hash = IdentityHash::new(basis)?;
     for (key, json) in rows {
-        part(key.as_bytes());
-        part(json.as_bytes());
+        hash.row(key, json);
     }
-    Ok(OverlayIdentity(core_prov::content_hash(&bytes)))
+    Ok(hash.finish())
+}
+
+/// Shared streaming form of the existing length-prefixed identity encoding.
+struct IdentityHash(blake3::Hasher);
+impl IdentityHash {
+    fn new(basis: &OverlayBasis) -> Result<Self, OverlayError> {
+        let mut hash = Self(blake3::Hasher::new());
+        hash.part(b"cartograph-knowledge-overlay@1");
+        hash.part(serde_json::to_string(basis)?.as_bytes());
+        Ok(hash)
+    }
+    fn part(&mut self, value: &[u8]) {
+        self.0.update(&(value.len() as u64).to_be_bytes());
+        self.0.update(value);
+    }
+    fn row(&mut self, key: &str, json: &str) {
+        self.part(key.as_bytes());
+        self.part(json.as_bytes());
+    }
+    fn finish(self) -> OverlayIdentity {
+        OverlayIdentity(self.0.finalize().to_hex().to_string())
+    }
 }
 
 #[cfg(test)]
