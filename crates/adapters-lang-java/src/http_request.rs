@@ -32,7 +32,7 @@ fn uppercase_token(name: &str) -> bool {
 
 /// The URL a `URI` expression names: a literal only for a proven
 /// `URI.create("<lit>")` or `new URI("<lit>")`, else its computed spelling.
-fn url(proof: &Proof<'_>, method: TsNode<'_>, uri: TsNode<'_>) -> IdentityExpr {
+pub(crate) fn url(proof: &Proof<'_>, method: TsNode<'_>, uri: TsNode<'_>) -> IdentityExpr {
     let cx = proof.cx;
     let argument = match uri.kind() {
         "method_invocation" if static_call(proof, method, uri, URI, "create") => {

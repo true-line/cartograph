@@ -19,6 +19,7 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+mod apache_http;
 mod jaxrs;
 mod jpa;
 pub mod jvm;
@@ -991,6 +992,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         // JDK `java.net.http` request builders (AC-0475).
         out.unjoined_sites
             .extend(http_request::sites(&cx, root, &imports, &methods_by_start));
+        // Apache HttpClient 4 and 5 request constructors (AC-0478).
+        out.unjoined_sites
+            .extend(apache_http::sites(&cx, root, &imports, &methods_by_start));
         // Square OkHttp request builders (AC-0476).
         out.unjoined_sites
             .extend(okhttp::sites(&cx, root, &imports, &methods_by_start));
