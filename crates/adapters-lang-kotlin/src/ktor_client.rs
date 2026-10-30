@@ -90,7 +90,7 @@ fn absolute(url: &str) -> bool {
 }
 
 /// Ktor client fetch sites in this file, owned by their innermost enclosing
-/// function.
+/// function, else by the file (#1426).
 pub(crate) fn sites(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
@@ -151,9 +151,9 @@ pub(crate) fn sites(
         if !proof.is_client(call, client, HTTP_CLIENT, true) {
             continue;
         }
-        let Some(symbol) = rest_template::enclosing(functions, call) else {
-            continue;
-        };
+        // A request outside any function (a property or top-level
+        // initializer) is owned by its file (#1426).
+        let symbol = rest_template::enclosing(functions, call);
         let block_names = |word| lambda.is_some_and(|lambda| names(cx, lambda, word));
         let method = match fixed {
             _ if block_names("method") => "?",
@@ -169,7 +169,7 @@ pub(crate) fn sites(
         });
         // `Type.function`, naming the call in a runtime-base Gap.
         let entry = symbol
-            .rsplit_once('#')
+            .and_then(|symbol| symbol.rsplit_once('#'))
             .map(|(_, member)| member.to_string());
         out.push(FetchSite {
             method: method.to_string(),
@@ -177,7 +177,7 @@ pub(crate) fn sites(
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
-            symbol: Some(symbol.clone()),
+            symbol: symbol.cloned(),
             path: cx.path.to_string(),
             byte_start: call.start_byte() as u64,
             // The block is part of the request when it is present.

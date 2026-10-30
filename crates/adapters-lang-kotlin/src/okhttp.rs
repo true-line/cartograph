@@ -81,7 +81,7 @@ fn foreign_literal(cx: &FileCx<'_>, argument: TsNode<'_>, string: bool) -> bool 
 }
 
 /// OkHttp request sites in this file, owned by their innermost enclosing
-/// function.
+/// function, else by the file (#1426).
 pub(crate) fn sites(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
@@ -119,9 +119,9 @@ pub(crate) fn sites(
         if !build_args.is_empty() || proof.shadows("build") {
             continue;
         }
-        let Some(symbol) = rest_template::enclosing(functions, build) else {
-            continue;
-        };
+        // A request outside any function (a property or top-level
+        // initializer) is owned by its file (#1426).
+        let symbol = rest_template::enclosing(functions, build);
         // Walk back to `Request.Builder()`; links seen first are the last
         // called, so the first method and `url` found are the ones that apply.
         let mut verb = None;
@@ -170,7 +170,7 @@ pub(crate) fn sites(
         };
         // `Type.function`, naming the call in a computed-URL Gap.
         let entry = symbol
-            .rsplit_once('#')
+            .and_then(|symbol| symbol.rsplit_once('#'))
             .map(|(_, member)| member.to_string());
         out.push(FetchSite {
             method: verb.unwrap_or_else(|| "GET".to_string()),
@@ -178,7 +178,7 @@ pub(crate) fn sites(
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
-            symbol: Some(symbol.clone()),
+            symbol: symbol.cloned(),
             path: cx.path.to_string(),
             byte_start: node.start_byte() as u64,
             byte_end: build.end_byte() as u64,

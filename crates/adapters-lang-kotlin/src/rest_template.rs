@@ -256,7 +256,7 @@ pub(crate) fn enclosing<'f, 't>(
 }
 
 /// `RestTemplate` fetch sites in this file, owned by their innermost
-/// enclosing function.
+/// enclosing function, else by the file (#1426).
 pub(crate) fn sites(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
@@ -347,9 +347,9 @@ pub(crate) fn sites(
                 None => continue,
             },
         };
-        let Some(symbol) = enclosing(functions, call) else {
-            continue;
-        };
+        // A request outside any function (a property or top-level
+        // initializer) is owned by its file (#1426).
+        let symbol = enclosing(functions, call);
         if !proof.is_client(call, receiver, REST_TEMPLATE, true) {
             continue;
         }
@@ -359,7 +359,7 @@ pub(crate) fn sites(
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
-            symbol: Some(symbol.clone()),
+            symbol: symbol.cloned(),
             path: cx.path.to_string(),
             byte_start: call.start_byte() as u64,
             byte_end: call.end_byte() as u64,
