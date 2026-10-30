@@ -397,6 +397,20 @@ impl CaptureStore {
         Ok(inventory)
     }
 
+    /// Each source's largest retained capture, by selected byte length: the
+    /// weight its share of a store-wide budget is proportional to (#725).
+    pub fn source_byte_weights(&self) -> Result<BTreeMap<SourceId, u64>> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut weights = BTreeMap::new();
+        visit_manifests(&transaction, |id, manifest| {
+            let weight = weights.entry(manifest.source_id.clone()).or_insert(0);
+            *weight = (*weight).max(capture_info(id, manifest).byte_len);
+            Ok(())
+        })?;
+        transaction.commit()?;
+        Ok(weights)
+    }
+
     /// Atomically forget exactly this source's current capture set. The caller
     /// supplies the sorted, unique IDs from its preview; a changed inventory
     /// rejects the whole operation. Only objects referenced by deleted captures
@@ -830,6 +844,36 @@ mod tests {
                 |row| Ok((nonnegative(row, 0)?, nonnegative(row, 1)?)),
             )
             .unwrap()
+    }
+
+    // AC-0497: a source's weight is its largest retained capture's selected
+    // bytes, empty files included, never a sum across its captures (#725).
+    #[test]
+    fn source_byte_weights_take_each_sources_largest_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store =
+            CaptureStore::open(&dir.path().join("captures.sqlite"), StoreLimits::default())
+                .unwrap();
+        assert!(store.source_byte_weights().unwrap().is_empty());
+        store
+            .persist(&captured_files(
+                "large",
+                &[("a.ts", b"12345"), ("b.ts", b"678")],
+            ))
+            .unwrap();
+        store
+            .persist(&captured_files("large", &[("a.ts", b"1234")]))
+            .unwrap();
+        store
+            .persist(&captured_files("small", &[("a.ts", b"12"), ("e.ts", b"")]))
+            .unwrap();
+        assert_eq!(
+            store.source_byte_weights().unwrap(),
+            BTreeMap::from([
+                (SourceId::new("large").unwrap(), 8),
+                (SourceId::new("small").unwrap(), 2),
+            ])
+        );
     }
 
     // AC-0135: restart preserves exact raw objects; identical writes are idempotent.

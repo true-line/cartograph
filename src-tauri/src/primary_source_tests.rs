@@ -3056,3 +3056,48 @@ fn receipt_workspace_covers_capture_roundtrip_and_range_refusal() {
         }
     }
 }
+
+#[test]
+fn receipt_share_follows_each_sources_captured_bytes() {
+    // AC-0497: a source's receipts are admitted up to its share of the store,
+    // proportional to its captured bytes among all retained sources; the rest
+    // are named omissions rather than a failed recovery (#725).
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let large_root = directory(dir.path(), "large");
+    let small_root = directory(dir.path(), "small");
+    // Three times the small source's bytes: the small source's share is a quarter.
+    let padding = "x".repeat(2 * STABLE_A.len() - 3);
+    std::fs::write(
+        large_root.join("source.ts"),
+        format!("{STABLE_A}//{padding}\n"),
+    )
+    .unwrap();
+    std::fs::write(small_root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let large_source = register_local_source(&state, &large_root).unwrap();
+    let small_source = register_local_source(&state, &small_root).unwrap();
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 8;
+
+    let retain = |source: &RegisteredSource| {
+        let parsed = parse(&state, source, || {});
+        let mut kept = parsed.receipts.clone();
+        let (omitted, _) = state
+            .primary_sources
+            .persist(&parsed.input, source, &parsed.receipts)
+            .unwrap()
+            .keep_retained(&mut kept);
+        (parsed.receipts.len(), kept.len(), omitted)
+    };
+    // Alone in the store, the large source has all of it.
+    let (total, kept, omitted) = retain(&large_source);
+    assert_eq!((total, kept), (3, 3));
+    assert!(omitted.is_empty());
+    let (total, kept, omitted) = retain(&small_source);
+    assert_eq!((total, kept), (3, 2));
+    assert_eq!(omitted, BTreeMap::from([("source.ts".to_string(), 1)]));
+    // Three quarters of the store still holds every large-source receipt.
+    let (_, kept, omitted) = retain(&large_source);
+    assert_eq!(kept, 3);
+    assert!(omitted.is_empty());
+}
