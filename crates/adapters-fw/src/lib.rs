@@ -130,7 +130,24 @@ pub fn in_jvm_test_source_set(path: &str) -> bool {
                 .find(|pair| pair[0] == "src")
                 .map(|pair| pair[1])
         });
-    root.is_some_and(|set| JVM_TEST_SOURCE_SETS.contains(&set))
+    root.is_some_and(is_test_source_set)
+}
+
+/// Whether a source-set name holds only test code: a fixed Maven/Gradle
+/// test set, a Kotlin Multiplatform or Android test set (`jvmTest`,
+/// `commonTest`, `androidUnitTest`, `iosSimulatorArm64Test`, …), test
+/// fixtures of a target (`jvmTestFixtures`) or an Android variant test set
+/// (`testDebug`, `androidTestRelease`) (#1424).
+fn is_test_source_set(set: &str) -> bool {
+    let variant = |prefix: &str| {
+        set.strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+    };
+    JVM_TEST_SOURCE_SETS.contains(&set)
+        || (set.len() > "Test".len() && set.ends_with("Test"))
+        || set.ends_with("TestFixtures")
+        || variant("test")
+        || variant("androidTest")
 }
 
 #[cfg(test)]
@@ -150,6 +167,14 @@ mod tests {
             "a\\src\\test\\java\\X.java",
             "src/app/src/test/java/X.java",
             "src/test/X.java",
+            "shared/src/commonTest/kotlin/X.kt",
+            "shared/src/jvmTest/kotlin/X.kt",
+            "app/src/androidUnitTest/kotlin/X.kt",
+            "app/src/androidInstrumentedTest/kotlin/X.kt",
+            "shared/src/iosSimulatorArm64Test/kotlin/X.kt",
+            "lib/src/jvmTestFixtures/kotlin/X.kt",
+            "app/src/testDebug/java/X.java",
+            "app/src/androidTestRelease/kotlin/X.kt",
         ] {
             assert!(in_jvm_test_source_set(path), "{path}");
         }
@@ -158,6 +183,11 @@ mod tests {
             "test-suite/module/omod/src/main/java/X.java",
             "src/jvmMain/kotlin/X.kt",
             "src/testing/java/X.java",
+            "shared/src/commonMain/kotlin/X.kt",
+            "app/src/debug/kotlin/X.kt",
+            "src/Test/java/X.java",
+            "src/contest/java/X.java",
+            "src/testdata/java/X.java",
             "test/src/main/java/X.java",
             "web/src/main/java/com/acme/src/test/Controller.java",
             "src/main/kotlin/com/acme/src/test/Controller.kt",
