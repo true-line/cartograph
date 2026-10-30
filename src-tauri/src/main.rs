@@ -11019,6 +11019,11 @@ export function App() {
 
     #[test]
     fn a_preflight_started_after_a_github_recovery_is_done_keeps_its_findings() {
+        if crate::registered_source_tests::isolated_managed_exact_test(
+            "tests::a_preflight_started_after_a_github_recovery_is_done_keeps_its_findings",
+        ) {
+            return;
+        }
         // AC-0214 (#497 and its review): as for a local recovery. The managed
         // clone is ready and its write reservation released before `done`,
         // so the preflight can read it.
@@ -11040,6 +11045,11 @@ export function App() {
 
     #[test]
     fn a_preflight_started_after_a_manifest_recovery_is_done_keeps_its_findings() {
+        if crate::registered_source_tests::isolated_managed_exact_test(
+            "tests::a_preflight_started_after_a_manifest_recovery_is_done_keeps_its_findings",
+        ) {
+            return;
+        }
         // AC-0214 (#497 and its review): as for a local recovery, for every
         // repo, cloned or local.
         use tauri::{Listener, Manager};
