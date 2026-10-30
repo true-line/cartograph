@@ -175,6 +175,8 @@ const RUST_KAFKA: &str = "import-proven `FutureRecord::to`/`BaseRecord::to` reco
 const JAVA_KAFKA: &str = "`send` on a single-type-imported or fully qualified `KafkaTemplate` local, parameter or own-type field, and method-level `@KafkaListener` `topics`; subclasses, `sendDefault`, wildcard imports and class-level listeners are not read, and a topic must be an exact literal with no placeholder";
 /// What the Python event SDK cells read (AC-0458).
 const PY_EVENTS: &str = "registry `pypi` entries: methods on a once-bound or inline selected factory call (`boto3.client(\"sqs\")`, `KafkaProducer(…)`) in their own scope, and constructors; instance attributes and passed-in clients are not read, an identity is followed only within its file, and qualifiers and batch keys are not applied";
+/// What the Python SQLAlchemy data model cell reads (AC-0474).
+const PY_SQLALCHEMY: &str = "declarative models on an import-proven base (`declarative_base()`, `registry().generate_base()`, `DeclarativeBase`, Flask-SQLAlchemy `db.Model`) with a literal `__tablename__`; imperative `Table()` and `map_imperatively` mappings are not read, and a dynamic table name or an unprovable reference target is a Gap";
 const NEXT_API: &str = "pages/api and app-router route handlers under a package declaring next; next.config basePath is not applied and wrapped or re-exported handlers stay Gaps";
 const TSX_ONLY: &str = "recorded in .tsx/.js/.jsx files; plain .ts modules are not scanned";
 
@@ -267,6 +269,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Python", "httpx", HttpClientCalls, Partial, PY_CLIENT),
     cell("Python", "boto3", EventSites, Partial, PY_EVENTS),
     cell("Python", "kafka-python", EventSites, Partial, PY_EVENTS),
+    cell("Python", "sqlalchemy", DataModel, Partial, PY_SQLALCHEMY),
     cell("Go", CORE, Imports, Supported, ""),
     cell("Go", CORE, Calls, Supported, ""),
     cell("Go", "net-http", HttpEndpoints, Supported, ""),
