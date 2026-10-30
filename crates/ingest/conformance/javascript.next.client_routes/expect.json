@@ -6,6 +6,13 @@
       "props": {
         "router": "next-pages"
       }
+    },
+    {
+      "label": "Screen",
+      "id": "screen:local/p@/orders/[id]",
+      "props": {
+        "router": "next-app"
+      }
     }
   ],
   "edges": [
@@ -13,6 +20,11 @@
       "label": "RENDERS",
       "src": "screen:local/p@/users/[id]",
       "dst": "sym:local/p@pages/users/[id].js#UserDetail"
+    },
+    {
+      "label": "RENDERS",
+      "src": "screen:local/p@/orders/[id]",
+      "dst": "sym:local/p@app/(shop)/orders/[id]/page.js#OrderDetail"
     }
   ]
 }

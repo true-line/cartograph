@@ -31,7 +31,8 @@ use crate::callable::{self, Bindings};
 use crate::{EXTRACTOR_ID, FileCx, SourceId, file_id, resolution::ResolutionIndex};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tree_sitter::Node as TsNode;
 
 /// Framework label on every endpoint this module emits.
@@ -286,32 +287,25 @@ fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, Option<&'st
     })
 }
 
+/// Whether the Next package at `dir` has `router` (`app` or `pages`) at its
+/// root. Next selects the root directory by its existence alone, so one
+/// holding only assets (`app/globals.css`) still makes `src/<router>`
+/// inactive; walked source files cannot tell.
+fn root_router(root: &Path, dir: &str, router: &str) -> bool {
+    root.join(dir).join(router).is_dir()
+}
+
 /// Emit every proven route site as an Endpoint, and every unproven one under
 /// a proven package as a Gap.
 pub(crate) fn complete(
     sites: Vec<Site>,
+    root: &Path,
     index: &ResolutionIndex,
     id: &SourceId,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
 ) {
     let mut seen: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
-    let files: Vec<String> = nodes
-        .iter()
-        .filter(|node| node.label == "File")
-        .filter_map(|node| node.props["path"].as_str().map(str::to_string))
-        .collect();
-    let root_router = |dir: &str, app: bool| {
-        let base = if dir.is_empty() {
-            String::new()
-        } else {
-            format!("{dir}/")
-        };
-        files.iter().any(|file| {
-            file.strip_prefix(&base)
-                .is_some_and(|rel| rel.starts_with(if app { "app/" } else { "pages/" }))
-        })
-    };
     for site in sites {
         let Some((dir, manifest, span)) = index.declaring_manifest(&site.file, "next") else {
             continue;
@@ -322,7 +316,8 @@ pub(crate) fn complete(
             &site.file[dir.len() + 1..]
         };
         let app = site.app;
-        let Some((path, prefix)) = route(rel, app, root_router(dir, app)) else {
+        let router = if app { "app" } else { "pages" };
+        let Some((path, prefix)) = route(rel, app, root_router(root, dir, router)) else {
             continue;
         };
         let declaration = EvidenceRef {
@@ -420,9 +415,125 @@ pub(crate) fn complete(
     }
 }
 
+/// Screen router label for app-router pages.
+pub const APP_ROUTER: &str = "next-app";
+
+/// The screen route of an app-router `page` file relative to its package,
+/// or `None` when the conventions do not route it. Segments keep their
+/// file spelling, as pages-router screens do (`/users/[id]`); `(group)`
+/// segments drop, and `_private`, `@slot` and `(.)` intercept segments are
+/// not routed. A root `app/` makes `src/app` inactive.
+fn app_screen_route(rel: &str, root_router: bool) -> Option<String> {
+    let rel = match rel.strip_prefix("src/") {
+        Some(_) if root_router => return None,
+        Some(inner) => inner,
+        None => rel,
+    };
+    let inner = rel.strip_prefix("app/")?;
+    let (dirs, name) = inner.rsplit_once('/').unwrap_or(("", inner));
+    (stem_of(name)? == "page").then_some(())?;
+    let mut segments = Vec::new();
+    for segment in dirs.split('/').filter(|s| !s.is_empty()) {
+        if segment.starts_with('_') || segment.starts_with('@') || segment.starts_with("(.") {
+            return None;
+        }
+        if !(segment.starts_with('(') && segment.ends_with(')')) {
+            segments.push(segment);
+        }
+    }
+    Some(format!("/{}", segments.join("/")))
+}
+
+/// Next.js app-router pages (#1364): under a package that declares `next`,
+/// `app/**/page.<ext>` (or `src/app/**`) is a `Screen` that `RENDERS` the
+/// file's default export, citing the file and the manifest's `next`
+/// declaration. The screen records the file convention, not a verified
+/// page: a page without a recovered default export (including any `.ts`
+/// page, as default exports are read from component files only) is a
+/// screen with no `RENDERS`. A screen id another router
+/// already emitted is kept.
+pub(crate) fn app_screens(
+    root: &Path,
+    index: &ResolutionIndex,
+    id: &SourceId,
+    default_exports: &HashMap<String, String>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    let mut seen: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
+    let files: Vec<String> = nodes
+        .iter()
+        .filter(|node| node.label == "File")
+        .filter_map(|node| node.props["path"].as_str().map(str::to_string))
+        .collect();
+    for file in &files {
+        let Some((dir, manifest, span)) = index.declaring_manifest(file, "next") else {
+            continue;
+        };
+        let rel = if dir.is_empty() {
+            file.as_str()
+        } else {
+            &file[dir.len() + 1..]
+        };
+        let Some(route) = app_screen_route(rel, root_router(root, dir, "app")) else {
+            continue;
+        };
+        let screen = format!("screen:{}@{route}", id.repo);
+        if !seen.insert(screen.clone()) {
+            continue;
+        }
+        let evidence = vec![
+            EvidenceRef {
+                repo: id.repo.into(),
+                path: file.clone(),
+                byte_start: 0,
+                byte_end: 0,
+                commit_sha: id.commit.into(),
+            },
+            EvidenceRef {
+                repo: id.repo.into(),
+                path: manifest.to_string(),
+                byte_start: span.0,
+                byte_end: span.1,
+                commit_sha: id.commit.into(),
+            },
+        ];
+        let prov = |fact: &str| {
+            let prov = Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                evidence.clone(),
+                EXTRACTOR_ID,
+                fact.as_bytes(),
+            )
+            .expect("Deterministic within ceiling");
+            serde_json::to_value(prov).expect("provenance serializes")
+        };
+        nodes.push(Node {
+            id: screen.clone(),
+            label: "Screen".into(),
+            props: serde_json::json!({
+                "route": route,
+                "router": APP_ROUTER,
+                "prov": prov(&format!("Screen {route}")),
+            }),
+        });
+        if let Some(component) = default_exports.get(file) {
+            edges.push(Edge {
+                src: screen.clone(),
+                dst: component.clone(),
+                label: "RENDERS".into(),
+                props: serde_json::json!({
+                    "prov": prov(&format!("RENDERS {screen} -> {component}")),
+                }),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::route;
+    use super::{app_screen_route, route};
     use crate::{IncrementalCache, SourceId, extract_dir, extract_dir_incremental};
     use core_prov::Provenance;
 
@@ -806,5 +917,227 @@ mod tests {
         // A root router makes `src/` inactive.
         assert_eq!(route("src/app/api/x/route.ts", true, true), None);
         assert_eq!(route("app/api/x/route.ts", true, true).unwrap().0, "/api/x");
+    }
+
+    fn screens(out: &crate::Extraction, router: &str) -> Vec<(String, Option<String>)> {
+        let mut screens: Vec<_> = out
+            .nodes
+            .iter()
+            .filter(|n| n.label == "Screen" && n.props["router"] == router)
+            .map(|n| {
+                let renders = out
+                    .edges
+                    .iter()
+                    .find(|e| e.label == "RENDERS" && e.src == n.id)
+                    .map(|e| e.dst.clone());
+                (n.props["route"].as_str().unwrap().to_string(), renders)
+            })
+            .collect();
+        screens.sort();
+        screens
+    }
+
+    // AC-0467: a `next` package's app-router pages become screens that
+    // render their default export, citing the page and the `next`
+    // declaration; other packages, other file names and unrouted segments
+    // yield none.
+    #[test]
+    fn next_app_router_pages_become_screens() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "web/package.json",
+            r#"{ "dependencies": { "next": "15.0.0" } }"#,
+        );
+        write(
+            root,
+            "web/app/page.tsx",
+            "export default function Home() { return <main />; }\n",
+        );
+        write(
+            root,
+            "web/app/(shop)/users/[id]/page.tsx",
+            "export default function User() { return <div />; }\n",
+        );
+        write(
+            root,
+            "web/app/docs/[...slug]/page.js",
+            "export default function Docs() { return null; }\n",
+        );
+        write(
+            root,
+            "web/app/empty/page.tsx",
+            "export function NotDefault() { return null; }\n",
+        );
+        write(
+            root,
+            "web/app/users/layout.tsx",
+            "export default function Layout({ children }) { return children; }\n",
+        );
+        for unrouted in [
+            "web/app/_lib/page.tsx",
+            "web/app/@modal/x/page.tsx",
+            "web/app/(.)photo/page.tsx",
+            "web/src/app/shadowed/page.tsx",
+        ] {
+            write(
+                root,
+                unrouted,
+                "export default function P() { return null; }\n",
+            );
+        }
+        write(
+            root,
+            "lib/package.json",
+            r#"{ "dependencies": { "express": "4" } }"#,
+        );
+        write(
+            root,
+            "lib/app/page.tsx",
+            "export default function Other() { return null; }\n",
+        );
+
+        let out = extract_dir(root, &id("abc123")).unwrap();
+        let sym = |path: &str, name: &str| Some(format!("sym:qwtm/example@{path}#{name}"));
+        assert_eq!(
+            screens(&out, super::APP_ROUTER),
+            [
+                ("/".to_string(), sym("web/app/page.tsx", "Home")),
+                (
+                    "/docs/[...slug]".to_string(),
+                    sym("web/app/docs/[...slug]/page.js", "Docs")
+                ),
+                ("/empty".to_string(), None),
+                (
+                    "/users/[id]".to_string(),
+                    sym("web/app/(shop)/users/[id]/page.tsx", "User")
+                ),
+            ]
+        );
+        let symbols: std::collections::HashSet<_> =
+            out.nodes.iter().map(|n| n.id.as_str()).collect();
+        // A page without a recovered default export is still a screen by
+        // file convention; it renders nothing recovered.
+        for renders in screens(&out, super::APP_ROUTER)
+            .into_iter()
+            .filter_map(|(_, renders)| renders)
+        {
+            assert!(symbols.contains(renders.as_str()));
+        }
+        let screen = out
+            .nodes
+            .iter()
+            .find(|n| n.id == "screen:qwtm/example@/users/[id]")
+            .unwrap();
+        let prov: Provenance = serde_json::from_value(screen.props["prov"].clone()).unwrap();
+        assert!(
+            prov.evidence
+                .iter()
+                .any(|e| e.path == "web/package.json" && e.byte_end > 0)
+        );
+        assert!(
+            prov.evidence
+                .iter()
+                .any(|e| e.path == "web/app/(shop)/users/[id]/page.tsx")
+        );
+
+        // Deterministic, and a cache reuse at a new commit cites that commit.
+        assert_eq!(out.nodes, extract_dir(root, &id("abc123")).unwrap().nodes);
+        let mut cache = IncrementalCache::default();
+        extract_dir_incremental(root, &id("abc123"), &mut cache).unwrap();
+        let (again, _) = extract_dir_incremental(root, &id("def456"), &mut cache).unwrap();
+        let screen = again
+            .nodes
+            .iter()
+            .find(|n| n.id == "screen:qwtm/example@/")
+            .unwrap();
+        let prov: Provenance = serde_json::from_value(screen.props["prov"].clone()).unwrap();
+        assert!(prov.evidence.iter().all(|e| e.commit_sha == "def456"));
+    }
+
+    // AC-0467 (#1365 review): a root `app/` holding only assets still makes
+    // `src/app` inactive, for screens and route handlers alike, because Next
+    // selects the root directory by its existence.
+    #[test]
+    fn next_asset_only_root_app_still_shadows_src_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "package.json",
+            r#"{ "dependencies": { "next": "15.0.0" } }"#,
+        );
+        write(root, "app/globals.css", "body {}\n");
+        write(
+            root,
+            "src/app/page.tsx",
+            "export default function Home() { return null; }\n",
+        );
+        write(root, "src/app/api/x/route.ts", "export function GET() {}\n");
+        let out = extract_dir(root, &id("abc123")).unwrap();
+        assert_eq!(screens(&out, super::APP_ROUTER), []);
+        assert!(next_endpoints(&out).is_empty());
+    }
+
+    // AC-0467: a pages-router screen of the same route keeps its id, and
+    // without a root `app/` the `src/app` pages are routed. A `.ts` page
+    // holds no JSX component, so it renders nothing recovered.
+    #[test]
+    fn next_app_screens_defer_to_existing_screens_and_route_src_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "package.json",
+            r#"{ "dependencies": { "next": "14" } }"#,
+        );
+        write(
+            root,
+            "pages/about.tsx",
+            "export default function About() { return null; }\n",
+        );
+        write(
+            root,
+            "src/app/about/page.tsx",
+            "export default function AppAbout() { return null; }\n",
+        );
+        write(
+            root,
+            "src/app/(marketing)/pricing/page.ts",
+            "export default function Pricing() { return null; }\n",
+        );
+        let out = extract_dir(root, &id("abc123")).unwrap();
+        assert_eq!(
+            screens(&out, super::APP_ROUTER),
+            [("/pricing".to_string(), None)]
+        );
+        assert_eq!(
+            screens(&out, "next-pages"),
+            [(
+                "/about".to_string(),
+                Some("sym:qwtm/example@pages/about.tsx#About".into())
+            )]
+        );
+    }
+
+    // AC-0467: app-router page conventions relative to the package directory.
+    #[test]
+    fn next_app_page_conventions_map_to_screen_routes() {
+        let cases = [
+            ("app/page.tsx", false, Some("/")),
+            ("app/a/(g)/b/page.jsx", false, Some("/a/b")),
+            ("src/app/[[...x]]/page.ts", false, Some("/[[...x]]")),
+            ("src/app/x/page.tsx", true, None),
+            ("app/x/route.ts", false, None),
+            ("app/x/page.mdx", false, None),
+            ("app/x/_p/page.tsx", false, None),
+            ("app/@s/page.tsx", false, None),
+            ("app/(..)x/page.tsx", false, None),
+            ("pages/x.tsx", false, None),
+        ];
+        for (rel, root_router, want) in cases {
+            assert_eq!(app_screen_route(rel, root_router).as_deref(), want, "{rel}");
+        }
     }
 }
