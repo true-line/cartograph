@@ -1241,11 +1241,27 @@ impl ReceiptStore {
     /// (#722). Integrity failures still reject the whole batch; a receipt that
     /// only lacks room is left out and counted under its file path, and the
     /// ids actually retained (new or already stored) are returned with them.
+    #[cfg(test)]
     fn persist(
         &mut self,
         capture: &Capture,
         source: &RegisteredSource,
         receipts: &[Receipt],
+    ) -> Result<RetainedReceipts, String> {
+        let share = self.capacity;
+        self.persist_within(capture, source, receipts, share)
+    }
+
+    /// [`Self::persist`], also leaving out each receipt that would take the
+    /// batch's retained rows past `share`, the source's (count, bytes) ceiling
+    /// (#725). Rows from the source's earlier recoveries still count against
+    /// the store-wide bound but not against the share; nothing is evicted.
+    fn persist_within(
+        &mut self,
+        capture: &Capture,
+        source: &RegisteredSource,
+        receipts: &[Receipt],
+        share: (u64, u64),
     ) -> Result<RetainedReceipts, String> {
         let mut rows = Vec::new();
         let mut batch = std::collections::BTreeMap::new();
@@ -1293,6 +1309,10 @@ impl ReceiptStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let (mut count, mut bytes) = receipt_storage(&tx)?;
+        // The batch's retained rows, each normalized header counted once
+        // whether new or already stored, measured against `share`.
+        let (mut source_count, mut source_bytes) = (0u64, 0u64);
+        let mut charged_headers = std::collections::BTreeSet::new();
         let mut retained = RetainedReceipts::default();
         for (id, path, fact_key, fact_digest, canonical_json, normalized) in rows {
             let old: Option<(String, String, String, Option<String>)> = tx
@@ -1304,6 +1324,8 @@ impl ReceiptStore {
                 .optional()
                 .map_err(storage_error)?;
             if let Some((old_source, old_repo, old_payload, old_header_id)) = old {
+                source_count += 1;
+                source_bytes += old_payload.len() as u64;
                 let old_json = if let Some(header_id) = old_header_id {
                     let (header_source, header_repo, header_json): (String, String, String) = tx
                         .query_row(
@@ -1314,6 +1336,9 @@ impl ReceiptStore {
                         .map_err(storage_error)?;
                     if header_source != old_source || header_repo != old_repo {
                         return Err(storage_error("receipt header ownership"));
+                    }
+                    if charged_headers.insert(header_id.clone()) {
+                        source_bytes += header_json.len() as u64;
                     }
                     rebuild_normalized_receipt(
                         &id,
@@ -1361,7 +1386,17 @@ impl ReceiptStore {
                     None => normalized.header_json.len() as u64,
                 };
                 let row_cost = normalized.body_json.len() as u64 + header_cost;
-                if count + 1 > self.capacity.0 || bytes + row_cost > self.capacity.1 {
+                let source_cost = normalized.body_json.len() as u64
+                    + if charged_headers.contains(&normalized.header_id) {
+                        0
+                    } else {
+                        normalized.header_json.len() as u64
+                    };
+                if count + 1 > self.capacity.0
+                    || bytes + row_cost > self.capacity.1
+                    || source_count + 1 > share.0
+                    || source_bytes + source_cost > share.1
+                {
                     *retained.omitted.entry(path).or_default() += 1;
                     retained.omitted_facts.push((fact_key, fact_digest));
                     continue;
@@ -1382,6 +1417,9 @@ impl ReceiptStore {
                 }
                 count += 1;
                 bytes += row_cost;
+                source_count += 1;
+                source_bytes += source_cost;
+                charged_headers.insert(normalized.header_id.clone());
                 require_one(
                     tx.execute(
                         "INSERT INTO receipts (id,source_id,repo_key,payload,header_id) VALUES (?1,?2,?3,?4,?5)",
@@ -1397,6 +1435,8 @@ impl ReceiptStore {
                 )?;
             } else if count + 1 > self.capacity.0
                 || bytes + canonical_json.len() as u64 > self.capacity.1
+                || source_count + 1 > share.0
+                || source_bytes + canonical_json.len() as u64 > share.1
             {
                 *retained.omitted.entry(path).or_default() += 1;
                 retained.omitted_facts.push((fact_key, fact_digest));
@@ -1404,6 +1444,8 @@ impl ReceiptStore {
             } else {
                 count += 1;
                 bytes += canonical_json.len() as u64;
+                source_count += 1;
+                source_bytes += canonical_json.len() as u64;
                 require_one(
                     tx.execute(
                         "INSERT INTO receipts (id,source_id,repo_key,payload) VALUES (?1,?2,?3,?4)",
@@ -1883,17 +1925,44 @@ impl PrimarySourceStore {
     ) -> Result<RetainedReceipts, String> {
         self.storage.verify()?;
         if let Some(capture) = &input.capture {
-            self.captures.lock().map_err(storage_error)?.persist(capture).map_err(|_| "Source retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())?;
-            self.receipts
-                .lock()
-                .map_err(storage_error)?
-                .persist(capture, source, receipts)
+            let (weight, total) = {
+                let mut captures = self.captures.lock().map_err(storage_error)?;
+                captures.persist(capture).map_err(|_| "Source retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())?;
+                let weights = captures.source_byte_weights().map_err(storage_error)?;
+                let weight = weights
+                    .get(&capture.manifest().source_id)
+                    .copied()
+                    .unwrap_or(0);
+                (weight, weights.values().sum())
+            };
+            let mut store = self.receipts.lock().map_err(storage_error)?;
+            let share = (
+                source_share(store.capacity.0, weight, total),
+                source_share(store.capacity.1, weight, total),
+            );
+            store.persist_within(capture, source, receipts, share)
         } else if !receipts.is_empty() {
             Err(storage_error("uncaptured receipts"))
         } else {
             Ok(RetainedReceipts::default())
         }
     }
+}
+
+/// The most one source's recovery may retain of a store-wide `capacity`:
+/// proportional to its captured bytes `weight` among all retained sources'
+/// `total`, never below a sixteenth, and never above the store (#725). Shares
+/// are ceilings, not reservations: they can sum past `capacity`, and the
+/// store-wide bound still applies, so a source may get less than its share.
+fn source_share(capacity: u64, weight: u64, total: u64) -> u64 {
+    if total == 0 {
+        return capacity;
+    }
+    let proportional = u128::from(capacity) * u128::from(weight) / u128::from(total);
+    u64::try_from(proportional)
+        .unwrap_or(capacity)
+        .max(capacity / 16)
+        .min(capacity)
 }
 
 /// Receipts one recovery actually retained, and those left out for lack of
@@ -2526,6 +2595,157 @@ mod tests {
         assert!(omitted_facts.is_empty());
         assert_eq!(kept, receipts);
         assert_eq!(receipt_count(&store), receipts.len() as i64);
+    }
+
+    // AC-0497: a source's share of the receipt store is proportional to its
+    // captured bytes, never below a sixteenth of the store and never above it
+    // (#725).
+    #[test]
+    fn source_share_is_proportional_with_a_floor_and_a_ceiling() {
+        assert_eq!(source_share(1600, 1, 2), 800);
+        assert_eq!(source_share(1600, 3, 4), 1200);
+        assert_eq!(source_share(1600, 99, 1000), 158);
+        assert_eq!(source_share(1600, 63, 1000), 100);
+        assert_eq!(source_share(1600, 62, 1000), 100);
+        assert_eq!(source_share(1600, 1, 1000), 100);
+        assert_eq!(source_share(1600, 5, 5), 1600);
+        assert_eq!(source_share(1600, 7, 5), 1600);
+        assert_eq!(source_share(1600, 0, 0), 1600);
+        assert_eq!(source_share(u64::MAX, u64::MAX - 1, u64::MAX), u64::MAX - 1);
+    }
+
+    fn payload_bytes(store: &ReceiptStore) -> u64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(length(payload)),0) FROM receipts",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap() as u64
+    }
+
+    // AC-0497: once a batch's retained rows reach the source's share, by count
+    // or bytes, the rest are named omissions; identical rows already stored
+    // stay retained and count against the share (#725).
+    #[test]
+    fn receipts_beyond_a_source_share_are_named_omissions() {
+        let (_directory, source, capture, _, receipts) = fixture();
+        assert!(receipts.len() >= 2);
+        let named = |n: usize| {
+            std::collections::BTreeMap::from([("rule.ts".to_string(), (receipts.len() - n) as u64)])
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let open = |name: &str| ReceiptStore::open(&directory.path().join(name)).unwrap();
+
+        let mut store = open("count.sqlite");
+        for share in [(1, u64::MAX), (0, 0)] {
+            let mut kept = receipts.clone();
+            let (omitted, omitted_facts) = store
+                .persist_within(&capture, &source, &receipts, share)
+                .unwrap()
+                .keep_retained(&mut kept);
+            assert_eq!(kept, receipts[..1]);
+            assert_eq!(omitted, named(1));
+            assert_eq!(omitted_facts.len(), receipts.len() - 1);
+        }
+
+        // The first receipt's whole cost, header included, is exactly enough.
+        let mut store = open("first.sqlite");
+        store.persist(&capture, &source, &receipts[..1]).unwrap();
+        let (_, first_cost) = receipt_storage(&store.conn).unwrap();
+        let first_payload = payload_bytes(&store);
+        for (name, share, retained) in [
+            ("exact.sqlite", first_cost, 1),
+            ("below.sqlite", first_cost - 1, 0),
+        ] {
+            let mut store = open(name);
+            let mut kept = receipts[..1].to_vec();
+            let (omitted, _) = store
+                .persist_within(&capture, &source, &receipts[..1], (u64::MAX, share))
+                .unwrap()
+                .keep_retained(&mut kept);
+            assert_eq!(kept, receipts[..retained]);
+            assert_eq!(omitted.values().sum::<u64>(), 1 - retained as u64);
+        }
+
+        // An already-stored identical row counts against the share by count
+        // and by its stored bytes, its header included once.
+        let mut both = open("both.sqlite");
+        both.persist(&capture, &source, &receipts[..2]).unwrap();
+        let second_body = payload_bytes(&both) - first_payload;
+        // Two new rows sharing a header are charged it once.
+        for (name, share, retained) in [
+            ("pair-exact.sqlite", first_cost + second_body, 2),
+            ("pair-below.sqlite", first_cost + second_body - 1, 1),
+        ] {
+            let mut store = open(name);
+            let mut kept = receipts[..2].to_vec();
+            store
+                .persist_within(&capture, &source, &receipts[..2], (u64::MAX, share))
+                .unwrap()
+                .keep_retained(&mut kept);
+            assert_eq!(kept, receipts[..retained], "{name}");
+        }
+        for (share, retained) in [
+            ((1, u64::MAX), 1),
+            ((2, u64::MAX), 2),
+            ((u64::MAX, first_cost + second_body - 1), 1),
+            ((u64::MAX, first_cost + second_body), 2),
+        ] {
+            let mut kept = receipts[..2].to_vec();
+            let mut store = open("first.sqlite");
+            let (omitted, _) = store
+                .persist_within(&capture, &source, &receipts[..2], share)
+                .unwrap()
+                .keep_retained(&mut kept);
+            assert_eq!(kept, receipts[..retained]);
+            assert_eq!(omitted.values().sum::<u64>(), 2 - retained as u64);
+            drop(store);
+            if retained == 2 {
+                // Undo the admission so the next case starts from one row.
+                let store = open("first.sqlite");
+                store
+                    .conn
+                    .execute("DELETE FROM receipts WHERE id = ?1", [receipts[1].id()])
+                    .unwrap();
+            }
+        }
+
+        // A legacy row is charged its whole JSON, alone or before a
+        // normalized one.
+        let legacy = mint_v2_receipt_from_v3(&receipts[0]);
+        let legacy_cost = legacy.to_json().unwrap().len() as u64;
+        let mixed = [legacy.clone(), receipts[1].clone()];
+        let mut alone = open("second.sqlite");
+        alone.persist(&capture, &source, &receipts[1..2]).unwrap();
+        let (_, second_cost) = receipt_storage(&alone.conn).unwrap();
+        for (name, batch, share, retained) in [
+            ("legacy-exact.sqlite", 1, (u64::MAX, legacy_cost), 1),
+            ("legacy-below.sqlite", 1, (u64::MAX, legacy_cost - 1), 0),
+            ("legacy-count.sqlite", 2, (1, u64::MAX), 1),
+            (
+                "mixed-exact.sqlite",
+                2,
+                (u64::MAX, legacy_cost + second_cost),
+                2,
+            ),
+            (
+                "mixed-below.sqlite",
+                2,
+                (u64::MAX, legacy_cost + second_cost - 1),
+                1,
+            ),
+            ("legacy-none.sqlite", 2, (0, u64::MAX), 0),
+        ] {
+            let mut store = open(name);
+            let mut kept = mixed[..batch].to_vec();
+            store
+                .persist_within(&capture, &source, &mixed[..batch], share)
+                .unwrap()
+                .keep_retained(&mut kept);
+            assert_eq!(kept, mixed[..retained], "{name}");
+        }
     }
 
     #[test]
