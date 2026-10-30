@@ -1,6 +1,6 @@
 # ADR-0051 — Layered knowledge model: deterministic base, knowledge layer, artifact-only targets
 
-- **Status:** Proposed (owner review)
+- **Status:** Accepted (owner, 2026-10-30)
 - **Date:** 2026-10-25
 - **Deciders:** Cartograph owner; implementation agents (Claude, Codex)
 
@@ -27,7 +27,7 @@ Today's facts:
 - **Embeddings.** `crates/semantic` embeds through a local Ollama
   `/api/embed` endpoint (`nomic-embed-text`) and builds an in-memory `usearch`
   ANN index per invocation. It serves only the semantic preview (candidates
-  and unresolved hops). ADR-0037 (Proposed) caches vectors in a bounded
+  and unresolved hops). ADR-0037 caches vectors in a bounded
   SQLite store. No ingest phase embeds a codebase, and nothing indexes text
   lexically.
 - **Knowledge nodes.** Nothing outside `crates/spec` produces `Capability`,
@@ -133,8 +133,9 @@ service dependency, while keeping the base authoritative.
   community detection). When a measured need appears, an in-memory graph
   engine loads a derived copy at query time. The `GraphStore` trait keeps
   the Kuzu-fork escape hatch from ADR-0008.
-- Embedding cost and provider identity follow ADR-0037; until it is accepted,
-  the ingest phase is built behind it and stays opt-in.
+- Embedding cost and provider identity follow ADR-0037. Its acceptance
+  (2026-10-30) lifts the earlier condition that the ingest phase be built
+  behind it; the phase still runs only with a configured embedding provider.
 
 ## Alternatives
 
