@@ -10,6 +10,7 @@ mod bounded;
 pub mod coverage;
 pub mod generation;
 pub mod omission;
+pub mod overlay;
 pub mod placeholder;
 pub mod rules;
 pub mod scoped;

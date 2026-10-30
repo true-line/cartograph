@@ -5991,10 +5991,22 @@ fn main() {
             let embedding_cache = Arc::new(Mutex::new(
                 semantic::embedding_cache::EmbeddingCache::open_disposable(&data_dir)?,
             ));
+            // ADR-0051 knowledge overlay (#1440): derived facts, discarded
+            // with the cached vectors before any destructive graph lifecycle.
+            let knowledge_overlay = Arc::new(Mutex::new(
+                core_graph::overlay::OverlayStore::open_disposable(&data_dir)
+                    .map_err(std::io::Error::other)?,
+            ));
             let invalidator = Arc::clone(&embedding_cache);
+            let overlay_invalidator = Arc::clone(&knowledge_overlay);
             let graph = SqliteGraphStore::open_with_reset_hook(
                 data_dir.join("graph.db"),
                 Box::new(move || {
+                    overlay_invalidator
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .invalidate()
+                        .map_err(|e| e.to_string())?;
                     invalidator
                         .lock()
                         .map_err(|e| e.to_string())?
@@ -6006,6 +6018,11 @@ fn main() {
                 .lock()
                 .map_err(|e| std::io::Error::other(e.to_string()))?
                 .bind_instance(&graph.instance_id()?)?;
+            knowledge_overlay
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .bind_instance(&graph.instance_id()?)
+                .map_err(std::io::Error::other)?;
             let state_path = data_dir.join("state.db");
             let work_packets = work_packets::PacketRuntime::open(&state_path)?;
             let jobs = JobStore::open(&state_path)?;
