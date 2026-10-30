@@ -170,9 +170,11 @@ const JAVA_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(
 const JAVA_NET_HTTP: &str = "inline `HttpRequest.newBuilder([uri])…build()` chains on a single-type-imported or fully qualified `java.net.http.HttpRequest` whose every link is a builder member; a builder held in a variable and built later is not read, and a URL is a literal only as `URI.create(\"…\")` or `new URI(\"…\")` on a proven `java.net.URI`";
 /// What the Java OkHttp client cell reads (AC-0476).
 const JAVA_OKHTTP: &str = "inline `new Request.Builder()…build()` chains on an imported or fully qualified `okhttp3.Request.Builder` whose every link is a builder member; a builder held in a variable and built later is not read, and a URL is a literal only as `url(\"…\")`";
+/// What the Java Apache HttpClient cell reads (AC-0478).
+const JAVA_APACHE: &str = "one-argument `new HttpGet|HttpHead|HttpPost|HttpPut|HttpPatch|HttpDelete|HttpOptions|HttpTrace(…)` of HttpClient 4 or 5, single-type-imported or fully qualified, without a class body; request builders, wildcard imports and a URI set after construction are not read, and a URL is a literal only as a string literal or a proven `URI.create`/`new URI` literal";
 /// What the Java core client cell still lacks (AC-0435, AC-0437, AC-0441,
-/// AC-0475, AC-0476).
-const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces, Spring `RestTemplate` and `WebClient`, JDK `java.net.http` and OkHttp request builders";
+/// AC-0475, AC-0476, AC-0478).
+const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces, Spring `RestTemplate` and `WebClient`, JDK `java.net.http` and OkHttp request builders, and Apache HttpClient request constructors";
 const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript, Python boto3/kafka-python, Java and Kotlin Spring Kafka, Go AWS SDK/kafka-go and Rust rdkafka";
 /// What the Go event SDK cells read (AC-0462).
 const GO_EVENTS: &str = "keyed AWS SDK `SendMessageInput`/`ReceiveMessageInput`/`PublishInput` and kafka-go `Writer`/`WriterConfig`/`ReaderConfig` literals on the file's import of the exact path; the client a request is sent through is not read, unkeyed literals are not read, and an identity must be an exact literal (through `aws.String` for AWS)";
@@ -329,6 +331,13 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         JAVA_NET_HTTP,
     ),
     cell("Java", "okhttp", HttpClientCalls, Partial, JAVA_OKHTTP),
+    cell(
+        "Java",
+        "apache-httpclient",
+        HttpClientCalls,
+        Partial,
+        JAVA_APACHE,
+    ),
     cell("Java", CORE, HttpClientCalls, Unsupported, NO_JAVA_CLIENT),
     cell("Java", "spring-kafka", EventSites, Partial, JAVA_KAFKA),
     cell("Kotlin", CORE, Types, Supported, ""),

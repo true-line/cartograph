@@ -4673,3 +4673,181 @@ class ClientTest {
     ]);
     assert_eq!(webclient_rows(&sites), Vec::<[&str; 3]>::new());
 }
+
+#[test]
+fn apache_httpclient_requests_become_fetch_sites() {
+    // AC-0478 (#1411): HttpClient 4 and 5 request classes, imported or fully
+    // qualified (also spaced); the class gives the method, a string literal
+    // or proven `URI.create`/`new URI` literal is a literal URL, and any
+    // other argument is computed. (T-0478)
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Four.java",
+            r#"package io.demo;
+
+import java.net.URI;
+import org.apache.http.client.methods.HttpDelete;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpHead;
+import org.apache.http.client.methods.HttpOptions;
+import org.apache.http.client.methods.HttpPatch;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpPut;
+import org.apache.http.client.methods.HttpTrace;
+
+class Four {
+    void calls(String path, URI target) {
+        new HttpGet("https://host/a");
+        new HttpHead("https://host/b");
+        new HttpPost(URI.create("https://host/c"));
+        new HttpPut(new URI("https://host/d"));
+        new HttpPatch("https://host/" + path);
+        new HttpDelete(target);
+        new HttpOptions("https://host/e");
+        new HttpTrace("https://host/f");
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Five.java",
+            r#"package io.demo;
+
+import org.apache.hc.client5.http.classic.methods.HttpPost;
+
+class Five {
+    void calls() {
+        new HttpPost("https://host/g");
+        new org.apache.hc.client5.http.classic.methods.HttpGet("https://host/h");
+        new org . apache . http . client . methods . HttpPut("https://host/i");
+    }
+}
+"#,
+        ),
+    ]);
+    assert_eq!(
+        webclient_rows(&sites),
+        [
+            ["POST", "literal:https://host/g", "none"],
+            ["GET", "literal:https://host/h", "none"],
+            ["PUT", "literal:https://host/i", "none"],
+            ["GET", "literal:https://host/a", "none"],
+            ["HEAD", "literal:https://host/b", "none"],
+            ["POST", "literal:https://host/c", "none"],
+            ["PUT", "literal:https://host/d", "none"],
+            ["PATCH", "computed:\"https://host/\" + path", "none"],
+            ["DELETE", "computed:target", "none"],
+            ["OPTIONS", "literal:https://host/e", "none"],
+            ["TRACE", "literal:https://host/f", "none"],
+        ]
+    );
+}
+
+#[test]
+fn unproven_apache_httpclient_requests_are_not_fetch_sites() {
+    // AC-0478: a no-argument constructor, an anonymous subclass, a
+    // wildcard-imported, foreign, file-declared or unimported class, a
+    // declared or imported `org` lookalike, a non-request class and a test
+    // source yield none. (T-0478)
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Client.java",
+            r#"package io.demo;
+
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpRequestBase;
+
+class Client {
+    void calls() {
+        new HttpGet();
+        new HttpGet("https://host/x") {};
+        new HttpRequestBase("https://host/x");
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Star.java",
+            r#"package io.demo;
+
+import org.apache.http.client.methods.*;
+
+class Star {
+    void calls() {
+        new HttpGet("https://host/x");
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Foreign.java",
+            r#"package io.demo;
+
+import com.example.HttpGet;
+
+class Foreign {
+    void calls() {
+        new HttpGet("https://host/x");
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Local.java",
+            r#"package io.demo;
+
+import org.apache.http.client.methods.HttpGet;
+
+class Local {
+    static class HttpGet {
+        HttpGet(String url) {}
+    }
+
+    void calls() {
+        new HttpGet("https://host/x");
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Lookalike.java",
+            r#"package io.demo;
+
+class Lookalike {
+    static class org {
+        static class apache {}
+    }
+
+    void calls() {
+        new org.apache.http.client.methods.HttpGet("https://host/x");
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Unimported.java",
+            r#"package io.demo;
+
+class Unimported {
+    void calls() {
+        new HttpGet("https://host/x");
+    }
+}
+"#,
+        ),
+        (
+            "src/test/java/io/demo/ClientTest.java",
+            r#"package io.demo;
+
+import org.apache.http.client.methods.HttpGet;
+
+class ClientTest {
+    void calls() {
+        new HttpGet("https://host/x");
+    }
+}
+"#,
+        ),
+    ]);
+    assert_eq!(webclient_rows(&sites), Vec::<[&str; 3]>::new());
+}
