@@ -1,8 +1,8 @@
 # ADR-0037 — Bounded persistent semantic vectors
 
-- **Status:** Proposed
+- **Status:** Accepted (owner, 2026-10-30)
 - **Date:** 2026-10-20
-- **Deciders:** Cartograph maintainers (owner review pending)
+- **Deciders:** Cartograph owner; Cartograph maintainers
 
 ## Context
 
