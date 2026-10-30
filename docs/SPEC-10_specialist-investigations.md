@@ -1009,3 +1009,16 @@ binaries: its per-ID task read fails, as can a history page containing it and th
 full receipt-reconciliation audit. SQLite schema validation alone does not detect
 this incompatibility. Future opt-in validation must use disposable profiles; no
 task is silently skipped and no old saved bytes are rewritten here.
+
+### Gated analyst input/schema (#1390, AC-0480)
+
+Immutable `domain-analyst@18`, based on @17, defines the final caller-obligation
+choice contract, including reserved null semantic feedback. Typed candidate
+authority supplies compact input choices, finite acquisition schema and exact
+acquisition membership; blocked/deferred state never opens broad exploration.
+FinishOnly remains finish-only. No acquisition stamp is admitted in this slice.
+Dispatch is explicitly disabled before source/provider preparation and at the
+store boundary before a transaction. The reason is shared, and historical
+nonce-recovery ordering, @15/@17 identities, catalogs and limits stay unchanged.
+Host authentication, semantic journal, sizing/sealing, worker and UI activation
+remain separate prerequisites; pure input tests establish no model efficacy.

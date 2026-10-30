@@ -841,3 +841,79 @@ mod task_relay;
 #[cfg(unix)]
 #[path = "activation_tests/service_relay.rs"]
 mod service_relay;
+
+// AC-0480: actual public/store boundaries reject before source/provider/writes.
+#[test]
+fn gated_analyst_dispatch_refuses_before_provider_and_writes() {
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, mut request, app_data| {
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+        request.specialist_id = "domain-analyst@18".into();
+        for item in &mut request.obligations.obligations {
+            if let Obligation::Source {
+                target,
+                obligation_id,
+            } = item
+            {
+                target.receipt_id = format!("ts-primary-v2:{}", "0".repeat(64));
+                target.target_id = target.content_id().unwrap();
+                *obligation_id = Obligation::Source {
+                    target: target.clone(),
+                    obligation_id: String::new(),
+                }
+                .content_id()
+                .unwrap();
+            }
+        }
+        request = request
+            .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            app_data.join("state.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let version = || {
+            conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = version();
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        let error = completion_start::start_access(
+            request.clone(),
+            app.clone(),
+            Instant::now(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, InvestigationStartError::Rejected { code: "unavailable", ref message, definitive: true } if message == GATED_ANALYST_DISPATCH_REASON)
+        );
+        let mut jobs = state.jobs.lock().unwrap();
+        assert_eq!(
+            jobs.start_next_prompt_investigation(&request, None)
+                .unwrap_err(),
+            crate::jobs::investigations::InvestigationStoreError::DispatchDisabled
+        );
+        assert_eq!(
+            jobs.start_completion_access(&request, None, true, None)
+                .unwrap_err()
+                .to_string(),
+            GATED_ANALYST_DISPATCH_REASON
+        );
+        assert!(
+            jobs.existing_investigation_completion(&request)
+                .unwrap()
+                .is_none()
+        );
+        drop(jobs);
+        assert_eq!(version(), before);
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    });
+}

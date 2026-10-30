@@ -59,6 +59,8 @@ pub enum SpecialistId {
     DomainAnalystV15,
     #[serde(rename = "domain-analyst@17")]
     DomainAnalystV17,
+    #[serde(rename = "domain-analyst@18")]
+    DomainAnalystV18,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -225,6 +227,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -256,6 +259,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -288,6 +292,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -313,6 +318,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -332,6 +338,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -351,6 +358,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -367,6 +375,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
                 | Self::EvidenceAuditorV11
         )
     }
@@ -400,6 +409,7 @@ impl SpecialistId {
             Self::DomainAnalystV14 => 14,
             Self::DomainAnalystV15 => 15,
             Self::DomainAnalystV17 => 17,
+            Self::DomainAnalystV18 => 18,
         }
     }
 
@@ -415,6 +425,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
         ) {
             return 10;
         }
@@ -429,10 +440,17 @@ impl SpecialistId {
     }
 
     pub fn uses_exact_node_queries(self) -> bool {
-        self == Self::DomainAnalystV17
+        matches!(self, Self::DomainAnalystV17 | Self::DomainAnalystV18)
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV18 {
+            return format!(
+                "{}\nObligation acquisition choices@1: While turn_progress.acquisition_choices is incomplete, choose an acquisition exactly from its entries. Exact discovery admits metadata only; its next source read still crosses retained receipt/range guards. Inventory is directly selectable. Blocked and deferred obligations remain unattempted, not satisfied. action_not_offered feedback rejects only that proposal, grants no evidence and no extra retry budget. Reconsider the currently offered choices; an honest finish retains the existing completion requirements. Ordinary exploration resumes only after every required read has an applicable attempt.",
+                Self::DomainAnalystV17.prompt()
+            );
+        }
+
         if self == Self::DomainAnalystV17 {
             return format!(
                 "{}\nExact-node queries@1: query_context may select scope {{\"type\":\"node\",\"id\":\"exact node ID\"}} to retrieve only that node. For an exact caller source target, use its fact.id before selecting its admitted role/index. Use neighborhoods when relationships are needed. Task scope and all acquisition and finish requirements remain unchanged.",
@@ -486,7 +504,8 @@ impl SpecialistId {
             | Self::DomainAnalystV13
             | Self::DomainAnalystV14
             | Self::DomainAnalystV15
-            | Self::DomainAnalystV17 => {
+            | Self::DomainAnalystV17
+            | Self::DomainAnalystV18 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -599,6 +618,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV14
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
+                | Self::DomainAnalystV18
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -645,7 +665,8 @@ impl SpecialistId {
             | Self::DomainAnalystV13
             | Self::DomainAnalystV14
             | Self::DomainAnalystV15
-            | Self::DomainAnalystV17 => (
+            | Self::DomainAnalystV17
+            | Self::DomainAnalystV18 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1053,3 +1074,6 @@ mod finish_example_tests {
         }
     }
 }
+
+/// Dispatch remains disabled until the complete authenticated workflow lands.
+pub const GATED_ANALYST_DISPATCH_REASON: &str = "domain-analyst@18 dispatch is disabled until authenticated acquisition workflow integration is complete.";

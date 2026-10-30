@@ -1145,3 +1145,141 @@ fn analyst_schema_is_exact_for_role_mode_and_reserve() {
 
 #[path = "admitted_schema_tests.rs"]
 mod admitted_schema_tests;
+
+// AC-0480: pure typed choices, not dispatch or completed-read authentication.
+#[test]
+fn gated_analyst_input_schema_and_membership_share_authority() {
+    let role = SpecialistId::DomainAnalystV18;
+    let build = |id: &str, mode| {
+        let mut f = Fixture::new(role, 7);
+        if let Obligation::Source {
+            target,
+            obligation_id,
+        } = &mut f.request.obligations.obligations[0]
+        {
+            target.fact = crate::TaskFactKey::Node { id: id.into() };
+            target.target_id = target.content_id().unwrap();
+            *obligation_id = Obligation::Source {
+                target: target.clone(),
+                obligation_id: String::new(),
+            }
+            .content_id()
+            .unwrap();
+        }
+        f.metadata.request_hash = f
+            .request
+            .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        f.metadata.obligations_hash = f
+            .request
+            .obligations
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let choices = std::sync::Arc::new(
+            acquisition_choices::AcquisitionChoices::derive(
+                &contract,
+                &f.metadata,
+                "task",
+                &f.ledger,
+                &[],
+                &INVESTIGATION_V2_POLICY,
+            )
+            .unwrap(),
+        );
+        let input = f.build(role, &usage(mode), mode, 0, None).unwrap();
+        (input, choices)
+    };
+    let (base, choices) = build("node:chosen", CompletionCallMode::Choice);
+    assert!(base.action("step".into()).is_err());
+    let input = base.with_acquisition_choices(choices.clone()).unwrap();
+    let action = input.action("step".into()).unwrap();
+    let prompt: Value = serde_json::from_str(&action.payload.prompt).unwrap();
+    let schema: Value =
+        serde_json::from_str(action.payload.response_schema.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        prompt["turn_progress"]["acquisition_choices"],
+        serde_json::to_value(&*choices).unwrap()
+    );
+    assert!(prompt["turn_progress"]["action_feedback"].is_null());
+    assert_eq!(
+        schema["anyOf"][2]["enum"][0],
+        prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"]
+    );
+    let context = input.ledger().coverage.as_ref().unwrap().context_id.clone();
+    let read =
+        |choices: &acquisition_choices::AcquisitionChoices| match &choices.entries()[0].action {
+            acquisition_choices::AcquisitionAction::QueryContext { query, .. } => {
+                QualifiedInvestigationAction::QueryContext {
+                    context_id: context.clone(),
+                    query: query.clone(),
+                }
+            }
+            _ => panic!("initial exact query"),
+        };
+    assert!(input.permits_acquisition(&read(&choices)));
+    let (foreign, other) = build("node:other", CompletionCallMode::Choice);
+    assert!(!input.permits_acquisition(&read(&other)));
+    assert!(foreign.with_acquisition_choices(choices.clone()).is_err());
+    let (finish, finish_choices) = build("node:chosen", CompletionCallMode::FinishOnly);
+    let finish = finish.with_acquisition_choices(finish_choices).unwrap();
+    assert_eq!(
+        finish
+            .action("step".into())
+            .unwrap()
+            .payload
+            .response_schema
+            .as_deref(),
+        Some(response_schema::FINISH)
+    );
+    assert!(!finish.permits_acquisition(&read(&choices)));
+    let mut stale = input.clone();
+    stale.ledger.revision += 1;
+    assert!(stale.action("step".into()).is_err());
+    assert!(!stale.permits_acquisition(&read(&choices)));
+    let provider = llm::OllamaProvider::local_default().unwrap();
+    let prepared = llm::EgressFirewall::new(llm::EgressPolicy::default())
+        .prepare_bounded(
+            &provider,
+            &action,
+            &llm::bounded::CompletionLimits::default(),
+        )
+        .unwrap();
+    assert!(prepared.matches_action(&action));
+    assert!(
+        input
+            .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+            .is_err()
+    );
+    for (old, pin) in [
+        (
+            SpecialistId::DomainAnalystV15,
+            "ec99aee7d993cae30220094c8afb31430ba33a95b77cd4389ae81fbe0ef0041c",
+        ),
+        (
+            SpecialistId::DomainAnalystV17,
+            "3bbbb030e6c75e5d6b7adf9a00ff26597da61a772f4f77c384e11fdc348902a2",
+        ),
+    ] {
+        assert_eq!(old.definition().unwrap().prompt_fingerprint, pin);
+        let historical = Fixture::new(old, 7)
+            .build(
+                old,
+                &usage(CompletionCallMode::Choice),
+                CompletionCallMode::Choice,
+                0,
+                None,
+            )
+            .unwrap();
+        assert!(
+            historical
+                .with_acquisition_choices(choices.clone())
+                .is_err()
+        );
+    }
+}

@@ -119,3 +119,34 @@ pub(super) fn validate(
     }
     Ok(())
 }
+
+/// The typed authority supplies both compact choices and exact action objects.
+pub(super) fn select_acquisition(
+    mode: CompletionCallMode,
+    choices: &acquisition_choices::AcquisitionChoices,
+    ledger: &InvestigationInputLedger,
+) -> Result<Option<String>, InvestigationError> {
+    if mode == CompletionCallMode::FinishOnly {
+        return Ok(Some(FINISH.into()));
+    }
+    if choices.attempts_complete() {
+        return select_admitted(SpecialistId::DomainAnalystV17, mode, ledger);
+    }
+    if choices.entries().is_empty() {
+        return Ok(Some(FINISH.into()));
+    }
+    let mut schema: Value =
+        serde_json::from_str(FINISH).map_err(|_| InvestigationError::InvalidInput)?;
+    let actions = choices
+        .entries()
+        .iter()
+        .map(|entry| &entry.action)
+        .collect::<Vec<_>>();
+    schema["anyOf"]
+        .as_array_mut()
+        .ok_or(InvestigationError::InvalidInput)?
+        .push(serde_json::json!({"enum":actions}));
+    String::from_utf8(bounded_bytes(&schema, MAX_INPUT_BYTES)?)
+        .map(Some)
+        .map_err(|_| InvestigationError::InvalidInput)
+}

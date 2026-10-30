@@ -27,7 +27,7 @@ pub enum AcquisitionAction {
     },
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AcquisitionChoice {
     pub obligation_id: String,
     pub action: AcquisitionAction,
@@ -35,7 +35,7 @@ pub struct AcquisitionChoice {
 
 /// Immutable derivation with stable envelope order. Deferred entries are a
 /// byte-bound suffix, never completed/satisfied obligations. Finish is separate.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AcquisitionChoices {
     contract_hash: String,
     input_ledger_hash: String,
@@ -54,6 +54,65 @@ impl AcquisitionChoices {
     /// Unattempted without a supported next action; never satisfied.
     pub fn blocked(&self) -> &[String] {
         &self.blocked
+    }
+
+    pub fn attempts_complete(&self) -> bool {
+        self.entries.is_empty() && self.blocked.is_empty() && self.deferred == 0
+    }
+    pub fn validate_basis(
+        &self,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        if self.contract_hash != contract.fingerprint_with_policy(policy)?
+            || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
+            || self.completion_metadata_hash != metadata.fingerprint_with_policy(policy)?
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+    pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {
+        self.attempts_complete()
+            || self
+                .entries
+                .iter()
+                .any(|entry| match (&entry.action, action) {
+                    (
+                        AcquisitionAction::QueryContext {
+                            context_id: expected,
+                            query: expected_query,
+                        },
+                        QualifiedInvestigationAction::QueryContext { context_id, query },
+                    ) => expected == context_id && expected_query == query,
+                    (
+                        AcquisitionAction::ReadEvidence {
+                            fact: expected,
+                            role: expected_role,
+                            index: expected_index,
+                        },
+                        QualifiedInvestigationAction::SourceOrFinish(
+                            InvestigationAction::ReadEvidence { fact, role, index },
+                        ),
+                    ) => expected == fact && expected_role == role && expected_index == index,
+                    (
+                        AcquisitionAction::ReadCoverageInventory {
+                            context_id,
+                            repo,
+                            inventory_hash,
+                            max_bytes,
+                        },
+                        QualifiedInvestigationAction::ReadCoverageInventory(read),
+                    ) => {
+                        context_id == &read.context_id
+                            && repo == &read.repo
+                            && inventory_hash == &read.inventory_hash
+                            && max_bytes == &read.max_bytes
+                    }
+                    _ => false,
+                })
     }
 
     /// Exact binding is consistency checking, not authentication of local JSON

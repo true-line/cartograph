@@ -510,3 +510,30 @@ fn obligation_acquisition_choices_block_only_unqueryable_source_ids() {
             }));
     }
 }
+
+// AC-0480: schema-only synthetic pending states never become input authority.
+#[test]
+fn gated_acquisition_schema_never_broadens_empty_pending_choices() {
+    let f = Fixture::new();
+    let mut sizing_only = f.derive(&f.empty(), &[]).unwrap();
+    sizing_only.entries.clear();
+    sizing_only.blocked.clear();
+    sizing_only.deferred = 1;
+    for blocked in [false, true] {
+        if blocked {
+            sizing_only.deferred = 0;
+            sizing_only.blocked.push("a".repeat(64));
+        }
+        for mode in [
+            staged_refusal::CompletionCallMode::Choice,
+            staged_refusal::CompletionCallMode::FinishOnly,
+        ] {
+            assert_eq!(
+                super::super::response_schema::select_acquisition(mode, &sizing_only, &f.ledger)
+                    .unwrap()
+                    .as_deref(),
+                Some(super::super::response_schema::FINISH)
+            );
+        }
+    }
+}

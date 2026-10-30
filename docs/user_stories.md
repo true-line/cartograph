@@ -714,6 +714,9 @@
 - **AC-0473** Given existing admission families, then a reserved optional acquisition stamp validates choices/feedback hash shape, an absent stamp preserves exact @15/@17 admission serialization and fingerprints, and every present stamp fails the shared admission validator and actual sealing with positive unchanged-input controls. No new specialist, runtime acquisition workflow, default exposure or numerical limit is introduced. Unknown future-family task/history/audit incompatibility remains explicit (#1387; prerequisites for #1385/#1382).
 - **Trace:** H4 · `agents` · — · T-0473
 
+- **AC-0480** Given explicit gated domain-analyst@18, then its immutable @17-based definition and final feedback contract support typed caller-bound compact choices, matching finite response schema and exact acquisition membership. Missing/stale/foreign authority is rejected, FinishOnly remains finish-only; blocked/deferred obligations with no available choices do not reopen broad exploration, and existing @15/@17 bytes remain unchanged. Public and direct-store dispatch reject with one unavailable reason before provider/source preparation or durable task writes. No stamp support, runtime worker/UI activation, catalog promotion or numerical limit change is introduced (#1390).
+- **Trace:** H4 · `agents`, `app` · — · T-0480
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
