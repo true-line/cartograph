@@ -1925,16 +1925,18 @@ impl PrimarySourceStore {
     ) -> Result<RetainedReceipts, String> {
         self.storage.verify()?;
         if let Some(capture) = &input.capture {
-            let (weight, total) = {
-                let mut captures = self.captures.lock().map_err(storage_error)?;
-                captures.persist(capture).map_err(|_| "Source retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())?;
-                let weights = captures.source_byte_weights().map_err(storage_error)?;
-                let weight = weights
-                    .get(&capture.manifest().source_id)
-                    .copied()
-                    .unwrap_or(0);
-                (weight, weights.values().sum())
-            };
+            // The capture guard is held through receipt admission so the
+            // weights cannot go stale under a concurrent recovery or forget.
+            // Lock order is captures then receipts; nothing holds receipts
+            // while taking captures.
+            let mut captures = self.captures.lock().map_err(storage_error)?;
+            captures.persist(capture).map_err(|_| "Source retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())?;
+            let weights = captures.source_byte_weights().map_err(storage_error)?;
+            let weight = weights
+                .get(&capture.manifest().source_id)
+                .copied()
+                .unwrap_or(0);
+            let total = weights.values().sum();
             let mut store = self.receipts.lock().map_err(storage_error)?;
             let share = (
                 source_share(store.capacity.0, weight, total),
