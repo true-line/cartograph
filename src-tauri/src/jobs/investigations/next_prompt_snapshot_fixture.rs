@@ -14,6 +14,12 @@ pub(in crate::jobs::investigations) struct Fixture {
 }
 impl Fixture {
     pub(in crate::jobs::investigations) fn new(cloud: bool) -> Self {
+        Self::customized(cloud, |_| {})
+    }
+    pub(in crate::jobs::investigations) fn customized(
+        cloud: bool,
+        setup: impl FnOnce(&mut InitialFixture),
+    ) -> Self {
         let profile = provider(cloud).0;
         let mode = if cloud {
             InvestigationProviderMode::Cloud
@@ -33,6 +39,7 @@ impl Fixture {
                 unavailable_reason: None,
             },
         );
+        setup(&mut f);
         let policy = &INVESTIGATION_V2_POLICY;
         let mut usage = f.task.detail.usage.clone();
         usage.active_milliseconds += 5;
@@ -59,6 +66,22 @@ impl Fixture {
             policy,
         )
         .unwrap();
+        let input = if f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            let choices = agents::investigation::acquisition_choices::AcquisitionChoices::derive(
+                &f.task.completion_intent.as_ref().unwrap().contract(),
+                &f.metadata,
+                &f.task.detail.summary.investigation_id,
+                &f.ledger,
+                &[],
+                policy,
+            )
+            .unwrap();
+            input
+                .with_acquisition_choices(std::sync::Arc::new(choices))
+                .unwrap()
+        } else {
+            input
+        };
         let action = input
             .action(format!("{}:step-1", f.task.detail.summary.investigation_id))
             .unwrap();

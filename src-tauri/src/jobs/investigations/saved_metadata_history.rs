@@ -129,7 +129,8 @@ impl<'a> SavedMetadataHistory<'a> {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let choices = self.choices_before(cutoff, ledger, &self.metadata_at(&basis.step_id)?)?;
+        let choices =
+            self.choices_before(cutoff, ledger, &self.metadata_at(&basis.step_id)?, &[])?;
         if basis
             .admission
             .acquisition
@@ -164,8 +165,63 @@ impl<'a> SavedMetadataHistory<'a> {
         if self.metadata_before(cutoff)? != *metadata {
             return Err(InvestigationStoreError::Invalid);
         }
+        Ok(Some(std::sync::Arc::new(self.choices_before(
+            cutoff,
+            ledger,
+            metadata,
+            &[],
+        )?)))
+    }
+    /// The caller must independently derive this suffix from the actual read
+    /// outcome; this read-only projection grants no publication authority.
+    pub(in super::super) fn prospective_choices(
+        &self,
+        ledger: &InvestigationInputLedger,
+        metadata: &ProtectedCompletionMetadata,
+        suffix: &[AttemptRecord],
+    ) -> Result<
+        Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
+        InvestigationStoreError,
+    > {
+        self.check_epoch()?;
+        if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+            return Ok(None);
+        }
+        let cutoff = self
+            .task
+            .detail
+            .usage
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        let mut expected = self.metadata_before(cutoff)?;
+        if expected
+            .completed_attempt_ids
+            .len()
+            .checked_add(suffix.len())
+            .is_none_or(|count| count > INVESTIGATION_V2_POLICY.max_completed_attempts())
+        {
+            return Err(InvestigationStoreError::Capacity);
+        }
+        let call = self
+            .task
+            .admission_state
+            .as_ref()
+            .and_then(|state| state.current_call.as_ref())
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if suffix.iter().any(|record| {
+            record.step_id != call.step_id || record.input_revision != ledger.revision
+        }) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        expected
+            .completed_attempt_ids
+            .extend(suffix.iter().map(|record| record.attempt_id.clone()));
+        if expected != *metadata {
+            return Err(InvestigationStoreError::Invalid);
+        }
         Ok(Some(std::sync::Arc::new(
-            self.choices_before(cutoff, ledger, metadata)?,
+            self.choices_before(cutoff, ledger, metadata, suffix)?,
         )))
     }
     fn choices_before(
@@ -173,6 +229,7 @@ impl<'a> SavedMetadataHistory<'a> {
         cutoff: u32,
         ledger: &InvestigationInputLedger,
         metadata: &ProtectedCompletionMetadata,
+        suffix: &[AttemptRecord],
     ) -> Result<
         agents::investigation::acquisition_choices::AcquisitionChoices,
         InvestigationStoreError,
@@ -181,10 +238,11 @@ impl<'a> SavedMetadataHistory<'a> {
             .attempts
             .iter()
             .filter(|entry| self.ordinals[&entry.record.step_id] < cutoff)
+            .map(|entry| &entry.record)
             .collect::<Vec<_>>();
         let mut ledgers = BTreeMap::new();
         for entry in &records {
-            let revision = entry.record.input_revision;
+            let revision = entry.input_revision;
             if let std::collections::btree_map::Entry::Vacant(slot) = ledgers.entry(revision) {
                 let value = ledger_at(
                     self.connection,
@@ -204,10 +262,13 @@ impl<'a> SavedMetadataHistory<'a> {
             .iter()
             .map(
                 |entry| agents::investigation::staged_attempt::AttemptEvidence {
-                    record: &entry.record,
-                    ledger: &ledgers[&entry.record.input_revision],
+                    record: entry,
+                    ledger: &ledgers[&entry.input_revision],
                 },
             )
+            .chain(suffix.iter().map(|record| {
+                agents::investigation::staged_attempt::AttemptEvidence { record, ledger }
+            }))
             .collect::<Vec<_>>();
         let choices = agents::investigation::acquisition_choices::AcquisitionChoices::derive(
             &self

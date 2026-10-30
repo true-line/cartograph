@@ -1065,3 +1065,15 @@ FeedbackSome is supported only together with this prefix check. Old families
 remain None-only with identical bytes. Public/store starts and saved @18 worker
 execution remain disabled before provider dispatch. Prospective acquisitions,
 worker membership, UI and seven-target execution are the activation follow-up.
+
+### Gated prospective metadata choices (#1408, AC-0485)
+
+The @18 query/inventory continuation derives candidate choices from authenticated
+saved attempts plus the exact projected attempt suffix and candidate ledger.
+The actual candidate Input attaches this authority before certification/sealing;
+the publication transaction independently rederives and checks its choices stamp.
+Accepted metadata publication clears semantic feedback. Stale choices refuse
+before retention callbacks or durable effects, and reopened current choices agree.
+Existing logical owner bounds include transient history/ledgers and retained
+choices; no RSS guarantee is claimed. Source continuation remains closed to @18,
+and membership, repair, UI and all dispatch/worker activation remain follow-ups.

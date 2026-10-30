@@ -136,6 +136,14 @@ impl InvestigationInput {
             policy,
         )?;
         admission_input::apply_admission_progress(&mut progress, mode, count, &feedback)?;
+        if let Some(choices) = &candidate.acquisition_choices {
+            if candidate.action_feedback.is_some() {
+                return Err(InvestigationError::InvalidInput);
+            }
+            progress["acquisition_choices"] =
+                serde_json::to_value(&**choices).map_err(|_| InvestigationError::InvalidInput)?;
+            progress["action_feedback"] = Value::Null;
+        }
         if next["turn_progress"] != progress {
             return Err(InvestigationError::InvalidInput);
         }

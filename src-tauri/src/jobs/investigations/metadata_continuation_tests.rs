@@ -222,3 +222,170 @@ fn metadata_continuation_snapshot_rejects_epoch_request_raw_and_action_substitut
         );
     }
 }
+
+// AC-0485: scripted read outcomes, actual candidates/certificates/writer; no provider.
+#[test]
+fn metadata_choices_use_projected_attempts_and_reopen_after_publication() {
+    use next_prompt_invocation::tests::{firewall, limits, provider};
+    for kind in [ContextPreviewKind::Query, ContextPreviewKind::Inventory] {
+        let mut proposal = Proposal::gated(kind);
+        let snapshot = assert_read_only(&proposal);
+        let candidate = proposal.candidate(&snapshot);
+        let action = candidate.action(snapshot.next_action_id().into()).unwrap();
+        let prompt: Value = serde_json::from_str(&action.payload.prompt).unwrap();
+        let entries = prompt["turn_progress"]["acquisition_choices"]["entries"]
+            .as_array()
+            .unwrap();
+        if kind == ContextPreviewKind::Query {
+            assert_eq!(snapshot.metadata().completed_attempt_ids.len(), 0);
+            assert!(
+                entries
+                    .iter()
+                    .any(|item| item["action"]["type"] == "read_evidence")
+            );
+        } else {
+            assert_eq!(snapshot.metadata().completed_attempt_ids.len(), 1);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0]["action"]["type"], "query_context");
+            assert!(
+                !entries
+                    .iter()
+                    .any(|item| item["action"]["type"] == "read_coverage_inventory")
+            );
+        }
+        let prepared = firewall()
+            .prepare_bounded(&provider(false), &action, &limits())
+            .unwrap();
+        let disclosure = candidate
+            .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .unwrap();
+        let stamp = disclosure.admission.as_ref().unwrap();
+        snapshot.validate_acquisition(stamp).unwrap();
+        assert!(
+            stamp
+                .acquisition
+                .as_ref()
+                .unwrap()
+                .action_feedback_hash
+                .is_none()
+        );
+        #[cfg(unix)]
+        {
+            let (retained, _) =
+                metadata_history_workspace::next_prompt_metadata_continuation_workspace().unwrap();
+            assert!(
+                retained
+                    >= context_hub::logical::count(&prompt["turn_progress"]["acquisition_choices"])
+                        .unwrap()
+            );
+        }
+        let expected = stamp.acquisition.as_ref().unwrap().choices_hash.clone();
+        proposal.publish(&snapshot);
+        let reopened = JobStore::open(proposal.f.base.f.directory.path().join("state.db")).unwrap();
+        let tx = reopened.conn.unchecked_transaction().unwrap();
+        let task = load_next_prompt_task(&tx, proposal.f.base.id()).unwrap();
+        let ledger = load_ledger(&tx, &task).unwrap().unwrap();
+        let metadata = completion::metadata_current_next_prompt(&tx, &task).unwrap();
+        assert_eq!(&metadata, snapshot.metadata());
+        let choices = completion::SavedMetadataHistory::load(&tx, &task)
+            .unwrap()
+            .current_choices(&ledger, &metadata)
+            .unwrap()
+            .unwrap();
+        assert_eq!(choices.stamp_hash().unwrap(), expected);
+        if kind == ContextPreviewKind::Inventory {
+            // Substitute a well-formed, checksummed older ledger at the exact
+            // revision now named by the acquired inventory attempt.
+            completion::rewrite_test_body(
+                &tx,
+                "investigation_inputs",
+                proposal.f.base.id(),
+                "revision",
+                &signed(ledger.revision).unwrap(),
+                &encode(&proposal.f.base.f.ledger, MAX_MANIFEST_BYTES).unwrap(),
+            );
+            assert!(completion::SavedMetadataHistory::load(&tx, &task).is_err());
+        }
+    }
+}
+
+#[test]
+fn metadata_choices_reject_stale_authority_before_publication() {
+    use next_prompt_invocation::tests::{firewall, limits, provider};
+    for kind in [ContextPreviewKind::Query, ContextPreviewKind::Inventory] {
+        let mut proposal = Proposal::gated(kind);
+        let snapshot = proposal.snapshot().unwrap();
+        let before = proposal.f.rows();
+        let tx = proposal
+            .f
+            .base
+            .f
+            .store
+            .conn
+            .unchecked_transaction()
+            .unwrap();
+        let task = load_next_prompt_task(&tx, proposal.f.base.id()).unwrap();
+        let call = task
+            .admission_state
+            .as_ref()
+            .unwrap()
+            .current_call
+            .as_ref()
+            .unwrap();
+        let stale = completion::SavedMetadataHistory::load(&tx, &task)
+            .unwrap()
+            .acquisition_choices_at(call, &proposal.f.base.f.ledger)
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        // A genuine stale authority cannot pass Input's fingerprint binding.
+        assert!(
+            proposal
+                .candidate(&snapshot)
+                .with_acquisition_choices(std::sync::Arc::new(stale))
+                .is_err()
+        );
+        let candidate = proposal.candidate(&snapshot);
+        let prepared = firewall()
+            .prepare_bounded(
+                &provider(false),
+                &candidate.action(snapshot.next_action_id().into()).unwrap(),
+                &limits(),
+            )
+            .unwrap();
+        let good = candidate
+            .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .unwrap();
+        snapshot
+            .validate_acquisition(good.admission.as_ref().unwrap())
+            .unwrap();
+        let old = proposal
+            .f
+            .input
+            .seal_disclosure_with_policy(&proposal.f.prepared, &INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .unwrap();
+        // Isolate the exact stamp comparator independently used by the writer,
+        // using genuine current/candidate seals, without a forgeable cache API.
+        assert!(
+            snapshot
+                .validate_acquisition(old.admission.as_ref().unwrap())
+                .is_err()
+        );
+        let callbacks = std::cell::Cell::new(0);
+        // The real writer rejects this valid stale Input earlier on its old
+        // ledger; this is atomicity proof, not isolation of its stamp check.
+        assert!(
+            proposal
+                .try_publish(&snapshot, true, |_| {
+                    callbacks.set(callbacks.get() + 1);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(callbacks.get(), 0);
+        assert_eq!(proposal.f.rows(), before);
+    }
+}
