@@ -986,7 +986,18 @@ pub(crate) fn isolated_managed_exact_test(exact: &str) -> bool {
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&stdout).contains("test result: ok. 1 passed;"),
+        "isolated {exact} must execute exactly one passing test:\n{}",
+        String::from_utf8_lossy(&stdout)
+    );
     true
+}
+
+#[test]
+#[should_panic(expected = "must execute exactly one passing test")]
+fn isolated_managed_exact_test_rejects_missing_case() {
+    isolated_managed_exact_test("registered_source_tests::__missing_isolated_case");
 }
 
 fn ready_managed_source(state: &AppState, name: &str) -> RegisteredSource {
