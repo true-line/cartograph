@@ -113,7 +113,7 @@ pub(super) fn run<R: tauri::Runtime>(
         execution,
         provider,
         live,
-        started,
+        RunClock::new(started),
         None,
     )
 }
@@ -144,6 +144,51 @@ pub(super) fn run_completion_with_limits<R: tauri::Runtime>(
     started: Instant,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 ) {
+    run_completion_with_clock(
+        app,
+        id,
+        request,
+        execution,
+        provider,
+        live,
+        RunClock::new(started),
+        task_limits,
+    );
+}
+
+#[cfg(test)]
+pub(super) fn run_completion_with_frozen_active_clock<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    request: obligations::StagedObligationRequest,
+    execution: JobExecution,
+    provider: Arc<dyn LlmProvider>,
+    live: Arc<LiveTask>,
+    started: Instant,
+) {
+    run_completion_with_clock(
+        app,
+        id,
+        request,
+        execution,
+        provider,
+        live,
+        RunClock::frozen_active(started),
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_completion_with_clock<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    request: obligations::StagedObligationRequest,
+    execution: JobExecution,
+    provider: Arc<dyn LlmProvider>,
+    live: Arc<LiveTask>,
+    clock: RunClock,
+    task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
+) {
     match FrozenContext::completion_acquisition_request(&request) {
         Ok(projected) => run_inner(
             app,
@@ -153,7 +198,7 @@ pub(super) fn run_completion_with_limits<R: tauri::Runtime>(
             execution,
             provider,
             live,
-            started,
+            clock,
             task_limits,
         ),
         Err(_) => {
@@ -186,7 +231,7 @@ fn run_inner<R: tauri::Runtime>(
     execution: JobExecution,
     provider: Arc<dyn LlmProvider>,
     live: Arc<LiveTask>,
-    started: Instant,
+    mut clock: RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 ) {
     let state = app.state::<AppState>();
@@ -195,7 +240,6 @@ fn run_inner<R: tauri::Runtime>(
         id: &id,
         live: &live,
     };
-    let mut clock = RunClock::new(started);
     let outcome = (|| {
         let request = request?;
         let detail = read_detail(&state, &id, &execution)?;

@@ -154,6 +154,8 @@ impl LiveTask {
 pub(super) struct RunClock {
     started: Instant,
     consent_waiting: Duration,
+    #[cfg(test)]
+    active_elapsed_override: Option<Duration>,
 }
 
 impl RunClock {
@@ -161,11 +163,26 @@ impl RunClock {
         Self {
             started,
             consent_waiting: Duration::ZERO,
+            #[cfg(test)]
+            active_elapsed_override: None,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn frozen_active(started: Instant) -> Self {
+        Self {
+            started,
+            consent_waiting: Duration::ZERO,
+            active_elapsed_override: Some(Duration::ZERO),
         }
     }
     pub(super) fn active_milliseconds(&self) -> u64 {
-        self.started
-            .elapsed()
+        #[cfg(test)]
+        let elapsed = self
+            .active_elapsed_override
+            .unwrap_or_else(|| self.started.elapsed());
+        #[cfg(not(test))]
+        let elapsed = self.started.elapsed();
+        elapsed
             .saturating_sub(self.consent_waiting)
             .as_millis()
             .try_into()
@@ -188,5 +205,23 @@ impl RunClock {
         Instant::now()
             .checked_add(remaining)
             .ok_or(HostError::LimitExceeded)
+    }
+}
+
+#[cfg(test)]
+mod run_clock_tests {
+    use super::*;
+    #[test]
+    fn frozen_active_time_keeps_real_wall_deadline() {
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(3601))
+            .unwrap();
+        let frozen = RunClock::frozen_active(started);
+        assert_eq!(frozen.active_milliseconds(), 0);
+        assert_eq!(frozen.remaining_wall(), Duration::ZERO);
+        assert_eq!(frozen.deadline(), Err(HostError::LimitExceeded));
+
+        let real = RunClock::new(started);
+        assert!(real.active_milliseconds() >= 3_600_000);
     }
 }

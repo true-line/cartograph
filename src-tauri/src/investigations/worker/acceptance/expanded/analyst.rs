@@ -200,17 +200,46 @@ fn run_analyst(
 ) -> Result<Value, String> {
     run_control(directory, expected, provider, CaptureFixture::Baseline)
 }
+#[derive(Clone, Copy)]
+enum BoundaryClock {
+    Real,
+    FrozenActive,
+}
+
 fn run_control(
     directory: &Path,
     expected: &PreparationBinding,
     provider: Arc<dyn LlmProvider>,
     fixture: CaptureFixture,
 ) -> Result<Value, String> {
+    run_control_with_clock(directory, expected, provider, fixture, BoundaryClock::Real)
+}
+fn run_control_frozen_active(
+    directory: &Path,
+    expected: &PreparationBinding,
+    provider: Arc<dyn LlmProvider>,
+    fixture: CaptureFixture,
+) -> Result<Value, String> {
+    run_control_with_clock(
+        directory,
+        expected,
+        provider,
+        fixture,
+        BoundaryClock::FrozenActive,
+    )
+}
+fn run_control_with_clock(
+    directory: &Path,
+    expected: &PreparationBinding,
+    provider: Arc<dyn LlmProvider>,
+    fixture: CaptureFixture,
+    clock: BoundaryClock,
+) -> Result<Value, String> {
     let prepared = reopen_control(directory, expected, fixture)?;
     if prepared.auditor_id.is_some() {
         return Err("Unexpected auditor task.".into());
     }
-    execute_bound(directory, &Authority::synthetic(&prepared), provider)?;
+    execute_bound_with_clock(directory, &Authority::synthetic(&prepared), provider, clock)?;
     reopen_control_receipt(directory, expected, fixture)
 }
 pub(super) fn execute_bound(
@@ -218,7 +247,15 @@ pub(super) fn execute_bound(
     authority: &Authority<'_>,
     provider: Arc<dyn LlmProvider>,
 ) -> Result<Value, String> {
-    execute_role(directory, authority, provider, "analyst")?;
+    execute_bound_with_clock(directory, authority, provider, BoundaryClock::Real)
+}
+fn execute_bound_with_clock(
+    directory: &Path,
+    authority: &Authority<'_>,
+    provider: Arc<dyn LlmProvider>,
+    clock: BoundaryClock,
+) -> Result<Value, String> {
+    execute_role_with_clock(directory, authority, provider, "analyst", clock)?;
     let receipt = collect_bound(authority)?;
     exclusive(&directory.join("analyst-receipt.json"), &bytes(&receipt)?)?;
     Ok(receipt)
@@ -228,6 +265,15 @@ pub(super) fn execute_role(
     authority: &Authority<'_>,
     provider: Arc<dyn LlmProvider>,
     role: &str,
+) -> Result<(), String> {
+    execute_role_with_clock(directory, authority, provider, role, BoundaryClock::Real)
+}
+fn execute_role_with_clock(
+    directory: &Path,
+    authority: &Authority<'_>,
+    provider: Arc<dyn LlmProvider>,
+    role: &str,
+    clock: BoundaryClock,
 ) -> Result<(), String> {
     if descriptor(provider.as_ref(), InvestigationProviderMode::Local).map_err(|e| e.to_string())?
         != *authority.provider
@@ -263,15 +309,29 @@ pub(super) fn execute_role(
         .investigations
         .insert(authority.analyst_id)
         .map_err(|e| e.to_string())?;
-    run_completion(
-        authority.app.handle().clone(),
-        authority.analyst_id.to_owned(),
-        authority.request.clone(),
-        execution,
-        provider,
-        live,
-        Instant::now(),
-    );
+    let started = Instant::now();
+    match clock {
+        BoundaryClock::Real => run_completion(
+            authority.app.handle().clone(),
+            authority.analyst_id.to_owned(),
+            authority.request.clone(),
+            execution,
+            provider,
+            live,
+            started,
+        ),
+        BoundaryClock::FrozenActive => {
+            crate::investigations::worker::run_completion_with_frozen_active_clock(
+                authority.app.handle().clone(),
+                authority.analyst_id.to_owned(),
+                authority.request.clone(),
+                execution,
+                provider,
+                live,
+                started,
+            )
+        }
+    }
     Ok(())
 }
 
@@ -386,7 +446,7 @@ mod boundary_tests {
         assert!(targets[0].captured.byte_end - targets[0].captured.byte_start >= 7 * 1024);
         drop(prepared);
         assert!(reopen(directory.path(), &binding).is_err());
-        let receipt = run_control(
+        let receipt = run_control_frozen_active(
             directory.path(),
             &binding,
             provider.clone(),
@@ -398,13 +458,15 @@ mod boundary_tests {
             receipt
         );
         eprintln!(
-            "actual boundary: calls={}, refusals={}, FinishOnly={}, events={}, receipt bytes={}, first refusal={}",
+            "actual boundary: calls={}, refusals={}, FinishOnly={}, events={}, receipt bytes={}, status={}, error={:?}, usage={}",
             receipt["detail"]["usage"]["model_invocations"],
             receipt["capacity_refusal_count"],
             receipt["finish_only_calls"],
             receipt["events"].as_array().unwrap().len(),
             bytes(&receipt).unwrap().len(),
-            receipt["capacity_refusals"][0]
+            receipt["detail"]["status"],
+            receipt["detail"]["error"],
+            receipt["detail"]["usage"]
         );
         let count = receipt["capacity_refusal_count"].as_u64().unwrap();
         assert!(count > 0);
