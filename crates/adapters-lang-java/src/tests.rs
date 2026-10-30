@@ -4361,3 +4361,130 @@ class D {
         1
     );
 }
+
+#[test]
+fn java_net_http_request_builders_become_fetch_sites() {
+    // AC-0475 (#1395): import-proven and fully qualified `HttpRequest`
+    // builders; the last method link wins (default GET), the last `uri`
+    // wins over the `newBuilder` argument, `method` keeps a token literal
+    // without lowercase letters only (#1396: `M-SEARCH`), and a URL is literal only through a proven `URI`.
+    let sites = retrofit_sites(&[(
+        "src/main/java/io/demo/Client.java",
+        r#"package io.demo;
+
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.time.Duration;
+
+class Client {
+    void calls(String path, URI target) throws Exception {
+        HttpRequest.newBuilder(URI.create("https://host/a")).build();
+        HttpRequest.newBuilder().uri(new URI("https://host/b")).DELETE().build();
+        HttpRequest.newBuilder(URI.create("https://host/old")).uri(URI.create("https://host/c"))
+            .header("A", "1").headers("B", "2", "C", "3").setHeader("D", "4")
+            .timeout(Duration.ofSeconds(5)).PUT(null).POST(null).build();
+        HttpRequest.newBuilder().uri(URI.create("https://host/" + path)).GET().build();
+        HttpRequest.newBuilder().uri(target).method("PATCH", null).build();
+        HttpRequest.newBuilder().uri(URI.create("https://host/d")).method("patch", null).build();
+        HttpRequest.newBuilder().uri(URI.create("https://host/s")).method("M-SEARCH", null).build();
+        HttpRequest.newBuilder().uri(URI.create("https://host/s")).method("GET /", null).build();
+        java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://host/e")).HEAD().build();
+    }
+}
+"#,
+    )]);
+    assert_eq!(
+        webclient_rows(&sites),
+        [
+            ["GET", "literal:https://host/a", "none"],
+            ["DELETE", "literal:https://host/b", "none"],
+            ["POST", "literal:https://host/c", "none"],
+            ["GET", "computed:\"https://host/\" + path", "none"],
+            ["PATCH", "computed:target", "none"],
+            ["?", "literal:https://host/d", "none"],
+            ["M-SEARCH", "literal:https://host/s", "none"],
+            ["?", "literal:https://host/s", "none"],
+            ["HEAD", "literal:https://host/e", "none"],
+        ]
+    );
+}
+
+#[test]
+fn unproven_java_net_http_builders_are_not_fetch_sites() {
+    // AC-0475: a foreign or obscured `HttpRequest`, a builder with a link
+    // that is no builder member or the wrong arity, a two-argument
+    // `newBuilder`, a held builder and a chain without a URI yield none;
+    // an unproven `URI.create` gives a computed URL; test sources yield none.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Client.java",
+            r#"package io.demo;
+
+import java.net.http.HttpRequest;
+
+class Client {
+    void calls(HttpRequest base, Object HttpRequest2) throws Exception {
+        HttpRequest.newBuilder(URI.create("https://host/unproven-uri")).build();
+        HttpRequest.newBuilder(URI.create("https://host/x")).copy().build();
+        HttpRequest.newBuilder(URI.create("https://host/x")).GET(1).build();
+        HttpRequest.newBuilder(URI.create("https://host/x")).headers("A").build();
+        HttpRequest.newBuilder(base, (k, v) -> true).build();
+        HttpRequest.Builder held = HttpRequest.newBuilder(URI.create("https://host/x"));
+        held.build();
+        HttpRequest.newBuilder().GET().build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Shadow.java",
+            r#"package io.demo;
+
+import java.net.URI;
+import java.net.http.HttpRequest;
+
+class Shadow {
+    void calls(Object HttpRequest) {
+        HttpRequest.newBuilder(URI.create("https://host/y")).build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Foreign.java",
+            r#"package io.demo;
+
+import java.net.URI;
+import com.acme.HttpRequest;
+
+class Foreign {
+    void calls() {
+        HttpRequest.newBuilder(URI.create("https://host/z")).build();
+    }
+}
+"#,
+        ),
+        (
+            "src/test/java/io/demo/ClientTest.java",
+            r#"package io.demo;
+
+import java.net.URI;
+import java.net.http.HttpRequest;
+
+class ClientTest {
+    void calls() {
+        HttpRequest.newBuilder(URI.create("https://host/t")).build();
+    }
+}
+"#,
+        ),
+    ]);
+    assert_eq!(
+        webclient_rows(&sites),
+        [[
+            "GET",
+            "computed:URI.create(\"https://host/unproven-uri\")",
+            "none"
+        ]]
+    );
+}

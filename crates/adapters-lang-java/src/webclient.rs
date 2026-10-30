@@ -40,7 +40,7 @@ fn verb(name: &str) -> Option<Option<&'static str>> {
 }
 
 /// The call's non-comment arguments.
-fn arguments<'t>(call: TsNode<'t>) -> Vec<TsNode<'t>> {
+pub(crate) fn arguments<'t>(call: TsNode<'t>) -> Vec<TsNode<'t>> {
     let Some(arguments) = call.child_by_field_name("arguments") else {
         return Vec::new();
     };
@@ -51,9 +51,15 @@ fn arguments<'t>(call: TsNode<'t>) -> Vec<TsNode<'t>> {
         .collect()
 }
 
-/// A static call `WebClient.<name>(…)` whose qualifier names the proven type
-/// and is obscured by no visible variable.
-fn static_call(proof: &Proof<'_>, method: TsNode<'_>, call: TsNode<'_>, name: &str) -> bool {
+/// A static call `<Type>.<name>(…)` whose qualifier names the proven type
+/// `fqn` and is obscured by no visible variable.
+pub(crate) fn static_call(
+    proof: &Proof<'_>,
+    method: TsNode<'_>,
+    call: TsNode<'_>,
+    fqn: &str,
+    name: &str,
+) -> bool {
     let cx = proof.cx;
     call.kind() == "method_invocation"
         && call
@@ -62,7 +68,7 @@ fn static_call(proof: &Proof<'_>, method: TsNode<'_>, call: TsNode<'_>, name: &s
         && call.child_by_field_name("object").is_some_and(|object| {
             let spelling = cx.text(&object);
             let first = spelling.split('.').next().unwrap_or(spelling).trim();
-            proof.names(spelling, WEB_CLIENT)
+            proof.names(spelling, fqn)
                 && !jpa::names_a_variable(cx, method, call, first)
                 && (!spelling.contains('.')
                     || (!proof.declared.contains(first)
@@ -88,7 +94,7 @@ fn client_base(
     client: TsNode<'_>,
 ) -> Option<Option<IdentityExpr>> {
     let cx = proof.cx;
-    if static_call(proof, method, client, "create") {
+    if static_call(proof, method, client, WEB_CLIENT, "create") {
         let args = arguments(client);
         return Some(match args.as_slice() {
             [] => None,
@@ -108,7 +114,7 @@ fn client_base(
         let mut opaque = false;
         let mut node = client.child_by_field_name("object")?;
         loop {
-            if static_call(proof, method, node, "builder") {
+            if static_call(proof, method, node, WEB_CLIENT, "builder") {
                 return Some(if opaque {
                     Some(IdentityExpr::Computed(cx.text(&client).to_string()))
                 } else {
