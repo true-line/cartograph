@@ -18,6 +18,9 @@ impl LlmProvider for Offline {
             tool_use: false,
         }
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
     fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
         Ok(ProviderProfile {
             protocol_version: llm::bounded::PROTOCOL_VERSION.into(),
@@ -51,7 +54,17 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new() -> Self {
-        let (mut f, mut r) = source_validation::internal_source_obligation_fixture();
+        Self::with_gated(false)
+    }
+    pub(super) fn gated() -> Self {
+        Self::with_gated(true)
+    }
+    fn with_gated(gated: bool) -> Self {
+        let (mut f, mut r) = if gated {
+            source_validation::gated_source_obligation_fixture()
+        } else {
+            source_validation::internal_source_obligation_fixture()
+        };
         let policy = &INVESTIGATION_V2_POLICY;
         let raw=serde_json::json!({"context":{"context_id":f.request.expected_context_id,
             "coverage":f.ledger.coverage.as_ref().unwrap().qualification,
@@ -82,6 +95,18 @@ impl Fixture {
             policy,
         )
         .unwrap();
+        let current = if gated {
+            let choices = completion::SavedMetadataHistory::load(&tx, &f.task)
+                .unwrap()
+                .acquisition_choices_at(&f.basis, &f.ledger)
+                .unwrap()
+                .unwrap();
+            current
+                .with_acquisition_admission(std::sync::Arc::new(choices), None)
+                .unwrap()
+        } else {
+            current
+        };
         let prepared = prepared(&current, format!("{}:{}", f.basis.task_id, f.step.step_id));
         assert_eq!(
             current
@@ -263,6 +288,31 @@ impl Fixture {
             &INVESTIGATION_V2_POLICY,
         )
         .unwrap();
+        let input = if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            drop(tx);
+            self.f
+                .store
+                .next_source_continuation_snapshot(&SourceContinuationSnapshotInput {
+                    investigation_id: &self.f.basis.task_id,
+                    expected_revision: self.f.task.detail.summary.revision,
+                    request: &self.f.request,
+                    candidate_ledger: input.ledger(),
+                    outcome: if kind == DispositionKind::Acquired {
+                        SourceContinuationOutcome::Acquired
+                    } else {
+                        SourceContinuationOutcome::Unavailable(match outcome {
+                            AttemptOutcome::Unavailable { reason } => reason,
+                            _ => unreachable!(),
+                        })
+                    },
+                    active_milliseconds: usage.active_milliseconds,
+                })
+                .unwrap()
+                .attach_acquisition(input)
+                .unwrap()
+        } else {
+            input
+        };
         let prepared = prepared(
             &input,
             format!(

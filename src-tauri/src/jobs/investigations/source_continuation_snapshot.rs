@@ -32,8 +32,18 @@ pub(crate) struct SourceContinuationSnapshot {
     mode: CompletionCallMode,
     capacity_refusal_count: u32,
     next_action_id: String,
+    choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
 }
 impl SourceContinuationSnapshot {
+    pub(crate) fn attach_acquisition(
+        &self,
+        input: InvestigationInput,
+    ) -> Result<InvestigationInput, InvestigationError> {
+        match &self.choices {
+            Some(choices) => input.with_acquisition_admission(choices.clone(), None),
+            None => Ok(input),
+        }
+    }
     pub(crate) fn saved_revision(&self) -> u64 {
         self.saved_revision
     }
@@ -77,6 +87,23 @@ impl SourceContinuationSnapshot {
     pub(crate) fn capacity_feedback(&self) -> Option<&AdmissionCapacityFeedback> {
         None
     }
+}
+
+/// Compare only independently derived authority, never a caller-supplied hash.
+pub(super) fn validate_acquisition(
+    choices: &agents::investigation::acquisition_choices::AcquisitionChoices,
+    stamp: &DisclosedAdmissionState,
+) -> Result<(), InvestigationStoreError> {
+    stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, &INVESTIGATION_V2_POLICY)?;
+    if stamp.acquisition.as_ref()
+        != Some(&agents::investigation::AcquisitionAdmission {
+            choices_hash: choices.stamp_hash()?,
+            action_feedback_hash: None,
+        })
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
 }
 
 impl JobStore {
@@ -151,6 +178,15 @@ impl JobStore {
             .map(|entry| entry.record.clone())
             .collect::<Vec<_>>();
         let metadata = continuation_metadata(&core.metadata, &suffix)?;
+        let choices = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            completion::SavedMetadataHistory::load(&tx, &task)?.prospective_choices(
+                input.candidate_ledger,
+                &metadata,
+                &suffix,
+            )?
+        } else {
+            None
+        };
         drop(suffix); // Metadata owns its result before the saved history reload.
         let mode = metadata.next_call_mode_with_policy(&projected.task.detail.usage, policy)?;
         let mut entries = completion::attempts(&tx, &task)?;
@@ -216,6 +252,7 @@ impl JobStore {
             basis,
             mode,
             capacity_refusal_count: call.admission.capacity_refusal_count,
+            choices,
             next_action_id: format!(
                 "{}:step-{}",
                 input.investigation_id,

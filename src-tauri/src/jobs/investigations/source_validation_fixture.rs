@@ -14,19 +14,30 @@ pub(in crate::jobs::investigations) fn fixture_with_source_obligation()
 -> (completion::InternalFixture, Reservation) {
     fixture_with_obligation(true)
 }
+pub(in crate::jobs::investigations) fn gated_source_obligation_fixture()
+-> (completion::InternalFixture, Reservation) {
+    let (f, source) = invocation_fixture(true, true);
+    reserve_fixture(f, source)
+}
 fn fixture_with_obligation(source_obligation: bool) -> (completion::InternalFixture, Reservation) {
-    let (f, source) = invocation_fixture(source_obligation);
+    let (f, source) = invocation_fixture(source_obligation, false);
     reserve_fixture(f, source)
 }
 pub(in crate::jobs::investigations) fn source_invocation_fixture()
 -> (completion::InternalFixture, InvestigationInspectionTarget) {
-    invocation_fixture(true)
+    invocation_fixture(true, false)
 }
 fn invocation_fixture(
     source_obligation: bool,
+    gated: bool,
 ) -> (completion::InternalFixture, InvestigationInspectionTarget) {
     let mut target = None;
     let mut f = completion::internal_fixture_with_initial_ledger(|store, task, ledger, request| {
+        if gated {
+            request.specialist_id = "domain-analyst@18".into();
+            task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+            task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+        }
         let mut source:InvestigationInspectionTarget=serde_json::from_value(json!({
             "schema_version":1,"target_id":"","graph_snapshot_id":ledger.graph_snapshot_id,
             "fact":{"kind":"node","id":"node:checkout"},"fact_digest":format!("node-v1:{}","b".repeat(64)),
@@ -60,7 +71,11 @@ fn invocation_fixture(
             if let Obligation::Source { obligation_id, .. } = &mut obligation {
                 *obligation_id = id;
             }
-            request.obligations.obligations = vec![obligation];
+            if gated {
+                request.obligations.obligations.push(obligation);
+            } else {
+                request.obligations.obligations = vec![obligation];
+            }
         }
         ledger.selected_facts.push(agents::TaskFactSelection {
             fact: source.fact.clone(),
@@ -353,8 +368,23 @@ pub(in crate::jobs::investigations) fn captured_source_invocation(
     InvestigationInspectionTarget,
     String,
 ) {
+    captured_source_invocation_for(false, initialize)
+}
+pub(in crate::jobs::investigations) fn captured_source_invocation_for(
+    gated: bool,
+    initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
+) -> (
+    completion::InternalFixture,
+    InvestigationInspectionTarget,
+    String,
+) {
     let mut target = None;
     let mut f = completion::internal_fixture_with_initial_ledger(|store, task, ledger, request| {
+        if gated {
+            request.specialist_id = "domain-analyst@18".into();
+            task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+            task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+        }
         let provider = llm::OllamaProvider::new(
             "http://127.0.0.1:11434",
             "test-model",

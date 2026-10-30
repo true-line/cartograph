@@ -124,6 +124,7 @@ pub(super) fn project(
     };
     let ledger = match continuation.as_ref() {
         Some(c) => Some(validate_continuation(
+            connection,
             before,
             &saved,
             &core.ledger,
@@ -394,7 +395,9 @@ mod validation;
 use validation::{continuation_metadata, usage_for, validate_continuation, validate_next_ledger};
 #[path = "source_settlement_envelope.rs"]
 mod envelope_projection;
-pub(super) use envelope_projection::{SettlementEnvelope, envelope};
+pub(super) use envelope_projection::{
+    SettlementEnvelope, envelope, envelope_with_authenticated_core,
+};
 #[path = "source_settlement_storage.rs"]
 mod storage_writer;
 #[cfg(test)]

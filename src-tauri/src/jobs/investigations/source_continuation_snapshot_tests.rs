@@ -306,3 +306,294 @@ fn source_continuation_snapshot_rejects_checksummed_unbacked_prior_refusal() {
     assert!(snapshot(&fixture, candidate.ledger(), None).is_err());
     assert_eq!(fixture.f.store.conn.total_changes(), changes);
 }
+
+fn sealed_admission(
+    input: &InvestigationInput,
+    prepared: &PreparedBoundedCompletion,
+) -> DisclosedAdmissionState {
+    input
+        .seal_disclosure_with_policy(prepared, &INVESTIGATION_V2_POLICY)
+        .unwrap()
+        .unwrap()
+        .admission
+        .unwrap()
+}
+fn source_rows(fixture: &Fixture) -> Vec<Vec<u8>> {
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let task = load_next_prompt_task_base(&tx, &fixture.f.basis.task_id).unwrap();
+    let mut rows = vec![encode(&task, MAX_RECORD_BYTES).unwrap()];
+    for table in [
+        "investigation_inputs",
+        "investigation_events",
+        "completion_attempts",
+        "investigation_read_reservations",
+        "investigation_read_validation_charges",
+        "investigation_read_dispositions",
+    ] {
+        rows.extend(
+            tx.prepare(&format!(
+                "SELECT body FROM {table} WHERE task_id=?1 ORDER BY body"
+            ))
+            .unwrap()
+            .query_map([&fixture.f.basis.task_id], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(Result::unwrap),
+        );
+    }
+    rows
+}
+
+// AC-0487: genuine saved invocation, read-only candidate, real seal, owner writer
+// and fresh-open reader. The native outcome is scripted, with no source/provider I/O.
+#[test]
+fn source_prospective_attachment_matches_outcomes_and_reopens() {
+    for reason in [
+        None,
+        Some(UnavailableReason::PinnedTargetAbsent),
+        Some(UnavailableReason::RangeOutOfBounds),
+    ] {
+        let mut fixture = Fixture::gated();
+        fixture.charge();
+        let before = source_rows(&fixture);
+        let changes = fixture.f.store.conn.total_changes();
+        let (candidate, prepared) = fixture.candidate(reason.clone());
+        let projection = snapshot(&fixture, candidate.ledger(), reason.clone()).unwrap();
+        assert_eq!(source_rows(&fixture), before);
+        assert_eq!(fixture.f.store.conn.total_changes(), changes);
+        let admission = sealed_admission(&candidate, &prepared);
+        assert_ne!(
+            admission.acquisition,
+            sealed_admission(&fixture.current, &fixture.prepared).acquisition
+        );
+        assert!(
+            admission
+                .acquisition
+                .as_ref()
+                .unwrap()
+                .action_feedback_hash
+                .is_none()
+        );
+        let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+        let choices = completion::SavedMetadataHistory::load(&tx, &fixture.f.task)
+            .unwrap()
+            .prospective_choices(
+                candidate.ledger(),
+                projection.metadata(),
+                projection.attempts(),
+            )
+            .unwrap()
+            .unwrap();
+        validate_acquisition(&choices, &admission).unwrap();
+        #[cfg(unix)]
+        {
+            let retained = snapshot_workspace::workspace().unwrap().0;
+            let wire = serde_json::to_vec(&(
+                projection.request(),
+                projection.base_ledger(),
+                projection.ledger(),
+                projection.detail(),
+                projection.metadata(),
+                &projection.basis().input_ledger_hash,
+                &projection.basis().previous_ledger,
+                projection.basis().completed_tool,
+                &*choices,
+            ))
+            .unwrap()
+            .len();
+            assert!(retained >= wire + std::mem::size_of_val(&projection));
+        }
+        assert!(
+            choices
+                .entries()
+                .iter()
+                .all(|entry| entry.obligation_id != projection.attempts()[0].obligation_id)
+        );
+        assert!(!choices.entries().is_empty()); // inventory remains unattempted
+        let matching = fixture
+            .f
+            .request
+            .obligations
+            .obligations
+            .iter()
+            .filter(|item| fixture.r.binding.original_read.matches(item))
+            .map(|item| item.key().1)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            projection
+                .attempts()
+                .iter()
+                .map(|item| item.obligation_id.as_str())
+                .collect::<Vec<_>>(),
+            matching
+        );
+        drop(tx);
+        let calls = std::cell::Cell::new(0);
+        let before_usage = fixture.f.task.detail.usage.clone();
+        fixture
+            .f
+            .store
+            .publish_next_prompt_source(
+                &fixture.f._execution_guard,
+                projection.saved_revision(),
+                SourceContinuation {
+                    current: &fixture.current,
+                    current_prepared: &fixture.prepared,
+                    candidate: &candidate,
+                    candidate_prepared: &prepared,
+                    proof: &fixture.proof,
+                },
+                reason
+                    .clone()
+                    .map(SourceContinuationOutcome::Unavailable)
+                    .unwrap_or(SourceContinuationOutcome::Acquired),
+                projection.detail().usage.active_milliseconds,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        let reopened = JobStore::open(fixture.f.directory.path().join("state.db")).unwrap();
+        let saved = reopened
+            .investigation_next_prompt_snapshot(&fixture.f.basis.task_id, &fixture.f.request)
+            .unwrap();
+        assert_eq!(saved.ledger(), candidate.ledger());
+        assert_eq!(saved.metadata(), projection.metadata());
+        assert_eq!(saved.attempts(), projection.attempts());
+        assert_eq!(saved.attempt_ledgers(), projection.attempt_ledgers());
+        let pending = saved.attach_acquisition(candidate.clone()).unwrap();
+        assert_eq!(
+            sealed_admission(&pending, &prepared).acquisition,
+            admission.acquisition
+        );
+        assert_eq!(
+            saved.detail().usage.evidence_items,
+            before_usage.evidence_items + usize::from(reason.is_none())
+        );
+        assert_eq!(
+            saved.ledger().revision,
+            fixture.f.ledger.revision + u64::from(reason.is_none())
+        );
+        assert_eq!(
+            saved.ledger().citations.len(),
+            fixture.f.ledger.citations.len() + usize::from(reason.is_none())
+        );
+        assert_eq!(
+            saved.detail().usage.tool_actions,
+            before_usage.tool_actions + 1
+        );
+        assert_eq!(
+            saved.detail().usage.evidence_requests,
+            before_usage.evidence_requests + 1
+        );
+    }
+}
+
+#[test]
+fn source_prospective_attachment_rejects_reason_swap_before_retained_callback() {
+    let mut fixture = Fixture::gated();
+    fixture.charge();
+    let a = UnavailableReason::PinnedTargetAbsent;
+    let b = UnavailableReason::RangeOutOfBounds;
+    let (candidate_a, prepared_a) = fixture.candidate(Some(a));
+    let (candidate_b, prepared_b) = fixture.candidate(Some(b.clone()));
+    assert_eq!(candidate_a.ledger(), candidate_b.ledger());
+    let projected_b = snapshot(&fixture, candidate_b.ledger(), Some(b.clone())).unwrap();
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let expected_b = completion::SavedMetadataHistory::load(&tx, &fixture.f.task)
+        .unwrap()
+        .prospective_choices(
+            candidate_b.ledger(),
+            projected_b.metadata(),
+            projected_b.attempts(),
+        )
+        .unwrap()
+        .unwrap();
+    validate_acquisition(&expected_b, &sealed_admission(&candidate_b, &prepared_b)).unwrap();
+    assert!(
+        validate_acquisition(&expected_b, &sealed_admission(&candidate_a, &prepared_a)).is_err()
+    );
+    drop(tx);
+    let before = source_rows(&fixture);
+    let changes = fixture.f.store.conn.total_changes();
+    let calls = std::cell::Cell::new(0);
+    let result = fixture.f.store.publish_next_prompt_source(
+        &fixture.f._execution_guard,
+        projected_b.saved_revision(),
+        SourceContinuation {
+            current: &fixture.current,
+            current_prepared: &fixture.prepared,
+            candidate: &candidate_a,
+            candidate_prepared: &prepared_a,
+            proof: &fixture.proof,
+        },
+        SourceContinuationOutcome::Unavailable(b),
+        projected_b.detail().usage.active_milliseconds,
+        |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        },
+    );
+    assert!(matches!(result, Err(InvestigationStoreError::Invalid)));
+    assert_eq!(calls.get(), 0);
+    assert_eq!(fixture.f.store.conn.total_changes(), changes);
+    assert_eq!(source_rows(&fixture), before);
+    // The current seal is valid authority for its own metadata, but cannot be
+    // attached as authority for the different prospective completion metadata.
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let current = completion::SavedMetadataHistory::load(&tx, &fixture.f.task)
+        .unwrap()
+        .acquisition_choices_at(&fixture.f.basis, &fixture.f.ledger)
+        .unwrap()
+        .unwrap();
+    assert!(
+        candidate_b
+            .with_acquisition_admission(std::sync::Arc::new(current), None)
+            .is_err()
+    );
+    drop(tx);
+    assert_eq!(source_rows(&fixture), before);
+}
+
+// AC-0487: borrowing an authenticated core for sizing is not permission to
+// substitute a different call or ledger. The ordinary wrapper stays strict.
+#[test]
+fn source_envelope_borrowed_core_keeps_exact_call_and_ledger_binding() {
+    let fixture = Fixture::gated();
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let core =
+        admission_contract::load_saved_call_basis_core(&tx, &fixture.f.task, &fixture.f.basis)
+            .unwrap();
+    let response: InvestigationResponseMeta = read_body(
+        &tx,
+        "investigation_responses",
+        "step_id",
+        &fixture.f.basis.task_id,
+        &fixture.f.step.step_id,
+    )
+    .unwrap()
+    .unwrap();
+    let strict = envelope(&tx, &fixture.f.task, &fixture.r, &response).unwrap();
+    assert_eq!(
+        envelope_with_authenticated_core(&tx, &fixture.f.task, &fixture.r, &response, &core)
+            .unwrap(),
+        strict,
+    );
+    for wrong_step in [false, true] {
+        let mut altered = admission_contract::SavedCallCore {
+            step: core.step.clone(),
+            ledger: core.ledger.clone(),
+            metadata: core.metadata.clone(),
+            ordinal: core.ordinal,
+        };
+        if wrong_step {
+            altered.step.step_id.push_str(":foreign");
+        } else {
+            altered.ledger.revision += 1;
+        }
+        assert!(envelope_with_authenticated_core(
+            &tx, &fixture.f.task, &fixture.r, &response, &altered,
+        ).is_err());
+    }
+}

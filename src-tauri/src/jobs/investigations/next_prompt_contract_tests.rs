@@ -62,6 +62,27 @@ fn prepare_with_pages(
         policy,
     )
     .unwrap();
+    let input = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let choices = agents::investigation::acquisition_choices::AcquisitionChoices::derive(
+            &agents::investigation::InvestigationCompletionContract {
+                schema_version: 1,
+                request_hash: metadata.request_hash.clone(),
+                obligations_hash: metadata.obligations_hash.clone(),
+                obligations: request.obligations.clone(),
+            },
+            metadata,
+            &task.detail.summary.investigation_id,
+            ledger,
+            &[],
+            policy,
+        )
+        .unwrap();
+        input
+            .with_acquisition_admission(std::sync::Arc::new(choices), None)
+            .unwrap()
+    } else {
+        input
+    };
     let step_id = format!("admission-step:{}", task.detail.usage.model_invocations + 1);
     let action = input.action(step_id.clone()).unwrap();
     let provider = OllamaProvider::new(

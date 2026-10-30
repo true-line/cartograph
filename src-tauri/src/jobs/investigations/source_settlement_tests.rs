@@ -170,9 +170,9 @@ mod fault_tests;
 #[path = "source_continuation_snapshot_tests.rs"]
 mod source_snapshot_tests;
 
-// AC-0485: the independent metadata path must not open source continuation.
+// AC-0487: a different saved family is not authority for this current call.
 #[test]
-fn source_continuation_keeps_gated_analyst_closed() {
+fn source_continuation_rejects_substituted_task_family() {
     let mut fixture = Fixture::new();
     fixture.charge();
     let (candidate, prepared) = fixture.candidate(None);
@@ -200,6 +200,7 @@ fn source_continuation_keeps_gated_analyst_closed() {
     let active = fixture.f.task.detail.usage.active_milliseconds + 1;
     assert!(
         validate_continuation(
+            &tx,
             &fixture.f.task,
             &saved,
             &core.ledger,
@@ -221,6 +222,7 @@ fn source_continuation_keeps_gated_analyst_closed() {
     gated.completion_intent = Some(serde_json::from_value(intent).unwrap());
     assert!(
         validate_continuation(
+            &tx,
             &gated,
             &saved,
             &core.ledger,
