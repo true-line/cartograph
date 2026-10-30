@@ -1,5 +1,17 @@
 # cartograph
 
+## 0.53.0
+
+### Minor Changes
+
+- 3f802f2: After an ingest finishes, Cartograph now runs the knowledge embedding phase in the background. When the local Ollama embedding model is installed it embeds the new graph and records the run in the knowledge overlay; without it, the run is reported as skipped and the ingest is unaffected (#1441).
+
+### Patch Changes
+
+- b724a8f: Directory recovery now holds TypeScript receipts in a compact form: each file's identity is stored once and shared by its receipts, and the full receipt is rebuilt when needed. The receipt budgets measure this retained memory, so a large repository keeps more of its receipts citable within the same limits. Persistence also writes receipts one at a time instead of holding the whole batch's JSON (#725).
+- 3bd282b: Adds graph-first hybrid retrieval from ADR-0051 as a library step. A query that names a symbol or endpoint returns that node first, then its graph neighbours, then text matches ranked by SQLite full-text search and, when a local embedding model is available, fused with vector similarity. Every hit cites the base graph and nothing is written back (#1442).
+- 85c2a00: Provenance can now record its evidence basis, separately from its tier: source, artifact or observation (ADR-0051). Artifact evidence cites the artifact's content digest, its kind and an offset or member path. Existing graphs and exports are unchanged, and read as `source` (or `observation` for T1 facts). No artifact reader ships yet (#1444).
+
 ## 0.52.1
 
 ### Patch Changes
