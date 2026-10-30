@@ -1128,3 +1128,13 @@ implementations share that witness without changing generic APIs or byte domains
 Unbound validation still rejects acquisition stamps. This agents prerequisite
 neither authenticates SQLite nor completes transactional finish/reopen (AC-0490),
 initial-authority acceptance (AC-0489), or any activation gate.
+
+### Gated authenticated accepted finish (#1431, AC-0490)
+
+A private host basis selects the last named invocation in one strict journal
+replay and rederives exact choices and prior feedback. It binds the saved intent,
+task, call, ledger and complete disclosure before the pure consistency API is
+used. Accepted result creation, finishing hashes and durable reread share this
+authority within the existing transaction. Generic/history behavior and ceilings
+remain unchanged. Early-Finish refusal persistence is not adopted here, nor are
+initial worker authority, public/store/resume or UI activation enabled.

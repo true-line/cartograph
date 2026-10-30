@@ -128,6 +128,18 @@ impl Fixture {
         let authorized = firewall()
             .authorize_bounded(&provider(false), &self.prepared, None)
             .unwrap();
+        let active = if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            self.input
+                .seal_disclosure_with_policy(&self.prepared, &INVESTIGATION_V2_POLICY)
+                .unwrap()
+                .unwrap()
+                .admission
+                .unwrap()
+                .consumed_budgets
+                .active_milliseconds
+        } else {
+            self.f.task.detail.usage.active_milliseconds
+        };
         self.f
             .store
             .begin_next_prompt_invocation(
@@ -136,7 +148,7 @@ impl Fixture {
                 &NextPromptInvocation {
                     input: &self.input,
                     prepared: &self.prepared,
-                    active_milliseconds: self.f.task.detail.usage.active_milliseconds,
+                    active_milliseconds: active,
                 },
                 &authorized,
                 |_| Ok(()),
@@ -146,7 +158,11 @@ impl Fixture {
     }
     fn response(&self, original: &serde_json::Value) -> InvestigationResponseMeta {
         InvestigationResponseMeta {
-            step_id: "step-1".into(),
+            step_id: if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+                format!("step-{}", self.f.task.detail.usage.model_invocations)
+            } else {
+                "step-1".into()
+            },
             response_hash: core_prov::content_hash(b"complete bounded response"),
             action_hash: core_prov::content_hash(&encode(original, MAX_ACTION_BYTES).unwrap()),
             observed_model: None,
@@ -181,7 +197,14 @@ impl Fixture {
         self.refresh();
     }
     pub(in crate::jobs::investigations) fn acquire_inventory(&mut self) {
+        self.acquire_inventory_observed(|_| {});
+    }
+    pub(in crate::jobs::investigations) fn acquire_inventory_observed(
+        &mut self,
+        observe: impl FnOnce(&Self),
+    ) {
         self.begin();
+        observe(self);
         let policy = &INVESTIGATION_V2_POLICY;
         let Obligation::Inventory { target, .. } = &self.f.request.obligations.obligations[0]
         else {
@@ -262,7 +285,37 @@ impl Fixture {
             policy,
         )
         .unwrap();
-        let action_id = format!("{}:step-2", self.id());
+        let candidate =
+            if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+                self.f
+                    .store
+                    .investigation_metadata_continuation_snapshot(
+                        self.id(),
+                        self.f.task.detail.summary.revision,
+                        &MetadataContinuationRead {
+                            request: &self.f.request,
+                            response: &response,
+                            original_action: &original,
+                            current: &self.input,
+                            current_prepared: &self.prepared,
+                            candidate_ledger: &ledger,
+                            raw_response: &raw,
+                            kind: ContextPreviewKind::Inventory,
+                            active_milliseconds: usage.active_milliseconds,
+                        },
+                    )
+                    .unwrap()
+                    .attach_acquisition(candidate)
+                    .unwrap()
+            } else {
+                candidate
+            };
+        let action_id =
+            if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+                format!("{}:step-{}", self.id(), usage.model_invocations + 1)
+            } else {
+                format!("{}:step-2", self.id())
+            };
         let prepared = firewall()
             .prepare_bounded(
                 &provider(false),

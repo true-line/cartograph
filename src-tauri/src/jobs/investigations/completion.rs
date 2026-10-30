@@ -1556,6 +1556,7 @@ pub(super) fn validate_result(
     result: &InvestigationResult,
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
+    basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
 ) -> Result<(), InvestigationStoreError> {
     let policy = saved_policy(task)?;
     result.validate_specialist(task.detail.specialist.id)?;
@@ -1585,20 +1586,32 @@ pub(super) fn validate_result(
             ledger,
         })
         .collect::<Vec<_>>();
-    result.validate_completion_for_binding_with_policy(
-        &intent.request_hash,
-        &intent.obligations,
-        &intent.expected_context,
-        intent.expected_graph.as_deref(),
-        &task.detail.summary.investigation_id,
-        &step.step_id,
-        ledger,
-        step.disclosure
-            .as_ref()
-            .ok_or(InvestigationStoreError::Invalid)?,
-        &evidence,
-        policy,
-    )?;
+    if let Some(basis) = basis {
+        basis.check_step(ledger, step)?;
+        basis.binding()?.validate_completion(
+            result,
+            &intent.request_hash,
+            &intent.obligations,
+            &intent.expected_context,
+            intent.expected_graph.as_deref(),
+            &evidence,
+        )?;
+    } else {
+        result.validate_completion_for_binding_with_policy(
+            &intent.request_hash,
+            &intent.obligations,
+            &intent.expected_context,
+            intent.expected_graph.as_deref(),
+            &task.detail.summary.investigation_id,
+            &step.step_id,
+            ledger,
+            step.disclosure
+                .as_ref()
+                .ok_or(InvestigationStoreError::Invalid)?,
+            &evidence,
+            policy,
+        )?;
+    }
     Ok(())
 }
 pub(super) fn accepted(
@@ -1607,18 +1620,28 @@ pub(super) fn accepted(
     result: &InvestigationResult,
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
+    basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
 ) -> Result<(), InvestigationStoreError> {
     let policy = saved_policy(task)?;
     if task.completion_intent.is_none() {
         return Ok(());
     }
-    validate_result(connection, task, result, ledger, step)?;
+    validate_result(connection, task, result, ledger, step, basis)?;
     let intent = validated_intent(task)?;
     let completion = result
         .completion
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
     let refusals = raw_refusals(connection, task)?;
+    let disclosure_hash = if let Some(basis) = basis {
+        basis.check_step(ledger, step)?;
+        basis.binding()?.fingerprint()?
+    } else {
+        step.disclosure
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?
+            .fingerprint_with_policy(ledger, policy)?
+    };
     let detail = InvestigationCompletionDetail {
         schema_version: 1,
         request_hash: intent.request_hash.clone(),
@@ -1628,11 +1651,7 @@ pub(super) fn accepted(
         assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
             step_id: step.step_id.clone(),
             input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
-            disclosure_hash: step
-                .disclosure
-                .as_ref()
-                .ok_or(InvestigationStoreError::Invalid)?
-                .fingerprint_with_policy(ledger, policy)?,
+            disclosure_hash,
             finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
         },
         assessment: completion.assessment.clone(),
@@ -1752,6 +1771,19 @@ pub(super) fn validate_saved(
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
+        let basis =
+            admission_journal::AuthenticatedCompletionBasis::load(connection, task, step_id)?;
+        let disclosure_hash = if let Some(basis) = &basis {
+            basis.check_step(&ledger, &step)?;
+            let bound = basis.binding()?;
+            bound.validate_result(&result)?;
+            bound.fingerprint()?
+        } else {
+            step.disclosure
+                .as_ref()
+                .ok_or(InvestigationStoreError::Invalid)?
+                .fingerprint_with_policy(&ledger, policy)?
+        };
         let expected = InvestigationCompletionDetail {
             schema_version: 1,
             request_hash: intent.request_hash.clone(),
@@ -1761,11 +1793,7 @@ pub(super) fn validate_saved(
             assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
                 step_id: step_id.clone(),
                 input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
-                disclosure_hash: step
-                    .disclosure
-                    .as_ref()
-                    .ok_or(InvestigationStoreError::Invalid)?
-                    .fingerprint_with_policy(&ledger, policy)?,
+                disclosure_hash,
                 finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
             },
             assessment: completion.assessment.clone(),

@@ -755,6 +755,9 @@
 - **AC-0491** Given typed acquisition choices and feedback, a borrowed consistency witness binds exact task/step/ledger/disclosure and policy for the shared agents finish/result implementation. Real typed finish, changed identity/policy/stamp rejection and generic-stamp/historical-family controls are tested. This pure API does not authenticate durable records or complete AC-0490 transactional finish/reopen, AC-0489, or activation (#1431 prerequisite).
 - **Trace:** H4 · `agents` · — · T-0491
 
+- **AC-0490** Given a real saved gated @18 finishing invocation, accepted-result publication and fresh durable reread independently replay the last named call's choices and prior feedback, binding exact intent/task/step/ledger/disclosure. Genuine insufficient-evidence persistence and reopen succeed; coherently rehashed stamp or earlier-call substitution fails without reader writes. Historical/unbound behavior, numeric ceilings and activation gates stay unchanged. Early-Finish refusal adoption and AC-0489 remain separate (#1431).
+- **Trace:** H4 · `app` · — · T-0490
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
