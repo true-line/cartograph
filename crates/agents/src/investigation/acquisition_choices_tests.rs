@@ -434,3 +434,79 @@ fn obligation_acquisition_choices_are_a_stable_bounded_prefix() {
     wrong.validate_with_policy(POLICY).unwrap();
     assert!(f.derive(&wrong, &[]).is_err());
 }
+
+// AC-0472: source-fact validity does not imply exact-query-scope eligibility.
+#[test]
+fn obligation_acquisition_choices_block_only_unqueryable_source_ids() {
+    for length in [1024, 1025, 4000] {
+        let mut f = Fixture::new();
+        f.target.fact = TaskFactKey::Node {
+            id: "n".repeat(length),
+        };
+        f.target.target_id = f.target.content_id().unwrap();
+        for item in &mut f.contract.obligations.obligations {
+            if matches!(item, Obligation::Source { .. }) {
+                *item = identified(Obligation::Source {
+                    obligation_id: String::new(),
+                    target: Box::new(f.target.clone()),
+                });
+            }
+        }
+        f.contract.obligations = f
+            .contract
+            .obligations
+            .normalized_with_policy(POLICY)
+            .unwrap_or_else(|error| panic!("contract for {length}-byte source ID: {error:?}"));
+        f.contract.obligations_hash = f
+            .contract
+            .obligations
+            .fingerprint_with_policy(POLICY)
+            .unwrap();
+        f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+        f.contract.validate_with_policy(POLICY).unwrap();
+        let discovery = f
+            .derive(&f.empty(), &[])
+            .unwrap_or_else(|error| panic!("discovery for {length}-byte source ID: {error:?}"));
+        assert!(discovery.entries().iter().any(|choice| matches!(
+            choice.action,
+            AcquisitionAction::ReadCoverageInventory { .. }
+        )));
+        if length == 1024 {
+            assert!(discovery.blocked().is_empty());
+            assert!(
+                discovery
+                    .entries()
+                    .iter()
+                    .any(|choice| matches!(choice.action, AcquisitionAction::QueryContext { .. }))
+            );
+        } else {
+            assert_eq!(discovery.entries().len(), 1);
+            assert_eq!(
+                discovery.blocked(),
+                &[f.contract
+                    .obligations
+                    .obligations
+                    .iter()
+                    .find(|item| matches!(item, Obligation::Source { .. }))
+                    .unwrap()
+                    .key()
+                    .1]
+            );
+        }
+        // An existing frozen binding remains readable even when its ID cannot
+        // be expressed in a new exact-query scope. No source guard is bypassed.
+        f.ledger.selected_facts[0].fact = f.target.fact.clone();
+        for citation in &mut f.ledger.citations {
+            citation.fact = f.target.fact.clone();
+        }
+        f.ledger.validate_with_policy(POLICY).unwrap();
+        let admitted = f.derive(&f.ledger, &[]).unwrap();
+        assert!(admitted.blocked().is_empty());
+        assert!(admitted.entries().iter().any(|choice| choice.action
+            == AcquisitionAction::ReadEvidence {
+                fact: f.target.fact.clone(),
+                role: f.target.role,
+                index: f.target.index,
+            }));
+    }
+}

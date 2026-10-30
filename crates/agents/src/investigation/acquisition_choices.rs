@@ -165,16 +165,22 @@ impl AcquisitionChoices {
                             index: target.index,
                         })
                     } else if let TaskFactKey::Node { id } = &target.fact {
-                        let query = InvestigationQuery {
-                            scope: InvestigationScope::Node { id: id.clone() },
+                        let mut query = InvestigationQuery {
+                            scope: InvestigationScope::All,
                             kind: Some(InvestigationFactKind::Node),
                             labels: vec![],
                             max_facts: 1,
                             max_bytes: MAX_QUERY_BYTES,
                             cursor: None,
                         };
+                        // Preserve all fixed query invariants. Only replacing
+                        // the scope below may make this valid source ID
+                        // ineligible for exact discovery under protocol limits.
                         query.validate_retained()?;
-                        if ledger.queries.iter().any(|page| page.query == query) {
+                        query.scope = InvestigationScope::Node { id: id.clone() };
+                        if query.validate_retained().is_err()
+                            || ledger.queries.iter().any(|page| page.query == query)
+                        {
                             None
                         } else {
                             Some(AcquisitionAction::QueryContext {
@@ -217,9 +223,9 @@ impl AcquisitionChoices {
             }
         }
         // Existing serialized-action ceiling, further capped by the policy's
-        // envelope ceiling. Blocked IDs are separate, so they cannot hide the
-        // first actionable choice behind a prefix of non-actions. Allocation
-        // before truncation is bounded by the admitted contract and slot cap.
+        // envelope ceiling. Blocked IDs cannot occupy actionable prefix slots,
+        // but their encoded bytes still count toward this same ceiling.
+        // Allocation before truncation is bounded by the contract and slot cap.
         while bounded_bytes(&output, byte_limit).is_err() {
             output
                 .entries
