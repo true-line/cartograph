@@ -316,6 +316,25 @@ pub fn admit_finish_with_policy(
     timestamp: String,
     policy: &InvestigationPolicy,
 ) -> Result<FinishDecision, InvestigationError> {
+    admit_finish_with_policy_using_consistency(
+        request, task, step, input, disclosure, finish, attempts, model, timestamp, policy, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn admit_finish_with_policy_using_consistency(
+    request: &StagedObligationRequest,
+    task: &str,
+    step: &str,
+    input: &InvestigationInput,
+    disclosure: &InvestigationDisclosure,
+    finish: &StagedFinish,
+    attempts: &[AttemptEvidence<'_>],
+    model: Option<String>,
+    timestamp: String,
+    policy: &InvestigationPolicy,
+    consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+) -> Result<FinishDecision, InvestigationError> {
     finish.validate_for_role(matches!(
         request.specialist_id.as_str(),
         "spec-writer@2" | "gap-triager@2"
@@ -393,7 +412,7 @@ pub fn admit_finish_with_policy(
             return Err(InvestigationError::InvalidInput);
         }
     }
-    let assessment = derive_assessment_for_binding_with_policy(
+    let assessment = derive_assessment_for_binding_with_policy_using_consistency(
         &request.intent_hash_with_policy(policy)?,
         &request.obligations,
         task,
@@ -403,6 +422,7 @@ pub fn admit_finish_with_policy(
         finish.outcome,
         attempts,
         policy,
+        consistency,
     )?;
     let completion = if matches!(disclosure.schema_version, 4..=6) {
         Some(InvestigationCompletionResult {
@@ -426,6 +446,7 @@ pub fn admit_finish_with_policy(
         timestamp,
         completion,
         policy,
+        consistency,
     )?;
     let admitted = input.admit_narrative(admitted, finish)?;
     let unmet = assessment
@@ -519,8 +540,38 @@ pub fn derive_assessment_for_binding_with_policy(
     attempts: &[AttemptEvidence<'_>],
     policy: &InvestigationPolicy,
 ) -> Result<Vec<ObligationObservation>, InvestigationError> {
+    derive_assessment_for_binding_with_policy_using_consistency(
+        request_hash,
+        envelope,
+        task,
+        step,
+        ledger,
+        disclosure,
+        outcome,
+        attempts,
+        policy,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn derive_assessment_for_binding_with_policy_using_consistency(
+    request_hash: &str,
+    envelope: &ObligationEnvelope,
+    task: &str,
+    step: &str,
+    ledger: &InvestigationInputLedger,
+    disclosure: &InvestigationDisclosure,
+    outcome: CompletionOutcome,
+    attempts: &[AttemptEvidence<'_>],
+    policy: &InvestigationPolicy,
+    consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+) -> Result<Vec<ObligationObservation>, InvestigationError> {
+    if let Some(bound) = consistency {
+        bound.check(task, step, ledger, disclosure)?;
+    }
     let envelope = envelope.normalized_with_policy(policy)?;
-    disclosure.validate_with_policy(ledger, policy)?;
+    disclosure.validate_consistent(ledger, policy, consistency)?;
     if attempts.len() > policy.max_completed_attempts() {
         return Err(InvestigationError::LimitExceeded);
     }
@@ -537,14 +588,17 @@ pub fn derive_assessment_for_binding_with_policy(
     let source_assessment = if sources.is_empty() {
         None
     } else {
-        Some(InvestigationInspectionAssessment::derive_with_policy(
-            &sources,
-            ledger,
-            step,
-            disclosure,
-            &[],
-            policy,
-        )?)
+        Some(
+            InvestigationInspectionAssessment::derive_with_policy_using_consistency(
+                &sources,
+                ledger,
+                step,
+                disclosure,
+                &[],
+                policy,
+                consistency,
+            )?,
+        )
     };
     let mut assessment = Vec::new();
     for obligation in &envelope.obligations {

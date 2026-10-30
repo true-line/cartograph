@@ -540,7 +540,44 @@ impl InvestigationResult {
         attempts: &[super::staged_attempt::AttemptEvidence<'_>],
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
-        self.validate_with_disclosure_and_policy(ledger, step, disclosure, policy)?;
+        Self::validate_completion_for_binding_with_policy_using_consistency(
+            self,
+            request_hash,
+            envelope,
+            expected_context_id,
+            expected_graph_revision,
+            task,
+            step,
+            ledger,
+            disclosure,
+            attempts,
+            policy,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_completion_for_binding_with_policy_using_consistency(
+        &self,
+        request_hash: &str,
+        envelope: &ObligationEnvelope,
+        expected_context_id: &str,
+        expected_graph_revision: Option<&str>,
+        task: &str,
+        step: &str,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        attempts: &[super::staged_attempt::AttemptEvidence<'_>],
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<(), InvestigationError> {
+        self.validate_with_disclosure_and_policy_using_consistency(
+            ledger,
+            step,
+            disclosure,
+            policy,
+            consistency,
+        )?;
         let envelope = envelope.normalized_with_policy(policy)?;
         let proof = ledger
             .coverage
@@ -587,7 +624,7 @@ impl InvestigationResult {
             || completion.finishing_attempts_hash
                 != completed_attempts_hash_with_policy(attempts, policy)?
             || completion.assessment
-                != super::staged_finish::derive_assessment_for_binding_with_policy(
+                != super::staged_finish::derive_assessment_for_binding_with_policy_using_consistency(
                     request_hash,
                     &envelope,
                     task,
@@ -597,6 +634,7 @@ impl InvestigationResult {
                     completion.outcome,
                     attempts,
                     policy,
+                    consistency,
                 )?
         {
             return Err(InvestigationError::InvalidInput);

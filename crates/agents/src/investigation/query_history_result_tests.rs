@@ -106,6 +106,7 @@ fn result(
         None,
         "2026-10-21T00:00:00Z".into(),
         &INVESTIGATION_V2_POLICY,
+        None,
     )
     .unwrap()
 }
@@ -207,6 +208,7 @@ fn query_history_result_rejects_self_consistent_foreign_registry_and_missing_com
             None,
             "2026-10-21T00:00:00Z".into(),
             &INVESTIGATION_V2_POLICY,
+            None,
         )
         .is_err()
     );

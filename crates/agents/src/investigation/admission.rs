@@ -330,6 +330,7 @@ impl InvestigationResult {
             observed_response_model,
             created_at,
             policy,
+            None,
         )
     }
 
@@ -381,6 +382,7 @@ impl InvestigationResult {
             observed_response_model,
             created_at,
             policy,
+            None,
         )
     }
 
@@ -434,6 +436,7 @@ impl InvestigationResult {
             observed_response_model,
             created_at,
             policy,
+            None,
         )
     }
 
@@ -463,6 +466,7 @@ impl InvestigationResult {
             model,
             created_at,
             &INVESTIGATION_V1_POLICY,
+            None,
         )
     }
 
@@ -479,6 +483,7 @@ impl InvestigationResult {
         model: Option<String>,
         created_at: String,
         policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
     ) -> Result<Self, InvestigationError> {
         Self::admit_bound(
             investigation_id,
@@ -491,6 +496,7 @@ impl InvestigationResult {
             model,
             created_at,
             policy,
+            consistency,
         )
     }
 
@@ -506,7 +512,12 @@ impl InvestigationResult {
         observed_response_model: Option<String>,
         created_at: String,
         policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
     ) -> Result<Self, InvestigationError> {
+        if let Some(bound) = consistency {
+            let (step, disclosure) = binding.ok_or(InvestigationError::InvalidInput)?;
+            bound.check(investigation_id, step, ledger, disclosure)?;
+        }
         ledger.validate_with_policy(policy)?;
         if ledger.schema_version == 2 && binding.is_none() {
             return Err(InvestigationError::InvalidInput);
@@ -521,7 +532,7 @@ impl InvestigationResult {
                 if !super::records::opaque_id(step) {
                     return Err(InvestigationError::InvalidInput);
                 }
-                disclosure.eligible_citations_with_policy(ledger, policy)?
+                disclosure.eligible_citations_consistent(ledger, policy, consistency)?
             }
             None => ledger
                 .citations
@@ -594,7 +605,9 @@ impl InvestigationResult {
             graph_snapshot_id: ledger.graph_snapshot_id.clone(),
             invocation_step_id: binding.map(|(step, _)| step.to_owned()),
             disclosure_hash: binding
-                .map(|(_, disclosure)| disclosure.fingerprint_with_policy(ledger, policy))
+                .map(|(_, disclosure)| {
+                    disclosure.fingerprint_consistent(ledger, policy, consistency)
+                })
                 .transpose()?,
             narrative: None,
             findings,
@@ -605,28 +618,35 @@ impl InvestigationResult {
         };
         if let Some(targets) = inspection_targets {
             let (step, disclosure) = binding.ok_or(InvestigationError::InvalidInput)?;
-            result.inspection_assessment =
-                Some(InvestigationInspectionAssessment::derive_with_policy(
+            result.inspection_assessment = Some(
+                InvestigationInspectionAssessment::derive_with_policy_using_consistency(
                     targets,
                     ledger,
                     step,
                     disclosure,
                     &result.findings,
                     policy,
-                )?);
+                    consistency,
+                )?,
+            );
         }
         result.result_id = result.content_id()?;
         match binding {
             Some((_, disclosure)) if matches!(result.schema_version, 5..=7) => {
                 result.validate_bound(
                     ledger,
-                    &disclosure.eligible_citations_with_policy(ledger, policy)?,
+                    &disclosure.eligible_citations_consistent(ledger, policy, consistency)?,
                     policy,
                 )?;
             }
-            Some((step, disclosure)) => {
-                result.validate_with_disclosure_and_policy(ledger, step, disclosure, policy)?
-            }
+            Some((step, disclosure)) => result
+                .validate_with_disclosure_and_policy_using_consistency(
+                    ledger,
+                    step,
+                    disclosure,
+                    policy,
+                    consistency,
+                )?,
             None => result.validate_with_policy(ledger, policy)?,
         }
         Ok(result)
@@ -796,6 +816,23 @@ impl InvestigationResult {
         disclosure: &InvestigationDisclosure,
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
+        Self::validate_with_disclosure_and_policy_using_consistency(
+            self, ledger, step_id, disclosure, policy, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_with_disclosure_and_policy_using_consistency(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step_id: &str,
+        disclosure: &InvestigationDisclosure,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<(), InvestigationError> {
+        if let Some(bound) = consistency {
+            bound.check(&self.investigation_id, step_id, ledger, disclosure)?;
+        }
         if self.schema_version
             != if disclosure.schema_version == 6 {
                 7
@@ -817,7 +854,11 @@ impl InvestigationResult {
             || !super::records::opaque_id(step_id)
             || self.invocation_step_id.as_deref() != Some(step_id)
             || self.disclosure_hash.as_deref()
-                != Some(disclosure.fingerprint_with_policy(ledger, policy)?.as_str())
+                != Some(
+                    disclosure
+                        .fingerprint_consistent(ledger, policy, consistency)?
+                        .as_str(),
+                )
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -837,11 +878,18 @@ impl InvestigationResult {
             )?;
         }
         if let Some(assessment) = &self.inspection_assessment {
-            assessment.validate_with_policy(ledger, step_id, disclosure, &self.findings, policy)?;
+            assessment.validate_with_policy_using_consistency(
+                ledger,
+                step_id,
+                disclosure,
+                &self.findings,
+                policy,
+                consistency,
+            )?;
         }
         self.validate_bound(
             ledger,
-            &disclosure.eligible_citations_with_policy(ledger, policy)?,
+            &disclosure.eligible_citations_consistent(ledger, policy, consistency)?,
             policy,
         )
     }

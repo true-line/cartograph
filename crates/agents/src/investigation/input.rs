@@ -658,6 +658,26 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
     ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
     {
+        Self::admit_completion_finish_with_policy_using_consistency(
+            self, request, task, step, disclosure, finish, attempts, model, timestamp, policy, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_completion_finish_with_policy_using_consistency(
+        &self,
+        request: &obligations::StagedObligationRequest,
+        task: &str,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+        model: Option<String>,
+        timestamp: String,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
+    {
         let request = request.normalized_with_policy(policy)?;
         if disclosure.schema_version
             != match request.schema_version {
@@ -669,7 +689,7 @@ impl InvestigationInput {
             return Err(InvestigationError::InvalidInput);
         }
         let request = &request;
-        let decision = staged_finish::admit_finish_with_policy(
+        let decision = staged_finish::admit_finish_with_policy_using_consistency(
             request,
             task,
             step,
@@ -680,6 +700,7 @@ impl InvestigationInput {
             model.clone(),
             timestamp.clone(),
             policy,
+            consistency,
         )?;
         let staged_finish::FinishDecision::Accepted(candidate) = decision else {
             return Ok(Err(decision));
@@ -701,9 +722,16 @@ impl InvestigationInput {
             timestamp,
             Some(completion),
             policy,
+            consistency,
         )?;
         let result = self.admit_narrative(result, finish)?;
-        result.validate_with_disclosure_and_policy(&self.ledger, step, disclosure, policy)?;
+        result.validate_with_disclosure_and_policy_using_consistency(
+            &self.ledger,
+            step,
+            disclosure,
+            policy,
+            consistency,
+        )?;
         Ok(Ok(result))
     }
 
@@ -767,6 +795,7 @@ impl InvestigationInput {
             created_at,
             completion,
             &INVESTIGATION_V1_POLICY,
+            None,
         )
     }
 
@@ -783,6 +812,7 @@ impl InvestigationInput {
         created_at: String,
         completion: Option<InvestigationCompletionResult>,
         policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
     ) -> Result<InvestigationResult, InvestigationError> {
         if self.compact != disclosure.is_some() {
             return Err(InvestigationError::InvalidInput);
@@ -821,6 +851,7 @@ impl InvestigationInput {
                 observed_response_model,
                 created_at,
                 policy,
+                consistency,
             );
         }
         if let Some(disclosure) = disclosure {
