@@ -334,9 +334,9 @@ impl JobStore {
                 if let Some(result) = &result {
                     let ledger =
                         load_ledger(&tx, &task)?.ok_or(InvestigationStoreError::Invalid)?;
-                    validate_result_basis(result, &ledger, &invoked, &task.detail.limits)?;
+                    validate_result_basis(result, &ledger, &invoked, &task.detail.limits, None)?;
                     validate_inspection_result(&task, result)?;
-                    completion::accepted(&tx, &mut task, result, &ledger, &invoked)?;
+                    completion::accepted(&tx, &mut task, result, &ledger, &invoked, None)?;
                     if result.investigation_id != id
                         || result.observed_response_model != response.observed_model
                     {

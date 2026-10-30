@@ -66,6 +66,7 @@ pub(crate) fn next_prompt_result_workspace() -> Option<(usize, usize)> {
             .max(ledger_read)
             .max(semantic),
     ])?;
+    let (basis, basis_peak) = completion_basis_workspace()?;
     let checks = sum(&[
         semantic,
         next_prompt_contract_workspace()?,
@@ -77,10 +78,41 @@ pub(crate) fn next_prompt_result_workspace() -> Option<(usize, usize)> {
         row,
         ledger,
         row, // result, current ledger, named step
+        // Selected authority survives result/assessment checks after replay drops.
+        basis,
         read.max(next_prompt_ledger_workspace()?)
+            .max(basis_peak)
             .max(step_basis)
             .max(completion)
             .max(checks),
     ])?;
     Some((row, peak))
+}
+
+/// Selected saved call plus canonical contract/choices/feedback; no replay cache.
+pub(super) fn completion_basis_workspace() -> Option<(usize, usize)> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let extra = sum(&[
+        size_of::<admission_journal::AuthenticatedCompletionBasis>(),
+        json_bytes(policy.envelope_bytes().checked_add(256)?)?,
+        // Final choices and feedback each fit the existing action serializer.
+        json_bytes(MAX_ACTION_BYTES)?.checked_mul(2)?,
+        agents::investigation::acquisition_choices::AcquisitionChoices::private_workspace_bytes(
+            policy,
+        )?,
+    ])?;
+    let retained = sum(&[
+        saved_call_workspace::next_prompt_raw_call_workspace()?.0,
+        metadata_history_workspace::row_workspace()?,
+        extra,
+    ])?;
+    // Replay already covers shared history + timeline/entries + transient
+    // historical-ledger map/candidate construction in read_entries. Selecting
+    // the last call moves its core, rather than retaining a second whole epoch.
+    Some((
+        retained,
+        next_prompt_capacity_replay_workspace()?
+            .1
+            .checked_add(extra)?,
+    ))
 }

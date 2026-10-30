@@ -124,23 +124,44 @@ impl JobStore {
                     .disclosure
                     .as_ref()
                     .ok_or(InvestigationStoreError::Invalid)?;
-                match input.current.admit_completion_finish_with_policy(
-                    &request,
-                    &id,
+                let basis = admission_journal::AuthenticatedCompletionBasis::load(
+                    &tx,
+                    &task,
                     &authenticated.call.step_id,
-                    disclosure,
-                    &finish,
-                    &evidence,
-                    input.response.observed_model.clone(),
-                    timestamp(&tx)?,
-                    policy,
-                )? {
+                )?;
+                if let Some(basis) = &basis {
+                    basis.check_response(&authenticated)?;
+                }
+                let decision = if let Some(basis) = &basis {
+                    basis.binding()?.admit_finish(
+                        input.current,
+                        &request,
+                        &finish,
+                        &evidence,
+                        input.response.observed_model.clone(),
+                        timestamp(&tx)?,
+                    )?
+                } else {
+                    input.current.admit_completion_finish_with_policy(
+                        &request,
+                        &id,
+                        &authenticated.call.step_id,
+                        disclosure,
+                        &finish,
+                        &evidence,
+                        input.response.observed_model.clone(),
+                        timestamp(&tx)?,
+                        policy,
+                    )?
+                };
+                match decision {
                     Ok(result) => {
                         validate_result_basis(
                             &result,
                             &authenticated.core.ledger,
                             &authenticated.core.step,
                             &task.detail.limits,
+                            basis.as_ref(),
                         )?;
                         validate_inspection_result(&task, &result)?;
                         accepted(
@@ -149,6 +170,7 @@ impl JobStore {
                             &result,
                             &authenticated.core.ledger,
                             &authenticated.core.step,
+                            basis.as_ref(),
                         )?;
                         let body = encode(&result, MAX_RESULT_BYTES)?;
                         let result_hash = core_prov::content_hash(&body);

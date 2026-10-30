@@ -2545,7 +2545,14 @@ fn investigation_compact_disclosure_is_durable_and_finishing_binding_is_revalida
     missing.disclosure = None;
     let body = encode(&missing, MAX_INVOCATION_BYTES).unwrap();
     assert!(
-        validate_result_basis(&result, &ledger, &missing, &InvestigationLimits::default()).is_err()
+        validate_result_basis(
+            &result,
+            &ledger,
+            &missing,
+            &InvestigationLimits::default(),
+            None
+        )
+        .is_err()
     );
     assert!(
         fixture

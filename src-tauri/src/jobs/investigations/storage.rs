@@ -770,9 +770,15 @@ pub(super) fn validate_result_basis(
     ledger: &InvestigationInputLedger,
     step: &PendingInvestigationStep,
     limits: &InvestigationLimits,
+    basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
 ) -> Result<(), InvestigationStoreError> {
     let policy = InvestigationPolicy::for_limits(limits).ok_or(InvestigationStoreError::Invalid)?;
     validate_step(step, limits)?;
+    if let Some(basis) = basis {
+        basis.check_step(ledger, step)?;
+        basis.binding()?.validate_result(result)?;
+        return Ok(());
+    }
     match &step.disclosure {
         Some(disclosure) => {
             result.validate_with_disclosure_and_policy(ledger, &step.step_id, disclosure, policy)?
@@ -1658,9 +1664,18 @@ pub(super) fn load_result(
             if step.step_id != *step_id || step.disclosure.is_none() {
                 return Err(InvestigationStoreError::Invalid);
             }
+            let basis =
+                admission_journal::AuthenticatedCompletionBasis::load(connection, task, step_id)?;
             validate_step_basis(connection, task, &step)?;
-            validate_result_basis(result, &ledger, &step, &task.detail.limits)?;
-            super::completion::validate_result(connection, task, result, &ledger, &step)?;
+            validate_result_basis(result, &ledger, &step, &task.detail.limits, basis.as_ref())?;
+            super::completion::validate_result(
+                connection,
+                task,
+                result,
+                &ledger,
+                &step,
+                basis.as_ref(),
+            )?;
         } else {
             if task.detail.summary.specialist_id.uses_compact_disclosure() {
                 return Err(InvestigationStoreError::Invalid);

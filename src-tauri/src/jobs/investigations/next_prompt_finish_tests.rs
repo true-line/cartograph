@@ -399,3 +399,403 @@ fn assert_task_load_workspace(tx: &Connection, saved: &StoredTask) {
     let (journal, replay) = next_prompt_staged_workspace().unwrap();
     assert!(peak >= retained + journal * 2 + replay);
 }
+
+// Cold setup only; every subsequent call/attempt is actually admitted.
+fn gated_finish_fixture(prior_refusal: bool) -> Fixture {
+    use completion::next_prompt_snapshot::tests::fixture::Fixture as Acquisition;
+    let base = Acquisition::customized(false, |f| {
+        f.request.specialist_id = "domain-analyst@18".into();
+        let intent = completion::host_fixture_intent(&f.request).unwrap();
+        f.task.intent_hash = intent.request_hash.clone();
+        f.task.detail.completion = Some(completion::initial_detail(&intent));
+        f.task.completion_intent = Some(intent);
+        f.task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+        f.task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+        f.metadata = completion::derive_protected_metadata(&f.task, vec![], &[]).unwrap();
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        admission_journal::tests::save_task(&tx, &f.task);
+        tx.commit().unwrap();
+    });
+    let mut ready = Fixture::from_base(base, false);
+    if prior_refusal {
+        ready.begin();
+        let original = ready.query_action();
+        let mut response = ready.response.clone();
+        response.action_hash =
+            core_prov::content_hash(&encode(&original, MAX_ACTION_BYTES).unwrap());
+        ready
+            .base
+            .f
+            .store
+            .refuse_next_prompt(
+                &ready.base.f.execution,
+                ready.base.f.task.detail.summary.revision,
+                &response,
+                &original,
+                admission_journal::RefusalReason::Action(
+                    agents::investigation::ActionRefusalReason::ActionNotOffered,
+                ),
+            )
+            .unwrap();
+        ready.next();
+    }
+    let Fixture {
+        mut base,
+        input,
+        prepared,
+        ..
+    } = ready;
+    base.input = input;
+    base.prepared = prepared;
+    base.acquire_inventory_observed(|base| {
+        let tx = base.f.store.conn.unchecked_transaction().unwrap();
+        let step = base.f.task.pending.as_ref().unwrap();
+        assert_eq!(
+            step.disclosure
+                .as_ref()
+                .unwrap()
+                .admission
+                .as_ref()
+                .unwrap()
+                .acquisition
+                .as_ref()
+                .unwrap()
+                .action_feedback_hash
+                .is_some(),
+            prior_refusal
+        );
+        let basis =
+            admission_journal::AuthenticatedCompletionBasis::load(&tx, &base.f.task, &step.step_id)
+                .unwrap()
+                .unwrap();
+        assert!(
+            basis
+                .binding()
+                .unwrap()
+                .fingerprint()
+                .unwrap()
+                .starts_with("investigation-disclosure-v6:")
+        );
+    });
+    Fixture::from_base(base, false)
+}
+
+#[test]
+fn gated_authenticated_finish_persists_and_reopens() {
+    assert_gated_finish_reopens(gated_finish_fixture(false));
+}
+#[test]
+fn gated_authenticated_finish_reopens_prior_semantic_feedback() {
+    // AC-0490: real Some feedback is authenticated before inventory clears it.
+    assert_gated_finish_reopens(gated_finish_fixture(true));
+}
+fn assert_gated_finish_reopens(mut f: Fixture) -> Fixture {
+    f.begin();
+    let before = f.base.f.task.detail.usage.clone();
+    let detail = f.publish().unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::InsufficientEvidence)
+    );
+    assert_eq!(detail.usage.tool_actions, before.tool_actions);
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(f.base.id()).unwrap(), detail);
+    let result = reopened.investigation_result(f.base.id()).unwrap().unwrap();
+    assert_eq!(result.schema_version, 7);
+    assert_eq!(
+        result.invocation_step_id.as_deref(),
+        Some(f.response.step_id.as_str())
+    );
+    let tx = reopened.conn.unchecked_transaction().unwrap();
+    let task = load_next_prompt_task(&tx, f.base.id()).unwrap();
+    assert_eq!(load_result(&tx, &task).unwrap().unwrap(), result);
+    assert!(
+        task.admission_state
+            .as_ref()
+            .unwrap()
+            .current_call
+            .as_ref()
+            .unwrap()
+            .admission
+            .acquisition
+            .as_ref()
+            .unwrap()
+            .action_feedback_hash
+            .is_none()
+    );
+    #[cfg(unix)]
+    assert_task_load_workspace(&tx, &task);
+    f
+}
+
+fn gated_stored_rows(f: &Fixture) -> Vec<(Vec<u8>, String)> {
+    let connection = &f.base.f.store.conn;
+    let mut rows = vec![
+        connection
+            .query_row(
+                "SELECT record,record_hash FROM investigation_tasks WHERE id=?1",
+                [f.base.id()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap(),
+    ];
+    for table in [
+        "investigation_invocations",
+        "investigation_responses",
+        "investigation_results",
+        "investigation_inputs",
+        "investigation_events",
+        "investigation_admission_refusals",
+    ] {
+        if table == "investigation_admission_refusals" {
+            let present: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            // Preserve namespace absence/presence as part of the snapshot too.
+            rows.push((table.as_bytes().to_vec(), present.to_string()));
+            if !present {
+                continue;
+            }
+        }
+        rows.extend(
+            connection
+                .prepare(&format!(
+                    "SELECT body,body_hash FROM {table} WHERE task_id=?1 ORDER BY body,body_hash"
+                ))
+                .unwrap()
+                .query_map([f.base.id()], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap),
+        );
+    }
+    rows
+}
+
+#[test]
+fn gated_authenticated_finish_rejects_rehashed_stamps_without_reader_writes() {
+    // AC-0490: direct factory negatives isolate authority, not a row checksum.
+    for field in ["choices", "feedback"] {
+        let f = assert_gated_finish_reopens(gated_finish_fixture(true));
+        let mut task = f.saved();
+        let id = f.base.id();
+        let finishing = f.response.step_id.as_str();
+        let step_id = if field == "feedback" {
+            "step-2"
+        } else {
+            finishing
+        };
+        let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+        assert!(
+            admission_journal::AuthenticatedCompletionBasis::load(&tx, &task, finishing)
+                .unwrap()
+                .is_some()
+        );
+        let mut step: PendingInvestigationStep =
+            read_body(&tx, "investigation_invocations", "step_id", id, &step_id)
+                .unwrap()
+                .unwrap();
+        let stamp = step
+            .disclosure
+            .as_mut()
+            .unwrap()
+            .admission
+            .as_mut()
+            .unwrap()
+            .acquisition
+            .as_mut()
+            .unwrap();
+        let hash = if field == "choices" {
+            &mut stamp.choices_hash
+        } else {
+            stamp
+                .action_feedback_hash
+                .as_mut()
+                .expect("actual prior Some")
+        };
+        let byte = if hash.starts_with('a') { "b" } else { "a" };
+        hash.replace_range(..1, byte);
+        if field == "choices" {
+            task.admission_state
+                .as_mut()
+                .unwrap()
+                .current_call
+                .as_mut()
+                .unwrap()
+                .admission = step.disclosure.as_ref().unwrap().admission.clone().unwrap();
+        }
+        completion::rewrite_test_body(
+            &tx,
+            "investigation_invocations",
+            id,
+            "step_id",
+            &step_id,
+            &encode(&step, MAX_INVOCATION_BYTES).unwrap(),
+        );
+        admission_journal::tests::save_task(&tx, &task);
+        assert_eq!(
+            read_body::<PendingInvestigationStep>(
+                &tx,
+                "investigation_invocations",
+                "step_id",
+                id,
+                &step_id
+            )
+            .unwrap()
+            .unwrap(),
+            step
+        );
+        if field == "choices" {
+            let history = completion::SavedMetadataHistory::load(&tx, &task).unwrap();
+            let call = task
+                .admission_state
+                .as_ref()
+                .unwrap()
+                .current_call
+                .as_ref()
+                .unwrap();
+            let metadata = history.metadata_at(finishing).unwrap();
+            call.validate_core(&task, &step, &f.base.f.ledger, &metadata)
+                .unwrap();
+            assert!(
+                history
+                    .acquisition_choices_at(call, &f.base.f.ledger)
+                    .is_err()
+            );
+        }
+        assert!(
+            admission_journal::AuthenticatedCompletionBasis::load(&tx, &task, finishing).is_err(),
+            "{field}"
+        );
+        tx.commit().unwrap();
+        let before = gated_stored_rows(&f);
+        let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+        let changes = reopened.conn.total_changes();
+        assert!(reopened.investigation(id).is_err(), "{field} detail");
+        assert!(reopened.investigation_result(id).is_err(), "{field} result");
+        assert_eq!(reopened.conn.total_changes(), changes);
+        assert_eq!(gated_stored_rows(&f), before);
+    }
+}
+
+#[test]
+fn gated_authenticated_finish_rejects_earlier_call_and_foreign_pair() {
+    // AC-0490: the old call is valid history, but cannot bind this final result.
+    let f = assert_gated_finish_reopens(gated_finish_fixture(true));
+    let task = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let basis =
+        admission_journal::AuthenticatedCompletionBasis::load(&tx, &task, &f.response.step_id)
+            .unwrap()
+            .unwrap();
+    let last: PendingInvestigationStep = read_body(
+        &tx,
+        "investigation_invocations",
+        "step_id",
+        f.base.id(),
+        &f.response.step_id,
+    )
+    .unwrap()
+    .unwrap();
+    let earlier: PendingInvestigationStep = read_body(
+        &tx,
+        "investigation_invocations",
+        "step_id",
+        f.base.id(),
+        &"step-2",
+    )
+    .unwrap()
+    .unwrap();
+    let old_ledger: InvestigationInputLedger =
+        read_body(&tx, "investigation_inputs", "revision", f.base.id(), &0i64)
+            .unwrap()
+            .unwrap();
+    basis.check_step(&f.base.f.ledger, &last).unwrap();
+    assert!(
+        admission_journal::AuthenticatedCompletionBasis::load(&tx, &task, &earlier.step_id)
+            .is_err()
+    );
+    assert!(basis.check_step(&f.base.f.ledger, &earlier).is_err());
+    assert!(basis.check_step(&old_ledger, &last).is_err());
+}
+
+// AC-0490: generic transition cannot bypass the dedicated @18 writer.
+#[test]
+fn gated_valid_finish_cannot_enter_generic_action_admitted() {
+    let mut f = gated_finish_fixture(false);
+    f.begin();
+    let result = {
+        let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+        let task = load_next_prompt_task(&tx, f.base.id()).unwrap();
+        assert_eq!(task.phase, Phase::Invocation);
+        let basis =
+            admission_journal::AuthenticatedCompletionBasis::load(&tx, &task, &f.response.step_id)
+                .unwrap()
+                .unwrap();
+        let entries = attempts(&tx, &task).unwrap();
+        assert_eq!(entries.len(), 1);
+        let evidence = [AttemptEvidence {
+            record: &entries[0].record,
+            ledger: &f.base.f.ledger,
+        }];
+        let finish = serde_json::from_value(f.original.clone()).unwrap();
+        let bound = basis.binding().unwrap();
+        let result = bound
+            .admit_finish(
+                &f.input,
+                &f.base.f.request,
+                &finish,
+                &evidence,
+                f.response.observed_model.clone(),
+                "2026-10-30T14:00:00Z".into(),
+            )
+            .unwrap()
+            .ok()
+            .unwrap();
+        // Otherwise valid result through the exact dedicated host validators.
+        validate_result(
+            &tx,
+            &task,
+            &result,
+            &f.base.f.ledger,
+            task.pending.as_ref().unwrap(),
+            Some(&basis),
+        )
+        .unwrap();
+        result
+    };
+    let before = gated_stored_rows(&f);
+    let usage = f.saved().detail.usage;
+    let changes = f.base.f.store.conn.total_changes();
+    assert_eq!(
+        f.base.f.store.advance_investigation(
+            &f.base.f.execution,
+            f.base.f.task.detail.summary.revision,
+            InvestigationTransition::ActionAdmitted {
+                response: f.response.clone(),
+                tool: None,
+                result: Some(Box::new(result)),
+            }
+        ),
+        Err(InvestigationStoreError::Invalid)
+    );
+    assert_eq!(f.base.f.store.conn.total_changes(), changes);
+    assert_eq!(gated_stored_rows(&f), before);
+    assert_eq!(f.saved().detail.usage, usage);
+    // The same still-pending call remains usable through its dedicated writer.
+    assert_eq!(
+        f.publish().unwrap().summary.status,
+        InvestigationStatus::Completed
+    );
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    assert!(
+        reopened
+            .investigation_result(f.base.id())
+            .unwrap()
+            .is_some()
+    );
+}

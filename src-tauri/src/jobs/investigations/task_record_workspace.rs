@@ -99,12 +99,15 @@ pub(crate) fn next_prompt_task_load_workspace() -> Option<(usize, usize)> {
         128,
         slots::<String>(3)?,
     ])?;
+    let (basis, basis_peak) = result_replay_workspace::completion_basis_workspace()?;
     let projection = sum(&[
         result,
         row,
         ledger,
         expected,
+        basis,
         acquisition
+            .max(basis_peak)
             .max(next_prompt_ledger_workspace()?)
             .max(completion_result_validation_workspace(
                 policy,

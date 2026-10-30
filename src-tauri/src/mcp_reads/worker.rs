@@ -437,6 +437,16 @@ fn task_phase_workspaces(
         )?,
     )?
     .1;
+    // Finish publication retains its authenticated response/core while the
+    // selected completion basis and result/attempt validation are acquired.
+    // Current Inputs and the actual provider preparation/response stay in the
+    // context term below, outside this phase maximum.
+    let finish = crate::jobs::investigations::next_prompt_result_workspace()?
+        .1
+        .checked_add(crate::jobs::investigations::next_prompt_saved_call_workspace()?.0)?
+        .checked_add(context_hub::logical::json_bytes(
+            agents::investigation::MAX_ACTION_BYTES.checked_mul(2)?,
+        )?)?; // saved call DTO plus separately encoded original action
     let execution = provider
         .max(settlement)
         .max(construction)
@@ -473,7 +483,7 @@ fn task_phase_workspaces(
         .max(crate::jobs::investigations::next_prompt_saved_validation_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_pending_source_workspace()?)
         .max(crate::jobs::investigations::next_prompt_source_capacity_workspace()?.1)
-        .max(crate::jobs::investigations::next_prompt_result_workspace()?.1)
+        .max(finish)
         .max(crate::jobs::investigations::next_prompt_staged_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_task_load_workspace()?.1)
         .max(

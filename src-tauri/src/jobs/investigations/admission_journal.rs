@@ -861,6 +861,129 @@ pub(super) fn saved_core(
     }
     Ok(witness.core)
 }
+/// Saved provenance for the pure agents witness. Only the same-transaction
+/// replay below can construct this owner; no caller role/stamp is authority.
+pub(super) struct AuthenticatedCompletionBasis {
+    call: SavedCallBasis,
+    core: SavedCallCore,
+    contract: agents::investigation::InvestigationCompletionContract,
+    choices: agents::investigation::acquisition_choices::AcquisitionChoices,
+    feedback: Option<ActionFeedback>,
+}
+impl AuthenticatedCompletionBasis {
+    pub(super) fn load(
+        connection: &Connection,
+        task: &StoredTask,
+        step: &str,
+    ) -> Result<Option<Self>, InvestigationStoreError> {
+        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+            return Ok(None);
+        }
+        require_transaction(connection)?;
+        admission_contract::validate_pairing(task)?;
+        let intent = task
+            .completion_intent
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        intent.validate(task)?;
+        let state = task
+            .admission_state
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        state.validate_task_binding(task)?;
+        let history = completion::SavedMetadataHistory::load(connection, task)?;
+        let mut line = timeline(connection, task, &history)?;
+        let entries = read_entries(connection, task, &line, &history)?;
+        let (&ordinal, witness) = line
+            .calls
+            .last_key_value()
+            .ok_or(InvestigationStoreError::Missing)?;
+        if witness.call.step_id != step
+            || ordinal != task.detail.usage.model_invocations
+            || state.current_call.as_ref() != Some(&witness.call)
+            || task.ledger_revision != Some(witness.core.ledger.revision)
+            || task.ledger_hash.as_ref() != Some(&witness.call.input_ledger_hash)
+            || witness.call.request_hash != intent.request_hash
+            || witness.core.metadata.obligations_hash != intent.obligations_hash
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let feedback = project(&entries, &line, Some(ordinal)).action_feedback;
+        let choices = history
+            .acquisition_choices_at(&witness.call, &witness.core.ledger)?
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let (_, witness) = line
+            .calls
+            .pop_last()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let result = Self {
+            call: witness.call,
+            core: witness.core,
+            contract: intent.contract(),
+            choices,
+            feedback,
+        };
+        drop((history, line, entries));
+        result.binding()?;
+        Ok(Some(result))
+    }
+    pub(super) fn binding(
+        &self,
+    ) -> Result<agents::investigation::AcquisitionDisclosureConsistency<'_>, InvestigationStoreError>
+    {
+        Ok(self.choices.bind_completion_disclosure(
+            &self.call.task_id,
+            &self.call.step_id,
+            &self.contract,
+            &self.core.metadata,
+            &self.core.ledger,
+            self.core
+                .step
+                .disclosure
+                .as_ref()
+                .ok_or(InvestigationStoreError::Invalid)?,
+            self.feedback.as_ref(),
+            &INVESTIGATION_V2_POLICY,
+        )?)
+    }
+    pub(super) fn check_step(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step: &PendingInvestigationStep,
+    ) -> Result<(), InvestigationStoreError> {
+        if self.core.ledger != *ledger || self.core.step != *step {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
+    pub(super) fn check_response(
+        &self,
+        response: &metadata_admission::AuthenticatedResponse,
+    ) -> Result<(), InvestigationStoreError> {
+        // authenticate_saved_response already re-sealed the actual Input and
+        // matched the ENTIRE disclosure to this core (including its stamp).
+        self.check_step(&response.core.ledger, &response.core.step)?;
+        if self.call != response.call
+            || self.core.metadata != response.core.metadata
+            || self.core.ordinal != response.core.ordinal
+            || self
+                .feedback
+                .as_ref()
+                .map(ActionFeedback::stamp_hash)
+                .transpose()?
+                != response
+                    .call
+                    .admission
+                    .acquisition
+                    .as_ref()
+                    .and_then(|s| s.action_feedback_hash.clone())
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
+}
+
 /// Exact immutable cutoff; own or later refusals cannot supply its feedback.
 pub(super) fn derive_at(
     connection: &Connection,
