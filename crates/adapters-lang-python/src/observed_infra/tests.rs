@@ -1309,6 +1309,119 @@ def parameter(captured):
     );
 }
 
+// AC-0496: `aiohttp.request(...)` and a name bound once to a proven
+// `aiohttp.ClientSession(...)` are fetch sites as AC-0424/AC-0425 read
+// them; the session's `base_url` (positional or keyword) is resolved
+// against as RFC 3986. (T-0496)
+#[test]
+fn proven_aiohttp_requests_become_fetch_sites() {
+    let sites = fetches(&[(
+        "app/aio.py",
+        r#"
+import aiohttp
+from aiohttp import ClientSession as CS
+
+async def module_call():
+    async with aiohttp.request("get", "https://h/m") as r:
+        return await r.text()
+
+async def positional_base():
+    async with aiohttp.ClientSession("https://h.io/api/") as s:
+        async with s.get("users") as r:
+            await r.json()
+        await s.request("POST", "/root")
+
+async def keyword_base():
+    session = CS(base_url="https://k.io")
+    await session.delete("/x")
+
+async def no_base():
+    async with aiohttp.ClientSession() as plain:
+        await plain.patch("https://h/p")
+"#,
+    )]);
+    let owner = |name: &str| format!("sym:{REPO}@app/aio.py#{name}");
+    assert_eq!(
+        sites.iter().map(shown_base).collect::<Vec<_>>(),
+        vec![
+            format!("app/aio.py GET lit:https://h/m {}", owner("module_call")),
+            format!(
+                "app/aio.py GET lit:users {} base=lit:https://h.io/api/ Resolve",
+                owner("positional_base")
+            ),
+            format!(
+                "app/aio.py POST lit:/root {} base=lit:https://h.io/api/ Resolve",
+                owner("positional_base")
+            ),
+            format!(
+                "app/aio.py DELETE lit:/x {} base=lit:https://k.io Resolve",
+                owner("keyword_base")
+            ),
+            format!("app/aio.py PATCH lit:https://h/p {}", owner("no_base")),
+        ]
+    );
+}
+
+// AC-0496: aiohttp has no module verb functions, and splatted, rebound,
+// patched or shadowed sessions yield nothing. (T-0496)
+#[test]
+fn unproven_aiohttp_requests_are_not_fetch_sites() {
+    let sites = fetches(&[
+        (
+            "app/neg.py",
+            r#"
+import aiohttp
+
+async def verbs():
+    await aiohttp.get("https://h/none")
+
+async def splat(opts):
+    async with aiohttp.ClientSession(**opts) as s:
+        await s.get("/splat")
+
+async def rebound():
+    t = aiohttp.ClientSession()
+    t = aiohttp.ClientSession()
+    await t.get("/twice")
+"#,
+        ),
+        (
+            "app/mocked.py",
+            r#"
+import aiohttp
+from unittest.mock import patch
+
+@patch("aiohttp.ClientSession.get")
+async def test_mocked(_):
+    s = aiohttp.ClientSession()
+    await s.get("/mocked")
+"#,
+        ),
+    ]);
+    assert!(
+        sites.is_empty(),
+        "{:?}",
+        sites.iter().map(shown).collect::<Vec<_>>()
+    );
+    let shadowed = fetches(&[
+        ("aiohttp.py", "def request(method, url): ...\n"),
+        (
+            "app/svc.py",
+            r#"
+import aiohttp
+
+async def call():
+    await aiohttp.request("GET", "https://h/shadowed")
+"#,
+        ),
+    ]);
+    assert!(
+        shadowed.is_empty(),
+        "{:?}",
+        shadowed.iter().map(shown).collect::<Vec<_>>()
+    );
+}
+
 fn events(files: &[(&str, &str)]) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     for (path, body) in files {

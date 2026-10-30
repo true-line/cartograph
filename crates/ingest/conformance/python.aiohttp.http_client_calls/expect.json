@@ -1,0 +1,5 @@
+{
+  "fetch_sites": [
+    { "method": "POST", "url": "https://api.example.com/users" }
+  ]
+}

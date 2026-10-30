@@ -58,7 +58,8 @@ pub enum BaseJoin {
     Concat,
     /// RFC 3986 reference resolution, as Retrofit's `HttpUrl.resolve`: a
     /// path with a leading `/` replaces the base path, a relative one
-    /// replaces its last segment.
+    /// replaces its last segment, and a network-path one (`//host/x`)
+    /// keeps only the base's scheme.
     Resolve,
     /// httpx `base_url` merging (#1240), as `Client._merge_url`: a URL with
     /// a scheme and a host stands alone; any other URL's raw path (query
@@ -134,6 +135,18 @@ pub fn join_base(base: &str, path: &str, join: BaseJoin) -> String {
         BaseJoin::Resolve => {
             if path.starts_with("http://") || path.starts_with("https://") {
                 return path.to_string();
+            }
+            if let Some(network) = path.strip_prefix("//") {
+                let scheme = base.find(':').map_or("", |i| &base[..=i]);
+                let end = network.find(['/', '?', '#']).unwrap_or(network.len());
+                let (authority, rest) = network.split_at(end);
+                let split = rest.find(['?', '#']).unwrap_or(rest.len());
+                let (reference, suffix) = rest.split_at(split);
+                let reference = match reference {
+                    "" => String::new(),
+                    reference => remove_dot_segments(reference),
+                };
+                return format!("{scheme}//{authority}{reference}{suffix}");
             }
             let base = base.split(['?', '#']).next().unwrap_or(base);
             let authority_end = base
@@ -384,6 +397,8 @@ mod tests {
             ("g/../h", "http://a/b/c/h"),
             ("g?y/./x", "http://a/b/c/g?y/./x"),
             ("g#s/../x", "http://a/b/c/g#s/../x"),
+            ("//g", "http://g"),
+            ("//g/x/../y?q", "http://g/y?q"),
         ] {
             assert_eq!(
                 join_base(base, reference, BaseJoin::Resolve),

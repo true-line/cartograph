@@ -53,8 +53,9 @@ use crate::{
 
 const EXTRACTOR_ID: &str = "t0.observed-infra-python";
 
-/// HTTP client modules whose module functions are fetch sites (AC-0424).
-const HTTP_MODULES: &[&str] = &["requests", "httpx"];
+/// HTTP client modules whose module functions are fetch sites (AC-0424);
+/// aiohttp's only one is `request` (AC-0496).
+const HTTP_MODULES: &[&str] = &["requests", "httpx", "aiohttp"];
 
 /// Client constructors whose instances' verb methods are fetch sites
 /// (#1240, AC-0425).
@@ -62,6 +63,7 @@ const HTTP_CONSTRUCTORS: &[(&str, &str)] = &[
     ("requests", "Session"),
     ("httpx", "Client"),
     ("httpx", "AsyncClient"),
+    ("aiohttp", "ClientSession"),
 ];
 
 /// A name proven bound to one client instance (AC-0425).
@@ -73,7 +75,8 @@ struct Receiver {
     spelling: String,
     /// Start byte of the function the binding is in; `None` at module level.
     function: Option<usize>,
-    /// An httpx `base_url=`, joined under (`BaseJoin::Merge`).
+    /// An httpx `base_url=`, joined under (`BaseJoin::Merge`), or an aiohttp
+    /// `base_url`, resolved against (`BaseJoin::Resolve`, AC-0496).
     base: Option<FetchBase>,
 }
 
@@ -235,15 +238,26 @@ fn receivers(
         if !clients.contains(&module) || !HTTP_CONSTRUCTORS.contains(&(module, export)) {
             continue;
         }
-        let base = (module == "httpx")
-            .then(|| keyword(cx, bound.args, "base_url"))
-            .flatten()
-            .map(|base| FetchBase {
-                url: classify_with(cx, root, base, scope, true, exact_string),
-                join: BaseJoin::Merge,
-                path: cx.path.to_string(),
-                byte_start: base.start_byte() as u64,
-            });
+        // aiohttp's `base_url` is also its one positional parameter, and
+        // `ClientSession._build_url` resolves a relative URL against it with
+        // `URL.join` (RFC 3986).
+        let (base, join) = match module {
+            "httpx" => (keyword(cx, bound.args, "base_url"), BaseJoin::Merge),
+            "aiohttp" => (
+                positional(bound.args)
+                    .first()
+                    .copied()
+                    .or_else(|| keyword(cx, bound.args, "base_url")),
+                BaseJoin::Resolve,
+            ),
+            _ => (None, BaseJoin::Merge),
+        };
+        let base = base.map(|base| FetchBase {
+            url: classify_with(cx, root, base, scope, true, exact_string),
+            join,
+            path: cx.path.to_string(),
+            byte_start: base.start_byte() as u64,
+        });
         out.insert(
             bound.name,
             Receiver {
@@ -471,7 +485,7 @@ const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "
 
 /// The method and URL argument of a proven `requests`/`httpx` module call:
 /// a verb function, or `request(method, url)` with `?` for a method that is
-/// not a string literal.
+/// not a string literal. aiohttp has only `request`.
 fn http_call<'t>(
     cx: &FileCx,
     clients: &[&str],
@@ -479,8 +493,7 @@ fn http_call<'t>(
     export: &str,
     args: TsNode<'t>,
 ) -> Option<(String, Option<TsNode<'t>>)> {
-    clients
-        .contains(&module)
+    (clients.contains(&module) && (module != "aiohttp" || export == "request"))
         .then(|| verb_call(cx, export, args))
         .flatten()
 }

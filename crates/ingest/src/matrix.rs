@@ -152,7 +152,7 @@ use Support::*;
 /// What the Go HTTP client cell reads (AC-0434).
 const GO_CLIENT: &str = "`net/http` package functions, `http.DefaultClient` verbs and `NewRequest` sites; a constructed `http.Client` is read only through its `NewRequest`, and a URL must be an exact literal";
 /// What the Python HTTP client cells read (AC-0424).
-const PY_CLIENT: &str = "module functions and once-bound `Session`/`Client` receivers in their own scope; instance attributes and passed-in clients are not read, and a URL is followed only within its file";
+const PY_CLIENT: &str = "module functions and once-bound `Session`/`Client`/`ClientSession` receivers in their own scope; instance attributes and passed-in clients are not read, and a URL is followed only within its file";
 const NO_JVM_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit interfaces, Spring `RestTemplate` and `WebClient`, OkHttp request builders, Apache HttpClient request constructors and Ktor client requests";
 /// What the Kotlin WebClient client cell reads (AC-0457).
 const KT_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a named-imported or fully qualified `WebClient` typed local, parameter or property, `this.x`, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a held client's base is an undeclared runtime base, and a `uri` must be a pure string literal";
@@ -280,6 +280,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("Python", "requests", HttpClientCalls, Partial, PY_CLIENT),
     cell("Python", "httpx", HttpClientCalls, Partial, PY_CLIENT),
+    cell("Python", "aiohttp", HttpClientCalls, Partial, PY_CLIENT),
     cell("Python", "boto3", EventSites, Partial, PY_EVENTS),
     cell("Python", "kafka-python", EventSites, Partial, PY_EVENTS),
     cell("Python", "sqlalchemy", DataModel, Partial, PY_SQLALCHEMY),
