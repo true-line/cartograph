@@ -153,13 +153,15 @@ use Support::*;
 const GO_CLIENT: &str = "`net/http` package functions, `http.DefaultClient` verbs and `NewRequest` sites; a constructed `http.Client` is read only through its `NewRequest`, and a URL must be an exact literal";
 /// What the Python HTTP client cells read (AC-0424).
 const PY_CLIENT: &str = "module functions and once-bound `Session`/`Client` receivers in their own scope; instance attributes and passed-in clients are not read, and a URL is followed only within its file";
-const NO_JVM_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit interfaces, Spring `RestTemplate` and `WebClient`, OkHttp request builders and Apache HttpClient request constructors";
+const NO_JVM_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit interfaces, Spring `RestTemplate` and `WebClient`, OkHttp request builders, Apache HttpClient request constructors and Ktor client requests";
 /// What the Kotlin WebClient client cell reads (AC-0457).
 const KT_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a named-imported or fully qualified `WebClient` typed local, parameter or property, `this.x`, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a held client's base is an undeclared runtime base, and a `uri` must be a pure string literal";
 /// What the Kotlin OkHttp client cell reads (AC-0477).
 const KT_OKHTTP: &str = "inline `Request.Builder()…build()` chains on a named-imported (or aliased) or fully qualified `okhttp3.Request.Builder` whose every link is a positional builder member; a builder held in a variable and built later, a trailing lambda, a link name the file declares or imports and files with wildcard imports are not read, and a URL is a literal only as a pure string `url(\"…\")`";
 /// What the Kotlin Apache HttpClient cell reads (AC-0471).
 const KT_APACHE: &str = "`HttpGet(<url>)` and the other HttpClient 4 and 5 request classes, named-imported (or aliased) or fully qualified, with one positional argument and no trailing lambda; a file-declared name, a binding of the first segment, a captured `org` (declared, imported or possibly wildcard-imported) and no-argument constructors are not read, and a URL is a literal only as a pure string literal";
+/// What the Kotlin Ktor client cell reads (AC-0479).
+const KT_KTOR: &str = "`<client>.<verb>(<url>)` `io.ktor.client.request` extensions (named or aliased imports; a wildcard import proves nothing) on a named-imported or fully qualified `HttpClient` typed or constructed local, parameter or property, or `this.x`; block-only calls and named arguments are not read, a block naming `method` or `url` gives `?` or a computed URL, a URL is a literal only as a pure string literal, and a non-absolute URL joins an undeclared runtime `defaultRequest` base";
 /// What the Kotlin RestTemplate client cell reads (AC-0456).
 const KT_REST: &str = "named-imported or fully qualified `RestTemplate` receivers: a typed local, parameter or property, `this.x`, or an inline `RestTemplate()`; star imports, `RestTemplateBuilder` results, named arguments and a one-argument `getForObject<T>(url)` are not read, and a URL must be a pure string literal";
 /// What the Kotlin Spring Kafka event cell reads (AC-0468).
@@ -370,6 +372,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         Partial,
         KT_APACHE,
     ),
+    cell("Kotlin", "ktor-client", HttpClientCalls, Partial, KT_KTOR),
     cell("Kotlin", "spring-kafka", EventSites, Partial, KT_KAFKA),
     cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Kotlin", CORE, EventSites, Unsupported, NO_EVENTS),

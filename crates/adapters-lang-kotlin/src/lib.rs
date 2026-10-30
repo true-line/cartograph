@@ -1722,13 +1722,16 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         .extend(rest_template::sites(&cx, root, &functions, &imports));
     out.unjoined_sites
         .extend(webclient::sites(&cx, root, &functions, &imports));
-    // Square OkHttp request builders (AC-0477) and Apache HttpClient
-    // request constructors (AC-0471), product sources only.
+    // Square OkHttp request builders (AC-0477), Apache HttpClient request
+    // constructors (AC-0471) and Ktor client requests (AC-0479), product
+    // sources only.
     if product {
         out.unjoined_sites
             .extend(okhttp::sites(&cx, root, &functions, &imports));
         out.unjoined_sites
             .extend(apache_http::sites(&cx, root, &functions, &imports));
+        out.unjoined_sites
+            .extend(ktor_client::sites(&cx, root, &functions, &imports));
     }
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
@@ -2475,6 +2478,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 
 mod apache_http;
 mod hilt_binds;
+mod ktor_client;
 pub mod navigation3;
 mod okhttp;
 mod queries;

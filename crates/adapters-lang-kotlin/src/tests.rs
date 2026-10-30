@@ -4883,3 +4883,199 @@ class ClientTest {
     ]);
     assert!(rows.is_empty(), "{rows:?}");
 }
+
+fn ktor_rows(files: &[(&str, &str)]) -> Vec<[String; 4]> {
+    let show = |url: IdentityExpr| match url {
+        IdentityExpr::Literal(url) => format!("literal {url}"),
+        IdentityExpr::Computed(text) => format!("computed {text}"),
+        other => format!("{other:?}"),
+    };
+    retrofit_sites(files)
+        .into_iter()
+        .map(|site| {
+            [
+                site.method,
+                show(site.url),
+                site.base
+                    .map(|base| format!("{} {:?}", show(base.url), base.join))
+                    .unwrap_or_else(|| "none".to_string()),
+                site.entry.unwrap_or_default(),
+            ]
+        })
+        .collect()
+}
+
+// AC-0479 (#1416): every verb through named and aliased imports;
+// typed, constructed, parameter and `this.x` clients; a block naming
+// `method` or `url`; `request`; relative and computed URLs join a runtime
+// client base as an RFC 3986 reference, absolute literals keep none.
+// (T-0479)
+#[test]
+fn ktor_client_requests_become_fetch_sites() {
+    let rows = ktor_rows(&[(
+        "src/main/kotlin/io/demo/Named.kt",
+        r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.request.delete
+import io.ktor.client.request.get
+import io.ktor.client.request.head
+import io.ktor.client.request.options
+import io.ktor.client.request.patch
+import io.ktor.client.request.post as send
+import io.ktor.client.request.put
+import io.ktor.client.request.request
+
+class Named(private val client: HttpClient) {
+    suspend fun calls(id: String) {
+        client.get("https://host/a")
+        client.send("https://host/b") { setBody(id) }
+        this.client.put("https://host/c")
+        client.delete("/orders/$id")
+        client.patch(id)
+        client.head("https://host/d")
+        client.options("https://host/e")
+        client.request("https://host/f")
+        client.request("https://host/g") { method = HttpMethod.Post }
+        client.get("https://host/h") { url { path("x") } }
+    }
+
+    suspend fun local() {
+        val local = HttpClient(CIO)
+        local.get("orders")
+    }
+}
+"#,
+    )]);
+    let rows: Vec<[&str; 4]> = rows
+        .iter()
+        .map(|[a, b, c, d]| [a.as_str(), b.as_str(), c.as_str(), d.as_str()])
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ["GET", "literal https://host/a", "none", "Named.calls"],
+            ["POST", "literal https://host/b", "none", "Named.calls"],
+            ["PUT", "literal https://host/c", "none", "Named.calls"],
+            [
+                "DELETE",
+                "computed \"/orders/$id\"",
+                "computed client Resolve",
+                "Named.calls"
+            ],
+            [
+                "PATCH",
+                "computed id",
+                "computed client Resolve",
+                "Named.calls"
+            ],
+            ["HEAD", "literal https://host/d", "none", "Named.calls"],
+            ["OPTIONS", "literal https://host/e", "none", "Named.calls"],
+            ["GET", "literal https://host/f", "none", "Named.calls"],
+            ["?", "literal https://host/g", "none", "Named.calls"],
+            [
+                "GET",
+                "computed \"https://host/h\"",
+                "computed client Resolve",
+                "Named.calls"
+            ],
+            [
+                "GET",
+                "literal orders",
+                "computed local Resolve",
+                "Named.local"
+            ],
+        ]
+    );
+    // A request block is part of the cited call.
+    let source = "package io.demo\n\nimport io.ktor.client.HttpClient\nimport io.ktor.client.request.request\n\nclass Block(private val client: HttpClient) {\n    suspend fun go() = client.request(\"https://host/z\") { method = HttpMethod.Put }\n}\n";
+    let sites = retrofit_sites(&[("src/main/kotlin/io/demo/Block.kt", source)]);
+    let [site] = &sites[..] else {
+        panic!("{sites:?}");
+    };
+    assert_eq!(
+        &source[site.byte_start as usize..site.byte_end as usize],
+        "client.request(\"https://host/z\") { method = HttpMethod.Put }"
+    );
+}
+
+// AC-0479: an unproven or foreign receiver, another package's `get`, a
+// wildcard-only import (a sibling file may declare a winning same-package
+// extension), a file-declared `get`, an unimported extension, a
+// block-only or named-argument call, two arguments and a test source yield
+// none. (T-0479)
+#[test]
+fn unproven_ktor_client_requests_are_not_fetch_sites() {
+    let rows = ktor_rows(&[
+        (
+            "src/main/kotlin/io/demo/Client.kt",
+            r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import com.example.post
+
+class Client(private val client: HttpClient, private val other: Any) {
+    suspend fun calls() {
+        other.get("https://host/x")
+        client.post("https://host/x")
+        client.get { url("https://host/x") }
+        client.get(urlString = "https://host/x")
+        client.get("https://host/x", 1)
+        client.put("https://host/x")
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Star.kt",
+            r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.*
+
+fun star(client: HttpClient) = client.get("https://host/x")
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Shadow.kt",
+            r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+
+fun HttpClient.get(path: String): Unit = Unit
+
+class Shadow(private val client: HttpClient) {
+    fun calls() = client.get("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Foreign.kt",
+            r#"package io.demo
+
+import com.example.HttpClient
+import io.ktor.client.request.get
+
+class Foreign(private val client: HttpClient) {
+    suspend fun calls() = client.get("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/test/kotlin/io/demo/ClientTest.kt",
+            r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+
+class ClientTest(private val client: HttpClient) {
+    suspend fun calls() = client.get("https://host/x")
+}
+"#,
+        ),
+    ]);
+    assert_eq!(rows, Vec::<[String; 4]>::new());
+}
