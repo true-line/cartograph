@@ -4488,3 +4488,188 @@ class ClientTest {
         ]]
     );
 }
+
+#[test]
+fn okhttp_request_builders_become_fetch_sites() {
+    // AC-0476 (#1405): `Request`-import, nested `Builder`-import and fully
+    // qualified (also unimported and spaced) OkHttp builders; the last method link wins (default GET),
+    // the last `url` wins, `method` keeps a token literal without lowercase
+    // letters only, and only a string `url` argument is a literal.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Client.java",
+            r#"package io.demo;
+
+import okhttp3.CacheControl;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+
+class Client {
+    void calls(String path, okhttp3.HttpUrl target, RequestBody body) {
+        new Request.Builder().url("https://host/a").build();
+        new Request.Builder().url("https://host/b").delete().build();
+        new Request.Builder().url("https://host/old").url("https://host/c")
+            .header("A", "1").addHeader("B", "2").removeHeader("C").tag("t")
+            .tag(String.class, "u").cacheControl(CacheControl.FORCE_NETWORK)
+            .put(body).post(body).build();
+        new Request.Builder().url("https://host/" + path).get().build();
+        new Request.Builder().url(target).patch(body).build();
+        new Request.Builder().url("https://host/d").method("patch", body).build();
+        new Request.Builder().url("https://host/p").method("PROPFIND", null).build();
+        new Request.Builder().head().url("https://host/h").delete(body).build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Nested.java",
+            r#"package io.demo;
+
+import okhttp3.Request.Builder;
+
+class Nested {
+    void calls() {
+        new Builder().url("https://host/e").build();
+        new okhttp3.Request.Builder().url("https://host/f").head().build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Bare.java",
+            r#"package io.demo;
+
+class Bare {
+    void calls() {
+        new okhttp3 . Request . Builder().url("https://host/g").build();
+    }
+}
+"#,
+        ),
+    ]);
+    assert_eq!(
+        webclient_rows(&sites),
+        [
+            ["GET", "literal:https://host/g", "none"],
+            ["GET", "literal:https://host/a", "none"],
+            ["DELETE", "literal:https://host/b", "none"],
+            ["POST", "literal:https://host/c", "none"],
+            ["GET", "computed:\"https://host/\" + path", "none"],
+            ["PATCH", "computed:target", "none"],
+            ["?", "literal:https://host/d", "none"],
+            ["PROPFIND", "literal:https://host/p", "none"],
+            ["DELETE", "literal:https://host/h", "none"],
+            ["GET", "literal:https://host/e", "none"],
+            ["HEAD", "literal:https://host/f", "none"],
+        ]
+    );
+}
+
+#[test]
+fn unproven_okhttp_builders_are_not_fetch_sites() {
+    // AC-0476: a foreign, file-declared or unimported `Request`, a declared
+    // or imported `okhttp3` lookalike (connector P2 on #1406), an
+    // anonymous builder subclass, an unknown or wrong-arity link, a held
+    // builder and a chain without `url` yield none; test sources yield none.
+    let sites = retrofit_sites(&[
+        (
+            "src/main/java/io/demo/Client.java",
+            r#"package io.demo;
+
+import okhttp3.Request;
+
+class Client {
+    void calls(Request.Builder base) {
+        new Request.Builder().url("https://host/x").newBuilder().build();
+        new Request.Builder().url("https://host/x").get(1).build();
+        new Request.Builder().url("https://host/x").post().build();
+        new Request.Builder().url("https://host/x").header("A").build();
+        new Request.Builder() {}.url("https://host/x").build();
+        new Request.Builder("seed").url("https://host/x").build();
+        Request.Builder held = new Request.Builder().url("https://host/x");
+        held.build();
+        base.url("https://host/x").build();
+        new Request.Builder().get().build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Foreign.java",
+            r#"package io.demo;
+
+import com.acme.Request;
+
+class Foreign {
+    void calls() {
+        new Request.Builder().url("https://host/z").build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Local.java",
+            r#"package io.demo;
+
+import okhttp3.Request;
+
+class Local {
+    static class Request { static class Builder {} }
+    void calls() {
+        new Request.Builder().url("https://host/l").build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Lookalike.java",
+            r#"package io.demo;
+
+class Lookalike {
+    static class okhttp3 { static class Request { static class Builder {} } }
+    void calls() {
+        new okhttp3.Request.Builder().url("https://host/k").build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/ImportedLookalike.java",
+            r#"package io.demo;
+
+import com.acme.okhttp3;
+
+class ImportedLookalike {
+    void calls() {
+        new okhttp3.Request.Builder().url("https://host/m").build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/Unimported.java",
+            r#"package io.demo;
+
+class Unimported {
+    void calls() {
+        new Request.Builder().url("https://host/u").build();
+    }
+}
+"#,
+        ),
+        (
+            "src/test/java/io/demo/ClientTest.java",
+            r#"package io.demo;
+
+import okhttp3.Request;
+
+class ClientTest {
+    void calls() {
+        new Request.Builder().url("https://host/t").build();
+    }
+}
+"#,
+        ),
+    ]);
+    assert_eq!(webclient_rows(&sites), Vec::<[&str; 3]>::new());
+}
