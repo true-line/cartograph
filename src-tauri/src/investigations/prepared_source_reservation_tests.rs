@@ -321,3 +321,6 @@ fn prepared_source_host_reservation_retained_lock_substitution_never_reads() {
 
 #[path = "prepared_source_publication_tests.rs"]
 mod publication_tests;
+
+#[path = "prepared_source_membership_tests.rs"]
+mod membership_tests;

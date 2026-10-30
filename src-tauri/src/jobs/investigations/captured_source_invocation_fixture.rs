@@ -155,6 +155,9 @@ impl CapturedSourceInvocationFixture {
                 .unwrap();
         }
     }
+    pub(crate) fn id(&self) -> &str {
+        &self.inner.basis.task_id
+    }
     pub(crate) fn request(&self) -> &StagedObligationRequest {
         &self.inner.request
     }

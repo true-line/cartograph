@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 mod admission_contract;
 #[path = "investigations/admission_journal.rs"]
 mod admission_journal;
+pub(crate) use admission_journal::RefusalReason as NextPromptRefusalReason;
 #[path = "investigations/admission_transition.rs"]
 mod admission_transition;
 #[path = "investigations/chat.rs"]

@@ -21,7 +21,7 @@ fn publication<'a>(
         provider,
     }
 }
-fn provider() -> llm::OllamaProvider {
+pub(super) fn provider() -> llm::OllamaProvider {
     llm::OllamaProvider::new(
         "http://127.0.0.1:11434",
         "test-model",

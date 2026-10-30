@@ -748,6 +748,9 @@
 - **AC-0487** Given a real saved gated @18 source invocation, source snapshots attach exact prospective choices for acquired and unavailable outcomes, and transactional settlement independently rederives and compares that authority before publication. Actual attached candidate/reopen parity, reason-A/B stamp rejection with zero callback/writes, and unchanged historical behavior are tested; the source certificate and all runtime activation gates remain enforced (#1423).
 - **Trace:** H4 · `app` · — · T-0487
 
+- **AC-0488** Given a real saved gated @18 invocation, the actual shared worker response coordinator passes offered Choice reads through and durably refuses valid unoffered reads before metadata/source preparation. Exact response hashes/usage and reopened feedback are preserved with zero acquisition effects; cancellation/stale responses produce no semantic journal writes. Historical, decode and FinishOnly behavior remains unchanged, with no initial-authority/repair-loop/UI/activation change (#1427).
+- **Trace:** H4 · `app` · — · T-0488
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
