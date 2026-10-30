@@ -142,6 +142,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             None, // An accepted acquisition clears only the latest refusal slot.
             policy,
         );
+        let candidate = candidate.and_then(|candidate| snapshot.attach_acquisition(candidate));
         let candidate = match candidate {
             Ok(candidate) => candidate,
             Err(InvestigationError::LimitExceeded) => {

@@ -87,7 +87,9 @@ pub(crate) use attempt_record_workspace::next_prompt_attempt_replay_workspace;
 #[path = "investigations/metadata_history_workspace.rs"]
 mod metadata_history_workspace;
 #[cfg(unix)]
-pub(crate) use metadata_history_workspace::next_prompt_metadata_workspace;
+pub(crate) use metadata_history_workspace::{
+    next_prompt_metadata_continuation_workspace, next_prompt_metadata_workspace,
+};
 #[cfg(unix)]
 #[path = "investigations/saved_call_workspace.rs"]
 mod saved_call_workspace;

@@ -16,7 +16,43 @@ pub(super) struct Proposal {
 }
 impl Proposal {
     pub fn new(kind: ContextPreviewKind, refusal: bool) -> Self {
-        let mut f = FinishFixture::new(true);
+        Self::from_fixture(FinishFixture::new(true), kind, refusal)
+    }
+    pub fn gated(kind: ContextPreviewKind) -> Self {
+        use completion::next_prompt_snapshot::tests::fixture::Fixture;
+        let (_, target) = source_validation::internal_source_invocation_fixture();
+        let base = Fixture::customized(false, |f| {
+            f.request.specialist_id = "domain-analyst@18".into();
+            assert_eq!(target.graph_snapshot_id, f.ledger.graph_snapshot_id);
+            f.request.expected_graph_revision = Some(target.graph_snapshot_id.clone());
+            f.task.expected_graph_revision = f.request.expected_graph_revision.clone();
+            let mut source = Obligation::Source {
+                obligation_id: String::new(),
+                target: Box::new(target),
+            };
+            let id = source.content_id().unwrap();
+            if let Obligation::Source { obligation_id, .. } = &mut source {
+                *obligation_id = id;
+            }
+            f.request.obligations.obligations.push(source);
+            f.request = f
+                .request
+                .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+                .unwrap();
+            let intent = completion::host_fixture_intent(&f.request).unwrap();
+            f.task.intent_hash = intent.request_hash.clone();
+            f.task.detail.completion = Some(completion::initial_detail(&intent));
+            f.task.completion_intent = Some(intent.clone());
+            f.task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+            f.task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+            f.metadata = completion::derive_protected_metadata(&f.task, vec![], &[]).unwrap();
+            let tx = f.store.conn.unchecked_transaction().unwrap();
+            admission_journal::tests::save_task(&tx, &f.task);
+            tx.commit().unwrap();
+        });
+        Self::from_fixture(FinishFixture::from_base(base, false), kind, false)
+    }
+    fn from_fixture(mut f: FinishFixture, kind: ContextPreviewKind, refusal: bool) -> Self {
         if refusal {
             f.capacity_refusal();
         }
@@ -77,7 +113,7 @@ impl Proposal {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        InvestigationInput::prepare_v9_with_policy(
+        let input = InvestigationInput::prepare_v9_with_policy(
             &self.f.base.f.request.question,
             self.f.base.f.task.detail.summary.specialist_id,
             self.ledger.clone(),
@@ -94,19 +130,27 @@ impl Proposal {
             None,
             &INVESTIGATION_V2_POLICY,
         )
-        .unwrap()
+        .unwrap();
+        snapshot.attach_acquisition(input).unwrap()
     }
     pub fn publish(&mut self, snapshot: &MetadataContinuationSnapshot) -> InvestigationDetail {
-        let candidate = self.candidate(snapshot);
-        let action = candidate.action(snapshot.next_action_id().into()).unwrap();
-        let prepared = firewall()
-            .prepare_bounded(&provider(false), &action, &limits())
-            .unwrap();
+        self.try_publish(snapshot, false, |_| Ok(())).unwrap()
+    }
+    pub fn try_publish(
+        &mut self,
+        snapshot: &MetadataContinuationSnapshot,
+        stale: bool,
+        retained: impl FnOnce(
+            &crate::sources::RetainedSourceView<'_>,
+        ) -> Result<(), InvestigationStoreError>,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        let actual = self.candidate(snapshot);
+        let candidate = &actual;
         let proof = self
             .f
             .input
             .certify_context_preview_v9_with_policy(
-                &candidate,
+                candidate,
                 self.kind,
                 &self.raw,
                 snapshot.admitted_usage(),
@@ -116,29 +160,32 @@ impl Proposal {
                 &INVESTIGATION_V2_POLICY,
             )
             .unwrap();
-        let active_milliseconds = self.read().active_milliseconds;
-        self.f
-            .base
-            .f
-            .store
-            .admit_next_prompt_metadata(
-                &self.f.base.f.execution,
-                snapshot.revision(),
-                &MetadataAdmission {
-                    response: &self.response,
-                    original_action: &self.original,
-                    current: &self.f.input,
-                    candidate: &candidate,
-                    current_prepared: &self.f.prepared,
-                    candidate_prepared: &prepared,
-                    proof: &proof,
-                    kind: self.kind,
-                    active_milliseconds,
-                },
-                &self.raw,
-                |_| Ok(()),
+        let candidate = if stale { &self.f.input } else { candidate };
+        let prepared = firewall()
+            .prepare_bounded(
+                &provider(false),
+                &candidate.action(snapshot.next_action_id().into()).unwrap(),
+                &limits(),
             )
-            .unwrap()
+            .unwrap();
+        let active_milliseconds = self.read().active_milliseconds;
+        self.f.base.f.store.admit_next_prompt_metadata(
+            &self.f.base.f.execution,
+            snapshot.revision(),
+            &MetadataAdmission {
+                response: &self.response,
+                original_action: &self.original,
+                current: &self.f.input,
+                candidate,
+                current_prepared: &self.f.prepared,
+                candidate_prepared: &prepared,
+                proof: &proof,
+                kind: self.kind,
+                active_milliseconds,
+            },
+            &self.raw,
+            retained,
+        )
     }
     pub fn advance_query(&mut self, replay: bool) {
         assert_eq!(self.kind, ContextPreviewKind::Query);
@@ -244,12 +291,68 @@ impl Proposal {
                     })
                     .unwrap();
                 self.raw = serde_json::json!({"context":page,"evidence_options":[]}).to_string();
+                let target = if self.f.base.f.task.detail.summary.specialist_id
+                    == SpecialistId::DomainAnalystV18
+                {
+                    self.f
+                        .base
+                        .f
+                        .request
+                        .obligations
+                        .sources_with_policy(&INVESTIGATION_V2_POLICY)
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                };
+                let mut query = query;
+                if let Some(target) = target {
+                    let agents::TaskFactKey::Node { id } = &target.fact else {
+                        panic!("node fixture");
+                    };
+                    query.scope = InvestigationScope::Node { id: id.clone() };
+                    query.kind = Some(InvestigationFactKind::Node);
+                    query.max_facts = 1; // Same exact-target selector offered by @18.
+                    self.raw = serde_json::json!({"context":{"context_id":self.f.base.f.request.expected_context_id,
+                        "coverage":prior.coverage.as_ref().unwrap().qualification,
+                        "response":{"snapshot_id":prior.scope_snapshot_id,"view":"recovered_graph","total_selected":1,
+                        "facts":[{"reference":target.fact,"properties":{"note":"bounded native fixture"}}],"next_cursor":null}},
+                        "evidence_options":[{"fact":target.fact,"origin":"captured_primary_source_metadata","ranges":[]}]}).to_string();
+                    self.ledger.citations.push(InvestigationCitation {
+                        citation_id: "fact:checkout".into(),
+                        fact: target.fact.clone(),
+                        fact_digest: target.fact_digest.clone(),
+                        source: None,
+                        role: None,
+                        index: None,
+                        text_hash: None,
+                        origin: InvestigationEvidenceOrigin::GraphMetadata,
+                    });
+                    self.ledger.selected_facts.push(agents::TaskFactSelection {
+                        fact: target.fact,
+                        fact_digest: target.fact_digest.clone(),
+                        binding: Some(agents::TaskSourceAssociation {
+                            repo_key: target.source.repo.clone(),
+                            receipt_id: target.receipt_id.clone(),
+                            emitted_fact_digest: target.fact_digest,
+                        }),
+                    });
+                    self.ledger
+                        .receipt_references
+                        .push(InvestigationReceiptReference {
+                            source_id: target.registered_source_id,
+                            repo_key: target.source.repo,
+                            receipt_id: target.receipt_id,
+                        });
+                }
+
                 self.ledger.queries.push(InvestigationQueryManifest {
                     query: query.clone(),
                     response_hash: core_prov::content_hash(self.raw.as_bytes()),
                     response_bytes: self.raw.len(),
-                    returned_facts: 0,
-                    total_selected: 0,
+                    returned_facts: self.ledger.selected_facts.len(),
+                    total_selected: self.ledger.selected_facts.len(),
                     has_more: false,
                 });
                 self.original = if replay {
@@ -273,7 +376,34 @@ impl Proposal {
                 };
             }
             ContextPreviewKind::Inventory => {
-                let request = prior.coverage_reads[0].request.clone();
+                let request = prior
+                    .coverage_reads
+                    .first()
+                    .map(|read| read.request.clone())
+                    .unwrap_or_else(|| {
+                        let target = self
+                            .f
+                            .base
+                            .f
+                            .request
+                            .obligations
+                            .obligations
+                            .iter()
+                            .find_map(|item| {
+                                if let Obligation::Inventory { target, .. } = item {
+                                    Some(target)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap();
+                        InvestigationCoverageRead {
+                            context_id: target.context_id.clone(),
+                            repo: target.repo.clone(),
+                            inventory_hash: target.inventory_hash.clone(),
+                            max_bytes: MAX_QUERY_BYTES,
+                        }
+                    });
                 self.raw = String::from_utf8(
                     encode(
                         &self.f.base.f.archive.read(&request).unwrap(),

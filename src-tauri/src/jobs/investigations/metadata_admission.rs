@@ -7,6 +7,8 @@ use serde_json::Value;
 #[path = "metadata_continuation.rs"]
 mod metadata_continuation;
 pub(crate) use metadata_continuation::MetadataContinuationRead;
+#[cfg(unix)]
+pub(super) use metadata_continuation::MetadataContinuationSnapshot;
 
 pub(crate) struct MetadataAdmission<'a> {
     pub response: &'a InvestigationResponseMeta,
@@ -270,7 +272,7 @@ fn publish(
     if stamp.mode != snapshot.mode() {
         return Err(InvestigationStoreError::Invalid);
     }
-    stamp.validate_with_metadata(metadata, policy)?;
+    snapshot.validate_acquisition(stamp)?;
     task.detail.usage = usage.clone();
     task.action_tool = Some(tool);
     // Revalidate retained registry identities and already-held evidence guards

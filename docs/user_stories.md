@@ -733,6 +733,9 @@
 - **AC-0484** Given an explicitly seeded cold @18 task, real preparation, sealing, pre-call invocation/consent and reopened readers authenticate current choices and the exact preceding semantic feedback together. Missing/forged/old-role stamps and swapped/dropped/wrong-ordinal/later feedback fail after positive controls; accepted publication clears while refusal/rollback preserve feedback. Historical @15/@17 bytes and limits stay unchanged, and real saved-task resume plus public/store gates refuse before provider dispatch. No prospective acquisition, worker activation or model acceptance is introduced (#1403).
 - **Trace:** H4 · `agents`, `app` · — · T-0484
 
+- **AC-0485** Given synthetic @18 query and inventory continuations, exact candidate-ledger and projected-attempt authority is attached before real certification/sealing and independently rederived by the metadata writer. Inventory progress removes completed targets; valid stale choices and substituted prior ledgers fail before retained callbacks or writes. Successful publication/reopen agree and clear semantic feedback within unchanged logical bounds and policy caps. Historical families remain unchanged; @18 source continuation and public/store/worker activation remain closed (#1408).
+- **Trace:** H4 · `app` · — · T-0485
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

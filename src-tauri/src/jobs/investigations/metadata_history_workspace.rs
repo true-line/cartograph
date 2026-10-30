@@ -142,7 +142,7 @@ pub(super) fn acquisition_choices_workspace() -> Option<usize> {
         decode,
         MAX_RECORD_BYTES,
         slots::<Vec<u8>>(1)?, // next named ledger read
-        slots::<&completion::AttemptEntry>(attempts)?,
+        slots::<&AttemptRecord>(attempts)?,
         slots::<agents::investigation::staged_attempt::AttemptEvidence<'_>>(attempts)?,
         slots::<Vec<u8>>(3)?,
         next_prompt_metadata_workspace()?.1, // metadata_at remains live during derive
@@ -154,4 +154,35 @@ pub(super) fn acquisition_choices_workspace() -> Option<usize> {
         slots::<Vec<u8>>(1)?,               // rejected/final bounded encoding
         MAX_MANIFEST_BYTES.checked_mul(2)?, // canonical encoding/domain fingerprints
     ])
+}
+
+/// Metadata candidate snapshot and independent writer derivation. Borrowed
+/// current/candidate inputs and transport owners are charged by the caller.
+#[cfg(unix)]
+pub(crate) fn next_prompt_metadata_continuation_workspace() -> Option<(usize, usize)> {
+    let (history, metadata, load) = next_prompt_metadata_workspace()?;
+    let (core, core_load) = next_prompt_saved_call_workspace()?;
+    let (ledger, _) = InvestigationInputLedger::decode_workspace_bytes()?;
+    let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
+    let retained = sum(&[
+        size_of::<metadata_admission::MetadataContinuationSnapshot>(),
+        ledger, // previous ledger in the turn basis
+        metadata,
+        json_bytes(MAX_ACTION_BYTES)?, // final bounded choices retained by Arc
+        64,
+        128 + 6 + 20, // ledger hash and next action ID
+    ])?;
+    let stable = sum(&[
+        task.checked_mul(2)?, // saved task plus projected usage candidate
+        core,
+        ledger, // borrowed candidate during validation/derivation
+        metadata,
+        row_workspace()?.checked_mul(INVESTIGATION_V2_POLICY.max_completed_attempts())?,
+        retained,
+    ])?;
+    let peak = stable.checked_add(
+        load.max(core_load)
+            .max(history.checked_add(acquisition_choices_workspace()?)?),
+    )?;
+    Some((retained, peak))
 }

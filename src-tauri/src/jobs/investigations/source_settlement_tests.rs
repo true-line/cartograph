@@ -169,3 +169,69 @@ mod fault_tests;
 
 #[path = "source_continuation_snapshot_tests.rs"]
 mod source_snapshot_tests;
+
+// AC-0485: the independent metadata path must not open source continuation.
+#[test]
+fn source_continuation_keeps_gated_analyst_closed() {
+    let mut fixture = Fixture::new();
+    fixture.charge();
+    let (candidate, prepared) = fixture.candidate(None);
+    let c = SourceContinuation {
+        current: &fixture.current,
+        current_prepared: &fixture.prepared,
+        candidate: &candidate,
+        candidate_prepared: &prepared,
+        proof: &fixture.proof,
+    };
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let saved = source_validation::validate_saved_pending(&tx, &fixture.f.task).unwrap();
+    let core =
+        admission_contract::load_saved_call_basis_core(&tx, &fixture.f.task, &fixture.f.basis)
+            .unwrap();
+    let response = read_body(
+        &tx,
+        "investigation_responses",
+        "step_id",
+        &fixture.f.basis.task_id,
+        &fixture.f.step.step_id,
+    )
+    .unwrap()
+    .unwrap();
+    let active = fixture.f.task.detail.usage.active_milliseconds + 1;
+    assert!(
+        validate_continuation(
+            &fixture.f.task,
+            &saved,
+            &core.ledger,
+            &core.metadata,
+            &core.step,
+            &response,
+            &c,
+            DispositionKind::Acquired,
+            None,
+            active
+        )
+        .is_ok()
+    );
+    let mut gated = fixture.f.task.clone();
+    gated.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+    gated.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+    let mut intent = serde_json::to_value(gated.completion_intent.as_ref().unwrap()).unwrap();
+    intent["specialist"] = "domain-analyst@18".into();
+    gated.completion_intent = Some(serde_json::from_value(intent).unwrap());
+    assert!(
+        validate_continuation(
+            &gated,
+            &saved,
+            &core.ledger,
+            &core.metadata,
+            &core.step,
+            &response,
+            &c,
+            DispositionKind::Acquired,
+            None,
+            active
+        )
+        .is_err()
+    );
+}

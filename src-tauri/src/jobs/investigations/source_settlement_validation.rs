@@ -60,6 +60,10 @@ pub(super) fn validate_continuation(
     reason: Option<&UnavailableReason>,
     active: u64,
 ) -> Result<InvestigationInputLedger, InvestigationStoreError> {
+    // Metadata-only prospective authority does not authorize source settlement.
+    if before.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let policy = &INVESTIGATION_V2_POLICY;
     validate_next_ledger(before, saved, base, c.candidate.ledger(), kind, active)?;
     if c.current.ledger() != base {

@@ -23,8 +23,39 @@ pub(crate) struct MetadataContinuationSnapshot {
     mode: CompletionCallMode,
     count: u32,
     next_action_id: String,
+    choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
 }
 impl MetadataContinuationSnapshot {
+    pub(crate) fn attach_acquisition(
+        &self,
+        input: InvestigationInput,
+    ) -> Result<InvestigationInput, InvestigationError> {
+        match &self.choices {
+            Some(choices) => input.with_acquisition_admission(choices.clone(), None),
+            None => Ok(input),
+        }
+    }
+    pub(super) fn validate_acquisition(
+        &self,
+        stamp: &DisclosedAdmissionState,
+    ) -> Result<(), InvestigationStoreError> {
+        if let Some(choices) = &self.choices {
+            stamp.validate_saved_role_shape(
+                SpecialistId::DomainAnalystV18,
+                &INVESTIGATION_V2_POLICY,
+            )?;
+            let expected = agents::investigation::AcquisitionAdmission {
+                choices_hash: choices.stamp_hash()?,
+                action_feedback_hash: None,
+            };
+            if stamp.acquisition.as_ref() != Some(&expected) {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        } else {
+            stamp.validate_with_metadata(&self.metadata, &INVESTIGATION_V2_POLICY)?;
+        }
+        Ok(())
+    }
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
@@ -244,6 +275,12 @@ pub(super) fn derive(
     };
     basis.validate_with_policy(ledger, policy)?;
     let mode = metadata.next_call_mode_with_policy(&usage, policy)?;
+    let choices = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        completion::SavedMetadataHistory::load(tx, task)?
+            .prospective_choices(ledger, &metadata, &records)?
+    } else {
+        None
+    };
     Ok(DerivedContinuation {
         snapshot: MetadataContinuationSnapshot {
             revision: task.detail.summary.revision,
@@ -254,6 +291,7 @@ pub(super) fn derive(
             mode,
             count: call.admission.capacity_refusal_count,
             next_action_id: authenticated.next_action_id.clone(),
+            choices,
         },
         tool,
         read,

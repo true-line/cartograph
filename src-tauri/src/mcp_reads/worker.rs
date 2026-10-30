@@ -490,7 +490,11 @@ fn task_phase_workspaces(
     // The returned source snapshot survives input/firewall construction until
     // prepared_source_publication drops it before the final revalidation.
     let (snapshot, snapshot_peak) = crate::jobs::investigations::source_snapshot_workspace()?;
-    let execution = snapshot_peak.max(snapshot.checked_add(execution)?);
+    let (metadata_snapshot, metadata_peak) =
+        crate::jobs::investigations::next_prompt_metadata_continuation_workspace()?;
+    let execution = snapshot_peak
+        .max(metadata_peak)
+        .max(snapshot.max(metadata_snapshot).checked_add(execution)?);
     let execution = crate::investigations::inventory_admission_workspace(execution)?;
     let (query_retained, query_peak) =
         crate::investigations::query_workspace::admitted_workspace(limits.scope, app_path_bytes)?;

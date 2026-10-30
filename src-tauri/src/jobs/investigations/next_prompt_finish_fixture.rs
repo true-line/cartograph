@@ -12,7 +12,12 @@ pub(in crate::jobs::investigations) struct Fixture {
 }
 impl Fixture {
     pub(in crate::jobs::investigations) fn new(acquired: bool) -> Self {
-        let mut base = acquisition::Fixture::new(false);
+        Self::from_base(acquisition::Fixture::new(false), acquired)
+    }
+    pub(in crate::jobs::investigations) fn from_base(
+        mut base: acquisition::Fixture,
+        acquired: bool,
+    ) -> Self {
         if acquired {
             base.acquire_inventory();
         }
@@ -78,6 +83,7 @@ impl Fixture {
             policy,
         )
         .unwrap();
+        let input = saved.attach_acquisition(input).unwrap();
         let action = input
             .action(format!(
                 "{}:step-{}",
