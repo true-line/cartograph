@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.52.0
+
+### Minor Changes
+
+- 4651f1a: Python ingest reads `aiohttp` client requests as fetch sites: `aiohttp.request(method, url)` and the verb methods of a once-bound `aiohttp.ClientSession`, whose `base_url` is resolved against as aiohttp does (#1432).
+- 26d50c4: The receipt store shares its capacity across retained sources: one source's recovery keeps receipts up to a ceiling proportional to its captured bytes (never below a sixteenth of the store), and anything past it becomes a named omission rather than crowding other sources out (#725).
+
 ## 0.51.0
 
 ### Minor Changes
