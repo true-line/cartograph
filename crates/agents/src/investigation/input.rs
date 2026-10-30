@@ -20,6 +20,7 @@ pub struct InvestigationInput {
     compact: bool,
     acquisition_choices: Option<std::sync::Arc<acquisition_choices::AcquisitionChoices>>,
     acquisition_mode: Option<staged_refusal::CompletionCallMode>,
+    action_feedback: Option<ActionRefusalFeedback>,
     inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
 }
 
@@ -370,6 +371,7 @@ impl InvestigationInput {
             compact,
             acquisition_choices: None,
             acquisition_mode: None,
+            action_feedback: None,
             inspection_requirements: None,
         })
     }
@@ -475,9 +477,7 @@ impl InvestigationInput {
         prepared: &llm::bounded::PreparedBoundedCompletion,
         policy: &InvestigationPolicy,
     ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
-        if self.payload.system == SpecialistId::DomainAnalystV18.prompt() {
-            return Err(InvestigationError::InvalidInput);
-        }
+        self.validate_acquisition_projection()?;
         if !self.compact {
             return Ok(None);
         }
@@ -496,6 +496,17 @@ impl InvestigationInput {
         // The sealer parses both payloads; this schema-inspection tree is done.
         drop(prompt);
         match admission {
+            Some(admission) if self.acquisition_choices.is_some() => {
+                super::sealing::seal_admission_inner(
+                    &self.ledger,
+                    &self.payload,
+                    prepared,
+                    policy,
+                    self.inspection_requirements.as_deref(),
+                    Some(admission),
+                    Some(self),
+                )
+            }
             Some(admission) => super::sealing::seal_with_admission_policy(
                 &self.ledger,
                 &self.payload,

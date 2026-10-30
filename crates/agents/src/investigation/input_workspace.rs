@@ -94,8 +94,10 @@ impl InvestigationInput {
             MAX_PRIVACY_STRINGS.checked_add(reads.checked_mul(MAX_QUERY_BYTES.checked_add(1)?)?)?;
         sum(&[
             size_of::<Self>(),
+            json_bytes(MAX_ACTION_BYTES)?, // cached, final bounded acquisition choices
+            128,                           // cached feedback action/choices hashes
             json_bytes(MAX_MANIFEST_BYTES)?, // validated owned ledger
-            json_bytes(MAX_INPUT_BYTES)?,    // complete accepted payload wire
+            json_bytes(MAX_INPUT_BYTES)?,  // complete accepted payload wire
             json_bytes(policy.envelope_bytes())?, // normalized private targets
             privacy_bytes,
             slots::<String>(privacy_slots)?,
@@ -127,6 +129,8 @@ impl InvestigationInput {
             json_bytes(count(&self.ledger).unwrap()).unwrap(),
             json_bytes(count(&self.payload).unwrap()).unwrap(),
             json_bytes(count(&self.inspection_requirements).unwrap()).unwrap(),
+            json_bytes(count(&self.acquisition_choices.as_deref()).unwrap()).unwrap(),
+            json_bytes(count(&self.action_feedback).unwrap()).unwrap(),
             strings.clone().map(String::len).sum(),
             slots::<String>(strings.count()).unwrap(),
         ])

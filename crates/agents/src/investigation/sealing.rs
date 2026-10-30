@@ -30,6 +30,25 @@ pub(super) fn seal_with_admission_policy(
     private_targets: Option<&[InvestigationInspectionTarget]>,
     admission: Option<DisclosedAdmissionState>,
 ) -> Result<InvestigationDisclosure, InvestigationError> {
+    seal_admission_inner(
+        ledger,
+        original,
+        prepared,
+        policy,
+        private_targets,
+        admission,
+        None,
+    )
+}
+pub(super) fn seal_admission_inner(
+    ledger: &InvestigationInputLedger,
+    original: &CompletionPayload,
+    prepared: &PreparedBoundedCompletion,
+    policy: &InvestigationPolicy,
+    private_targets: Option<&[InvestigationInspectionTarget]>,
+    admission: Option<DisclosedAdmissionState>,
+    acquisition: Option<&InvestigationInput>,
+) -> Result<InvestigationDisclosure, InvestigationError> {
     let egress = &prepared.preview().egress;
     let before = parse_prompt(&original.prompt)?;
     let after = parse_prompt(&egress.payload.prompt)?;
@@ -42,7 +61,14 @@ pub(super) fn seal_with_admission_policy(
         return Err(InvestigationError::InvalidInput);
     }
     if let Some(state) = &admission {
-        response_schema::validate(ledger, original, &before)?;
+        if let Some(input) = acquisition {
+            state.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
+            if state.acquisition.as_ref() != Some(&input.acquisition_stamp(original)?) {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else {
+            response_schema::validate(ledger, original, &before)?;
+        }
         if original.response_schema != egress.payload.response_schema {
             return Err(InvestigationError::InvalidInput);
         }
@@ -52,10 +78,17 @@ pub(super) fn seal_with_admission_policy(
             &original.system,
             &egress.payload.system,
         )?;
-        let metadata = serde_json::from_value(before["completion_metadata"].clone())
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        state.validate_with_metadata(&metadata, policy)?;
-        if ![
+        let metadata: staged_refusal::ProtectedCompletionMetadata =
+            serde_json::from_value(before["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        if acquisition.is_some() {
+            if metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)? != state.mode {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else {
+            state.validate_with_metadata(&metadata, policy)?;
+        }
+        let historical_role = [
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::DomainAnalystV11,
@@ -67,7 +100,8 @@ pub(super) fn seal_with_admission_policy(
             SpecialistId::EvidenceAuditorV11,
         ]
         .iter()
-        .any(|role| original.system == role.prompt())
+        .any(|role| original.system == role.prompt());
+        if (acquisition.is_none() && !historical_role)
             || state.turn_progress_hash
                 != content_hash(&bounded_bytes(&before["turn_progress"], MAX_INPUT_BYTES)?)
             || serde_json::to_value(&state.consumed_budgets)
@@ -452,7 +486,11 @@ pub(super) fn seal_with_admission_policy(
             })
             .transpose()?,
     };
-    disclosure.validate_with_policy(ledger, policy)?;
+    if acquisition.is_some() {
+        disclosure.validate_saved_role_shape(ledger, policy, SpecialistId::DomainAnalystV18)?;
+    } else {
+        disclosure.validate_with_policy(ledger, policy)?;
+    }
     Ok(disclosure)
 }
 

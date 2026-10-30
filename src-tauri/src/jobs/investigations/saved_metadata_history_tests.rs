@@ -377,7 +377,7 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
             assert_eq!(core.metadata.completed_attempt_ids.len(), index);
             assert_eq!(core.ledger, witnesses[index].2);
             if role == SpecialistId::DomainAnalystV18 {
-                assert!(next_prompt_invocations(&tx, &task).is_err()); // unqualified helper stays closed
+                assert!(next_prompt_invocations(&tx, &task).is_ok()); // full prefix authentication
             }
         }
         for mutation in ["choices", "feedback", "ledger", "attempt"] {

@@ -199,6 +199,10 @@ fn run_inner<R: tauri::Runtime>(
     let outcome = (|| {
         let request = request?;
         let detail = read_detail(&state, &id, &execution)?;
+        // Start gates do not cover resuming an already saved cold @18 task.
+        if detail.summary.specialist_id == agents::investigation::SpecialistId::DomainAnalystV18 {
+            return Err(Failure::Stop(InvestigationStopReason::PreparationFailed));
+        }
         let mut worker = Worker {
             app: &app,
             state: &state,
@@ -394,7 +398,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>();
-                InvestigationInput::prepare_v9_with_policy(
+                snapshot.attach_acquisition(InvestigationInput::prepare_v9_with_policy(
                     &snapshot.request().question,
                     self.detail.summary.specialist_id,
                     context.ledger.clone(),
@@ -410,7 +414,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     snapshot.capacity_refusal_count(),
                     snapshot.capacity_feedback(),
                     policy,
-                )?
+                )?)?
             } else if let Some(completion_request) = completion_request {
                 let snapshot = completion_snapshot
                     .as_ref()

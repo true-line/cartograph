@@ -92,6 +92,7 @@ pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
         slots::<&crate::TaskFactKey>(policy.limits().selected_facts)?,
         MAX_MANIFEST_BYTES,              // bounded borrowed-key encoding
         json_bytes(MAX_MANIFEST_BYTES)?, // decoded exact keys
+        json_bytes(MAX_INPUT_BYTES)?,    // finite @18 enum and projection validation
         json_bytes(CHOICE.len().checked_add(EXACT_NODE_SCOPE.len())?)?, // compiled template tree
         MAX_INPUT_BYTES,                 // bounded schema encoding (also on rejection)
         slots::<Vec<u8>>(2)?,

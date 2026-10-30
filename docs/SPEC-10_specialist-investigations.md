@@ -1054,3 +1054,14 @@ publication. Canonical feedback hashes bind the writer's current projection;
 feedbackSome stamps remain rejected by every reader until activation implements
 prefix authentication. Dispatch/sealing/UI stay gated; full runtime acquisition
 and seven-source/inventory/finish/reopen acceptance remain mandatory follow-up.
+
+### Gated real @18 sealing and feedback prefix (#1403, AC-0484)
+
+Actual current input/sealing and pre-call/consent readers bind typed choices and
+canonical semantic feedback to the exact authenticated journal prefix. The raw
+history/timeline bootstrap remains choices-only; public saved readers validate
+feedback after that replay, without calling the journal from choices derivation.
+FeedbackSome is supported only together with this prefix check. Old families
+remain None-only with identical bytes. Public/store starts and saved @18 worker
+execution remain disabled before provider dispatch. Prospective acquisitions,
+worker membership, UI and seven-target execution are the activation follow-up.

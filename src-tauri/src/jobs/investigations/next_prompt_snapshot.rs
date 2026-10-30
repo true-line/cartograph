@@ -10,6 +10,7 @@ pub(crate) struct NextPromptSnapshot {
     mode: CompletionCallMode,
     capacity: admission_journal::CapacityState,
     pending: Option<PendingInvestigationStep>,
+    choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
 }
 
 impl NextPromptSnapshot {
@@ -45,8 +46,19 @@ impl NextPromptSnapshot {
     pub(crate) fn capacity_feedback(&self) -> Option<&AdmissionCapacityFeedback> {
         self.capacity.feedback.as_ref()
     }
-    /// Consent retains this exact sealed step; a worker must keep its matching
-    /// live prepared payload instead of treating this metadata as a new grant.
+    pub(crate) fn attach_acquisition(
+        &self,
+        input: InvestigationInput,
+    ) -> Result<InvestigationInput, InvestigationStoreError> {
+        match &self.choices {
+            Some(choices) => Ok(input.with_acquisition_admission(
+                choices.clone(),
+                self.capacity.action_feedback.clone(),
+            )?),
+            None => Ok(input),
+        }
+    }
+    /// Consent retains this exact sealed step and its matching prepared payload.
     pub(crate) fn pending_step(&self) -> Option<&PendingInvestigationStep> {
         self.pending.as_ref()
     }
@@ -115,8 +127,15 @@ impl JobStore {
         } else {
             derived_mode
         };
+        let choices = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            completion::SavedMetadataHistory::load(&tx, &task)?
+                .current_choices(&ledger, &metadata)?
+        } else {
+            None
+        };
         let snapshot = NextPromptSnapshot {
             request,
+            choices,
             saved: CompletionPromptSnapshot {
                 detail: task.detail,
                 ledger,

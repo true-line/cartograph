@@ -208,7 +208,24 @@ impl SavedCallBasis {
         }
         drop(actual_metadata);
         let capacity = admission_journal::derive_current(connection, task)?;
-        Self::from_pre_call(task, step, ledger, metadata, &capacity)
+        let value = Self::from_pre_call(task, step, ledger, metadata, &capacity)?;
+        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            let choices = completion::SavedMetadataHistory::load(connection, task)?
+                .current_choices(ledger, metadata)?;
+            if choices
+                .as_ref()
+                .map(|choices| choices.stamp_hash())
+                .transpose()?
+                != value
+                    .admission
+                    .acquisition
+                    .as_ref()
+                    .map(|stamp| stamp.choices_hash.clone())
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
+        Ok(value)
     }
     /// Journal-independent core for replaying a historical saved call. Current
     /// task usage/ledger may have advanced; these exact witnesses may not.
@@ -271,6 +288,17 @@ impl SavedCallBasis {
     ) -> Result<(), InvestigationStoreError> {
         if self.admission.capacity_refusal_count != capacity.count
             || self.admission.capacity_feedback != capacity.feedback
+            || self
+                .admission
+                .acquisition
+                .as_ref()
+                .and_then(|stamp| stamp.action_feedback_hash.as_deref())
+                != capacity
+                    .action_feedback
+                    .as_ref()
+                    .map(|feedback| feedback.stamp_hash())
+                    .transpose()?
+                    .as_deref()
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -370,7 +398,7 @@ pub(super) struct SavedCallCore {
     /// Explicit immutable within-task ordinal. Never SQLite rowid.
     pub ordinal: u32,
 }
-/// Exact named ledger/step/cutoff, no capacity-journal call (avoids replay cycles).
+/// Exact named ledger/step/cutoff; @18 authenticates the full journal prefix.
 /// The caller owns the DB transaction and separately authenticates task/lease.
 pub(super) fn load_saved_call_basis_core(
     connection: &Connection,
@@ -381,6 +409,9 @@ pub(super) fn load_saved_call_basis_core(
         return Err(InvestigationStoreError::Invalid);
     }
     validate_pairing(task)?;
+    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        return admission_journal::saved_core(connection, task, basis);
+    }
     let id = &task.detail.summary.investigation_id;
     if basis.task_id != *id {
         return Err(InvestigationStoreError::Invalid);

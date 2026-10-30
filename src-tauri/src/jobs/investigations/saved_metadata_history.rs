@@ -91,7 +91,12 @@ impl<'a> SavedMetadataHistory<'a> {
         step: &str,
     ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
         self.check_epoch()?;
-        let cutoff = self.ordinal(step)?;
+        self.metadata_before(self.ordinal(step)?)
+    }
+    fn metadata_before(
+        &self,
+        cutoff: u32,
+    ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
         let records = self
             .attempts
             .iter()
@@ -121,14 +126,57 @@ impl<'a> SavedMetadataHistory<'a> {
         let cutoff = self.ordinal(&basis.step_id)?;
         if basis.task_id != self.task.detail.summary.investigation_id
             || basis.invocation_ordinal != cutoff
-            || basis
-                .admission
-                .acquisition
-                .as_ref()
-                .is_none_or(|stamp| stamp.action_feedback_hash.is_some())
         {
             return Err(InvestigationStoreError::Invalid);
         }
+        let choices = self.choices_before(cutoff, ledger, &self.metadata_at(&basis.step_id)?)?;
+        if basis
+            .admission
+            .acquisition
+            .as_ref()
+            .map(|stamp| stamp.choices_hash.as_str())
+            != Some(choices.stamp_hash()?.as_str())
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(Some(choices))
+    }
+
+    pub(in super::super) fn current_choices(
+        &self,
+        ledger: &InvestigationInputLedger,
+        metadata: &ProtectedCompletionMetadata,
+    ) -> Result<
+        Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
+        InvestigationStoreError,
+    > {
+        self.check_epoch()?;
+        if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+            return Ok(None);
+        }
+        let cutoff = self
+            .task
+            .detail
+            .usage
+            .model_invocations
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        if self.metadata_before(cutoff)? != *metadata {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(Some(std::sync::Arc::new(
+            self.choices_before(cutoff, ledger, metadata)?,
+        )))
+    }
+    fn choices_before(
+        &self,
+        cutoff: u32,
+        ledger: &InvestigationInputLedger,
+        metadata: &ProtectedCompletionMetadata,
+    ) -> Result<
+        agents::investigation::acquisition_choices::AcquisitionChoices,
+        InvestigationStoreError,
+    > {
         let records = self
             .attempts
             .iter()
@@ -138,7 +186,11 @@ impl<'a> SavedMetadataHistory<'a> {
         for entry in &records {
             let revision = entry.record.input_revision;
             if let std::collections::btree_map::Entry::Vacant(slot) = ledgers.entry(revision) {
-                let value = ledger_at(self.connection, &basis.task_id, revision)?;
+                let value = ledger_at(
+                    self.connection,
+                    &self.task.detail.summary.investigation_id,
+                    revision,
+                )?;
                 if value.revision != revision
                     || value.coverage.as_ref()
                         != self.archive.as_ref().map(|archive| archive.proof())
@@ -164,22 +216,13 @@ impl<'a> SavedMetadataHistory<'a> {
                 .as_ref()
                 .ok_or(InvestigationStoreError::Invalid)?
                 .contract(),
-            &self.metadata_at(&basis.step_id)?,
-            &basis.task_id,
+            metadata,
+            &self.task.detail.summary.investigation_id,
             ledger,
             &evidence,
             &INVESTIGATION_V2_POLICY,
         )?;
-        if basis
-            .admission
-            .acquisition
-            .as_ref()
-            .map(|stamp| stamp.choices_hash.as_str())
-            != Some(choices.stamp_hash()?.as_str())
-        {
-            return Err(InvestigationStoreError::Invalid);
-        }
-        Ok(Some(choices))
+        Ok(choices)
     }
 
     /// Ledger is the exact canonical row already associated with this ModelStarted

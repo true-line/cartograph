@@ -7,7 +7,7 @@ mod saved_metadata_history;
 pub(super) use saved_metadata_history::SavedMetadataHistory;
 
 #[path = "next_prompt_snapshot.rs"]
-mod next_prompt_snapshot;
+pub(super) mod next_prompt_snapshot;
 
 #[path = "next_prompt_finish.rs"]
 mod next_prompt_finish;
@@ -1202,6 +1202,10 @@ pub(super) fn next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
+    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        admission_journal::derive_current(connection, task)?;
+        return raw_next_prompt_invocations(connection, task);
+    }
     let steps = raw_next_prompt_invocations(connection, task)?;
     for (_, step) in &steps {
         step.disclosure
@@ -1213,7 +1217,7 @@ pub(super) fn next_prompt_invocations(
     Ok(steps)
 }
 // Bootstrap only: SavedMetadataHistory authenticates choices after loading the
-// attempt epoch. Unqualified metadata/action readers remain closed to @18.
+// attempt epoch. Public @18 readers separately authenticate the journal prefix.
 fn raw_next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,

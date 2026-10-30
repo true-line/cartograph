@@ -7,6 +7,14 @@ use std::mem::size_of;
 /// Schema preflight, accumulated Timeline.calls and outer task replay are not
 /// covered. These logical owners are neither allocator sizes nor process RSS.
 pub(crate) fn next_prompt_saved_call_workspace() -> Option<(usize, usize)> {
+    let (retained, peak) = next_prompt_raw_call_workspace()?;
+    Some((
+        retained,
+        peak.max(next_prompt_capacity_replay_workspace()?.1),
+    ))
+}
+// Lower timeline construction must never recurse through full journal replay.
+pub(crate) fn next_prompt_raw_call_workspace() -> Option<(usize, usize)> {
     let row = super::metadata_history_workspace::row_workspace()?;
     let (ledger, ledger_decode) = InvestigationInputLedger::decode_workspace_bytes()?;
     let (_, projection, history_peak) = next_prompt_metadata_workspace()?;

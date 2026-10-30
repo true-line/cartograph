@@ -695,6 +695,18 @@ fn read_entries(
         let before = project(&entries, line, Some(*ordinal));
         if witness.call.admission.capacity_refusal_count != before.count
             || witness.call.admission.capacity_feedback != before.feedback
+            || witness
+                .call
+                .admission
+                .acquisition
+                .as_ref()
+                .and_then(|stamp| stamp.action_feedback_hash.as_deref())
+                != before
+                    .action_feedback
+                    .as_ref()
+                    .map(|feedback| feedback.stamp_hash())
+                    .transpose()?
+                    .as_deref()
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -823,32 +835,52 @@ fn validate_reason(
     Ok(())
 }
 
-/// Strict historical cutoff: a missing invocation is invalid, never "latest".
-/// Its own refusal is excluded; later accepted publications cannot clear its
-/// earlier feedback. All saved bodies/chain/call stamps are validated first.
+// Lower history/timeline constructs choices-only cores. Feedback becomes
+// authoritative only after read_entries validates every strict saved prefix.
+fn replay(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<(Timeline, Vec<Entry>), InvestigationStoreError> {
+    let history = completion::SavedMetadataHistory::load(connection, task)?;
+    let line = timeline(connection, task, &history)?;
+    let entries = read_entries(connection, task, &line, &history)?;
+    Ok((line, entries))
+}
+pub(super) fn saved_core(
+    connection: &Connection,
+    task: &StoredTask,
+    basis: &SavedCallBasis,
+) -> Result<SavedCallCore, InvestigationStoreError> {
+    let (mut line, _) = replay(connection, task)?;
+    let witness = line
+        .calls
+        .remove(&basis.invocation_ordinal)
+        .ok_or(InvestigationStoreError::Missing)?;
+    if witness.call != *basis {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(witness.core)
+}
+/// Exact immutable cutoff; own or later refusals cannot supply its feedback.
 pub(super) fn derive_at(
     connection: &Connection,
     task: &StoredTask,
     step_id: &str,
 ) -> Result<CapacityState, InvestigationStoreError> {
-    let history = completion::SavedMetadataHistory::load(connection, task)?;
-    let line = timeline(connection, task, &history)?;
+    let (line, entries) = replay(connection, task)?;
     let cutoff = line
         .calls
         .iter()
         .find(|(_, witness)| witness.call.step_id == step_id)
         .map(|(ordinal, _)| *ordinal)
         .ok_or(InvestigationStoreError::Missing)?;
-    let entries = read_entries(connection, task, &line, &history)?;
     Ok(project(&entries, &line, Some(cutoff)))
 }
 pub(super) fn derive_current(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<CapacityState, InvestigationStoreError> {
-    let history = completion::SavedMetadataHistory::load(connection, task)?;
-    let line = timeline(connection, task, &history)?;
-    let entries = read_entries(connection, task, &line, &history)?;
+    let (line, entries) = replay(connection, task)?;
     Ok(project(&entries, &line, None))
 }
 
