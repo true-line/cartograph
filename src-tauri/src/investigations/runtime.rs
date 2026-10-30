@@ -151,6 +151,8 @@ impl LiveTask {
     }
 }
 
+const WALL_LIMIT: Duration = Duration::from_secs(3600);
+
 pub(super) struct RunClock {
     started: Instant,
     consent_waiting: Duration,
@@ -175,36 +177,47 @@ impl RunClock {
             active_elapsed_override: Some(Duration::ZERO),
         }
     }
-    pub(super) fn active_milliseconds(&self) -> u64 {
+    fn active_milliseconds_at(&self, now: Instant) -> u64 {
         #[cfg(test)]
         let elapsed = self
             .active_elapsed_override
-            .unwrap_or_else(|| self.started.elapsed());
+            .unwrap_or_else(|| now.saturating_duration_since(self.started));
         #[cfg(not(test))]
-        let elapsed = self.started.elapsed();
+        let elapsed = now.saturating_duration_since(self.started);
         elapsed
             .saturating_sub(self.consent_waiting)
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX)
     }
+    pub(super) fn active_milliseconds(&self) -> u64 {
+        self.active_milliseconds_at(Instant::now())
+    }
     pub(super) fn record_wait(&mut self, elapsed: Duration) {
         self.consent_waiting = self.consent_waiting.saturating_add(elapsed);
     }
+    fn remaining_wall_at(&self, now: Instant) -> Duration {
+        WALL_LIMIT.saturating_sub(now.saturating_duration_since(self.started))
+    }
     pub(super) fn remaining_wall(&self) -> Duration {
-        Duration::from_secs(3600).saturating_sub(self.started.elapsed())
+        self.remaining_wall_at(Instant::now())
     }
     pub(super) fn deadline(&self) -> Result<Instant, HostError> {
-        let active = Duration::from_millis(self.active_milliseconds());
-        let remaining = Duration::from_secs(600)
-            .saturating_sub(active)
-            .min(self.remaining_wall());
-        if remaining.is_zero() {
-            return Err(HostError::LimitExceeded);
-        }
+        let remaining = self.remaining_deadline_at(Instant::now())?;
         Instant::now()
             .checked_add(remaining)
             .ok_or(HostError::LimitExceeded)
+    }
+    fn remaining_deadline_at(&self, now: Instant) -> Result<Duration, HostError> {
+        let active = Duration::from_millis(self.active_milliseconds_at(now));
+        let remaining = Duration::from_secs(600)
+            .saturating_sub(active)
+            .min(self.remaining_wall_at(now));
+        if remaining.is_zero() {
+            Err(HostError::LimitExceeded)
+        } else {
+            Ok(remaining)
+        }
     }
 }
 
@@ -213,15 +226,20 @@ mod run_clock_tests {
     use super::*;
     #[test]
     fn frozen_active_time_keeps_real_wall_deadline() {
-        let started = Instant::now()
-            .checked_sub(Duration::from_secs(3601))
-            .unwrap();
+        let started = Instant::now();
+        let expired = started.checked_add(WALL_LIMIT).unwrap();
         let frozen = RunClock::frozen_active(started);
-        assert_eq!(frozen.active_milliseconds(), 0);
-        assert_eq!(frozen.remaining_wall(), Duration::ZERO);
-        assert_eq!(frozen.deadline(), Err(HostError::LimitExceeded));
+        assert_eq!(frozen.active_milliseconds_at(expired), 0);
+        assert_eq!(frozen.remaining_wall_at(expired), Duration::ZERO);
+        assert_eq!(
+            frozen.remaining_deadline_at(expired),
+            Err(HostError::LimitExceeded)
+        );
 
         let real = RunClock::new(started);
-        assert!(real.active_milliseconds() >= 3_600_000);
+        assert_eq!(
+            real.active_milliseconds_at(expired),
+            WALL_LIMIT.as_millis() as u64
+        );
     }
 }
