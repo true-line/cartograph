@@ -75,7 +75,10 @@ fn parse(state: &AppState, source: &RegisteredSource, after_capture: impl FnOnce
     Parsed {
         input,
         extraction,
-        receipts,
+        receipts: receipts
+            .iter()
+            .map(|receipt| receipt.to_receipt().unwrap())
+            .collect(),
         delta,
     }
 }
@@ -1078,6 +1081,84 @@ fn primary_source_persistence_rejects_foreign_receipts_before_publication() {
         primary_source::describe(&state, &fact).unwrap().receipt_id,
         old.receipt_id
     );
+}
+
+fn header_rows(app_data: &Path) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open_with_flags(
+        app_data.join("retained-source/receipts.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut query = conn
+        .prepare("SELECT id,header FROM receipt_headers ORDER BY id")
+        .unwrap();
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn streamed_persistence_rolls_back_rows_written_before_a_later_rejection() {
+    // AC-0503: persistence admits receipts one at a time inside one
+    // transaction; a receipt rejected after valid ones were written leaves
+    // no receipt or header row of the batch, also after reopening.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let first_root = directory(dir.path(), "first");
+    let second_root = directory(dir.path(), "second");
+    std::fs::write(first_root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(second_root.join("source.ts"), STABLE_B).unwrap();
+    let state = app_state(&app_data);
+    let first_source = register_local_source(&state, &first_root).unwrap();
+    let second_source = register_local_source(&state, &second_root).unwrap();
+    let first = parse(&state, &first_source, || {});
+    publish(&state, &first_source, &first);
+    let (receipts, headers) = (receipt_rows(&app_data), header_rows(&app_data));
+    assert!(!receipts.is_empty() && !headers.is_empty());
+    drop(first);
+    std::fs::write(first_root.join("source.ts"), STABLE_B).unwrap();
+    let changed = parse(&state, &first_source, || {});
+    let foreign = parse(&state, &second_source, || {});
+    // The valid receipts are new rows under a new header, written first.
+    assert!(
+        changed
+            .receipts
+            .iter()
+            .all(|receipt| !receipts.iter().any(|row| row.0 == receipt.id()))
+    );
+    let mut batch = changed.receipts.clone();
+    batch.push(foreign.receipts[0].clone());
+    assert!(
+        state
+            .primary_sources
+            .persist(&changed.input, &first_source, &batch)
+            .is_err()
+    );
+    assert_eq!(
+        (receipt_rows(&app_data), header_rows(&app_data)),
+        (receipts.clone(), headers.clone())
+    );
+    drop(foreign);
+    let changed_receipts = changed.receipts.clone();
+    drop(changed);
+    drop(state);
+    let reopened = app_state(&app_data);
+    assert_eq!(
+        (receipt_rows(&app_data), header_rows(&app_data)),
+        (receipts.clone(), headers)
+    );
+    // Without the rejected receipt the same valid receipts are admitted, so
+    // they were written, then rolled back.
+    let again = parse(&reopened, &first_source, || {});
+    assert_eq!(again.receipts, changed_receipts);
+    let retained = reopened
+        .primary_sources
+        .persist(&again.input, &first_source, &again.receipts)
+        .unwrap();
+    drop(retained);
+    assert!(receipt_rows(&app_data).len() > receipts.len());
 }
 
 fn retain_staged_proposal_reference(

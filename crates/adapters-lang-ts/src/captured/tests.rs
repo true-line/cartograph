@@ -337,6 +337,8 @@ fn live_config_changes_remain_outside_primary_receipt_closure() {
     assert!(first_receipts.iter().all(|receipt| {
         receipt.file().path == "main.ts"
             || receipt
+                .to_receipt()
+                .unwrap()
                 .ranges()
                 .iter()
                 .all(|range| range.role == RangeRole::Provenance)
@@ -670,9 +672,27 @@ fn captured_parser_emits_the_same_const_unproven_eval_gap() {
         && edge.src.ends_with("#run")));
 }
 
-fn by_fact(mut receipts: Vec<Receipt>) -> Vec<Receipt> {
+/// Directory receipts in full form, in fact-key order.
+fn by_fact(receipts: Vec<MintedReceipt>) -> Vec<Receipt> {
+    let mut receipts: Vec<_> = receipts
+        .iter()
+        .map(|receipt| receipt.to_receipt().unwrap())
+        .collect();
     receipts.sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
     receipts
+}
+
+/// What admitting `receipts` charges, each shared header once (#725).
+fn charged<'a>(receipts: impl IntoIterator<Item = &'a MintedReceipt>) -> usize {
+    let mut charge = Charge::default();
+    let unbounded = ReceiptBudget {
+        bytes: usize::MAX,
+        receipts: usize::MAX,
+    };
+    for receipt in receipts {
+        assert!(charge.admit(receipt, 0, unbounded));
+    }
+    charge.bytes
 }
 
 // AC-0280: every directly emitted callable becomes citable through a
@@ -756,10 +776,9 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
             .1
         })
         .collect();
-    let size = |receipt: &Receipt| receipt.to_json().unwrap().len();
     let rules: Vec<_> = per_file.iter().flat_map(|file| &file.rules).collect();
-    let rule_bytes: usize = rules.iter().map(|receipt| size(receipt)).sum();
-    let first = &per_file[0].declarations[0].0;
+    let rule_bytes = charged(rules.iter().copied());
+    let first = &per_file[0].declarations[0];
     assert_eq!(per_file[0].declarations.len(), 1);
     assert_eq!(per_file[1].declarations.len(), 2);
     let run = |bytes, receipts| {
@@ -774,7 +793,11 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
         )
     };
     // Room for the rules and exactly the first declaration in manifest order.
-    let (_, admitted, stats) = run(rule_bytes + size(first), usize::MAX).unwrap();
+    // The first declaration shares a rule's file header, so it adds only its
+    // own bytes.
+    let with_first = charged(rules.iter().copied().chain([first]));
+    assert_eq!(with_first - rule_bytes, first.retained_bytes());
+    let (_, admitted, stats) = run(with_first, usize::MAX).unwrap();
     assert_eq!(admitted.len(), rules.len() + 1);
     assert!(admitted.contains(first));
     assert_eq!(
@@ -785,7 +808,7 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let expected_b_decls: Vec<_> = per_file[1]
         .declarations
         .iter()
-        .map(|(receipt, _)| core_graph::source::SourceOmission {
+        .map(|receipt| core_graph::source::SourceOmission {
             fact: receipt.fact_key().clone(),
             emitted_fact_digest: receipt.fact_digest().to_owned(),
             kind: core_graph::source::ReceiptOmissionKind::Declarations,
@@ -803,7 +826,7 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let expected_all_decls: Vec<_> = per_file
         .iter()
         .flat_map(|file| &file.declarations)
-        .map(|(receipt, _)| core_graph::source::SourceOmission {
+        .map(|receipt| core_graph::source::SourceOmission {
             fact: receipt.fact_key().clone(),
             emitted_fact_digest: receipt.fact_digest().to_owned(),
             kind: core_graph::source::ReceiptOmissionKind::Declarations,
@@ -845,7 +868,7 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     );
     // Declarations only fill what the admitted rules left; none is admitted
     // past the byte budget, and every one left out is still named.
-    let admitted_bytes: usize = admitted.iter().map(size).sum();
+    let admitted_bytes = charged(&admitted);
     assert!(admitted_bytes < rule_bytes);
     assert_eq!(
         admitted.len() - kept + stats.omitted_declaration_receipts.values().sum::<u64>() as usize,
@@ -879,15 +902,12 @@ fn captured_declarations_are_bounded_per_file_before_admission() {
     };
     let all = produce(usize::MAX, usize::MAX);
     assert_eq!((all.declarations.len(), all.omitted_declarations), (3, 0));
-    for (receipt, bytes) in &all.declarations {
-        assert_eq!(*bytes, receipt.to_json().unwrap().len());
-    }
     let counted = produce(usize::MAX, 1);
     assert_eq!(
         (counted.declarations.len(), counted.omitted_declarations),
         (1, 2)
     );
-    let sized = produce(all.declarations[0].1 + all.declarations[1].1, usize::MAX);
+    let sized = produce(charged(&all.declarations[..2]), usize::MAX);
     assert_eq!(
         (sized.declarations.len(), sized.omitted_declarations),
         (2, 1)
@@ -1288,7 +1308,7 @@ export function small() {{ const inner = 1; return inner; }}
         .unwrap()
         .1
     };
-    let local = |receipt: &Receipt| match receipt.fact_key() {
+    let local = |receipt: &MintedReceipt| match receipt.fact_key() {
         FactKey::Node { id } => {
             id.starts_with("decl:") && id.contains("#configureDefaultOrderProcess/")
         }
@@ -1298,10 +1318,126 @@ export function small() {{ const inner = 1; return inner; }}
     let locals = all
         .declarations
         .iter()
-        .filter(|(receipt, _)| local(receipt))
+        .filter(|receipt| local(receipt))
         .count();
     assert_eq!(locals, 6);
     let rest = produce(all.declarations.len() - locals);
     assert_eq!(rest.omitted_declarations, locals as u64);
-    assert!(!rest.declarations.iter().any(|(receipt, _)| local(receipt)));
+    assert!(!rest.declarations.iter().any(local));
+}
+
+// AC-0503: directory extraction retains receipts in compact form, one shared
+// header per file, and rebuilds the exact receipt on demand (#725).
+#[test]
+fn compact_receipts_rebuild_exactly_and_share_one_header_per_file() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("a.ts"),
+        b"export function guard(ok: boolean) { if (!ok) return false; return true; }\nexport function one() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("b.ts"),
+        b"export function two() { return 2; }\n",
+    )
+    .unwrap();
+    let paths = enumerate_paths(directory.path()).unwrap();
+    let capture = capture(directory.path(), &paths);
+    let (_, minted, _) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let mut full = Vec::new();
+    for path in &paths {
+        full.extend(
+            extract_file(capture.file(path).unwrap(), &parser_id())
+                .unwrap()
+                .1,
+        );
+    }
+    full.sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
+    assert_eq!(by_fact(minted.clone()), full);
+    for receipt in &minted {
+        let rebuilt = receipt.to_receipt().unwrap();
+        let json = receipt.to_json().unwrap();
+        // Wire bytes and id are those of the full receipt, and decode alone.
+        assert_eq!(json, rebuilt.to_json().unwrap());
+        assert_eq!(Receipt::from_json(&json).unwrap(), rebuilt);
+        assert_eq!(receipt.id(), rebuilt.id());
+        assert_eq!(
+            receipt.captured_spans().collect::<Vec<_>>(),
+            rebuilt
+                .ranges()
+                .iter()
+                .map(|range| range.captured.clone())
+                .collect::<Vec<_>>()
+        );
+        let shares = minted
+            .iter()
+            .filter(|other| other.file().path == receipt.file().path)
+            .all(|other| Arc::ptr_eq(other.header(), receipt.header()));
+        assert!(shares, "{} has one header", receipt.file().path);
+    }
+    // The compact form retains less than the canonical JSON of the same
+    // receipts.
+    let json_bytes: usize = full.iter().map(|r| r.to_json().unwrap().len()).sum();
+    assert!(charged(&minted) < json_bytes);
+}
+
+// AC-0503: a file header is charged once, only with the first receipt admitted
+// under it; a refused receipt charges nothing and leaves its header uncharged.
+#[test]
+fn shared_headers_are_charged_once_after_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("a.ts"),
+        b"export function one() { return 1; }\nexport function two() { return 2; }\n",
+    )
+    .unwrap();
+    let paths = enumerate_paths(directory.path()).unwrap();
+    let capture = capture(directory.path(), &paths);
+    let declarations = extract_file_with(
+        capture.file("a.ts").unwrap(),
+        &parser_id(),
+        Registries::builtin(),
+        FILE_DECLARATIONS,
+    )
+    .unwrap()
+    .1
+    .declarations;
+    let [first, second] = &declarations[..] else {
+        panic!("two declarations");
+    };
+    let header =
+        first.header().retained_bytes() + std::mem::size_of::<(usize, Arc<MintedHeader>)>();
+    let exact = header + first.retained_bytes();
+    let budget = |bytes| ReceiptBudget {
+        bytes,
+        receipts: usize::MAX,
+    };
+    let mut charge = Charge::default();
+    // One byte short: refused, and nothing is charged or held.
+    assert!(!charge.admit(first, 0, budget(exact - 1)));
+    assert_eq!((charge.bytes, charge.headers.len()), (0, 0));
+    // Exactly enough: the header is charged with the first admission.
+    assert!(charge.admit(first, 0, budget(exact)));
+    assert_eq!((charge.bytes, charge.headers.len()), (exact, 1));
+    // The second receipt of the file adds only its own bytes.
+    let both = exact + second.retained_bytes();
+    assert!(!charge.admit(second, 1, budget(both - 1)));
+    assert!(charge.admit(second, 1, budget(both)));
+    assert_eq!((charge.bytes, charge.headers.len()), (both, 1));
+    // The count ceiling still applies on its own.
+    assert!(!Charge::default().admit(
+        first,
+        1,
+        ReceiptBudget {
+            bytes: usize::MAX,
+            receipts: 1,
+        }
+    ));
 }

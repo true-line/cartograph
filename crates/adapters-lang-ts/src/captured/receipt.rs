@@ -1120,6 +1120,8 @@ mod tests {
     }
 }
 
+mod minted;
+pub use minted::{Citable, MintedHeader, MintedReceipt};
 mod workspace;
 pub use workspace::{fact_match_workspace, fact_match_workspace_bytes};
 #[cfg(test)]
