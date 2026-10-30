@@ -1,5 +1,15 @@
 # cartograph
 
+## 0.48.0
+
+### Minor Changes
+
+- 94bc02b: Rust sources now recover rdkafka producer records and consumer subscriptions as Kafka event sites (#1371).
+
+### Patch Changes
+
+- fd72cf6: Build on Rust 1.97.1 and wasmtime/wasmtime-wasi 50.0.1 (#1376).
+
 ## 0.47.0
 
 ### Minor Changes
