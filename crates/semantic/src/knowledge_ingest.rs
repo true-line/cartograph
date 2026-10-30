@@ -87,9 +87,14 @@ pub fn units(nodes: &[Node]) -> (Vec<KnowledgeUnit>, usize) {
     (units, omitted)
 }
 
+/// Redaction passes allowed before a unit falls back to its bare label.
+const REDACTION_PASSES: usize = 8;
+
 /// Label plus scalar properties in key order; nested values, including
-/// `prov`, are left out. Redaction runs before truncation so a cut cannot split a secret
-/// past its pattern.
+/// `prov`, are left out. Redaction runs before truncation so a cut cannot
+/// split a secret past its pattern, and is repeated to a fixed point: the
+/// cached provider redacts again, so only a fixed point is the exact text
+/// it embeds and hashes under [`KnowledgeUnit::key`].
 fn render(node: &Node) -> String {
     let mut text = node.label.clone();
     if let Some(props) = node.props.as_object() {
@@ -106,15 +111,22 @@ fn render(node: &Node) -> String {
             text.push_str(&value);
         }
     }
-    let (mut text, _) = core_redact::redact_text(&text);
-    if text.len() > MAX_UNIT_BYTES {
-        let mut end = MAX_UNIT_BYTES;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+    for _ in 0..REDACTION_PASSES {
+        let (mut next, _) = core_redact::redact_text(&text);
+        if next.len() > MAX_UNIT_BYTES {
+            let mut end = MAX_UNIT_BYTES;
+            while !next.is_char_boundary(end) {
+                end -= 1;
+            }
+            next.truncate(end);
         }
-        text.truncate(end);
+        if next == text {
+            return text;
+        }
+        text = next;
     }
-    text
+    // No fixed point within the bound: embed nothing a pattern could match.
+    node.label.clone()
 }
 
 /// Result of the phase. Neither variant touches the base graph.

@@ -239,3 +239,34 @@ fn redaction_precedes_truncation_so_a_cut_secret_never_leaks() {
     assert!(!units[0].text.contains("AKIA"));
     assert!(units[0].text.contains("[REDACTED"));
 }
+
+#[test]
+fn unit_keys_hash_the_exact_text_the_cache_embeds() {
+    // An access-key-shaped run that continues past 16 characters is not a
+    // match; truncation can cut it to exactly 16 at the end of the unit,
+    // which the cached provider's own redaction pass would then change.
+    let (_dir, cache) = cache();
+    let provider = Recording::new(true);
+    let prefix = "Resource\nnote: ";
+    let filler = format!("{} ", "x ".repeat((MAX_UNIT_BYTES - prefix.len() - 21) / 2));
+    let note = format!("{filler}AKIA{}", "ABCDEFGHIJKLMNOPQRSTU");
+    assert_eq!(prefix.len() + filler.len() + 20, MAX_UNIT_BYTES);
+    let nodes = vec![node(
+        "res:k",
+        "Resource",
+        serde_json::json!({ "note": note }),
+    )];
+    let PhaseOutcome::Embedded { units, .. } = run_with(&nodes, Some(&provider), &cache) else {
+        panic!("phase skipped");
+    };
+    let sent = provider.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(!sent[0].contains("AKIA"));
+    assert_eq!(core_redact::redact_text(&sent[0]).0, sent[0]);
+    let key = KnowledgeUnit {
+        node_id: "res:k".into(),
+        text: sent[0].clone(),
+    }
+    .key();
+    assert_eq!(units, [("res:k".to_owned(), key)]);
+}
