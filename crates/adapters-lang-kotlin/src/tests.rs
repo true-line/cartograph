@@ -4294,3 +4294,176 @@ fun o(client: WebClient, id: String) = client.get().uri("/o/{id}", id).retrieve(
         ]
     );
 }
+
+fn kafka_rows(source: &str) -> Vec<String> {
+    extract_source(
+        source.as_bytes(),
+        "src/main/kotlin/io/demo/Orders.kt",
+        &id(),
+    )
+    .unwrap()
+    .event_sites
+    .iter()
+    .map(|site| {
+        assert_eq!(site.kind, "kafka-topic");
+        let identity = match &site.identity {
+            adapters_fw::events::IdentityExpr::Literal(topic) => format!("lit:{topic}"),
+            adapters_fw::events::IdentityExpr::Computed(text)
+            | adapters_fw::events::IdentityExpr::EnvRef(text) => format!("computed:{text}"),
+        };
+        let owner = site.symbol.as_deref().unwrap_or("-");
+        let owner = owner.rsplit_once('#').map_or(owner, |(_, name)| name);
+        format!("{:?} {identity} {owner}", site.role)
+    })
+    .collect()
+}
+
+// AC-0468: `send` on a proven `KafkaTemplate` property, `this.x` or
+// constructed local produces its first-argument topic; a one-argument send,
+// a placeholder or a non-literal topic is computed. Named-import and fully
+// qualified `@KafkaListener` functions consume each `topics` element of a
+// collection literal or `arrayOf`, and a `topicPattern` is one computed
+// site. (T-0468)
+#[test]
+fn spring_kafka_templates_and_listeners_become_event_sites() {
+    let rows = kafka_rows(
+        r##"package io.demo
+
+import org.springframework.kafka.annotation.KafkaListener
+import org.springframework.kafka.core.KafkaTemplate
+
+class Orders(private val kafka: KafkaTemplate<String, String>) {
+    fun place(id: String, record: ProducerRecord<String, String>) {
+        kafka.send("orders", id)
+        this.kafka.send("audit", id, "x")
+        kafka.send("full", 0, 1L, "k", id)
+        kafka.send(record)
+        kafka.send("${'$'}{topics.orders}", id)
+        kafka.send(topicName(), id)
+        kafka.send("#{beans.topic}", id)
+    }
+
+    fun local(factory: ProducerFactory<String, String>) {
+        val template = KafkaTemplate(factory)
+        template.send("local", "v")
+    }
+
+    @KafkaListener(topics = ["orders", "returns"], groupId = "billing")
+    fun onOrder(message: String) {}
+
+    @KafkaListener(topics = arrayOf("audit"))
+    fun onAudit(message: String) {}
+
+    @org.springframework.kafka.annotation.KafkaListener(topicPattern = "orders.*")
+    fun onAny(message: String) {}
+}
+"##,
+    );
+    assert_eq!(
+        rows,
+        [
+            "Produces lit:orders Orders.place",
+            "Produces lit:audit Orders.place",
+            "Produces lit:full Orders.place",
+            "Produces computed:kafka.send(record) Orders.place",
+            "Produces computed:\"${'$'}{topics.orders}\" Orders.place",
+            "Produces computed:topicName() Orders.place",
+            "Produces computed:\"#{beans.topic}\" Orders.place",
+            "Produces lit:local Orders.local",
+            "Consumes lit:orders Orders.onOrder",
+            "Consumes lit:returns Orders.onOrder",
+            "Consumes lit:audit Orders.onAudit",
+            "Consumes computed:topicPattern = \"orders.*\" Orders.onAny",
+        ]
+    );
+}
+
+// AC-0468 (#1367 review): an import alias proves `@KafkaListener` through the
+// same binding check, and `arrayOf<String>(…)` lists its topics; an alias of
+// a foreign annotation proves nothing. (T-0468)
+#[test]
+fn spring_kafka_listener_aliases_and_typed_arrays_are_read() {
+    let rows = kafka_rows(
+        r#"package io.demo
+
+import org.springframework.kafka.annotation.KafkaListener as Listener
+import com.other.KafkaListener as Foreign
+
+class Orders {
+    @Listener(topics = arrayOf<String>("orders", "returns"))
+    fun onOrder(message: String) {}
+
+    @Foreign(topics = ["ignored"])
+    fun onForeign(message: String) {}
+}
+"#,
+    );
+    assert_eq!(
+        rows,
+        [
+            "Consumes lit:orders Orders.onOrder",
+            "Consumes lit:returns Orders.onOrder",
+        ]
+    );
+}
+
+// AC-0468: an unimported or foreign `KafkaTemplate`, a shadowed receiver, a
+// subclass, `sendDefault`, named arguments, a trailing lambda, a file-declared
+// or imported `send`, more arguments than any `send` overload takes, and a
+// foreign or unimported `@KafkaListener` yield no site. (T-0468)
+#[test]
+fn unproven_spring_kafka_calls_are_not_event_sites() {
+    for source in [
+        r#"package io.demo
+class A(private val kafka: KafkaTemplate<String, String>) {
+    fun f() = kafka.send("t", "v")
+    @KafkaListener(topics = ["t"])
+    fun g(m: String) {}
+}
+"#,
+        r#"package io.demo
+import com.other.KafkaTemplate
+import com.other.KafkaListener
+class A(private val kafka: KafkaTemplate<String, String>) {
+    fun f() = kafka.send("t", "v")
+    @KafkaListener(topics = ["t"])
+    fun g(m: String) {}
+}
+"#,
+        r#"package io.demo
+import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.requestreply.ReplyingKafkaTemplate
+class A(private val kafka: KafkaTemplate<String, String>, private val reply: ReplyingKafkaTemplate<String, String, String>) {
+    fun f(kafka: Other) = kafka.send("t", "v")
+    fun g() {
+        reply.send("t", "v")
+        this.kafka.sendDefault("v")
+        this.kafka.send(topic = "t", data = "v")
+        this.kafka.send("t") { }
+    }
+}
+"#,
+        r#"package io.demo
+import org.springframework.kafka.core.KafkaTemplate
+fun KafkaTemplate<String, String>.send(topic: String, data: String): Unit = Unit
+class A(private val kafka: KafkaTemplate<String, String>) {
+    fun f() = kafka.send("t", "v")
+}
+"#,
+        r#"package io.demo
+import org.springframework.kafka.core.KafkaTemplate
+import custom.send
+class A(private val kafka: KafkaTemplate<String, String>) {
+    fun f() = kafka.send("t", "v")
+}
+"#,
+        r#"package io.demo
+import org.springframework.kafka.core.KafkaTemplate
+class A(private val kafka: KafkaTemplate<String, String>) {
+    fun f() = kafka.send("t", 0, 1L, "k", "v", "extra")
+}
+"#,
+    ] {
+        assert_eq!(kafka_rows(source), Vec::<String>::new(), "{source}");
+    }
+}

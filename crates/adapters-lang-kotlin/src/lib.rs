@@ -51,6 +51,9 @@ pub struct Extraction {
     pub edges: Vec<Edge>,
     /// Retrofit client calls (#737), stitched by the `events` crate.
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
+    /// Spring Kafka producer and listener sites (#1366), stitched by the
+    /// `events` crate.
+    pub event_sites: Vec<adapters_fw::events::EventSite>,
     /// Retrofit builder base URLs, joined to `fetch_sites` repo-wide.
     retrofit_bases: Vec<adapters_fw::client::FetchBase>,
     /// Client calls that carry their own base (Spring `RestTemplate` and
@@ -1721,6 +1724,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         .extend(webclient::sites(&cx, root, &functions, &imports));
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
+    // Spring Kafka producers and listeners (#1366).
+    out.event_sites
+        .extend(spring_kafka::sites(&cx, root, &functions, &imports));
 
     // Android Navigation 3 entries and back-stack navigations (AC-0351).
     out.navigation3 = navigation3::extract(
@@ -2190,6 +2196,7 @@ pub fn extract_dir_incremental_with_progress(
                 .extend(extraction.declared_importables);
             out.packages.extend(extraction.packages);
             out.fetch_sites.extend(extraction.fetch_sites);
+            out.event_sites.extend(extraction.event_sites);
             out.retrofit_bases.extend(extraction.retrofit_bases);
             out.unjoined_sites.extend(extraction.unjoined_sites);
             out.navigation3.extend(extraction.navigation3);
@@ -2464,6 +2471,7 @@ mod queries;
 mod receivers;
 mod rest_template;
 mod retrofit;
+mod spring_kafka;
 mod webclient;
 
 #[cfg(test)]

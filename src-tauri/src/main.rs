@@ -1716,6 +1716,7 @@ fn extract_tree_with_registries(
         extraction.nodes.extend(kotlin.nodes);
         extraction.edges.extend(kotlin.edges);
         extraction.fetch_sites.extend(kotlin.fetch_sites);
+        extraction.event_sites.extend(kotlin.event_sites);
     }
     if wants_infra {
         let tf_id = iac::SourceId { repo, commit };
