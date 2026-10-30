@@ -707,6 +707,9 @@
 - **AC-0432** Given an explicitly selected analyst or auditor @11, its product instructions explain repeated source acquisition, reuse of supplied citations and the latest query cursor after source reads. It reuses request7, the existing Expanded policy, actions, admission and result formats without new budgets, retries, automatic actions or stop conditions. Every historical @10 prompt byte, fingerprint and saved-task identity remains unchanged. Captured analyst preparation may explicitly freeze @11; an absent role keeps its historical @10 serialization and identity. Guidance is not evidence of improved model efficacy; fresh independently frozen acceptance remains required (#1273).
 - **Trace:** H4 · `agents`, `app`, `ui` · — · T-0432
 
+- **AC-0472** Given a validated completion contract, admitted ledger and ordered host-validated completed-read evidence, then the pure acquisition-choice foundation deterministically offers exact-node discovery, exact guarded-read intent or exact inventory intent for unattempted obligations, preserves unavailable/refused outcomes without claiming satisfaction, suppresses an already recorded ineffective discovery, and bounds its stable candidate prefix using existing action/envelope byte limits. Foreign, malformed or mismatched state fails closed. It registers/exposes no new family and changes no historical wire, runtime action or numerical limit; complete runtime integration remains pending (#1383; related #1382).
+- **Trace:** H4 · `agents` · — · T-0472
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
