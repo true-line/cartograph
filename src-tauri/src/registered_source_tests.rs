@@ -935,10 +935,14 @@ fn managed_readiness_batch_rolls_back_on_late_invalid_member() {
 }
 
 fn isolated_managed_operation_case(name: &str) -> bool {
+    isolated_managed_exact_test(&format!("registered_source_tests::{name}"))
+}
+
+/// Run lock-release assertions after exec, apart from parallel fork activity.
+pub(crate) fn isolated_managed_exact_test(exact: &str) -> bool {
     use std::io::Read;
     use std::process::{Child, Command, Stdio};
     const MARKER: &str = "CARTOGRAPH_REGISTERED_OPERATION_CASE";
-    let exact = format!("registered_source_tests::{name}");
     if std::env::var(MARKER).is_ok_and(|value| value == exact) {
         return false;
     }
@@ -953,8 +957,8 @@ fn isolated_managed_operation_case(name: &str) -> bool {
     }
     let mut child = Cleanup(
         Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
-            .env(MARKER, &exact)
+            .args(["--exact", exact, "--nocapture", "--test-threads=1"])
+            .env(MARKER, exact)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -982,7 +986,18 @@ fn isolated_managed_operation_case(name: &str) -> bool {
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&stdout).contains("test result: ok. 1 passed;"),
+        "isolated {exact} must execute exactly one passing test:\n{}",
+        String::from_utf8_lossy(&stdout)
+    );
     true
+}
+
+#[test]
+#[should_panic(expected = "must execute exactly one passing test")]
+fn isolated_managed_exact_test_rejects_missing_case() {
+    isolated_managed_exact_test("registered_source_tests::__missing_isolated_case");
 }
 
 fn ready_managed_source(state: &AppState, name: &str) -> RegisteredSource {
