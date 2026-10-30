@@ -307,6 +307,65 @@ def sync():
 }
 
 #[test]
+fn aiohttp_session_base_url_resolves_before_the_stitch() {
+    // AC-0496: a call on a proven `aiohttp.ClientSession(base_url)` is
+    // resolved against the base as RFC 3986 before the ordinary stitch: a
+    // relative path stays under `/api/`, a rooted one replaces it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+import aiohttp
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/api/users", methods=["GET"])
+def users():
+    return []
+
+async def sync():
+    async with aiohttp.ClientSession("http://localhost:5000/api/") as session:
+        await session.get("users")
+
+async def rooted():
+    async with aiohttp.ClientSession(base_url="http://localhost:5000/api/") as other:
+        await other.get("/users")
+"#,
+    )
+    .unwrap();
+    let (x, _) = crate::extract_tree_with_summary(
+        dir.path(),
+        REPO,
+        "workdir",
+        &[],
+        &BTreeMap::new(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    let fetches: Vec<(&str, &str)> = x
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "FETCHES")
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    // `/users` resolves to `http://localhost:5000/users`: no endpoint, a Gap.
+    assert_eq!(
+        fetches
+            .iter()
+            .map(|(src, dst)| (*src, dst.split_once('@').map_or(*dst, |(kind, _)| kind)))
+            .collect::<Vec<_>>(),
+        [
+            ("sym:local/p@app.py#sync", "ep:local/p"),
+            ("sym:local/p@app.py#rooted", "gap:fetch:local/p"),
+        ]
+    );
+    assert_eq!(fetches[0].1, "ep:local/p@GET:/api/users");
+}
+
+#[test]
 fn go_net_http_calls_stitch_to_same_repo_routes_even_client_only() {
     // AC-0434: a `net/http` client call is a fetch site the ordinary stitch
     // binds to the same repository's method-less route (and a HEAD call to

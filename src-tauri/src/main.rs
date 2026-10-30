@@ -1553,7 +1553,7 @@ fn extract_tree_with_registries(
         extraction.nodes.extend(observed.nodes);
         extraction.edges.extend(observed.edges);
     }
-    // Python carries server routes, `requests`/`httpx` client calls and
+    // Python carries server routes, `requests`/`httpx`/`aiohttp` client calls and
     // boto3/kafka-python event sites, so a client- or events-only Python
     // repository runs it too.
     if wants_application {
@@ -1584,7 +1584,7 @@ fn extract_tree_with_registries(
         extraction.edges.extend(python.edges);
         // Observed infrastructure from Python (#734): registry clients the
         // code proves it talks to (boto3, redis, smtplib, SQLAlchemy), and
-        // `requests`/`httpx` calls as fetch sites (AC-0424), and boto3 /
+        // `requests`/`httpx`/`aiohttp` calls as fetch sites (AC-0424, AC-0496), and boto3 /
         // kafka-python calls as event sites (AC-0458).
         let observed = adapters_lang_python::observed_infra::extract_dir_with_sites(
             root, &python_id, registries,
