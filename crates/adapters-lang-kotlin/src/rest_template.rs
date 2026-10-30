@@ -42,7 +42,7 @@ const HTTP_METHOD: &str = "org.springframework.http.HttpMethod";
 const CLIENT_PACKAGE: &str = "org.springframework.web.client";
 
 /// The names of every function this file declares, at any depth.
-fn declared_functions(cx: &FileCx<'_>, root: TsNode<'_>) -> HashSet<String> {
+pub(crate) fn declared_functions(cx: &FileCx<'_>, root: TsNode<'_>) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -77,7 +77,7 @@ pub(crate) fn named_children<'t>(node: TsNode<'t>) -> Vec<TsNode<'t>> {
 }
 
 /// Receiver and type-spelling proof for a Spring client type in one file,
-/// shared with the other Spring client readers.
+/// shared with [`super::webclient`].
 pub(crate) struct Proof<'a> {
     pub(crate) cx: &'a FileCx<'a>,
     root: TsNode<'a>,
@@ -95,10 +95,36 @@ impl<'a> Proof<'a> {
         }
     }
 
+    /// Whether the file declares or imports a function `name`, which a call
+    /// of that name may resolve to instead of a member of another signature.
+    pub(crate) fn shadows(&self, name: &str) -> bool {
+        self.imports.bindings.contains_key(name)
+            || declared_functions(self.cx, self.root).contains(name)
+    }
+
     /// Whether `name` is lexically bound (a local, parameter or property) at
     /// `site`, which obscures a type of that name.
     pub(crate) fn binds(&self, site: TsNode<'_>, name: &str) -> bool {
         receivers::lexical_binding(self.cx, site, name, &self.hilt).is_some()
+    }
+
+    /// Whether `name` is bound at `site` with a stated built-in value type
+    /// (`String`, `Int`, …) that no import, declaration or type parameter
+    /// visible where the binding is declared rebinds: a value that is never
+    /// a function.
+    pub(crate) fn binds_value(&self, site: TsNode<'_>, name: &str) -> bool {
+        const VALUE_TYPES: &[&str] = &[
+            "Boolean", "Byte", "Char", "Double", "Float", "Int", "Long", "Short", "String",
+        ];
+        matches!(
+            receivers::lexical_binding_scope(self.cx, site, name, &self.hilt),
+            Some((receivers::Binding::Typed(ty), scope))
+                if VALUE_TYPES.contains(&ty.as_str())
+                    && !self.imports.bindings.contains_key(&ty)
+                    && !receivers::declares_name(self.cx, self.root, &ty)
+                    && !receivers::declares_type_parameter(self.cx, scope, &ty)
+                    && !receivers::is_type_parameter(self.cx, scope, &ty)
+        )
     }
 
     /// Whether a type spelling names `fqn` in this file.
