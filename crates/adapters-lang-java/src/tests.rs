@@ -4555,7 +4555,8 @@ class Nested {
 
 #[test]
 fn unproven_okhttp_builders_are_not_fetch_sites() {
-    // AC-0476: a foreign, file-declared or unimported `Request`, an
+    // AC-0476: a foreign, file-declared or unimported `Request`, a declared
+    // or imported `okhttp3` lookalike (connector P2 on #1406), an
     // anonymous builder subclass, an unknown or wrong-arity link, a held
     // builder and a chain without `url` yield none; test sources yield none.
     let sites = retrofit_sites(&[
@@ -4609,6 +4610,31 @@ class Local {
 "#,
         ),
         (
+            "src/main/java/io/demo/Lookalike.java",
+            r#"package io.demo;
+
+class Lookalike {
+    static class okhttp3 { static class Request { static class Builder {} } }
+    void calls() {
+        new okhttp3.Request.Builder().url("https://host/k").build();
+    }
+}
+"#,
+        ),
+        (
+            "src/main/java/io/demo/ImportedLookalike.java",
+            r#"package io.demo;
+
+import com.acme.okhttp3;
+
+class ImportedLookalike {
+    void calls() {
+        new okhttp3.Request.Builder().url("https://host/m").build();
+    }
+}
+"#,
+        ),
+        (
             "src/main/java/io/demo/Unimported.java",
             r#"package io.demo;
 
@@ -4633,5 +4659,5 @@ class ClientTest {
 "#,
         ),
     ]);
-    assert!(webclient_rows(&sites).is_empty());
+    assert_eq!(webclient_rows(&sites), Vec::<[&str; 3]>::new());
 }

@@ -47,6 +47,14 @@ fn builder_root(proof: &Proof<'_>, node: TsNode<'_>) -> bool {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
+        // A file-declared or imported `okhttp3` type captures a qualified
+        // spelling, as in `webclient::static_call`.
+        if spelling.starts_with("okhttp3.")
+            && (proof.declared.contains("okhttp3")
+                || proof.imports.bindings.contains_key("okhttp3"))
+        {
+            return false;
+        }
         proof.names(&spelling, BUILDER)
             || spelling
                 .strip_suffix(".Builder")
