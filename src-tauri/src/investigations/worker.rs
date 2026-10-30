@@ -578,7 +578,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponseMetadata))?;
             if let Some(mode) = admission_mode
                 && self
-                    .admit_next_finish_response(
+                    .admit_next_finish_or_action_refusal(
                         completion_request.ok_or(HostError::InvalidInput)?,
                         &input,
                         &prepared,
@@ -1375,4 +1375,62 @@ fn stop<R: tauri::Runtime>(
 mod tests;
 
 #[cfg(test)]
-pub(super) use tests::{with_public_start_fixture, with_public_start_fixture_then};
+pub(super) use tests::{
+    with_public_start_fixture, with_public_start_fixture_then, with_response_app,
+};
+
+// Test only: exercise the actual response coordinator on a genuine saved call
+// without opening the public/run/resume gates or dispatching any provider.
+#[cfg(test)]
+pub(super) fn handle_gated_response(
+    app: &tauri::AppHandle<tauri::test::MockRuntime>,
+    saved: &crate::jobs::investigations::CapturedSourceInvocationFixture,
+    completion: &BoundedCompletion,
+    before_handle: impl FnOnce(),
+) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let detail = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_owned_detail(saved.execution(), saved.id())
+        .unwrap();
+    let live = state.investigations.insert(saved.id()).unwrap();
+    let mut clock = RunClock::new(Instant::now() - Duration::from_secs(1));
+    let mode = saved
+        .current()
+        .seal_disclosure_with_policy(saved.prepared(), &INVESTIGATION_V2_POLICY)
+        .unwrap()
+        .unwrap()
+        .admission
+        .unwrap()
+        .mode;
+    let mut worker = Worker {
+        app,
+        state: &state,
+        id: saved.id(),
+        execution: saved.execution(),
+        live: &live,
+        detail,
+        clock: &mut clock,
+        task_limits: None,
+    };
+    before_handle();
+    let result = validate_completion(completion, saved.prepared())
+        .and_then(|()| {
+            saved
+                .current()
+                .validate_response_metadata(completion.response_model.as_deref())?;
+            worker.admit_next_finish_or_action_refusal(
+                saved.request(),
+                saved.current(),
+                saved.prepared(),
+                completion,
+                mode,
+                &saved.admission().response.step_id,
+            )
+        })
+        .map_err(|error| format!("{error:?}"));
+    state.investigations.remove(saved.id());
+    result
+}

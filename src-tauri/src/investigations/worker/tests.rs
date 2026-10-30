@@ -1207,3 +1207,12 @@ fn investigation_provider_failure_codes_preserve_terminal_semantics_and_bounds()
     assert_eq!(Failure::from(error).reason(), Some(Stop::StoreCapacity));
     assert_eq!(context.ledger.fingerprint().unwrap(), before);
 }
+
+// Reuse the existing AppHandle lifetime boundary for coordinator-only fixtures.
+pub(in crate::investigations) fn with_response_app(
+    state: AppState,
+    test: impl FnOnce(&tauri::AppHandle<tauri::test::MockRuntime>),
+) {
+    let app = FixtureApp::new(state);
+    test(app.handle());
+}

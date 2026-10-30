@@ -4,7 +4,7 @@ use crate::investigations::evidence::EvidenceGuards;
 use crate::jobs::investigations::NextPromptInvocation;
 
 impl<R: tauri::Runtime> Worker<'_, R> {
-    pub(super) fn admit_next_finish_response(
+    pub(super) fn admit_next_finish_or_action_refusal(
         &mut self,
         request: &obligations::StagedObligationRequest,
         input: &InvestigationInput,
@@ -28,11 +28,23 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.detail.summary.specialist_id,
         )
         .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
-        if matches!(action, CompletionInvestigationAction::Read(_))
-            && mode != staged_refusal::CompletionCallMode::FinishOnly
+        let unoffered = if let CompletionInvestigationAction::Read(read) = &action
+            && mode == staged_refusal::CompletionCallMode::Choice
         {
-            return Ok(false);
-        }
+            if input.permits_acquisition(read) {
+                return Ok(false);
+            }
+            // Cancellation/deadlines precede refusal. Unlike a late finish,
+            // an acquisition response cannot rebase to a newer task revision.
+            let revision = self.detail.summary.revision;
+            self.check_new_work()?;
+            if self.detail.summary.revision != revision {
+                return Err(InvestigationStoreError::Stale.into());
+            }
+            true
+        } else {
+            false
+        };
         let original: serde_json::Value = serde_json::from_str(&completion.text)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
         let response = InvestigationResponseMeta {
@@ -54,6 +66,24 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .and_then(|usage| usage.cache_read_input_tokens),
             active_milliseconds: self.clock.active_milliseconds(),
         };
+        if unoffered {
+            self.detail = self
+                .state
+                .jobs
+                .lock()
+                .map_err(|_| HostError::Operational)?
+                .refuse_next_prompt(
+                    self.execution,
+                    self.detail.summary.revision,
+                    &response,
+                    &original,
+                    crate::jobs::investigations::NextPromptRefusalReason::Action(
+                        ActionRefusalReason::ActionNotOffered,
+                    ),
+                )?;
+            super::super::emit_changed(self.app, &self.detail);
+            return Ok(true);
+        }
         // A response is admitted once against its authenticated saved call.
         // A lost revision or acknowledgement is not permission to resubmit it.
         // Read the current revision once so a cancellation during the call can

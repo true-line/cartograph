@@ -1106,3 +1106,14 @@ events as saved authority. Persisted-state readers remain strict. The unread-sou
 certificate remains mandatory. Public
 start, store-start and worker/resume gates remain closed; this private admission
 slice does not activate @18 or establish model-driven investigation acceptance.
+
+### Gated acquisition membership (#1427, AC-0488)
+
+Before metadata/source preparation, the shared response coordinator checks typed
+Choice-mode reads against the exact current Input choices. A valid unoffered
+@18 action is published once through the authenticated action-refusal writer;
+only its existing invocation is charged, with no acquisition or capacity debit.
+Cancellation, stale revision, invalid decode and FinishOnly retain their existing
+boundaries. Reopened feedback is bound to that call; no new model attempt is
+started by this slice. All initial/repair-loop, UI and activation work remains
+separate, and public/store/worker gates remain closed.
