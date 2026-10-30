@@ -18,6 +18,8 @@ pub struct InvestigationInput {
     supplied_strings: Vec<String>,
     graph_strings: Vec<String>,
     compact: bool,
+    acquisition_choices: Option<std::sync::Arc<acquisition_choices::AcquisitionChoices>>,
+    acquisition_mode: Option<staged_refusal::CompletionCallMode>,
     inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
 }
 
@@ -366,6 +368,8 @@ impl InvestigationInput {
             supplied_strings,
             graph_strings,
             compact,
+            acquisition_choices: None,
+            acquisition_mode: None,
             inspection_requirements: None,
         })
     }
@@ -426,6 +430,7 @@ impl InvestigationInput {
     }
 
     pub fn action(&self, action_id: String) -> Result<CompletionAction, InvestigationError> {
+        self.validate_acquisition_projection()?;
         if !super::records::opaque_id(&action_id) {
             return Err(InvestigationError::InvalidInput);
         }
@@ -470,6 +475,9 @@ impl InvestigationInput {
         prepared: &llm::bounded::PreparedBoundedCompletion,
         policy: &InvestigationPolicy,
     ) -> Result<Option<InvestigationDisclosure>, InvestigationError> {
+        if self.payload.system == SpecialistId::DomainAnalystV18.prompt() {
+            return Err(InvestigationError::InvalidInput);
+        }
         if !self.compact {
             return Ok(None);
         }

@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Task ownership, bounded row decoding, saved-call/ledger/result replay and
 /// host encodings are separate. Regex/native allocations are not modeled.
 pub fn next_prompt_validation_workspace() -> Option<usize> {
-    let definition = definition_workspace(SpecialistId::DomainAnalystV17)?
+    let definition = definition_workspace(SpecialistId::DomainAnalystV18)?
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
@@ -105,7 +105,7 @@ mod tests {
     // Pin the definition component independently, not the much larger total.
     #[test]
     fn saved_family_definitions_fit_admitted_definition_workspace() {
-        let admitted = definition_workspace(SpecialistId::DomainAnalystV17)
+        let admitted = definition_workspace(SpecialistId::DomainAnalystV18)
             .unwrap()
             .max(definition_workspace(SpecialistId::EvidenceAuditorV11).unwrap());
         for role in [
