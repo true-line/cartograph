@@ -2,7 +2,7 @@
 //! activation: a human-facing adapter must supply reviewed policy explicitly.
 use super::{
     ReadError,
-    worker::{Worker, WorkerLimits},
+    worker::{Worker, WorkerLimits, WorkerStartup},
 };
 use mcp_local::{
     activation::{Activation, ActivationLimits, ActivationStatus},
@@ -291,25 +291,25 @@ impl Service {
         rotation: Option<&Arc<()>>,
     ) -> Result<PathBuf, ReadError> {
         policy.validate()?;
-        // Granted activation must be usable before any endpoint is published.
+        // Validate and retain the exact task-worker floor before publishing an
+        // endpoint. The accepted-session factory reuses this prepared config.
         let task_session = tasks
             .owner_snapshot()
             .map_err(|_| ReadError::Storage)?
             .map(|_| tasks.session());
-        if task_session.is_some() {
+        let task_startup = if task_session.is_some() {
             use tauri::Manager;
             let app_state = app
                 .try_state::<crate::AppState>()
                 .ok_or(ReadError::Storage)?;
-            let minimum = super::worker::task_phase_minimum(
+            WorkerStartup::prepare(
                 policy.worker,
+                true,
                 app_state.primary_sources.retained_app_path_bytes(),
-            )
-            .ok_or(ReadError::Limit)?;
-            if policy.worker.reserved_bytes.get() < minimum {
-                return Err(ReadError::Limit);
-            }
-        }
+            )?
+        } else {
+            WorkerStartup::prepare(policy.worker, false, 0)?
+        };
         let mut state = shared.lock().map_err(|_| ReadError::Storage)?;
         match (&state.rotation, rotation) {
             (None, None) => {}
@@ -339,14 +339,15 @@ impl Service {
             let app = app.clone();
             let budget = factory_budget.clone();
             let tasks = task_session.clone();
+            let startup = task_startup;
             async move {
                 let id = mcp_wire::capability::Capability::generate()
                     .map_err(|_| ServeError::Application)?;
-                Worker::start_with_tasks(
+                Worker::start_with_startup(
                     app,
                     id.expose_for_local_transport(),
                     policy.export_mode,
-                    policy.worker,
+                    startup,
                     budget,
                     tasks,
                 )

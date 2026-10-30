@@ -46,6 +46,95 @@ pub(crate) struct WorkerLimits {
     pub reserved_bytes: NonZeroUsize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct WorkerStartup {
+    limits: WorkerLimits,
+    task_phase: TaskPhaseAdmission,
+}
+
+#[derive(Clone, Copy)]
+enum TaskPhaseAdmission {
+    NoTaskGrant,
+    TaskGrant {
+        app_path_bytes: usize,
+        minimum: usize,
+    },
+}
+
+impl WorkerStartup {
+    #[cfg(test)]
+    async fn prepare_on_blocking_pool(
+        compute: impl FnOnce() -> Result<Self, ReadError> + Send + 'static,
+    ) -> Result<Self, ReadError> {
+        tokio::task::spawn_blocking(compute)
+            .await
+            .map_err(|_| ReadError::Storage)?
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn prepare(
+        limits: WorkerLimits,
+        task_granted: bool,
+        app_path_bytes: usize,
+    ) -> Result<Self, ReadError> {
+        Self::prepare_with(limits, task_granted, app_path_bytes, task_phase_minimum)
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn prepare(
+        limits: WorkerLimits,
+        _task_granted: bool,
+        _app_path_bytes: usize,
+    ) -> Result<Self, ReadError> {
+        Ok(Self {
+            limits,
+            task_phase: TaskPhaseAdmission::NoTaskGrant,
+        })
+    }
+
+    #[cfg(unix)]
+    fn prepare_with(
+        limits: WorkerLimits,
+        task_granted: bool,
+        app_path_bytes: usize,
+        compute: impl FnOnce(WorkerLimits, usize) -> Option<usize>,
+    ) -> Result<Self, ReadError> {
+        let task_phase = if task_granted {
+            let minimum = compute(limits, app_path_bytes).ok_or(ReadError::Limit)?;
+            if limits.reserved_bytes.get() < minimum {
+                return Err(ReadError::Limit);
+            }
+            TaskPhaseAdmission::TaskGrant {
+                app_path_bytes,
+                minimum,
+            }
+        } else {
+            TaskPhaseAdmission::NoTaskGrant
+        };
+        Ok(Self { limits, task_phase })
+    }
+
+    #[cfg(unix)]
+    fn validate_task_phase(
+        &self,
+        task_granted: bool,
+        app_path_bytes: usize,
+    ) -> Result<(), ReadError> {
+        let minimum = match self.task_phase {
+            TaskPhaseAdmission::NoTaskGrant if !task_granted => return Ok(()),
+            TaskPhaseAdmission::TaskGrant {
+                app_path_bytes: expected,
+                minimum,
+            } if task_granted && expected == app_path_bytes => minimum,
+            _ => return Err(ReadError::InvalidRequest),
+        };
+        if self.limits.reserved_bytes.get() < minimum {
+            return Err(ReadError::Limit);
+        }
+        Ok(())
+    }
+}
+
 struct Request {
     value: serde_json::Value,
     reply: oneshot::Sender<Result<DispatchAction, ReadError>>,
@@ -71,8 +160,10 @@ impl Worker {
         Self::start_with_tasks(app, session_id, mode, limits, budget, None).await
     }
 
-    /// Authenticated factory path. Host activation owns the optional grant;
-    /// transport arguments cannot supply a principal or task authority.
+    /// Test convenience; production must pass the validated preflight value.
+    /// Preparation runs on Tokio's blocking pool so this legacy test path does
+    /// not monopolize an async worker.
+    #[cfg(test)]
     pub(crate) async fn start_with_tasks<R: tauri::Runtime>(
         app: tauri::AppHandle<R>,
         session_id: String,
@@ -81,6 +172,35 @@ impl Worker {
         budget: WorkBudget,
         tasks: Option<agents::investigation::McpTaskSession>,
     ) -> Result<Self, ReadError> {
+        let task_granted = tasks
+            .as_ref()
+            .is_some_and(|session| session.with_grant(|_, _| ()).is_ok());
+        #[cfg(unix)]
+        let app_path_bytes = if task_granted {
+            app.state::<crate::AppState>()
+                .primary_sources
+                .retained_app_path_bytes()
+        } else {
+            0
+        };
+        #[cfg(not(unix))]
+        let app_path_bytes = 0;
+        let startup = WorkerStartup::prepare_on_blocking_pool(move || {
+            WorkerStartup::prepare(limits, task_granted, app_path_bytes)
+        })
+        .await?;
+        Self::start_with_startup(app, session_id, mode, startup, budget, tasks).await
+    }
+
+    pub(crate) async fn start_with_startup<R: tauri::Runtime>(
+        app: tauri::AppHandle<R>,
+        session_id: String,
+        mode: spec::ExportMode,
+        startup: WorkerStartup,
+        budget: WorkBudget,
+        tasks: Option<agents::investigation::McpTaskSession>,
+    ) -> Result<Self, ReadError> {
+        let limits = startup.limits;
         if session_id.is_empty()
             || (limits.acquisition_mode == AcquisitionMode::Scoped
                 && (session_id.len() > 64 || session_id.chars().any(char::is_control)))
@@ -93,20 +213,17 @@ impl Worker {
         #[cfg(unix)]
         {
             validate_reservation(limits)?;
-            if tasks
+            let task_granted = tasks
                 .as_ref()
-                .is_some_and(|session| session.with_grant(|_, _| ()).is_ok())
-            {
-                let path_bytes = app
-                    .state::<crate::AppState>()
+                .is_some_and(|session| session.with_grant(|_, _| ()).is_ok());
+            let path_bytes = if task_granted {
+                app.state::<crate::AppState>()
                     .primary_sources
-                    .retained_app_path_bytes();
-                if limits.reserved_bytes.get()
-                    < task_phase_minimum(limits, path_bytes).ok_or(ReadError::Limit)?
-                {
-                    return Err(ReadError::Limit);
-                }
-            }
+                    .retained_app_path_bytes()
+            } else {
+                0
+            };
+            startup.validate_task_phase(task_granted, path_bytes)?;
         }
         let permit = budget
             .try_acquire(limits.reserved_bytes, 0)
@@ -676,6 +793,72 @@ pub(crate) mod tests {
         };
         limits
     }
+    // AC-0320: accepted-session startup reuses the prepublication task floor,
+    // while preserving its grant, path, and reservation checks.
+    #[cfg(unix)]
+    #[test]
+    fn prepared_task_startup_computes_once_and_rejects_mismatches() {
+        use std::cell::Cell;
+        let limits = limits();
+        let path_bytes = 321;
+        let computations = Cell::new(0);
+        let startup = WorkerStartup::prepare_with(limits, true, path_bytes, |_, _| {
+            computations.set(computations.get() + 1);
+            Some(1)
+        })
+        .unwrap();
+        assert_eq!(computations.get(), 1);
+        startup.validate_task_phase(true, path_bytes).unwrap();
+        assert_eq!(computations.get(), 1);
+        assert!(matches!(
+            startup.validate_task_phase(false, path_bytes),
+            Err(ReadError::InvalidRequest)
+        ));
+        assert!(matches!(
+            startup.validate_task_phase(true, path_bytes + 1),
+            Err(ReadError::InvalidRequest)
+        ));
+        let too_small = WorkerLimits {
+            reserved_bytes: nz(1),
+            ..limits
+        };
+        assert!(matches!(
+            WorkerStartup::prepare_with(too_small, true, path_bytes, |_, _| Some(2)),
+            Err(ReadError::Limit)
+        ));
+        assert_eq!(startup.limits.reserved_bytes, limits.reserved_bytes);
+    }
+
+    // AC-0320: the test-only compatibility path keeps expensive preparation
+    // off the async executor, matching the production prepublication path.
+    #[test]
+    fn test_startup_preparation_runs_off_async_executor() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use std::{sync::mpsc, time::Duration};
+            let limits = limits();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = mpsc::sync_channel::<()>(0);
+            let preparing = tokio::spawn(WorkerStartup::prepare_on_blocking_pool(move || {
+                let _ = entered_tx.send(());
+                if release_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                    return Err(ReadError::Storage);
+                }
+                WorkerStartup::prepare(limits, false, 0)
+            }));
+            entered_rx.await.unwrap();
+            let (heartbeat_tx, heartbeat_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _ = heartbeat_tx.send(());
+            });
+            heartbeat_rx.await.unwrap();
+            release_tx.send(()).unwrap();
+            preparing.await.unwrap().unwrap();
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn task_floor_retains_context_during_saved_task_replay() {
