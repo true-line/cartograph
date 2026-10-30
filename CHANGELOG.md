@@ -1,5 +1,19 @@
 # cartograph
 
+## 0.49.0
+
+### Minor Changes
+
+- 51ffaab: Java sources now recover JDK `java.net.http` request builder chains as client calls (#1395).
+- f40418c: Kotlin Spring Kafka producers (`KafkaTemplate.send`) and `@KafkaListener` functions now become `kafka-topic` event sites, like their Java counterparts.
+- 9efa9cb: Kotlin sources now recover Spring `WebClient` request chains on proven clients (#1342).
+- ae81eb5: Next.js App Router pages (`app/**/page.tsx`) now become screens that render their default export, under a package that declares `next`.
+- 0cf43c8: The coverage report now claims Python SQLAlchemy data models (Partial), backed by a conformance fixture, so recovered `DataEntity` schemas from Flask-SQLAlchemy and declarative models are no longer reported as uncovered (#1389).
+
+### Patch Changes
+
+- 93a61f4: A Java Spring `WebClient` base URL that ends in `/` now keeps the slash before a relative request path, so `create("https://host/api/").get().uri("orders")` binds to `/api/orders` (#1380).
+
 ## 0.48.0
 
 ### Minor Changes
