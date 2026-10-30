@@ -3978,6 +3978,39 @@ fn feign_wildcard_class_mapping_settles_at_the_join() {
     );
 }
 
+#[test]
+fn webclient_bases_keep_their_slash_before_relative_paths() {
+    // AC-0441 (#1380): a literal base keeps its trailing `/` before a
+    // relative request path, as Spring joins `/api/` + `orders` to
+    // `/api/orders`; before a rooted or computed path the doubled `/`
+    // collapses, and a base without the slash concatenates as Spring does.
+    let sites = retrofit_sites(&[(
+        "src/main/java/io/demo/Client.java",
+        r#"package io.demo;
+
+import org.springframework.web.reactive.function.client.WebClient;
+
+class Client {
+    void calls(String path) {
+        WebClient.create("https://host/api/").get().uri("orders").retrieve();
+        WebClient.create("https://host/api/").get().uri("/orders").retrieve();
+        WebClient.builder().baseUrl("https://host/api/").build().get().uri(path).retrieve();
+        WebClient.create("https://host/api").get().uri("orders").retrieve();
+    }
+}
+"#,
+    )]);
+    assert_eq!(
+        webclient_rows(&sites),
+        [
+            ["GET", "literal:orders", "literal:https://host/api/"],
+            ["GET", "literal:/orders", "literal:https://host/api"],
+            ["GET", "computed:path", "literal:https://host/api"],
+            ["GET", "literal:orders", "literal:https://host/api"],
+        ]
+    );
+}
+
 fn webclient_rows(sites: &[adapters_fw::client::FetchSite]) -> Vec<[String; 3]> {
     let expr = |expr: &IdentityExpr| match expr {
         IdentityExpr::Literal(url) => format!("literal:{url}"),
