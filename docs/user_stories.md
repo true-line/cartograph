@@ -711,6 +711,9 @@
 - **AC-0472** Given a validated completion contract, admitted ledger and ordered host-validated completed-read evidence, then the pure acquisition-choice foundation deterministically offers exact-node discovery, exact guarded-read intent or exact inventory intent for unattempted obligations, preserves unavailable/refused outcomes without claiming satisfaction, suppresses an already recorded ineffective discovery, and bounds its stable candidate prefix using existing action/envelope byte limits. Foreign, malformed or mismatched state fails closed. It registers/exposes no new family and changes no historical wire, runtime action or numerical limit; complete runtime integration remains pending (#1383; related #1382).
 - **Trace:** H4 · `agents` · — · T-0472
 
+- **AC-0473** Given existing admission families, then a reserved optional acquisition stamp validates choices/feedback hash shape, an absent stamp preserves exact @15/@17 admission serialization and fingerprints, and every present stamp fails the shared admission validator and actual sealing with positive unchanged-input controls. No new specialist, runtime acquisition workflow, default exposure or numerical limit is introduced. Unknown future-family task/history/audit incompatibility remains explicit (#1387; prerequisites for #1385/#1382).
+- **Trace:** H4 · `agents` · — · T-0473
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

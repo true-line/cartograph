@@ -619,6 +619,7 @@ impl InvestigationInput {
         let (prompt, _) = self.admission_reserve_basis(policy)?;
         let progress = &prompt["turn_progress"];
         let state = DisclosedAdmissionState {
+            acquisition: None,
             schema_version: 1,
             mode: serde_json::from_value(progress["admission_mode"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?,

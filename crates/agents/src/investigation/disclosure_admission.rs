@@ -13,6 +13,29 @@ pub struct DisclosedAdmissionState {
     #[serde(deserialize_with = "required_feedback")]
     pub capacity_feedback: Option<AdmissionCapacityFeedback>,
     pub turn_progress_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<AcquisitionAdmission>,
+}
+
+/// Reserved representation only. No registered admission family supports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquisitionAdmission {
+    pub choices_hash: String,
+    pub action_feedback_hash: Option<String>,
+}
+impl AcquisitionAdmission {
+    pub fn validate(&self) -> Result<(), InvestigationError> {
+        if !crate::source_basis::hash(&self.choices_hash)
+            || self
+                .action_feedback_hash
+                .as_deref()
+                .is_some_and(|hash| !crate::source_basis::hash(hash))
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
 }
 fn required_feedback<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -26,6 +49,12 @@ impl DisclosedAdmissionState {
         &self,
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
+        if let Some(acquisition) = &self.acquisition {
+            acquisition.validate()?;
+            // Future support needs explicit family-bound sealing/replay checks;
+            // shape validity alone never admits this reserved extension.
+            return Err(InvestigationError::InvalidInput);
+        }
         let usage = &self.consumed_budgets;
         let limits = policy.limits();
         if policy.profile() != INVESTIGATION_V2_POLICY.profile()

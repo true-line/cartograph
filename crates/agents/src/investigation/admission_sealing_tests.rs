@@ -444,3 +444,113 @@ fn admission_sealing_result_seven_has_exact_disclosure_family_and_content_domain
             .is_err()
     );
 }
+
+// AC-0473: literal legacy bytes, prompt pins and actual positive seal controls.
+#[test]
+fn reserved_acquisition_stamp_preserves_legacy_bytes_and_rejects_present() {
+    const LEGACY: &[u8] = br#"{"schema_version":1,"mode":"choice","consumed_budgets":{"model_invocations":0,"tool_actions":0,"selected_facts":0,"evidence_requests":0,"evidence_items":0,"evidence_bytes":0,"captured_validation_bytes":0,"generated_token_reservations":0,"reported_input_tokens":null,"reported_output_tokens":null,"active_milliseconds":0},"capacity_refusal_count":0,"capacity_feedback":null,"turn_progress_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+    let legacy: DisclosedAdmissionState = serde_json::from_slice(LEGACY).unwrap();
+    assert!(legacy.acquisition.is_none());
+    legacy
+        .validate_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    assert_eq!(serde_json::to_vec(&legacy).unwrap(), LEGACY);
+    for (role, fingerprint) in [
+        (
+            SpecialistId::DomainAnalystV15,
+            "ec99aee7d993cae30220094c8afb31430ba33a95b77cd4389ae81fbe0ef0041c",
+        ),
+        (
+            SpecialistId::DomainAnalystV17,
+            "3bbbb030e6c75e5d6b7adf9a00ff26597da61a772f4f77c384e11fdc348902a2",
+        ),
+    ] {
+        assert_eq!(role.definition().unwrap().prompt_fingerprint, fingerprint);
+        let fixture = Fixture::new(role, 7);
+        let input = fixture
+            .build(
+                role,
+                &usage(CompletionCallMode::Choice),
+                CompletionCallMode::Choice,
+                0,
+                None,
+            )
+            .unwrap();
+        let disclosure = seal(&input);
+        assert!(disclosure.admission.unwrap().acquisition.is_none());
+        // Preserve the original admission and private target authority when
+        // exercising the low-level sealer directly.
+        let mut admission = input
+            .disclosed_admission_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        assert!(admission.acquisition.is_none());
+        assert!(
+            serde_json::to_value(&admission)
+                .unwrap()
+                .get("acquisition")
+                .is_none()
+        );
+        let action = input.action("step:admission".into()).unwrap();
+        let prepared = prepare(&input);
+        assert!(
+            sealing::seal_with_admission_policy(
+                input.ledger(),
+                &action.payload,
+                &prepared,
+                &INVESTIGATION_V2_POLICY,
+                input.inspection_requirements.as_deref(),
+                Some(admission.clone())
+            )
+            .is_ok()
+        );
+        let reserved = AcquisitionAdmission {
+            choices_hash: "b".repeat(64),
+            action_feedback_hash: Some("c".repeat(64)),
+        };
+        reserved.validate().unwrap();
+        admission.acquisition = Some(reserved);
+        assert_eq!(
+            admission.validate_with_policy(&INVESTIGATION_V2_POLICY),
+            Err(InvestigationError::InvalidInput)
+        );
+        assert!(
+            sealing::seal_with_admission_policy(
+                input.ledger(),
+                &action.payload,
+                &prepared,
+                &INVESTIGATION_V2_POLICY,
+                input.inspection_requirements.as_deref(),
+                Some(admission)
+            )
+            .is_err(),
+            "{role:?}"
+        );
+    }
+}
+
+// AC-0473: hash shape is consistency only, never support for a reserved stamp.
+#[test]
+fn reserved_acquisition_stamp_checks_hash_shape() {
+    for (choices_hash, action_feedback_hash, valid) in [
+        ("a".repeat(64), None, true),
+        ("a".repeat(64), Some("b".repeat(64)), true),
+        ("short".into(), None, false),
+        ("a".repeat(64), Some("not-a-hash".into()), false),
+    ] {
+        assert_eq!(
+            AcquisitionAdmission {
+                choices_hash,
+                action_feedback_hash
+            }
+            .validate()
+            .is_ok(),
+            valid
+        );
+    }
+    assert!(
+        serde_json::from_value::<AcquisitionAdmission>(
+            json!({"choices_hash":"a".repeat(64),"action_feedback_hash":null,"extra":true})
+        )
+        .is_err()
+    );
+}
