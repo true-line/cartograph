@@ -206,6 +206,25 @@ impl InvestigationDisclosure {
         ledger: &InvestigationInputLedger,
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
+        self.validate_admission_basis(ledger, policy, None)
+    }
+
+    /// Role/shape consistency for a saved-call core, not stamp authentication.
+    pub fn validate_saved_role_shape(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        role: SpecialistId,
+    ) -> Result<(), InvestigationError> {
+        self.validate_admission_basis(ledger, policy, Some(role))
+    }
+
+    fn validate_admission_basis(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        saved_role: Option<SpecialistId>,
+    ) -> Result<(), InvestigationError> {
         ledger.validate_with_policy(policy)?;
         let expected_coverage = ledger
             .coverage
@@ -232,7 +251,11 @@ impl InvestigationDisclosure {
         }
         let admission = self.admission.is_some();
         if let Some(state) = &self.admission {
-            state.validate_with_policy(policy)?;
+            if let Some(role) = saved_role {
+                state.validate_saved_role_shape(role, policy)?;
+            } else {
+                state.validate_with_policy(policy)?;
+            }
             if !completion || self.query_history.is_none() {
                 return Err(InvestigationError::InvalidInput);
             }

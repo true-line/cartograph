@@ -1022,3 +1022,12 @@ store boundary before a transaction. The reason is shared, and historical
 nonce-recovery ordering, @15/@17 identities, catalogs and limits stay unchanged.
 Host authentication, semantic journal, sizing/sealing, worker and UI activation
 remain separate prerequisites; pure input tests establish no model efficacy.
+
+### Saved-call acquisition stamp shape (#1394, AC-0481)
+
+The journal-independent saved-call core obtains the specialist from validated
+saved task context. Only @18 requires a present, well-shaped acquisition stamp;
+historical families require its absence. Generic validation and sealing remain
+closed to every present stamp, and @18 dispatch remains disabled. This checks
+role/shape and existing saved witnesses, not candidate identity or authenticated
+feedback. Other durable readers and full @18 reopen are not enabled here.

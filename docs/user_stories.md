@@ -717,6 +717,9 @@
 - **AC-0480** Given explicit gated domain-analyst@18, then its immutable @17-based definition and final feedback contract support typed caller-bound compact choices, matching finite response schema and exact acquisition membership. Missing/stale/foreign authority is rejected, FinishOnly remains finish-only; blocked/deferred obligations with no available choices do not reopen broad exploration, and existing @15/@17 bytes remain unchanged. Public and direct-store dispatch reject with one unavailable reason before provider/source preparation or durable task writes. No stamp support, runtime worker/UI activation, catalog promotion or numerical limit change is introduced (#1390).
 - **Trace:** H4 · `agents`, `app` · — · T-0480
 
+- **AC-0481** Given synthetic durable task/step/ledger/metadata witnesses, saved-call core validation uses the saved task family to require a well-shaped acquisition stamp only for @18. Missing/malformed @18 stamps and consistently rehashed historical-family stamps fail; generic validation still rejects present stamps. Existing bytes, dispatch and sealing gates remain unchanged. This prerequisite proves role/shape, not candidate identity or full @18 reopen (#1394).
+- **Trace:** H4 · `agents`, `app` · — · T-0481
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

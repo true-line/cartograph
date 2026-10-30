@@ -90,6 +90,12 @@ impl SavedCallBasis {
         self.admission.mode
     }
     fn validate_shape(&self) -> Result<(), InvestigationStoreError> {
+        self.validate_saved_shape(None)
+    }
+    fn validate_saved_shape(
+        &self,
+        saved_role: Option<SpecialistId>,
+    ) -> Result<(), InvestigationStoreError> {
         if self.schema_version != 1
             || !id_valid(&self.task_id)
             || !id_valid(&self.step_id)
@@ -112,8 +118,13 @@ impl SavedCallBasis {
             &self.admission.consumed_budgets,
             &INVESTIGATION_V2_POLICY.limits(),
         )?;
-        self.admission
-            .validate_with_policy(&INVESTIGATION_V2_POLICY)?;
+        if let Some(role) = saved_role {
+            self.admission
+                .validate_saved_role_shape(role, &INVESTIGATION_V2_POLICY)?;
+        } else {
+            self.admission
+                .validate_with_policy(&INVESTIGATION_V2_POLICY)?;
+        }
         encode(self, MAX_INVOCATION_BYTES)?;
         Ok(())
     }
@@ -219,7 +230,8 @@ impl SavedCallBasis {
         validate_pairing(task)?;
         ledger
             .validate_for_specialist(task.detail.summary.specialist_id, &INVESTIGATION_V2_POLICY)?;
-        self.validate_shape()?;
+        let role = task.detail.summary.specialist_id;
+        self.validate_saved_shape(Some(role))?;
         let policy = &INVESTIGATION_V2_POLICY;
         let intent = task
             .completion_intent
@@ -231,8 +243,12 @@ impl SavedCallBasis {
             .disclosure
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
-        disclosure.validate_with_policy(ledger, policy)?;
-        self.admission.validate_with_metadata(metadata, policy)?;
+        disclosure.validate_saved_role_shape(ledger, policy, role)?;
+        if metadata.next_call_mode_with_policy(&self.admission.consumed_budgets, policy)?
+            != self.admission.mode
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
         if self.task_id != task.detail.summary.investigation_id
             || self.request_hash != task.intent_hash
             || self.step_id != step.step_id
