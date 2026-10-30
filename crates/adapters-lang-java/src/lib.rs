@@ -991,6 +991,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         // JDK `java.net.http` request builders (AC-0475).
         out.unjoined_sites
             .extend(http_request::sites(&cx, root, &imports, &methods_by_start));
+        // Square OkHttp request builders (AC-0476).
+        out.unjoined_sites
+            .extend(okhttp::sites(&cx, root, &imports, &methods_by_start));
         // Spring Kafka producers and listeners (AC-0459).
         out.event_sites.extend(spring_kafka::sites(
             &cx,
@@ -1695,6 +1698,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 
 mod feign;
 mod http_request;
+mod okhttp;
 mod rest_template;
 mod retrofit;
 mod spring_kafka;
