@@ -4566,7 +4566,8 @@ class Bare {
 }
 
 // AC-0477: a foreign, file-declared or unimported `Request`, a binding of
-// the first segment, a file-declared or imported link function, a literal
+// the first segment, a file-level `okhttp3` object, a wildcard import, a
+// file-declared or imported link function, a literal
 // the member cannot take, named arguments, a trailing lambda, an unknown or
 // wrong-arity link, a held builder and a chain without `url` yield none;
 // test sources yield none. (T-0477)
@@ -4647,6 +4648,33 @@ class Extension {
         Request.Builder().url("https://host/x").build()
         Request.Builder().get().tag("t").url("https://host/y").build()
     }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Captured.kt",
+            r#"package io.demo
+
+object okhttp3 {
+    object Request {
+        class Builder
+    }
+}
+
+class Captured {
+    fun calls() = okhttp3.Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Wildcard.kt",
+            r#"package io.demo
+
+import com.example.*
+import okhttp3.Request
+
+class Wildcard {
+    fun calls(endpoint: Endpoint) = Request.Builder().url(endpoint).build()
 }
 "#,
         ),

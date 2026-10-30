@@ -4,7 +4,9 @@
 //! A chain `Request.Builder()…build()` is a client call only when its root
 //! calls a proven `okhttp3.Request.Builder` constructor with no arguments:
 //! a named-imported (or aliased) `Request` or `Request.Builder`, or a fully
-//! qualified spelling, whose first segment no visible binding obscures.
+//! qualified spelling, whose first segment no visible binding obscures and
+//! no file-level `okhttp3` declaration or import captures. A file with a
+//! wildcard import is not read: an extension it brings may be called.
 //! Every link must be a `Request.Builder` member called positionally with
 //! that member's arity and no trailing lambda; a function of the link's
 //! name declared or imported by the file may be the one called, and a
@@ -22,7 +24,7 @@ use tree_sitter::Node as TsNode;
 
 use super::rest_template::{self, Proof, named_children};
 use super::webclient::member_call;
-use super::{FileCx, Imports, pure_string_literal};
+use super::{FileCx, Imports, pure_string_literal, receivers};
 
 const REQUEST: &str = "okhttp3.Request";
 const BUILDER: &str = "okhttp3.Request.Builder";
@@ -37,8 +39,9 @@ fn uppercase_token(name: &str) -> bool {
 }
 
 /// Whether `node` is `Request.Builder()` on a proven OkHttp builder at
-/// `site`.
-fn builder_root(proof: &Proof<'_>, site: TsNode<'_>, node: TsNode<'_>) -> bool {
+/// `site`; `captured`: a file-level `okhttp3` declaration or import would
+/// win over the package for a qualified spelling.
+fn builder_root(proof: &Proof<'_>, captured: bool, site: TsNode<'_>, node: TsNode<'_>) -> bool {
     let cx = proof.cx;
     if node.kind() != "call_expression" {
         return false;
@@ -57,6 +60,9 @@ fn builder_root(proof: &Proof<'_>, site: TsNode<'_>, node: TsNode<'_>) -> bool {
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
+    if captured && spelling.starts_with("okhttp3.") {
+        return false;
+    }
     proof.names_value_at(site, &spelling, BUILDER)
         || spelling
             .strip_suffix(".Builder")
@@ -92,6 +98,16 @@ pub(crate) fn sites(
     {
         return Vec::new();
     }
+    // A wildcard-imported `Request.Builder` extension wins wherever no
+    // member overload applies, which a non-literal argument cannot rule out
+    // (connector P2 on #1410).
+    if !imports.wildcard_packages.is_empty() {
+        return Vec::new();
+    }
+    // A file-level `okhttp3` object, class or import captures a qualified
+    // spelling (connector P2 on #1410).
+    let captured =
+        imports.bindings.contains_key("okhttp3") || receivers::declares_name(cx, root, "okhttp3");
     let proof = Proof::new(cx, root, imports);
     let mut out = Vec::new();
     let mut stack = vec![root];
@@ -110,7 +126,7 @@ pub(crate) fn sites(
         // called, so the first method and `url` found are the ones that apply.
         let mut verb = None;
         let mut url = None;
-        while !builder_root(&proof, build, node) {
+        while !builder_root(&proof, captured, build, node) {
             let Some((receiver, name, args)) = member_call(cx, node) else {
                 continue 'calls;
             };
