@@ -1148,3 +1148,15 @@ Accepted-result binding stays latest-only, with no skip-current switch. Existing
 finish decisions, refusal record fingerprints/assessment, two-refusal cap, usage,
 rollback and reread share their strict validators. Generic stamps remain rejected
 and all public/store/worker/UI activation gates and limits stay unchanged.
+
+### Gated initial choices and bounded inner loop (#1429, AC-0489)
+
+The @18 first prompt attaches choices derived from the authenticated initial
+state's saved normalized completion contract, exact frozen ledger and empty
+attempt prefix, before action construction/sealing. The initial publication
+writer independently rederives the stamp after staging its named ledger/archive;
+producer attachment cannot authorize itself. Historical initial inputs stay
+unchanged. Scripted private-inner-loop tests prove unoffered feedback -> offered
+acquisition -> honest finish/reopen, exact existing invocation/FinishOnly bounds,
+and cancellation without a new semantic refusal. No new retry counter or ceiling
+is introduced. Public/store/resume gates and UI/default exposure remain closed.

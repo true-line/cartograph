@@ -205,7 +205,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         context: &FrozenContext,
         history: &[String],
     ) -> Result<(), Failure> {
-        let (detail, metadata) = self
+        let (detail, metadata, initial_contract) = self
             .state
             .jobs
             .lock()
@@ -249,6 +249,22 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             None,
             policy,
         )?;
+        let input = match initial_contract {
+            Some(contract) => {
+                let choices = acquisition_choices::AcquisitionChoices::derive(
+                    &contract,
+                    &metadata,
+                    self.id,
+                    &context.ledger,
+                    &[],
+                    policy,
+                )?;
+                // This producer is not publication authority: the initial writer
+                // independently rederives the stamp on its staged ledger/archive.
+                input.with_acquisition_admission(Arc::new(choices), None)?
+            }
+            None => input,
+        }; // construction-only contract is dropped before firewall/sealing
         let action = input.action(format!("{}:step-1", self.id))?;
         let limits = CompletionLimits::new(
             super::super::provider_workspace::completion_limit_values(policy)?,

@@ -85,6 +85,87 @@ impl NextFixture {
             live,
         }
     }
+    fn gated(provider: &dyn LlmProvider) -> Self {
+        let mut f = Self::new(provider, SpecialistId::DomainAnalystV17);
+        f.request.specialist_id = "domain-analyst@18".into();
+        let hash = f
+            .request
+            .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        let connection = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT record FROM investigation_tasks WHERE id=?1",
+                [&f.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let task: Value = serde_json::from_slice(&bytes).unwrap();
+        // Preserve the typed canonical field order while replacing only the cold
+        // family/definition and whole-request hash; no invocation exists yet.
+        let text = String::from_utf8(bytes)
+            .unwrap()
+            .replace(
+                &serde_json::to_string(&SpecialistId::DomainAnalystV17.definition().unwrap())
+                    .unwrap(),
+                &serde_json::to_string(&SpecialistId::DomainAnalystV18.definition().unwrap())
+                    .unwrap(),
+            )
+            .replace("\"domain-analyst@17\"", "\"domain-analyst@18\"")
+            .replace(task["intent_hash"].as_str().unwrap(), &hash);
+        let bytes = text.into_bytes();
+        connection
+            .execute(
+                "UPDATE investigation_tasks SET record=?1,record_hash=?2 WHERE id=?3",
+                rusqlite::params![bytes, core_prov::content_hash(&bytes), f.id],
+            )
+            .unwrap();
+        drop(connection);
+        f
+    }
+    // Real inner loop only; production start/run/resume gates remain intact.
+    fn run_gated_inner(&self, provider: &dyn LlmProvider) {
+        let app = self.base.base.app.handle();
+        let state = app.state::<AppState>();
+        let _cleanup = Cleanup {
+            state: &state,
+            id: &self.id,
+            live: &self.live,
+        };
+        let mut clock = RunClock::new(Instant::now());
+        let detail = read_detail(&state, &self.id, &self.execution).unwrap();
+        let request = FrozenContext::completion_acquisition_request(&self.request).unwrap();
+        let mut worker = Worker {
+            app,
+            state: &state,
+            id: &self.id,
+            execution: &self.execution,
+            live: &self.live,
+            detail,
+            clock: &mut clock,
+            task_limits: None,
+        };
+        let outcome = worker
+            .execute_inner(&request, Some(&self.request), provider)
+            .map_err(|failure| {
+                failure.preparation_after_call(
+                    request.specialist_id,
+                    worker.detail.usage.model_invocations,
+                )
+            });
+        if let Err(failure) = outcome
+            && let Some(reason) = failure.reason()
+        {
+            stop(
+                app,
+                &state,
+                &self.id,
+                &self.execution,
+                reason,
+                clock.active_milliseconds(),
+            );
+        }
+    }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
         self.base.base.app.run_completion(
             self.id.clone(),
@@ -105,6 +186,12 @@ enum SourceScenario {
     LostAck,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GatedFlow {
+    Repair,
+    Repeat,
+    Cancel,
+}
 struct NextProvider {
     capacity_control: bool,
     observed: Scripted,
@@ -121,6 +208,7 @@ struct NextProvider {
     large_finish: bool,
     exact_targets: bool,
     auditor_finish: bool,
+    gated_flow: Option<GatedFlow>,
 }
 impl NextProvider {
     fn new(malformed: bool) -> Self {
@@ -140,6 +228,7 @@ impl NextProvider {
             large_finish: false,
             exact_targets: false,
             auditor_finish: false,
+            gated_flow: None,
         }
     }
 }
@@ -168,14 +257,16 @@ impl LlmProvider for NextProvider {
         control: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
         assert_eq!((control.check)(), CallDirective::Continue);
-        if self.metadata_query.is_some() {
+        if self.metadata_query.is_some() || self.gated_flow.is_some() {
             self.received_payloads
                 .lock()
                 .unwrap()
                 .push(request.payload().clone());
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
-        if let Some(schema) = &request.payload().response_schema {
+        if let Some(schema) = &request.payload().response_schema
+            && self.gated_flow.is_none()
+        {
             let parsed: Value = serde_json::from_str(schema).unwrap();
             assert_eq!(
                 parsed["anyOf"].as_array().unwrap().len(),
@@ -211,7 +302,22 @@ impl LlmProvider for NextProvider {
         if call == 0 && self.lose_metadata_ack {
             crate::jobs::investigations::metadata_host_fixture::lose_next_ack();
         }
-        let text = if self.exact_targets {
+        let text = if let Some(flow) = self.gated_flow {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            if call == 0 || flow != GatedFlow::Repair {
+                json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                    "scope":{"type":"all"},"kind":null,"labels":[],
+                    "max_facts":12,"max_bytes":16384,"cursor":null}})
+                .to_string()
+            } else if call == 1 {
+                prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"].to_string()
+            } else {
+                json!({"schema_version":1,"outcome":"insufficient_evidence","action":{
+                    "type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence",
+                    "limitations":["This mechanical inventory read does not establish source behavior."]}}).to_string()
+            }
+        } else if self.exact_targets {
             let prompts = self.observed.prompts.lock().unwrap();
             exact_node_tests::next_action(prompts.last().unwrap()).to_string()
         } else if self.invalid_source_first && call == 0 {
@@ -318,7 +424,7 @@ impl LlmProvider for NextProvider {
                 "limitations":["No inventory acquisition has completed."]}})
             .to_string()
         };
-        if call == 2
+        if (call == 2 || (call == 0 && self.gated_flow == Some(GatedFlow::Cancel)))
             && let Some(cancel) = self.observed.cancel.lock().unwrap().as_ref()
         {
             // The final response has been computed while the invocation is in
@@ -1796,39 +1902,7 @@ mod exact_node_tests;
 #[test]
 fn gated_saved_acquisition_task_stops_before_provider() {
     let provider = Arc::new(Scripted::new(Mode::Malformed));
-    let mut f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV17);
-    f.request.specialist_id = "domain-analyst@18".into();
-    let hash = f
-        .request
-        .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
-        .unwrap();
-    let connection = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT record FROM investigation_tasks WHERE id=?1",
-            [&f.id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let task: Value = serde_json::from_slice(&bytes).unwrap();
-    // Preserve the typed canonical field order while replacing only the cold
-    // family/definition and whole-request hash; no invocation exists yet.
-    let text = String::from_utf8(bytes)
-        .unwrap()
-        .replace(
-            &serde_json::to_string(&SpecialistId::DomainAnalystV17.definition().unwrap()).unwrap(),
-            &serde_json::to_string(&SpecialistId::DomainAnalystV18.definition().unwrap()).unwrap(),
-        )
-        .replace("\"domain-analyst@17\"", "\"domain-analyst@18\"")
-        .replace(task["intent_hash"].as_str().unwrap(), &hash);
-    let bytes = text.into_bytes();
-    connection
-        .execute(
-            "UPDATE investigation_tasks SET record=?1,record_hash=?2 WHERE id=?3",
-            rusqlite::params![bytes, core_prov::content_hash(&bytes), f.id],
-        )
-        .unwrap();
-    drop(connection);
+    let f = NextFixture::gated(provider.as_ref());
     let state = f.base.base.app.state::<AppState>();
     let before = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
     assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV18);
@@ -1846,3 +1920,6 @@ fn gated_saved_acquisition_task_stops_before_provider() {
     let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
     assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
 }
+
+#[path = "initial_acquisition_tests.rs"]
+mod initial_acquisition_tests;
