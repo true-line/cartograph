@@ -994,3 +994,18 @@ no dispatch, source access, family registration or runtime exposure. Authenticat
 of host-journal completion remains the caller's responsibility. Model projection,
 schema/host membership, saved-call sealing and seven-target worker integration
 remain required follow-up work before claiming the runtime feature or #598 success.
+
+### Reserved acquisition admission stamp (#1387, AC-0473)
+
+Admission schema1 reserves an optional `acquisition` stamp containing a choices
+hash and an optional semantic-feedback hash. Absent stamps preserve exact
+historical serialization; present stamps validate hash shape but are rejected
+by the shared admission validator because no currently registered family supports
+them. This is a compatibility prerequisite for #1385/#1382, not runtime choices,
+a new specialist, a dispatch permission or a change to numerical limits.
+
+A future unknown specialist (including planned @18) remains fail-closed in older
+binaries: its per-ID task read fails, as can a history page containing it and the
+full receipt-reconciliation audit. SQLite schema validation alone does not detect
+this incompatibility. Future opt-in validation must use disposable profiles; no
+task is silently skipped and no old saved bytes are rewritten here.
