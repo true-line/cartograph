@@ -4492,7 +4492,7 @@ class ClientTest {
 #[test]
 fn okhttp_request_builders_become_fetch_sites() {
     // AC-0476 (#1405): `Request`-import, nested `Builder`-import and fully
-    // qualified OkHttp builders; the last method link wins (default GET),
+    // qualified (also unimported and spaced) OkHttp builders; the last method link wins (default GET),
     // the last `url` wins, `method` keeps a token literal without lowercase
     // letters only, and only a string `url` argument is a literal.
     let sites = retrofit_sites(&[
@@ -4535,10 +4535,22 @@ class Nested {
 }
 "#,
         ),
+        (
+            "src/main/java/io/demo/Bare.java",
+            r#"package io.demo;
+
+class Bare {
+    void calls() {
+        new okhttp3 . Request . Builder().url("https://host/g").build();
+    }
+}
+"#,
+        ),
     ]);
     assert_eq!(
         webclient_rows(&sites),
         [
+            ["GET", "literal:https://host/g", "none"],
             ["GET", "literal:https://host/a", "none"],
             ["DELETE", "literal:https://host/b", "none"],
             ["POST", "literal:https://host/c", "none"],

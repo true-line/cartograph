@@ -74,7 +74,9 @@ pub(crate) fn sites(
         let simple = fqn.rsplit('.').next().unwrap_or(fqn);
         imports.bindings.get(simple).map(String::as_str) == Some(fqn)
     };
-    if !bound(REQUEST) && !bound(BUILDER) && !cx.text(&root).contains(REQUEST) {
+    // A qualified spelling may space its dots (`okhttp3 . Request`), so the
+    // unimported fast path looks for the package name alone.
+    if !bound(REQUEST) && !bound(BUILDER) && !cx.text(&root).contains("okhttp3") {
         return Vec::new();
     }
     let proof = Proof::new(cx, root, imports);
