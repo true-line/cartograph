@@ -1219,8 +1219,19 @@ fn mask_soft_keyword_names(source: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         &source[at..at + len]
     };
     // An expression is still open when the token before `at` is an
-    // operator, a separator or `return`.
+    // operator, a separator or `return`. A `*` whose previous token is `.`
+    // ends a star import, as Kotlin has no `.*` expression (#1417); hidden
+    // whitespace or comments may separate the two.
     let expression_open = |at: usize| match (0..at).rev().find(|&at| token(at)) {
+        Some(last)
+            if source[last] == b'*'
+                && (0..last)
+                    .rev()
+                    .find(|&at| token(at))
+                    .is_some_and(|dot| source[dot] == b'.') =>
+        {
+            false
+        }
         Some(last) if b"=(,.:<>+-*/%&|!?[".contains(&source[last]) => true,
         Some(last) => {
             let first = (0..=last)
