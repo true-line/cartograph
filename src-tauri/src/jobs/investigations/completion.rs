@@ -1990,6 +1990,8 @@ pub(super) use settlement_projection::{
 };
 
 #[cfg(test)]
+pub(super) use next_prompt_snapshot::tests::rewrite as rewrite_test_body;
+#[cfg(test)]
 pub(super) use tests::next_prompt_initial_fixture::{InitialFixture, initial_fixture};
 
 #[cfg(test)]

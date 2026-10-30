@@ -295,8 +295,9 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
     assert_eq!(
         state(&f),
         CapacityState {
+            action_feedback: None,
             count: 1,
-            feedback: Some(first.feedback())
+            feedback: first.feedback()
         }
     );
     start_call(&mut f, &[], None);
@@ -305,6 +306,7 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
     assert_eq!(
         state(&f),
         CapacityState {
+            action_feedback: None,
             count: 1,
             feedback: None
         }
@@ -317,15 +319,17 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
     assert_eq!(
         state(&f),
         CapacityState {
+            action_feedback: None,
             count: 2,
-            feedback: Some(second.feedback())
+            feedback: second.feedback()
         }
     );
     let tx = f.store.conn.unchecked_transaction().unwrap();
     #[cfg(unix)]
     {
         // AC-0327: actual multi-call replay retains all cores and publications.
-        let line = timeline(&tx, &f.task).unwrap();
+        let history = completion::SavedMetadataHistory::load(&tx, &f.task).unwrap();
+        let line = timeline(&tx, &f.task, &history).unwrap();
         assert_eq!(line.calls.len(), 3);
         assert_eq!(line.publications.len(), 2);
         let (retained, peak) = next_prompt_timeline_workspace().unwrap();
@@ -343,7 +347,7 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
         let (core, _) = next_prompt_saved_call_workspace().unwrap();
         assert!(retained >= core * INVESTIGATION_V2_POLICY.limits().model_invocations as usize);
         assert!(peak >= retained + next_prompt_metadata_workspace().unwrap().2);
-        let entries = read_entries(&tx, &f.task, &line).unwrap();
+        let entries = read_entries(&tx, &f.task, &line, &history).unwrap();
         assert_eq!(entries.len(), 2);
         let (rows, replay) = next_prompt_capacity_replay_workspace().unwrap();
         let actual = serde_json::to_vec(&entries).unwrap().len()
@@ -358,13 +362,15 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
     assert_eq!(
         derive_at(&tx, &f.task, &second_step).unwrap(),
         CapacityState {
+            action_feedback: None,
             count: 1,
-            feedback: Some(first.feedback())
+            feedback: first.feedback()
         }
     );
     assert_eq!(
         derive_at(&tx, &f.task, &third_step).unwrap(),
         CapacityState {
+            action_feedback: None,
             count: 1,
             feedback: None
         }
@@ -383,8 +389,9 @@ fn admission_journal_refuse_accept_and_historical_cutoffs_use_logical_ordinals()
     assert_eq!(
         derive_current(&tx, &task).unwrap(),
         CapacityState {
+            action_feedback: None,
             count: 2,
-            feedback: Some(second.feedback())
+            feedback: second.feedback()
         }
     );
 }
@@ -398,8 +405,9 @@ fn admission_journal_accept_before_refusal_does_not_clear_later_feedback() {
     assert_eq!(
         state(&f),
         CapacityState {
+            action_feedback: None,
             count: 1,
-            feedback: Some(entry.feedback())
+            feedback: entry.feedback()
         }
     );
 }
@@ -527,8 +535,9 @@ fn admission_journal_reopen_rejects_rehashed_identity_chain_count_and_action_tam
     assert_eq!(
         state(&f),
         CapacityState {
+            action_feedback: None,
             count: 1,
-            feedback: Some(entry.feedback())
+            feedback: entry.feedback()
         }
     );
     // A mutable task/revision counter cannot manufacture a clear publication.
@@ -647,7 +656,7 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
         )
         .is_ok()
     );
-    assert_eq!(
+    assert!(matches!(
         validate_proposal(
             &value,
             &finish_response,
@@ -656,12 +665,12 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
             f.task.detail.summary.specialist_id
         ),
         Err(InvestigationStoreError::Invalid)
-    );
+    ));
     let value = proposal(&f, 12);
     let response = response(&f, &value);
     let mut call = f.basis.clone();
     call.admission.mode = CompletionCallMode::FinishOnly;
-    assert_eq!(
+    assert!(matches!(
         validate_proposal(
             &value,
             &response,
@@ -670,7 +679,7 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
             f.task.detail.summary.specialist_id
         ),
         Err(InvestigationStoreError::Invalid)
-    );
+    ));
 }
 
 #[test]
@@ -733,7 +742,7 @@ fn admission_journal_saved_call_reopen_authenticates_nonzero_feedback_and_count(
         // Rehashing a structurally valid but different refusal cannot change
         // the feedback originally sealed into this actual saved invocation.
         let mut changed = entry.clone();
-        changed.reason = CapacityRefusalReason::UnprovenContribution;
+        changed.reason = RefusalReason::Capacity(CapacityRefusalReason::UnprovenContribution);
         changed.entry_id = changed.content_id().unwrap();
         rewrite_entry(&tx, &changed);
         assert!(f.basis.validate_saved(&tx, &f.task).is_err());
@@ -817,4 +826,59 @@ fn exact_node_old_saved_ledger_is_rejected_by_persisted_role() {
     assert!(storage::load_ledger(&tx, &task).is_err());
     task.detail.summary.specialist_id = SpecialistId::DomainAnalystV17;
     assert_eq!(storage::load_ledger(&tx, &task).unwrap(), Some(ledger));
+}
+
+#[test]
+fn admission_journal_capacity_only_preserves_legacy_bytes_hashes_and_counts() {
+    // AC-0482: retain the pre-semantic entry layout and v1 hash domain exactly.
+    #[derive(Serialize)]
+    struct LegacyCapacityEntry<'a> {
+        schema_version: u32,
+        entry_id: &'a str,
+        sequence: u32,
+        count: u32,
+        call: &'a SavedCallBasis,
+        invocation_hash: &'a str,
+        response: &'a InvestigationResponseMeta,
+        proposal: &'a Value,
+        reason: CapacityRefusalReason,
+        previous_entry_id: &'a Option<String>,
+    }
+    let mut f = internal_next_prompt_fixture();
+    let first = refuse(&mut f, 12);
+    start_call(&mut f, &[], None);
+    let second = refuse(&mut f, 13);
+    assert_eq!(
+        second.previous_entry_id.as_deref(),
+        Some(first.entry_id.as_str())
+    );
+    for (index, entry) in [first, second].iter().enumerate() {
+        assert_eq!(
+            (entry.sequence, entry.count),
+            (index as u32 + 1, index as u32 + 1)
+        );
+        let mut legacy = LegacyCapacityEntry {
+            schema_version: 1,
+            entry_id: &entry.entry_id,
+            sequence: entry.sequence,
+            count: entry.count,
+            call: &entry.call,
+            invocation_hash: &entry.invocation_hash,
+            response: &entry.response,
+            proposal: &entry.proposal,
+            reason: CapacityRefusalReason::PromptCapacity,
+            previous_entry_id: &entry.previous_entry_id,
+        };
+        let bytes = encode(&legacy, MAX_ENTRY_BYTES).unwrap();
+        assert_eq!(encode(entry, MAX_ENTRY_BYTES).unwrap(), bytes);
+        let decoded: Entry = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(&decoded, entry);
+        legacy.entry_id = "";
+        let mut framed = b"cartograph:investigation-admission-refusal:v1\0".to_vec();
+        framed.extend(encode(&legacy, MAX_ENTRY_BYTES).unwrap());
+        assert_eq!(entry.entry_id, core_prov::content_hash(&framed));
+        assert_eq!(entry.content_id().unwrap(), entry.entry_id);
+    }
+    assert_eq!(state(&f).count, 2);
+    assert!(state(&f).action_feedback.is_none());
 }

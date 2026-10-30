@@ -1038,7 +1038,19 @@ Existing saved-call readers rederive @18 choices from the exact invocation's
 prior authenticated attempts, metadata and retained ledger revisions. Revision
 keys, scope/graph and coverage stay bound; repeated revisions share one transient
 ledger owner. The saved canonical choices hash must match. Non-null semantic
-feedback hashes remain unsupported here; AC-0482 must authenticate them before
+feedback hashes remain unsupported here; activation must authenticate them before
 support is enabled. Unqualified invocation/metadata readers remain closed to @18;
 only the private replay bootstrap admits shape pending exact choices validation.
 Generic validation, dispatch and sealing stay closed; no runtime workflow is enabled.
+
+### Gated action-refusal journal (#1397, AC-0482)
+
+The existing authenticated admission writer can atomically record an @18 Choice
+acquisition absent from its exact saved candidates, with response and paired
+ActionRefused event. All entries consume existing sequence/call bounds; semantic
+entries consume no capacity-refusal, tool, query, evidence or attempt budget.
+Capacity/semantic feedback project independently and clear only after accepted
+publication. Canonical feedback hashes bind the writer's current projection;
+feedbackSome stamps remain rejected by every reader until activation implements
+prefix authentication. Dispatch/sealing/UI stay gated; full runtime acquisition
+and seven-source/inventory/finish/reopen acceptance remain mandatory follow-up.

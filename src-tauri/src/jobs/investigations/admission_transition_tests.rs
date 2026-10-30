@@ -310,3 +310,275 @@ fn admission_namespace_count(connection: &Connection) -> i64 {
         )
         .unwrap()
 }
+
+// Explicit cold @18 witnesses: no sealer, worker or provider is activated.
+fn action_fixture() -> (completion::InternalFixture, Value) {
+    use agents::investigation::{AcquisitionAdmission, acquisition_choices::AcquisitionChoices};
+    let mut f = internal_next_prompt_fixture();
+    let policy = &INVESTIGATION_V2_POLICY;
+    f.request.specialist_id = "domain-analyst@18".into();
+    let intent = completion::host_fixture_intent(&f.request).unwrap();
+    f.task.intent_hash = intent.request_hash.clone();
+    f.task.completion_intent = Some(intent.clone());
+    f.task.detail.completion = Some(completion::initial_detail(&intent));
+    f.task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+    f.task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+    f.metadata.request_hash = intent.request_hash.clone();
+    let choices = AcquisitionChoices::derive(
+        &intent.contract(),
+        &f.metadata,
+        &f.basis.task_id,
+        &f.ledger,
+        &[],
+        policy,
+    )
+    .unwrap();
+    let offered = serde_json::to_value(&choices.entries()[0].action).unwrap();
+    let disclosure = f.step.disclosure.as_mut().unwrap();
+    disclosure.completion_contract_hash =
+        Some(intent.contract().fingerprint_with_policy(policy).unwrap());
+    disclosure.completion_metadata_hash = Some(f.metadata.fingerprint_with_policy(policy).unwrap());
+    let registry = agents::investigation::ProgressiveInvestigationContext::prepare(
+        &intent.request_hash,
+        &f.ledger,
+        &[],
+        policy,
+    )
+    .unwrap()
+    .query_history;
+    disclosure.query_history.as_mut().unwrap().request_hash = intent.request_hash.clone();
+    disclosure.query_history.as_mut().unwrap().registry_hash = registry.registry_hash;
+    disclosure.admission.as_mut().unwrap().acquisition = Some(AcquisitionAdmission {
+        choices_hash: choices.stamp_hash().unwrap(),
+        action_feedback_hash: None,
+    });
+    f.basis.request_hash = intent.request_hash;
+    f.basis.completion_metadata_hash = f.metadata.fingerprint_with_policy(policy).unwrap();
+    f.basis.admission = disclosure.admission.clone().unwrap();
+    f.task.pending = Some(f.step.clone());
+    f.task.admission_state.as_mut().unwrap().current_call = Some(f.basis.clone());
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    completion::rewrite_test_body(
+        &tx,
+        "investigation_invocations",
+        &f.basis.task_id,
+        "step_id",
+        &f.step.step_id,
+        &encode(&f.step, MAX_INVOCATION_BYTES).unwrap(),
+    );
+    fixture::save_task(&tx, &f.task);
+    load_next_prompt_task(&tx, &f.basis.task_id).unwrap();
+    tx.commit().unwrap();
+    (f, offered)
+}
+fn action_next(f: &mut completion::InternalFixture) {
+    let state = fixture::state(f);
+    let ordinal = f.task.detail.usage.model_invocations + 1;
+    f.step.step_id = format!("action-step:{ordinal}");
+    let admission = f
+        .step
+        .disclosure
+        .as_mut()
+        .unwrap()
+        .admission
+        .as_mut()
+        .unwrap();
+    admission.consumed_budgets = f.task.detail.usage.clone();
+    admission.capacity_refusal_count = state.count;
+    admission.capacity_feedback = state.feedback;
+    f.basis.step_id = f.step.step_id.clone();
+    f.basis.invocation_ordinal = ordinal;
+    f.basis.admission = admission.clone();
+    f.task.pending = Some(f.step.clone());
+    f.task.phase = Phase::Invocation;
+    f.task.admission_state.as_mut().unwrap().current_call = Some(f.basis.clone());
+    f.task.detail.usage.model_invocations += 1;
+    f.task.detail.usage.generated_token_reservations += f.step.generated_tokens;
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    insert_body(
+        &tx,
+        "investigation_invocations",
+        &f.basis.task_id,
+        &f.step.step_id,
+        &f.step,
+        MAX_INVOCATION_BYTES,
+    )
+    .unwrap();
+    bump(&tx, &mut f.task).unwrap();
+    event(
+        &tx,
+        &mut f.task,
+        InvestigationEventKind::ModelStarted,
+        Some(&f.step.step_id),
+        None,
+        "Synthetic invocation; no provider executed.",
+    )
+    .unwrap();
+    fixture::save_task(&tx, &f.task);
+    tx.commit().unwrap();
+}
+#[test]
+fn action_refusal_journal_preserves_capacity_bytes_and_atomic_feedback() {
+    // AC-0482: real owner-checked writer and fresh durable reads, cold producer.
+    use admission_journal::RefusalReason;
+    use agents::investigation::ActionRefusalReason;
+    let semantic = RefusalReason::Action(ActionRefusalReason::ActionNotOffered);
+    let write = |f: &mut completion::InternalFixture, revision, value: &Value, reason| {
+        let response = fixture::response(f, value);
+        f.store
+            .refuse_next_prompt(&f._execution_guard, revision, &response, value, reason)
+    };
+    let mut historical = internal_next_prompt_fixture();
+    let revision = historical.task.detail.summary.revision;
+    let proposal = fixture::proposal(&historical, 1);
+    assert!(write(&mut historical, revision, &proposal, semantic).is_err());
+    let (mut f, offered) = action_fixture();
+    let before_inputs = body_rows(&f.store.conn, "investigation_inputs", &f.basis.task_id);
+    let mut steps = vec![];
+    let mut hashes = vec![];
+    let mut semantic_sequence = 0;
+    for index in 0..3 {
+        if index != 0 {
+            action_next(&mut f);
+        }
+        steps.push(f.step.step_id.clone());
+        let proposal = fixture::proposal(&f, index + 1);
+        hashes.push(core_prov::content_hash(
+            &encode(&proposal, MAX_ACTION_BYTES).unwrap(),
+        ));
+        let revision = f.task.detail.summary.revision;
+        let reason = if index == 1 {
+            semantic
+        } else {
+            RefusalReason::Capacity(CapacityRefusalReason::PromptCapacity)
+        };
+        if index == 1 {
+            let before = saved_task_row(&f.store.conn, &f.basis.task_id);
+            assert!(write(&mut f, revision, &offered, semantic).is_err());
+            assert_eq!(saved_task_row(&f.store.conn, &f.basis.task_id), before);
+            FAIL_AFTER_REFUSAL_WRITE.with(|flag| flag.set(true));
+            assert!(write(&mut f, revision, &proposal, semantic).is_err());
+            assert!(!FAIL_AFTER_REFUSAL_WRITE.with(|flag| flag.replace(false)));
+            assert_eq!(saved_task_row(&f.store.conn, &f.basis.task_id), before);
+            assert!(fixture::state(&f).action_feedback.is_none());
+        }
+        write(&mut f, revision, &proposal, reason).unwrap(); // deliberately discard acknowledgement
+        let reopened = JobStore::open(f.store.conn.path().unwrap()).unwrap();
+        let tx = reopened.conn.unchecked_transaction().unwrap();
+        f.task = load_next_prompt_task(&tx, &f.basis.task_id).unwrap();
+        let state = admission_journal::derive_current(&tx, &f.task).unwrap();
+        assert_eq!(state.count, [1, 1, 2][index]);
+        assert_eq!(
+            state.feedback.as_ref().unwrap().action_hash,
+            hashes[if index < 2 { 0 } else { 2 }]
+        );
+        assert_eq!(f.task.detail.usage.model_invocations, index as u32 + 1);
+        assert_eq!(
+            (
+                f.task.detail.usage.tool_actions,
+                f.task.detail.usage.evidence_requests,
+                f.task.detail.usage.evidence_bytes
+            ),
+            (0, 0, 0)
+        );
+        assert!(completion::attempts(&tx, &f.task).unwrap().is_empty());
+        let acquired = load_ledger(&tx, &f.task).unwrap().unwrap();
+        assert_eq!(
+            acquired
+                .queries
+                .iter()
+                .map(|page| page.response_bytes)
+                .sum::<usize>(),
+            0
+        );
+        assert!(acquired.queries.is_empty() && acquired.coverage_reads.is_empty());
+        assert_eq!(
+            f.task.detail.usage.generated_token_reservations,
+            (index as u32 + 1) * f.step.generated_tokens
+        );
+        assert_eq!(
+            body_rows(&tx, "investigation_inputs", &f.basis.task_id),
+            before_inputs
+        );
+        if index == 1 {
+            semantic_sequence = f.task.detail.summary.last_event_sequence;
+        }
+        if index != 0 {
+            assert_eq!(
+                state.action_feedback.as_ref().unwrap().action_hash,
+                hashes[1]
+            );
+            assert_eq!(
+                state.action_feedback.as_ref().unwrap().invocation_ordinal,
+                2
+            );
+        }
+        tx.commit().unwrap();
+        assert!(write(&mut f, revision, &proposal, reason).is_err());
+    }
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    for (sequence, expected_count) in [1, 1, 2].into_iter().enumerate() {
+        let entry: admission_journal::Entry = read_body(
+            &tx,
+            "investigation_admission_refusals",
+            "sequence",
+            &f.basis.task_id,
+            &(sequence as u32 + 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (entry.sequence, entry.count),
+            (sequence as u32 + 1, expected_count)
+        );
+    }
+    let at = admission_journal::derive_at(&tx, &f.task, &steps[2]).unwrap();
+    assert_eq!(at.count, 1);
+    assert_eq!(at.action_feedback.as_ref().unwrap().invocation_ordinal, 2);
+    tx.commit().unwrap();
+    // Move the refusal before ModelCompleted while preserving row hashes/keys.
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    let mut refused: InvestigationEvent = read_body(
+        &tx,
+        "investigation_events",
+        "sequence",
+        &f.basis.task_id,
+        &signed(semantic_sequence).unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    let mut completed: InvestigationEvent = read_body(
+        &tx,
+        "investigation_events",
+        "sequence",
+        &f.basis.task_id,
+        &signed(semantic_sequence - 1).unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    std::mem::swap(&mut refused.sequence, &mut completed.sequence);
+    for event in [refused, completed] {
+        completion::rewrite_test_body(
+            &tx,
+            "investigation_events",
+            &f.basis.task_id,
+            "sequence",
+            &signed(event.sequence).unwrap(),
+            &encode(&event, 16 * 1024).unwrap(),
+        );
+    }
+    assert!(admission_journal::derive_current(&tx, &f.task).is_err());
+    drop(tx);
+    action_next(&mut f);
+    fixture::accept_query(&mut f); // trusted publication fixture, not live @18 membership/dispatch
+    let state = fixture::state(&f);
+    assert_eq!(state.count, 2);
+    assert!(state.feedback.is_none() && state.action_feedback.is_none());
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    assert!(
+        admission_journal::derive_at(&tx, &f.task, &steps[2])
+            .unwrap()
+            .action_feedback
+            .is_some()
+    );
+}

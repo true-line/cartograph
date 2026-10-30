@@ -401,6 +401,7 @@ pub enum InvestigationEventKind {
     FinishRefused,
     SourceReplayRefused,
     CapacityRefused,
+    ActionRefused,
     ReadUnavailable,
 }
 

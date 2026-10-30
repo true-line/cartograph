@@ -726,6 +726,9 @@
 - **AC-0483** Given synthetic saved @18 invocations including a completed inventory read, existing saved-call readers rederive choices using authenticated attempts strictly before each invocation and exact retained ledger keys, graph/scope and coverage. Historical cutoff choices remain stable after later progress; rehashed foreign ledgers, choices hashes and unsupported feedback hashes fail. Transient owners are bounded, historical bytes stay unchanged, and dispatch/sealing remain disabled. This prerequisite authenticates saved choices, not semantic feedback or full runtime acquisition (#1398).
 - **Trace:** H4 · `app` · — · T-0483
 
+- **AC-0482** Given synthetic saved @18 calls, the existing owner-checked transaction records a strictly decoded unoffered acquisition, response and exact refusal event, and reopens identical canonical feedback without tool/query/evidence/attempt or capacity-refusal charges. Capacity/semantic interleaving preserves independent feedback, total sequences and consumed model invocations; accepted publication clears feedback while rollback/refusal does not. Legacy capacity bytes/hash and sequence=count stay unchanged; substitution, duplicate, old-role, offered, FinishOnly, stale and cancelled writes fail. FeedbackSome remains rejected, and runtime activation/semantic acceptance remain unestablished (#1397).
+- **Trace:** H4 · `agents`, `app` · — · T-0482
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

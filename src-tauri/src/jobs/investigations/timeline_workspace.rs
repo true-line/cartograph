@@ -1,7 +1,7 @@
 //! Retained admission timeline and replay owners; refusal rows remain separate.
 use super::*;
 use crate::jobs::investigations::attempt_record_workspace::next_prompt_attempt_acquisition_workspace;
-use context_hub::logical::{json_bytes, map, slots, sum};
+use context_hub::logical::{json_bytes, map, set, slots, sum};
 use std::mem::size_of;
 
 /// Logical retained Timeline and replay peak, including borrowed task/history.
@@ -26,6 +26,7 @@ pub(crate) fn next_prompt_timeline_workspace() -> Option<(usize, usize)> {
     let retained = sum(&[
         size_of::<Timeline>(),
         map::<u32, CallWitness>(calls)?,
+        set::<u32>(calls)?, // at most one semantic refusal event per invocation
         core.checked_add(basis)?.checked_mul(calls)?,
         slots::<Publication>(events)?,
     ])?;
