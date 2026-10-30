@@ -908,24 +908,44 @@ impl AuthenticatedCompletionBasis {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let feedback = project(&entries, &line, Some(ordinal)).action_feedback;
+        let result = Self::from_named(intent, &history, &mut line, &entries, ordinal)?;
+        drop((history, line, entries));
+        result.binding()?;
+        Ok(Some(result))
+    }
+    // Eligibility is enforced by the two distinct factories, never a flag.
+    fn from_named(
+        intent: &completion::CompletionIntent,
+        history: &completion::SavedMetadataHistory<'_>,
+        line: &mut Timeline,
+        entries: &[Entry],
+        ordinal: u32,
+    ) -> Result<Self, InvestigationStoreError> {
+        let witness = line
+            .calls
+            .get(&ordinal)
+            .ok_or(InvestigationStoreError::Missing)?;
+        if witness.call.request_hash != intent.request_hash
+            || witness.core.metadata.request_hash != intent.request_hash
+            || witness.core.metadata.obligations_hash != intent.obligations_hash
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let feedback = project(entries, line, Some(ordinal)).action_feedback;
         let choices = history
             .acquisition_choices_at(&witness.call, &witness.core.ledger)?
             .ok_or(InvestigationStoreError::Invalid)?;
-        let (_, witness) = line
+        let witness = line
             .calls
-            .pop_last()
-            .ok_or(InvestigationStoreError::Invalid)?;
-        let result = Self {
+            .remove(&ordinal)
+            .ok_or(InvestigationStoreError::Missing)?;
+        Ok(Self {
             call: witness.call,
             core: witness.core,
             contract: intent.contract(),
             choices,
             feedback,
-        };
-        drop((history, line, entries));
-        result.binding()?;
-        Ok(Some(result))
+        })
     }
     pub(super) fn binding(
         &self,
@@ -981,6 +1001,94 @@ impl AuthenticatedCompletionBasis {
             return Err(InvestigationStoreError::Invalid);
         }
         Ok(())
+    }
+}
+
+/// Historical refusals cannot be supplied as latest accepted-result authority.
+/// The private wrapped payload is shared, not a second replay implementation.
+pub(super) struct AuthenticatedRefusalBasis(AuthenticatedCompletionBasis);
+impl AuthenticatedRefusalBasis {
+    pub(super) fn load(
+        connection: &Connection,
+        task: &StoredTask,
+        sequence: u32,
+        expected: &staged::JournalEntry,
+    ) -> Result<Option<Self>, InvestigationStoreError> {
+        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+            return Ok(None);
+        }
+        require_transaction(connection)?;
+        admission_contract::validate_pairing(task)?;
+        let intent = task
+            .completion_intent
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?;
+        intent.validate(task)?;
+        if !(1..=2).contains(&sequence) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let actual: staged::JournalEntry = read_body(
+            connection,
+            "staged_completion_refusals",
+            "sequence",
+            &task.detail.summary.investigation_id,
+            &sequence,
+        )?
+        .ok_or(InvestigationStoreError::Missing)?;
+        if expected.record.refusal_count != sequence
+            || expected.record.task_id != task.detail.summary.investigation_id
+            || actual != *expected
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        drop(actual);
+        let response: InvestigationResponseMeta = read_body(
+            connection,
+            "investigation_responses",
+            "step_id",
+            &task.detail.summary.investigation_id,
+            &expected.record.step_id,
+        )?
+        .ok_or(InvestigationStoreError::Missing)?;
+        if response != expected.response {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        drop(response); // both row reloads precede the shared replay epoch
+
+        let history = completion::SavedMetadataHistory::load(connection, task)?;
+        let mut line = timeline(connection, task, &history)?;
+        let entries = read_entries(connection, task, &line, &history)?;
+        // Timeline authenticates unique saved step IDs; the ordinal below
+        // independently binds the selected refusal to that invocation.
+        let (&ordinal, witness) = line
+            .calls
+            .iter()
+            .find(|(_, witness)| witness.call.step_id == expected.record.step_id)
+            .ok_or(InvestigationStoreError::Missing)?;
+        if expected.ledger_revision != witness.core.ledger.revision
+            || expected.usage.model_invocations != ordinal
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let result = Self(AuthenticatedCompletionBasis::from_named(
+            intent, &history, &mut line, &entries, ordinal,
+        )?);
+        drop((history, line, entries));
+        result.binding()?;
+        Ok(Some(result))
+    }
+    pub(super) fn binding(
+        &self,
+    ) -> Result<agents::investigation::AcquisitionDisclosureConsistency<'_>, InvestigationStoreError>
+    {
+        self.0.binding()
+    }
+    pub(super) fn check_step(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step: &PendingInvestigationStep,
+    ) -> Result<(), InvestigationStoreError> {
+        self.0.check_step(ledger, step)
     }
 }
 

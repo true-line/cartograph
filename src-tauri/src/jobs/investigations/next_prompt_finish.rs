@@ -214,6 +214,7 @@ impl JobStore {
                             input.current,
                             &finish,
                             input.response.clone(),
+                            basis.as_ref(),
                         )?;
                     }
                     Err(FinishDecision::Accepted(_)) => {

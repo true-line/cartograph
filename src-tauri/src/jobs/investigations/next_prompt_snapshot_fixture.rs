@@ -267,26 +267,9 @@ impl Fixture {
             previous_ledger: Some(self.f.ledger.clone()),
             completed_tool: Some(InvestigationTool::ReadCoverageInventory),
         };
-        let candidate = InvestigationInput::prepare_v9_with_policy(
-            &self.f.request.question,
-            self.f.task.detail.summary.specialist_id,
-            ledger.clone(),
-            &[],
-            &[],
-            &[],
-            &usage,
-            &basis,
-            &self.f.request,
-            &metadata,
-            &[raw.as_str()],
-            CompletionCallMode::Choice,
-            0,
-            None,
-            policy,
-        )
-        .unwrap();
-        let candidate =
-            if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let snapshot = if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18
+        {
+            Some(
                 self.f
                     .store
                     .investigation_metadata_continuation_snapshot(
@@ -304,12 +287,35 @@ impl Fixture {
                             active_milliseconds: usage.active_milliseconds,
                         },
                     )
-                    .unwrap()
-                    .attach_acquisition(candidate)
-                    .unwrap()
-            } else {
-                candidate
-            };
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let candidate = InvestigationInput::prepare_v9_with_policy(
+            &self.f.request.question,
+            self.f.task.detail.summary.specialist_id,
+            ledger.clone(),
+            &[],
+            &[],
+            &[],
+            snapshot.as_ref().map_or(&usage, |s| s.usage()),
+            snapshot.as_ref().map_or(&basis, |s| s.basis()),
+            &self.f.request,
+            snapshot.as_ref().map_or(&metadata, |s| s.metadata()),
+            &[raw.as_str()],
+            snapshot
+                .as_ref()
+                .map_or(CompletionCallMode::Choice, |s| s.mode()),
+            snapshot.as_ref().map_or(0, |s| s.capacity_refusal_count()),
+            None,
+            policy,
+        )
+        .unwrap();
+        let candidate = match snapshot {
+            Some(snapshot) => snapshot.attach_acquisition(candidate).unwrap(),
+            None => candidate,
+        };
         let action_id =
             if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
                 format!("{}:step-{}", self.id(), usage.model_invocations + 1)

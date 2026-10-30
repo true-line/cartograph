@@ -1138,3 +1138,13 @@ used. Accepted result creation, finishing hashes and durable reread share this
 authority within the existing transaction. Generic/history behavior and ceilings
 remain unchanged. Early-Finish refusal persistence is not adopted here, nor are
 initial worker authority, public/store/resume or UI activation enabled.
+
+### Gated historical Finish refusals (#1446, AC-0492)
+
+A distinct historical refusal binding reads the actual saved refusal sequence
+and authenticates its immutable invocation, ledger, choices and strict prior
+feedback cutoff. It does not require the task's later current call or ledger.
+Accepted-result binding stays latest-only, with no skip-current switch. Existing
+finish decisions, refusal record fingerprints/assessment, two-refusal cap, usage,
+rollback and reread share their strict validators. Generic stamps remain rejected
+and all public/store/worker/UI activation gates and limits stay unchanged.

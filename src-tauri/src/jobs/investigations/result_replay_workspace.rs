@@ -90,7 +90,7 @@ pub(crate) fn next_prompt_result_workspace() -> Option<(usize, usize)> {
 }
 
 /// Selected saved call plus canonical contract/choices/feedback; no replay cache.
-pub(super) fn completion_basis_workspace() -> Option<(usize, usize)> {
+pub(crate) fn completion_basis_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let extra = sum(&[
         size_of::<admission_journal::AuthenticatedCompletionBasis>(),
@@ -108,7 +108,7 @@ pub(super) fn completion_basis_workspace() -> Option<(usize, usize)> {
     ])?;
     // Replay already covers shared history + timeline/entries + transient
     // historical-ledger map/candidate construction in read_entries. Selecting
-    // the last call moves its core, rather than retaining a second whole epoch.
+    // the named call moves its core, rather than retaining a second whole epoch.
     Some((
         retained,
         next_prompt_capacity_replay_workspace()?

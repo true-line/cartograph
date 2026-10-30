@@ -443,6 +443,11 @@ fn task_phase_workspaces(
     // context term below, outside this phase maximum.
     let finish = crate::jobs::investigations::next_prompt_result_workspace()?
         .1
+        .max(
+            crate::jobs::investigations::next_prompt_staged_workspace()?
+                .1
+                .checked_add(crate::jobs::investigations::completion_basis_workspace()?.0)?,
+        ) // current writer basis survives historical refusal replay
         .checked_add(crate::jobs::investigations::next_prompt_saved_call_workspace()?.0)?
         .checked_add(context_hub::logical::json_bytes(
             agents::investigation::MAX_ACTION_BYTES.checked_mul(2)?,
