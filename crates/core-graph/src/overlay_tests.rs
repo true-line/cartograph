@@ -621,3 +621,187 @@ fn graph_reset_hook_discards_the_overlay() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+// AC-0505: independent old encoding oracle, not the shared streaming helper.
+#[test]
+fn capability_read_identity_matches_legacy_encoding() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    let mut input = facts();
+    input[0].cites.insert(BaseRef::Node("sym:a".into()));
+    if let OverlayItem::Node(n) = &mut input[0].item {
+        n.id = "cap:é\"\\\n".into();
+    }
+    // Keep edge endpoints valid after changing the node identity.
+    if let OverlayItem::Edge(e) = &mut input[1].item {
+        e.dst = "cap:é\"\\\n".into();
+    }
+    let published = store.publish(&base, recipe(), input).unwrap();
+    let (identity, basis, selected) = current(
+        store
+            .read_capabilities_bounded(&base.revision, 1, MAX_BYTES)
+            .unwrap(),
+    );
+    let rows: Vec<(String, String)> = store
+        .connection
+        .prepare("SELECT key, fact FROM overlay_facts ORDER BY key")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut old = Vec::new();
+    let basis_json = serde_json::to_string(&basis).unwrap();
+    for bytes in std::iter::once(b"cartograph-knowledge-overlay@1".as_slice())
+        .chain(std::iter::once(basis_json.as_bytes()))
+        .chain(
+            rows.iter()
+                .flat_map(|(key, json)| [key.as_bytes(), json.as_bytes()]),
+        )
+    {
+        old.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        old.extend_from_slice(bytes);
+    }
+    assert_eq!(identity.0, core_prov::content_hash(&old));
+    assert_eq!(identity, published);
+    assert_eq!(current(store.read(&base.revision).unwrap()).0, identity);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].cites.len(), 2);
+    assert_eq!(snapshot(&graph).graph, base.graph);
+    assert_eq!(graph.read_revision().unwrap(), base.revision);
+}
+
+// AC-0505: exact retained logical JSON bytes/count; limits never return partial facts.
+#[test]
+fn capability_read_selected_boundaries_and_state_parity() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    let read =
+        |s: &OverlayStore, count, bytes| s.read_capabilities_bounded(&base.revision, count, bytes);
+    assert_eq!(read(&store, 0, 0).unwrap(), OverlayRead::Absent);
+    let input = facts();
+    let bytes = serde_json::to_string(&input[0]).unwrap().len();
+    store.publish(&base, recipe(), input.clone()).unwrap();
+    assert_eq!(
+        current(read(&store, 1, bytes).unwrap()).2,
+        vec![input[0].clone()]
+    );
+    for (count, cap) in [(0, bytes), (1, bytes - 1)] {
+        assert!(matches!(
+            read(&store, count, cap),
+            Err(OverlayError::SelectionLimit)
+        ));
+    }
+    let mut two = input.clone();
+    let mut second = input[0].clone();
+    if let OverlayItem::Node(n) = &mut second.item {
+        n.id = "cap:second".into();
+    }
+    let second_bytes = serde_json::to_string(&second).unwrap().len();
+    two.push(second);
+    store.publish(&base, recipe(), two).unwrap();
+    assert_eq!(
+        current(read(&store, 2, bytes + second_bytes).unwrap())
+            .2
+            .len(),
+        2
+    );
+    assert!(matches!(
+        read(&store, 1, MAX_BYTES),
+        Err(OverlayError::SelectionLimit)
+    ));
+    assert!(matches!(
+        read(&store, 2, bytes + second_bytes - 1),
+        Err(OverlayError::SelectionLimit)
+    ));
+    store
+        .publish(
+            &base,
+            recipe(),
+            vec![
+                input[1].clone(),
+                OverlayFact {
+                    item: OverlayItem::Node(node("cap:checkout", "Actor")),
+                    cites: input[0].cites.clone(),
+                },
+            ],
+        )
+        .unwrap();
+    assert!(current(read(&store, 0, 0).unwrap()).2.is_empty());
+    let mut other = base.revision.clone();
+    other.graph_instance = "different-instance".into();
+    assert_eq!(
+        store.read_capabilities_bounded(&other, 0, 0).unwrap(),
+        store.read(&other).unwrap()
+    );
+    assert_eq!(snapshot(&graph).graph, base.graph);
+    assert_eq!(graph.read_revision().unwrap(), base.revision);
+}
+
+// AC-0505: all rows are identity/shape checked, even after selection overflow.
+#[test]
+fn capability_read_rejects_unselected_corruption_before_limit() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    let mut input = facts();
+    input.push(OverlayFact {
+        item: OverlayItem::Node(node("zz:actor", "Actor")),
+        cites: input[0].cites.clone(),
+    });
+    for (assignment, resealed) in [
+        ("fact = replace(fact, 'Actor', 'Other')", false),
+        ("key = key || 'wrong'", true),
+        ("fact = json_set(fact, '$.cites', json('[]'))", true),
+        ("fact = json_remove(fact, '$.item.Node.props.prov')", true),
+        (
+            "fact = json_set(fact, '$.item.Node.props.prov.confidence_tier', 'Confirmed')",
+            true,
+        ),
+        ("fact = '{'", true),
+    ] {
+        store.publish(&base, recipe(), input.clone()).unwrap();
+        store
+            .connection
+            .execute(
+                &format!("UPDATE overlay_facts SET {assignment} WHERE fact LIKE '%zz:actor%'"),
+                [],
+            )
+            .unwrap();
+        if resealed {
+            reseal(&store);
+        }
+        for count in [0, 1] {
+            let result = store.read_capabilities_bounded(&base.revision, count, MAX_BYTES);
+            assert!(
+                matches!(
+                    result,
+                    Err(OverlayError::Schema(_) | OverlayError::Encoding(_))
+                ),
+                "{assignment}: {result:?}"
+            );
+        }
+    }
+}
+
+// AC-0505: bound SQLite-owned row bytes before decoding or copying them.
+#[test]
+fn capability_read_refuses_oversized_single_row_before_decode() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    store.publish(&base, recipe(), facts()).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE overlay_facts SET key = ?1 WHERE key LIKE 'e%'",
+            ["x".repeat(MAX_FACT_BYTES + 1)],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.read_capabilities_bounded(&base.revision, 0, 0),
+        Err(OverlayError::Schema("overlay row bytes"))
+    ));
+}
