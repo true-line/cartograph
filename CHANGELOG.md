@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.51.0
+
+### Minor Changes
+
+- 09e2fc4: Kotlin RestTemplate, WebClient, OkHttp, Ktor and Apache HttpClient requests in property or top-level initializers are now recovered as file-owned client calls (#1426).
+
 ## 0.50.0
 
 ### Minor Changes
