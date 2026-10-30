@@ -17,7 +17,7 @@ pub struct DisclosedAdmissionState {
     pub acquisition: Option<AcquisitionAdmission>,
 }
 
-/// Reserved representation only. No registered admission family supports it.
+/// Shape-only stamp. Its hashes require separate saved-cutoff authentication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionAdmission {
@@ -55,6 +55,29 @@ impl DisclosedAdmissionState {
             // shape validity alone never admits this reserved extension.
             return Err(InvestigationError::InvalidInput);
         }
+        self.validate_shape_with_policy(policy)
+    }
+
+    /// Saved-call structural check only. The host must obtain the role from
+    /// validated saved task context; this does not authenticate either hash.
+    pub fn validate_saved_role_shape(
+        &self,
+        role: SpecialistId,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        if (role == SpecialistId::DomainAnalystV18) != self.acquisition.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(acquisition) = &self.acquisition {
+            acquisition.validate()?;
+        }
+        self.validate_shape_with_policy(policy)
+    }
+
+    fn validate_shape_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
         let usage = &self.consumed_budgets;
         let limits = policy.limits();
         if policy.profile() != INVESTIGATION_V2_POLICY.profile()

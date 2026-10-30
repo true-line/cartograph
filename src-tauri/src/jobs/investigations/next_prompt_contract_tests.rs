@@ -433,3 +433,125 @@ fn next_prompt_contract_intent4_requires_disclosure6_assessment_basis() {
         );
     }
 }
+
+#[test]
+fn saved_call_core_acquisition_stamp_uses_saved_task_role() {
+    // AC-0481: synthetic saved witnesses prove role/shape only, not acquisition
+    // hash provenance or an enabled @18 producer/public reader.
+    let f = internal_fixture();
+    for role in [
+        SpecialistId::DomainAnalystV15,
+        SpecialistId::DomainAnalystV17,
+        SpecialistId::DomainAnalystV18,
+    ] {
+        let mut task = clone_task(&f.task);
+        let mut request = f.request.clone();
+        request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
+        let intent = host_fixture_intent(&request).unwrap();
+        task.intent_hash = intent.request_hash.clone();
+        task.detail.summary.specialist_id = role;
+        task.detail.specialist = role.definition().unwrap();
+        task.detail.completion = Some(initial_detail(&intent));
+        task.completion_intent = Some(intent.clone());
+        let mut metadata = f.metadata.clone();
+        metadata.request_hash = task.intent_hash.clone();
+        let mut basis = f.basis.clone();
+        basis.request_hash = task.intent_hash.clone();
+        basis.completion_metadata_hash = metadata
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap();
+        basis.admission.acquisition = (role == SpecialistId::DomainAnalystV18).then(|| {
+            agents::investigation::AcquisitionAdmission {
+                choices_hash: "a".repeat(64),
+                action_feedback_hash: Some("b".repeat(64)),
+            }
+        });
+        let mut step = f.step.clone();
+        let disclosure = step.disclosure.as_mut().unwrap();
+        disclosure.completion_contract_hash = Some(
+            intent
+                .contract()
+                .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+                .unwrap(),
+        );
+        disclosure.completion_metadata_hash = Some(basis.completion_metadata_hash.clone());
+        assert!(f.ledger.queries.is_empty());
+        let history = agents::investigation::ProgressiveInvestigationContext::prepare(
+            &task.intent_hash,
+            &f.ledger,
+            &[],
+            &INVESTIGATION_V2_POLICY,
+        )
+        .unwrap()
+        .query_history;
+        let saved_history = disclosure.query_history.as_mut().unwrap();
+        saved_history.request_hash = task.intent_hash.clone();
+        saved_history.registry_hash = history.registry_hash;
+        let mut check = |basis: &SavedCallBasis| {
+            step.disclosure.as_mut().unwrap().admission = Some(basis.admission.clone());
+            task.pending = Some(step.clone());
+            task.admission_state.as_mut().unwrap().current_call = Some(basis.clone());
+            let bytes = encode(&task, MAX_RECORD_BYTES).unwrap();
+            // Persist and checksum the exact task carrying the family. No
+            // request/disclosure field supplies a role to validate_core.
+            f.store
+                .conn
+                .execute(
+                    "UPDATE investigation_tasks SET record=?2,record_hash=?3 WHERE id=?1",
+                    params![
+                        task.detail.summary.investigation_id,
+                        bytes,
+                        core_prov::content_hash(&bytes)
+                    ],
+                )
+                .unwrap();
+            let (saved, hash): (Vec<u8>, String) = f
+                .store
+                .conn
+                .query_row(
+                    "SELECT record,record_hash FROM investigation_tasks WHERE id=?1",
+                    [&task.detail.summary.investigation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(hash, core_prov::content_hash(&saved));
+            let saved_task: StoredTask = serde_json::from_slice(&saved).unwrap();
+            basis.validate_core(&saved_task, &step, &f.ledger, &metadata)
+        };
+        check(&basis).unwrap_or_else(|error| panic!("{role:?} positive core: {error:?}"));
+        let mut changed = basis.clone();
+        if role == SpecialistId::DomainAnalystV18 {
+            changed
+                .admission
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .action_feedback_hash = None;
+            check(&changed).unwrap();
+            assert!(
+                basis
+                    .admission
+                    .validate_with_policy(&INVESTIGATION_V2_POLICY)
+                    .is_err()
+            );
+            changed.admission.acquisition = None;
+            assert!(check(&changed).is_err());
+            for malformed in [true, false] {
+                let mut changed = basis.clone();
+                let stamp = changed.admission.acquisition.as_mut().unwrap();
+                if malformed {
+                    stamp.choices_hash = "bad".into();
+                } else {
+                    stamp.action_feedback_hash = Some("bad".into());
+                }
+                assert!(check(&changed).is_err());
+            }
+        } else {
+            changed.admission.acquisition = Some(agents::investigation::AcquisitionAdmission {
+                choices_hash: "a".repeat(64),
+                action_feedback_hash: None,
+            });
+            assert!(check(&changed).is_err());
+        }
+    }
+}
