@@ -5079,3 +5079,37 @@ class ClientTest(private val client: HttpClient) {
     ]);
     assert_eq!(rows, Vec::<[String; 4]>::new());
 }
+
+// AC-0470 (#1417): a `suspend` declaration right after a star import keeps
+// its modifier and its Symbol; a `*` operator still opens an expression.
+// (T-0470)
+#[test]
+fn suspend_after_a_star_import_keeps_its_declaration() {
+    for (source, masked) in [
+        (
+            "import a.b.*\n\nsuspend fun c()",
+            "import a.b.*\n\nsuspend fun c()",
+        ),
+        (
+            "import a.b.* // all\nsuspend fun c()",
+            "import a.b.* // all\nsuspend fun c()",
+        ),
+        (
+            "import a.b. /* generated */ *\nsuspend fun c()",
+            // The block comment is blanked; `suspend` keeps its spelling.
+            "import a.b.                 *\nsuspend fun c()",
+        ),
+        ("x = a * suspend\nfun d()", "x = a * suspen_\nfun d()"),
+    ] {
+        let out = mask_soft_keyword_names(source.as_bytes());
+        assert_eq!(std::str::from_utf8(&out).unwrap(), masked, "{source}");
+    }
+    let path = "src/main/kotlin/com/demo/Api.kt";
+    let source =
+        "package com.demo\n\nimport io.ktor.client.request.*\n\nsuspend fun load(): Int = 1\n";
+    let out = extract_source(source.as_bytes(), path, &id()).unwrap();
+    let symbol = node(&out.nodes, &format!("sym:local/demo@{path}#load"));
+    let span = &symbol.props["prov"]["evidence"][0];
+    let start = span["byte_start"].as_u64().unwrap() as usize;
+    assert!(source[start..].starts_with("suspend fun load("));
+}
