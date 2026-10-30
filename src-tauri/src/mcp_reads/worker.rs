@@ -122,6 +122,7 @@ impl WorkerStartup {
     ) -> Result<(), ReadError> {
         let minimum = match self.task_phase {
             TaskPhaseAdmission::NoTaskGrant if !task_granted => return Ok(()),
+            TaskPhaseAdmission::TaskGrant { minimum, .. } if !task_granted => minimum,
             TaskPhaseAdmission::TaskGrant {
                 app_path_bytes: expected,
                 minimum,
@@ -810,8 +811,16 @@ pub(crate) mod tests {
         assert_eq!(computations.get(), 1);
         startup.validate_task_phase(true, path_bytes).unwrap();
         assert_eq!(computations.get(), 1);
+        // A revoked grant keeps the safe, already-reserved read-only startup.
+        startup.validate_task_phase(false, 0).unwrap();
+        assert_eq!(computations.get(), 1);
+
+        let no_task = WorkerStartup::prepare_with(limits, false, 0, |_, _| {
+            panic!("read-only startup must not compute the task floor")
+        })
+        .unwrap();
         assert!(matches!(
-            startup.validate_task_phase(false, path_bytes),
+            no_task.validate_task_phase(true, path_bytes),
             Err(ReadError::InvalidRequest)
         ));
         assert!(matches!(
