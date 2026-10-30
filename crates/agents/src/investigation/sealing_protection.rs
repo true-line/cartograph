@@ -16,6 +16,23 @@ pub(in crate::investigation) fn admission_protected_fields(
     admission_protected_values(&before, &after, &original.system, &redacted.system)
 }
 
+/// Representation-only projection check. The caller already selected this
+/// schema through the real typed selector; this grants no sealing authority.
+pub(in crate::investigation) fn selected_schema_protected_fields(
+    original: &CompletionPayload,
+    redacted: &CompletionPayload,
+    selected: &str,
+) -> Result<(), InvestigationError> {
+    if original.response_schema.as_deref() != Some(selected)
+        || original.response_schema != redacted.response_schema
+    {
+        return Err(InvestigationError::InvalidInput);
+    }
+    let before = parse_prompt(&original.prompt)?;
+    let after = parse_prompt(&redacted.prompt)?;
+    admission_protected_values(&before, &after, &original.system, &redacted.system)
+}
+
 // Actual sealing already owns both preflighted trees. Borrow them instead of
 // reparsing and retaining another pair; source preview uses the wrapper above.
 pub(super) fn admission_protected_values(

@@ -152,12 +152,14 @@ impl InvestigationInput {
             limits,
             policy,
             None,
+            None,
             false,
         )
     }
 
     pub(super) fn measure_unchanged_protected_reserve(
         &self,
+        target: &InvestigationInspectionTarget,
         profile: &llm::bounded::ProviderProfile,
         limits: &llm::bounded::CompletionLimits,
         action_id: &str,
@@ -172,6 +174,7 @@ impl InvestigationInput {
             limits,
             policy,
             None,
+            Some(target),
             true,
         )
     }
@@ -186,6 +189,7 @@ impl InvestigationInput {
         limits: &llm::bounded::CompletionLimits,
         policy: &InvestigationPolicy,
         unread_source: Option<(usize, usize)>,
+        source_target: Option<&InvestigationInspectionTarget>,
         protect: bool,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         if core_redact::TEXT_POLICY_VERSION != "redact-text@1" {
@@ -295,18 +299,25 @@ impl InvestigationInput {
                 prompt["turn_progress"]["action_feedback"] =
                     serde_json::to_value(feedback).map_err(|_| InvestigationError::InvalidInput)?;
             }
-            #[cfg(test)]
-            assert!(
-                context_hub::logical::count(&prompt).unwrap()
-                    <= reserve_projection_bytes(policy).unwrap()
-            );
             action.payload.response_schema = if let Some(choices) = &self.acquisition_choices {
-                response_schema::select_acquisition(mode, choices, &self.ledger)?
+                if let Some(target) = source_target {
+                    let (future, schema) =
+                        choices.source_projection(&contract, &self.ledger, target, mode, policy)?;
+                    prompt["turn_progress"]["acquisition_choices"] = future;
+                    schema
+                } else {
+                    response_schema::select_acquisition(mode, choices, &self.ledger)?
+                }
             } else if let Some(role) = schema_role {
                 response_schema::select_admitted(role, mode, &self.ledger)?
             } else {
                 None
             };
+            #[cfg(test)]
+            assert!(
+                context_hub::logical::count(&prompt).unwrap()
+                    <= reserve_projection_bytes(policy).unwrap()
+            );
             wire::replace_prompt(&mut action.payload, &prompt, MAX_INPUT_BYTES)?;
             if protect {
                 let inspected = llm::bounded::inspect_bounded_action(profile, &action, limits)
@@ -321,6 +332,11 @@ impl InvestigationInput {
                     &self.ledger,
                     &action.payload,
                     inspected.payload(),
+                    if self.acquisition_choices.is_some() {
+                        action.payload.response_schema.as_deref()
+                    } else {
+                        None
+                    },
                 )?;
             }
             let measurements = match unread_source {
@@ -618,6 +634,7 @@ impl InvestigationInput {
             limits,
             policy,
             Some((span_index, bytes)),
+            Some(target),
             protect,
         )
     }
@@ -823,6 +840,7 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
     }
     sum(&[
         MAX_INPUT_BYTES.checked_mul(20)?,
+        MAX_ACTION_BYTES, // future source choices can expose a larger bounded prefix
         count(&metadata)?,
         progress_bytes,
         staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?,

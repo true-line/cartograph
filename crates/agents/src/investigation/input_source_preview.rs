@@ -99,8 +99,13 @@ impl InvestigationInput {
         // A genuinely unavailable read advances usage/attempt metadata without
         // acquiring a citation or revising the ledger. Bound that complete
         // protected representation independently; no size ordering is assumed.
-        let unavailable =
-            self.measure_unchanged_protected_reserve(profile, limits, next_action_id, policy)?;
+        let unavailable = self.measure_unchanged_protected_reserve(
+            target,
+            profile,
+            limits,
+            next_action_id,
+            policy,
+        )?;
         let continuation = AdmissionReserveMeasurements {
             choice: maximum(acquired.choice, unavailable.choice),
             finish_only: maximum(acquired.finish_only, unavailable.finish_only),
@@ -116,7 +121,15 @@ impl InvestigationInput {
                 &(
                     self.ledger.fingerprint_with_policy(policy)?,
                     content_hash(&bounded_bytes(&self.payload, MAX_INPUT_BYTES)?),
-                    disclosure.fingerprint_with_policy(&self.ledger, policy)?,
+                    if self.acquisition_choices.is_some() {
+                        disclosure.fingerprint_saved_role_shape(
+                            &self.ledger,
+                            policy,
+                            SpecialistId::DomainAnalystV18,
+                        )?
+                    } else {
+                        disclosure.fingerprint_with_policy(&self.ledger, policy)?
+                    },
                     &current.preview().egress.action_id,
                     target,
                     profile,
@@ -142,8 +155,14 @@ pub(super) fn protected_representation(
     ledger: &InvestigationInputLedger,
     before: &CompletionPayload,
     after: &CompletionPayload,
+    selected_schema: Option<&str>,
 ) -> Result<(), InvestigationError> {
-    super::super::sealing::admission_protected_fields(ledger, before, after)?;
+    match selected_schema {
+        Some(schema) => {
+            super::super::sealing::selected_schema_protected_fields(before, after, schema)?
+        }
+        None => super::super::sealing::admission_protected_fields(ledger, before, after)?,
+    }
     if before.spans.len() != after.spans.len()
         || before.spans.iter().zip(&after.spans).any(|(a, b)| {
             a.id != b.id

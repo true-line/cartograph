@@ -43,6 +43,9 @@ pub struct AcquisitionChoices {
     entries: Vec<AcquisitionChoice>,
     blocked: Vec<String>,
     deferred: usize,
+    // Private derivation state, never part of the canonical choices wire/hash.
+    #[serde(skip)]
+    pending: Vec<bool>,
 }
 impl AcquisitionChoices {
     /// Canonical typed JSON under the existing action cap; not a publication
@@ -144,7 +147,7 @@ impl AcquisitionChoices {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let proof = ledger
+        ledger
             .coverage
             .as_ref()
             .ok_or(InvestigationError::InvalidInput)?;
@@ -187,17 +190,115 @@ impl AcquisitionChoices {
             }
             attempted.insert(record.obligation_id.as_str());
         }
+        let pending = contract
+            .obligations
+            .obligations
+            .iter()
+            .map(|item| !attempted.contains(item.key().1))
+            .collect();
+        Self::from_pending(
+            contract,
+            ledger,
+            metadata.fingerprint_with_policy(policy)?,
+            pending,
+            policy,
+        )
+    }
+
+    /// Additional unencoded cache owner. Encoded choices are charged separately.
+    pub fn private_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+        context_hub::logical::sum(&[
+            std::mem::size_of::<Vec<bool>>(),
+            context_hub::logical::slots::<bool>(policy.max_completion_obligations())?,
+        ])
+    }
+    #[cfg(test)]
+    pub(super) fn private_bytes(&self) -> usize {
+        std::mem::size_of::<Vec<bool>>() + std::mem::size_of_val(self.pending.as_slice())
+    }
+    /// Candidate construction before prefix truncation. Borrowed contract,
+    /// ledgers, attempt witnesses and their validation remain caller-owned.
+    pub fn candidate_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+        let bytes = policy
+            .envelope_bytes()
+            .checked_add(
+                policy.max_completion_obligations().checked_mul(
+                    context_hub::coverage::MAX_COVERAGE_IDENTITY_BYTES
+                        .checked_mul(6)?
+                        .checked_add(1024)?,
+                )?,
+            )?
+            .checked_add(1024)?;
+        context_hub::logical::json_bytes(bytes)?.checked_add(Self::private_workspace_bytes(policy)?)
+    }
+    /// Serializer-only conditional source completion. No attempt, ledger, Input
+    /// or AcquisitionChoices leaves this projection; unknown hashes stay sizing
+    /// values and the real publication must independently derive its authority.
+    pub(super) fn source_projection(
+        &self,
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        target: &InvestigationInspectionTarget,
+        mode: staged_refusal::CompletionCallMode,
+        policy: &InvestigationPolicy,
+    ) -> Result<(serde_json::Value, Option<String>), InvestigationError> {
+        if self.contract_hash != contract.fingerprint_with_policy(policy)?
+            || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let read = ReadIntent::Source {
+            fact: target.fact.clone(),
+            role: target.role,
+            index: target.index,
+        };
+        let mut pending = self.pending.clone();
+        for (slot, obligation) in pending.iter_mut().zip(&contract.obligations.obligations) {
+            if read.matches(obligation) {
+                *slot = false;
+            }
+        }
+        let mut projected = Self::from_pending(
+            contract,
+            ledger,
+            self.completion_metadata_hash.clone(),
+            pending,
+            policy,
+        )?;
+        projected.input_ledger_hash = "f".repeat(64);
+        projected.completion_metadata_hash = "f".repeat(64);
+        let schema = response_schema::select_acquisition(mode, &projected, ledger)?;
+        let value =
+            serde_json::to_value(projected).map_err(|_| InvestigationError::InvalidInput)?;
+        Ok((value, schema))
+    }
+
+    fn from_pending(
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        completion_metadata_hash: String,
+        pending: Vec<bool>,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        if pending.len() != contract.obligations.obligations.len() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let proof = ledger
+            .coverage
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
         let mut output = Self {
             contract_hash: contract.fingerprint_with_policy(policy)?,
             input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
-            completion_metadata_hash: metadata.fingerprint_with_policy(policy)?,
+            completion_metadata_hash,
             entries: Vec::new(),
             blocked: Vec::new(),
             deferred: 0,
+            pending,
         };
         // Validate every obligation, including the eventual deferred suffix.
         let byte_limit = MAX_ACTION_BYTES.min(policy.envelope_bytes());
-        for obligation in &contract.obligations.obligations {
+        for (position, obligation) in contract.obligations.obligations.iter().enumerate() {
             let (_, id) = obligation.key();
             let action = match obligation {
                 Obligation::Source { target, .. } => {
@@ -278,7 +379,7 @@ impl AcquisitionChoices {
                     })
                 }
             };
-            if !attempted.contains(id) {
+            if output.pending[position] {
                 if let Some(action) = action {
                     output.entries.push(AcquisitionChoice {
                         obligation_id: id.into(),

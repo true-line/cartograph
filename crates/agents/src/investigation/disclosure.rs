@@ -407,6 +407,18 @@ impl InvestigationDisclosure {
         policy: &InvestigationPolicy,
     ) -> Result<String, InvestigationError> {
         self.validate_with_policy(ledger, policy)?;
+        self.fingerprint_bytes()
+    }
+    pub(super) fn fingerprint_saved_role_shape(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        role: SpecialistId,
+    ) -> Result<String, InvestigationError> {
+        self.validate_saved_role_shape(ledger, policy, role)?;
+        self.fingerprint_bytes()
+    }
+    fn fingerprint_bytes(&self) -> Result<String, InvestigationError> {
         let (prefix, domain): (&str, &[u8]) = if self.schema_version == 6 {
             (
                 "investigation-disclosure-v6",

@@ -122,20 +122,6 @@ pub(super) fn acquisition_choices_workspace() -> Option<usize> {
     let policy = &INVESTIGATION_V2_POLICY;
     let attempts = policy.max_completed_attempts();
     let (ledger, decode) = InvestigationInputLedger::decode_workspace_bytes()?;
-    // Before truncation, action/obligation strings are subsets of the admitted
-    // contract. Each query additionally clones the validated coverage context
-    // ID (worst JSON escape: six bytes/input byte); 1024 dominates its fixed
-    // keys/numbers plus the choice wrapper. Another 1024 covers hashes/fields.
-    let candidates = policy
-        .envelope_bytes()
-        .checked_add(
-            policy.max_completion_obligations().checked_mul(
-                context_hub::coverage::MAX_COVERAGE_IDENTITY_BYTES
-                    .checked_mul(6)?
-                    .checked_add(1024)?,
-            )?,
-        )?
-        .checked_add(1024)?;
     sum(&[
         map::<u64, InvestigationInputLedger>(attempts)?,
         ledger.checked_mul(attempts)?, // at most one owner per distinct revision
@@ -149,7 +135,9 @@ pub(super) fn acquisition_choices_workspace() -> Option<usize> {
         next_prompt_contract_workspace()?,
         ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
         set::<&str>(attempts)?,
-        json_bytes(candidates)?, // all candidates exist before prefix truncation
+        agents::investigation::acquisition_choices::AcquisitionChoices::candidate_workspace_bytes(
+            policy,
+        )?,
         MAX_ACTION_BYTES,
         slots::<Vec<u8>>(1)?,               // rejected/final bounded encoding
         MAX_MANIFEST_BYTES.checked_mul(2)?, // canonical encoding/domain fingerprints
@@ -169,6 +157,9 @@ pub(crate) fn next_prompt_metadata_continuation_workspace() -> Option<(usize, us
         ledger, // previous ledger in the turn basis
         metadata,
         json_bytes(MAX_ACTION_BYTES)?, // final bounded choices retained by Arc
+        agents::investigation::acquisition_choices::AcquisitionChoices::private_workspace_bytes(
+            &INVESTIGATION_V2_POLICY,
+        )?,
         64,
         128 + 6 + 20, // ledger hash and next action ID
     ])?;

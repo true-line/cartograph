@@ -19,6 +19,9 @@ impl LlmProvider for DescriptorOnly {
             tool_use: false,
         }
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
     fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
         Ok(profile())
     }
@@ -307,12 +310,18 @@ fn source_preview_protection_checks_span_metadata_but_allows_independent_text_re
     let inspected =
         inspect_bounded_action(&profile(), &action, &CompletionLimits::default()).unwrap();
     assert_ne!(payload.spans[0].text, inspected.payload().spans[0].text);
-    input::source_preview::protected_representation(input.ledger(), &payload, inspected.payload())
-        .unwrap();
+    input::source_preview::protected_representation(
+        input.ledger(),
+        &payload,
+        inspected.payload(),
+        None,
+    )
+    .unwrap();
     let mut wrong = inspected.payload().clone();
     wrong.spans[0].path = "different".into();
     assert!(
-        input::source_preview::protected_representation(input.ledger(), &payload, &wrong).is_err()
+        input::source_preview::protected_representation(input.ledger(), &payload, &wrong, None)
+            .is_err()
     );
 }
 
@@ -507,4 +516,399 @@ fn source_preview_wire_gate_rejects_one_byte_below_full_continuation_bound() {
             expected
         );
     }
+}
+
+// AC-0486: binding-valid synthetic observations exercise pure representation
+// closure, not host journal authority or completed native source reads.
+fn source_choices(
+    fixture: &Fixture,
+    input: InvestigationInput,
+    records: &[staged_attempt::AttemptRecord],
+    prior: &InvestigationInputLedger,
+) -> InvestigationInput {
+    input
+        .with_acquisition_choices(derive_source_choices(fixture, records, prior))
+        .unwrap()
+}
+fn derive_source_choices(
+    fixture: &Fixture,
+    records: &[staged_attempt::AttemptRecord],
+    prior: &InvestigationInputLedger,
+) -> std::sync::Arc<acquisition_choices::AcquisitionChoices> {
+    let contract = InvestigationCompletionContract {
+        schema_version: 1,
+        request_hash: fixture.metadata.request_hash.clone(),
+        obligations_hash: fixture.metadata.obligations_hash.clone(),
+        obligations: fixture.request.obligations.clone(),
+    };
+    let evidence = records
+        .iter()
+        .map(|record| staged_attempt::AttemptEvidence {
+            record,
+            ledger: if record.input_revision == fixture.ledger.revision {
+                &fixture.ledger
+            } else {
+                prior
+            },
+        })
+        .collect::<Vec<_>>();
+    let choices = acquisition_choices::AcquisitionChoices::derive(
+        &contract,
+        &fixture.metadata,
+        "source-preview-task",
+        &fixture.ledger,
+        &evidence,
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
+    std::sync::Arc::new(choices)
+}
+fn source_record(
+    f: &Fixture,
+    target: &InvestigationInspectionTarget,
+    step: &str,
+    outcome: staged_attempt::AttemptOutcome,
+) -> staged_attempt::AttemptRecord {
+    let obligation = f
+        .request
+        .obligations
+        .obligations
+        .iter()
+        .find(|item| {
+            staged_attempt::ReadIntent::Source {
+                fact: target.fact.clone(),
+                role: target.role,
+                index: target.index,
+            }
+            .matches(item)
+        })
+        .unwrap();
+    let mut record = staged_attempt::AttemptRecord {
+        schema_version: 1,
+        attempt_id: String::new(),
+        task_id: "source-preview-task".into(),
+        request_hash: f.metadata.request_hash.clone(),
+        obligations_hash: f.metadata.obligations_hash.clone(),
+        obligation_id: obligation.key().1.into(),
+        step_id: step.into(),
+        read: staged_attempt::ReadIntent::Source {
+            fact: target.fact.clone(),
+            role: target.role,
+            index: target.index,
+        },
+        input_ledger_hash: f
+            .ledger
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap(),
+        input_revision: f.ledger.revision,
+        outcome,
+    };
+    record.attempt_id = record.content_id().unwrap();
+    record
+}
+
+#[test]
+fn source_preview_bounds_last_pending_source_fallback() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let role = SpecialistId::DomainAnalystV18;
+    for acquired in [false, true] {
+        let (mut f, raw, target, prototype) = source_fixture(role, "bounded source");
+        let mut other = target.clone();
+        other.index += 1;
+        other.target_id = other.content_id().unwrap();
+        let mut obligation = Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(other.clone()),
+        };
+        let id = obligation.content_id().unwrap();
+        if let Obligation::Source { obligation_id, .. } = &mut obligation {
+            *obligation_id = id;
+        }
+        f.request.obligations.obligations.push(obligation);
+        f.request.obligations = f
+            .request
+            .obligations
+            .normalized_with_policy(policy)
+            .unwrap();
+        f.metadata.request_hash = f.request.intent_hash_with_policy(policy).unwrap();
+        f.metadata.obligations_hash = f
+            .request
+            .obligations
+            .fingerprint_with_policy(policy)
+            .unwrap();
+        let mut records = (0..policy.max_completed_attempts() - 1)
+            .map(|i| {
+                source_record(
+                    &f,
+                    &other,
+                    &format!("prior:{i}"),
+                    staged_attempt::AttemptOutcome::Unavailable {
+                        reason: staged_attempt::UnavailableReason::PinnedTargetAbsent,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        f.metadata.completed_attempt_ids = records
+            .iter()
+            .map(|record| record.attempt_id.clone())
+            .collect();
+        let prior = f.ledger.clone();
+        let current = source_choices(
+            &f,
+            build_source(&f, &raw, &[], role, CompletionCallMode::Choice),
+            &records,
+            &prior,
+        );
+        assert_eq!(
+            current
+                .acquisition_choices
+                .as_ref()
+                .unwrap()
+                .stamp_hash()
+                .unwrap(),
+            "67dbaa375a25aa00d18c314605484120aae60de093161344cf229186537c87bf"
+        );
+        current.assert_retained_workspace(policy);
+        let action = current.action("current:1".into()).unwrap();
+        let inspected =
+            inspect_bounded_action(&profile(), &action, &CompletionLimits::default()).unwrap();
+        let schema = action.payload.response_schema.as_deref().unwrap();
+        input::source_preview::protected_representation(
+            current.ledger(),
+            &action.payload,
+            inspected.payload(),
+            Some(schema),
+        )
+        .unwrap();
+        assert!(
+            input::source_preview::protected_representation(
+                current.ledger(),
+                &action.payload,
+                inspected.payload(),
+                Some("{}")
+            )
+            .is_err()
+        );
+        let mut altered = inspected.payload().clone();
+        let mut body: Value = serde_json::from_str(&altered.prompt).unwrap();
+        body["turn_progress"]["acquisition_choices"]["entries"] = json!([]);
+        altered.prompt = serde_json::to_string(&body).unwrap();
+        assert!(
+            input::source_preview::protected_representation(
+                current.ledger(),
+                &action.payload,
+                &altered,
+                Some(schema)
+            )
+            .is_err()
+        );
+        let proof = current
+            .certify_unread_source_v9_with_policy(
+                &prepare(&current),
+                &target,
+                &profile(),
+                &CompletionLimits::default(),
+                "next:2",
+                policy,
+            )
+            .unwrap();
+        let boundary = [
+            proof.continuation().choice,
+            proof.continuation().finish_only,
+        ]
+        .iter()
+        .flat_map(|v| {
+            [
+                v.raw_string_bytes,
+                v.original_payload_bytes,
+                v.redacted_payload_bytes,
+                v.original_action_bytes.saturating_sub(4096),
+            ]
+        })
+        .max()
+        .unwrap();
+        for (bytes, expected) in [(boundary, true), (boundary - 1, false)] {
+            let limits = CompletionLimits::new(CompletionLimitValues {
+                input_bytes: bytes,
+                ..CompletionLimits::default().values()
+            })
+            .unwrap();
+            let prepared = llm::EgressFirewall::new(llm::EgressPolicy::default())
+                .prepare_bounded(&DescriptorOnly, &action, &limits)
+                .unwrap();
+            assert_eq!(
+                current
+                    .certify_unread_source_v9_with_policy(
+                        &prepared,
+                        &target,
+                        &profile(),
+                        &limits,
+                        "next:2",
+                        policy
+                    )
+                    .is_ok(),
+                expected
+            );
+        }
+        let mut evidence = vec![];
+        if acquired {
+            acquire_source(&mut f, &target, &prototype, &mut evidence, "bounded source");
+        }
+        let outcome = if acquired {
+            staged_attempt::AttemptOutcome::SourceAcquired {
+                citation_id: "evidence-1".into(),
+            }
+        } else {
+            staged_attempt::AttemptOutcome::Unavailable {
+                reason: staged_attempt::UnavailableReason::PinnedTargetAbsent,
+            }
+        };
+        records.push(source_record(&f, &target, "next:2", outcome));
+        f.metadata.completed_attempt_ids = records
+            .iter()
+            .map(|record| record.attempt_id.clone())
+            .collect();
+        for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+            let actual = source_choices(
+                &f,
+                build_source(&f, &raw, &evidence, role, mode),
+                &records,
+                &prior,
+            );
+            let action = actual.action("next:2".into()).unwrap();
+            assert_eq!(
+                action.payload.response_schema,
+                response_schema::select_admitted(SpecialistId::DomainAnalystV17, mode, &f.ledger)
+                    .unwrap()
+            );
+            let measured =
+                measure_bounded_action(&profile(), &action, &CompletionLimits::default()).unwrap();
+            assert_dominates(
+                if mode == CompletionCallMode::Choice {
+                    proof.continuation().choice
+                } else {
+                    proof.continuation().finish_only
+                },
+                measured,
+            );
+        }
+    }
+}
+
+#[test]
+fn source_preview_projects_deferred_choices_without_authority() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let (mut f, _, template, _) = source_fixture(SpecialistId::DomainAnalystV18, "bounded");
+    let mut sources = vec![];
+    for index in 0..policy.max_completion_obligations() {
+        let mut target = template.clone();
+        target.fact = crate::TaskFactKey::Node {
+            id: format!("{index:02}{}", "\"".repeat(1000)),
+        };
+        target.target_id = target.content_id().unwrap();
+        let mut item = Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(target),
+        };
+        let id = item.content_id().unwrap();
+        if let Obligation::Source { obligation_id, .. } = &mut item {
+            *obligation_id = id;
+        }
+        sources.push(item);
+        f.request.obligations.obligations = sources.clone();
+        if f.request
+            .obligations
+            .normalized_with_policy(policy)
+            .is_err()
+        {
+            sources.pop();
+            break;
+        }
+    }
+    f.request.obligations.obligations = sources;
+    f.request.obligations = f
+        .request
+        .obligations
+        .normalized_with_policy(policy)
+        .unwrap();
+    f.metadata.request_hash = f.request.intent_hash_with_policy(policy).unwrap();
+    f.metadata.obligations_hash = f
+        .request
+        .obligations
+        .fingerprint_with_policy(policy)
+        .unwrap();
+    let Obligation::Source { target, .. } = &f.request.obligations.obligations[0] else {
+        unreachable!()
+    };
+    let target = target.clone();
+    // Every target is already bound, so the deferred frontier contains source
+    // reads too. Completing one read frees enough space for a deferred peer.
+    let selected = f.ledger.selected_facts[0].clone();
+    let citation = f.ledger.citations[0].clone();
+    f.ledger.selected_facts.clear();
+    f.ledger.citations.clear();
+    for (index, obligation) in f.request.obligations.obligations.iter().enumerate() {
+        let Obligation::Source { target, .. } = obligation else {
+            unreachable!()
+        };
+        let mut fact = selected.clone();
+        fact.fact = target.fact.clone();
+        f.ledger.selected_facts.push(fact);
+        let mut graph = citation.clone();
+        graph.fact = target.fact.clone();
+        graph.citation_id = format!("graph-{index}");
+        f.ledger.citations.push(graph);
+    }
+    f.ledger.selected_facts.sort_by(|a, b| a.fact.cmp(&b.fact));
+    let selected_count = f.ledger.selected_facts.len();
+    f.ledger.queries[0].query.max_facts = selected_count;
+    f.ledger.queries[0].returned_facts = selected_count;
+    f.ledger.queries[0].total_selected = selected_count;
+    let current = derive_source_choices(&f, &[], &f.ledger);
+    assert!(current.deferred() > 0);
+    assert!(
+        current.private_bytes()
+            <= acquisition_choices::AcquisitionChoices::private_workspace_bytes(policy).unwrap()
+    );
+    let contract = InvestigationCompletionContract {
+        schema_version: 1,
+        request_hash: f.metadata.request_hash.clone(),
+        obligations_hash: f.metadata.obligations_hash.clone(),
+        obligations: f.request.obligations.clone(),
+    };
+    let (projected, schema) = current
+        .source_projection(
+            &contract,
+            &f.ledger,
+            &target,
+            CompletionCallMode::Choice,
+            policy,
+        )
+        .unwrap();
+    let record = source_record(
+        &f,
+        &target,
+        "conditional-read",
+        staged_attempt::AttemptOutcome::Unavailable {
+            reason: staged_attempt::UnavailableReason::PinnedTargetAbsent,
+        },
+    );
+    f.metadata.completed_attempt_ids = vec![record.attempt_id.clone()];
+    let actual = derive_source_choices(&f, &[record], &f.ledger);
+    assert!(actual.entries().iter().any(|entry| {
+        !current
+            .entries()
+            .iter()
+            .any(|old| old.obligation_id == entry.obligation_id)
+    }));
+    let mut expected = serde_json::to_value(&*actual).unwrap();
+    expected["input_ledger_hash"] = "f".repeat(64).into();
+    expected["completion_metadata_hash"] = "f".repeat(64).into();
+    assert_eq!(projected, expected);
+    assert_eq!(
+        schema,
+        response_schema::select_acquisition(CompletionCallMode::Choice, &actual, &f.ledger)
+            .unwrap()
+    );
+    assert!(bounded_bytes(&projected, MAX_ACTION_BYTES).is_ok());
 }

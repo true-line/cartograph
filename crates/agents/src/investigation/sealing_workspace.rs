@@ -20,6 +20,8 @@ impl InvestigationInput {
         let (disclosure, sealing) = Self::sealing_workspace_bytes(policy, limits)?;
         sum(&[
             Self::context_preview_workspace_bytes(policy, limits)?,
+            acquisition_choices::AcquisitionChoices::candidate_workspace_bytes(policy)?,
+            acquisition_choices::AcquisitionChoices::private_workspace_bytes(policy)?,
             sealing,
             disclosure.checked_mul(2)?, // actual receipt and sizing-only clone
             json_bytes(projected)?.checked_mul(2)?, // source reserve/mode clone
