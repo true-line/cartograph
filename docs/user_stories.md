@@ -762,6 +762,9 @@
 - **AC-0492** Given a saved gated @18 early Finish, genuine NotAttempted refusal publication and historical reread use the actual saved sequence's immutable call/ledger and independently rederived choices/prior feedback. A later acquisition/call cannot retarget that refusal. Real first-refusal/later-ledger/result-reopen, cap-two and coherent tamper/rollback controls preserve generic/history semantics, accepted latest-only eligibility and all activation gates/limits (#1446).
 - **Trace:** H4 · `app` · — · T-0492
 
+- **AC-0489** Given a genuine cold gated @18 task, the worker attaches initial choices from the same saved normalized contract used by independent initial publication. A real scripted inner loop durably refuses an unoffered read, accepts an exact offered action and honestly finishes/reopens; repeated refusals debit every actual invocation and stop at the existing FinishOnly/invocation bounds. Inflight cancellation creates no semantic refusal or next call. No public/store/resume activation, UI/default promotion, new counter or ceiling is added (#1429).
+- **Trace:** H4 · `app` · — · T-0489
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

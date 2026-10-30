@@ -541,6 +541,22 @@ fn task_phase_workspaces(
     let construction = agents::investigation::InvestigationInput::construction_workspace_bytes(
         &agents::investigation::INVESTIGATION_V2_POLICY,
     )?;
+    // Initial @18 preparation retains the saved normalized contract through
+    // input construction, then derives choices before dropping that contract.
+    // Its two hashes and fixed keys add less than 256 bytes to the envelope.
+    // Charge construction scratch alongside candidate derivation conservatively;
+    // completed input owners are retained in context below, not hidden slack.
+    let initial_choices = context_hub::logical::json_bytes(
+        agents::investigation::INVESTIGATION_V2_POLICY
+            .envelope_bytes()
+            .checked_add(256)?,
+    )?
+    .checked_add(construction)?
+    .checked_add(
+        agents::investigation::acquisition_choices::AcquisitionChoices::candidate_workspace_bytes(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )?,
+    )?;
     // The writer holds its projection through retained-source validation and
     // replay. Candidate preparation survives commit; original invocation,
     // current/candidate inputs and source guards stay in context below.
@@ -572,7 +588,7 @@ fn task_phase_workspaces(
         )?)?; // saved call DTO plus separately encoded original action
     let execution = provider
         .max(settlement)
-        .max(construction)
+        .max(initial_choices)
         .max(
             crate::investigations::source_candidate_workspace::workspace(
                 agents::investigation::MAX_MANIFEST_BYTES,

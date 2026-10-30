@@ -10,7 +10,14 @@ impl JobStore {
         execution: &JobExecution,
         revision: u64,
         request: &StagedObligationRequest,
-    ) -> Result<(InvestigationDetail, ProtectedCompletionMetadata), InvestigationStoreError> {
+    ) -> Result<
+        (
+            InvestigationDetail,
+            ProtectedCompletionMetadata,
+            Option<InvestigationCompletionContract>,
+        ),
+        InvestigationStoreError,
+    > {
         execution.verify()?;
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
@@ -35,8 +42,18 @@ impl JobStore {
             return Err(InvestigationStoreError::Invalid);
         }
         let metadata = completion::derive_protected_metadata(&task, vec![], &[])?;
+        let contract = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            Some(
+                task.completion_intent
+                    .as_ref()
+                    .ok_or(InvestigationStoreError::Invalid)?
+                    .contract(),
+            )
+        } else {
+            None
+        };
         tx.commit()?;
-        Ok((task.detail, metadata))
+        Ok((task.detail, metadata, contract))
     }
 
     pub(crate) fn admit_next_prompt_initial_context(

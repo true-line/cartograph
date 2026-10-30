@@ -531,12 +531,13 @@ fn next_prompt_initial_owned_detail_requires_owner_alongside_public_history() {
 fn next_prompt_initial_state_binds_original_request_owner_and_revision() {
     let mut f = fixture();
     let revision = f.task.detail.summary.revision;
-    let (detail, metadata) = f
+    let (detail, metadata, contract) = f
         .store
         .investigation_next_prompt_initial_state(&f.execution, revision, &f.request)
         .unwrap();
     assert_eq!(detail, f.task.detail);
     assert_eq!(metadata, f.metadata);
+    assert!(contract.is_none()); // historical initial state creates no choices owner
     let mut changed = f.request.clone();
     changed.question.push_str(" Different intent.");
     assert!(matches!(
