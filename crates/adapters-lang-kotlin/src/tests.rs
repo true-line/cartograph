@@ -4701,3 +4701,185 @@ class ClientTest {
     ]);
     assert_eq!(rows, Vec::<[String; 3]>::new());
 }
+
+// AC-0471 (#1420): Apache HttpClient 4 and 5 request classes through named
+// imports, an alias and fully qualified (also spaced and unimported)
+// spellings; the class gives the method and only a pure string argument is
+// a literal. (T-0471)
+#[test]
+fn apache_http_request_constructors_become_fetch_sites() {
+    let rows = okhttp_rows(&[
+        (
+            "src/main/kotlin/io/demo/Client.kt",
+            r#"package io.demo
+
+import java.net.URI
+import org.apache.http.client.methods.HttpDelete
+import org.apache.http.client.methods.HttpGet
+import org.apache.http.client.methods.HttpHead
+import org.apache.http.client.methods.HttpPost as Post
+import org.apache.hc.client5.http.classic.methods.HttpOptions
+import org.apache.hc.client5.http.classic.methods.HttpPatch
+import org.apache.hc.client5.http.classic.methods.HttpPut
+import org.apache.hc.client5.http.classic.methods.HttpTrace
+
+class Client {
+    fun calls(path: String, target: URI) {
+        HttpGet("https://host/a")
+        Post("https://host/b")
+        HttpPut("https://host/$path")
+        HttpPatch(target)
+        HttpDelete("https://host/d")
+        HttpHead("https://host/h")
+        HttpOptions("https://host/o")
+        HttpTrace("https://host/t")
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Bare.kt",
+            r#"package io.demo
+
+class Bare {
+    fun calls() = org . apache . http . client . methods . HttpGet("https://host/q")
+}
+"#,
+        ),
+    ]);
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[method, url, entry]| [method.as_str(), url.as_str(), entry.as_str()])
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ["GET", "literal https://host/q", "Bare.calls"],
+            ["GET", "literal https://host/a", "Client.calls"],
+            ["POST", "literal https://host/b", "Client.calls"],
+            ["PUT", "computed \"https://host/$path\"", "Client.calls"],
+            ["PATCH", "computed target", "Client.calls"],
+            ["DELETE", "literal https://host/d", "Client.calls"],
+            ["HEAD", "literal https://host/h", "Client.calls"],
+            ["OPTIONS", "literal https://host/o", "Client.calls"],
+            ["TRACE", "literal https://host/t", "Client.calls"],
+        ]
+    );
+}
+
+// AC-0471 (#1420): no-argument, named, two-argument and trailing-lambda
+// calls, unimported, foreign, file-declared and parameter-bound names, a
+// captured or possibly wildcard-captured `org`, and test sources yield no
+// site. (T-0471)
+#[test]
+fn unproven_apache_http_requests_are_not_fetch_sites() {
+    let rows = okhttp_rows(&[
+        (
+            "src/main/kotlin/io/demo/Shapes.kt",
+            r#"package io.demo
+
+import org.apache.http.client.methods.HttpGet
+import org.apache.http.client.methods.HttpPost
+
+class Shapes {
+    fun calls(entity: Any) {
+        HttpGet()
+        HttpGet(uri = "https://host/x")
+        HttpPost("https://host/x", entity)
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Trailing.kt",
+            r#"package io.demo
+
+import org.apache.http.client.methods.HttpGet
+
+class Trailing {
+    fun calls() = HttpGet("https://host/x") { }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Bound.kt",
+            r#"package io.demo
+
+import org.apache.http.client.methods.HttpGet
+
+class Bound {
+    fun calls(urls: List<String>) = urls.map { HttpGet -> HttpGet("https://host/x") }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Foreign.kt",
+            r#"package io.demo
+
+import com.example.HttpGet
+
+class Foreign {
+    fun calls() = HttpGet("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Unimported.kt",
+            r#"package io.demo
+
+class Unimported {
+    fun calls() = HttpGet("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Local.kt",
+            r#"package io.demo
+
+import org.apache.http.client.methods.HttpGet
+
+class HttpGet(val url: String)
+
+class Local {
+    fun calls() = HttpGet("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Captured.kt",
+            r#"package io.demo
+
+object org {
+    object apache
+}
+
+class Captured {
+    fun calls() = org.apache.http.client.methods.HttpGet("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Wildcard.kt",
+            r#"package io.demo
+
+import com.example.*
+
+class Wildcard {
+    fun calls() = org.apache.http.client.methods.HttpGet("https://host/x")
+}
+"#,
+        ),
+        (
+            "src/test/kotlin/io/demo/ClientTest.kt",
+            r#"package io.demo
+
+import org.apache.http.client.methods.HttpGet
+
+class ClientTest {
+    fun calls() = HttpGet("https://host/x")
+}
+"#,
+        ),
+    ]);
+    assert!(rows.is_empty(), "{rows:?}");
+}
