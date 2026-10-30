@@ -3289,8 +3289,17 @@ fn complete_directory(
     let navigation = std::mem::take(&mut out.client_navigation);
     client_navigation::complete(navigation, &files, id.repo, &mut out.nodes, &mut out.edges);
     next_pages_screens(out, id);
+    next_api::app_screens(
+        root,
+        &index,
+        id,
+        &out.default_exports,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     next_api::complete(
         std::mem::take(&mut out.next_routes),
+        root,
         &index,
         id,
         &mut out.nodes,
