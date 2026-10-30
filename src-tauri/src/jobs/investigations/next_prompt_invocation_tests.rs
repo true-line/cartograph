@@ -24,6 +24,9 @@ impl LlmProvider for OfflineProvider {
     fn embed(&self, _: &[String]) -> Result<Vec<llm::Embedding>, llm::ProviderError> {
         panic!("no provider dispatch permitted")
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
     fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
         Ok(self.0.clone())
     }

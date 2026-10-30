@@ -10,7 +10,7 @@ pub(crate) fn next_prompt_timeline_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let calls = usize::try_from(policy.limits().model_invocations).ok()?;
     let events = usize::try_from(policy.journal_events()).ok()?;
-    let (core, call_peak) = next_prompt_saved_call_workspace()?;
+    let (core, call_peak) = super::super::saved_call_workspace::next_prompt_raw_call_workspace()?;
     // Basis clones task identity, step disclosure and event step_id; those
     // originate in separately byte-admitted rows. Fingerprint is returned text.
     let basis = sum(&[

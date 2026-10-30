@@ -970,8 +970,41 @@ pub(super) fn load_next_prompt_task(
 ) -> Result<StoredTask, InvestigationStoreError> {
     let task = load_next_prompt_task_base(connection, id)?;
     if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
-        // Ready has no current call to trigger the current-call reader below.
-        super::admission_journal::derive_current(connection, &task)?;
+        if task.ledger_revision.is_some() {
+            // Ready has no current call to trigger the current-call reader below.
+            super::admission_journal::derive_current(connection, &task)?;
+        } else {
+            // No replay epoch exists before ContextPrepared, including a stop
+            // during preparation. Never let absent context hide saved work.
+            if task.ledger_hash.is_some()
+                || task.detail.usage.model_invocations != 0
+                || !matches!(
+                    task.phase,
+                    Phase::Queued | Phase::Preparing | Phase::Terminal
+                )
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let has_refusals = admission_journal::validate_optional_schema(connection)?.is_some();
+            for table in [
+                "investigation_inputs",
+                "investigation_invocations",
+                "investigation_responses",
+                "investigation_admission_refusals",
+            ] {
+                if table == "investigation_admission_refusals" && !has_refusals {
+                    continue;
+                }
+                let exists: bool = connection.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE task_id=?1)"),
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+            }
+        }
     }
     completion::validate_saved(connection, &task)?;
     Ok(task)

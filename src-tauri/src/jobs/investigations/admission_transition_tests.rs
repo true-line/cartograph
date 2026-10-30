@@ -386,6 +386,12 @@ fn action_next(f: &mut completion::InternalFixture) {
     admission.consumed_budgets = f.task.detail.usage.clone();
     admission.capacity_refusal_count = state.count;
     admission.capacity_feedback = state.feedback;
+    admission.acquisition.as_mut().unwrap().action_feedback_hash = state
+        .action_feedback
+        .as_ref()
+        .map(|feedback| feedback.stamp_hash())
+        .transpose()
+        .unwrap();
     f.basis.step_id = f.step.step_id.clone();
     f.basis.invocation_ordinal = ordinal;
     f.basis.admission = admission.clone();

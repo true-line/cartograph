@@ -285,12 +285,24 @@ impl InvestigationInput {
                 policy.limits().model_invocations,
                 &Some(&feedback),
             )?;
+            if self.acquisition_choices.is_some() {
+                let feedback = ActionRefusalFeedback {
+                    reason: ActionRefusalReason::ActionNotOffered,
+                    invocation_ordinal: policy.limits().model_invocations,
+                    action_hash: "f".repeat(64),
+                    choices_hash: "f".repeat(64),
+                };
+                prompt["turn_progress"]["action_feedback"] =
+                    serde_json::to_value(feedback).map_err(|_| InvestigationError::InvalidInput)?;
+            }
             #[cfg(test)]
             assert!(
                 context_hub::logical::count(&prompt).unwrap()
                     <= reserve_projection_bytes(policy).unwrap()
             );
-            action.payload.response_schema = if let Some(role) = schema_role {
+            action.payload.response_schema = if let Some(choices) = &self.acquisition_choices {
+                response_schema::select_acquisition(mode, choices, &self.ledger)?
+            } else if let Some(role) = schema_role {
                 response_schema::select_admitted(role, mode, &self.ledger)?
             } else {
                 None
@@ -619,7 +631,11 @@ impl InvestigationInput {
         let (prompt, _) = self.admission_reserve_basis(policy)?;
         let progress = &prompt["turn_progress"];
         let state = DisclosedAdmissionState {
-            acquisition: None,
+            acquisition: self
+                .acquisition_choices
+                .as_ref()
+                .map(|_| self.acquisition_stamp(&self.payload))
+                .transpose()?,
             schema_version: 1,
             mode: serde_json::from_value(progress["admission_mode"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?,
@@ -633,9 +649,17 @@ impl InvestigationInput {
                 .map_err(|_| InvestigationError::InvalidInput)?,
             turn_progress_hash: core_prov::content_hash(&bounded_bytes(progress, MAX_INPUT_BYTES)?),
         };
-        let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
-            .map_err(|_| InvestigationError::InvalidInput)?;
-        state.validate_with_metadata(&metadata, policy)?;
+        let metadata: ProtectedCompletionMetadata =
+            serde_json::from_value(prompt["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        if self.acquisition_choices.is_some() {
+            state.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
+            if metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)? != state.mode {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else {
+            state.validate_with_metadata(&metadata, policy)?;
+        }
         Ok(state)
     }
 
@@ -655,6 +679,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV14,
             SpecialistId::DomainAnalystV15,
             SpecialistId::DomainAnalystV17,
+            SpecialistId::DomainAnalystV18,
             SpecialistId::EvidenceAuditorV11,
         ]
         .into_iter()
@@ -663,7 +688,11 @@ impl InvestigationInput {
         self.ledger.validate_for_specialist(role, policy)?;
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        response_schema::validate(&self.ledger, &self.payload, &prompt)?;
+        if role == SpecialistId::DomainAnalystV18 {
+            self.validate_acquisition_projection()?;
+        } else {
+            response_schema::validate(&self.ledger, &self.payload, &prompt)?;
+        }
         let proof = self
             .ledger
             .coverage
@@ -680,7 +709,7 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        exact_admission_fields(
+        exact_admission_fields_extended(
             &prompt["turn_progress"],
             &[
                 "contract",
@@ -693,6 +722,11 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
+            if role == SpecialistId::DomainAnalystV18 {
+                &["acquisition_choices", "action_feedback"]
+            } else {
+                &[]
+            },
         )?;
         exact_admission_fields(
             &prompt["completion_metadata"],
@@ -778,6 +812,13 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
             "last_completed_action": {"type": "read_coverage_inventory"}
         });
         apply_admission_progress(&mut progress, mode, u32::MAX, &Some(&feedback)).ok()?;
+        progress["action_feedback"] = serde_json::to_value(ActionRefusalFeedback {
+            reason: ActionRefusalReason::ActionNotOffered,
+            invocation_ordinal: u32::MAX,
+            action_hash: "f".repeat(64),
+            choices_hash: "f".repeat(64),
+        })
+        .ok()?;
         progress_bytes = progress_bytes.max(count(&progress)?);
     }
     sum(&[
@@ -789,8 +830,19 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
 }
 
 fn exact_admission_fields(value: &Value, names: &[&str]) -> Result<(), InvestigationError> {
+    exact_admission_fields_extended(value, names, &[])
+}
+fn exact_admission_fields_extended(
+    value: &Value,
+    names: &[&str],
+    extension: &[&str],
+) -> Result<(), InvestigationError> {
     let object = value.as_object().ok_or(InvestigationError::InvalidInput)?;
-    if object.len() != names.len() || object.keys().any(|key| !names.contains(&key.as_str())) {
+    if object.len() != names.len() + extension.len()
+        || object
+            .keys()
+            .any(|key| !names.contains(&key.as_str()) && !extension.contains(&key.as_str()))
+    {
         return Err(InvestigationError::InvalidInput);
     }
     Ok(())
@@ -879,11 +931,18 @@ impl InvestigationInput {
 }
 
 impl InvestigationInput {
-    /// Pure @18 input assembly; dispatch and sealing remain explicitly disabled.
+    /// Current @18 input assembly; dispatch remains gated until worker activation.
     /// The caller must authenticate the host journal before deriving choices.
     pub fn with_acquisition_choices(
+        self,
+        choices: std::sync::Arc<acquisition_choices::AcquisitionChoices>,
+    ) -> Result<Self, InvestigationError> {
+        self.with_acquisition_admission(choices, None)
+    }
+    pub fn with_acquisition_admission(
         mut self,
         choices: std::sync::Arc<acquisition_choices::AcquisitionChoices>,
+        feedback: Option<ActionRefusalFeedback>,
     ) -> Result<Self, InvestigationError> {
         if self.payload.system != SpecialistId::DomainAnalystV18.prompt() {
             return Err(InvestigationError::InvalidInput);
@@ -892,7 +951,9 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         prompt["turn_progress"]["acquisition_choices"] =
             serde_json::to_value(&*choices).map_err(|_| InvestigationError::InvalidInput)?;
-        prompt["turn_progress"]["action_feedback"] = Value::Null;
+        prompt["turn_progress"]["action_feedback"] =
+            serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
+        self.action_feedback = feedback;
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
         self.payload.response_schema =
@@ -912,9 +973,35 @@ impl InvestigationInput {
                     .as_ref()
                     .is_some_and(|choices| choices.permits_acquisition(action)))
     }
+    pub(in crate::investigation) fn acquisition_stamp(
+        &self,
+        original: &llm::CompletionPayload,
+    ) -> Result<AcquisitionAdmission, InvestigationError> {
+        if self.payload != *original
+            || self.payload.system != SpecialistId::DomainAnalystV18.prompt()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.validate_acquisition_projection()?;
+        Ok(AcquisitionAdmission {
+            choices_hash: self
+                .acquisition_choices
+                .as_ref()
+                .ok_or(InvestigationError::InvalidInput)?
+                .stamp_hash()?,
+            action_feedback_hash: self
+                .action_feedback
+                .as_ref()
+                .map(|feedback| feedback.stamp_hash())
+                .transpose()?,
+        })
+    }
     pub(super) fn validate_acquisition_projection(&self) -> Result<(), InvestigationError> {
         if self.payload.system != SpecialistId::DomainAnalystV18.prompt() {
-            return if self.acquisition_choices.is_none() {
+            return if self.acquisition_choices.is_none()
+                && self.action_feedback.is_none()
+                && self.acquisition_mode.is_none()
+            {
                 Ok(())
             } else {
                 Err(InvestigationError::InvalidInput)
@@ -928,15 +1015,20 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         let contract = serde_json::from_value(prompt["completion_contract"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
-        let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
-            .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata: ProtectedCompletionMetadata =
+            serde_json::from_value(prompt["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
         choices.validate_basis(&contract, &metadata, &self.ledger, &INVESTIGATION_V2_POLICY)?;
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
         if self.acquisition_mode != Some(mode)
             || prompt["turn_progress"]["acquisition_choices"]
                 != serde_json::to_value(&**choices).map_err(|_| InvestigationError::InvalidInput)?
-            || prompt["turn_progress"].get("action_feedback") != Some(&Value::Null)
+            || prompt["turn_progress"].get("action_feedback")
+                != Some(
+                    &serde_json::to_value(&self.action_feedback)
+                        .map_err(|_| InvestigationError::InvalidInput)?,
+                )
             || self.payload.response_schema
                 != response_schema::select_acquisition(mode, choices, &self.ledger)?
         {

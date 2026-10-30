@@ -729,6 +729,9 @@
 - **AC-0482** Given synthetic saved @18 calls, the existing owner-checked transaction records a strictly decoded unoffered acquisition, response and exact refusal event, and reopens identical canonical feedback without tool/query/evidence/attempt or capacity-refusal charges. Capacity/semantic interleaving preserves independent feedback, total sequences and consumed model invocations; accepted publication clears feedback while rollback/refusal does not. Legacy capacity bytes/hash and sequence=count stay unchanged; substitution, duplicate, old-role, offered, FinishOnly, stale and cancelled writes fail. FeedbackSome remains rejected, and runtime activation/semantic acceptance remain unestablished (#1397).
 - **Trace:** H4 · `agents`, `app` · — · T-0482
 
+- **AC-0484** Given an explicitly seeded cold @18 task, real preparation, sealing, pre-call invocation/consent and reopened readers authenticate current choices and the exact preceding semantic feedback together. Missing/forged/old-role stamps and swapped/dropped/wrong-ordinal/later feedback fail after positive controls; accepted publication clears while refusal/rollback preserve feedback. Historical @15/@17 bytes and limits stay unchanged, and real saved-task resume plus public/store gates refuse before provider dispatch. No prospective acquisition, worker activation or model acceptance is introduced (#1403).
+- **Trace:** H4 · `agents`, `app` · — · T-0484
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

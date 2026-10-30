@@ -1791,3 +1791,58 @@ fn next_prompt_unadmitted_source_fact_stops_before_preparation() {
 
 #[path = "exact_node_tests.rs"]
 mod exact_node_tests;
+
+// AC-0484: a valid saved @18 task cannot bypass the closed start gate by resume.
+#[test]
+fn gated_saved_acquisition_task_stops_before_provider() {
+    let provider = Arc::new(Scripted::new(Mode::Malformed));
+    let mut f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV17);
+    f.request.specialist_id = "domain-analyst@18".into();
+    let hash = f
+        .request
+        .intent_hash_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    let connection = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
+    let bytes: Vec<u8> = connection
+        .query_row(
+            "SELECT record FROM investigation_tasks WHERE id=?1",
+            [&f.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let task: Value = serde_json::from_slice(&bytes).unwrap();
+    // Preserve the typed canonical field order while replacing only the cold
+    // family/definition and whole-request hash; no invocation exists yet.
+    let text = String::from_utf8(bytes)
+        .unwrap()
+        .replace(
+            &serde_json::to_string(&SpecialistId::DomainAnalystV17.definition().unwrap()).unwrap(),
+            &serde_json::to_string(&SpecialistId::DomainAnalystV18.definition().unwrap()).unwrap(),
+        )
+        .replace("\"domain-analyst@17\"", "\"domain-analyst@18\"")
+        .replace(task["intent_hash"].as_str().unwrap(), &hash);
+    let bytes = text.into_bytes();
+    connection
+        .execute(
+            "UPDATE investigation_tasks SET record=?1,record_hash=?2 WHERE id=?3",
+            rusqlite::params![bytes, core_prov::content_hash(&bytes), f.id],
+        )
+        .unwrap();
+    drop(connection);
+    let state = f.base.base.app.state::<AppState>();
+    let before = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
+    assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV18);
+    assert_eq!(before.usage.model_invocations, 0);
+    f.run(provider.clone());
+    let detail = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.error.as_deref(),
+        Some(InvestigationStopReason::PreparationFailed.test_message())
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(detail.usage.model_invocations, 0);
+    assert_eq!(detail.usage.tool_actions, 0);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+}

@@ -1197,7 +1197,8 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
     };
     let (base, choices) = build("node:chosen", CompletionCallMode::Choice);
     assert!(base.action("step".into()).is_err());
-    let input = base.with_acquisition_choices(choices.clone()).unwrap();
+    let mut input = base.with_acquisition_choices(choices.clone()).unwrap();
+    input.assert_retained_workspace(&INVESTIGATION_V2_POLICY);
     let action = input.action("step".into()).unwrap();
     let prompt: Value = serde_json::from_str(&action.payload.prompt).unwrap();
     let schema: Value =
@@ -1227,7 +1228,18 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
     assert!(!input.permits_acquisition(&read(&other)));
     assert!(foreign.with_acquisition_choices(choices.clone()).is_err());
     let (finish, finish_choices) = build("node:chosen", CompletionCallMode::FinishOnly);
-    let finish = finish.with_acquisition_choices(finish_choices).unwrap();
+    let finish = finish
+        .with_acquisition_admission(
+            finish_choices,
+            Some(ActionRefusalFeedback {
+                reason: ActionRefusalReason::ActionNotOffered,
+                invocation_ordinal: 1,
+                action_hash: "a".repeat(64),
+                choices_hash: choices.stamp_hash().unwrap(),
+            }),
+        )
+        .unwrap();
+    finish.assert_retained_workspace(&INVESTIGATION_V2_POLICY);
     assert_eq!(
         finish
             .action("step".into())
@@ -1251,11 +1263,39 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
         )
         .unwrap();
     assert!(prepared.matches_action(&action));
-    assert!(
-        input
-            .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
-            .is_err()
-    );
+    input
+        .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+        .unwrap()
+        .unwrap();
+    // AC-0484: use the exact actual sealer authority, not a disclosure-only
+    // shape check. The positive seal above precedes every stamp mutation.
+    let admission = input
+        .disclosed_admission_with_policy(&INVESTIGATION_V2_POLICY)
+        .unwrap();
+    for mutation in ["missing", "choices", "feedback"] {
+        let mut forged = admission.clone();
+        match mutation {
+            "missing" => forged.acquisition = None,
+            "choices" => forged.acquisition.as_mut().unwrap().choices_hash = "f".repeat(64),
+            "feedback" => {
+                forged.acquisition.as_mut().unwrap().action_feedback_hash = Some("f".repeat(64))
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            sealing::seal_admission_inner(
+                input.ledger(),
+                &action.payload,
+                &prepared,
+                &INVESTIGATION_V2_POLICY,
+                input.inspection_requirements.as_deref(),
+                Some(forged),
+                Some(&input)
+            )
+            .is_err(),
+            "{mutation}"
+        );
+    }
     for (old, pin) in [
         (
             SpecialistId::DomainAnalystV15,
@@ -1276,6 +1316,16 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
                 None,
             )
             .unwrap();
+        if old == SpecialistId::DomainAnalystV17 {
+            let original =
+                std::mem::replace(&mut input.payload.system, historical.payload.system.clone());
+            assert!(
+                input
+                    .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+                    .is_err()
+            );
+            input.payload.system = original;
+        }
         assert!(
             historical
                 .with_acquisition_choices(choices.clone())
