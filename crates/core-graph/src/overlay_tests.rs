@@ -12,6 +12,7 @@ fn prov(tier: Tier, confidence: ConfidenceTier) -> serde_json::Value {
         extractor_id: "knowledge-rules".into(),
         content_hash: core_prov::content_hash(b"fact"),
         method: Default::default(),
+        basis: None,
     })
     .unwrap()
 }

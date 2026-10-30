@@ -67,6 +67,7 @@ impl<'a> Support<'a> {
             extractor_id: String::new(),
             content_hash: String::new(),
             method: ProducingMethod::Unrecorded,
+            basis: None,
         };
         integrity.validate().ok()?;
         (support.confidence_tier != ConfidenceTier::Gap && !support.evidence.is_empty())
