@@ -1202,6 +1202,22 @@ pub(super) fn next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
+    let steps = raw_next_prompt_invocations(connection, task)?;
+    for (_, step) in &steps {
+        step.disclosure
+            .as_ref()
+            .and_then(|value| value.admission.as_ref())
+            .ok_or(InvestigationStoreError::Invalid)?
+            .validate_with_policy(saved_policy(task)?)?;
+    }
+    Ok(steps)
+}
+// Bootstrap only: SavedMetadataHistory authenticates choices after loading the
+// attempt epoch. Unqualified metadata/action readers remain closed to @18.
+fn raw_next_prompt_invocations(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
     #[cfg(test)]
     saved_metadata_history::note_invocation_sweep();
     if connection.is_autocommit() {

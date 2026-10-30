@@ -339,9 +339,7 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
             let admission = disclosure.admission.as_mut().unwrap();
             admission.acquisition =
                 (role == SpecialistId::DomainAnalystV18).then(|| AcquisitionAdmission {
-                    choices_hash: core_prov::content_hash(
-                        &encode(&choices, MAX_ACTION_BYTES).unwrap(),
-                    ),
+                    choices_hash: choices.stamp_hash().unwrap(),
                     action_feedback_hash: None,
                 });
             let call = admission_contract::SavedCallBasis {
@@ -378,6 +376,9 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
                 admission_contract::load_saved_call_basis_core(&tx, &task, &calls[index]).unwrap();
             assert_eq!(core.metadata.completed_attempt_ids.len(), index);
             assert_eq!(core.ledger, witnesses[index].2);
+            if role == SpecialistId::DomainAnalystV18 {
+                assert!(next_prompt_invocations(&tx, &task).is_err()); // unqualified helper stays closed
+            }
         }
         for mutation in ["choices", "feedback", "ledger", "attempt"] {
             if role != SpecialistId::DomainAnalystV18 && matches!(mutation, "choices" | "feedback")
@@ -385,9 +386,13 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
                 continue;
             }
             let tx = reopened.conn.unchecked_transaction().unwrap();
-            let task = load_next_prompt_task(&tx, &id).unwrap();
-            let mut call = calls[0].clone();
-            let mut step = witnesses[0].1.clone();
+            let mut task = load_next_prompt_task(&tx, &id).unwrap();
+            let index = usize::from(mutation == "choices");
+            let mut call = calls[index].clone();
+            let mut step = witnesses[index].1.clone();
+            if mutation == "choices" {
+                validate_step_basis(&tx, &task, &step).unwrap();
+            }
             match mutation {
                 "choices" | "feedback" => {
                     let stamp = call.admission.acquisition.as_mut().unwrap();
@@ -433,12 +438,73 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
                 }
                 _ => unreachable!(),
             }
+            if mutation == "choices" {
+                task.pending = Some(step.clone());
+                task.admission_state.as_mut().unwrap().current_call = Some(call.clone());
+                admission_journal::tests::save_task(&tx, &task);
+                assert!(validate_step_basis(&tx, &task, &step).is_err());
+                assert!(next_prompt_invocations(&tx, &task).is_err());
+            }
             assert!(
                 admission_contract::load_saved_call_basis_core(&tx, &task, &call).is_err(),
                 "{mutation}"
             );
             assert!(load_next_prompt_task(&tx, &id).is_err(), "{mutation}");
             // Dropping each transaction preserves the independently passing control.
+        }
+        if role == SpecialistId::DomainAnalystV18 {
+            // Settle through the existing capacity writer: Ready has no current
+            // call, so public history must independently validate older stamps.
+            let proposal = serde_json::json!({"type":"query_context", "context_id": f.request.expected_context_id,
+                "query":{"scope":InvestigationScope::All,"kind":null,"labels":[],"max_facts":1,"max_bytes":16384,"cursor":null}});
+            let mut response = fixture.response.clone();
+            response.action_hash =
+                core_prov::content_hash(&encode(&proposal, MAX_ACTION_BYTES).unwrap());
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            let ready = admission_transition::refuse_capacity(
+                &tx,
+                &f.task,
+                &response,
+                &proposal,
+                CapacityRefusalReason::PromptCapacity,
+            )
+            .unwrap();
+            assert_eq!(ready.phase, Phase::Ready);
+            assert!(
+                ready
+                    .admission_state
+                    .as_ref()
+                    .unwrap()
+                    .current_call
+                    .is_none()
+            );
+            tx.commit().unwrap();
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            load_next_prompt_task(&tx, &id).unwrap(); // positive Ready control
+            let mut historical = witnesses[0].1.clone();
+            historical
+                .disclosure
+                .as_mut()
+                .unwrap()
+                .admission
+                .as_mut()
+                .unwrap()
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .choices_hash = "f".repeat(64);
+            rewrite(
+                &tx,
+                "investigation_invocations",
+                &id,
+                "step_id",
+                &historical.step_id,
+                &encode(&historical, MAX_INVOCATION_BYTES).unwrap(),
+            );
+            assert!(
+                load_next_prompt_task(&tx, &id).is_err(),
+                "Ready must authenticate prior choices"
+            );
         }
         #[cfg(unix)]
         {

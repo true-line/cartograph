@@ -45,6 +45,14 @@ pub struct AcquisitionChoices {
     deferred: usize,
 }
 impl AcquisitionChoices {
+    /// Canonical typed JSON under the existing action cap; not a publication
+    /// proof. Producers and saved readers must use these identical hash bytes.
+    pub fn stamp_hash(&self) -> Result<String, InvestigationError> {
+        Ok(core_prov::content_hash(&bounded_bytes(
+            self,
+            MAX_ACTION_BYTES,
+        )?))
+    }
     pub fn entries(&self) -> &[AcquisitionChoice] {
         &self.entries
     }

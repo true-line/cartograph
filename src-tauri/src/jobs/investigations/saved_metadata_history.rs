@@ -26,7 +26,7 @@ impl<'a> SavedMetadataHistory<'a> {
         let schema_version = connection.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
         let temp_schema_version =
             connection.query_row("PRAGMA temp.schema_version", [], |r| r.get(0))?;
-        let steps = next_prompt_invocations(connection, task)?;
+        let steps = raw_next_prompt_invocations(connection, task)?;
         let ordinals = steps
             .iter()
             .map(|(ordinal, step)| (step.step_id.clone(), *ordinal))
@@ -175,7 +175,7 @@ impl<'a> SavedMetadataHistory<'a> {
             .acquisition
             .as_ref()
             .map(|stamp| stamp.choices_hash.as_str())
-            != Some(core_prov::content_hash(&encode(&choices, MAX_ACTION_BYTES)?).as_str())
+            != Some(choices.stamp_hash()?.as_str())
         {
             return Err(InvestigationStoreError::Invalid);
         }

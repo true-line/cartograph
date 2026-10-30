@@ -1038,5 +1038,7 @@ Existing saved-call readers rederive @18 choices from the exact invocation's
 prior authenticated attempts, metadata and retained ledger revisions. Revision
 keys, scope/graph and coverage stay bound; repeated revisions share one transient
 ledger owner. The saved canonical choices hash must match. Non-null semantic
-feedback hashes remain unsupported until journal authentication lands. Generic
-validation, dispatch and sealing stay closed; no runtime workflow is enabled.
+feedback hashes remain unsupported here; AC-0482 must authenticate them before
+support is enabled. Unqualified invocation/metadata readers remain closed to @18;
+only the private replay bootstrap admits shape pending exact choices validation.
+Generic validation, dispatch and sealing stay closed; no runtime workflow is enabled.
