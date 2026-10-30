@@ -4467,3 +4467,209 @@ class A(private val kafka: KafkaTemplate<String, String>) {
         assert_eq!(kafka_rows(source), Vec::<String>::new(), "{source}");
     }
 }
+
+fn okhttp_rows(files: &[(&str, &str)]) -> Vec<[String; 3]> {
+    retrofit_sites(files)
+        .into_iter()
+        .map(|site| {
+            let url = match site.url {
+                IdentityExpr::Literal(url) => format!("literal {url}"),
+                IdentityExpr::Computed(text) => format!("computed {text}"),
+                other => format!("{other:?}"),
+            };
+            [site.method, url, site.entry.unwrap_or_default()]
+        })
+        .collect()
+}
+
+// AC-0477 (#1409): `Request`-import, aliased, nested `Builder`-import and
+// fully qualified (also unimported and spaced) OkHttp builders; the last
+// method link wins (default GET), the last `url` wins, `method` keeps a
+// token literal without lowercase letters only, and only a pure string
+// `url` argument is a literal. (T-0477)
+#[test]
+fn okhttp_request_builders_become_fetch_sites() {
+    let rows = okhttp_rows(&[
+        (
+            "src/main/kotlin/io/demo/Client.kt",
+            r#"package io.demo
+
+import okhttp3.CacheControl
+import okhttp3.HttpUrl
+import okhttp3.Request
+import okhttp3.RequestBody
+
+class Client {
+    fun calls(path: String, target: HttpUrl, body: RequestBody) {
+        Request.Builder().url("https://host/a").build()
+        Request.Builder().url("https://host/b").delete().build()
+        Request.Builder().url("https://host/old").url("https://host/c")
+            .header("A", "1").addHeader("B", "2").removeHeader("C").tag("t")
+            .tag(String::class.java, "u").cacheControl(CacheControl.FORCE_NETWORK)
+            .put(body).post(body).build()
+        Request.Builder().url("https://host/$path").get().build()
+        Request.Builder().url(target).patch(body).build()
+        Request.Builder().url("https://host/d").method("patch", body).build()
+        Request.Builder().url("https://host/p").method("PROPFIND", null).build()
+        Request.Builder().head().url("https://host/h").delete(body).build()
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Nested.kt",
+            r#"package io.demo
+
+import okhttp3.Request.Builder
+import okhttp3.Request as OkRequest
+
+class Nested {
+    fun calls() {
+        Builder().url("https://host/e").build()
+        okhttp3.Request.Builder().url("https://host/f").head().build()
+        OkRequest.Builder().url("https://host/g").build()
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Bare.kt",
+            r#"package io.demo
+
+class Bare {
+    fun calls() = okhttp3 . Request . Builder().url("https://host/i").build()
+}
+"#,
+        ),
+    ]);
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[method, url, entry]| [method.as_str(), url.as_str(), entry.as_str()])
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ["GET", "literal https://host/i", "Bare.calls"],
+            ["GET", "literal https://host/a", "Client.calls"],
+            ["DELETE", "literal https://host/b", "Client.calls"],
+            ["POST", "literal https://host/c", "Client.calls"],
+            ["GET", "computed \"https://host/$path\"", "Client.calls"],
+            ["PATCH", "computed target", "Client.calls"],
+            ["?", "literal https://host/d", "Client.calls"],
+            ["PROPFIND", "literal https://host/p", "Client.calls"],
+            ["DELETE", "literal https://host/h", "Client.calls"],
+            ["GET", "literal https://host/e", "Nested.calls"],
+            ["HEAD", "literal https://host/f", "Nested.calls"],
+            ["GET", "literal https://host/g", "Nested.calls"],
+        ]
+    );
+}
+
+// AC-0477: a foreign, file-declared or unimported `Request`, a binding of
+// the first segment, a file-declared or imported link function, a literal
+// the member cannot take, named arguments, a trailing lambda, an unknown or
+// wrong-arity link, a held builder and a chain without `url` yield none;
+// test sources yield none. (T-0477)
+#[test]
+fn unproven_okhttp_builders_are_not_fetch_sites() {
+    let rows = okhttp_rows(&[
+        (
+            "src/main/kotlin/io/demo/Client.kt",
+            r#"package io.demo
+
+import okhttp3.Request
+import okhttp3.RequestBody
+
+class Client {
+    fun calls(base: Request.Builder, body: RequestBody) {
+        Request.Builder().url("https://host/x").newBuilder().build()
+        Request.Builder().url("https://host/x").get(1).build()
+        Request.Builder().url("https://host/x").post().build()
+        Request.Builder().url("https://host/x").post("text").build()
+        Request.Builder().url(42).build()
+        Request.Builder().url(url = "https://host/x").build()
+        Request.Builder().url("https://host/x").apply { header("A", "1") }.build()
+        Request.Builder("seed").url("https://host/x").build()
+        Request.Builder().get().build()
+        base.url("https://host/x").build()
+    }
+
+    fun shadowed(okhttp3: Any) = okhttp3.Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Bound.kt",
+            r#"package io.demo
+
+import okhttp3.Request
+
+class Bound {
+    fun calls(Request: Any) = Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Foreign.kt",
+            r#"package io.demo
+
+import com.example.Request
+
+class Foreign {
+    fun calls() = Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Local.kt",
+            r#"package io.demo
+
+import okhttp3.Request
+
+class Request
+
+class Local {
+    fun calls() = Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Extension.kt",
+            r#"package io.demo
+
+import okhttp3.Request
+import com.example.tag
+
+fun Request.Builder.url(u: Int): Request.Builder = this
+
+class Extension {
+    fun calls() {
+        Request.Builder().url("https://host/x").build()
+        Request.Builder().get().tag("t").url("https://host/y").build()
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/io/demo/Unimported.kt",
+            r#"package io.demo
+
+class Unimported {
+    fun calls() = Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+        (
+            "src/test/kotlin/io/demo/ClientTest.kt",
+            r#"package io.demo
+
+import okhttp3.Request
+
+class ClientTest {
+    fun calls() = Request.Builder().url("https://host/x").build()
+}
+"#,
+        ),
+    ]);
+    assert_eq!(rows, Vec::<[String; 3]>::new());
+}

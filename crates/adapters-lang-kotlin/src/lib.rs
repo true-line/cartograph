@@ -1722,6 +1722,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         .extend(rest_template::sites(&cx, root, &functions, &imports));
     out.unjoined_sites
         .extend(webclient::sites(&cx, root, &functions, &imports));
+    // Square OkHttp request builders (AC-0477), product sources only.
+    if product {
+        out.unjoined_sites
+            .extend(okhttp::sites(&cx, root, &functions, &imports));
+    }
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
     // Spring Kafka producers and listeners (#1366).
@@ -2467,6 +2472,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 
 mod hilt_binds;
 pub mod navigation3;
+mod okhttp;
 mod queries;
 mod receivers;
 mod rest_template;
