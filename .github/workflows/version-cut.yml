@@ -6,10 +6,18 @@ on:
   push:
     branches:
       - main
+  # Tagging starts when the exact cut commit's CI run completes on main, so no
+  # job holds a runner while CodeQL waits for a heavy slot (#1378).
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
+# A tag run is keyed by its commit: it must never replace a pending version-PR
+# run, or another commit's tag run, in a shared queue.
 concurrency:
-  group: version-cut
+  group: ${{ github.event_name == 'workflow_run' && format('version-tag-{0}', github.event.workflow_run.head_sha) || 'version-cut' }}
   cancel-in-progress: false
 
 permissions:
@@ -41,6 +49,7 @@ jobs:
   version-pr:
     name: Version packages PR
     needs: policy
+    if: github.event_name != 'workflow_run'
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
     timeout-minutes: 20
     outputs:
@@ -175,12 +184,17 @@ jobs:
 
   tag:
     name: Tag version merges
-    needs: [policy, version-pr]
+    needs: policy
+    # A main push only refreshes the version PR; its CI completion tags it.
+    # Only a CI run of a push to this repository's main can start a tag.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
-    # The exact-commit CI poll is intentionally allowed to wait 70 minutes;
-    # leave setup and publication headroom without returning to GitHub's
-    # unbounded six-hour default.
-    timeout-minutes: 90
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
@@ -191,6 +205,8 @@ jobs:
       - name: Checkout full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # A CI completion tags the commit its run tested, not today's main.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -202,10 +218,11 @@ jobs:
       - name: Tag a fresh reviewed version cut
         id: tag
         env:
-          BEFORE_SHA: ${{ github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-          HAS_RELEASES: ${{ needs.version-pr.outputs.has-releases }}
+          CI_RUN: ${{ github.event.workflow_run.id }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           set -euo pipefail
 
@@ -213,8 +230,15 @@ jobs:
           current=$(node -p 'require("./package.json").version')
 
           tag=$(node scripts/release-version.mjs tag)
-          if [ "$EVENT_NAME" = "push" ]; then
-            previous=$(git show "$BEFORE_SHA:package.json" 2>/dev/null \
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            cut_commit=$(git rev-parse HEAD)
+            if [ "$cut_commit" != "$CI_SHA" ]; then
+              echo "::error::Checked out $cut_commit, not the CI run's $CI_SHA."
+              exit 1
+            fi
+            # A version PR is squash-merged: its first parent is the main it
+            # was cut from.
+            previous=$(git show "$cut_commit^1:package.json" 2>/dev/null \
               | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version' \
               2>/dev/null || true)
             if [ -z "$previous" ] || [ "$previous" = "$current" ]; then
@@ -222,7 +246,6 @@ jobs:
               echo 'kind=none' >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            cut_commit=$(git rev-parse HEAD)
           else
             # Manual dispatch is publication recovery only. It must never infer
             # or create a missing tag from arbitrary version history.
@@ -260,34 +283,27 @@ jobs:
           fi
 
           pending=$(node scripts/release-version.mjs pending)
-          if [ "$HAS_RELEASES" = true ] || [ -n "$pending" ]; then
+          if [ -n "$pending" ]; then
             echo "Changesets remain pending ($pending); nothing to tag."
             echo 'kind=none' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # The version PR follows the normal ready/queue lifecycle. Wait for
-          # the exact main commit's stable CI result; do not dispatch another
-          # equivalent suite from version automation.
-          ci_run=''
-          for _ in $(seq 1 140); do
-            ci_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=push&head_sha=$cut_commit&per_page=100" \
-              --jq 'first(.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | .id) // empty')
-            if [ -n "$ci_run" ]; then
-              conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" --jq '.conclusion // empty')
-              if [ "$conclusion" = success ]; then
-                break
-              fi
-              if [ -n "$conclusion" ]; then
-                echo "::error::Exact-commit CI concluded $conclusion; refusing to tag."
-                exit 1
-              fi
+          # Tag only on the exact cut commit's own successful CI run; never
+          # dispatch another equivalent suite from version automation.
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            if [ "$CI_CONCLUSION" != success ]; then
+              echo "::error::Exact-commit CI concluded $CI_CONCLUSION; refusing to tag."
+              exit 1
             fi
-            sleep 30
-          done
-          if [ -z "$ci_run" ]; then
-            echo "::error::No completed CI run found for exact cut commit $cut_commit."
-            exit 1
+            ci_run=$CI_RUN
+          else
+            ci_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=push&head_sha=$cut_commit&per_page=100" \
+              --jq 'first(.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | .id) // empty')
+            if [ -z "$ci_run" ]; then
+              echo "::error::No successful CI run found for exact cut commit $cut_commit."
+              exit 1
+            fi
           fi
           stable=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
             --jq 'any(.jobs[]; .name == "CI" and .conclusion == "success")')
