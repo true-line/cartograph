@@ -4,7 +4,7 @@ use super::*;
 pub(in crate::jobs::investigations) mod fixture;
 use fixture::Fixture;
 
-fn rewrite(
+pub(in crate::jobs::investigations) fn rewrite(
     tx: &Transaction<'_>,
     table: &str,
     task: &str,

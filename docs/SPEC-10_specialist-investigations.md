@@ -1031,3 +1031,14 @@ historical families require its absence. Generic validation and sealing remain
 closed to every present stamp, and @18 dispatch remains disabled. This checks
 role/shape and existing saved witnesses, not candidate identity or authenticated
 feedback. Other durable readers and full @18 reopen are not enabled here.
+
+### Saved acquisition authority (#1398, AC-0483)
+
+Existing saved-call readers rederive @18 choices from the exact invocation's
+prior authenticated attempts, metadata and retained ledger revisions. Revision
+keys, scope/graph and coverage stay bound; repeated revisions share one transient
+ledger owner. The saved canonical choices hash must match. Non-null semantic
+feedback hashes remain unsupported here; AC-0482 must authenticate them before
+support is enabled. Unqualified invocation/metadata readers remain closed to @18;
+only the private replay bootstrap admits shape pending exact choices validation.
+Generic validation, dispatch and sealing stay closed; no runtime workflow is enabled.

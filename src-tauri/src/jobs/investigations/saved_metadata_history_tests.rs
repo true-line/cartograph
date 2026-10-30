@@ -238,3 +238,279 @@ fn saved_metadata_history_reused_append_core_rejects_substituted_call_basis() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
+    // AC-0483: real synthetic inventory admission, then explicit gated-family
+    // witness conversion. This is not an @18 producer, migration or model run.
+    use agents::investigation::{AcquisitionAdmission, acquisition_choices::AcquisitionChoices};
+    use completion::next_prompt_snapshot::tests::rewrite;
+    for role in [
+        SpecialistId::DomainAnalystV15,
+        SpecialistId::DomainAnalystV17,
+        SpecialistId::DomainAnalystV18,
+    ] {
+        let mut fixture = FinishFixture::new(true);
+        fixture.begin();
+        let f = &mut fixture.base.f;
+        let policy = &INVESTIGATION_V2_POLICY;
+        let id = f.task.detail.summary.investigation_id.clone();
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let history = SavedMetadataHistory::load(&tx, &f.task).unwrap();
+        assert_eq!(history.attempts.len(), 1);
+        let mut entry: AttemptEntry = read_body(&tx, "completion_attempts", "sequence", &id, &1i64)
+            .unwrap()
+            .unwrap();
+        let mut witnesses = history
+            .steps
+            .iter()
+            .map(|(ordinal, step)| {
+                let ledger = ledger_at(&tx, &id, u64::from(*ordinal - 1)).unwrap();
+                assert_eq!(
+                    ledger.fingerprint_with_policy(policy).unwrap(),
+                    step.input_ledger_hash
+                );
+                (
+                    *ordinal,
+                    step.clone(),
+                    ledger,
+                    history.metadata_at(&step.step_id).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(witnesses.len(), 2);
+        drop(history);
+        f.request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
+        let intent = CompletionIntent::new(&f.request).unwrap();
+        let old_attempt = entry.record.attempt_id.clone();
+        entry.record.request_hash = intent.request_hash.clone();
+        entry.record.attempt_id = entry.record.content_id().unwrap();
+        rewrite(
+            &tx,
+            "completion_attempts",
+            &id,
+            "sequence",
+            &1i64,
+            &encode(&entry, MAX_RECORD_BYTES).unwrap(),
+        );
+        f.task.intent_hash = intent.request_hash.clone();
+        f.task.detail.completion.as_mut().unwrap().request_hash = intent.request_hash.clone();
+        f.task.completion_intent = Some(intent.clone());
+        f.task.detail.summary.specialist_id = role;
+        f.task.detail.specialist = role.definition().unwrap();
+        let attempt_ledger = ledger_at(&tx, &id, entry.record.input_revision).unwrap();
+        let mut calls = vec![];
+        for (ordinal, step, ledger, metadata) in &mut witnesses {
+            metadata.request_hash = intent.request_hash.clone();
+            for attempt in &mut metadata.completed_attempt_ids {
+                assert_eq!(attempt, &old_attempt);
+                *attempt = entry.record.attempt_id.clone();
+            }
+            let evidence = [agents::investigation::staged_attempt::AttemptEvidence {
+                record: &entry.record,
+                ledger: &attempt_ledger,
+            }];
+            let choices = AcquisitionChoices::derive(
+                &intent.contract(),
+                metadata,
+                &id,
+                ledger,
+                if *ordinal == 1 { &[] } else { &evidence },
+                policy,
+            )
+            .unwrap();
+            assert_eq!(choices.attempts_complete(), *ordinal == 2);
+            let disclosure = step.disclosure.as_mut().unwrap();
+            disclosure.completion_contract_hash =
+                Some(intent.contract().fingerprint_with_policy(policy).unwrap());
+            disclosure.completion_metadata_hash =
+                Some(metadata.fingerprint_with_policy(policy).unwrap());
+            let history = agents::investigation::ProgressiveInvestigationContext::prepare(
+                &intent.request_hash,
+                ledger,
+                &[],
+                policy,
+            )
+            .unwrap()
+            .query_history;
+            let query_history = disclosure.query_history.as_mut().unwrap();
+            query_history.request_hash = intent.request_hash.clone();
+            query_history.registry_hash = history.registry_hash;
+            let admission = disclosure.admission.as_mut().unwrap();
+            admission.acquisition =
+                (role == SpecialistId::DomainAnalystV18).then(|| AcquisitionAdmission {
+                    choices_hash: choices.stamp_hash().unwrap(),
+                    action_feedback_hash: None,
+                });
+            let call = admission_contract::SavedCallBasis {
+                schema_version: 1,
+                task_id: id.clone(),
+                request_hash: intent.request_hash.clone(),
+                step_id: step.step_id.clone(),
+                invocation_ordinal: *ordinal,
+                input_ledger_hash: step.input_ledger_hash.clone(),
+                input_revision: ledger.revision,
+                completion_metadata_hash: metadata.fingerprint_with_policy(policy).unwrap(),
+                admission: admission.clone(),
+            };
+            rewrite(
+                &tx,
+                "investigation_invocations",
+                &id,
+                "step_id",
+                &step.step_id,
+                &encode(step, MAX_INVOCATION_BYTES).unwrap(),
+            );
+            calls.push(call);
+        }
+        f.task.pending = Some(witnesses[1].1.clone());
+        f.task.admission_state.as_mut().unwrap().current_call = Some(calls[1].clone());
+        admission_journal::tests::save_task(&tx, &f.task);
+        tx.commit().unwrap();
+        // Reopen after publication of the later read, including the earlier cutoff.
+        let reopened = JobStore::open(f.directory.path().join("state.db")).unwrap();
+        for index in 0..2 {
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            let task = load_next_prompt_task(&tx, &id).unwrap();
+            let core =
+                admission_contract::load_saved_call_basis_core(&tx, &task, &calls[index]).unwrap();
+            assert_eq!(core.metadata.completed_attempt_ids.len(), index);
+            assert_eq!(core.ledger, witnesses[index].2);
+            if role == SpecialistId::DomainAnalystV18 {
+                assert!(next_prompt_invocations(&tx, &task).is_err()); // unqualified helper stays closed
+            }
+        }
+        for mutation in ["choices", "feedback", "ledger", "attempt"] {
+            if role != SpecialistId::DomainAnalystV18 && matches!(mutation, "choices" | "feedback")
+            {
+                continue;
+            }
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            let mut task = load_next_prompt_task(&tx, &id).unwrap();
+            let index = usize::from(mutation == "choices");
+            let mut call = calls[index].clone();
+            let mut step = witnesses[index].1.clone();
+            if mutation == "choices" {
+                validate_step_basis(&tx, &task, &step).unwrap();
+            }
+            match mutation {
+                "choices" | "feedback" => {
+                    let stamp = call.admission.acquisition.as_mut().unwrap();
+                    if mutation == "choices" {
+                        stamp.choices_hash = "f".repeat(64);
+                    } else {
+                        stamp.action_feedback_hash = Some("f".repeat(64));
+                    }
+                    step.disclosure.as_mut().unwrap().admission = Some(call.admission.clone());
+                    rewrite(
+                        &tx,
+                        "investigation_invocations",
+                        &id,
+                        "step_id",
+                        &step.step_id,
+                        &encode(&step, MAX_INVOCATION_BYTES).unwrap(),
+                    );
+                }
+                "ledger" => {
+                    let mut ledger = witnesses[0].2.clone();
+                    ledger.revision = 1; // valid body under the wrong retained key
+                    rewrite(
+                        &tx,
+                        "investigation_inputs",
+                        &id,
+                        "revision",
+                        &0i64,
+                        &encode(&ledger, MAX_MANIFEST_BYTES).unwrap(),
+                    );
+                }
+                "attempt" => {
+                    let mut forged = entry.clone();
+                    forged.record.request_hash = "f".repeat(64);
+                    forged.record.attempt_id = forged.record.content_id().unwrap();
+                    rewrite(
+                        &tx,
+                        "completion_attempts",
+                        &id,
+                        "sequence",
+                        &1i64,
+                        &encode(&forged, MAX_RECORD_BYTES).unwrap(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            if mutation == "choices" {
+                task.pending = Some(step.clone());
+                task.admission_state.as_mut().unwrap().current_call = Some(call.clone());
+                admission_journal::tests::save_task(&tx, &task);
+                assert!(validate_step_basis(&tx, &task, &step).is_err());
+                assert!(next_prompt_invocations(&tx, &task).is_err());
+            }
+            assert!(
+                admission_contract::load_saved_call_basis_core(&tx, &task, &call).is_err(),
+                "{mutation}"
+            );
+            assert!(load_next_prompt_task(&tx, &id).is_err(), "{mutation}");
+            // Dropping each transaction preserves the independently passing control.
+        }
+        if role == SpecialistId::DomainAnalystV18 {
+            // Settle through the existing capacity writer: Ready has no current
+            // call, so public history must independently validate older stamps.
+            let proposal = serde_json::json!({"type":"query_context", "context_id": f.request.expected_context_id,
+                "query":{"scope":InvestigationScope::All,"kind":null,"labels":[],"max_facts":1,"max_bytes":16384,"cursor":null}});
+            let mut response = fixture.response.clone();
+            response.action_hash =
+                core_prov::content_hash(&encode(&proposal, MAX_ACTION_BYTES).unwrap());
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            let ready = admission_transition::refuse_capacity(
+                &tx,
+                &f.task,
+                &response,
+                &proposal,
+                CapacityRefusalReason::PromptCapacity,
+            )
+            .unwrap();
+            assert_eq!(ready.phase, Phase::Ready);
+            assert!(
+                ready
+                    .admission_state
+                    .as_ref()
+                    .unwrap()
+                    .current_call
+                    .is_none()
+            );
+            tx.commit().unwrap();
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            load_next_prompt_task(&tx, &id).unwrap(); // positive Ready control
+            let mut historical = witnesses[0].1.clone();
+            historical
+                .disclosure
+                .as_mut()
+                .unwrap()
+                .admission
+                .as_mut()
+                .unwrap()
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .choices_hash = "f".repeat(64);
+            rewrite(
+                &tx,
+                "investigation_invocations",
+                &id,
+                "step_id",
+                &historical.step_id,
+                &encode(&historical, MAX_INVOCATION_BYTES).unwrap(),
+            );
+            assert!(
+                load_next_prompt_task(&tx, &id).is_err(),
+                "Ready must authenticate prior choices"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let transient = metadata_history_workspace::acquisition_choices_workspace().unwrap();
+            let (_, _, history) = next_prompt_metadata_workspace().unwrap();
+            assert!(next_prompt_saved_call_workspace().unwrap().1 >= history + transient);
+        }
+    }
+}

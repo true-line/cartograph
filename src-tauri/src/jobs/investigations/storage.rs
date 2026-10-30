@@ -734,7 +734,7 @@ pub(super) fn validate_step_basis(
     }
     if let Some(disclosure) = &step.disclosure {
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
-        disclosure.validate_with_policy(&ledger, policy)?;
+        disclosure.validate_saved_role_shape(&ledger, policy, task.detail.summary.specialist_id)?;
         let completion_sources = task
             .completion_intent
             .as_ref()
@@ -969,6 +969,10 @@ pub(super) fn load_next_prompt_task(
     id: &str,
 ) -> Result<StoredTask, InvestigationStoreError> {
     let task = load_next_prompt_task_base(connection, id)?;
+    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        // Ready has no current call to trigger the current-call reader below.
+        super::admission_journal::derive_current(connection, &task)?;
+    }
     completion::validate_saved(connection, &task)?;
     Ok(task)
 }

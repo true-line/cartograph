@@ -720,6 +720,9 @@
 - **AC-0481** Given synthetic durable task/step/ledger/metadata witnesses, saved-call core validation uses the saved task family to require a well-shaped acquisition stamp only for @18. Missing/malformed @18 stamps and consistently rehashed historical-family stamps fail; generic validation still rejects present stamps. Existing bytes, dispatch and sealing gates remain unchanged. This prerequisite proves role/shape, not candidate identity or full @18 reopen (#1394).
 - **Trace:** H4 · `agents`, `app` · — · T-0481
 
+- **AC-0483** Given synthetic saved @18 invocations including a completed inventory read, existing saved-call readers rederive choices using authenticated attempts strictly before each invocation and exact retained ledger keys, graph/scope and coverage. Historical cutoff choices remain stable after later progress; rehashed foreign ledgers, choices hashes and unsupported feedback hashes fail. Transient owners are bounded, historical bytes stay unchanged, and dispatch/sealing remain disabled. This prerequisite authenticates saved choices, not semantic feedback or full runtime acquisition (#1398).
+- **Trace:** H4 · `app` · — · T-0483
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

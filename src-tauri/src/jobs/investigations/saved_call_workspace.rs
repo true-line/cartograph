@@ -40,6 +40,7 @@ pub(crate) fn next_prompt_saved_call_workspace() -> Option<(usize, usize)> {
     // their scratch conservatively preserves rejected-row encoding too.
     let validation = sum(&[
         next_prompt_contract_workspace()?,
+        metadata_history_workspace::acquisition_choices_workspace()?,
         agents::investigation::disclosure_validation_workspace(
             &INVESTIGATION_V2_POLICY,
             MAX_RECORD_BYTES,

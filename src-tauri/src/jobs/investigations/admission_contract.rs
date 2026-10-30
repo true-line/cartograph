@@ -67,7 +67,7 @@ impl StoredAdmissionState {
             return Err(InvestigationStoreError::Invalid);
         }
         if let Some(call) = &self.current_call {
-            call.validate_shape()?;
+            call.validate_saved_shape(task.detail.summary.specialist_id)?;
             if call.task_id != task.detail.summary.investigation_id
                 || call.request_hash != task.intent_hash
                 || task.ledger_hash.as_ref() != Some(&call.input_ledger_hash)
@@ -89,12 +89,9 @@ impl SavedCallBasis {
     pub(super) fn mode(&self) -> CompletionCallMode {
         self.admission.mode
     }
-    fn validate_shape(&self) -> Result<(), InvestigationStoreError> {
-        self.validate_saved_shape(None)
-    }
     fn validate_saved_shape(
         &self,
-        saved_role: Option<SpecialistId>,
+        saved_role: SpecialistId,
     ) -> Result<(), InvestigationStoreError> {
         if self.schema_version != 1
             || !id_valid(&self.task_id)
@@ -118,13 +115,8 @@ impl SavedCallBasis {
             &self.admission.consumed_budgets,
             &INVESTIGATION_V2_POLICY.limits(),
         )?;
-        if let Some(role) = saved_role {
-            self.admission
-                .validate_saved_role_shape(role, &INVESTIGATION_V2_POLICY)?;
-        } else {
-            self.admission
-                .validate_with_policy(&INVESTIGATION_V2_POLICY)?;
-        }
+        self.admission
+            .validate_saved_role_shape(saved_role, &INVESTIGATION_V2_POLICY)?;
         encode(self, MAX_INVOCATION_BYTES)?;
         Ok(())
     }
@@ -231,7 +223,7 @@ impl SavedCallBasis {
         ledger
             .validate_for_specialist(task.detail.summary.specialist_id, &INVESTIGATION_V2_POLICY)?;
         let role = task.detail.summary.specialist_id;
-        self.validate_saved_shape(Some(role))?;
+        self.validate_saved_shape(role)?;
         let policy = &INVESTIGATION_V2_POLICY;
         let intent = task
             .completion_intent
@@ -393,14 +385,6 @@ pub(super) fn load_saved_call_basis_core(
     if basis.task_id != *id {
         return Err(InvestigationStoreError::Invalid);
     }
-    let step: PendingInvestigationStep = read_body(
-        connection,
-        "investigation_invocations",
-        "step_id",
-        id,
-        &basis.step_id,
-    )?
-    .ok_or(InvestigationStoreError::Missing)?;
     let ledger: InvestigationInputLedger = read_body(
         connection,
         "investigation_inputs",
@@ -414,12 +398,5 @@ pub(super) fn load_saved_call_basis_core(
         return Err(InvestigationStoreError::Invalid);
     }
     drop(archive);
-    let metadata = completion::metadata_at_saved_step(connection, task, &step)?;
-    basis.validate_core(task, &step, &ledger, &metadata)?;
-    Ok(SavedCallCore {
-        step,
-        ledger,
-        metadata,
-        ordinal: basis.invocation_ordinal,
-    })
+    completion::SavedMetadataHistory::load(connection, task)?.validate_timeline_call(basis, &ledger)
 }

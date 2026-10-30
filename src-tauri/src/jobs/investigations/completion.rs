@@ -1202,6 +1202,22 @@ pub(super) fn next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
+    let steps = raw_next_prompt_invocations(connection, task)?;
+    for (_, step) in &steps {
+        step.disclosure
+            .as_ref()
+            .and_then(|value| value.admission.as_ref())
+            .ok_or(InvestigationStoreError::Invalid)?
+            .validate_with_policy(saved_policy(task)?)?;
+    }
+    Ok(steps)
+}
+// Bootstrap only: SavedMetadataHistory authenticates choices after loading the
+// attempt epoch. Unqualified metadata/action readers remain closed to @18.
+fn raw_next_prompt_invocations(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
     #[cfg(test)]
     saved_metadata_history::note_invocation_sweep();
     if connection.is_autocommit() {
@@ -1238,7 +1254,7 @@ pub(super) fn next_prompt_invocations(
             .admission
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
-        admission.validate_with_policy(policy)?;
+        admission.validate_saved_role_shape(task.detail.summary.specialist_id, policy)?;
         let ordinal = admission
             .consumed_budgets
             .model_invocations

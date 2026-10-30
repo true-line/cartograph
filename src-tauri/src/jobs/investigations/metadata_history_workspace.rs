@@ -116,3 +116,42 @@ pub(super) fn row_workspace() -> Option<usize> {
         element.checked_mul(RECORD_MAX_VALUES)?,
     ])
 }
+
+/// Additional transient choices derivation; borrowed history/task are separate.
+pub(super) fn acquisition_choices_workspace() -> Option<usize> {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let attempts = policy.max_completed_attempts();
+    let (ledger, decode) = InvestigationInputLedger::decode_workspace_bytes()?;
+    // Before truncation, action/obligation strings are subsets of the admitted
+    // contract. Each query additionally clones the validated coverage context
+    // ID (worst JSON escape: six bytes/input byte); 1024 dominates its fixed
+    // keys/numbers plus the choice wrapper. Another 1024 covers hashes/fields.
+    let candidates = policy
+        .envelope_bytes()
+        .checked_add(
+            policy.max_completion_obligations().checked_mul(
+                context_hub::coverage::MAX_COVERAGE_IDENTITY_BYTES
+                    .checked_mul(6)?
+                    .checked_add(1024)?,
+            )?,
+        )?
+        .checked_add(1024)?;
+    sum(&[
+        map::<u64, InvestigationInputLedger>(attempts)?,
+        ledger.checked_mul(attempts)?, // at most one owner per distinct revision
+        decode,
+        MAX_RECORD_BYTES,
+        slots::<Vec<u8>>(1)?, // next named ledger read
+        slots::<&completion::AttemptEntry>(attempts)?,
+        slots::<agents::investigation::staged_attempt::AttemptEvidence<'_>>(attempts)?,
+        slots::<Vec<u8>>(3)?,
+        next_prompt_metadata_workspace()?.1, // metadata_at remains live during derive
+        next_prompt_contract_workspace()?,
+        ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
+        set::<&str>(attempts)?,
+        json_bytes(candidates)?, // all candidates exist before prefix truncation
+        MAX_ACTION_BYTES,
+        slots::<Vec<u8>>(1)?,               // rejected/final bounded encoding
+        MAX_MANIFEST_BYTES.checked_mul(2)?, // canonical encoding/domain fingerprints
+    ])
+}
