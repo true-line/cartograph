@@ -104,7 +104,7 @@ fn verb(name: &str) -> Option<Option<&'static str>> {
 
 /// A call `<receiver>.<name>(<positional arguments>)` with no trailing
 /// lambda: its receiver, name and arguments.
-fn member_call<'s, 't>(
+pub(crate) fn member_call<'s, 't>(
     cx: &FileCx<'s>,
     call: TsNode<'t>,
 ) -> Option<(TsNode<'t>, &'s str, Vec<TsNode<'t>>)> {
