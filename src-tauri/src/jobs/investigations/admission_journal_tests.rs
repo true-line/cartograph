@@ -128,6 +128,17 @@ pub(in crate::jobs::investigations) fn start_call(
         policy,
     )
     .unwrap();
+    let input = if f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let choices = completion::SavedMetadataHistory::load(&tx, &f.task)
+            .unwrap()
+            .current_choices(&f.ledger, &f.metadata)
+            .unwrap()
+            .unwrap();
+        input.with_acquisition_admission(choices, None).unwrap()
+    } else {
+        input
+    };
     let id = format!("journal-step:{}", f.task.detail.usage.model_invocations + 1);
     let action = input.action(format!("{}:{id}", f.basis.task_id)).unwrap();
     let provider = OllamaProvider::new(

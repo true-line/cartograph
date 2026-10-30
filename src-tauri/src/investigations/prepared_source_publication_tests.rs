@@ -50,7 +50,15 @@ fn read(
 }
 #[test]
 fn prepared_source_publication_acquired_installs_actual_read_only_after_ack() {
-    let (saved, state, mut context, target, _) = fixture();
+    assert_acquired_publication(false);
+}
+// AC-0487: execute the production attachment callsite, not a manual test attach.
+#[test]
+fn prepared_source_publication_gated_source_uses_attached_candidate() {
+    assert_acquired_publication(true);
+}
+fn assert_acquired_publication(gated: bool) {
+    let (saved, state, mut context, target, _) = fixture_for(gated);
     reset_reads();
     let candidate = match read(&saved, &state, &context, &target) {
         Ok(candidate) => candidate,
@@ -83,6 +91,14 @@ fn prepared_source_publication_acquired_installs_actual_read_only_after_ack() {
             .unwrap()
             .is_some()
     );
+    let admission = published
+        .input
+        .seal_disclosure_with_policy(&published.prepared, context.policy)
+        .unwrap()
+        .unwrap()
+        .admission
+        .unwrap();
+    assert_eq!(admission.acquisition.is_some(), gated);
     assert_eq!(published.detail.usage.evidence_items, 1);
     assert_eq!(
         saved.publication_after_reopen(),

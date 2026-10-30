@@ -39,6 +39,38 @@ pub(in crate::jobs::investigations) fn envelope(
         .and_then(|s| s.current_call.as_ref())
         .ok_or(InvestigationStoreError::Invalid)?;
     let core = admission_contract::load_saved_call_basis_core(connection, reservation_task, call)?;
+    envelope_with_authenticated_core(connection, reservation_task, reservation, response, &core)
+}
+
+/// Sizing a not-yet-published reservation must retain its authenticated
+/// Invocation core; its future events cannot be replayed as saved authority.
+/// The live source-admission owner authenticates that core before projection.
+pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
+    connection: &Connection,
+    reservation_task: &StoredTask,
+    reservation: &read_reservations::Reservation,
+    response: &InvestigationResponseMeta,
+    core: &admission_contract::SavedCallCore,
+) -> Result<SettlementEnvelope, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    reservation.validate()?;
+    let pending = reservation_task
+        .pending_source_read
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?;
+    if pending.reservation_hash != reservation.fingerprint()?
+        || pending.step_id != reservation.binding.step_id
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let call = reservation_task
+        .admission_state
+        .as_ref()
+        .and_then(|s| s.current_call.as_ref())
+        .ok_or(InvestigationStoreError::Invalid)?;
+    call.validate_core(reservation_task, &core.step, &core.ledger, &core.metadata)?;
     if response.step_id != call.step_id
         || response.response_hash != reservation.binding.original_response_hash
         || response.action_hash != reservation.binding.original_action_hash

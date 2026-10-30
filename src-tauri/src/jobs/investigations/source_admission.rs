@@ -245,7 +245,17 @@ impl JobStore {
         ];
         task = projected;
         let validation = source_validation::validation_storage_bound(&tx, &task, &reservation)?;
-        let envelope = source_settlement::envelope(&tx, &task, &reservation, input.response)?;
+        let envelope = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            source_settlement::envelope_with_authenticated_core(
+                &tx,
+                &task,
+                &reservation,
+                input.response,
+                core,
+            )?
+        } else {
+            source_settlement::envelope(&tx, &task, &reservation, input.response)?
+        };
         reservation.storage_claim = StorageClaim {
             validation_bytes: validation,
             settlement_bytes: envelope.bytes,
@@ -262,7 +272,17 @@ impl JobStore {
             .as_mut()
             .ok_or(InvestigationStoreError::Invalid)?
             .reservation_hash = reservation.fingerprint()?;
-        let repeated = source_settlement::envelope(&tx, &task, &reservation, input.response)?;
+        let repeated = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            source_settlement::envelope_with_authenticated_core(
+                &tx,
+                &task,
+                &reservation,
+                input.response,
+                core,
+            )?
+        } else {
+            source_settlement::envelope(&tx, &task, &reservation, input.response)?
+        };
         if repeated != envelope
             || source_validation::validation_storage_bound(&tx, &task, &reservation)? != validation
         {

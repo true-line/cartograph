@@ -77,6 +77,8 @@ pub(crate) fn workspace(
         next_prompt_contract_workspace()?,
         ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
         continuation_peak,
+        next_prompt_metadata_workspace()?.0,
+        metadata_history_workspace::acquisition_choices_workspace()?,
     ])?;
     // project_observation/refresh_observation own loaded attempts, raw refusals
     // and a new detail while validating it, including the terminal alternative.

@@ -49,6 +49,7 @@ pub(super) fn usage_for(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate_continuation(
+    connection: &Connection,
     before: &StoredTask,
     saved: &SavedRead,
     base: &InvestigationInputLedger,
@@ -60,10 +61,6 @@ pub(super) fn validate_continuation(
     reason: Option<&UnavailableReason>,
     active: u64,
 ) -> Result<InvestigationInputLedger, InvestigationStoreError> {
-    // Metadata-only prospective authority does not authorize source settlement.
-    if before.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
-        return Err(InvestigationStoreError::Invalid);
-    }
     let policy = &INVESTIGATION_V2_POLICY;
     validate_next_ledger(before, saved, base, c.candidate.ledger(), kind, active)?;
     if c.current.ledger() != base {
@@ -138,6 +135,12 @@ pub(super) fn validate_continuation(
         .admission
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
+    if before.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let choices = completion::SavedMetadataHistory::load(connection, before)?
+            .prospective_choices(ledger, &next_metadata, &records)?
+            .ok_or(InvestigationStoreError::Invalid)?;
+        source_snapshot::validate_acquisition(&choices, state)?;
+    }
     if state.consumed_budgets != usage_for(saved, kind, active)?
         || state.mode
             != next_metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)?

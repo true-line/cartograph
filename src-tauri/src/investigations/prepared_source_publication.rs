@@ -230,6 +230,9 @@ impl RetainedOutcome {
                 SourcePublicationError::Host(HostError::from(error))
             }
         })?;
+        let candidate = snapshot
+            .attach_acquisition(candidate)
+            .map_err(HostError::from)?;
         // The candidate owns its prompt; construction-only copies need not
         // overlap firewall preparation or durable source settlement.
         drop(evidence);

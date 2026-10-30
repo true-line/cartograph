@@ -12,8 +12,19 @@ fn fixture() -> (
     InvestigationInspectionTarget,
     std::path::PathBuf,
 ) {
+    fixture_for(false)
+}
+fn fixture_for(
+    gated: bool,
+) -> (
+    CapturedSourceInvocationFixture,
+    AppState,
+    FrozenContext,
+    InvestigationInspectionTarget,
+    std::path::PathBuf,
+) {
     let mut actual = None;
-    let saved = CapturedSourceInvocationFixture::new(|private| {
+    let saved = CapturedSourceInvocationFixture::with_gated(gated, |private| {
         let state = Fixture::state_at(private);
         let (mut context, target) = Fixture::context_for(&state);
         let qualification = CoverageQualification::new(

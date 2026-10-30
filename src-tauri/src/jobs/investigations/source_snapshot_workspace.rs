@@ -73,6 +73,10 @@ pub(crate) fn workspace() -> Option<(usize, usize)> {
         projected_detail,
         ledger.checked_mul(3)?,
         metadata,
+        context_hub::logical::json_bytes(MAX_ACTION_BYTES)?,
+        agents::investigation::acquisition_choices::AcquisitionChoices::private_workspace_bytes(
+            policy,
+        )?,
         64,
         128 + 6 + 20,
     ])?;
@@ -157,7 +161,11 @@ pub(crate) fn workspace() -> Option<(usize, usize)> {
             .max(reads)
             .max(validation)
             .max(encoding)
-            .max(turn),
+            .max(turn)
+            .max(sum(&[
+                next_prompt_metadata_workspace()?.0,
+                metadata_history_workspace::acquisition_choices_workspace()?,
+            ])?),
     )?;
     Some((retained, peak))
 }

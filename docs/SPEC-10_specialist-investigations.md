@@ -1075,8 +1075,9 @@ the publication transaction independently rederives and checks its choices stamp
 Accepted metadata publication clears semantic feedback. Stale choices refuse
 before retention callbacks or durable effects, and reopened current choices agree.
 Existing logical owner bounds include transient history/ledgers and retained
-choices; no RSS guarantee is claimed. Source continuation remains closed to @18,
-and membership, repair, UI and all dispatch/worker activation remain follow-ups.
+choices; no RSS guarantee is claimed. Source continuation is separately guarded
+by AC-0487; membership, repair, UI and all dispatch/worker activation remain
+follow-ups.
 
 ### Gated source-choice certificate (#1415, AC-0486)
 
@@ -1087,5 +1088,21 @@ sizing-only serialization. A bounded, unencoded pending mask preserves knowledge
 lost by prefix truncation; existing choices JSON and hashes stay identical.
 Sizing hashes/Values never become Input, attempt evidence or publication authority.
 Acquired/unavailable projections retain existing protected-redaction and wire
-checks. Source publication and every dispatch/worker gate remain closed; source
-snapshot/settlement attachment remains separate mandatory work.
+checks. This certificate grants no publication or activation authority; source
+snapshot/settlement attachment is separately guarded by AC-0487, and every public
+dispatch/worker gate remains closed.
+
+### Gated source prospective attachment (#1423, AC-0487)
+
+The source continuation snapshot derives @18 choices from the exact candidate
+ledger and materialized outcome records, and attaches them before preparation
+and sealing. Source settlement independently derives that authority again in its
+owner transaction, comparing the sealed choices and absent action feedback before
+metadata-hash acceptance. Acquired and unavailable outcomes retain their existing
+read, citation, ledger and accounting guards; every matching obligation gets its
+actual outcome record. Reservation sizing borrows the actual same-transaction
+authenticated invocation core; it cannot replay future, unpublished reservation
+events as saved authority. Persisted-state readers remain strict. The unread-source
+certificate remains mandatory. Public
+start, store-start and worker/resume gates remain closed; this private admission
+slice does not activate @18 or establish model-driven investigation acceptance.

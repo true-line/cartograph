@@ -17,7 +17,17 @@ impl CapturedSourceInvocationFixture {
     pub(crate) fn new(
         initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
     ) -> Self {
-        let (f, target, raw) = source_validation::captured_source_invocation(initialize);
+        Self::with_gated(false, initialize)
+    }
+    pub(crate) fn with_gated(
+        gated: bool,
+        initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
+    ) -> Self {
+        let (f, target, raw) = if gated {
+            source_validation::captured_source_invocation_for(true, initialize)
+        } else {
+            source_validation::captured_source_invocation(initialize)
+        };
         let tx = f.store.conn.unchecked_transaction().unwrap();
         let basis = turn::basis(&tx, &f.task).unwrap();
         tx.commit().unwrap();
@@ -40,6 +50,19 @@ impl CapturedSourceInvocationFixture {
             policy,
         )
         .unwrap();
+        let current = if gated {
+            let tx = f.store.conn.unchecked_transaction().unwrap();
+            let choices = completion::SavedMetadataHistory::load(&tx, &f.task)
+                .unwrap()
+                .acquisition_choices_at(&f.basis, &f.ledger)
+                .unwrap()
+                .unwrap();
+            current
+                .with_acquisition_admission(std::sync::Arc::new(choices), None)
+                .unwrap()
+        } else {
+            current
+        };
         // Construction exposes a local profile only; no invocation/transport.
         let provider = llm::OllamaProvider::new(
             "http://127.0.0.1:11434",

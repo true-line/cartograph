@@ -477,12 +477,16 @@ pub(crate) use tests::fixture_data::{SourceValidationInitialData, captured_sourc
 
 #[cfg(test)]
 pub(super) use tests::fixture_data::fixture_with_source_obligation as internal_source_obligation_fixture;
+#[cfg(test)]
+pub(super) use tests::fixture_data::gated_source_obligation_fixture;
 
 #[cfg(test)]
 pub(super) use tests::fixture_data::source_invocation_fixture as internal_source_invocation_fixture;
 
 #[cfg(test)]
 pub(super) use tests::fixture_data::captured_source_invocation;
+#[cfg(test)]
+pub(super) use tests::fixture_data::captured_source_invocation_for;
 
 #[cfg(test)]
 pub(super) fn lose_next_charge_ack() {
