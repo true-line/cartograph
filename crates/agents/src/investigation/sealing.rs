@@ -581,4 +581,4 @@ mod query_history_tests;
 
 #[path = "sealing_protection.rs"]
 mod protection;
-pub(super) use protection::admission_protected_fields;
+pub(super) use protection::{admission_protected_fields, selected_schema_protected_fields};

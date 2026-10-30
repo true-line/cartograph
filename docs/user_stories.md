@@ -741,6 +741,9 @@
 - **AC-0485** Given synthetic @18 query and inventory continuations, exact candidate-ledger and projected-attempt authority is attached before real certification/sealing and independently rederived by the metadata writer. Inventory progress removes completed targets; valid stale choices and substituted prior ledgers fail before retained callbacks or writes. Successful publication/reopen agree and clear semantic feedback within unchanged logical bounds and policy caps. Historical families remain unchanged; @18 source continuation and public/store/worker activation remain closed (#1408).
 - **Trace:** H4 · `app` · — · T-0485
 
+- **AC-0486** Given a real sealed gated @18 input and pinned source descriptor, unread-source certification sizes acquired and unavailable future choices, including deferred-prefix growth and final-attempt fallback, in Choice and FinishOnly. Exact-bound/one-under and protected-redaction checks remain enforced; sizing representations cannot become authoritative evidence or prepared inputs. Historical choices bytes/hashes and numeric ceilings stay unchanged, extra private owners are bounded, and all source-publication/activation gates stay closed (#1415).
+- **Trace:** H4 · `agents` · — · T-0486
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

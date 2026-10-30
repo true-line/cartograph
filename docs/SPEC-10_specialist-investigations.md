@@ -1077,3 +1077,15 @@ before retention callbacks or durable effects, and reopened current choices agre
 Existing logical owner bounds include transient history/ledgers and retained
 choices; no RSS guarantee is claimed. Source continuation remains closed to @18,
 and membership, repair, UI and all dispatch/worker activation remain follow-ups.
+
+### Gated source-choice certificate (#1415, AC-0486)
+
+The unread-source serializer certificate covers post-source @18 choices in both
+call modes, including exposed deferred candidates and the final-attempt fallback
+schema. The same private candidate builder/selectors serve actual choices and
+sizing-only serialization. A bounded, unencoded pending mask preserves knowledge
+lost by prefix truncation; existing choices JSON and hashes stay identical.
+Sizing hashes/Values never become Input, attempt evidence or publication authority.
+Acquired/unavailable projections retain existing protected-redaction and wire
+checks. Source publication and every dispatch/worker gate remain closed; source
+snapshot/settlement attachment remains separate mandatory work.
