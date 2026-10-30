@@ -5113,3 +5113,129 @@ fn suspend_after_a_star_import_keeps_its_declaration() {
     let start = span["byte_start"].as_u64().unwrap() as usize;
     assert!(source[start..].starts_with("suspend fun load("));
 }
+
+// AC-0495 (#1426): requests in property and top-level initializers, outside
+// any function, are owned by their file in every Kotlin client extractor:
+// RestTemplate, WebClient, OkHttp, Ktor and Apache HttpClient. (T-0495)
+#[test]
+fn client_requests_outside_functions_are_file_owned() {
+    let path = "src/main/kotlin/io/demo/Holder.kt";
+    let sites = retrofit_sites(&[(
+        path,
+        r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import okhttp3.Request
+import org.apache.http.client.methods.HttpGet
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.reactive.function.client.WebClient
+
+val top = RestTemplate().getForObject("https://host/r", String::class.java)
+
+class Holder(private val client: HttpClient, private val web: WebClient) {
+    val ok = Request.Builder().url("https://host/o").build()
+    val apache = HttpGet("https://host/a")
+    val ktor = scope.async { client.get("https://host/k") }
+    val reactive = web.get().uri("https://host/w").retrieve()
+}
+"#,
+    )]);
+    type Row = (String, String, Option<String>, Option<String>, String);
+    let rows: Vec<Row> = sites
+        .into_iter()
+        .map(|site| {
+            let url = match site.url {
+                IdentityExpr::Literal(url) => url,
+                other => format!("{other:?}"),
+            };
+            (site.method, url, site.symbol, site.entry, site.path)
+        })
+        .collect();
+    let owned = |method: &str, url: &str| {
+        (
+            method.to_string(),
+            url.to_string(),
+            None,
+            None,
+            path.to_string(),
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            // Grouped by extractor: RestTemplate, WebClient, OkHttp, Apache,
+            // Ktor.
+            owned("GET", "https://host/r"),
+            owned("GET", "https://host/w"),
+            owned("GET", "https://host/o"),
+            owned("GET", "https://host/a"),
+            owned("GET", "https://host/k"),
+        ]
+    );
+}
+
+/// AC-0495: only property and top-level initializers of product sources are
+/// file-owned; accessors, `init` blocks, constructor defaults, delegates and
+/// test sources own no file-level request, while a test function keeps its
+/// own.
+#[test]
+fn client_requests_outside_initializers_are_not_file_owned() {
+    let sites = retrofit_sites(&[
+        (
+            "src/main/kotlin/io/demo/Lazy.kt",
+            r#"package io.demo
+
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import okhttp3.Request
+import org.apache.http.client.methods.HttpGet
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.reactive.function.client.WebClient
+
+class Lazy(
+    private val client: HttpClient,
+    private val web: WebClient,
+    val request: Request = Request.Builder().url("https://host/default").build(),
+) {
+    val reactive get() = web.get().uri("https://host/getter").retrieve()
+    val apache by lazy { HttpGet("https://host/delegate") }
+    val ktor get() = scope.async { client.get("https://host/ktor-getter") }
+
+    init {
+        val local = RestTemplate().getForObject("https://host/init", String::class.java)
+    }
+}
+"#,
+        ),
+        (
+            "src/test/kotlin/io/demo/HolderTest.kt",
+            r#"package io.demo
+
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.reactive.function.client.WebClient
+
+val top = RestTemplate().getForObject("https://host/test-top", String::class.java)
+
+class HolderTest(private val web: WebClient) {
+    val reactive = web.get().uri("https://host/test-w").retrieve()
+
+    fun call() = RestTemplate().getForObject("https://host/test-fn", String::class.java)
+}
+"#,
+        ),
+    ]);
+    let rows: Vec<(String, Option<String>)> = sites
+        .into_iter()
+        .map(|site| (format!("{:?}", site.url), site.symbol))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].0.contains("https://host/test-fn"), "{rows:?}");
+    assert!(
+        rows[0]
+            .1
+            .as_deref()
+            .is_some_and(|s| s.ends_with("#HolderTest.call")),
+        "{rows:?}"
+    );
+}

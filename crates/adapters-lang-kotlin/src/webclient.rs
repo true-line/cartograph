@@ -246,7 +246,7 @@ fn absolute(url: &str) -> bool {
 }
 
 /// `WebClient` fetch sites in this file, owned by their innermost enclosing
-/// function.
+/// function, else by the file (#1426).
 pub(crate) fn sites(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
@@ -278,9 +278,12 @@ pub(crate) fn sites(
         let Some(url) = uri_args.first().copied() else {
             continue;
         };
-        let Some(symbol) = rest_template::enclosing(functions, uri) else {
+        // A request outside any function (a property or top-level
+        // initializer) is owned by its file (#1426).
+        let symbol = rest_template::enclosing(functions, uri);
+        if symbol.is_none() && !rest_template::initializer(uri) {
             continue;
-        };
+        }
         let Some(base) = client_base(&proof, call, client) else {
             continue;
         };
@@ -318,7 +321,7 @@ pub(crate) fn sites(
         });
         // `Type.function`, naming the call in a runtime-base Gap.
         let entry = symbol
-            .rsplit_once('#')
+            .and_then(|symbol| symbol.rsplit_once('#'))
             .map(|(_, member)| member.to_string());
         out.push(FetchSite {
             method: http_method,
@@ -326,7 +329,7 @@ pub(crate) fn sites(
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
-            symbol: Some(symbol.clone()),
+            symbol: symbol.cloned(),
             path: cx.path.to_string(),
             byte_start: call.start_byte() as u64,
             byte_end: uri.end_byte() as u64,

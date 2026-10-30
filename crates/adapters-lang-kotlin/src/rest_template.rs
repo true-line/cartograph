@@ -255,8 +255,33 @@ pub(crate) fn enclosing<'f, 't>(
         .map(|(_, symbol)| symbol)
 }
 
+/// Whether `node`, outside every function, runs as a property or top-level
+/// initializer, the only context a file owns (#1426). Accessors, `init`
+/// blocks, constructors, delegates and enum entries own nothing.
+pub(crate) fn initializer(node: TsNode<'_>) -> bool {
+    let mut property = false;
+    let mut at = node.parent();
+    while let Some(ancestor) = at {
+        match ancestor.kind() {
+            "getter"
+            | "setter"
+            | "anonymous_initializer"
+            | "secondary_constructor"
+            | "class_parameter"
+            | "property_delegate"
+            | "explicit_delegation"
+            | "constructor_delegation_call"
+            | "enum_entry" => return false,
+            "property_declaration" => property = true,
+            _ => {}
+        }
+        at = ancestor.parent();
+    }
+    property
+}
+
 /// `RestTemplate` fetch sites in this file, owned by their innermost
-/// enclosing function.
+/// enclosing function, else by the file (#1426).
 pub(crate) fn sites(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
@@ -347,9 +372,12 @@ pub(crate) fn sites(
                 None => continue,
             },
         };
-        let Some(symbol) = enclosing(functions, call) else {
+        // A request outside any function (a property or top-level
+        // initializer) is owned by its file (#1426).
+        let symbol = enclosing(functions, call);
+        if symbol.is_none() && !initializer(call) {
             continue;
-        };
+        }
         if !proof.is_client(call, receiver, REST_TEMPLATE, true) {
             continue;
         }
@@ -359,7 +387,7 @@ pub(crate) fn sites(
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
-            symbol: Some(symbol.clone()),
+            symbol: symbol.cloned(),
             path: cx.path.to_string(),
             byte_start: call.start_byte() as u64,
             byte_end: call.end_byte() as u64,

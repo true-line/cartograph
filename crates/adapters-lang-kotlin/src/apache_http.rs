@@ -62,7 +62,7 @@ fn method(proof: &Proof<'_>, captured: bool, head: TsNode<'_>) -> Option<&'stati
 }
 
 /// Apache HttpClient request sites in this file, owned by their innermost
-/// enclosing function.
+/// enclosing function, else by the file (#1426).
 pub(crate) fn sites(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
@@ -117,12 +117,15 @@ pub(crate) fn sites(
         let Some(verb) = method(&proof, captured, head) else {
             continue;
         };
-        let Some(symbol) = rest_template::enclosing(functions, call) else {
+        // A request outside any function (a property or top-level
+        // initializer) is owned by its file (#1426).
+        let symbol = rest_template::enclosing(functions, call);
+        if symbol.is_none() && !rest_template::initializer(call) {
             continue;
-        };
+        }
         // `Type.function`, naming the call in a computed-URL Gap.
         let entry = symbol
-            .rsplit_once('#')
+            .and_then(|symbol| symbol.rsplit_once('#'))
             .map(|(_, member)| member.to_string());
         out.push(FetchSite {
             method: verb.to_string(),
@@ -130,7 +133,7 @@ pub(crate) fn sites(
                 Some(literal) => IdentityExpr::Literal(literal),
                 None => IdentityExpr::Computed(cx.text(&url).to_string()),
             },
-            symbol: Some(symbol.clone()),
+            symbol: symbol.cloned(),
             path: cx.path.to_string(),
             byte_start: call.start_byte() as u64,
             byte_end: call.end_byte() as u64,
