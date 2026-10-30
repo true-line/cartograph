@@ -13,7 +13,17 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.match(workflow, /npm run changeset:version/u);
   assert.doesNotMatch(workflow, /gh workflow run ci\.yml/u);
   assert.match(workflow, /event=push&head_sha=\$cut_commit/u);
-  assert.match(workflow, /select\(\.path == "\.github\/workflows\/ci\.yml"\)/u);
+  assert.match(workflow, /select\(\.path == "\.github\/workflows\/ci\.yml" and \.conclusion == "success"\)/u);
+  // Tagging starts from the cut commit's own completed CI run instead of a
+  // job polling for it while holding a runner (#1378).
+  assert.match(triggers(workflow), /^\s{2}workflow_run:\n\s{4}workflows: \[CI\]\n\s{4}types: \[completed\]\n\s{4}branches: \[main\]/mu);
+  assert.match(workflow, /github\.event\.workflow_run\.event == 'push'/u);
+  assert.match(workflow, /github\.event\.workflow_run\.head_repository\.full_name == github\.repository/u);
+  assert.match(workflow, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \|\| github\.sha \}\}/u);
+  assert.match(workflow, /"\$CI_CONCLUSION" != success/u);
+  assert.match(workflow, /"\$cut_commit" != "\$CI_SHA"/u);
+  assert.doesNotMatch(workflow, /for _ in \$\(seq/u);
+  assert.doesNotMatch(workflow, /sleep 30/u);
   assert.doesNotMatch(workflow, /workflow_runs\[\].*\.name == "CI"/u);
   assert.match(workflow, /Manual recovery requires an existing \$tag tag/u);
   assert.match(workflow, /commits\/\$cut_commit\/pulls/u);

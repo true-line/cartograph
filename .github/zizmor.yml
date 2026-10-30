@@ -8,3 +8,10 @@ rules:
       # in package.yml's own `secrets:` block — `inherit` is the intended
       # shape for this internal, same-repo call, not an oversight.
       - release.yml:172
+  dangerous-triggers:
+    ignore:
+      # version-cut.yml's `workflow_run` trigger (#1378) only starts the tag
+      # job for a CI run of a same-repo push to main, checks out that run's
+      # exact head SHA, asserts it is the cut commit and runs no code from a
+      # pull request; `version-pr` never runs on it.
+      - version-cut.yml:5
