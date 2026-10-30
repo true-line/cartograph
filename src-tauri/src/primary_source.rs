@@ -1,6 +1,6 @@
 //! Retained primary-source evidence; independent of tier and proposal review.
 
-use adapters_lang_ts::captured::{self, Receipt};
+use adapters_lang_ts::captured::{self, Citable, Receipt};
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use core_graph::source::{FactKey, SourceBinding};
@@ -245,7 +245,7 @@ fn restore_fact_id_prefix(compact: &str, repo_key: &str, path: &str) -> Option<S
     Some(format!("{kind_prefix}:{repo_key}@{path}{suffix}"))
 }
 
-fn normalize_v3_receipt(receipt: &Receipt, canonical_json: &str) -> Option<NormalizedReceipt> {
+fn normalize_v3_receipt(receipt: &impl Citable, canonical_json: &str) -> Option<NormalizedReceipt> {
     let wire: StrictV3WireReceipt = serde_json::from_str(canonical_json).ok()?;
     if wire.content.schema_version != 3
         || wire.receipt_id != receipt.id()
@@ -1246,7 +1246,7 @@ impl ReceiptStore {
         &mut self,
         capture: &Capture,
         source: &RegisteredSource,
-        receipts: &[Receipt],
+        receipts: &[impl Citable],
     ) -> Result<RetainedReceipts, String> {
         let share = self.capacity;
         self.persist_within(capture, source, receipts, share)
@@ -1260,10 +1260,23 @@ impl ReceiptStore {
         &mut self,
         capture: &Capture,
         source: &RegisteredSource,
-        receipts: &[Receipt],
+        receipts: &[impl Citable],
         share: (u64, u64),
     ) -> Result<RetainedReceipts, String> {
-        let mut rows = Vec::new();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let (mut count, mut bytes) = receipt_storage(&tx)?;
+        // The batch's retained rows, each normalized header counted once
+        // whether new or already stored, measured against `share`.
+        let (mut source_count, mut source_bytes) = (0u64, 0u64);
+        let mut charged_headers = std::collections::BTreeSet::new();
+        let mut retained = RetainedReceipts::default();
+        // Each receipt is checked, serialized and admitted in turn, so one
+        // canonical form is held at a time; the batch keeps only each id's
+        // content hash, to reject a repeat that differs (#725). A rejection
+        // drops the transaction, so nothing of the batch is kept.
         let mut batch = std::collections::BTreeMap::new();
         for receipt in receipts {
             if receipt.source_id().as_str() != source.source_id
@@ -1279,42 +1292,29 @@ impl ReceiptStore {
             {
                 return Err(storage_error("receipt capture"));
             }
-            for range in receipt.ranges() {
-                capture.read_span(&range.captured).map_err(storage_error)?;
+            for span in receipt.captured_spans() {
+                capture.read_span(&span).map_err(storage_error)?;
             }
             let json = receipt.to_json().map_err(storage_error)?;
             if json.len() as u64 > MAX_RECEIPT_BYTES {
                 return Err(storage_error("receipt bounds"));
             }
+            let hash = core_prov::content_hash(json.as_bytes());
             match batch.get(receipt.id()) {
-                Some(old) if old != &json => return Err(storage_error("receipt batch collision")),
-                Some(_) => {}
+                Some(old) if old != &hash => return Err(storage_error("receipt batch collision")),
+                Some(_) => continue,
                 None => {
-                    let normalized = normalize_v3_receipt(receipt, &json);
-                    batch.insert(receipt.id().to_owned(), json.clone());
-                    rows.push((
-                        receipt.id().to_owned(),
-                        receipt.file().path.clone(),
-                        receipt.fact_key().clone(),
-                        receipt.fact_digest().to_owned(),
-                        json,
-                        normalized,
-                    ));
+                    batch.insert(receipt.id().to_owned(), hash);
                 }
             }
-        }
-        drop(batch);
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let (mut count, mut bytes) = receipt_storage(&tx)?;
-        // The batch's retained rows, each normalized header counted once
-        // whether new or already stored, measured against `share`.
-        let (mut source_count, mut source_bytes) = (0u64, 0u64);
-        let mut charged_headers = std::collections::BTreeSet::new();
-        let mut retained = RetainedReceipts::default();
-        for (id, path, fact_key, fact_digest, canonical_json, normalized) in rows {
+            let normalized = normalize_v3_receipt(receipt, &json);
+            let (id, path, fact_key, fact_digest, canonical_json) = (
+                receipt.id().to_owned(),
+                receipt.file().path.clone(),
+                receipt.fact_key().clone(),
+                receipt.fact_digest().to_owned(),
+                json,
+            );
             let old: Option<(String, String, String, Option<String>)> = tx
                 .query_row(
                     "SELECT source_id,repo_key,payload,header_id FROM receipts WHERE id=?1",
@@ -1921,7 +1921,7 @@ impl PrimarySourceStore {
         &self,
         input: &PrimaryInput,
         source: &RegisteredSource,
-        receipts: &[Receipt],
+        receipts: &[impl Citable],
     ) -> Result<RetainedReceipts, String> {
         self.storage.verify()?;
         if let Some(capture) = &input.capture {
@@ -1980,7 +1980,7 @@ impl RetainedReceipts {
     /// Drop every receipt the store did not retain and return the omissions.
     pub(crate) fn keep_retained(
         self,
-        receipts: &mut Vec<Receipt>,
+        receipts: &mut Vec<impl Citable>,
     ) -> (
         std::collections::BTreeMap<String, u64>,
         Vec<(FactKey, String)>,
@@ -1999,7 +1999,7 @@ pub(crate) struct PrimaryInput {
 
 pub(crate) fn matching_bindings(
     extraction: &adapters_lang_ts::Extraction,
-    receipts: &[Receipt],
+    receipts: &[impl Citable],
 ) -> Vec<SourceBinding> {
     // Match the same facts that graph publication materializes: last-value
     // node winners, and edges after evidence union (AC-0203). A relation

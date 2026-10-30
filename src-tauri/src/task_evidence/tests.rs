@@ -89,7 +89,10 @@ pub(super) fn capture(state: &AppState, source: &RegisteredSource, publish: bool
     }
     Captured {
         nodes: extraction.nodes,
-        receipts,
+        receipts: receipts
+            .iter()
+            .map(|receipt| receipt.to_receipt().unwrap())
+            .collect(),
     }
     // The producer retention guard ends before task preparation or forgetting.
 }

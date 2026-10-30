@@ -1370,7 +1370,7 @@ fn extract_tree_with_primary(
     plugins: &[ActivePlugin],
     on_file: &mut dyn FnMut(&str),
     primary: Option<&source_capture::Capture>,
-    receipts: &mut Vec<adapters_lang_ts::captured::Receipt>,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
     reads: &mut ProducerReads,
 ) -> Result<(adapters_lang_ts::Extraction, LayerBreakdown, DeltaSummary), String> {
     extract_tree_with_registries(
@@ -1414,7 +1414,7 @@ fn extract_tree_with_registries(
     registries: &Registries,
     on_file: &mut dyn FnMut(&str),
     primary: Option<&source_capture::Capture>,
-    receipts: &mut Vec<adapters_lang_ts::captured::Receipt>,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
     reads: &mut ProducerReads,
 ) -> Result<(adapters_lang_ts::Extraction, LayerBreakdown, DeltaSummary), String> {
     // Layer hints gate extractors (AC-0002): empty means everything; the
