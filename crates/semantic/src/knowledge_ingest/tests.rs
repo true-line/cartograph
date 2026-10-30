@@ -1,0 +1,241 @@
+// AC-0499: knowledge-layer embedding phase (#1441).
+use super::*;
+use llm::{Embedding, EmbeddingIdentity, Locality, ProviderCaps};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Recording {
+    embeddings: bool,
+    calls: AtomicUsize,
+    sent: Mutex<Vec<String>>,
+}
+impl Recording {
+    fn new(embeddings: bool) -> Self {
+        Self {
+            embeddings,
+            calls: AtomicUsize::new(0),
+            sent: Mutex::new(vec![]),
+        }
+    }
+}
+impl LlmProvider for Recording {
+    fn id(&self) -> &str {
+        "recording"
+    }
+    fn locality(&self) -> Locality {
+        Locality::Local
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        ProviderCaps {
+            embeddings: self.embeddings,
+            chat: false,
+            tool_use: false,
+        }
+    }
+    fn embedding_cache_identity(&self) -> Result<Option<EmbeddingIdentity>, ProviderError> {
+        Ok(Some(EmbeddingIdentity {
+            endpoint: "http://127.0.0.1:11434/".into(),
+            model: "fixture".into(),
+            digest: format!("sha256:{:064x}", 1),
+            recipe: "fixture@1".into(),
+        }))
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sent.lock().unwrap().extend_from_slice(texts);
+        Ok(texts.iter().map(|t| vec![1.0, t.len() as f32]).collect())
+    }
+}
+
+fn node(id: &str, label: &str, props: serde_json::Value) -> Node {
+    Node {
+        id: id.into(),
+        label: label.into(),
+        props,
+    }
+}
+
+fn base() -> Vec<Node> {
+    vec![
+        node(
+            "sym:b",
+            "Symbol",
+            serde_json::json!({"name": "pay", "kind": "function", "arity": 2, "prov": {"tier": "T0"}}),
+        ),
+        node(
+            "zz:ep",
+            "Endpoint",
+            serde_json::json!({"method": "POST", "path": "/pay", "tags": ["x"]}),
+        ),
+        node("gap:z", "Gap", serde_json::json!({"name": "unresolved"})),
+        node(
+            "sym:a",
+            "Symbol",
+            serde_json::json!({"name": "charge", "pure": true}),
+        ),
+    ]
+}
+
+fn cache() -> (tempfile::TempDir, Arc<Mutex<EmbeddingCache>>) {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(Mutex::new(
+        EmbeddingCache::open(dir.path().join("cache.db")).unwrap(),
+    ));
+    cache
+        .lock()
+        .unwrap()
+        .bind_instance(&"a".repeat(32))
+        .unwrap();
+    (dir, cache)
+}
+
+fn run_with(
+    nodes: &[Node],
+    provider: Option<&dyn LlmProvider>,
+    cache: &Arc<Mutex<EmbeddingCache>>,
+) -> PhaseOutcome {
+    let lease = cache.lock().unwrap().lease().unwrap();
+    run(nodes, provider, Arc::clone(cache), lease).unwrap()
+}
+
+#[test]
+fn units_follow_the_recipe_order_and_render_scalars_only() {
+    let (units, omitted) = units(&base());
+    assert_eq!(omitted, 0);
+    let ids: Vec<_> = units.iter().map(|u| u.node_id.as_str()).collect();
+    assert_eq!(ids, ["zz:ep", "sym:a", "sym:b"]);
+    assert_eq!(units[0].text, "Endpoint\nmethod: POST\npath: /pay");
+    assert_eq!(units[1].text, "Symbol\nname: charge\npure: true");
+    assert_eq!(units[2].text, "Symbol\narity: 2\nkind: function\nname: pay");
+    assert_eq!(units[2].key().len(), 64);
+}
+
+#[test]
+fn units_past_the_cap_are_counted_and_long_text_is_bounded() {
+    let mut nodes: Vec<_> = (0..MAX_UNITS + 2)
+        .map(|i| node(&format!("sym:{i:06}"), "Symbol", serde_json::json!({})))
+        .collect();
+    nodes.push(node(
+        "zz:late",
+        "Endpoint",
+        serde_json::json!({"path": "é".repeat(MAX_UNIT_BYTES)}),
+    ));
+    nodes.push(node(
+        "sym:000000",
+        "Symbol",
+        serde_json::json!({"dup": true}),
+    ));
+    let (units, omitted) = units(&nodes);
+    assert_eq!(units.len(), MAX_UNITS);
+    assert_eq!(omitted, 3);
+    assert_eq!(units[0].node_id, "zz:late");
+    assert!(units[0].text.len() <= MAX_UNIT_BYTES);
+    assert!(units[0].text.len() > MAX_UNIT_BYTES - 2);
+    assert_eq!(units[1].node_id, "sym:000000");
+    assert_eq!(
+        units.last().unwrap().node_id,
+        format!("sym:{:06}", MAX_UNITS - 2)
+    );
+}
+
+#[test]
+fn no_provider_is_a_named_omission_with_the_base_unchanged() {
+    let (_dir, cache) = cache();
+    let nodes = base();
+    let before = nodes.clone();
+    let without_embeddings = Recording::new(false);
+    for provider in [None, Some(&without_embeddings as &dyn LlmProvider)] {
+        let outcome = run_with(&nodes, provider, &cache);
+        assert!(matches!(
+            outcome,
+            PhaseOutcome::Skipped {
+                omission: NO_PROVIDER
+            }
+        ));
+    }
+    assert_eq!(nodes, before);
+    assert_eq!(without_embeddings.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn unchanged_units_reuse_cached_vectors_without_provider_calls() {
+    let (_dir, cache) = cache();
+    let provider = Recording::new(true);
+    let first = run_with(&base(), Some(&provider), &cache);
+    let PhaseOutcome::Embedded {
+        binding,
+        units,
+        omitted,
+        stats,
+    } = first
+    else {
+        panic!("phase skipped");
+    };
+    assert_eq!(omitted, 0);
+    assert_eq!(stats.unique_misses, 3);
+    assert_eq!(binding.as_ref().unwrap().dimensions(), 2);
+    let expected: Vec<_> = super::units(&base())
+        .0
+        .iter()
+        .map(|unit| (unit.node_id.clone(), unit.key()))
+        .collect();
+    assert_eq!(units, expected);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+    let again = run_with(&base(), Some(&provider), &cache);
+    let PhaseOutcome::Embedded {
+        binding: second,
+        stats,
+        units: same,
+        ..
+    } = again
+    else {
+        panic!("phase skipped");
+    };
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!((stats.calls, stats.unique_misses, stats.hits), (0, 0, 3));
+    assert_eq!(second, binding);
+    assert_eq!(same, units);
+
+    let mut changed = base();
+    changed[0].props["name"] = "refund".into();
+    let PhaseOutcome::Embedded { stats, .. } = run_with(&changed, Some(&provider), &cache) else {
+        panic!("phase skipped");
+    };
+    assert_eq!((stats.calls, stats.unique_misses, stats.hits), (1, 1, 2));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn secrets_are_redacted_before_text_reaches_the_provider() {
+    let canary = "AKIAIOSFODNN7EXAMPLE";
+    let (_dir, cache) = cache();
+    let provider = Recording::new(true);
+    let nodes = vec![node(
+        "res:k",
+        "Resource",
+        serde_json::json!({"name": "bucket", "access_key": canary, "note": format!("password={canary}")}),
+    )];
+    let PhaseOutcome::Embedded { .. } = run_with(&nodes, Some(&provider), &cache) else {
+        panic!("phase skipped");
+    };
+    let sent = provider.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(!sent[0].contains(canary));
+    assert!(sent[0].contains("[REDACTED"));
+}
+
+#[test]
+fn redaction_precedes_truncation_so_a_cut_secret_never_leaks() {
+    let canary = "AKIAIOSFODNN7EXAMPLE";
+    let prefix = "Resource\nnote: ";
+    let filler = "x ".repeat((MAX_UNIT_BYTES - prefix.len() - 8) / 2);
+    let nodes = vec![node(
+        "res:k",
+        "Resource",
+        serde_json::json!({"note": format!("{filler}{canary}")}),
+    )];
+    let (units, _) = units(&nodes);
+    assert!(units[0].text.len() <= MAX_UNIT_BYTES);
+    assert!(!units[0].text.contains("AKIA"));
+    assert!(units[0].text.contains("[REDACTED"));
+}

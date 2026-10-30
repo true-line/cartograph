@@ -13,6 +13,7 @@ mod eval_report;
 pub use eval_report::EvalReport;
 pub mod evaluation;
 mod family;
+pub mod knowledge_ingest;
 pub mod name_unique;
 pub use family::{FamilyKey, HopKind};
 

@@ -951,3 +951,5 @@
 - **Security:** Local disposable store only; linked or special files are refused; no provider call.
 - **Performance:** Bounded to 200,000 facts and 256 MiB, with exact rejection rather than truncation.
 - **Trace:** P1 (#1445) · `core-graph`, `app` · ADR-0051, ADR-0037 · T-0498
+- **AC-0499** Given a base graph snapshot, when the knowledge embedding phase runs, then units are chosen and rendered by the versioned `knowledge-units@1` recipe in a fixed label-priority and id order, each unit's text is redacted before it is truncated to 2 KiB so no secret reaches the provider whole or cut, units past 16,384 are counted as a named omission, vectors are embedded through the ADR-0037 cache so an unchanged unit makes no provider call, and with no embedding provider the phase is skipped as the named omission `embedding-provider-unavailable` with the base untouched (#1441).
+- **Trace:** P1 (#1445) · `semantic` · ADR-0051, ADR-0037 · T-0499
