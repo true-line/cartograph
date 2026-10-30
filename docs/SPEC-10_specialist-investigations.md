@@ -977,3 +977,20 @@ existing joined prose/privacy and encoded capacity limits. Result identity
 covers it, and the existing atomic chat result reference remains its only publication
 owner. Historical roles keep their exact wire/prompt/definition contracts. This adds
 no streaming, new provider call, source authority, or full-conversation model memory.
+
+### Obligation acquisition-choice foundation (#1383, AC-0472; related #1382)
+
+A pure, bounded helper derives deterministic acquisition candidates from a validated
+completion contract, current admitted ledger and exact ordered completed-attempt
+evidence. Unadmitted Node targets offer exact-node discovery; matching frozen
+bindings offer the pinned fact/role/index read, and inventory obligations offer
+their exact qualified inventory read. An already recorded exact discovery with no
+admissible binding offers no repeated discovery and remains unattempted. Completed
+unavailable/refused reads retain their actual outcome; a refused finish alone
+never creates a read attempt or satisfies an obligation. Candidate absence is not
+satisfaction. Choices are a stable byte-bounded prefix under the existing action/envelope
+ceilings, with deferred and blocked obligations explicit. This foundation performs
+no dispatch, source access, family registration or runtime exposure. Authentication
+of host-journal completion remains the caller's responsibility. Model projection,
+schema/host membership, saved-call sealing and seven-target worker integration
+remain required follow-up work before claiming the runtime feature or #598 success.

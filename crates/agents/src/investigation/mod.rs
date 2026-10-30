@@ -4,6 +4,8 @@
 //! module accepts bounded input data and admits model actions; it has no graph
 //! store, filesystem, network dispatch or target-code mutation authority.
 
+#[doc(hidden)]
+pub mod acquisition_choices;
 mod admission;
 mod completion;
 mod coverage;
