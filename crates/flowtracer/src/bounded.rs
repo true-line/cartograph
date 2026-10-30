@@ -407,6 +407,7 @@ impl<'a> ProvenanceView<'a> {
                 // it places no restrictions on method labels. Keep those
                 // labels borrowed, verbatim, rather than inventing rules.
                 method: ProducingMethod::Unrecorded,
+                basis: None,
             };
             if validation.validate().is_ok() {
                 return view;
@@ -457,6 +458,7 @@ impl<'a> ProvenanceView<'a> {
             extractor_id: self.extractor_id.into_owned(),
             content_hash: self.content_hash.into_owned(),
             method: self.method.into_owned(),
+            basis: None,
         }
     }
 }

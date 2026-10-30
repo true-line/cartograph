@@ -121,6 +121,105 @@ pub struct EvidenceRef {
     pub commit_sha: String,
 }
 
+/// What kind of evidence a fact rests on, recorded separately from tier
+/// (ADR-0051 decision 5). A static read of an artifact is T0 like a source
+/// parse, but its evidence is the artifact, not a source span.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvidenceBasis {
+    /// Source text, cited by [`EvidenceRef`] spans.
+    Source,
+    /// A built artifact (bytecode, bundle, binary, image), cited by digest.
+    Artifact {
+        /// The artifact evidence; at least one.
+        refs: Vec<ArtifactRef>,
+    },
+    /// Runtime or execution observation (T1).
+    Observation,
+}
+
+impl EvidenceBasis {
+    /// An artifact basis needs at least one valid [`ArtifactRef`].
+    pub fn validate(&self) -> Result<(), IntegrityError> {
+        match self {
+            EvidenceBasis::Artifact { refs } if refs.is_empty() => {
+                Err(IntegrityError::Artifact("no artifact evidence"))
+            }
+            EvidenceBasis::Artifact { refs } => refs.iter().try_for_each(ArtifactRef::validate),
+            EvidenceBasis::Source | EvidenceBasis::Observation => Ok(()),
+        }
+    }
+}
+
+/// Where in an artifact the evidence is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactLocator {
+    /// A byte span of the artifact, end exclusive.
+    Offset {
+        /// Byte span start (inclusive).
+        start: u64,
+        /// Byte span end (exclusive).
+        end: u64,
+    },
+    /// A member of an archive or image, by relative path.
+    Member {
+        /// Relative member path (e.g. `com/acme/Pay.class`).
+        path: String,
+    },
+}
+
+/// Artifact evidence: the artifact's content digest, its kind and where in
+/// it the fact was read (ADR-0051 decision 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRef {
+    /// `sha256:` and 64 lowercase hex digits of the artifact bytes.
+    pub digest: String,
+    /// Artifact kind named by its reader (e.g. `jvm-class`, `js-bundle`):
+    /// 1 to 64 lowercase ASCII letters, digits and hyphens.
+    pub kind: String,
+    /// Offset or member path.
+    pub at: ArtifactLocator,
+}
+
+/// Longest artifact member path accepted.
+pub const MAX_MEMBER_PATH_BYTES: usize = 4096;
+
+impl ArtifactRef {
+    /// Check digest, kind and locator shape.
+    pub fn validate(&self) -> Result<(), IntegrityError> {
+        let hex = self.digest.strip_prefix("sha256:").unwrap_or_default();
+        if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(IntegrityError::Artifact("digest"));
+        }
+        if self.kind.is_empty()
+            || self.kind.len() > 64
+            || !self
+                .kind
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+        {
+            return Err(IntegrityError::Artifact("kind"));
+        }
+        match &self.at {
+            ArtifactLocator::Offset { start, end } if start < end => Ok(()),
+            ArtifactLocator::Offset { .. } => Err(IntegrityError::Artifact("offset")),
+            ArtifactLocator::Member { path }
+                if !path.is_empty()
+                    && path.len() <= MAX_MEMBER_PATH_BYTES
+                    && !path.contains(['\\', '\0'])
+                    // A colon in the first segment is a drive (`C:/`, `C:x`)
+                    // or a scheme on some platform, never a member.
+                    && !path.split('/').next().unwrap_or_default().contains(':')
+                    && path.split('/').all(|seg| !matches!(seg, "" | "." | "..")) =>
+            {
+                Ok(())
+            }
+            ArtifactLocator::Member { .. } => Err(IntegrityError::Artifact("member path")),
+        }
+    }
+}
+
 /// Provenance attached to every node and edge (SPEC-00 §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
@@ -139,6 +238,11 @@ pub struct Provenance {
     /// recorded, so facts without one serialize exactly as before.
     #[serde(default, skip_serializing_if = "ProducingMethod::is_unrecorded")]
     pub method: ProducingMethod,
+    /// Evidence basis (ADR-0051 decision 5). `None` is the default basis
+    /// for the tier, see [`Provenance::basis`], and is omitted from the wire
+    /// form so existing facts serialize exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<EvidenceBasis>,
 }
 
 impl Provenance {
@@ -164,6 +268,7 @@ impl Provenance {
             extractor_id: extractor_id.into(),
             content_hash: content_hash(fact_bytes),
             method: ProducingMethod::Unrecorded,
+            basis: None,
         })
     }
 
@@ -173,6 +278,24 @@ impl Provenance {
     pub fn with_method(mut self, method: ProducingMethod) -> Self {
         self.method = method;
         self
+    }
+
+    /// Record the evidence basis. Tier, confidence, evidence and content
+    /// hash are unchanged.
+    #[must_use]
+    pub fn with_basis(mut self, basis: EvidenceBasis) -> Self {
+        self.basis = Some(basis);
+        self
+    }
+
+    /// The recorded basis, or the tier's default: `observation` for T1,
+    /// `source` otherwise.
+    pub fn basis(&self) -> EvidenceBasis {
+        match (&self.basis, self.tier) {
+            (Some(basis), _) => basis.clone(),
+            (None, Tier::Dynamic) => EvidenceBasis::Observation,
+            (None, _) => EvidenceBasis::Source,
+        }
     }
 
     /// Re-validate provenance loaded from an external graph or IPC payload.
@@ -186,7 +309,7 @@ impl Provenance {
                 confidence_tier: self.confidence_tier,
             });
         }
-        Ok(())
+        self.basis.as_ref().map_or(Ok(()), EvidenceBasis::validate)
     }
 }
 
@@ -213,6 +336,9 @@ pub enum IntegrityError {
         /// Asserted confidence.
         confidence_tier: ConfidenceTier,
     },
+    /// Artifact evidence is missing or malformed in the named part.
+    #[error("artifact evidence: invalid {0}")]
+    Artifact(&'static str),
 }
 
 /// Content-address a byte sequence (BLAKE3, hex). Deterministic by
@@ -327,6 +453,182 @@ mod tests {
             forged.validate(),
             Err(IntegrityError::AboveCeiling { .. })
         ));
+    }
+
+    #[test]
+    fn evidence_basis_defaults_by_tier_and_keeps_the_legacy_wire_form() {
+        // AC-0502 (T-0502): facts without a basis serialize exactly as
+        // before and read back as `source`, or `observation` for T1.
+        let legacy = serde_json::json!({
+            "tier": "Deterministic", "confidence_tier": "Confirmed", "evidence": [
+                {"repo": "acme/api", "path": "a.py", "byte_start": 0, "byte_end": 4, "commit_sha": "abc"}
+            ], "extractor_id": "t0.python", "content_hash": "h"
+        });
+        let read: Provenance = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(read.basis, None);
+        assert_eq!(read.basis(), EvidenceBasis::Source);
+        assert_eq!(serde_json::to_value(&read).unwrap(), legacy);
+        let fresh = Provenance::new(
+            Tier::Semantic,
+            ConfidenceTier::InferredStrong,
+            vec![],
+            "t2",
+            b"f",
+        )
+        .unwrap();
+        assert!(serde_json::to_value(&fresh).unwrap().get("basis").is_none());
+        for (tier, basis) in [
+            (Tier::Deterministic, EvidenceBasis::Source),
+            (Tier::Dynamic, EvidenceBasis::Observation),
+            (Tier::Semantic, EvidenceBasis::Source),
+            (Tier::Agentic, EvidenceBasis::Source),
+        ] {
+            let p = Provenance::new(tier, ConfidenceTier::Gap, vec![], "x", b"f").unwrap();
+            assert_eq!(p.basis(), basis, "{tier:?}");
+        }
+    }
+
+    fn artifact(at: ArtifactLocator) -> ArtifactRef {
+        ArtifactRef {
+            digest: format!("sha256:{}", "ab".repeat(32)),
+            kind: "jvm-class".into(),
+            at,
+        }
+    }
+
+    #[test]
+    fn an_artifact_basis_round_trips_beside_tier_and_confidence() {
+        // AC-0502 (T-0502): the basis is its own field; recording it never
+        // changes tier, confidence or content hash, and the confidence
+        // ceiling (which verified-only exports filter on) still applies.
+        let base = Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+            vec![],
+            "t0.jvm",
+            b"f",
+        )
+        .unwrap();
+        let basis = EvidenceBasis::Artifact {
+            refs: vec![
+                artifact(ArtifactLocator::Member {
+                    path: "com/acme/Pay.class".into(),
+                }),
+                artifact(ArtifactLocator::Offset { start: 16, end: 64 }),
+            ],
+        };
+        let read = base.clone().with_basis(basis.clone());
+        assert_eq!(
+            (read.tier, read.confidence_tier, &read.content_hash),
+            (base.tier, base.confidence_tier, &base.content_hash)
+        );
+        assert!(read.validate().is_ok());
+        let wire = serde_json::to_value(&read).unwrap();
+        assert_eq!(wire["basis"]["kind"], "artifact");
+        assert_eq!(
+            wire["basis"]["refs"][0]["at"]["member"]["path"],
+            "com/acme/Pay.class"
+        );
+        assert_eq!(wire["basis"]["refs"][1]["at"]["offset"]["end"], 64);
+        assert_eq!(serde_json::from_value::<Provenance>(wire).unwrap(), read);
+        assert_eq!(read.basis(), basis);
+        let observed = base.clone().with_basis(EvidenceBasis::Observation);
+        assert_eq!(
+            serde_json::to_value(&observed).unwrap()["basis"],
+            serde_json::json!({"kind": "observation"})
+        );
+        let mut above = read.clone();
+        above.tier = Tier::Semantic;
+        assert!(matches!(
+            above.validate(),
+            Err(IntegrityError::AboveCeiling { .. })
+        ));
+    }
+
+    #[test]
+    fn artifact_refs_validate_digest_kind_and_locator() {
+        // AC-0502 (T-0502).
+        let member = |path: &str| ArtifactLocator::Member { path: path.into() };
+        let ok = artifact(member("a/b.class"));
+        assert!(ok.validate().is_ok());
+        let digests = [
+            "ab".repeat(32),
+            format!("sha1:{}", "ab".repeat(32)),
+            format!("sha256:{}", "AB".repeat(32)),
+            format!("sha256:{}", "a".repeat(63)),
+            format!("sha256:{}g", "a".repeat(63)),
+        ];
+        for digest in digests {
+            let bad = ArtifactRef {
+                digest,
+                ..ok.clone()
+            };
+            assert_eq!(bad.validate(), Err(IntegrityError::Artifact("digest")));
+        }
+        for kind in [
+            String::new(),
+            "JVM".into(),
+            "jvm_class".into(),
+            "k".repeat(65),
+        ] {
+            let bad = ArtifactRef { kind, ..ok.clone() };
+            assert_eq!(bad.validate(), Err(IntegrityError::Artifact("kind")));
+        }
+        assert!(
+            artifact(ArtifactLocator::Offset { start: 0, end: 1 })
+                .validate()
+                .is_ok()
+        );
+        for (start, end) in [(4, 4), (5, 4)] {
+            assert_eq!(
+                artifact(ArtifactLocator::Offset { start, end }).validate(),
+                Err(IntegrityError::Artifact("offset"))
+            );
+        }
+        let long = "p".repeat(MAX_MEMBER_PATH_BYTES + 1);
+        assert!(artifact(member(&long[1..])).validate().is_ok());
+        assert!(artifact(member("META-INF/x:y")).validate().is_ok());
+        for path in [
+            "C:/Windows/x.dll",
+            "C:x.dll",
+            "c:",
+            "file:a/b",
+            "",
+            "/abs",
+            "a/../b",
+            "a//b",
+            "a/",
+            "./a",
+            "a\\b",
+            "a\0b",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                artifact(member(path)).validate(),
+                Err(IntegrityError::Artifact("member path")),
+                "{path:?}"
+            );
+        }
+        let empty = Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+            vec![],
+            "x",
+            b"f",
+        )
+        .unwrap()
+        .with_basis(EvidenceBasis::Artifact { refs: vec![] });
+        assert_eq!(
+            empty.validate(),
+            Err(IntegrityError::Artifact("no artifact evidence"))
+        );
+        let forged: Provenance = serde_json::from_value(serde_json::json!({
+            "tier": "Deterministic", "confidence_tier": "Confirmed", "evidence": [],
+            "extractor_id": "x", "content_hash": "h",
+            "basis": {"kind": "artifact", "refs": [{"digest": "sha256:00", "kind": "jar", "at": {"offset": {"start": 0, "end": 1}}}]}
+        }))
+        .unwrap();
+        assert_eq!(forged.validate(), Err(IntegrityError::Artifact("digest")));
     }
 
     #[test]

@@ -95,6 +95,7 @@ fn candidate_provenance(props: &serde_json::Value, identity: &Text<'_>) -> Prove
                 extractor_id: "spec.invalid-provenance".into(),
                 content_hash: hash.finalize().to_hex().to_string(),
                 method: core_prov::ProducingMethod::Unrecorded,
+                basis: None,
             }
         })
 }
