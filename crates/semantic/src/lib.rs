@@ -15,6 +15,7 @@ pub mod evaluation;
 mod family;
 pub mod knowledge_ingest;
 pub mod name_unique;
+pub mod retrieval;
 pub use family::{FamilyKey, HopKind};
 
 use core_graph::omission::{gap_query, is_interface_dispatch};
