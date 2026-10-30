@@ -1117,3 +1117,14 @@ Cancellation, stale revision, invalid decode and FinishOnly retain their existin
 boundaries. Reopened feedback is bound to that call; no new model attempt is
 started by this slice. All initial/repair-loop, UI and activation work remains
 separate, and public/store/worker gates remain closed.
+
+### Pure acquisition finish consistency (#1431 prerequisite, AC-0491)
+
+A borrowed agents witness binds exact task, invocation, ledger, full disclosure
+and policy to typed choices and feedback. It proves consistency only: callers
+can supply their own derivation inputs, and host authentication of saved witnesses
+remains separate. The existing assessment, citation, result and fingerprint
+implementations share that witness without changing generic APIs or byte domains.
+Unbound validation still rejects acquisition stamps. This agents prerequisite
+neither authenticates SQLite nor completes transactional finish/reopen (AC-0490),
+initial-authority acceptance (AC-0489), or any activation gate.

@@ -464,7 +464,10 @@ impl InvestigationDisclosure {
         policy: &InvestigationPolicy,
     ) -> Result<BTreeSet<String>, InvestigationError> {
         self.validate_with_policy(ledger, policy)?;
-        Ok(ledger
+        Ok(self.eligible_citations_unchecked(ledger))
+    }
+    fn eligible_citations_unchecked(&self, ledger: &InvestigationInputLedger) -> BTreeSet<String> {
+        ledger
             .citations
             .iter()
             .filter(|citation| match citation.origin {
@@ -474,7 +477,7 @@ impl InvestigationDisclosure {
                 }),
             })
             .map(|citation| citation.citation_id.clone())
-            .collect())
+            .collect()
     }
 }
 
@@ -483,3 +486,192 @@ mod admission;
 pub use admission::{
     AcquisitionAdmission, ActionRefusalFeedback, ActionRefusalReason, DisclosedAdmissionState,
 };
+
+/// Pure consistency witness over typed derivation inputs, NOT authentication of
+/// a saved call or SQLite. The host must authenticate all witnesses at the exact
+/// saved cutoff before using this explicit path; generic validators stay strict.
+/// Fields are private and borrowed so a witness cannot be retargeted to a call.
+pub struct AcquisitionDisclosureConsistency<'a> {
+    pub(super) task: &'a str,
+    policy: &'a InvestigationPolicy,
+    pub(super) step: &'a str,
+    pub(super) ledger: &'a InvestigationInputLedger,
+    pub(super) disclosure: &'a InvestigationDisclosure,
+}
+impl acquisition_choices::AcquisitionChoices {
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_completion_disclosure<'a>(
+        &self,
+        task: &'a str,
+        step: &'a str,
+        contract: &InvestigationCompletionContract,
+        metadata: &staged_refusal::ProtectedCompletionMetadata,
+        ledger: &'a InvestigationInputLedger,
+        disclosure: &'a InvestigationDisclosure,
+        feedback: Option<&ActionRefusalFeedback>,
+        policy: &'a InvestigationPolicy,
+    ) -> Result<AcquisitionDisclosureConsistency<'a>, InvestigationError> {
+        self.validate_basis(contract, metadata, ledger, policy)?;
+        disclosure.validate_saved_role_shape(ledger, policy, SpecialistId::DomainAnalystV18)?;
+        let expected = AcquisitionAdmission {
+            choices_hash: self.stamp_hash()?,
+            action_feedback_hash: feedback
+                .map(ActionRefusalFeedback::stamp_hash)
+                .transpose()?,
+        };
+        if !super::records::opaque_id(task)
+            || !super::records::opaque_id(step)
+            || disclosure
+                .admission
+                .as_ref()
+                .and_then(|state| state.acquisition.as_ref())
+                != Some(&expected)
+            || disclosure.completion_contract_hash.as_deref()
+                != Some(contract.fingerprint_with_policy(policy)?.as_str())
+            || disclosure.completion_metadata_hash.as_deref()
+                != Some(metadata.fingerprint_with_policy(policy)?.as_str())
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(AcquisitionDisclosureConsistency {
+            task,
+            step,
+            ledger,
+            disclosure,
+            policy,
+        })
+    }
+}
+impl AcquisitionDisclosureConsistency<'_> {
+    pub(super) fn check(
+        &self,
+        task: &str,
+        step: &str,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+    ) -> Result<(), InvestigationError> {
+        if self.task != task
+            || self.step != step
+            || self.ledger != ledger
+            || self.disclosure != disclosure
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+    /// Canonical fingerprint for the later authenticated host finish/reopen path.
+    pub fn fingerprint(&self) -> Result<String, InvestigationError> {
+        self.disclosure.fingerprint_bytes()
+    }
+}
+impl InvestigationDisclosure {
+    // Construction ran full disclosure validation under this policy. The bound
+    // path may reuse it only for a value-equal ledger/disclosure and the same
+    // policy below; loosening construction invalidates this shortcut.
+    pub(super) fn validate_consistent(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<(), InvestigationError> {
+        if let Some(bound) = consistency {
+            if bound.policy.profile() != policy.profile()
+                || bound.policy.limits() != policy.limits()
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+            bound.check(bound.task, bound.step, ledger, self)
+        } else {
+            self.validate_with_policy(ledger, policy)
+        }
+    }
+    pub(super) fn fingerprint_consistent(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<String, InvestigationError> {
+        self.validate_consistent(ledger, policy, consistency)?;
+        self.fingerprint_bytes()
+    }
+    pub(super) fn eligible_citations_consistent(
+        &self,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<BTreeSet<String>, InvestigationError> {
+        self.validate_consistent(ledger, policy, consistency)?;
+        Ok(self.eligible_citations_unchecked(ledger))
+    }
+}
+
+impl AcquisitionDisclosureConsistency<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_finish(
+        &self,
+        input: &InvestigationInput,
+        request: &obligations::StagedObligationRequest,
+        finish: &staged_finish::StagedFinish,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+        model: Option<String>,
+        timestamp: String,
+    ) -> Result<Result<InvestigationResult, staged_finish::FinishDecision>, InvestigationError>
+    {
+        self.check(self.task, self.step, input.ledger(), self.disclosure)?;
+        input.admit_completion_finish_with_policy_using_consistency(
+            request,
+            self.task,
+            self.step,
+            self.disclosure,
+            finish,
+            attempts,
+            model,
+            timestamp,
+            self.policy,
+            Some(self),
+        )
+    }
+    pub fn validate_result(&self, result: &InvestigationResult) -> Result<(), InvestigationError> {
+        self.check(
+            &result.investigation_id,
+            result
+                .invocation_step_id
+                .as_deref()
+                .ok_or(InvestigationError::InvalidInput)?,
+            self.ledger,
+            self.disclosure,
+        )?;
+        result.validate_with_disclosure_and_policy_using_consistency(
+            self.ledger,
+            self.step,
+            self.disclosure,
+            self.policy,
+            Some(self),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_completion(
+        &self,
+        result: &InvestigationResult,
+        request_hash: &str,
+        envelope: &obligations::ObligationEnvelope,
+        context: &str,
+        graph: Option<&str>,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+    ) -> Result<(), InvestigationError> {
+        self.validate_result(result)?;
+        result.validate_completion_for_binding_with_policy_using_consistency(
+            request_hash,
+            envelope,
+            context,
+            graph,
+            self.task,
+            self.step,
+            self.ledger,
+            self.disclosure,
+            attempts,
+            self.policy,
+            Some(self),
+        )
+    }
+}

@@ -751,6 +751,9 @@
 - **AC-0488** Given a real saved gated @18 invocation, the actual shared worker response coordinator passes offered Choice reads through and durably refuses valid unoffered reads before metadata/source preparation. Exact response hashes/usage and reopened feedback are preserved with zero acquisition effects; cancellation/stale responses produce no semantic journal writes. Historical, decode and FinishOnly behavior remains unchanged, with no initial-authority/repair-loop/UI/activation change (#1427).
 - **Trace:** H4 · `app` · — · T-0488
 
+- **AC-0491** Given typed acquisition choices and feedback, a borrowed consistency witness binds exact task/step/ledger/disclosure and policy for the shared agents finish/result implementation. Real typed finish, changed identity/policy/stamp rejection and generic-stamp/historical-family controls are tested. This pure API does not authenticate durable records or complete AC-0490 transactional finish/reopen, AC-0489, or activation (#1431 prerequisite).
+- **Trace:** H4 · `agents` · — · T-0491
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

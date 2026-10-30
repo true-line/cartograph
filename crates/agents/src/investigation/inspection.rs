@@ -207,7 +207,25 @@ impl InvestigationInspectionAssessment {
         findings: &[InvestigationFinding],
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
-        disclosure.validate_with_policy(ledger, policy)?;
+        Self::derive_with_policy_using_consistency(
+            targets, ledger, step, disclosure, findings, policy, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn derive_with_policy_using_consistency(
+        targets: &[InvestigationInspectionTarget],
+        ledger: &InvestigationInputLedger,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        findings: &[InvestigationFinding],
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<Self, InvestigationError> {
+        if let Some(bound) = consistency {
+            bound.check(bound.task, step, ledger, disclosure)?;
+        }
+        disclosure.validate_consistent(ledger, policy, consistency)?;
         let targets = normalize_inspection_targets_with_policy(targets, policy)?;
         if !super::records::opaque_id(step)
             || targets[0].graph_snapshot_id != ledger.graph_snapshot_id
@@ -264,7 +282,7 @@ impl InvestigationInspectionAssessment {
             requirements_hash,
             input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
             finishing_step_id: step.into(),
-            disclosure_hash: disclosure.fingerprint_with_policy(ledger, policy)?,
+            disclosure_hash: disclosure.fingerprint_consistent(ledger, policy, consistency)?,
             requirements,
         })
     }
@@ -303,14 +321,30 @@ impl InvestigationInspectionAssessment {
         findings: &[InvestigationFinding],
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
+        Self::validate_with_policy_using_consistency(
+            self, ledger, step, disclosure, findings, policy, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_with_policy_using_consistency(
+        &self,
+        ledger: &InvestigationInputLedger,
+        step: &str,
+        disclosure: &InvestigationDisclosure,
+        findings: &[InvestigationFinding],
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<(), InvestigationError> {
         if *self
-            != Self::derive_with_policy(
+            != Self::derive_with_policy_using_consistency(
                 &self.targets_with_policy(policy)?,
                 ledger,
                 step,
                 disclosure,
                 findings,
                 policy,
+                consistency,
             )?
         {
             return Err(InvestigationError::InvalidInput);

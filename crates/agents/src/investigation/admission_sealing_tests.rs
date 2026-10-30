@@ -554,3 +554,183 @@ fn reserved_acquisition_stamp_checks_hash_shape() {
         .is_err()
     );
 }
+
+#[test]
+fn acquisition_finish_consistency_binds_identity_policy_and_stamp() {
+    // AC-0491: these are pure caller witnesses, never durable authentication.
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in [
+        SpecialistId::DomainAnalystV10,
+        SpecialistId::EvidenceAuditorV10,
+        SpecialistId::DomainAnalystV11,
+        SpecialistId::DomainAnalystV12,
+        SpecialistId::DomainAnalystV13,
+        SpecialistId::DomainAnalystV14,
+        SpecialistId::DomainAnalystV15,
+        SpecialistId::DomainAnalystV17,
+        SpecialistId::EvidenceAuditorV11,
+        SpecialistId::DomainAnalystV18,
+    ] {
+        let text = "ordinary captured fixture material";
+        let (mut fixture, raw, target, prototype) = source_fixture(role, text);
+        let mut evidence = vec![];
+        acquire_source(&mut fixture, &target, &prototype, &mut evidence, text);
+        let input = build_source(&fixture, &raw, &evidence, role, CompletionCallMode::Choice);
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: fixture.metadata.request_hash.clone(),
+            obligations_hash: fixture.metadata.obligations_hash.clone(),
+            obligations: fixture.request.obligations.clone(),
+        };
+        let choices = acquisition_choices::AcquisitionChoices::derive(
+            &contract,
+            &fixture.metadata,
+            "task:admission",
+            input.ledger(),
+            &[],
+            policy,
+        )
+        .unwrap();
+        let input = if role == SpecialistId::DomainAnalystV18 {
+            input
+                .with_acquisition_choices(std::sync::Arc::new(choices.clone()))
+                .unwrap()
+        } else {
+            input
+        };
+        let disclosure = seal(&input);
+        let finish = StagedFinish {
+            narrative: None,
+            schema_version: 1,
+            outcome: CompletionOutcome::Supported,
+            action: InvestigationAction::Finish {
+                findings: vec![ProposedInvestigationFinding {
+                    claim_kind: InvestigationClaimKind::InferredInterpretation,
+                    title: "Scoped interpretation".into(),
+                    statement:
+                        "The retained material offers limited support for this interpretation."
+                            .into(),
+                    citation_ids: vec![evidence[0].id.clone()],
+                    limitations: vec!["Only the retained scope was inspected.".into()],
+                }],
+                knowledge_completeness: KnowledgeCompleteness::Partial,
+                limitations: vec!["Only this scoped material was considered.".into()],
+            },
+        };
+        let generic = input.admit_completion_finish_with_policy(
+            &fixture.request,
+            "task:admission",
+            "step:admission",
+            &disclosure,
+            &finish,
+            &[],
+            None,
+            "2026-10-30T12:00:00Z".into(),
+            policy,
+        );
+        if role != SpecialistId::DomainAnalystV18 {
+            generic
+                .unwrap_or_else(|error| panic!("{role:?}: {error:?}"))
+                .ok()
+                .expect("historical typed finish");
+            continue;
+        }
+        assert!(generic.is_err(), "unbound Some must remain rejected");
+        let bound = choices
+            .bind_completion_disclosure(
+                "task:admission",
+                "step:admission",
+                &contract,
+                &fixture.metadata,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .unwrap();
+        let result = bound
+            .admit_finish(
+                &input,
+                &fixture.request,
+                &finish,
+                &[],
+                None,
+                "2026-10-30T12:00:00Z".into(),
+            )
+            .unwrap()
+            .ok()
+            .expect("bound typed finish");
+        bound
+            .validate_completion(
+                &result,
+                &contract.request_hash,
+                &contract.obligations,
+                &fixture.request.expected_context_id,
+                fixture.request.expected_graph_revision.as_deref(),
+                &[],
+            )
+            .unwrap();
+        for field in ["task", "step", "disclosure"] {
+            let mut changed = result.clone();
+            match field {
+                "task" => changed.investigation_id = "task:foreign".into(),
+                "step" => changed.invocation_step_id = Some("step:foreign".into()),
+                "disclosure" => changed.disclosure_hash = Some("f".repeat(64)),
+                _ => unreachable!(),
+            }
+            assert!(bound.validate_result(&changed).is_err(), "{field}");
+        }
+        for (task, step) in [
+            ("task:foreign", "step:admission"),
+            ("task:admission", "step:foreign"),
+        ] {
+            assert!(
+                bound
+                    .check(task, step, input.ledger(), &disclosure)
+                    .is_err()
+            );
+        }
+        let mut ledger = input.ledger().clone();
+        ledger.revision += 1;
+        assert!(
+            bound
+                .check("task:admission", "step:admission", &ledger, &disclosure)
+                .is_err()
+        );
+        assert!(
+            disclosure
+                .validate_consistent(input.ledger(), &INVESTIGATION_V1_POLICY, Some(&bound))
+                .is_err()
+        );
+        for field in ["choices", "feedback"] {
+            let mut changed = disclosure.clone();
+            let stamp = changed
+                .admission
+                .as_mut()
+                .unwrap()
+                .acquisition
+                .as_mut()
+                .unwrap();
+            if field == "choices" {
+                stamp.choices_hash = "a".repeat(64);
+            } else {
+                stamp.action_feedback_hash = Some("b".repeat(64));
+            }
+            assert!(
+                choices
+                    .bind_completion_disclosure(
+                        "task:admission",
+                        "step:admission",
+                        &contract,
+                        &fixture.metadata,
+                        input.ledger(),
+                        &changed,
+                        None,
+                        policy
+                    )
+                    .is_err(),
+                "{field}"
+            );
+        }
+    }
+}
