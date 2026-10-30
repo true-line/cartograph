@@ -20,6 +20,7 @@ mod job_execution;
 #[cfg(test)]
 mod job_execution_host_tests;
 mod jobs;
+mod knowledge_phase;
 mod local_commit;
 mod mcp_reads;
 mod metrics;
@@ -75,6 +76,8 @@ struct AppState {
     work_packets: work_packets::PacketRuntime,
     extraction_caches: Mutex<ExtractionCaches>,
     embedding_cache: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
+    /// ADR-0051 knowledge overlay, shared with the graph reset hook.
+    knowledge_overlay: Option<Arc<Mutex<core_graph::overlay::OverlayStore>>>,
     /// Durable, host-owned authority for operational source locations.
     sources: Arc<Mutex<SourceRegistry>>,
     primary_sources: primary_source::PrimarySourceStore,
@@ -4168,6 +4171,11 @@ fn finish_source_operation<R: tauri::Runtime>(
     let ready = operation.set_writes_ready(&state.sources, true);
     operation.release();
     emit_job(app, &job);
+    if ready.is_ok() {
+        // AC-0506: managed-repo and system ingests settle here, so the
+        // knowledge phase follows them as it follows local ingests.
+        knowledge_phase::spawn_after_ingest(app);
+    }
     ready
 }
 
@@ -4482,7 +4490,9 @@ fn ingest_path_blocking(path: String, app: tauri::AppHandle) -> Result<IngestSum
     let operation = source_operation(&state, vec![(source.clone(), false)])?;
     let (running, execution) = start_job(&state, &source.ingest_job_kind())?;
     emit_job(&app, &running);
-    run_ingest(&source, &operation, &execution, &app, &state)
+    let summary = run_ingest(&source, &operation, &execution, &app, &state)?;
+    knowledge_phase::spawn_after_ingest(&app);
+    Ok(summary)
 }
 
 /// Cancel a queued or running job; running work stops at its next stage
@@ -4603,6 +4613,7 @@ fn retry_job_blocking<R: tauri::Runtime>(
     let kind = job.kind;
     if let (Some(source), Some(operation)) = (source, operation) {
         let summary = run_ingest(&source, &operation, &execution, &app, &state)?;
+        knowledge_phase::spawn_after_ingest(&app);
         let job = state
             .jobs
             .lock()
@@ -6059,6 +6070,7 @@ fn main() {
                 work_packets,
                 extraction_caches: Mutex::new(ExtractionCaches::default()),
                 embedding_cache: Some(embedding_cache),
+                knowledge_overlay: Some(knowledge_overlay),
                 sources: Arc::new(Mutex::new(sources)),
                 primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
                     .map_err(std::io::Error::other)?,
@@ -10235,6 +10247,7 @@ export function App() {
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
+            knowledge_overlay: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -11224,6 +11237,7 @@ export function App() {
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
+            knowledge_overlay: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(dir).unwrap(),
             sources: test_source_registry(&state_path, &std::collections::BTreeSet::new()),
             metrics: std::sync::Mutex::new(
@@ -11738,6 +11752,7 @@ export function App() {
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
+            knowledge_overlay: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -11997,6 +12012,7 @@ export function App() {
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
+            knowledge_overlay: None,
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
