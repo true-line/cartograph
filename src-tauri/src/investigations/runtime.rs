@@ -224,6 +224,7 @@ impl RunClock {
 #[cfg(test)]
 mod run_clock_tests {
     use super::*;
+    // AC-0287: synthetic active time preserves the real wall deadline.
     #[test]
     fn frozen_active_time_keeps_real_wall_deadline() {
         let started = Instant::now();
