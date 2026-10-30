@@ -158,13 +158,15 @@ const NO_JVM_CLIENT: &str = "outbound HTTP client calls are recognized only thro
 const KT_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a named-imported or fully qualified `WebClient` typed local, parameter or property, `this.x`, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a held client's base is an undeclared runtime base, and a `uri` must be a pure string literal";
 /// What the Kotlin RestTemplate client cell reads (AC-0456).
 const KT_REST: &str = "named-imported or fully qualified `RestTemplate` receivers: a typed local, parameter or property, `this.x`, or an inline `RestTemplate()`; star imports, `RestTemplateBuilder` results, named arguments and a one-argument `getForObject<T>(url)` are not read, and a URL must be a pure string literal";
+/// What the Kotlin Spring Kafka event cell reads (AC-0468).
+const KT_KAFKA: &str = "`send` on a named-imported or fully qualified `KafkaTemplate` typed or constructed local, parameter or property, or `this.x`, and function-level `@KafkaListener` `topics`; subclasses, `sendDefault`, star imports, named arguments, trailing lambdas and class-level listeners are not read, and a topic must be a pure string literal with no `#{…}` expression";
 /// What the Java RestTemplate client cell reads (AC-0435).
 const JAVA_REST: &str = "single-type-imported or fully qualified `RestTemplate` receivers: a local, parameter or own-type field, or `new RestTemplate()`; wildcard imports, inherited or outer-class fields and `RestTemplateBuilder` results are not read, and a URL must be an exact literal";
 const JAVA_FEIGN: &str = "single-type-imported or fully qualified `@FeignClient` interfaces with Spring mapping annotations; `Feign.builder()` clients, inherited interface methods and `@RequestLine` contracts are not read, and a service-name or placeholder base resolves only through the system manifest";
 const JAVA_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(…)` on a single-type-imported or fully qualified `WebClient` local, parameter or own-type field, or an inline `WebClient.create(…)`/`WebClient.builder()…build()`; the base is read only from an inline literal `create`/`baseUrl` argument, so a field-held client's base is an undeclared runtime base, and a `uri` must be an exact literal";
 /// What the Java core client cell still lacks (AC-0435, AC-0437, AC-0441).
 const NO_JAVA_CLIENT: &str = "outbound HTTP client calls are recognized only through Retrofit and OpenFeign interfaces and Spring `RestTemplate` and `WebClient`";
-const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript, Python boto3/kafka-python, Java Spring Kafka, Go AWS SDK/kafka-go and Rust rdkafka";
+const NO_EVENTS: &str = "message/event SDK sites are recognized only in TypeScript/JavaScript, Python boto3/kafka-python, Java and Kotlin Spring Kafka, Go AWS SDK/kafka-go and Rust rdkafka";
 /// What the Go event SDK cells read (AC-0462).
 const GO_EVENTS: &str = "keyed AWS SDK `SendMessageInput`/`ReceiveMessageInput`/`PublishInput` and kafka-go `Writer`/`WriterConfig`/`ReaderConfig` literals on the file's import of the exact path; the client a request is sent through is not read, unkeyed literals are not read, and an identity must be an exact literal (through `aws.String` for AWS)";
 /// What the Rust rdkafka cell reads (AC-0469).
@@ -331,6 +333,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
         Partial,
         KT_WEBCLIENT,
     ),
+    cell("Kotlin", "spring-kafka", EventSites, Partial, KT_KAFKA),
     cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Kotlin", CORE, EventSites, Unsupported, NO_EVENTS),
     cell(
