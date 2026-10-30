@@ -675,3 +675,47 @@ impl AcquisitionDisclosureConsistency<'_> {
         )
     }
 }
+
+impl AcquisitionDisclosureConsistency<'_> {
+    /// Pure refusal consistency; saved-row provenance remains the host's job.
+    pub fn validate_refusal(
+        &self,
+        record: &staged_refusal::RefusalRecord,
+        request_hash: &str,
+        envelope: &obligations::ObligationEnvelope,
+        attempts: &[staged_attempt::AttemptEvidence<'_>],
+        previous: Option<&staged_refusal::RefusalRecord>,
+    ) -> Result<staged_refusal::RefusalDisposition, InvestigationError> {
+        self.check(
+            &record.task_id,
+            &record.step_id,
+            self.ledger,
+            self.disclosure,
+        )?;
+        let assessment =
+            staged_finish::derive_assessment_for_binding_with_policy_using_consistency(
+                request_hash,
+                envelope,
+                self.task,
+                self.step,
+                self.ledger,
+                self.disclosure,
+                record.outcome,
+                attempts,
+                self.policy,
+                Some(self),
+            )?;
+        if record.assessment != assessment {
+            return Err(InvestigationError::InvalidInput);
+        }
+        record.validate_stored_basis_using_consistency(
+            request_hash,
+            envelope,
+            self.ledger,
+            self.disclosure,
+            previous,
+            self.policy,
+            Some(self),
+        )
+    }
+}

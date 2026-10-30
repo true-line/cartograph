@@ -134,6 +134,30 @@ impl RefusalRecord {
         previous: Option<&RefusalRecord>,
         policy: &InvestigationPolicy,
     ) -> Result<RefusalDisposition, InvestigationError> {
+        self.validate_stored_basis_using_consistency(
+            request_hash,
+            envelope,
+            ledger,
+            disclosure,
+            previous,
+            policy,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_stored_basis_using_consistency(
+        &self,
+        request_hash: &str,
+        envelope: &ObligationEnvelope,
+        ledger: &InvestigationInputLedger,
+        disclosure: &InvestigationDisclosure,
+        previous: Option<&RefusalRecord>,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<RefusalDisposition, InvestigationError> {
+        if let Some(bound) = consistency {
+            bound.check(&self.task_id, &self.step_id, ledger, disclosure)?;
+        }
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;
         self.feedback.bytes_with_policy(policy)?;
         let obligations = envelope.normalized_with_policy(policy)?;
@@ -143,7 +167,8 @@ impl RefusalRecord {
             || self.request_hash != request_hash
             || self.obligations_hash != obligations.fingerprint_with_policy(policy)?
             || self.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
-            || self.disclosure_hash != disclosure.fingerprint_with_policy(ledger, policy)?
+            || self.disclosure_hash
+                != disclosure.fingerprint_consistent(ledger, policy, consistency)?
             || !crate::source_basis::hash(&self.finish_hash)
             || !crate::source_basis::hash(&self.response_hash)
             || self.refusal_id != self.content_id()?

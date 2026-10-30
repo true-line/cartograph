@@ -188,13 +188,20 @@ fn chat_result_reference_rejects_cross_task_identity_on_read() {
 
 #[test]
 fn next_prompt_finish_boundary_refusals_use_existing_obligations_and_two_finish_cap() {
-    let mut f = Fixture::new(false);
+    // AC-0492: preserve the legacy control alongside the gated family.
+    for f in [Fixture::new(false), gated_pending_finish_fixture()] {
+        assert_two_finish_cap(f);
+    }
+}
+fn assert_two_finish_cap(mut f: Fixture) {
     f.begin();
     let first = f.publish().unwrap();
     assert_eq!(first.summary.status, InvestigationStatus::Running);
     assert_eq!(first.completion.as_ref().unwrap().refusal_count, 1);
     assert_eq!(first.usage.tool_actions, 0);
     assert_eq!(f.saved().phase, Phase::Ready);
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(f.base.id()).unwrap(), first);
     f.next();
     f.begin();
     let second = f.publish().unwrap();
@@ -248,12 +255,21 @@ fn next_prompt_finish_boundary_refusals_use_existing_obligations_and_two_finish_
             .count,
         0
     );
+    drop(tx);
+    let before = gated_stored_rows(&f);
+    assert_eq!(f.publish(), Err(InvestigationStoreError::Stale));
+    assert_eq!(gated_stored_rows(&f), before);
 }
 
 #[test]
 fn next_prompt_finish_boundary_late_cancel_preserves_valid_finish_and_terminates_refusal() {
-    for acquired in [false, true] {
-        let mut f = Fixture::new(acquired);
+    // AC-0492: identical assertions exercise both immutable families.
+    for (acquired, mut f) in [
+        (false, Fixture::new(false)),
+        (true, Fixture::new(true)),
+        (false, gated_pending_finish_fixture()),
+        (true, gated_finish_fixture(false)),
+    ] {
         f.begin();
         let id = f.base.id().to_owned();
         f.base
@@ -315,13 +331,18 @@ fn next_prompt_finish_boundary_rebinding_and_stale_proposals_leave_no_effects() 
 
 #[test]
 fn next_prompt_finish_boundary_final_write_rollback_and_lost_ack_are_exact() {
-    for acquired in [false, true] {
-        let mut f = Fixture::new(acquired);
+    // AC-0492: identical assertions exercise both immutable families.
+    for (acquired, mut f) in [
+        (false, Fixture::new(false)),
+        (true, Fixture::new(true)),
+        (false, gated_pending_finish_fixture()),
+        (true, gated_finish_fixture(false)),
+    ] {
         f.begin();
-        let before = f.rows();
+        let before = gated_stored_rows(&f);
         FAIL_BEFORE_FINISH_COMMIT.with(|flag| flag.set(true));
         assert_eq!(f.publish(), Err(InvestigationStoreError::Capacity));
-        assert_eq!(f.rows(), before);
+        assert_eq!(gated_stored_rows(&f), before);
         assert_eq!(
             chat::read_for_task(&f.base.f.store.conn, f.base.id())
                 .unwrap()
@@ -348,9 +369,9 @@ fn next_prompt_finish_boundary_final_write_rollback_and_lost_ack_are_exact() {
                 .len(),
             if acquired { 2 } else { 1 }
         );
-        let after = f.rows();
+        let after = gated_stored_rows(&f);
         assert_eq!(f.publish(), Err(InvestigationStoreError::Stale));
-        assert_eq!(f.rows(), after);
+        assert_eq!(gated_stored_rows(&f), after);
     }
 }
 
@@ -401,7 +422,7 @@ fn assert_task_load_workspace(tx: &Connection, saved: &StoredTask) {
 }
 
 // Cold setup only; every subsequent call/attempt is actually admitted.
-fn gated_finish_fixture(prior_refusal: bool) -> Fixture {
+fn gated_pending_finish_fixture() -> Fixture {
     use completion::next_prompt_snapshot::tests::fixture::Fixture as Acquisition;
     let base = Acquisition::customized(false, |f| {
         f.request.specialist_id = "domain-analyst@18".into();
@@ -416,7 +437,10 @@ fn gated_finish_fixture(prior_refusal: bool) -> Fixture {
         admission_journal::tests::save_task(&tx, &f.task);
         tx.commit().unwrap();
     });
-    let mut ready = Fixture::from_base(base, false);
+    Fixture::from_base(base, false)
+}
+fn gated_finish_fixture(prior_refusal: bool) -> Fixture {
+    let mut ready = gated_pending_finish_fixture();
     if prior_refusal {
         ready.begin();
         let original = ready.query_action();
@@ -547,8 +571,11 @@ fn gated_stored_rows(f: &Fixture) -> Vec<(Vec<u8>, String)> {
         "investigation_inputs",
         "investigation_events",
         "investigation_admission_refusals",
+        "staged_completion_intents",
+        "staged_completion_refusals",
+        "staged_completion_feedback",
     ] {
-        if table == "investigation_admission_refusals" {
+        if table == "investigation_admission_refusals" || table.starts_with("staged_completion_") {
             let present: bool = connection
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
@@ -798,4 +825,170 @@ fn gated_valid_finish_cannot_enter_generic_action_admitted() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn gated_finish_refusal_reopens_after_later_inventory_and_result() {
+    // AC-0492: refusal remains at ledger0 even after real acquisition/finish.
+    let f = historical_refusal_fixture();
+    let task = f.saved();
+    assert_eq!(task.detail.usage.model_invocations, 3);
+    assert_eq!(task.detail.usage.tool_actions, 1);
+    assert_eq!(task.detail.completion.as_ref().unwrap().refusal_count, 1);
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let entries = staged::load_for_task(&tx, &task).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].ledger_revision, 0);
+    assert_eq!(entries[0].record.step_id, "step-1");
+    let historical = admission_journal::AuthenticatedRefusalBasis::load(&tx, &task, 1, &entries[0])
+        .unwrap()
+        .unwrap();
+    assert!(historical.binding().is_ok());
+    assert!(admission_journal::AuthenticatedCompletionBasis::load(&tx, &task, "step-1").is_err());
+}
+
+fn historical_refusal_fixture() -> Fixture {
+    let mut f = gated_pending_finish_fixture();
+    f.begin();
+    let first = f.publish().unwrap();
+    assert_eq!(first.summary.status, InvestigationStatus::Running);
+    assert_eq!(first.completion.as_ref().unwrap().refusal_count, 1);
+    assert_eq!(first.usage.model_invocations, 1);
+    assert_eq!(first.usage.tool_actions, 0);
+    assert_eq!(f.saved().phase, Phase::Ready);
+    f.next();
+    let Fixture {
+        mut base,
+        input,
+        prepared,
+        ..
+    } = f;
+    base.input = input;
+    base.prepared = prepared;
+    base.acquire_inventory();
+    assert_eq!(base.f.ledger.revision, 1);
+    assert_gated_finish_reopens(Fixture::from_base(base, false))
+}
+
+#[test]
+fn gated_historical_refusal_rejects_rehashed_disclosure_fingerprint() {
+    // AC-0492: valid assessment/record identity cannot replace disclosure identity.
+    let f = historical_refusal_fixture();
+    let task = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let entries = staged::load_for_task(&tx, &task).unwrap();
+    let entry = &entries[0];
+    let basis = admission_journal::AuthenticatedRefusalBasis::load(&tx, &task, 1, entry)
+        .unwrap()
+        .unwrap();
+    let bound = basis.binding().unwrap();
+    let contract = task.completion_intent.as_ref().unwrap().contract();
+    let envelope = &contract.obligations;
+    bound
+        .validate_refusal(&entry.record, &task.intent_hash, envelope, &[], None)
+        .unwrap();
+    let mut forged = entry.record.clone();
+    forged.disclosure_hash = format!("investigation-disclosure-v6:{}", "a".repeat(64));
+    forged.refusal_id = forged.content_id().unwrap();
+    assert!(
+        bound
+            .validate_refusal(&forged, &task.intent_hash, envelope, &[], None)
+            .is_err()
+    );
+    let ledger: InvestigationInputLedger =
+        read_body(&tx, "investigation_inputs", "revision", f.base.id(), &0i64)
+            .unwrap()
+            .unwrap();
+    let step: PendingInvestigationStep = read_body(
+        &tx,
+        "investigation_invocations",
+        "step_id",
+        f.base.id(),
+        &"step-1",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        entry
+            .record
+            .validate_stored_basis_with_policy(
+                &task.intent_hash,
+                envelope,
+                &ledger,
+                step.disclosure.as_ref().unwrap(),
+                None,
+                &INVESTIGATION_V2_POLICY,
+            )
+            .is_err(),
+        "generic validation must still reject an unbound stamp"
+    );
+}
+
+#[test]
+fn gated_historical_refusal_rejects_actual_row_and_response_substitution_without_writes() {
+    // AC-0492: canonical body hashes are valid; actual saved association is not.
+    for field in ["ledger", "response"] {
+        let f = historical_refusal_fixture();
+        let task = f.saved();
+        let id = f.base.id();
+        let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+        let mut entries = staged::load_for_task(&tx, &task).unwrap();
+        let entry = &mut entries[0];
+        assert!(
+            admission_journal::AuthenticatedRefusalBasis::load(&tx, &task, 1, entry)
+                .unwrap()
+                .is_some()
+        );
+        let original_record = entry.record.clone();
+        entry.record.response_hash = "a".repeat(64);
+        entry.record.refusal_id = entry.record.content_id().unwrap();
+        entry.rehash_for_test();
+        assert!(
+            admission_journal::AuthenticatedRefusalBasis::load(&tx, &task, 1, entry).is_err(),
+            "full actual-row equality must reject a foreign record field"
+        );
+        entry.record = original_record;
+        entry.rehash_for_test();
+        if field == "ledger" {
+            entry.ledger_revision = 1;
+        } else {
+            entry.response.step_id = f.response.step_id.clone();
+        }
+        // Before rewriting, the same proposed value must fail full saved-row equality.
+        assert!(admission_journal::AuthenticatedRefusalBasis::load(&tx, &task, 1, entry).is_err());
+        entry.rehash_for_test();
+        completion::rewrite_test_body(
+            &tx,
+            "staged_completion_refusals",
+            id,
+            "sequence",
+            &1u32,
+            &encode(entry, MAX_RECORD_BYTES).unwrap(),
+        );
+        assert_eq!(
+            read_body::<staged::JournalEntry>(
+                &tx,
+                "staged_completion_refusals",
+                "sequence",
+                id,
+                &1u32,
+            )
+            .unwrap()
+            .unwrap(),
+            *entry
+        );
+        // Expected and actual now match, so this reaches the ledger/response backstop.
+        assert!(
+            admission_journal::AuthenticatedRefusalBasis::load(&tx, &task, 1, entry).is_err(),
+            "{field}"
+        );
+        tx.commit().unwrap();
+        let before = gated_stored_rows(&f);
+        let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+        let changes = reopened.conn.total_changes();
+        assert!(reopened.investigation(id).is_err(), "{field} detail");
+        assert!(reopened.investigation_result(id).is_err(), "{field} result");
+        assert_eq!(reopened.conn.total_changes(), changes);
+        assert_eq!(gated_stored_rows(&f), before);
+    }
 }

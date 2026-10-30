@@ -16,6 +16,9 @@ pub(crate) fn next_prompt_staged_workspace() -> Option<(usize, usize)> {
     let retained = sum(&[row.checked_mul(2)?, slots::<Vec<JournalEntry>>(1)?])?;
     // Binding's dynamic envelope is a subset of StoredTask's closed DTO union.
     let binding = task.checked_add(size_of::<Binding>())?;
+    // Historical factory reloads the complete Entry and ordinary response
+    // sequentially, dropping both before history/timeline. This bounded row +
+    // decode term covers rejected bodies too; their encodings are not retained.
     let acquisition = sum(&[
         row,
         task_decode.max(ledger_decode), // includes malformed tagged content
@@ -83,6 +86,7 @@ pub(crate) fn next_prompt_staged_workspace() -> Option<(usize, usize)> {
         calls.checked_mul(128)?,
         metadata_peak.max(acquisition).max(4096),
     ])?;
+    let (selected, selected_peak) = result_replay_workspace::completion_basis_workspace()?;
     let peak = sum(&[
         task,
         binding,
@@ -91,7 +95,9 @@ pub(crate) fn next_prompt_staged_workspace() -> Option<(usize, usize)> {
         ledger,
         witnesses,
         assessment,
+        selected, // historical named call retained through record/usage checks
         schema_workspace()?
+            .max(selected_peak)
             .max(acquisition)
             .max(next_prompt_contract_workspace()?)
             .max(next_prompt_ledger_workspace()?)

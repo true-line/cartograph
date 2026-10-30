@@ -1900,6 +1900,7 @@ pub(super) fn refused(
     input: &InvestigationInput,
     finish: &StagedFinish,
     response: InvestigationResponseMeta,
+    basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
 ) -> Result<(), InvestigationStoreError> {
     if task.phase != Phase::Invocation || task.completion_intent.is_none() {
         return Err(InvestigationStoreError::Stale);
@@ -1925,6 +1926,7 @@ pub(super) fn refused(
             finish,
             response.clone(),
             &attempts,
+            basis,
         )?
     } else {
         staged::append(

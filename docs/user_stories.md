@@ -759,6 +759,9 @@
 - **AC-0490** Given a real saved gated @18 finishing invocation, accepted-result publication and fresh durable reread independently replay the last named call's choices and prior feedback, binding exact intent/task/step/ledger/disclosure. Genuine insufficient-evidence persistence and reopen succeed; coherently rehashed stamp or earlier-call substitution fails without reader writes. Historical/unbound behavior, numeric ceilings and activation gates stay unchanged. Early-Finish refusal adoption and AC-0489 remain separate (#1431).
 - **Trace:** H4 · `app` · — · T-0490
 
+- **AC-0492** Given a saved gated @18 early Finish, genuine NotAttempted refusal publication and historical reread use the actual saved sequence's immutable call/ledger and independently rederived choices/prior feedback. A later acquisition/call cannot retarget that refusal. Real first-refusal/later-ledger/result-reopen, cap-two and coherent tamper/rollback controls preserve generic/history semantics, accepted latest-only eligibility and all activation gates/limits (#1446).
+- **Trace:** H4 · `app` · — · T-0492
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

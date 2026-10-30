@@ -548,6 +548,7 @@ impl JobStore {
                     &input,
                     &finish,
                     response,
+                    None,
                 )?;
             }
             InvestigationTransition::ReadUnavailable { read, reason } => {

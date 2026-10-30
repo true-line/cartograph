@@ -280,7 +280,7 @@ fn bind(
     )?;
     Ok(binding)
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct JournalEntry {
     entry_id: String,
@@ -291,6 +291,10 @@ pub(super) struct JournalEntry {
     pub ledger_revision: u64,
 }
 impl JournalEntry {
+    #[cfg(test)]
+    pub(in crate::jobs::investigations) fn rehash_for_test(&mut self) {
+        self.entry_id = self.content_id().unwrap();
+    }
     fn content_id(&self) -> Result<String, InvestigationStoreError> {
         encode(self, MAX_RECORD_BYTES)?;
         let value = serde_json::json!({"record":self.record,"response":self.response,"usage":self.usage,"attempts":self.attempts,"ledger_revision":self.ledger_revision});
@@ -703,6 +707,11 @@ pub(super) fn load_for_task(
         {
             validate_next_prompt_refusal_basis(connection, task, &entry, &step, &ledger)?;
         }
+        let basis =
+            admission_journal::AuthenticatedRefusalBasis::load(connection, task, sequence, &entry)?;
+        if let Some(basis) = &basis {
+            basis.check_step(&ledger, &step)?;
+        }
         let attempt_ledgers = completed_attempts_for_task(connection, task, &entry.attempts)?;
         let witnesses = entry
             .attempts
@@ -710,25 +719,37 @@ pub(super) fn load_for_task(
             .zip(&attempt_ledgers)
             .map(|(record, ledger)| AttemptEvidence { record, ledger })
             .collect::<Vec<_>>();
-        let assessment = derive_assessment_for_binding_with_policy(
-            &binding.request_hash,
-            &binding.envelope,
-            id,
-            &step.step_id,
-            &ledger,
-            disclosure,
-            entry.record.outcome,
-            &witnesses,
-            policy,
-        )?;
-        entry.record.validate_stored_basis_with_policy(
-            &binding.request_hash,
-            &binding.envelope,
-            &ledger,
-            disclosure,
-            entries.last().map(|entry| &entry.record),
-            policy,
-        )?;
+        let assessment = if let Some(basis) = &basis {
+            basis.binding()?.validate_refusal(
+                &entry.record,
+                &binding.request_hash,
+                &binding.envelope,
+                &witnesses,
+                entries.last().map(|entry| &entry.record),
+            )?;
+            entry.record.assessment.clone()
+        } else {
+            let assessment = derive_assessment_for_binding_with_policy(
+                &binding.request_hash,
+                &binding.envelope,
+                id,
+                &step.step_id,
+                &ledger,
+                disclosure,
+                entry.record.outcome,
+                &witnesses,
+                policy,
+            )?;
+            entry.record.validate_stored_basis_with_policy(
+                &binding.request_hash,
+                &binding.envelope,
+                &ledger,
+                disclosure,
+                entries.last().map(|entry| &entry.record),
+                policy,
+            )?;
+            assessment
+        };
         if entry.record.task_id != *id
             || entry.record.refusal_count != sequence
             || entry.record.assessment != assessment
@@ -882,7 +903,7 @@ pub(super) fn append(
         .ok_or(InvestigationStoreError::Missing)?;
     let task = load_task_base(tx, &id)?;
     append_for_task(
-        tx, namespace, execution, &task, request, input, finish, response, attempts,
+        tx, namespace, execution, &task, request, input, finish, response, attempts, None,
     )
 }
 
@@ -897,6 +918,7 @@ pub(super) fn append_for_task(
     finish: &StagedFinish,
     response: InvestigationResponseMeta,
     attempts: &[AttemptRecord],
+    basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
 ) -> Result<RefusalDisposition, InvestigationStoreError> {
     let id = task.detail.summary.investigation_id.clone();
     let policy = super::completion::saved_policy(task)?;
@@ -909,6 +931,9 @@ pub(super) fn append_for_task(
         return Err(InvestigationStoreError::Stale);
     }
     let binding = bind(tx, task, request)?;
+    if request.intent_hash_with_policy(policy)? != binding.request_hash {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let previous = load_for_task(tx, task)?;
     if previous.len() >= 2 {
         return Err(InvestigationStoreError::Capacity);
@@ -928,21 +953,37 @@ pub(super) fn append_for_task(
         .zip(&attempt_ledgers)
         .map(|(record, ledger)| AttemptEvidence { record, ledger })
         .collect::<Vec<_>>();
+    let decision = if let Some(basis) = basis {
+        basis.check_step(&ledger, &step)?;
+        match basis.binding()?.admit_finish(
+            input,
+            request,
+            finish,
+            &evidence,
+            response.observed_model.clone(),
+            "staged-admission".into(),
+        )? {
+            Err(decision) => decision,
+            Ok(_) => return Err(InvestigationStoreError::Invalid),
+        }
+    } else {
+        admit_finish_with_policy(
+            request,
+            &id,
+            &step.step_id,
+            input,
+            disclosure,
+            finish,
+            &evidence,
+            response.observed_model.clone(),
+            "staged-admission".into(),
+            policy,
+        )?
+    };
     let FinishDecision::Refused {
         assessment,
         feedback,
-    } = admit_finish_with_policy(
-        request,
-        &id,
-        &step.step_id,
-        input,
-        disclosure,
-        finish,
-        &evidence,
-        response.observed_model.clone(),
-        "staged-admission".into(),
-        policy,
-    )?
+    } = decision
     else {
         return Err(InvestigationStoreError::Invalid);
     };
@@ -959,11 +1000,14 @@ pub(super) fn append_for_task(
         schema_version: 1,
         refusal_id: String::new(),
         task_id: id.clone(),
-        request_hash: binding.request_hash,
+        request_hash: binding.request_hash.clone(),
         obligations_hash: binding.envelope.fingerprint_with_policy(policy)?,
         step_id: step.step_id.clone(),
         input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
-        disclosure_hash: disclosure.fingerprint_with_policy(&ledger, policy)?,
+        disclosure_hash: match basis {
+            Some(basis) => basis.binding()?.fingerprint()?,
+            None => disclosure.fingerprint_with_policy(&ledger, policy)?,
+        },
         finish_hash: finish.fingerprint()?,
         outcome: finish.outcome,
         response_hash: response.response_hash.clone(),
@@ -973,14 +1017,27 @@ pub(super) fn append_for_task(
         feedback,
     };
     record.refusal_id = record.content_id()?;
-    let disposition = record.validate_with_policy(
-        request,
-        &ledger,
-        disclosure,
-        finish,
-        previous.last().map(|entry| &entry.record),
-        policy,
-    )?;
+    let disposition = if let Some(basis) = basis {
+        if record.finish_hash != finish.fingerprint()? || record.outcome != finish.outcome {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        basis.binding()?.validate_refusal(
+            &record,
+            &binding.request_hash,
+            &binding.envelope,
+            &evidence,
+            previous.last().map(|entry| &entry.record),
+        )?
+    } else {
+        record.validate_with_policy(
+            request,
+            &ledger,
+            disclosure,
+            finish,
+            previous.last().map(|entry| &entry.record),
+            policy,
+        )?
+    };
     let mut entry = JournalEntry {
         entry_id: String::new(),
         record,
