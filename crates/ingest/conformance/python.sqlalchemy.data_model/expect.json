@@ -1,0 +1,35 @@
+{
+  "nodes": [
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@sqlalchemy:users",
+      "props": {
+        "storage": "sqlalchemy",
+        "store": "users"
+      }
+    },
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@sqlalchemy:aliases",
+      "props": {
+        "storage": "sqlalchemy",
+        "store": "aliases"
+      }
+    },
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@sqlalchemy:audit_logs",
+      "props": {
+        "storage": "sqlalchemy",
+        "store": "audit_logs"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "REFERENCES",
+      "src": "data:local/p@sqlalchemy:aliases",
+      "dst": "data:local/p@sqlalchemy:users"
+    }
+  ]
+}
