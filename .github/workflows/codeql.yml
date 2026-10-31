@@ -13,7 +13,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || vars.LINUX_RUNNER || '["self-hosted", "Linux", "X64"]') }}
+    runs-on: [self-hosted, Linux, X64]
     # Rust extraction outlived 45 minutes on every main push, so it never
     # produced an analysis while holding a heavy slot (#1373). The runtime
     # policy needs a literal timeout, so every language shares Rust's budget

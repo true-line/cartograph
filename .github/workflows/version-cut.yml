@@ -24,14 +24,12 @@ permissions:
   contents: read
 
 # Jobs run on the organisation's own runners: the Linux runner group holds one
-# x86-64 runner, the MacOS group one arm64 runner. A fork's pull request and a
-# merge-queue run keep a hosted runner, because a pull request controls the
-# workflow file it runs and would otherwise execute its own code on the
-# organisation's hardware.
+# x86-64 runner, the MacOS group one arm64 runner. No job runs on a
+# GitHub-hosted runner: hosted minutes are billed.
 jobs:
   policy:
     name: Action Policy
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
       # The organisation's Linux runner does not carry Node on its default PATH.
@@ -50,7 +48,7 @@ jobs:
     name: Version packages PR
     needs: policy
     if: github.event_name != 'workflow_run'
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     outputs:
       has-releases: ${{ steps.version.outputs.has-releases }}
@@ -193,7 +191,7 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || github.event.pull_request.head.repo.fork) && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64"]') }}
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     permissions:
       actions: read
