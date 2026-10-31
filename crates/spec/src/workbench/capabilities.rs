@@ -67,12 +67,35 @@ impl Support<'_> {
 /// Uses the existing selected projection, renderer, identity and output admission.
 /// The caller still proves overlay currency and admits its input graph/sidecar.
 /// Empty candidates preserve the legacy artifact bytes and identity.
+/// Legacy security behavior is unchanged; bounded hosts use the with_security API.
 pub fn compile_capability_user_stories(
     base: &RevisionedSnapshot,
     candidates: &[CapabilityStory<'_>],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     limits: SelectedCompileLimits,
+) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    compile_capability_stories(base, candidates, mode, rejected, limits, None)
+}
+/// Compile official Capability stories with the caller's complete security admission.
+/// A security refusal returns Limited with no artifact, through the shared dispatcher.
+pub fn compile_capability_user_stories_with_security(
+    base: &RevisionedSnapshot,
+    candidates: &[CapabilityStory<'_>],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    security: crate::SecurityLimits,
+) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    compile_capability_stories(base, candidates, mode, rejected, limits, Some(security))
+}
+fn compile_capability_stories(
+    base: &RevisionedSnapshot,
+    candidates: &[CapabilityStory<'_>],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    security: Option<crate::SecurityLimits>,
 ) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
     let mut nodes = BTreeMap::new();
     for n in &base.graph.0 {
@@ -160,9 +183,17 @@ pub fn compile_capability_user_stories(
             }
         }
     }
-    Ok(selected::compile_stories_with_support(
-        base, mode, rejected, limits, &stories,
-    ))
+    Ok(match security {
+        Some(security) => selected::compile_stories_with_security(
+            base,
+            mode,
+            rejected,
+            limits,
+            &stories,
+            Some(security),
+        ),
+        None => selected::compile_stories_with_support(base, mode, rejected, limits, &stories),
+    })
 }
 
 pub(super) fn support_id(capability: &str, cite: &BaseRef) -> String {

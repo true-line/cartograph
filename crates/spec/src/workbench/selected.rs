@@ -575,13 +575,24 @@ pub(super) fn compile_stories_with_support(
     limits: SelectedCompileLimits,
     stories: &capabilities::Stories<'_>,
 ) -> SelectedArtifactOutcome {
+    compile_stories_with_security(base, mode, rejected, limits, stories, None)
+}
+// Preserve the legacy helper signature, including pending combined-Actor callers.
+pub(super) fn compile_stories_with_security(
+    base: &core_graph::RevisionedSnapshot,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    stories: &capabilities::Stories<'_>,
+    security: Option<crate::SecurityLimits>,
+) -> SelectedArtifactOutcome {
     compile_selected(
         &base.graph.0,
         &base.graph.1,
         &[],
         mode,
         rejected,
-        (&["user-stories"], limits, None, Some(stories)),
+        (&["user-stories"], limits, security, Some(stories)),
     )
     .expect("official artifact id")
     .remove(0)

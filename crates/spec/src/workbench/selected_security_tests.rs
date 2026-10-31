@@ -136,3 +136,94 @@ fn selection_validation_and_empty_selection_precede_security_derivation() {
     );
     crate::security::SECURITY_OUTPUT_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
 }
+
+// AC-0504: the sidecar route retains caller security admission, even empty.
+#[test]
+fn capability_stories_preserve_caller_security_admission() {
+    let nodes = fixture();
+    let size = crate::security_projection_size(&nodes, &[]).unwrap();
+    assert!(size.rows > 0);
+    let mut candidate = nodes[0].clone();
+    candidate.id = "capability:security-fixture".into();
+    candidate.label = "Capability".into();
+    let source = Provenance::deserialize(&nodes[0].props["prov"]).unwrap();
+    candidate.props["prov"] = json!(
+        Provenance::new(
+            Tier::Semantic,
+            ConfidenceTier::InferredWeak,
+            source.evidence,
+            "fixture",
+            b"capability"
+        )
+        .unwrap()
+        .with_method(core_prov::ProducingMethod::Rule {
+            rule: "fixture".into(),
+            version: "1".into()
+        })
+    );
+    let cites = BTreeSet::from([core_graph::overlay::BaseRef::Node(nodes[0].id.clone())]);
+    let candidates = [crate::CapabilityStory {
+        capability: &candidate,
+        cites: &cites,
+    }];
+    let base = core_graph::RevisionedSnapshot {
+        revision: core_graph::StoreRevision {
+            graph_instance: "f".repeat(32),
+            generation: 1,
+        },
+        graph: (nodes, vec![]),
+    };
+    for candidates in [&[][..], &candidates[..]] {
+        let legacy = crate::compile_capability_user_stories(
+            &base,
+            candidates,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(legacy, SelectedArtifactOutcome::Produced(_)));
+        let compile = |security| {
+            crate::compile_capability_user_stories_with_security(
+                &base,
+                candidates,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                limits(),
+                security,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            compile(crate::SecurityLimits {
+                max_rows: size.rows,
+                max_output_bytes: size.bytes
+            }),
+            legacy
+        );
+        for (security, expected) in [
+            (
+                crate::SecurityLimits {
+                    max_rows: size.rows - 1,
+                    max_output_bytes: size.bytes,
+                },
+                crate::SecurityLimit::Rows,
+            ),
+            (
+                crate::SecurityLimits {
+                    max_rows: size.rows,
+                    max_output_bytes: size.bytes - 1,
+                },
+                crate::SecurityLimit::OutputBytes,
+            ),
+        ] {
+            crate::security::SECURITY_OUTPUT_MATERIALIZATIONS.with(|n| n.set(0));
+            assert!(
+                matches!(compile(security), SelectedArtifactOutcome::Limited {
+                artifact_id, limit: SelectedArtifactLimit::SecurityDerivation(error)
+            } if artifact_id == "user-stories" && error.limit == expected)
+            );
+            crate::security::SECURITY_OUTPUT_MATERIALIZATIONS.with(|n| assert_eq!(n.get(), 0));
+        }
+    }
+}
