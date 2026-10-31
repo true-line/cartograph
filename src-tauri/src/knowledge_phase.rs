@@ -179,6 +179,9 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
         }
         Err(omission) => derived.omissions.push(omission.code()),
     }
+    let entities = spec::derive_orm_domain_entities(snapshot);
+    derived.facts.extend(entities.facts);
+    derived.oversized += entities.oversized_models;
     derived
 }
 
@@ -186,11 +189,13 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
 /// changes the overlay identity.
 pub(crate) fn recipe_name() -> String {
     format!(
-        "{RECIPE};{}@{};{}@{}",
+        "{RECIPE};{}@{};{}@{};{}@{}",
         spec::CAPABILITY_GRAPHQL_RULE,
         spec::CAPABILITY_GRAPHQL_RULE_VERSION,
         spec::BUSINESS_FLOW_RULE,
-        spec::BUSINESS_FLOW_RULE_VERSION
+        spec::BUSINESS_FLOW_RULE_VERSION,
+        spec::DOMAIN_ENTITY_ORM_RULE,
+        spec::DOMAIN_ENTITY_ORM_RULE_VERSION
     )
 }
 
