@@ -16,6 +16,10 @@ pub(crate) struct SessionReservation {
     pub retained_session_bytes: usize,
     /// Wire Vec, hex-hash String and returned ID String while the session stays live.
     pub basis_digest_bytes: usize,
+    #[cfg(test)]
+    pub capability_selection_bytes: usize,
+    #[cfg(test)]
+    pub capability_read_peak_bytes: usize,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScopeReservation {
@@ -206,6 +210,17 @@ impl SessionReservation {
         let revision = sum(&[size_of::<core_graph::StoreRevision>(), revision_payload])?;
         let basis_digest_bytes = ReadBasis::digest_workspace()?;
         let hash = core_prov::content_hash(&[]);
+        let (n, bytes) = crate::mcp_reads::capability_caps(limits.graph);
+        let overlay = core_graph::overlay::capability_read_workspace(n, bytes)?;
+        let capability_selection_bytes = overlay.retained_selection_bytes;
+        // The output recipe is dropped. Basis payload is already charged in
+        // fixed_basis; pre-construction enum/vector headers still have owners.
+        let captured = sum(&[
+            capability_selection_bytes,
+            count(&basis.knowledge)?,
+            size_of::<crate::mcp_reads::KnowledgeBasis>(),
+            size_of::<Vec<core_graph::overlay::OverlayFact>>(),
+        ])?;
         let fixed_basis = sum(&[size_of::<ReadSession>(), count(&basis)?])?;
         let retained_session_bytes = sum(&[
             graph,
@@ -214,6 +229,7 @@ impl SessionReservation {
             rejected,
             coverage.retained,
             fixed_basis,
+            capability_selection_bytes,
             revision_payload, // ReadSession already owns the inline revision header
         ])?;
         let before_scope = sum(&[rejected, scope.peak_bytes])?;
@@ -227,7 +243,16 @@ impl SessionReservation {
             coverage.inventory_parse,
             revision,
         ])?;
+        let capability_read_peak_bytes = sum(&[
+            rejected,
+            scope.result_bytes,
+            graph,
+            coverage.stored,
+            revision,
+            overlay.peak_bytes,
+        ])?;
         let after_scope = sum(&[
+            captured,
             revision,
             rejected,
             scope.result_bytes,
@@ -236,6 +261,7 @@ impl SessionReservation {
             scope.peak_bytes,
         ])?;
         let comparisons = sum(&[
+            captured,
             revision,
             rejected,
             rejected,
@@ -246,6 +272,7 @@ impl SessionReservation {
             curation_row_peak()?,
         ])?;
         let common_identity = sum(&[
+            captured,
             revision,
             rejected,
             rejected,
@@ -296,6 +323,7 @@ impl SessionReservation {
         let acquisition_peak_bytes = [
             before_scope,
             bounded_read,
+            capability_read_peak_bytes,
             after_scope,
             comparisons,
             revision_recheck,
@@ -310,6 +338,10 @@ impl SessionReservation {
             acquisition_peak_bytes,
             retained_session_bytes,
             basis_digest_bytes,
+            #[cfg(test)]
+            capability_selection_bytes,
+            #[cfg(test)]
+            capability_read_peak_bytes,
         })
     }
 }

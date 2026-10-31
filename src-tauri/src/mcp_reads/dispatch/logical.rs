@@ -60,6 +60,7 @@ pub(crate) fn logical_protocol_workspace_bytes(limits: WorkerLimits) -> Option<u
     let errors = [
         ReadError::StaleBasis,
         ReadError::Limit,
+        ReadError::AdmissionLimit,
         ReadError::Storage,
         ReadError::ArtifactUnavailable,
         ReadError::EvidenceUnavailable,

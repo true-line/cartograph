@@ -14,6 +14,7 @@ use context_hub::{ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResp
 #[cfg(test)]
 use context_hub::{QueryRequest, QueryResponse};
 use core_graph::coverage::CoverageReadLimits;
+use core_graph::overlay::{OverlayFact, OverlayIdentity, OverlayRead, OverlayStore};
 #[cfg(test)]
 use core_graph::{Edge, Node};
 use core_graph::{
@@ -84,6 +85,60 @@ pub(crate) struct ReadBasis {
     pub h3_curated_available: bool,
     /// Captured mutation token, independent of the base content identity.
     pub base_revision: StoreRevision,
+    pub knowledge: KnowledgeBasis,
+}
+
+/// Host-captured consistency state, never a caller-supplied current flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum KnowledgeBasis {
+    Absent,
+    Stale(StoreRevision),
+    Current(OverlayIdentity),
+}
+
+fn capability_caps(limits: SnapshotReadLimits) -> (usize, usize) {
+    (
+        limits.max_rows.min(core_graph::overlay::MAX_FACTS),
+        limits.max_bytes.min(core_graph::overlay::MAX_BYTES),
+    )
+}
+
+fn read_knowledge(
+    overlay: Option<&Mutex<OverlayStore>>,
+    revision: &StoreRevision,
+    limits: SnapshotReadLimits,
+) -> Result<(KnowledgeBasis, Vec<OverlayFact>), ReadError> {
+    let Some(overlay) = overlay else {
+        return Ok((KnowledgeBasis::Absent, Vec::new()));
+    };
+    let (n, bytes) = capability_caps(limits);
+    let captured = overlay
+        .lock()
+        .map_err(|_| ReadError::Storage)?
+        .read_capabilities_bounded(revision, n, bytes)
+        .map_err(|e| match e {
+            core_graph::overlay::OverlayError::SelectionLimit => ReadError::AdmissionLimit,
+            _ => ReadError::Storage,
+        })?;
+    match captured {
+        OverlayRead::Absent => Ok((KnowledgeBasis::Absent, Vec::new())),
+        OverlayRead::Stale { base } => {
+            // Stored stale metadata is deserialized before publication-name
+            // validation; reject malformed revision shape before retaining it.
+            if base.graph_instance.len() != 32
+                || !base
+                    .graph_instance
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(ReadError::Storage);
+            }
+            Ok((KnowledgeBasis::Stale(base), Vec::new()))
+        }
+        OverlayRead::Current {
+            identity, facts, ..
+        } => Ok((KnowledgeBasis::Current(identity), facts)),
+    }
 }
 
 impl ReadBasis {
@@ -99,6 +154,10 @@ impl ReadBasis {
             registration_basis_digest: format!("source-registration-basis-v1:{hash}"),
             export_mode: ExportMode::VerifiedOnly,
             h3_curated_available: false,
+            knowledge: KnowledgeBasis::Stale(StoreRevision {
+                graph_instance: "f".repeat(32),
+                generation: u64::MAX,
+            }),
             base_revision: StoreRevision {
                 graph_instance: "f".repeat(32),
                 generation: u64::MAX,
@@ -132,6 +191,11 @@ pub(crate) struct ReadSession {
     graph_limits: SnapshotReadLimits,
     visible_facts: BTreeSet<context_hub::FactReference>,
     base: RevisionedSnapshot,
+    #[allow(
+        dead_code,
+        reason = "B1 captures immutable input; B2 adds its official compiler consumer"
+    )]
+    capabilities: Vec<OverlayFact>,
     rejected_hashes: BTreeSet<String>,
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
@@ -143,8 +207,28 @@ impl ReadSession {
     /// graph+coverage read. Observed drift fails rather than mixing revisions.
     /// Brackets cannot exclude ABA changes or create a cross-database transaction.
     /// Scope is trusted app metadata, not deserialized external filesystem input.
+    #[cfg(test)]
     pub(crate) fn acquire(
         graph: &Mutex<SqliteGraphStore>,
+        decisions: &Mutex<DecisionLog>,
+        scope: impl FnMut() -> Result<Vec<ScopedRepo>, ReadError>,
+        graph_limits: SnapshotReadLimits,
+        coverage_limits: CoverageReadLimits,
+        mode: ExportMode,
+    ) -> Result<Self, ReadError> {
+        Self::acquire_with_overlay(
+            graph,
+            None,
+            decisions,
+            scope,
+            graph_limits,
+            coverage_limits,
+            mode,
+        )
+    }
+    pub(crate) fn acquire_with_overlay(
+        graph: &Mutex<SqliteGraphStore>,
+        overlay: Option<&Mutex<OverlayStore>>,
         decisions: &Mutex<DecisionLog>,
         mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, ReadError>,
         graph_limits: SnapshotReadLimits,
@@ -158,6 +242,9 @@ impl ReadSession {
             .map_err(|_| ReadError::Storage)?
             .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
             .map_err(graph_error)?;
+        // The graph temporary has dropped; no overlay guard survives this call.
+        // This keeps reset's graph -> overlay lock order and the later recheck safe.
+        let (knowledge, capabilities) = read_knowledge(overlay, &base.revision, graph_limits)?;
         let after_scope = normalized_scope(scope()?)?;
         let after_rejected = rejected(decisions)?;
         if before_scope != after_scope || rejected_hashes != after_rejected {
@@ -214,12 +301,14 @@ impl ReadSession {
             export_mode: mode,
             h3_curated_available: false,
             base_revision: base.revision.clone(),
+            knowledge,
         };
         Ok(Self {
             basis,
             graph_limits,
             visible_facts,
             base,
+            capabilities,
             rejected_hashes,
             #[cfg(test)]
             snapshot,

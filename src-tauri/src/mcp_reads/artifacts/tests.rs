@@ -436,3 +436,5 @@ fn mcp_security_artifact_preserves_legacy_compiler_identity() {
     assert_eq!(&actual.artifact, expected);
     assert!(actual.artifact.content.contains("Unauthenticated endpoint"));
 }
+
+mod overlay_capture;

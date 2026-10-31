@@ -344,8 +344,9 @@ impl Worker {
                             if dispatcher.is_none() {
                                 dispatcher = Some(match limits.acquisition_mode {
                                     AcquisitionMode::Complete => {
-                                        let session = ReadSession::acquire(
+                                        let session = ReadSession::acquire_with_overlay(
                                             &state.graph,
+                                            state.knowledge_overlay.as_deref(),
                                             &state.decisions,
                                             || {
                                                 super::scope::coverage_scope(
