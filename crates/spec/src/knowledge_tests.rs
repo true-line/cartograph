@@ -84,7 +84,7 @@ fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {
         prov.method,
         ProducingMethod::Rule {
             rule: CAPABILITY_GRAPHQL_RULE.into(),
-            version: "1".into()
+            version: "2".into()
         }
     );
     let mut expected_evidence = BTreeMap::new();
@@ -331,6 +331,62 @@ fn graphql_capability_excludes_missing_ambiguous_gap_and_foreign_ownership() {
     }
 }
 
+// AC-0519: only source-basis support forms a candidate; the derived fact
+// defaults to Source, so artifact or observation support would be relabelled.
+#[test]
+fn graphql_capability_refuses_non_source_basis_support() {
+    let artifact = serde_json::json!({"kind": "artifact", "refs": [{
+        "digest": format!("sha256:{}", "a".repeat(64)),
+        "kind": "js-bundle",
+        "at": {"offset": {"start": 0, "end": 4}}
+    }]});
+    for target in ["endpoint", "edge", "handler"] {
+        for (basis, admitted) in [
+            (serde_json::json!({"kind": "source"}), true),
+            (artifact.clone(), false),
+            (serde_json::json!({"kind": "observation"}), false),
+        ] {
+            let mut base = fixture(PATH, REPO);
+            let ep = format!("ep:{REPO}@graphql:shop:query:order");
+            let handler = format!("sym:{REPO}@{PATH}#ShopOrderResolver.order");
+            base.graph.0.retain(|n| n.label != "Endpoint" || n.id == ep);
+            base.graph.1.retain(|e| e.label != "HANDLES" || e.src == ep);
+            let props = match target {
+                "endpoint" => &mut base.graph.0.iter_mut().find(|n| n.id == ep).unwrap().props,
+                "handler" => {
+                    &mut base
+                        .graph
+                        .0
+                        .iter_mut()
+                        .find(|n| n.id == handler)
+                        .unwrap()
+                        .props
+                }
+                _ => {
+                    &mut base
+                        .graph
+                        .1
+                        .iter_mut()
+                        .find(|e| e.label == "HANDLES")
+                        .unwrap()
+                        .props
+                }
+            };
+            props["prov"]["basis"] = basis.clone();
+            let prov: Provenance = serde_json::from_value(props["prov"].clone()).unwrap();
+            assert!(
+                prov.validate().is_ok(),
+                "{target} {basis} is otherwise valid"
+            );
+            assert_eq!(
+                derive_graphql_resolver_capabilities(&base).facts.len(),
+                usize::from(admitted),
+                "{target} {basis}"
+            );
+        }
+    }
+}
+
 // AC-0500: oversized groups are omitted while ordinary groups remain.
 #[test]
 fn graphql_capability_oversized_group_is_counted_without_losing_ordinary_group() {
@@ -496,7 +552,7 @@ fn capability_stories_roundtrip_current_overlay_with_per_capability_support() {
         .publish(
             &base,
             OverlayRecipe {
-                recipe: format!("{CAPABILITY_GRAPHQL_RULE}@1"),
+                recipe: format!("{CAPABILITY_GRAPHQL_RULE}@{CAPABILITY_GRAPHQL_RULE_VERSION}"),
                 embedding_namespace: None,
                 provider_ran: false,
             },

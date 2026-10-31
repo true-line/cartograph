@@ -3,13 +3,13 @@ use core_graph::{
     Node, RevisionedSnapshot,
     overlay::{BaseRef, MAX_FACT_BYTES, OverlayFact, OverlayItem},
 };
-use core_prov::{ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier};
+use core_prov::{ConfidenceTier, EvidenceBasis, EvidenceRef, ProducingMethod, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Deterministic recipe naming a semantic resolver-group capability.
 pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver-group";
 /// Changed grouping, support or naming semantics require a new recipe version.
-pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "1";
+pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
 
 // GraphQL field names use ASCII Name grammar; TS class/member identities do not.
 fn identifier(value: &str) -> bool {
@@ -28,6 +28,7 @@ fn support(props: &serde_json::Value) -> Option<Provenance> {
             prov.confidence_tier,
             ConfidenceTier::Confirmed | ConfidenceTier::InferredStrong
         )
+        && matches!(prov.basis, None | Some(EvidenceBasis::Source))
         && !prov.evidence.is_empty()
         && prov.evidence.iter().all(|e| {
             !e.repo.is_empty()
