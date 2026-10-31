@@ -96,6 +96,7 @@ fn no_provider_publishes_the_overlay_as_a_named_omission() {
             derived: 0,
             oversized: 0,
             derived_omission: None,
+            producer_omissions: vec![],
         }
     );
     assert_eq!(recipe_of(&host), Some(recipe(None, false)));
@@ -229,28 +230,65 @@ fn derived_capabilities_publish_without_a_provider() {
     put_resolver(&host.graph);
     let before = host.graph.lock().unwrap().read_snapshot().unwrap();
     let report = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    // One resolver Capability and one traced BusinessFlow per operation.
     assert_eq!(
         (report.published, report.derived, report.oversized),
-        (true, 1, 0)
+        (true, 3, 0)
     );
     assert_eq!(report.derived_omission, None);
+    assert!(report.producer_omissions.is_empty());
     let facts = published_facts(&host);
-    let [fact] = facts.as_slice() else {
+    let nodes: Vec<_> = facts
+        .iter()
+        .map(|fact| match &fact.item {
+            OverlayItem::Node(node) => node,
+            OverlayItem::Edge(_) => panic!("producers emit nodes"),
+        })
+        .collect();
+    let [capability] = nodes
+        .iter()
+        .filter(|n| n.label == "Capability")
+        .collect::<Vec<_>>()[..]
+    else {
         panic!("one Capability")
     };
-    let OverlayItem::Node(node) = &fact.item else {
-        panic!("Capability is a node")
-    };
-    assert_eq!(node.label, "Capability");
     assert_eq!(
-        node.props["title"],
+        capability.props["title"],
         "shop GraphQL operations in ShopOrderResolver"
     );
-    assert_eq!(fact.cites.len(), 6);
+    let flows: Vec<_> = nodes.iter().filter(|n| n.label == "BusinessFlow").collect();
+    assert_eq!(flows.len(), 2);
+    assert!(facts.iter().all(|fact| !fact.cites.is_empty()));
     assert_eq!(host.graph.lock().unwrap().read_snapshot().unwrap(), before);
     // Same base, same facts: a rerun republishes the identical set.
     run(&host.graph, &host.cache, &host.overlay, None).unwrap();
     assert_eq!(published_facts(&host), facts);
+}
+
+// AC-0514: a producer that fails as a whole is a named omission; the other
+// producers' facts are still derived.
+#[test]
+fn a_failed_producer_is_named_and_the_others_still_derive() {
+    let host = host();
+    put_resolver(&host.graph);
+    let snapshot = host
+        .graph
+        .lock()
+        .unwrap()
+        .read_snapshot_with_revision_bounded(SnapshotReadLimits::default())
+        .unwrap();
+    let derived = derive_within(
+        &snapshot,
+        flowtracer::TraceLimits {
+            max_flows: 1,
+            ..FLOW_LIMITS
+        },
+    );
+    assert_eq!(derived.omissions, vec!["business-flow-trace-flows"]);
+    let [fact] = derived.facts.as_slice() else {
+        panic!("only the Capability")
+    };
+    assert!(matches!(&fact.item, OverlayItem::Node(n) if n.label == "Capability"));
 }
 
 // AC-0514: a refused derived set still publishes the phase, named.
@@ -263,7 +301,7 @@ fn a_refused_derived_set_publishes_the_phase_without_it() {
         .lock()
         .unwrap()
         .read_snapshot_with_revision_bounded(SnapshotReadLimits::default());
-    let (facts, _) = derive(&snapshot.unwrap());
+    let facts = derive(&snapshot.unwrap()).facts;
     let OverlayItem::Node(capability) = &facts[0].item else {
         panic!("Capability is a node")
     };
@@ -299,6 +337,11 @@ fn the_recipe_names_every_producer_rule_within_the_name_bound() {
         "{}@{}",
         spec::CAPABILITY_GRAPHQL_RULE,
         spec::CAPABILITY_GRAPHQL_RULE_VERSION
+    )));
+    assert!(name.contains(&format!(
+        "{}@{}",
+        spec::BUSINESS_FLOW_RULE,
+        spec::BUSINESS_FLOW_RULE_VERSION
     )));
     assert!(format!("{name};{DERIVED_REJECTED}").len() <= MAX_NAME_BYTES);
 }
