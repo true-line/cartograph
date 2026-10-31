@@ -188,6 +188,49 @@ mod tests {
             );
         }
 
+        // Every finite f64 keeps its exact bits through pack, unpack and a
+        // stored row, including values the default fast float parser
+        // misrounds (-2.481203691041865e275 parses one ulp off).
+        let mut floats = vec![
+            51.248178375505404,
+            -2.481203691041865e275,
+            1.0715660391465826e-75,
+        ];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        while floats.len() < 20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let float = f64::from_bits(state);
+            if float.is_finite() {
+                floats.push(float);
+            }
+        }
+        let mut store = crate::SqliteGraphStore::open_in_memory().unwrap();
+        for (index, float) in floats.iter().enumerate() {
+            let node = Node {
+                id: format!("f{index}"),
+                label: "L".into(),
+                props: json!({ "x": float }),
+            };
+            let unpacked = PackedNode::pack(node.clone()).unwrap().unpack().unwrap();
+            assert_eq!(
+                unpacked.props["x"].as_f64().map(f64::to_bits),
+                Some(float.to_bits()),
+                "{float:e}"
+            );
+            assert_eq!(unpacked, node);
+            crate::GraphStore::put_node(&mut store, &node).unwrap();
+        }
+        let (stored, _) = store.read_snapshot().unwrap();
+        for node in stored {
+            let index: usize = node.id[1..].parse().unwrap();
+            assert_eq!(
+                node.props["x"].as_f64().map(f64::to_bits),
+                Some(floats[index].to_bits())
+            );
+        }
+
         // The depth boundary: 127 nested containers (arrays and objects)
         // pack and unpack exactly; 128 are refused, so every packed fact
         // unpacks.
