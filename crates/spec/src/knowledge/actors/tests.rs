@@ -412,3 +412,52 @@ import { Query, Resolver } from '@nestjs/graphql';
         core_prov::content_hash(format!("GraphQL permission syntax {wire}").as_bytes())
     );
 }
+
+// AC-0519: only source-backed Endpoint support can seed an Actor candidate.
+#[test]
+fn actors_require_source_basis_for_endpoint_support_and_preserve_site_provenance() {
+    let endpoint = endpoint("ep:a", &["Read"]);
+    let site_provenance = endpoint.props["permission_site"]["prov"].clone();
+    let source = base(vec![endpoint.clone()]);
+    let before = source.clone();
+    let endpoint_provenance: Provenance =
+        serde_json::from_value(endpoint.props["prov"].clone()).unwrap();
+    assert_eq!(
+        endpoint_provenance.basis(),
+        core_prov::EvidenceBasis::Source
+    );
+    let report = derive_permission_actors(&source);
+    assert_eq!(report.facts.len(), 1);
+    assert_eq!(
+        actor_node(&report.facts[0]).props["permission_site"]["prov"],
+        site_provenance
+    );
+    assert_eq!(source, before);
+
+    let artifact = core_prov::EvidenceBasis::Artifact {
+        refs: vec![core_prov::ArtifactRef {
+            digest: format!("sha256:{}", "a".repeat(64)),
+            kind: "jvm-class".into(),
+            at: core_prov::ArtifactLocator::Member {
+                path: "com/example/OrderResolver.class".into(),
+            },
+        }],
+    };
+    for basis in [artifact, core_prov::EvidenceBasis::Observation] {
+        let mut unsupported = endpoint.clone();
+        let provenance: Provenance =
+            serde_json::from_value(unsupported.props["prov"].clone()).unwrap();
+        let provenance = provenance.with_basis(basis);
+        assert!(provenance.validate().is_ok());
+        unsupported.props["prov"] = serde_json::to_value(provenance).unwrap();
+        assert!(
+            derive_permission_actors(&base(vec![unsupported.clone()]))
+                .facts
+                .is_empty()
+        );
+        assert_eq!(
+            unsupported.props["permission_site"]["prov"],
+            site_provenance
+        );
+    }
+}
