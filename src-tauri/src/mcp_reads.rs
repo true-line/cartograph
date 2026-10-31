@@ -125,7 +125,8 @@ fn read_knowledge(
         OverlayRead::Stale { base } => {
             // Stored stale metadata is deserialized before publication-name
             // validation; reject malformed revision shape before retaining it.
-            if base.graph_instance.len() != 32
+            if base.generation > i64::MAX as u64
+                || base.graph_instance.len() != 32
                 || !base
                     .graph_instance
                     .bytes()
@@ -142,7 +143,7 @@ fn read_knowledge(
 }
 
 impl ReadBasis {
-    /// Fixed wire owners at their longest supported representations.
+    /// Conservative wire owners; u64::MAX also covers every valid SQLite generation.
     fn reservation_fixture() -> Self {
         let hash = core_prov::content_hash(&[]);
         Self {

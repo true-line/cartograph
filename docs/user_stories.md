@@ -1012,6 +1012,6 @@
 - **Performance:** Logical ownership currency only, excluding allocator capacity and RSS; no numeric policy changes.
 - **Trace:** P1 (#1445, #1451, #1455, #1466) · `spec` · ADR-0051, ADR-0037 · T-0498, T-0500, T-0504, T-0508
 - **AC-0512** Complete read sessions capture an immutable Capability selection and Absent, Stale or verified Current overlay identity against their coherent base revision. Stale or absent overlays supply no selected facts; malformed storage fails closed, and corruption remains a storage failure even after selection overflow. Existing sessions retain their captured facts and basis across republish; base queries and official artifact compilation retain their existing behavior in this preparatory slice.
-- **Security:** Existing storage identity, citation and provenance checks apply before capture; graph and overlay locks are released before acquisition rechecks. No provider execution or base write.
+- **Security:** Existing storage identity, citation and provenance checks apply before capture; stale revision metadata must have a valid graph-instance shape and a generation in the nonnegative SQLite i64 domain. Graph and overlay locks are released before acquisition rechecks. No provider execution or base write.
 - **Performance:** Existing limits remain unchanged. Checked logical reservations compose storage row/basis scratch, selected JSON and typed containers, retained metadata, protocol and digest owners; these bounds do not guarantee RSS.
 - **Trace:** P1 (#1443, #1494) · `core-graph`, `app` · ADR-0051, ADR-0037 · T-0512

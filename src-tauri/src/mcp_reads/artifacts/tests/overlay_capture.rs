@@ -171,6 +171,32 @@ fn stale_selection_is_empty_and_malformed_stale_metadata_is_storage_failure() {
         KnowledgeBasis::Stale(before.revision)
     );
     assert!(stale.capabilities.is_empty());
+    // AC-0512: stale metadata must fit the store's nonnegative SQLite i64 generation.
+    let connection = rusqlite::Connection::open(f.dir.path().join("overlay.db")).unwrap();
+    let stored: String = connection
+        .query_row("SELECT basis FROM overlay_meta", [], |r| r.get(0))
+        .unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    for generation in [i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
+        metadata["base"]["generation"] = json!(generation);
+        connection
+            .execute("UPDATE overlay_meta SET basis=?1", [metadata.to_string()])
+            .unwrap();
+        let result = f.acquire(ExportMode::BestEffort, SnapshotReadLimits::default());
+        if generation == i64::MAX as u64 {
+            let session = result.unwrap();
+            assert!(matches!(
+                session.basis.knowledge,
+                KnowledgeBasis::Stale(base) if base.generation == generation
+            ));
+            assert!(session.capabilities.is_empty());
+        } else {
+            assert!(matches!(result, Err(ReadError::Storage)), "{generation}");
+        }
+    }
+    connection
+        .execute("UPDATE overlay_meta SET basis=?1", [stored])
+        .unwrap();
     rusqlite::Connection::open(f.dir.path().join("overlay.db"))
         .unwrap()
         .execute(
