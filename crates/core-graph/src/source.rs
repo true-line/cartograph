@@ -1106,7 +1106,7 @@ impl SqliteGraphStore {
     /// fact; missing, duplicate, wrong-owner or mismatched bindings roll back.
     pub fn apply_patch_with_source_bindings_if_snapshot_matches(
         &mut self,
-        expected: &(Vec<Node>, Vec<Edge>),
+        expected: &impl crate::ExpectedSnapshot,
         patch: &GraphPatch,
         repo_key: &str,
         bindings: &[SourceBinding],
@@ -1128,7 +1128,7 @@ impl SqliteGraphStore {
     /// [`SourceOmissions::NONE`] leaves the repository omission state unrecorded.
     pub fn apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
         &mut self,
-        expected: &(Vec<Node>, Vec<Edge>),
+        expected: &impl crate::ExpectedSnapshot,
         patch: &GraphPatch,
         repo_key: &str,
         bindings: &[SourceBinding],
