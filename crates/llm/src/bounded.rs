@@ -1250,7 +1250,7 @@ pub(super) fn complete_anthropic(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod wire_tests;

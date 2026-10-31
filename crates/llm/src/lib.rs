@@ -1213,9 +1213,15 @@ mod tests {
 
     #[test]
     fn unavailable_local_provider_fails_without_fallback() {
+        // AC-0021: an owned EOF endpoint fails closed without another fixture reusing its port.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        drop(listener);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            crate::bounded::tests::consume_request(&mut stream).unwrap();
+            drop(stream); // Close after the full request, without any HTTP response.
+            listener // Keep the endpoint reserved until the caller has observed the error.
+        });
         let provider = OllamaProvider::new(
             &format!("http://{address}"),
             "test-model",
@@ -1223,7 +1229,8 @@ mod tests {
         )
         .unwrap();
         let error = provider.embed(&["orders".into()]).unwrap_err();
-        assert!(matches!(error, ProviderError::Request(_)));
+        let _listener = server.join().unwrap();
+        assert!(matches!(error, ProviderError::Request(_)), "{error:?}");
     }
 
     #[test]

@@ -54,6 +54,12 @@ fn set_timeouts(stream: &TcpStream) {
         .unwrap();
 }
 
+// Reuse the bounded complete-frame reader for a test-only EOF transport fixture.
+pub(crate) fn consume_request(stream: &mut TcpStream) -> io::Result<()> {
+    set_timeouts(stream);
+    read_request(stream).map(|_| ())
+}
+
 fn framed(body: &[u8]) -> Vec<u8> {
     let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
     response.extend_from_slice(body);
