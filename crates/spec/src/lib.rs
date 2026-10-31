@@ -12,8 +12,9 @@ mod adr;
 mod contract;
 mod knowledge;
 pub use knowledge::{
+    BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
     CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport,
-    derive_graphql_resolver_capabilities,
+    derive_business_flows, derive_graphql_resolver_capabilities,
 };
 
 /// Version of the spec compiler's projection rules, recorded with every
