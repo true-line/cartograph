@@ -14,7 +14,8 @@ mod knowledge;
 pub use knowledge::{
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
     CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport,
-    derive_business_flows, derive_graphql_resolver_capabilities,
+    DOMAIN_ENTITY_ORM_RULE, DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport,
+    derive_business_flows, derive_graphql_resolver_capabilities, derive_orm_domain_entities,
 };
 
 /// Version of the spec compiler's projection rules, recorded with every

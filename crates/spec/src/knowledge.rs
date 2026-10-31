@@ -16,6 +16,179 @@ pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver
 /// Changed grouping, support or naming semantics require a new recipe version.
 pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
 
+/// Deterministic recipe projecting a persistence model to a weak domain candidate.
+pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";
+/// Changed eligibility, identity or projection semantics require a new version.
+pub const DOMAIN_ENTITY_ORM_RULE_VERSION: &str = "1";
+
+/// Candidates and mappings admitted under the overlay's per-fact byte cap.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DomainEntityReport {
+    /// Candidate/mapping pairs small enough for overlay admission.
+    pub facts: Vec<OverlayFact>,
+    /// Models omitted because either exact serialized fact exceeded the cap.
+    pub oversized_models: usize,
+}
+
+fn orm_model_support(node: &Node) -> Option<(Provenance, String, String)> {
+    let (storage, expected_extractor, columns_key) = match node.props["storage"].as_str()? {
+        "jpa" => ("jpa", "t0.adapter-java", "fields"),
+        "sqlalchemy" => ("sqlalchemy", "t0.adapter-python", "columns"),
+        _ => return None,
+    };
+    let name = node.props["name"].as_str()?.trim();
+    let table = node.props["table"].as_str()?.trim();
+    let store = node.props["store"].as_str()?.trim();
+    let table_source = node.props.get("table_source").and_then(|v| v.as_str());
+    if name.is_empty()
+        || table.is_empty()
+        || table != store
+        // The JPA adapter always classifies the source of the table name.
+        // Missing and unresolved values cannot prove a stable physical table.
+        || (storage == "jpa" && !matches!(table_source, Some("explicit" | "default")))
+        // Preserve fail-closed validation if another extractor supplies this field.
+        || (node.props.get("table_source").is_some()
+            && !matches!(table_source, Some("explicit" | "default")))
+        || node
+            .props
+            .get("schema")
+            .is_some_and(|v| v.as_str().is_none_or(str::is_empty))
+    {
+        return None;
+    }
+    let columns = node.props[columns_key].as_array()?;
+    if columns.is_empty()
+        || columns.iter().any(|column| {
+            column["name"]
+                .as_str()
+                .is_none_or(|field| field.trim().is_empty())
+        })
+    {
+        return None;
+    }
+    let prov: Provenance = serde_json::from_value(node.props.get("prov")?.clone()).ok()?;
+    if prov.validate().is_err()
+        || prov.tier != Tier::Deterministic
+        || prov.confidence_tier != ConfidenceTier::Confirmed
+        || prov.extractor_id != expected_extractor
+        || !matches!(prov.basis, None | Some(EvidenceBasis::Source))
+        || prov.evidence.is_empty()
+        || prov.evidence.iter().any(|e| {
+            e.repo.trim().is_empty()
+                || e.path.trim().is_empty()
+                || e.commit_sha.trim().is_empty()
+                || e.byte_start >= e.byte_end
+        })
+    {
+        return None;
+    }
+    Some((prov, name.to_owned(), storage.to_owned()))
+}
+
+fn domain_provenance(evidence: Vec<EvidenceRef>, identity: &[u8]) -> Provenance {
+    Provenance::new(
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+        evidence,
+        "t2.knowledge.domain-entity.orm-model",
+        identity,
+    )
+    .expect("semantic weak is within the confidence ceiling")
+    .with_method(ProducingMethod::Rule {
+        rule: DOMAIN_ENTITY_ORM_RULE.into(),
+        version: DOMAIN_ENTITY_ORM_RULE_VERSION.into(),
+    })
+}
+
+/// Derive weak DomainEntity candidates only from structurally validated JPA
+/// and SQLAlchemy DataEntity facts. The class name is display text, not the
+/// eligibility signal; each candidate maps explicitly to its persistence row.
+pub fn derive_orm_domain_entities(base: &RevisionedSnapshot) -> DomainEntityReport {
+    let mut by_id: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
+    for node in &base.graph.0 {
+        by_id
+            .entry(&node.id)
+            .and_modify(|value| *value = None)
+            .or_insert(Some(node));
+    }
+    let mut report = DomainEntityReport::default();
+    for node in by_id.values().filter_map(|node| *node) {
+        if node.label != "DataEntity" {
+            continue;
+        }
+        let Some((source_prov, name, storage)) = orm_model_support(node) else {
+            continue;
+        };
+        let key = serde_json::to_vec(&(
+            DOMAIN_ENTITY_ORM_RULE,
+            DOMAIN_ENTITY_ORM_RULE_VERSION,
+            &node.id,
+        ))
+        .expect("rule identity serializes");
+        let id = format!("domain-entity:orm-model:{}", core_prov::content_hash(&key));
+        let mut props = serde_json::json!({
+            "name": name,
+            "backing_data_entity_id": node.id,
+            "storage": storage,
+            "table": node.props["table"],
+        });
+        if let Some(schema) = node.props.get("schema") {
+            props["schema"] = schema.clone();
+        }
+        let cite = BaseRef::Node(node.id.clone());
+        let candidate_bytes = serde_json::to_vec(&(
+            DOMAIN_ENTITY_ORM_RULE,
+            DOMAIN_ENTITY_ORM_RULE_VERSION,
+            &props,
+            &cite,
+        ))
+        .expect("candidate content serializes");
+        props["prov"] = serde_json::json!(domain_provenance(
+            source_prov.evidence.clone(),
+            &candidate_bytes,
+        ));
+        let candidate = OverlayFact {
+            item: OverlayItem::Node(Node {
+                id: id.clone(),
+                label: "DomainEntity".into(),
+                props,
+            }),
+            cites: BTreeSet::from([cite.clone()]),
+        };
+        let edge_content = serde_json::to_vec(&(
+            DOMAIN_ENTITY_ORM_RULE,
+            DOMAIN_ENTITY_ORM_RULE_VERSION,
+            &id,
+            &node.id,
+            "MAPS_TO",
+            &cite,
+        ))
+        .expect("mapping content serializes");
+        let mapping = OverlayFact {
+            item: OverlayItem::Edge(core_graph::Edge {
+                src: id,
+                dst: node.id.clone(),
+                label: "MAPS_TO".into(),
+                props: serde_json::json!({
+                    "prov": domain_provenance(source_prov.evidence, &edge_content)
+                }),
+            }),
+            cites: BTreeSet::from([cite]),
+        };
+        if [&candidate, &mapping].into_iter().any(|fact| {
+            serde_json::to_string(fact)
+                .expect("overlay fact serialization")
+                .len()
+                > MAX_FACT_BYTES
+        }) {
+            report.oversized_models += 1;
+        } else {
+            report.facts.extend([candidate, mapping]);
+        }
+    }
+    report
+}
+
 // GraphQL field names use ASCII Name grammar; TS class/member identities do not.
 fn identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
