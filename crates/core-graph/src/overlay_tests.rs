@@ -805,3 +805,94 @@ fn capability_read_refuses_oversized_single_row_before_decode() {
         Err(OverlayError::Schema("overlay row bytes"))
     ));
 }
+
+#[test]
+fn capability_workspace_covers_real_selection_large_unselected_row_and_metadata() {
+    use std::mem::size_of;
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    let mut input = facts();
+    let mut actor = node("zz:actor", "Actor");
+    actor.props["padding"] = json!("x".repeat(MAX_FACT_BYTES / 2));
+    actor.props["nested"] = json!([{"value":"é\n"}]);
+    input.push(OverlayFact {
+        item: OverlayItem::Node(actor),
+        cites: input[0].cites.clone(),
+    });
+    let selected_bytes = serde_json::to_string(&input[0]).unwrap().len();
+    let bound = capability_read_workspace(1, selected_bytes).unwrap();
+    store.publish(&base, recipe(), input.clone()).unwrap();
+    let (identity, basis, selected) = current(
+        store
+            .read_capabilities_bounded(&base.revision, 1, selected_bytes)
+            .unwrap(),
+    );
+    assert_eq!(selected, vec![input[0].clone()]);
+    let citation_slots = selected[0].cites.len() * (size_of::<BaseRef>() + 2 * size_of::<usize>());
+    assert!(
+        bound.retained_selection_bytes
+            >= selected_bytes + size_of::<OverlayFact>() + citation_slots
+    );
+    // Independently decode the actual unrelated row, whose size is not selected_bytes.
+    let raw = serde_json::to_string(&input[2]).unwrap();
+    let decoded: OverlayFact = serde_json::from_str(&raw).unwrap();
+    let OverlayItem::Node(node) = &decoded.item else {
+        unreachable!()
+    };
+    let p = core_prov::Provenance::deserialize(&node.props["prov"]).unwrap();
+    let known_row = raw.len()
+        + decoded.key().len()
+        + size_of::<OverlayFact>()
+        + serde_json::to_string(&p).unwrap().len()
+        + citation_slots;
+    assert!(raw.len() > selected_bytes);
+    assert!(bound.row_scratch_bytes >= known_row);
+    let encoded = serde_json::to_string(&basis).unwrap();
+    let payload = basis.base.graph_instance.len()
+        + basis.recipe.recipe.len()
+        + basis
+            .recipe
+            .embedding_namespace
+            .as_ref()
+            .map_or(0, String::len);
+    assert!(bound.retained_metadata_bytes >= payload + identity.0.len() + size_of::<OverlayRead>());
+    assert!(bound.metadata_peak_bytes >= encoded.len() * 2 + payload + size_of::<IdentityHash>());
+    assert!(matches!(
+        store.read_capabilities_bounded(&base.revision, 0, 0),
+        Err(OverlayError::SelectionLimit)
+    ));
+    assert_eq!(graph.read_revision().unwrap(), base.revision);
+}
+
+#[test]
+fn capability_workspace_admits_stale_revision_strings_up_to_the_stored_basis_cap() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    store.publish(&base, recipe(), facts()).unwrap();
+    let (_, mut basis, _) = current(store.read(&base.revision).unwrap());
+    // The reader deserializes stale metadata without imposing publication names
+    // or graph-instance shape. Its returned string can be much longer than 32.
+    basis.base.graph_instance = "x".repeat(MAX_BASIS_BYTES / 2);
+    basis.recipe.embedding_namespace = Some("\"\\\n".repeat(512));
+    let raw = serde_json::to_string(&basis).unwrap();
+    assert!(raw.len() <= MAX_BASIS_BYTES);
+    store
+        .connection
+        .execute("UPDATE overlay_meta SET basis = ?1", [&raw])
+        .unwrap();
+    let read = store
+        .read_capabilities_bounded(&base.revision, 0, 0)
+        .unwrap();
+    let OverlayRead::Stale { base: stale } = &read else {
+        panic!("stale metadata")
+    };
+    assert_eq!(stale, &basis.base);
+    let bound = capability_read_workspace(0, 0).unwrap();
+    assert!(
+        bound.retained_metadata_bytes >= stale.graph_instance.len() + std::mem::size_of_val(&read)
+    );
+    let canonical = serde_json::to_string(&basis).unwrap();
+    assert!(bound.metadata_peak_bytes >= raw.len() + canonical.len() + stale.graph_instance.len());
+}
