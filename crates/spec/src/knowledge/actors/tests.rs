@@ -590,3 +590,49 @@ fn actors_refuse_escaped_public_without_normalizing_other_permissions() {
         );
     }
 }
+
+// AC-0515: both import locals require complete adapter identifier syntax;
+// Public is a legal alias and is excluded only as a permission alternative.
+#[test]
+fn actors_validate_both_import_locals_in_resealed_sites() {
+    for binding in ["decorator", "permission_import"] {
+        for local in [
+            "Gate Admin",
+            " ",
+            "Gate.Admin",
+            "1Gate",
+            "Gate()",
+            r"\u12",
+            r"\u{}",
+        ] {
+            let mut node = endpoint("ep:invalid-local", &["Read"]);
+            node.props["permission_site"][binding]["local"] = json!(local);
+            seal(&mut node);
+            assert!(
+                derive_permission_actors(&base(vec![node])).facts.is_empty(),
+                "{binding}: {local:?}"
+            );
+        }
+        for local in [
+            "$Gate",
+            "Öwner",
+            "G\u{301}ate",
+            "G\u{200c}ate",
+            "G\u{200d}ate",
+            r"\u0047ate",
+            r"\u{47}ate",
+            "Public",
+            r"\u0050ublic",
+        ] {
+            let mut node = endpoint("ep:valid-local", &["Read"]);
+            node.props["permission_site"][binding]["local"] = json!(local);
+            seal(&mut node);
+            let report = derive_permission_actors(&base(vec![node]));
+            assert_eq!(report.facts.len(), 1, "{binding}: {local:?}");
+            assert_eq!(
+                actor_node(&report.facts[0]).props["permission_site"][binding]["local"],
+                json!(local)
+            );
+        }
+    }
+}

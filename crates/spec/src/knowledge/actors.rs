@@ -36,7 +36,7 @@ struct PermissionSite {
 // Mirror tree-sitter-typescript 0.23.2's identifier token (also aliased to
 // property_identifier): a negated delimiter class plus source-spelled escapes.
 // Keep the existing control rejection; do not impose a narrower Unicode alphabet.
-fn permission_argument(argument: &str) -> bool {
+fn syntax_identifier(argument: &str, reject_public: bool) -> bool {
     let mut chars = argument.chars().peekable();
     let mut first = true;
     let mut public_prefix = Some(0);
@@ -84,7 +84,7 @@ fn permission_argument(argument: &str) -> bool {
         });
         first = false;
     }
-    !first && public_prefix != Some(6)
+    !first && !(reject_public && public_prefix == Some(6))
 }
 fn site(node: &Node) -> Option<PermissionSite> {
     if node.label != "Endpoint"
@@ -99,13 +99,12 @@ fn site(node: &Node) -> Option<PermissionSite> {
     let site = PermissionSite::deserialize(raw).ok()?;
     if site.basis != "import-bound-syntax"
         || site.arguments.is_empty()
-        || site.arguments.iter().any(|s| !permission_argument(s))
+        || site.arguments.iter().any(|s| !syntax_identifier(s, true))
         || node.props["permissions"] != serde_json::json!(site.arguments)
         || site.decorator.exported != "Allow"
         || site.permission_import.exported != "Permission"
         || [&site.decorator, &site.permission_import].iter().any(|b| {
-            b.local.is_empty()
-                || b.local.chars().any(char::is_control)
+            !syntax_identifier(&b.local, false)
                 || b.module.trim().is_empty()
                 || b.module.chars().any(char::is_control)
         })
