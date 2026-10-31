@@ -1,11 +1,13 @@
 //! Composition of module-owned logical phase bounds. No allocator/RSS claim.
 use super::{evidence, session};
 use crate::mcp_reads::{dispatch, worker::WorkerLimits};
-use context_hub::logical::{json_bytes, sum};
+use context_hub::logical::{json_bytes, slots, sum};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerReservation {
     pub required_bytes: usize,
+    #[cfg(test)]
+    pub capability_compile_bytes: usize,
 }
 impl WorkerReservation {
     pub(crate) fn for_limits(limits: WorkerLimits) -> Option<Self> {
@@ -18,6 +20,21 @@ impl WorkerReservation {
         let trace = flowtracer::logical_workspace_bound(graph, limits.dispatch.trace)?;
         let compile =
             spec::logical_compile_bound(graph, limits.dispatch.trace, limits.dispatch.compile)?;
+        let (n, bytes) = crate::mcp_reads::capability_caps(limits.graph);
+        let capability = spec::logical_capability_compile_bound(
+            graph,
+            limits.dispatch.trace,
+            limits.dispatch.compile,
+            n,
+            bytes,
+        )?;
+        // Borrowed candidate input belongs to the host, not the compiler helper.
+        // It drops before basis_id, alongside compiler validation scratch.
+        let capability_compile_bytes = sum(&[
+            capability.peak_bytes,
+            slots::<spec::CapabilityStory<'_>>(n)?,
+            std::mem::size_of::<Vec<spec::CapabilityStory<'_>>>(),
+        ])?;
         // basis_id is computed after selected compilation, with artifact and
         // original host flows still retained, but compiler projection scratch gone.
         let artifact_basis = sum(&[
@@ -40,6 +57,7 @@ impl WorkerReservation {
         let request_peak = [
             trace.peak_bytes,
             compile.peak_bytes,
+            capability_compile_bytes,
             artifact_basis,
             evidence,
             discovery,
@@ -54,6 +72,8 @@ impl WorkerReservation {
             request_peak,
         ])?;
         Some(Self {
+            #[cfg(test)]
+            capability_compile_bytes,
             // Lazy acquisition runs after protocol admission, with prior IDs and
             // the admitted call still alive.
             required_bytes: sum(&[session.acquisition_peak_bytes, ids, current_argument])?

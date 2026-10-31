@@ -192,10 +192,6 @@ pub(crate) struct ReadSession {
     graph_limits: SnapshotReadLimits,
     visible_facts: BTreeSet<context_hub::FactReference>,
     base: RevisionedSnapshot,
-    #[allow(
-        dead_code,
-        reason = "B1 captures immutable input; B2 adds its official compiler consumer"
-    )]
     capabilities: Vec<OverlayFact>,
     rejected_hashes: BTreeSet<String>,
     #[cfg(test)]
