@@ -86,7 +86,6 @@ pub(crate) struct ReadBasis {
     pub base_revision: StoreRevision,
 }
 
-#[cfg(unix)]
 impl ReadBasis {
     /// Fixed wire owners at their longest supported representations.
     fn reservation_fixture() -> Self {
@@ -106,6 +105,7 @@ impl ReadBasis {
             },
         }
     }
+    #[cfg(unix)]
     fn digest_workspace() -> Option<usize> {
         use context_hub::logical::{count, sum};
         let prefix = "mcp-read-basis-v1";

@@ -201,10 +201,11 @@ impl SessionReservation {
             limits.scope.max_source_registry_bytes.get(),
         )?;
         let rejected = rejection_set_bytes()?;
-        let revision = sum(&[size_of::<core_graph::StoreRevision>(), 32])?;
+        let basis = ReadBasis::reservation_fixture();
+        let revision_payload = basis.base_revision.graph_instance.len();
+        let revision = sum(&[size_of::<core_graph::StoreRevision>(), revision_payload])?;
         let basis_digest_bytes = ReadBasis::digest_workspace()?;
         let hash = core_prov::content_hash(&[]);
-        let basis = ReadBasis::reservation_fixture();
         let fixed_basis = sum(&[size_of::<ReadSession>(), count(&basis)?])?;
         let retained_session_bytes = sum(&[
             graph,
@@ -213,7 +214,7 @@ impl SessionReservation {
             rejected,
             coverage.retained,
             fixed_basis,
-            32, // base.revision payload; ReadSession already owns its inline header
+            revision_payload, // ReadSession already owns the inline revision header
         ])?;
         let before_scope = sum(&[rejected, scope.peak_bytes])?;
         let bounded_read = sum(&[
