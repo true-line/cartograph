@@ -461,3 +461,132 @@ fn actors_require_source_basis_for_endpoint_support_and_preserve_site_provenance
         );
     }
 }
+
+// AC-0515: a consistent hash does not make malformed adapter syntax eligible.
+#[test]
+fn actors_require_complete_property_identifiers_in_resealed_sites() {
+    for argument in [
+        "",
+        " ",
+        "Owner Admin",
+        " Owner",
+        "Owner ",
+        "1Owner",
+        "Owner.Admin",
+        "Owner[0]",
+        "Owner()",
+        "Owner; other",
+        "Owner/*comment*/",
+        "Owner+Admin",
+        "Owner\\u",
+        "Owner\\u{xyz}",
+        "Owner\u{85}Admin",
+        "Owner\u{feff}Admin",
+        "Owner\u{2060}Admin",
+        "Owner\u{200b}Admin",
+        "Owner\u{2028}Admin",
+        "Owner\u{2029}Admin",
+    ] {
+        // endpoint() matches permissions to arguments and seals the changed payload.
+        let source = base(vec![endpoint("ep:invalid", &[argument])]);
+        assert!(
+            derive_permission_actors(&source).facts.is_empty(),
+            "{argument:?}"
+        );
+    }
+    for argument in [
+        "$Owner",
+        "Read$",
+        "Öwner",
+        "ΔRead",
+        "O\u{301}wner",
+        "O\u{200c}wner",
+        "O\u{200d}wner",
+        r"\u004fwner",
+        r"\u{004f}wner",
+        r"\u0050ublicity",
+        r"\u{ffffffffffffffffffffffffffffffff}wner",
+        r"\u{000000000000000000000000000000004f}wner",
+    ] {
+        let source = base(vec![endpoint("ep:valid", &[argument])]);
+        let report = derive_permission_actors(&source);
+        assert_eq!(report.facts.len(), 1, "{argument:?}");
+        assert_eq!(
+            actor_node(&report.facts[0]).props["any_of"],
+            json!([argument])
+        );
+        // Oracle: the pinned real adapter must emit this exact source spelling.
+        let text = format!(
+            "import {{ Allow, Permission }} from 'policy';\nimport {{ Query, Resolver }} from '@nestjs/graphql';\n@Resolver() class R {{ @Query() @Allow(Permission.{argument}) order() {{}} }}"
+        );
+        let mut extraction = adapters_lang_ts::extract_source(
+            text.as_bytes(),
+            "order.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "oracle",
+                commit: "fixed",
+            },
+        )
+        .unwrap();
+        extraction.close_over_endpoints();
+        let real = RevisionedSnapshot {
+            graph: (extraction.nodes, extraction.edges),
+            ..base(vec![])
+        };
+        let report = derive_permission_actors(&real);
+        assert_eq!(report.facts.len(), 1, "adapter: {argument:?}");
+        assert_eq!(
+            actor_node(&report.facts[0]).props["any_of"],
+            json!([argument])
+        );
+    }
+}
+
+// AC-0515: Public abstains even when its exact adapter spelling uses escapes.
+#[test]
+fn actors_refuse_escaped_public_without_normalizing_other_permissions() {
+    for argument in [
+        r"\u0050ublic",
+        r"\u{50}ublic",
+        r"P\u0075blic",
+        r"\u0050\u0075\u0062\u006c\u0069\u0063",
+        r"\u{0000000000000000000000000000000050}ublic",
+    ] {
+        assert!(
+            derive_permission_actors(&base(vec![endpoint("ep:public", &[argument])]))
+                .facts
+                .is_empty(),
+            "{argument:?}"
+        );
+        let text = format!(
+            "import {{ Allow, Permission }} from 'policy';\nimport {{ Query, Resolver }} from '@nestjs/graphql';\n@Resolver() class R {{ @Query() @Allow(Permission.{argument}) order() {{}} }}"
+        );
+        let mut extraction = adapters_lang_ts::extract_source(
+            text.as_bytes(),
+            "order.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "oracle",
+                commit: "fixed",
+            },
+        )
+        .unwrap();
+        extraction.close_over_endpoints();
+        let endpoint = extraction
+            .nodes
+            .iter()
+            .find(|n| n.label == "Endpoint")
+            .unwrap();
+        assert_eq!(
+            endpoint.props["permission_site"]["arguments"],
+            json!([argument])
+        );
+        let real = RevisionedSnapshot {
+            graph: (extraction.nodes, extraction.edges),
+            ..base(vec![])
+        };
+        assert!(
+            derive_permission_actors(&real).facts.is_empty(),
+            "adapter: {argument:?}"
+        );
+    }
+}
