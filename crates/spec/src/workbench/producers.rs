@@ -77,14 +77,28 @@ pub(super) fn stories_with_support(
                 .checked_sub(base_count)
                 .and_then(|i| s.included.get(i))
         }) {
-            // Legacy headings are unchanged. New sidecar prose is JSON text,
-            // never executable Markdown/HTML or a new redaction policy.
-            writeln!(
-                content,
-                "## US-R-{:04} — Derived Capability\n\n    {}\n",
-                index + 1,
-                render::Serialized(&(&node.id, render::DisplayValue(&NodeName(node))))
-            )?;
+            if node.label == "Actor" {
+                writeln!(
+                    content,
+                    "## Actor caller set — Semantic / InferredWeak convention\n\n    {}\n",
+                    render::Serialized(&(
+                        &node.id,
+                        &node.props["any_of"],
+                        &node.props["assumption"],
+                        &node.props["permission_site"]["prov"]["evidence"]
+                    ))
+                )?;
+                content.push_str("Assumed caller set; not effective runtime authorization or an identified user, role or principal.\n\n")?;
+            } else {
+                // Legacy headings are unchanged. New sidecar prose is JSON text,
+                // never executable Markdown/HTML or a new redaction policy.
+                writeln!(
+                    content,
+                    "## US-R-{:04} — Derived Capability\n\n    {}\n",
+                    index + 1,
+                    render::Serialized(&(&node.id, render::DisplayValue(&NodeName(node))))
+                )?;
+            }
             for (cite, _) in &story.support {
                 writeln!(
                     content,

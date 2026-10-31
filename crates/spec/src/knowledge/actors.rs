@@ -196,5 +196,57 @@ pub fn derive_permission_actors(base: &RevisionedSnapshot) -> ActorReport {
     }
     report
 }
+
+/// Full producer consistency check; this does not attest runtime policy/currency.
+pub(crate) fn verify_actor<'a>(
+    base: &'a RevisionedSnapshot,
+    fact: &OverlayFact,
+) -> Option<&'a Node> {
+    if fact.cites.len() != 1 {
+        return None;
+    }
+    let BaseRef::Node(id) = fact.cites.first()? else {
+        return None;
+    };
+    let mut matches = base.graph.0.iter().filter(|n| &n.id == id);
+    let endpoint = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let syntax = site(endpoint)?;
+    (actor(endpoint, &syntax, ACTOR_ALLOW_ASSUMPTION) == *fact).then_some(endpoint)
+}
+
+/// Canonical verifier scratch using complete serialized base/candidate byte bounds.
+pub(crate) fn verification_workspace(base_bytes: usize, actor_bytes: usize) -> Option<usize> {
+    use crate::workbench::accounting::{json_bytes, slots, sum};
+    let bytes = base_bytes.checked_add(actor_bytes)?;
+    let value = json_bytes(bytes)?;
+    // site(): endpoint provenance, typed site, checked provenance, cloned payload,
+    // and the formatted syntax hash input overlap. No canonical fact exists yet.
+    let site_validation = sum(&[
+        value,
+        value,
+        value,
+        value,
+        bytes,
+        std::mem::size_of::<PermissionSite>(),
+        slots::<Provenance>(3)?,
+    ])?;
+    // actor(): retained typed site, props, typed Rule provenance and its JSON
+    // conversion, plus content Vec/hash input and the complete comparison fact.
+    let canonical = sum(&[
+        value,
+        value,
+        value,
+        value,
+        bytes,
+        std::mem::size_of::<PermissionSite>(),
+        std::mem::size_of::<OverlayFact>(),
+        std::mem::size_of::<Provenance>(),
+    ])?;
+    Some(site_validation.max(canonical))
+}
+
 #[cfg(test)]
 mod tests;
