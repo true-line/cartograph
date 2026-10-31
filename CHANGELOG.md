@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.55.1
+
+### Patch Changes
+
+- e6db0b2: Recovered user stories render capability names, ids and inline provenance as literal Markdown text, so stored HTML, fences, backticks and headings stay inert (#1453). The artifact viewer decodes these escapes, so it still shows the exact text.
+- b05b327: Ordinary spec export builds each Markdown register and its JSON index (US-TM, gap register, rule evidence) in one pass instead of two, with unchanged artifacts (#1478).
+
 ## 0.55.0
 
 ### Minor Changes
