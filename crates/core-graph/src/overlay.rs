@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+mod workspace;
+pub use workspace::{CapabilityReadWorkspace, capability_read_workspace};
+
 /// Most facts one overlay may hold.
 pub const MAX_FACTS: usize = 200_000;
 /// Most canonical fact bytes one overlay may hold.
@@ -369,6 +372,7 @@ impl OverlayStore {
     /// After selection overflow, discard selection and finish integrity checks:
     /// corruption takes precedence over SelectionLimit. Absent/Stale do not scan.
     /// As with `read`, citations are shape-checked, not re-resolved against base.
+    /// [`capability_read_workspace`] supplies logical ownership bounds for this read.
     pub fn read_capabilities_bounded(
         &self,
         current: &StoreRevision,
