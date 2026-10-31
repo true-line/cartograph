@@ -14,8 +14,11 @@ use context_hub::{ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResp
 #[cfg(test)]
 use context_hub::{QueryRequest, QueryResponse};
 use core_graph::coverage::CoverageReadLimits;
+#[cfg(test)]
+use core_graph::{Edge, Node};
 use core_graph::{
-    Edge, GraphError, Node, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore,
+    GraphError, RevisionedSnapshot, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore,
+    StoreRevision,
 };
 use serde::Serialize;
 use spec::ExportMode;
@@ -79,6 +82,47 @@ pub(crate) struct ReadBasis {
     pub registration_basis_digest: String,
     pub export_mode: ExportMode,
     pub h3_curated_available: bool,
+    /// Captured mutation token, independent of the base content identity.
+    pub base_revision: StoreRevision,
+}
+
+impl ReadBasis {
+    /// Fixed wire owners at their longest supported representations.
+    fn reservation_fixture() -> Self {
+        let hash = core_prov::content_hash(&[]);
+        Self {
+            recovered_graph_id: format!("context-v1:{hash}"),
+            projection_snapshot_id: format!("context-v1:{hash}"),
+            coverage_id: format!("coverage-context-v1:{hash}"),
+            context_id: format!("context-v2:{hash}"),
+            rejection_decision_digest: format!("compiler-rejections-v1:{hash}"),
+            registration_basis_digest: format!("source-registration-basis-v1:{hash}"),
+            export_mode: ExportMode::VerifiedOnly,
+            h3_curated_available: false,
+            base_revision: StoreRevision {
+                graph_instance: "f".repeat(32),
+                generation: u64::MAX,
+            },
+        }
+    }
+    #[cfg(unix)]
+    fn digest_workspace() -> Option<usize> {
+        use context_hub::logical::{count, sum};
+        let prefix = "mcp-read-basis-v1";
+        let wire = count(&(prefix, Self::reservation_fixture()))?;
+        // content_hash returns BLAKE3 hex, not the 32 raw digest bytes. Its
+        // String overlaps the owned wire Vec and the formatted returned ID.
+        let hash = core_prov::content_hash(&[]).len();
+        let identity = sum(&[prefix.len(), ":".len(), hash])?;
+        sum(&[
+            std::mem::size_of::<Vec<u8>>(),
+            wire,
+            std::mem::size_of::<String>(),
+            hash,
+            std::mem::size_of::<String>(),
+            identity,
+        ])
+    }
 }
 
 /// One immutable production-policy projection. Raw facts and effective rejected
@@ -87,8 +131,7 @@ pub(crate) struct ReadSession {
     basis: ReadBasis,
     graph_limits: SnapshotReadLimits,
     visible_facts: BTreeSet<context_hub::FactReference>,
-    raw_nodes: Vec<Node>,
-    raw_edges: Vec<Edge>,
+    base: RevisionedSnapshot,
     rejected_hashes: BTreeSet<String>,
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
@@ -110,24 +153,35 @@ impl ReadSession {
     ) -> Result<Self, ReadError> {
         let rejected_hashes = rejected(decisions)?;
         let before_scope = normalized_scope(scope()?)?;
-        let ((raw_nodes, raw_edges), recorded) = graph
+        let (base, recorded) = graph
             .lock()
             .map_err(|_| ReadError::Storage)?
-            .read_snapshot_with_coverage_bounded(graph_limits, coverage_limits)
+            .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
             .map_err(graph_error)?;
         let after_scope = normalized_scope(scope()?)?;
         let after_rejected = rejected(decisions)?;
         if before_scope != after_scope || rejected_hashes != after_rejected {
             return Err(ReadError::StaleBasis);
         }
+        // Scope/decision observations run without the graph lock. Refuse any
+        // observed graph drift, including same-content and coverage-only writes.
+        if graph
+            .lock()
+            .map_err(|_| ReadError::Storage)?
+            .read_revision()
+            .map_err(graph_error)?
+            != base.revision
+        {
+            return Err(ReadError::StaleBasis);
+        }
         // Drop the temporary raw index before constructing the filtered index.
         // Raw identity must never be replaced by the filtered projection's ID.
-        let recovered_graph_id = ContextSnapshot::new(raw_nodes.clone(), raw_edges.clone())
+        let recovered_graph_id = ContextSnapshot::new(base.graph.0.clone(), base.graph.1.clone())
             .map_err(context_error)?
             .id()
             .to_owned();
         let (nodes, edges) =
-            spec::project_recovered_facts(&raw_nodes, &raw_edges, mode, &rejected_hashes);
+            spec::project_recovered_facts(&base.graph.0, &base.graph.1, mode, &rejected_hashes);
         let visible_facts = nodes
             .iter()
             .map(|node| context_hub::FactReference::Node {
@@ -159,13 +213,13 @@ impl ReadSession {
             registration_basis_digest: digest("source-registration-basis-v1", &before_scope)?,
             export_mode: mode,
             h3_curated_available: false,
+            base_revision: base.revision.clone(),
         };
         Ok(Self {
             basis,
             graph_limits,
             visible_facts,
-            raw_nodes,
-            raw_edges,
+            base,
             rejected_hashes,
             #[cfg(test)]
             snapshot,

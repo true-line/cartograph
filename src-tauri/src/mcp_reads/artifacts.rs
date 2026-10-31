@@ -74,19 +74,19 @@ impl ReadSession {
             self.graph_limits.max_values,
         )
         .ok_or(ReadError::Limit)?;
-        let flows = match flowtracer::trace_bounded(&self.raw_nodes, &self.raw_edges, trace_limits)
-        {
-            Ok(flows) => flows,
-            Err(limit) => {
-                return Ok(ArtifactCompilation::Limited {
-                    artifact_id: id.into(),
-                    limit: ArtifactLimit::Trace(limit),
-                });
-            }
-        };
+        let flows =
+            match flowtracer::trace_bounded(&self.base.graph.0, &self.base.graph.1, trace_limits) {
+                Ok(flows) => flows,
+                Err(limit) => {
+                    return Ok(ArtifactCompilation::Limited {
+                        artifact_id: id.into(),
+                        limit: ArtifactLimit::Trace(limit),
+                    });
+                }
+            };
         let outcome = spec::compile_spec_selected_with_security(
-            &self.raw_nodes,
-            &self.raw_edges,
+            &self.base.graph.0,
+            &self.base.graph.1,
             &flows,
             self.basis.export_mode,
             &self.rejected_hashes,

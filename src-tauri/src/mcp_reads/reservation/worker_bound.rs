@@ -18,6 +18,13 @@ impl WorkerReservation {
         let trace = flowtracer::logical_workspace_bound(graph, limits.dispatch.trace)?;
         let compile =
             spec::logical_compile_bound(graph, limits.dispatch.trace, limits.dispatch.compile)?;
+        // basis_id is computed after selected compilation, with artifact and
+        // original host flows still retained, but compiler projection scratch gone.
+        let artifact_basis = sum(&[
+            compile.original_flows_bytes,
+            compile.artifact_bytes,
+            session.basis_digest_bytes,
+        ])?;
         let freshness = session::freshness_snapshot_peak_bytes(limits.graph)?;
         let evidence = evidence::evidence_peak_bytes(freshness, limits.evidence)?;
         let discovery = session::discovery_peak_bytes(limits)?;
@@ -33,6 +40,7 @@ impl WorkerReservation {
         let request_peak = [
             trace.peak_bytes,
             compile.peak_bytes,
+            artifact_basis,
             evidence,
             discovery,
             protocol,

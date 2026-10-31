@@ -73,12 +73,14 @@ fn cap(bytes: usize) -> NonZeroUsize {
 
 #[test]
 fn real_selected_compilation_and_catalog_match_official_compiler() {
+    // AC-0510: the move-owned coherent base preserves official artifact and catalog parity.
     let session = fixture(ExportMode::BestEffort);
+    let owned = (session.base.graph.0.as_ptr(), session.base.graph.1.as_ptr());
     let artifact = produced(&session);
-    let flows = flowtracer::trace(&session.raw_nodes, &session.raw_edges);
+    let flows = flowtracer::trace(&session.base.graph.0, &session.base.graph.1);
     let bundle = spec::compile_spec(
-        &session.raw_nodes,
-        &session.raw_edges,
+        &session.base.graph.0,
+        &session.base.graph.1,
         &flows,
         session.basis.export_mode,
         &session.rejected_hashes,
@@ -98,6 +100,26 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
         catalog
             .iter()
             .any(|metadata| metadata.id == official.id && metadata.schema == official.schema)
+    );
+    for descriptor in catalog {
+        let ArtifactCompilation::Produced(actual) = session
+            .compile_artifact(descriptor.id, trace_limits(), compile_limits())
+            .unwrap()
+        else {
+            panic!("fixture fits")
+        };
+        let legacy = bundle
+            .artifacts
+            .iter()
+            .find(|a| a.id == descriptor.id)
+            .unwrap();
+        assert_eq!(&actual.artifact, legacy, "{}", descriptor.id);
+    }
+    // Compiler inputs borrow the one retained raw base; the existing projected
+    // ContextSnapshot is separate, and no compiler call replaces that base.
+    assert_eq!(
+        owned,
+        (session.base.graph.0.as_ptr(), session.base.graph.1.as_ptr())
     );
 }
 
@@ -372,7 +394,7 @@ fn security_reservation_bound_overflow_fails_before_tracing_or_compilation() {
 #[test]
 fn mcp_security_artifact_preserves_legacy_compiler_identity() {
     let source = fixture(ExportMode::BestEffort);
-    let mut endpoint = source.raw_nodes[0].clone();
+    let mut endpoint = source.base.graph.0[0].clone();
     endpoint.id = "endpoint:public".into();
     endpoint.label = "Endpoint".into();
     endpoint.props["authenticated"] = json!(false);
@@ -396,10 +418,11 @@ fn mcp_security_artifact_preserves_legacy_compiler_identity() {
         panic!("admitted security fixture")
     };
     let flows =
-        flowtracer::trace_bounded(&session.raw_nodes, &session.raw_edges, trace_limits()).unwrap();
+        flowtracer::trace_bounded(&session.base.graph.0, &session.base.graph.1, trace_limits())
+            .unwrap();
     let expected = spec::compile_spec_selected(
-        &session.raw_nodes,
-        &session.raw_edges,
+        &session.base.graph.0,
+        &session.base.graph.1,
         &flows,
         session.basis.export_mode,
         &session.rejected_hashes,
