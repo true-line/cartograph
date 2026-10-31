@@ -130,8 +130,8 @@ fn sqlalchemy_entity_fixture() -> RevisionedSnapshot {
     }
 }
 
-#[test]
 // AC-0511: ORM-derived candidates and mappings stay cited in the overlay; malformed and oversized pairs fail closed.
+#[test]
 fn orm_domain_entities_map_real_jpa_facts_in_the_overlay_only() {
     use core_graph::overlay::{OverlayRead, OverlayRecipe, OverlayStore};
 
@@ -231,6 +231,7 @@ fn orm_domain_entities_map_real_jpa_facts_in_the_overlay_only() {
     assert_eq!(base, before); // candidate and mapping never enter the base graph
 }
 
+// AC-0511: SQLAlchemy-shaped persistence facts are accepted only with their matching Python extractor provenance.
 #[test]
 fn orm_domain_entities_accept_sqlalchemy_shape_and_reject_wrong_extractor() {
     let base = sqlalchemy_entity_fixture();
@@ -258,6 +259,7 @@ fn orm_domain_entities_accept_sqlalchemy_shape_and_reject_wrong_extractor() {
     );
 }
 
+// AC-0511: oversized candidate/mapping pairs are omitted together and counted.
 #[test]
 fn orm_domain_entities_omit_oversized_candidate_and_mapping_together() {
     let mut base = jpa_entity_fixture();
@@ -273,6 +275,7 @@ fn orm_domain_entities_omit_oversized_candidate_and_mapping_together() {
     assert_eq!(report.oversized_models, 1);
 }
 
+// AC-0511: malformed, weak, incomplete and ambiguous ORM evidence is rejected.
 #[test]
 fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
     let original = jpa_entity_fixture();
@@ -287,6 +290,7 @@ fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
         "missing-provenance",
         "malformed-provenance",
         "weak-provenance",
+        "inverted-evidence-span",
         "missing-table",
         "unresolved-table",
         "empty-fields",
@@ -307,6 +311,12 @@ fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
                     node.props["prov"] = serde_json::json!({"tier":"not-a-tier"})
                 }
                 "weak-provenance" => node.props["prov"]["confidence_tier"] = "InferredWeak".into(),
+                "inverted-evidence-span" => {
+                    let end = node.props["prov"]["evidence"][0]["byte_end"]
+                        .as_u64()
+                        .unwrap();
+                    node.props["prov"]["evidence"][0]["byte_start"] = serde_json::json!(end + 1);
+                }
                 "missing-table" => {
                     node.props.as_object_mut().unwrap().remove("table");
                 }
@@ -315,6 +325,14 @@ fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
                 "unsupported-storage" => node.props["storage"] = "unknown".into(),
                 _ => unreachable!(),
             }
+        }
+        if case == "weak-provenance" || case == "inverted-evidence-span" {
+            let provenance: Provenance =
+                serde_json::from_value(base.graph.0[data_index].props["prov"].clone()).unwrap();
+            assert!(
+                provenance.validate().is_ok(),
+                "{case} stays structurally valid"
+            );
         }
         assert!(derive_orm_domain_entities(&base).facts.is_empty(), "{case}");
     }
