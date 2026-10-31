@@ -68,7 +68,7 @@ pub(super) fn stories_with_support(
         }
     }
     let mut content = Text::new(&budget, "# Recovered user stories\n\n")?;
-    if capabilities.is_empty() {
+    if capabilities.is_empty() && !stories.is_some_and(|s| s.filtered > 0) {
         content.push_str("No Capability facts have been recovered yet.\n")?;
     }
     for (index, node) in capabilities.iter().enumerate() {

@@ -667,6 +667,56 @@ fn capability_stories_preserve_base_bytes_and_filter_whole_derived_story() {
     );
     assert!(!artifact.content.contains("support:"));
 }
+// AC-0504: an entirely filtered derived set reports omissions, not absent recovery.
+#[test]
+fn capability_stories_all_filtered_do_not_claim_no_recovered_capabilities() {
+    let mut base = fixture(PATH, REPO);
+    let facts = derive_graphql_resolver_capabilities(&base).facts;
+    assert_eq!(facts.len(), 1);
+    let support = base
+        .graph
+        .0
+        .iter_mut()
+        .find(|node| facts[0].cites.contains(&BaseRef::Node(node.id.clone())))
+        .unwrap();
+    // Curation rejects inferred support; Confirmed support cannot be rejected.
+    support.props["prov"]["confidence_tier"] = serde_json::json!("InferredStrong");
+    let rejected = BTreeSet::from([support.props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()]);
+    let compile = |facts: &[OverlayFact]| {
+        citation_artifact(
+            citation_compile(
+                &base,
+                facts,
+                crate::ExportMode::BestEffort,
+                &rejected,
+                usize::MAX,
+            )
+            .unwrap(),
+        )
+    };
+    let filtered = compile(&facts);
+    assert!(filtered.assertions.is_empty());
+    assert!(
+        filtered
+            .content
+            .contains("1 derived stories omitted because supporting facts are filtered.")
+    );
+    assert!(
+        !filtered
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+    let absent = compile(&[]);
+    assert!(
+        absent
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+    assert!(!absent.content.contains("omitted because"));
+}
 #[test]
 fn capability_stories_reject_invalid_or_foreign_support_without_partial_output() {
     use crate::CapabilityStoryInputError::*;
