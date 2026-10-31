@@ -24,6 +24,15 @@ impl<'a> Text<'a> {
         self.0.iter().flat_map(|part| part.bytes())
     }
 }
+/// Most parts any Candidate subject id holds; bounds `supports_listed` scratch.
+const SUBJECT_ID_PARTS: usize = 5;
+fn node_subject(id: &str) -> Text<'_> {
+    Text::new([id])
+}
+fn link_subject<'a>(src: &'a str, label: &'a str, dst: &'a str) -> Text<'a> {
+    let parts: [&'a str; SUBJECT_ID_PARTS] = [src, " ", label, " ", dst];
+    Text::new(parts)
+}
 impl PartialEq for Text<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.bytes().eq(other.bytes())
@@ -127,7 +136,7 @@ fn node_candidate<'a>(node: &'a Node, labels: &GapEdgeLabels<'a>) -> Candidate<'
     let omission = render::shared_gap(&provenance, &node.props, &node_name_text(node).to_string());
     Candidate {
         id: Text::new(["node:", &node.id]),
-        subject_id: Text::new([node.id.as_str()]),
+        subject_id: node_subject(&node.id),
         subject_kind: &node.label,
         summary,
         provenance,
@@ -136,7 +145,7 @@ fn node_candidate<'a>(node: &'a Node, labels: &GapEdgeLabels<'a>) -> Candidate<'
     }
 }
 fn edge_candidate(edge: &Edge) -> Candidate<'_> {
-    let subject_id = Text::new([edge.src.as_str(), " ", &edge.label, " ", &edge.dst]);
+    let subject_id = link_subject(&edge.src, &edge.label, &edge.dst);
     let mut id = Text::new(["edge:"]);
     id.0.extend(subject_id.0.clone());
     let provenance = candidate_provenance(&edge.props, &id);
@@ -178,7 +187,7 @@ fn hop_candidate<'a>(
     ]);
     Candidate {
         id,
-        subject_id: Text::new([hop.src.as_str(), " ", &hop.label, " ", &hop.dst]),
+        subject_id: link_subject(&hop.src, &hop.label, &hop.dst),
         subject_kind: "FlowHop",
         summary: Text::new([
             hop.label.as_str(),
@@ -986,9 +995,10 @@ pub(super) fn logical_workspace_bytes(
         slots::<usize>(rows)?,
         slots::<&Text<'_>>(rows)?,
     ])?;
-    // supports_listed may split every source byte into a fragment and clone
-    // the current token once for lookup. Neither vector owns those substrings.
-    let token = sum(&[slots::<Cow<'_, str>>(bytes)?, slots::<Cow<'_, str>>(bytes)?])?;
+    // supports_listed clears its token at every space, so between clears it
+    // keeps at most the last fragment of each subject part; the lookup clone
+    // is no longer. Neither vector owns those substrings.
+    let token = slots::<Cow<'_, str>>(SUBJECT_ID_PARTS)?.checked_mul(2)?;
     sum(&[
         row_headers,
         groups,
@@ -1017,6 +1027,58 @@ pub(super) fn logical_workspace_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-0523: the token probe keeps the historical flattened space split,
+    // and no subject id outgrows the parts its scratch is charged for.
+    #[test]
+    fn subject_token_scratch_is_bounded_by_parts_and_keeps_split() {
+        let historical = |subject: &str, listed: &BTreeSet<String>| {
+            subject
+                .split(' ')
+                .enumerate()
+                .any(|(i, word)| (i == 0 || i == 2) && listed.contains(word))
+        };
+        let names = [
+            "a",
+            "",
+            " ",
+            "a b",
+            "  é ",
+            "ü  x",
+            " lead",
+            "trail ",
+            "日本 語",
+        ];
+        let mut checked = 0;
+        for src in names {
+            for label in ["CALLS", "", "X Y"] {
+                for dst in names {
+                    let edge = Edge {
+                        src: src.into(),
+                        dst: dst.into(),
+                        label: label.into(),
+                        props: serde_json::json!({}),
+                    };
+                    let candidate = edge_candidate(&edge);
+                    assert!(candidate.subject_id.0.len() <= SUBJECT_ID_PARTS);
+                    let flat = candidate.subject_id.to_string();
+                    for word in flat.split(' ').chain(names) {
+                        let listed = BTreeSet::from([word.to_string()]);
+                        let texts = BTreeSet::from([Text::new([word])]);
+                        assert_eq!(
+                            supports_listed(&candidate, &texts),
+                            historical(&flat, &listed),
+                            "{flat:?} listed {word:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000);
+        assert_eq!(node_subject("a b c d e f").0.len(), 1);
+        assert_eq!(link_subject("a", "b", "c").0.len(), SUBJECT_ID_PARTS);
+    }
     fn prov(confidence: ConfidenceTier) -> Provenance {
         Provenance::new(
             Tier::Deterministic,
