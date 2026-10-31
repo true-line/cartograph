@@ -110,6 +110,9 @@ pub fn derive_business_flows(
     let flows = flowtracer::trace_bounded(&base.graph.0, &base.graph.1, limits)
         .map_err(BusinessFlowOmission::Trace)?;
     let mut remaining = limits.max_output_bytes;
+    // Repeated anchors may yield identical traces, but their duplicated node id
+    // becomes None here. Every candidate cites its trigger, so both are omitted.
+    // Distinct trigger ids are part of the hashed trace/cites and cannot alias.
     let mut nodes = BTreeMap::new();
     for node in &base.graph.0 {
         nodes

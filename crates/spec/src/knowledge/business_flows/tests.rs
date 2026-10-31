@@ -61,6 +61,7 @@ fn chain(kind: &str, length: usize) -> RevisionedSnapshot {
     base
 }
 
+// AC-0516: real server traces retain exact cited support, weak provenance and base immutability.
 #[test]
 fn business_flows_use_real_graphql_traces_and_exact_support() {
     let base = fixture();
@@ -142,6 +143,7 @@ fn business_flows_use_real_graphql_traces_and_exact_support() {
     assert_eq!(base, before);
 }
 
+// AC-0516: every trigger is supported; ambiguous repeated triggers cannot produce duplicate candidates.
 #[test]
 fn business_flows_cover_every_trigger_and_reverse_stored_edges() {
     for kind in [
@@ -164,6 +166,21 @@ fn business_flows_cover_every_trigger_and_reverse_stored_edges() {
             candidate(&report.facts[0]).props["trace"]["trigger_kind"],
             kind
         );
+        let mut repeated = base.clone();
+        repeated.graph.0.push(base.graph.0[0].clone());
+        let traces =
+            flowtracer::trace_bounded(&repeated.graph.0, &repeated.graph.1, limits()).unwrap();
+        if kind == "Screen" {
+            // Anchor tracing can repeat identical flows; publication must not.
+            assert_eq!(traces.len(), 2);
+            assert_eq!(
+                serde_json::to_value(&traces[0]).unwrap(),
+                serde_json::to_value(&traces[1]).unwrap()
+            );
+        }
+        let omitted = derive_business_flows(&repeated, limits()).unwrap();
+        assert_eq!(omitted.invalid_flows, traces.len(), "{kind}");
+        assert!(omitted.facts.is_empty(), "{kind}");
         if kind == "Channel" {
             assert!(report.facts[0].cites.contains(&BaseRef::Edge(
                 "step:1".into(),
@@ -179,6 +196,7 @@ fn business_flows_cover_every_trigger_and_reverse_stored_edges() {
     }
 }
 
+// AC-0516: Gap details and depth-limited partial state survive; empty traces are named omissions.
 #[test]
 fn business_flows_preserve_gap_depth_and_empty_state() {
     let mut gap = chain("Endpoint", 1);
@@ -216,6 +234,7 @@ fn business_flows_preserve_gap_depth_and_empty_state() {
     assert_eq!(report.empty_flows, 1);
 }
 
+// AC-0516: invalid or ambiguous support fails closed and trace limits return no partial report.
 #[test]
 fn business_flows_refuse_invalid_support_and_trace_overflow() {
     for case in [
@@ -272,6 +291,7 @@ fn business_flows_refuse_invalid_support_and_trace_overflow() {
     }
 }
 
+// AC-0516: identity binds content deterministically and the existing per-fact cap omits oversized candidates.
 #[test]
 fn business_flows_bind_content_and_omit_oversized_facts() {
     let mut base = fixture();
@@ -306,6 +326,7 @@ fn business_flows_bind_content_and_omit_oversized_facts() {
     assert_eq!(derive_business_flows(&before, limits()).unwrap(), original);
 }
 
+// AC-0516: cumulative allowance stops repeated large-support decoding before amplified retention.
 #[test]
 fn business_flows_bound_shared_support_before_repeated_decode() {
     let mut base = chain("Endpoint", 1);
