@@ -54,6 +54,7 @@ mod security;
 pub use security::{
     SecurityLimit, SecurityLimitExceeded, SecurityLimits, SecurityProjectionSize,
     derive_security_findings_bounded, security_projection_bound, security_projection_size,
+    security_projection_value_bound,
 };
 mod views;
 mod workbench;

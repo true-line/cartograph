@@ -10,7 +10,7 @@ pub use bounded::{
     SecurityLimit, SecurityLimitExceeded, SecurityLimits, SecurityProjectionSize,
     derive_security_findings_bounded, security_projection_size,
 };
-pub use maxima::security_projection_bound;
+pub use maxima::{security_projection_bound, security_projection_value_bound};
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};

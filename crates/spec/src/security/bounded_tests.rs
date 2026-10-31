@@ -1,4 +1,6 @@
-use super::super::{derive_security_findings, security_projection_bound};
+use super::super::{
+    derive_security_findings, security_projection_bound, security_projection_value_bound,
+};
 use super::*;
 use core_prov::{EvidenceRef, ProducingMethod, Provenance};
 use serde_json::{Value, json};
@@ -265,4 +267,89 @@ fn security_source_bound_is_checked_monotone_and_empty_output_is_exact() {
         .unwrap()
         .is_empty()
     );
+}
+
+fn row_values(nodes: &[Node], edges: &[Edge]) -> usize {
+    nodes.iter().map(|n| values(&n.props)).sum::<usize>()
+        + edges.iter().map(|e| values(&e.props)).sum::<usize>()
+}
+fn output_values(nodes: &[Node], edges: &[Edge]) -> usize {
+    derive_security_findings(nodes, edges)
+        .iter()
+        .map(|finding| values(&serde_json::to_value(finding).unwrap()))
+        .sum()
+}
+fn grant(actions: Value, scopes: Value, evidence: Value) -> Edge {
+    let mut prov = support(Tier::Deterministic, ConfidenceTier::Confirmed, "g");
+    prov["evidence"] = evidence;
+    Edge {
+        src: "policy:g".into(),
+        dst: "bucket:g".into(),
+        label: "GRANTS".into(),
+        props: json!({"actions":actions,"resource_scopes":scopes,"prov":prov}),
+    }
+}
+
+// AC-0521: finding value counts stay within the typed-row bound for escaped,
+// concentrated and many-minimal inputs, counting only property values.
+#[test]
+fn security_value_bound_covers_concentrated_and_minimal_rows() {
+    let mut cases = vec![];
+    for text in ["ordinary", "\0\n\t\r\\\"🧭 café", ""] {
+        cases.push(fixture(text));
+    }
+    // One row holding the whole allowance: many actions, scopes and evidence.
+    let actions: Vec<_> = (0..200).map(|i| json!(format!("a{i}*"))).collect();
+    let scopes: Vec<_> = (0..200).map(|i| json!(format!("s{i}"))).collect();
+    let evidence: Vec<_> = (0..64)
+        .map(|i| json!([format!("r{i}"), "p", 0, 1, "c"]))
+        .collect();
+    cases.push((
+        vec![],
+        vec![grant(json!(actions), json!(scopes), json!(evidence))],
+    ));
+    // Many minimal rows: positional evidence, empty scopes (fallback to dst).
+    let minimal: Vec<_> = (0..50)
+        .map(|i| {
+            let mut edge = grant(json!(["*"]), json!([]), json!([["r", "p", 0, 1, "c"]]));
+            edge.dst = format!("bucket:{i}");
+            edge
+        })
+        .collect();
+    cases.push((vec![], minimal));
+    for (nodes, edges) in cases {
+        let rows = nodes.len() + edges.len();
+        let bound = security_projection_value_bound(rows, row_values(&nodes, &edges)).unwrap();
+        assert!(output_values(&nodes, &edges) <= bound);
+    }
+}
+
+// AC-0521: each variable item costs exactly as many output values as its
+// smallest source form, so the per-value coefficient cannot be lowered.
+#[test]
+fn security_value_bound_slopes_match_their_source_values() {
+    let base = |actions: usize, scopes: usize, evidence: usize| {
+        let edge = grant(
+            json!((0..actions).map(|i| format!("a{i}*")).collect::<Vec<_>>()),
+            json!((0..scopes).map(|i| format!("s{i}")).collect::<Vec<_>>()),
+            json!(
+                (0..evidence)
+                    .map(|i| json!([format!("r{i}"), "p", 0, 1, "c"]))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        let (nodes, edges) = (vec![], vec![edge]);
+        (output_values(&nodes, &edges), row_values(&nodes, &edges))
+    };
+    let (output, source) = base(1, 1, 1);
+    for (actions, scopes, evidence) in [(2, 1, 1), (1, 2, 1), (1, 1, 2)] {
+        let (more_output, more_source) = base(actions, scopes, evidence);
+        assert_eq!(more_output - output, more_source - source);
+    }
+    let fixed = security_projection_value_bound(1, 0).unwrap();
+    assert!(output <= fixed + source);
+    assert!(security_projection_value_bound(usize::MAX, 1).is_none());
+    assert!(security_projection_value_bound(1, usize::MAX).is_none());
+    assert!(security_projection_value_bound(2, 0).unwrap() == 2 * fixed);
+    assert_eq!(security_projection_value_bound(0, 7), Some(7));
 }
