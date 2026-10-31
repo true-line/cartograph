@@ -39,6 +39,30 @@ fn containers(values: usize) -> Option<usize> {
     ])
 }
 
+/// Heap owned by one decoded rule DTO beyond its inline shell: string
+/// payloads come from distinct JSON string tokens (at most the wire), and each
+/// collection slot is one admitted array item. Enums and nested structs are
+/// inline in their parent slot. `rule_values` follows [`validation_workspace`].
+pub fn decoded_heap_bytes(rule_wire: usize, rule_values: usize) -> Option<usize> {
+    let values = rule_values.min(rule_wire.checked_add(1)?);
+    // Typed elements are sized by the input, before any collection or
+    // semantic refusal.
+    let element = [
+        size_of::<BranchCondition>(),
+        size_of::<RuleDependency>(),
+        size_of::<SourceRedaction>(),
+        size_of::<RedactionReason>(),
+        size_of::<String>(),
+        size_of::<LocalDefinition>(),
+        size_of::<EvidenceRef>(),
+        size_of::<DefinitionDependency>(),
+        size_of::<DefinitionExpressionNode>(),
+    ]
+    .into_iter()
+    .max()?;
+    rule_wire.checked_add(values.checked_mul(element)?)
+}
+
 /// Peak logical owners while `from_value` decodes and validates a rule whose
 /// compact JSON is at most `rule_wire` bytes. The consumed input `Value` is
 /// the caller's; the decoded DTO is included. Overflow returns `None`.
@@ -56,25 +80,9 @@ pub fn validation_workspace(rule_wire: usize, rule_values: usize) -> Option<usiz
     let values = rule_values.min(rule_wire.checked_add(1)?);
     // V2 preflight holds unvisited values with their depth.
     let preflight = slots::<(&Value, usize)>(values)?;
-    // The DTO owns at most the wire's string bytes. Typed elements are sized
-    // by the input, before any collection or semantic refusal.
-    let element = [
-        size_of::<BranchCondition>(),
-        size_of::<RuleDependency>(),
-        size_of::<SourceRedaction>(),
-        size_of::<RedactionReason>(),
-        size_of::<String>(),
-        size_of::<LocalDefinition>(),
-        size_of::<EvidenceRef>(),
-        size_of::<DefinitionDependency>(),
-        size_of::<DefinitionExpressionNode>(),
-    ]
-    .into_iter()
-    .max()?;
     let dto = sum(&[
         size_of::<GuardedExitEvidence>(),
-        rule_wire,
-        values.checked_mul(element)?,
+        decoded_heap_bytes(rule_wire, values)?,
     ])?;
     let decode = sum(&[dto, containers(values)?.checked_mul(TAGGED_DEPTH)?])?;
     // V2 validation runs only after `collection_bounds`, so its scratch is

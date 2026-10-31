@@ -951,7 +951,7 @@ pub(super) fn logical_workspace_bytes(
     hops: usize,
     flows: usize,
 ) -> Option<usize> {
-    use super::accounting::{json_bytes, map_slots, set_slots, slots, sum};
+    use super::accounting::{map_slots, set_slots, slots, sum, typed};
     use std::mem::size_of;
     let candidates = rows.checked_add(hops)?;
     let digits = usize::MAX.to_string().len();
@@ -993,17 +993,21 @@ pub(super) fn logical_workspace_bytes(
         row_headers,
         groups,
         token,
-        bytes,                     // graph candidate provenance payload
-        bytes,                     // cached original omissions
-        bytes,                     // direct node/edge omission details
-        flow_bytes,                // copied hop provenance
-        flow_bytes,                // uncached hop omission/fallback detail
+        bytes, // graph candidate provenance payload
+        rows.checked_mul(typed::fallback_provenance_heap())?, // fixed Gap fallback strings
+        bytes, // cached original omissions
+        bytes, // direct node/edge omission details
+        typed::omission_heap(0, candidates)?, // fixed fallback/classifier text per omission
+        slots::<[usize; 2]>(candidates)?, // shared omission Arc counters
+        flow_bytes, // copied hop provenance
+        flow_bytes, // uncached hop omission/fallback detail
         hops.checked_mul(digits)?, // owned hop ordinal fragments
         candidates.checked_mul(digits.checked_add("G-".len())?)?, // generated class IDs
         rows.checked_mul(digits.checked_add("M-".len())?)?,
         hops.checked_mul("unresolved  hop".len())?, // fallback fixed text; label payload is in flow_bytes
         flows.checked_mul(size_of::<&str>())?,
-        json_bytes(bytes)?, // one current typed parse/format role
+        typed::provenance_decode(bytes, values)?, // one current candidate provenance decode
+        bytes,                                    // current owned name for the Gap fallback
         size_of::<GapJson<'_, '_>>(),
         size_of::<MatrixJson<'_, '_>>(),
         size_of::<Sink>(),

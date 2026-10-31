@@ -177,7 +177,7 @@ pub struct SpecBundle {
     pub security_count: usize,
 }
 
-fn fallback_provenance(identity: &str) -> Provenance {
+pub(crate) fn fallback_provenance(identity: &str) -> Provenance {
     Provenance::new(
         Tier::Deterministic,
         ConfidenceTier::Gap,
