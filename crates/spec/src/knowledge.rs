@@ -4,7 +4,7 @@ pub use business_flows::{
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
     derive_business_flows,
 };
-mod actors;
+pub(crate) mod actors;
 pub use actors::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     derive_permission_actors,

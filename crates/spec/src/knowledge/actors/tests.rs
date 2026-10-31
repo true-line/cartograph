@@ -636,3 +636,280 @@ fn actors_validate_both_import_locals_in_resealed_sites() {
         }
     }
 }
+
+fn compile_actors(
+    base: &RevisionedSnapshot,
+    actors: &[OverlayFact],
+    caps: &[crate::CapabilityStory<'_>],
+    mode: crate::ExportMode,
+    rejected: &BTreeSet<String>,
+    bytes: usize,
+) -> Result<crate::SelectedArtifactOutcome, crate::CapabilityStoryInputError> {
+    crate::compile_knowledge_user_stories(
+        base,
+        caps,
+        actors,
+        mode,
+        rejected,
+        crate::SelectedCompileLimits {
+            max_bytes: bytes,
+            adr: crate::AdrLimits {
+                max_rows: usize::MAX,
+                max_output_bytes: usize::MAX,
+            },
+        },
+    )
+}
+fn produced(outcome: crate::SelectedArtifactOutcome) -> crate::SpecArtifact {
+    let crate::SelectedArtifactOutcome::Produced(artifact) = outcome else {
+        panic!("complete artifact")
+    };
+    assert!(artifact.verify_identity());
+    artifact
+}
+
+// AC-0518: canonical producer facts share one artifact with stable Capability bytes.
+#[test]
+fn actor_stories_render_canonical_assumptions_and_preserve_capability_bytes() {
+    let source = base(vec![
+        endpoint("ep:b", &["Update", "Owner", "Owner"]),
+        endpoint("ep:a", &["Read"]),
+    ]);
+    let before = source.clone();
+    let facts = derive_permission_actors(&source).facts;
+    for fact in &facts {
+        assert!(verify_actor(&source, fact).is_some());
+    }
+    let mut cap = actor_node(&facts[0]).clone();
+    cap.id = "cap:fixture".into();
+    cap.label = "Capability".into();
+    let caps = [crate::CapabilityStory {
+        capability: &cap,
+        cites: &facts[0].cites,
+    }];
+    let rejected = BTreeSet::new();
+    let legacy = crate::compile_capability_user_stories(
+        &source,
+        &caps,
+        crate::ExportMode::BestEffort,
+        &rejected,
+        crate::SelectedCompileLimits {
+            max_bytes: usize::MAX,
+            adr: crate::AdrLimits {
+                max_rows: usize::MAX,
+                max_output_bytes: usize::MAX,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        compile_actors(
+            &source,
+            &[],
+            &caps,
+            crate::ExportMode::BestEffort,
+            &rejected,
+            usize::MAX
+        )
+        .unwrap(),
+        legacy
+    );
+    let combined = produced(
+        compile_actors(
+            &source,
+            &facts,
+            &caps,
+            crate::ExportMode::BestEffort,
+            &rejected,
+            usize::MAX,
+        )
+        .unwrap(),
+    );
+    assert_eq!(combined.id, "user-stories");
+    assert!(combined.content.contains("Derived Capability"));
+    assert_eq!(
+        combined
+            .content
+            .matches("Actor caller set — Semantic / InferredWeak convention")
+            .count(),
+        2
+    );
+    assert!(
+        combined.content.contains(
+            "not effective runtime authorization or an identified user, role or principal"
+        )
+    );
+    for fact in &facts {
+        let node = actor_node(fact);
+        for value in [
+            &node.props["any_of"],
+            &node.props["assumption"],
+            &node.props["permission_site"]["prov"]["evidence"],
+        ] {
+            assert!(
+                combined
+                    .content
+                    .contains(&serde_json::to_string(value).unwrap())
+            );
+        }
+        assert!(combined.assertions.iter().any(|a| a.subject_id == node.id
+            && a.provenance.confidence_tier == ConfidenceTier::InferredWeak));
+        let cite = fact.cites.first().unwrap();
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"capability-story-support-v1\0");
+        hash.update(&serde_json::to_vec(&(&node.id, cite)).unwrap());
+        let id = format!("support:{}", hash.finalize().to_hex());
+        let assertion = combined.assertions.iter().find(|a| a.id == id).unwrap();
+        let endpoint = verify_actor(&source, fact).unwrap();
+        assert_eq!(assertion.subject_id, endpoint.id);
+        assert_eq!(assertion.provenance, support(&endpoint.props).unwrap());
+        assert!(
+            combined
+                .content
+                .contains(&serde_json::to_string(cite).unwrap())
+        );
+    }
+    let mut reordered = facts.clone();
+    reordered.reverse();
+    assert_eq!(
+        produced(
+            compile_actors(
+                &source,
+                &reordered,
+                &caps,
+                crate::ExportMode::BestEffort,
+                &rejected,
+                usize::MAX
+            )
+            .unwrap()
+        ),
+        combined
+    );
+    assert_eq!(source, before);
+}
+
+// AC-0518: malformed full facts fail atomically; valid hidden facts count omissions.
+#[test]
+fn actor_stories_refuse_invalid_and_count_hidden_candidates() {
+    let source = base(vec![endpoint("ep:a", &["Read"])]);
+    let facts = derive_permission_actors(&source).facts;
+    let run =
+        |base: &RevisionedSnapshot, actors: &[OverlayFact], mode, rejected: &BTreeSet<String>| {
+            compile_actors(base, actors, &[], mode, rejected, usize::MAX)
+        };
+    let rejected = BTreeSet::new();
+    for (key, value) in [
+        ("assumption", json!({"statement":"forged"})),
+        ("prov", json!({})),
+        ("any_of", json!(["Other"])),
+        ("extra", json!(true)),
+    ] {
+        let mut invalid = facts.clone();
+        let OverlayItem::Node(node) = &mut invalid[0].item else {
+            unreachable!()
+        };
+        node.props[key] = value; // keep original identity/hash: full equality is required
+        assert!(verify_actor(&source, &invalid[0]).is_none());
+        assert!(run(&source, &invalid, crate::ExportMode::BestEffort, &rejected).is_err());
+        assert!(
+            run(
+                &source,
+                &invalid,
+                crate::ExportMode::VerifiedOnly,
+                &rejected
+            )
+            .is_err()
+        );
+    }
+    let mut duplicate = facts.clone();
+    duplicate.push(facts[0].clone());
+    assert!(
+        run(
+            &source,
+            &duplicate,
+            crate::ExportMode::BestEffort,
+            &rejected
+        )
+        .is_err()
+    );
+    let mut shadowed = source.clone();
+    shadowed.graph.0.push(actor_node(&facts[0]).clone());
+    assert!(run(&shadowed, &facts, crate::ExportMode::BestEffort, &rejected).is_err());
+    let mut missing = source.clone();
+    missing.graph.0.clear();
+    assert!(run(&missing, &facts, crate::ExportMode::BestEffort, &rejected).is_err());
+    let mut ambiguous = source.clone();
+    ambiguous.graph.0.push(source.graph.0[0].clone());
+    assert!(run(&ambiguous, &facts, crate::ExportMode::BestEffort, &rejected).is_err());
+    let endpoint_hash = source.graph.0[0].props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (mode, rejected) in [
+        (crate::ExportMode::VerifiedOnly, BTreeSet::new()),
+        (
+            crate::ExportMode::BestEffort,
+            BTreeSet::from([endpoint_hash]),
+        ),
+    ] {
+        let artifact = produced(run(&source, &facts, mode, &rejected).unwrap());
+        assert!(artifact.assertions.is_empty());
+        assert!(artifact.content.contains("1 derived stories omitted"));
+        assert!(
+            !artifact
+                .content
+                .contains("No Capability facts have been recovered yet")
+        );
+        assert!(!artifact.content.contains("Actor caller set"));
+    }
+}
+
+// AC-0518: escaped ordered data and full assertion arrays share exact output admission.
+#[test]
+fn actor_stories_bound_workspace_and_complete_escaped_output() {
+    let source = base(vec![endpoint(
+        "ep:<img src=x>",
+        &["<script>bad</script>", "Owner", "Owner"],
+    )]);
+    let facts = derive_permission_actors(&source).facts;
+    assert_eq!(facts.len(), 1);
+    let run = |bytes| {
+        compile_actors(
+            &source,
+            &facts,
+            &[],
+            crate::ExportMode::BestEffort,
+            &BTreeSet::new(),
+            bytes,
+        )
+        .unwrap()
+    };
+    let artifact = produced(run(usize::MAX));
+    assert!(!artifact.content.contains("\n<script>"));
+    assert!(artifact.content.contains("    ["));
+    let bytes = artifact.content.len() + serde_json::to_vec(&artifact.assertions).unwrap().len();
+    assert_eq!(produced(run(bytes)), artifact);
+    assert!(matches!(
+        run(bytes - 1),
+        crate::SelectedArtifactOutcome::Limited { .. }
+    ));
+    let graph_bytes = serde_json::to_vec(&source.graph).unwrap().len();
+    let actor_bytes = serde_json::to_vec(&facts).unwrap().len();
+    let bound =
+        crate::logical_actor_story_workspace_bound(graph_bytes, facts.len(), actor_bytes).unwrap();
+    assert!(bound.canonical_scratch_bytes > serde_json::to_vec(&facts[0]).unwrap().len());
+    assert!(
+        crate::logical_actor_story_workspace_bound(graph_bytes, facts.len() + 1, actor_bytes)
+            .unwrap()
+            .retained_bytes
+            > bound.retained_bytes
+    );
+    assert!(
+        crate::logical_actor_story_workspace_bound(graph_bytes, facts.len(), actor_bytes + 1)
+            .unwrap()
+            .canonical_scratch_bytes
+            > bound.canonical_scratch_bytes
+    );
+    assert!(crate::logical_actor_story_workspace_bound(usize::MAX, 1, 1).is_none());
+    assert!(crate::logical_actor_story_workspace_bound(0, usize::MAX, 0).is_none());
+}

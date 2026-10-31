@@ -75,7 +75,7 @@ pub fn compile_capability_user_stories(
     rejected: &BTreeSet<String>,
     limits: SelectedCompileLimits,
 ) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
-    compile_capability_stories(base, candidates, &[], mode, rejected, limits, None)
+    compile_capability_stories(base, candidates, &[], (&[], None), mode, rejected, limits)
 }
 /// Compile official Capability stories with the caller's complete security admission.
 /// A security refusal returns Limited with no artifact, through the shared dispatcher.
@@ -92,10 +92,10 @@ pub fn compile_capability_user_stories_with_security(
         base,
         candidates,
         &[],
+        (&[], Some(security)),
         mode,
         rejected,
         limits,
-        Some(security),
     )
 }
 /// Compile official Capability stories with the caller's admitted flows and security limits.
@@ -113,22 +113,44 @@ pub fn compile_capability_user_stories_with_flows_and_security(
     compile_capability_stories(
         base,
         candidates,
-        flows,
+        &[],
+        (flows, Some(security)),
         mode,
         rejected,
         limits,
-        Some(security),
+    )
+}
+/// Compile one official artifact with canonical Actors and Capability sidecars.
+/// Callers admit retained input/currency, Capability workspace and the separate
+/// Actor workspace below. Invalid Actors fail atomically even when hidden.
+pub fn compile_knowledge_user_stories(
+    base: &RevisionedSnapshot,
+    candidates: &[CapabilityStory<'_>],
+    actors: &[core_graph::overlay::OverlayFact],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    compile_capability_stories(
+        base,
+        candidates,
+        actors,
+        (&[], None),
+        mode,
+        rejected,
+        limits,
     )
 }
 fn compile_capability_stories(
     base: &RevisionedSnapshot,
     candidates: &[CapabilityStory<'_>],
-    flows: &[flowtracer::Flow],
+    actors: &[core_graph::overlay::OverlayFact],
+    context: (&[flowtracer::Flow], Option<crate::SecurityLimits>),
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     limits: SelectedCompileLimits,
-    security: Option<crate::SecurityLimits>,
 ) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    let (flows, security) = context;
     let mut nodes = BTreeMap::new();
     for n in &base.graph.0 {
         nodes
@@ -215,6 +237,38 @@ fn compile_capability_stories(
             }
         }
     }
+    let mut actor_order = BTreeMap::new();
+    for fact in actors {
+        let endpoint = crate::knowledge::actors::verify_actor(base, fact)
+            .ok_or(CapabilityStoryInputError::Candidate)?;
+        let core_graph::overlay::OverlayItem::Node(node) = &fact.item else {
+            return Err(CapabilityStoryInputError::Candidate);
+        };
+        if nodes.contains_key(node.id.as_str()) || ordered.contains_key(node.id.as_str()) {
+            return Err(CapabilityStoryInputError::Candidate);
+        }
+        if actor_order
+            .insert(node.id.as_str(), (node, endpoint, fact))
+            .is_some()
+        {
+            return Err(CapabilityStoryInputError::DuplicateCandidate);
+        }
+    }
+    for (node, endpoint, fact) in actor_order.values() {
+        let p = Provenance::deserialize(&node.props["prov"]).expect("canonical Actor provenance");
+        let support = Support::Node(endpoint);
+        if included(&p, mode, rejected)
+            && visible_nodes.contains(endpoint.id.as_str())
+            && support.visible(mode, rejected)?
+        {
+            stories.included.push(Story {
+                node,
+                support: vec![(fact.cites.first().expect("one canonical citation"), support)],
+            });
+        } else {
+            stories.filtered += 1;
+        }
+    }
     Ok(match security {
         Some(security) => selected::compile_stories_with_flows_and_security(
             base,
@@ -234,4 +288,59 @@ pub(super) fn support_id(capability: &str, cite: &BaseRef) -> String {
     hash.update(b"capability-story-support-v1\0");
     serde_json::to_writer(&mut hash, &(capability, cite)).expect("hash writer");
     format!("support:{}", hash.finalize().to_hex())
+}
+
+/// Extra Actor-only logical ownership; compose with Capability and ordinary bounds.
+/// Retained inputs/output are excluded; output is charged once by the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActorStoryWorkspaceBound {
+    /// Ordered borrowed Actor index, retained Story and singleton support slots.
+    pub retained_bytes: usize,
+    /// Decoded syntax and canonical full-fact comparison peak.
+    pub canonical_scratch_bytes: usize,
+    /// Appended references plus current provenance/name and support-hash scratch.
+    pub renderer_extra_bytes: usize,
+    /// Conservative additive peak; no allocator-capacity or RSS guarantee.
+    pub peak_extra_bytes: usize,
+}
+/// Complete serialized base JSON and Actor OverlayFact JSON bytes bound scratch.
+/// Count/byte admission and persistent sessions remain caller responsibilities.
+/// Shared Story layout is unchanged, so size_of-based Capability bounds remain valid.
+pub fn logical_actor_story_workspace_bound(
+    base_json_bytes: usize,
+    actor_count: usize,
+    actor_json_bytes: usize,
+) -> Option<ActorStoryWorkspaceBound> {
+    use super::accounting::{map_slots, slots, sum};
+    use core_graph::overlay::OverlayFact;
+    let retained_bytes = sum(&[
+        map_slots::<&str, (&Node, &Node, &OverlayFact)>(actor_count)?,
+        std::mem::size_of::<BTreeMap<(), ()>>(),
+        slots::<Story<'_>>(actor_count)?,
+        slots::<(&BaseRef, Support<'_>)>(actor_count)?,
+    ])?;
+    let canonical_scratch_bytes =
+        crate::knowledge::actors::verification_workspace(base_json_bytes, actor_json_bytes)?;
+    let renderer_extra_bytes = sum(&[
+        slots::<&Node>(actor_count)?,
+        super::accounting::json_bytes(actor_json_bytes)?, // current provenance Value
+        super::accounting::json_bytes(actor_json_bytes)?, // simultaneous typed decode
+        super::accounting::json_bytes(base_json_bytes)?,  // current Endpoint provenance Value
+        super::accounting::json_bytes(base_json_bytes)?,  // simultaneous typed support decode
+        actor_json_bytes,
+        base_json_bytes, // current name/id formatting
+        std::mem::size_of::<blake3::Hasher>(),
+        std::mem::size_of::<String>(), // current support occurrence ID
+        support_id("", &BaseRef::Node(String::new())).len(),
+    ])?;
+    Some(ActorStoryWorkspaceBound {
+        retained_bytes,
+        canonical_scratch_bytes,
+        renderer_extra_bytes,
+        peak_extra_bytes: sum(&[
+            retained_bytes,
+            canonical_scratch_bytes,
+            renderer_extra_bytes,
+        ])?,
+    })
 }
