@@ -1,5 +1,18 @@
 # cartograph
 
+## 0.55.0
+
+### Minor Changes
+
+- 7ff6356: Publish ORM DomainEntity candidates and their `MAPS_TO` mappings with the knowledge phase after ingest, beside the Capability and BusinessFlow producers.
+
+### Patch Changes
+
+- 1d9179a: Derive weak, provenance-cited DomainEntity candidates and `MAPS_TO` relations from structurally validated JPA and SQLAlchemy persistence facts in the knowledge overlay.
+- b55eb11: Selected-compiler logical accounting now counts security findings with a proven per-row JSON value count, instead of one value per serialized output byte. This lowers the reservation floor the MCP read service derives for official artifacts. At 4 MiB / 5,000 rows / 100k values it falls from about 19 GB to about 9.5 GB.
+- f3d68ee: The registers workspace now charges the listed-subject token scratch at its proven five-part maximum, not one fragment per input byte. At 4 MiB / 5,000 rows / 100k values the selected-compiler logical floor falls from about 4.0 GB to about 2.4 GB.
+- beddd10: Selected-compiler logical accounting now charges typed provenance, omission and source-rule decodes by an explicit ownership recurrence, instead of one value role per input byte. Fixed fallback text, omission classification and the omission `Arc` counters each get an explicit charge. At 4 MiB / 5,000 rows / 100k values the derived floor falls from about 9.5 GB to about 4.0 GB.
+
 ## 0.54.0
 
 ### Minor Changes
