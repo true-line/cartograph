@@ -141,6 +141,190 @@ impl FactStore {
     }
 }
 
+/// Recovery facts a stage reads and edits by identity, held either as plain
+/// lists ([`FactLists`]) or packed ([`FactStore`]). A stage written against
+/// this trait behaves identically over both, so each stage can move to packed
+/// storage on its own and be checked for parity (#725). The parity holds for
+/// stages whose facts pack and that do not panic: plain lists accept facts the
+/// store refuses as unpackable, and a stage that panics mid-edit leaves its
+/// selected list slots vacant.
+///
+/// Selections see identities only (`(id, label)` for nodes and
+/// `(src, dst, label)` for edges) and are made before a stage runs. Edits use
+/// the fixed-slice contract of [`FactStore::update_nodes`]: selected facts
+/// keep their slots, additions are appended in order, nothing is removed.
+pub trait FactAccess {
+    /// Every node's `(id, label)`, in order.
+    fn node_keys(&self) -> impl Iterator<Item = (&str, &str)>;
+    /// Every edge's `(src, dst, label)`, in order.
+    fn edge_keys(&self) -> impl Iterator<Item = (&str, &str, &str)>;
+    /// Decode the edges `select` picks, in order.
+    fn decode_edges(
+        &self,
+        select: impl Fn(&str, &str, &str) -> bool,
+    ) -> Result<Vec<Edge>, GraphError>;
+    /// Decode the nodes `select` picks, in order.
+    fn decode_nodes(&self, select: impl Fn(&str, &str) -> bool) -> Result<Vec<Node>, GraphError>;
+    /// Edit the selected nodes in place and append new ones.
+    fn edit_nodes<T>(
+        &mut self,
+        select: impl Fn(&str, &str) -> bool,
+        stage: impl FnOnce(&mut [Node], &mut Vec<Node>) -> T,
+    ) -> Result<T, GraphError>;
+    /// Edit the selected edges in place and append new ones.
+    fn edit_edges<T>(
+        &mut self,
+        select: impl Fn(&str, &str, &str) -> bool,
+        stage: impl FnOnce(&mut [Edge], &mut Vec<Edge>) -> T,
+    ) -> Result<T, GraphError>;
+    /// Append nodes, then edges, after every held fact.
+    fn append(&mut self, nodes: Vec<Node>, edges: Vec<Edge>) -> Result<(), GraphError>;
+}
+
+/// Plain recovery lists borrowed as [`FactAccess`]; no fact is copied.
+#[derive(Debug)]
+pub struct FactLists<'a> {
+    /// Nodes in recovery order.
+    pub nodes: &'a mut Vec<Node>,
+    /// Edges in recovery order.
+    pub edges: &'a mut Vec<Edge>,
+}
+
+impl FactAccess for FactLists<'_> {
+    fn node_keys(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.label.as_str()))
+    }
+    fn edge_keys(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.edges
+            .iter()
+            .map(|edge| (edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
+    }
+    fn decode_edges(
+        &self,
+        select: impl Fn(&str, &str, &str) -> bool,
+    ) -> Result<Vec<Edge>, GraphError> {
+        Ok(self
+            .edges
+            .iter()
+            .filter(|edge| select(&edge.src, &edge.dst, &edge.label))
+            .cloned()
+            .collect())
+    }
+    fn decode_nodes(&self, select: impl Fn(&str, &str) -> bool) -> Result<Vec<Node>, GraphError> {
+        Ok(self
+            .nodes
+            .iter()
+            .filter(|node| select(&node.id, &node.label))
+            .cloned()
+            .collect())
+    }
+    fn edit_nodes<T>(
+        &mut self,
+        select: impl Fn(&str, &str) -> bool,
+        stage: impl FnOnce(&mut [Node], &mut Vec<Node>) -> T,
+    ) -> Result<T, GraphError> {
+        let vacant = || Node {
+            id: String::new(),
+            label: String::new(),
+            props: serde_json::Value::Null,
+        };
+        Ok(edit_in_place(
+            self.nodes,
+            |node| select(&node.id, &node.label),
+            vacant,
+            stage,
+        ))
+    }
+    fn edit_edges<T>(
+        &mut self,
+        select: impl Fn(&str, &str, &str) -> bool,
+        stage: impl FnOnce(&mut [Edge], &mut Vec<Edge>) -> T,
+    ) -> Result<T, GraphError> {
+        let vacant = || Edge {
+            src: String::new(),
+            dst: String::new(),
+            label: String::new(),
+            props: serde_json::Value::Null,
+        };
+        Ok(edit_in_place(
+            self.edges,
+            |edge| select(&edge.src, &edge.dst, &edge.label),
+            vacant,
+            stage,
+        ))
+    }
+    fn append(&mut self, nodes: Vec<Node>, edges: Vec<Edge>) -> Result<(), GraphError> {
+        self.nodes.extend(nodes);
+        self.edges.extend(edges);
+        Ok(())
+    }
+}
+
+impl FactAccess for FactStore {
+    fn node_keys(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.label.as_str()))
+    }
+    fn edge_keys(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.edges
+            .iter()
+            .map(|edge| (edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
+    }
+    fn decode_edges(
+        &self,
+        select: impl Fn(&str, &str, &str) -> bool,
+    ) -> Result<Vec<Edge>, GraphError> {
+        self.edges_where(|edge| select(&edge.src, &edge.dst, &edge.label))
+    }
+    fn decode_nodes(&self, select: impl Fn(&str, &str) -> bool) -> Result<Vec<Node>, GraphError> {
+        self.nodes_where(|node| select(&node.id, &node.label))
+    }
+    fn edit_nodes<T>(
+        &mut self,
+        select: impl Fn(&str, &str) -> bool,
+        stage: impl FnOnce(&mut [Node], &mut Vec<Node>) -> T,
+    ) -> Result<T, GraphError> {
+        self.update_nodes_where(|node| select(&node.id, &node.label), stage)
+    }
+    fn edit_edges<T>(
+        &mut self,
+        select: impl Fn(&str, &str, &str) -> bool,
+        stage: impl FnOnce(&mut [Edge], &mut Vec<Edge>) -> T,
+    ) -> Result<T, GraphError> {
+        self.update_edges_where(|edge| select(&edge.src, &edge.dst, &edge.label), stage)
+    }
+    fn append(&mut self, nodes: Vec<Node>, edges: Vec<Edge>) -> Result<(), GraphError> {
+        self.extend(nodes, edges)
+    }
+}
+
+/// Move the selected facts out of their slots, run the stage, and move them
+/// back; additions follow every held fact. Nothing is copied.
+fn edit_in_place<F, T>(
+    facts: &mut Vec<F>,
+    select: impl Fn(&F) -> bool,
+    vacant: impl Fn() -> F,
+    stage: impl FnOnce(&mut [F], &mut Vec<F>) -> T,
+) -> T {
+    let slots: Vec<usize> = (0..facts.len())
+        .filter(|&index| select(&facts[index]))
+        .collect();
+    let mut selected: Vec<F> = slots
+        .iter()
+        .map(|&index| std::mem::replace(&mut facts[index], vacant()))
+        .collect();
+    let mut added = Vec::new();
+    let output = stage(&mut selected, &mut added);
+    for (&index, fact) in slots.iter().zip(selected) {
+        facts[index] = fact;
+    }
+    facts.extend(added);
+    output
+}
+
 /// Select, decode, run and repack: everything is packed before the store is
 /// written, so a refused fact leaves it as it was.
 fn update_where<P, F, T>(
@@ -364,5 +548,63 @@ mod tests {
         );
         assert!(matches!(refused, Err(GraphError::FactStore(_))));
         assert_eq!(store.into_facts().unwrap(), before);
+    }
+
+    #[test]
+    fn fact_access_is_identical_over_lists_and_store() {
+        // AC-0531: the same identity-selected edits, decodes and appends over
+        // plain lists and the packed store leave identical facts in order.
+        let nodes = vec![
+            node("file:r@a.ts", "File", 1),
+            node("sym:r@a.ts#f", "Symbol", 2),
+            node("file:r@b.ts", "File", 3),
+        ];
+        let edges = vec![
+            Edge {
+                label: "IMPORTS".into(),
+                ..edge("file:r@a.ts", "mod:x")
+            },
+            edge("sym:r@a.ts#f", "sym:r@a.ts#f"),
+        ];
+        fn run(facts: &mut impl FactAccess) -> (usize, Vec<Node>) {
+            let files = facts
+                .edit_nodes(
+                    |_, label| label == "File",
+                    |files, added| {
+                        files.iter_mut().for_each(|f| f.props["seen"] = json!(true));
+                        added.push(node("file:r@c.ts", "File", 4));
+                        files.len()
+                    },
+                )
+                .unwrap();
+            facts
+                .edit_edges(
+                    |_, dst, label| label == "IMPORTS" && dst.starts_with("mod:"),
+                    |imports, added| {
+                        imports[0].dst = "file:r@b.ts".into();
+                        added.push(edge("file:r@c.ts", "file:r@a.ts"));
+                    },
+                )
+                .unwrap();
+            facts
+                .append(vec![node("sym:r@c.ts#g", "Symbol", 5)], Vec::new())
+                .unwrap();
+            let keys: Vec<String> = facts.node_keys().map(|(id, _)| id.to_owned()).collect();
+            assert_eq!(keys.len(), 5);
+            assert_eq!(facts.edge_keys().count(), 3);
+            (
+                files,
+                facts.decode_nodes(|id, _| id.ends_with("c.ts")).unwrap(),
+            )
+        }
+        let (mut list_nodes, mut list_edges) = (nodes.clone(), edges.clone());
+        let listed = run(&mut FactLists {
+            nodes: &mut list_nodes,
+            edges: &mut list_edges,
+        });
+        let mut store = FactStore::from_facts(nodes, edges).unwrap();
+        let stored = run(&mut store);
+        assert_eq!(listed, stored);
+        assert_eq!(store.into_facts().unwrap(), (list_nodes, list_edges));
     }
 }
