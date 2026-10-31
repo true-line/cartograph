@@ -14,6 +14,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const FROZEN_REPO: &str = "vendurehq/vendure";
+const FROZEN_COMMIT: &str = "2cc309deb5394af176314552ac7320a7b26a0104";
+const FROZEN_MANIFEST_SHA256: &str =
+    "96d2595907c4b1ea05991c7f0f2460df2f7b75267c486d5ee3e96c3d6ae49b83";
+const FROZEN_PROOF_SHA256: &str =
+    "22d1cb69a593d6cf87abf1207cac9a50e82e6df61181874f9ab2fbd79e30a763";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Receipt {
@@ -53,6 +60,92 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn frozen_files() -> Value {
+    serde_json::from_str(include_str!(
+        "../../investigations/worker/acceptance/vendure/frozen-files.json"
+    ))
+    .expect("embedded frozen Vendure file map")
+}
+
+fn pinned_proof_files() -> Value {
+    let frozen = frozen_files();
+    let files = frozen.as_object().expect("frozen file map");
+    let hashes: serde_json::Map<String, Value> = files
+        .iter()
+        .map(|(path, file)| (path.clone(), file["sha256"].clone()))
+        .collect();
+    Value::Object(hashes)
+}
+
+fn verify_pinned_capture_input(
+    input: &Value,
+    proof: &Value,
+    proof_sha256: &str,
+) -> Result<(), &'static str> {
+    if proof_sha256 != FROZEN_PROOF_SHA256
+        || input["proof_sha256"] != FROZEN_PROOF_SHA256
+        || input["repo"] != FROZEN_REPO
+        || input["commit_sha"] != FROZEN_COMMIT
+        || input["manifest_sha256"] != FROZEN_MANIFEST_SHA256
+        || proof["repo"] != FROZEN_REPO
+        || proof["commit_sha"] != FROZEN_COMMIT
+        || proof["manifest_sha256"] != FROZEN_MANIFEST_SHA256
+        || input["files"] != frozen_files()
+        || proof["files_sha256"] != pinned_proof_files()
+    {
+        return Err("captured input does not match the frozen Vendure proof");
+    }
+    Ok(())
+}
+
+#[test]
+fn pinned_capture_identity_rejects_caller_repaired_proof_pair() {
+    let files = frozen_files();
+    let proof_files = pinned_proof_files();
+    let mut input = serde_json::json!({
+        "repo": FROZEN_REPO,
+        "commit_sha": FROZEN_COMMIT,
+        "manifest_sha256": FROZEN_MANIFEST_SHA256,
+        "proof_sha256": FROZEN_PROOF_SHA256,
+        "files": files,
+    });
+    let mut proof = serde_json::json!({
+        "repo": FROZEN_REPO,
+        "commit_sha": FROZEN_COMMIT,
+        "manifest_sha256": FROZEN_MANIFEST_SHA256,
+        "files_sha256": proof_files,
+    });
+    assert!(verify_pinned_capture_input(&input, &proof, FROZEN_PROOF_SHA256).is_ok());
+
+    // A caller who changes both sides to self-consistent alternate identities
+    // or contents still cannot replace the compiled-in capture.
+    for field in ["repo", "commit_sha", "manifest_sha256"] {
+        let mut changed_input = input.clone();
+        let mut changed_proof = proof.clone();
+        changed_input[field] = Value::String("untrusted replacement".into());
+        changed_proof[field] = Value::String("untrusted replacement".into());
+        assert!(
+            verify_pinned_capture_input(&changed_input, &changed_proof, FROZEN_PROOF_SHA256)
+                .is_err()
+        );
+    }
+    let path = frozen_files()
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let mut changed_input = input;
+    let mut changed_proof = proof;
+    changed_input["files"][path.as_str()]["sha256"] = Value::String("0".repeat(64));
+    changed_proof["files_sha256"][path.as_str()] = Value::String("0".repeat(64));
+    assert!(
+        verify_pinned_capture_input(&changed_input, &changed_proof, FROZEN_PROOF_SHA256).is_err()
+    );
+    assert!(verify_pinned_capture_input(&changed_input, &changed_proof, "0").is_err());
+}
+
 // AC-0513: actual captured facts reach the real no-provider phase, session and official stories.
 #[test]
 #[ignore = "requires separately approved scratch-copy receipt and complete caller policy"]
@@ -73,24 +166,8 @@ fn captured_seventeen_file_capability_stories_without_provider() {
     let preparation: Value = serde_json::from_slice(&preparation).unwrap();
     let proof: Value = serde_json::from_slice(&proof_bytes).unwrap();
     let input = &preparation["input"];
-    assert_eq!(input["proof_sha256"], hash(&proof_bytes));
-    assert_eq!(input["repo"], "vendurehq/vendure");
-    assert_eq!(
-        input["commit_sha"],
-        "2cc309deb5394af176314552ac7320a7b26a0104"
-    );
-    for field in ["repo", "commit_sha", "manifest_sha256"] {
-        assert_eq!(input[field], proof[field]);
-    }
-    let files = input["files"].as_object().unwrap();
-    assert_eq!(files.len(), 17);
-    assert_eq!(
-        proof["files_sha256"].as_object().unwrap().len(),
-        files.len()
-    );
-    for (name, file) in files {
-        assert_eq!(file["sha256"], proof["files_sha256"][name]);
-    }
+    verify_pinned_capture_input(input, &proof, &hash(&proof_bytes)).unwrap();
+    assert_eq!(input["files"].as_object().unwrap().len(), 17);
     let policy = crate::mcp_reads::commands::captured_slice_policy(&policy_bytes).unwrap();
     assert!(matches!(
         policy.worker.acquisition_mode,
