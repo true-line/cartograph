@@ -77,10 +77,11 @@ pub use workbench::{
     PartitionArtifact, PartitionArtifactKind, PartitionError, PartitionWorkspaceBound,
     SelectedArtifactLimit, SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact,
     SpecAssertion, SpecBundle, artifact_catalog, compile_capability_user_stories,
-    compile_partition_selected, compile_spec, compile_spec_selected,
-    compile_spec_selected_with_security, count_gap_findings, count_interpretation_backlog,
-    is_drift_edge, is_drift_node, is_gap_edge, is_gap_node, logical_capability_compile_bound,
-    logical_compile_bound, logical_partition_bound, project_recovered_facts, provenance,
+    compile_capability_user_stories_with_security, compile_partition_selected, compile_spec,
+    compile_spec_selected, compile_spec_selected_with_security, count_gap_findings,
+    count_interpretation_backlog, is_drift_edge, is_drift_node, is_gap_edge, is_gap_node,
+    logical_capability_compile_bound, logical_compile_bound, logical_partition_bound,
+    project_recovered_facts, provenance,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query
