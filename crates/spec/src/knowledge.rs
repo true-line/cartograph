@@ -119,7 +119,6 @@ pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> Capabi
             continue;
         };
         if api == "default"
-            || !identifier(api)
             || !identifier(field)
             || !matches!(operation, "query" | "mutation")
             || props["method"] != operation.to_ascii_uppercase()

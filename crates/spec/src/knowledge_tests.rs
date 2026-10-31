@@ -149,6 +149,49 @@ fn graphql_capability_identity_order_and_base_are_permutation_independent() {
     }
     assert_eq!(base.revision, before.revision);
 }
+
+// AC-0500: retain adapter-emitted API scope text while rejecting unsafe path segments.
+#[test]
+fn graphql_capability_accepts_adapter_emitted_hyphenated_api_directory() {
+    let path = "packages/core/src/api/resolvers/admin-api/shop-order.resolver.ts";
+    let base = fixture(path, REPO);
+    let before = base.clone();
+    let endpoint = base
+        .graph
+        .0
+        .iter()
+        .find(|node| node.label == "Endpoint")
+        .unwrap();
+    assert_eq!(endpoint.props["api"], "admin-api");
+    assert_eq!(endpoint.props["scope_basis"], "resolver_directory");
+    assert_eq!(endpoint.props["path"], "admin-api.order");
+
+    let report = derive_graphql_resolver_capabilities(&base);
+    assert_eq!(report.oversized_groups, 0);
+    assert_eq!(report.facts.len(), 1);
+    assert_eq!(
+        capability(&report.facts[0]).props["title"],
+        "admin-api GraphQL operations in ShopOrderResolver"
+    );
+    assert_eq!(base, before);
+
+    // API names remain path segments: punctuation is accepted, but unsafe
+    // segment structure is still rejected by the existing path guard.
+    assert!(scoped_path(path, "admin-api"));
+    assert!(!scoped_path(
+        "packages/core/src/api/resolvers/../shop-order.resolver.ts",
+        ".."
+    ));
+    assert!(!scoped_path(
+        "packages/core/src/api/resolvers/admin\\api/shop-order.resolver.ts",
+        "admin\\api"
+    ));
+    assert!(!scoped_path(
+        "packages/core/src/api/resolvers/admin-api//shop-order.resolver.ts",
+        "admin-api"
+    ));
+}
+
 #[test]
 fn graphql_capability_excludes_missing_ambiguous_gap_and_foreign_ownership() {
     for case in [
