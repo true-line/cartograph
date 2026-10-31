@@ -47,7 +47,7 @@ fn orm_model_support(node: &Node) -> Option<(Provenance, String, String)> {
         // Missing and unresolved values cannot prove a stable physical table.
         || (storage == "jpa" && !matches!(table_source, Some("explicit" | "default")))
         // Preserve fail-closed validation if another extractor supplies this field.
-        || (node.props.contains_key("table_source")
+        || (node.props.get("table_source").is_some()
             && !matches!(table_source, Some("explicit" | "default")))
         || node
             .props
