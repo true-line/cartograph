@@ -29,12 +29,13 @@ fn count(f: &NextFixture, table: &str) -> u32 {
         .unwrap()
 }
 fn charges(f: &NextFixture, provider: &NextProvider, expected: u32) {
+    let detail = detail(f);
     assert_eq!(
         provider.observed.calls.load(Ordering::SeqCst),
         expected as usize,
-        "actual provider calls"
+        "actual provider calls; terminal error: {:?}",
+        detail.error
     );
-    let detail = detail(f);
     assert_eq!(detail.usage.model_invocations, expected);
     assert_eq!(
         detail.usage.generated_token_reservations,
@@ -121,10 +122,11 @@ fn gated_initial_worker_refusal_offered_finish_and_reopen() {
     assert!(reopened.investigation_result(&f.id).unwrap().is_some());
 }
 
+// AC-0489: isolate the call-count boundary from active time; real wall expiry remains.
 #[test]
 fn gated_initial_worker_refusals_stop_at_existing_finish_reserve() {
     let (f, provider) = fixture(GatedFlow::Repeat);
-    f.run_gated_inner(provider.as_ref());
+    f.run_gated_inner_frozen_active(provider.as_ref());
     let result = detail(&f);
     let prompts = provider.observed.prompts.lock().unwrap();
     let metadata: staged_refusal::ProtectedCompletionMetadata =
