@@ -8,9 +8,11 @@
 
 mod bounded;
 pub mod coverage;
+pub mod facts;
 pub mod generation;
 pub mod omission;
 pub mod overlay;
+pub mod packed;
 pub mod placeholder;
 pub mod rules;
 pub mod scoped;
@@ -87,6 +89,9 @@ pub enum GraphError {
     /// An opt-in bounded snapshot rejected its input or admission limits.
     #[error("bounded snapshot: {0}")]
     SnapshotBounds(#[from] SnapshotBoundsError),
+    /// A recovery stage broke the fact store's order contract.
+    #[error("fact store: {0}")]
+    FactStore(&'static str),
 }
 
 impl From<rusqlite::Error> for GraphError {
