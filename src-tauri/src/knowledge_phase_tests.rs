@@ -265,6 +265,82 @@ fn derived_capabilities_publish_without_a_provider() {
     assert_eq!(published_facts(&host), facts);
 }
 
+/// A JPA entity as the real Java adapter extracts it.
+fn put_entity(graph: &Mutex<SqliteGraphStore>) {
+    let facts = adapters_lang_java::extract_source(
+        b"package com.demo; import jakarta.persistence.Entity; import jakarta.persistence.Id; import jakarta.persistence.Table; @Entity @Table(name = \"orders\") public class Order { @Id private Integer id; private String status; }",
+        "src/main/java/com/demo/Order.java",
+        &adapters_lang_java::SourceId {
+            repo: "local/demo",
+            commit: "fixture-commit",
+        },
+    )
+    .unwrap();
+    let mut graph = graph.lock().unwrap();
+    for node in &facts.nodes {
+        graph.put_node(node).unwrap();
+    }
+    let ids: std::collections::BTreeSet<_> = facts.nodes.iter().map(|n| &n.id).collect();
+    for edge in facts
+        .edges
+        .iter()
+        .filter(|e| ids.contains(&e.src) && ids.contains(&e.dst))
+    {
+        graph.put_edge(edge).unwrap();
+    }
+}
+
+// AC-0520: ORM DomainEntity facts publish with the phase beside the other
+// producers, without a provider, and the base is unchanged.
+#[test]
+fn orm_domain_entities_publish_with_the_phase() {
+    let host = host();
+    put_resolver(&host.graph);
+    put_entity(&host.graph);
+    let before = host.graph.lock().unwrap().read_snapshot().unwrap();
+    let report = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    // The resolver's Capability and two BusinessFlows, then the entity's
+    // DomainEntity candidate and its MAPS_TO mapping.
+    assert_eq!(
+        (report.published, report.derived, report.oversized),
+        (true, 5, 0)
+    );
+    assert_eq!(report.derived_omission, None);
+    assert!(report.producer_omissions.is_empty());
+    let facts = published_facts(&host);
+    let [entity] = facts
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            OverlayItem::Node(node) if node.label == "DomainEntity" => Some(node),
+            _ => None,
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one DomainEntity")
+    };
+    let [mapping] = facts
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            OverlayItem::Edge(edge) if edge.label == "MAPS_TO" => Some(edge),
+            _ => None,
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one MAPS_TO mapping")
+    };
+    assert_eq!(mapping.src, entity.id);
+    assert!(
+        before
+            .0
+            .iter()
+            .any(|n| n.id == mapping.dst && n.label == "DataEntity")
+    );
+    assert!(facts.iter().all(|fact| !fact.cites.is_empty()));
+    assert_eq!(host.graph.lock().unwrap().read_snapshot().unwrap(), before);
+    run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert_eq!(published_facts(&host), facts);
+}
+
 // AC-0514: a producer that fails as a whole is a named omission; the other
 // producers' facts are still derived.
 #[test]
@@ -342,6 +418,11 @@ fn the_recipe_names_every_producer_rule_within_the_name_bound() {
         "{}@{}",
         spec::BUSINESS_FLOW_RULE,
         spec::BUSINESS_FLOW_RULE_VERSION
+    )));
+    assert!(name.contains(&format!(
+        "{}@{}",
+        spec::DOMAIN_ENTITY_ORM_RULE,
+        spec::DOMAIN_ENTITY_ORM_RULE_VERSION
     )));
     assert!(format!("{name};{DERIVED_REJECTED}").len() <= MAX_NAME_BYTES);
 }
