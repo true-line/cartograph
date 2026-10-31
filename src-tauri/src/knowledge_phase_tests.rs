@@ -2,7 +2,7 @@
 // the overlay recipe without touching the base (#1441).
 use super::*;
 use core_graph::overlay::OverlayRead;
-use core_graph::overlay::{MAX_NAME_BYTES, OverlayItem};
+use core_graph::overlay::{BaseRef, MAX_NAME_BYTES, OverlayItem};
 use core_graph::{GraphStore, Node};
 use llm::{Embedding, EmbeddingIdentity, Locality, ProviderCaps, ProviderError};
 
@@ -341,6 +341,139 @@ fn orm_domain_entities_publish_with_the_phase() {
     assert_eq!(published_facts(&host), facts);
 }
 
+/// A permission-gated NestJS resolver as the real TS adapter extracts it.
+fn put_permission_resolver(graph: &Mutex<SqliteGraphStore>) {
+    let facts = adapters_lang_ts::extract_source(
+        b"import { Query, Resolver } from '@nestjs/graphql';\nimport { Permission } from '@vendure/common/lib/generated-shop-types';\nimport { Allow } from '../../decorators/allow.decorator';\n@Resolver() export class ShopOrderResolver { @Query()\n@Allow(Permission.Owner)\nactiveOrder() {} }",
+        "packages/core/src/api/resolvers/shop/shop-order.resolver.ts",
+        &adapters_lang_ts::SourceId {
+            repo: "vendurehq/vendure",
+            commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+        },
+    )
+    .unwrap();
+    let mut graph = graph.lock().unwrap();
+    for node in &facts.nodes {
+        graph.put_node(node).unwrap();
+    }
+    let ids: std::collections::BTreeSet<_> = facts.nodes.iter().map(|n| &n.id).collect();
+    for edge in facts
+        .edges
+        .iter()
+        .filter(|e| ids.contains(&e.src) && ids.contains(&e.dst))
+    {
+        graph.put_edge(edge).unwrap();
+    }
+}
+
+fn labels(facts: &[OverlayFact]) -> Vec<&str> {
+    let mut labels: Vec<_> = facts
+        .iter()
+        .map(|fact| match &fact.item {
+            OverlayItem::Node(node) => node.label.as_str(),
+            OverlayItem::Edge(edge) => edge.label.as_str(),
+        })
+        .collect();
+    labels.sort_unstable();
+    labels
+}
+
+// AC-0532: a permission Actor publishes with the phase beside the other
+// producers, citing its base Endpoint, and the base is unchanged.
+#[test]
+fn permission_actors_publish_with_the_phase() {
+    let host = host();
+    put_permission_resolver(&host.graph);
+    let before = host.graph.lock().unwrap().read_snapshot().unwrap();
+    let report = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert_eq!(
+        (report.published, report.derived, report.oversized),
+        (true, 3, 0)
+    );
+    assert_eq!(report.derived_omission, None);
+    let facts = published_facts(&host);
+    assert_eq!(labels(&facts), ["Actor", "BusinessFlow", "Capability"]);
+    let [(actor, cites)] = facts
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            OverlayItem::Node(node) if node.label == "Actor" => Some((node, &fact.cites)),
+            _ => None,
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one Actor")
+    };
+    assert_eq!(actor.props["any_of"], serde_json::json!(["Owner"]));
+    let endpoint = actor.props["endpoint_id"].as_str().unwrap();
+    assert!(
+        before
+            .0
+            .iter()
+            .any(|n| n.id == endpoint && n.label == "Endpoint")
+    );
+    assert_eq!(
+        *cites,
+        std::collections::BTreeSet::from([BaseRef::Node(endpoint.into())])
+    );
+    assert_eq!(host.graph.lock().unwrap().read_snapshot().unwrap(), before);
+    run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert_eq!(published_facts(&host), facts);
+}
+
+// AC-0532: an Actor the overlay refuses refuses the whole derived set; no
+// Capability, BusinessFlow, DomainEntity or Actor subset is published.
+#[test]
+fn a_refused_actor_publishes_none_of_the_derived_facts() {
+    let host = host();
+    put_permission_resolver(&host.graph);
+    put_entity(&host.graph);
+    let snapshot = host
+        .graph
+        .lock()
+        .unwrap()
+        .read_snapshot_with_revision_bounded(SnapshotReadLimits::default())
+        .unwrap();
+    let derived = derive(&snapshot);
+    assert_eq!(
+        labels(&derived.facts),
+        [
+            "Actor",
+            "BusinessFlow",
+            "Capability",
+            "DomainEntity",
+            "MAPS_TO"
+        ]
+    );
+    let actor = derived
+        .facts
+        .iter()
+        .find_map(|fact| match &fact.item {
+            OverlayItem::Node(node) if node.label == "Actor" => Some(node.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // A base node under the Actor id makes the overlay refuse to shadow it.
+    host.graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: actor,
+            label: "Symbol".into(),
+            props: serde_json::json!({}),
+        })
+        .unwrap();
+    let report = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert_eq!(
+        (report.published, report.derived, report.derived_omission),
+        (true, 0, Some(DERIVED_REJECTED))
+    );
+    assert!(published_facts(&host).is_empty());
+    assert_eq!(
+        recipe_of(&host).unwrap().recipe,
+        format!("{};{DERIVED_REJECTED}", recipe_name())
+    );
+}
+
 // AC-0514: a producer that fails as a whole is a named omission; the other
 // producers' facts are still derived.
 #[test]
@@ -423,6 +556,11 @@ fn the_recipe_names_every_producer_rule_within_the_name_bound() {
         "{}@{}",
         spec::DOMAIN_ENTITY_ORM_RULE,
         spec::DOMAIN_ENTITY_ORM_RULE_VERSION
+    )));
+    assert!(name.contains(&format!(
+        "{}@{}",
+        spec::ACTOR_ALLOW_RULE,
+        spec::ACTOR_ALLOW_RULE_VERSION
     )));
     assert!(format!("{name};{DERIVED_REJECTED}").len() <= MAX_NAME_BYTES);
 }
