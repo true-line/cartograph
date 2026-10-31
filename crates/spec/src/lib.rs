@@ -10,6 +10,11 @@ use flowtracer::Flow;
 
 mod adr;
 mod contract;
+mod knowledge;
+pub use knowledge::{
+    CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport,
+    derive_graphql_resolver_capabilities,
+};
 
 /// Version of the spec compiler's projection rules, recorded with every
 /// rule-derived statement's producing method (AC-0244). Bump when a rule's

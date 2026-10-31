@@ -971,3 +971,8 @@
 - **Security:** Pure accounting helper; no provider, database write or admission-policy change.
 - **Performance:** Uses fixed-size templates and checked arithmetic without scanning facts.
 - **Trace:** P1 (#1445, #1456, #1469) · `core-graph`, `app` · ADR-0051, ADR-0037 · T-0498, T-0505, T-0509
+
+- **AC-0500** Given existing import-proven NestJS GraphQL Endpoint, HANDLES and Method facts, when the Capability rule groups operations by exact API and resolver ownership, then it emits Semantic/InferredWeak candidates with a versioned Rule method and every supporting base citation, leaves the input snapshot unchanged, and produces stable identities and ordering under input permutations; missing, ambiguous, Gap or foreign ownership yields no candidate; groups exceeding the existing overlay per-fact JSON limit are omitted with an oversized-group count while ordinary groups survive, including exact-boundary and escaping cases (#1451).
+- **Security:** Derived candidates preserve cited deterministic support and do not modify the base or call a provider.
+- **Performance:** Existing per-fact JSON limits reject oversized groups; aggregate publication admission remains separate.
+- **Trace:** P1 (#1445, #1451) · `spec` · ADR-0051, ADR-0037 · T-0500
