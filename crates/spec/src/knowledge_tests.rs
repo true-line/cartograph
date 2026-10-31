@@ -445,3 +445,405 @@ fn graphql_capability_roundtrips_overlay_store_with_exact_base_citations() {
     assert_eq!(facts[0].cites, expected[0].cites);
     assert_eq!(base, before);
 }
+// AC-0504: compiler-only citations, strict input consistency, no host currency claim.
+fn citation_limits(max_bytes: usize) -> crate::SelectedCompileLimits {
+    crate::SelectedCompileLimits {
+        max_bytes,
+        adr: crate::AdrLimits {
+            max_rows: usize::MAX,
+            max_output_bytes: usize::MAX,
+        },
+    }
+}
+fn citation_compile(
+    base: &RevisionedSnapshot,
+    facts: &[OverlayFact],
+    mode: crate::ExportMode,
+    rejected: &BTreeSet<String>,
+    max: usize,
+) -> Result<crate::SelectedArtifactOutcome, crate::CapabilityStoryInputError> {
+    let candidates: Vec<_> = facts
+        .iter()
+        .map(|fact| crate::CapabilityStory {
+            capability: capability(fact),
+            cites: &fact.cites,
+        })
+        .collect();
+    crate::compile_capability_user_stories(base, &candidates, mode, rejected, citation_limits(max))
+}
+fn citation_artifact(outcome: crate::SelectedArtifactOutcome) -> crate::SpecArtifact {
+    let crate::SelectedArtifactOutcome::Produced(artifact) = outcome else {
+        panic!("complete artifact")
+    };
+    assert!(artifact.verify_identity());
+    artifact
+}
+#[test]
+fn capability_stories_roundtrip_current_overlay_with_per_capability_support() {
+    use core_graph::overlay::{OverlayRead, OverlayRecipe, OverlayStore};
+    let base = fixture(PATH, REPO);
+    let before = base.clone();
+    let mut facts = derive_graphql_resolver_capabilities(&base).facts;
+    let mut second = facts[0].clone();
+    let OverlayItem::Node(node) = &mut second.item else {
+        unreachable!()
+    };
+    node.id.push_str(":second");
+    facts.push(second);
+    let mut store = OverlayStore::open_in_memory().unwrap();
+    store.bind_instance(&base.revision.graph_instance).unwrap();
+    store
+        .publish(
+            &base,
+            OverlayRecipe {
+                recipe: format!("{CAPABILITY_GRAPHQL_RULE}@1"),
+                embedding_namespace: None,
+                provider_ran: false,
+            },
+            facts,
+        )
+        .unwrap();
+    let OverlayRead::Current { mut facts, .. } = store.read(&base.revision).unwrap() else {
+        panic!("Current")
+    };
+    let compile = |facts: &[OverlayFact]| {
+        citation_artifact(
+            citation_compile(
+                &base,
+                facts,
+                crate::ExportMode::BestEffort,
+                &BTreeSet::new(),
+                usize::MAX,
+            )
+            .unwrap(),
+        )
+    };
+    let artifact = compile(&facts);
+    assert_eq!(artifact.assertions.len(), 14); // two capabilities, six support occurrences each
+    let mut occurrence_ids = BTreeSet::new();
+    for fact in &facts {
+        for cite in &fact.cites {
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"capability-story-support-v1\0");
+            hash.update(&serde_json::to_vec(&(&capability(fact).id, cite)).unwrap());
+            let id = format!("support:{}", hash.finalize().to_hex());
+            assert!(occurrence_ids.insert(id.clone()));
+            let assertion = artifact.assertions.iter().find(|a| a.id == id).unwrap();
+            let props = match cite {
+                BaseRef::Node(id) => &base.graph.0.iter().find(|n| &n.id == id).unwrap().props,
+                BaseRef::Edge(src, dst, label) => {
+                    &base
+                        .graph
+                        .1
+                        .iter()
+                        .find(|e| (&e.src, &e.dst, &e.label) == (src, dst, label))
+                        .unwrap()
+                        .props
+                }
+            };
+            assert_eq!(
+                assertion.provenance,
+                serde_json::from_value::<Provenance>(props["prov"].clone()).unwrap()
+            );
+            assert!(
+                artifact
+                    .content
+                    .contains(&serde_json::to_string(&(id, cite)).unwrap())
+            );
+        }
+    }
+    facts.reverse();
+    assert_eq!(compile(&facts), artifact); // bytes AND content identity, not presence only
+    assert!(!artifact.content.contains("omitted because"));
+    assert_eq!(base, before);
+}
+#[test]
+fn capability_stories_preserve_base_bytes_and_filter_whole_derived_story() {
+    use crate::ExportMode::{BestEffort, VerifiedOnly};
+    let mut base = fixture(PATH, REPO);
+    let facts = derive_graphql_resolver_capabilities(&base).facts;
+    let mut existing = capability(&facts[0]).clone();
+    existing.id = "base-capability".into();
+    base.graph.0.push(existing);
+    for mode in [BestEffort, VerifiedOnly] {
+        let legacy = crate::compile_spec_selected(
+            &base.graph.0,
+            &base.graph.1,
+            &[],
+            mode,
+            &BTreeSet::new(),
+            &["user-stories"],
+            citation_limits(usize::MAX),
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(
+            citation_compile(&base, &[], mode, &BTreeSet::new(), usize::MAX).unwrap(),
+            legacy
+        );
+    }
+    let legacy = citation_artifact(
+        crate::compile_spec_selected(
+            &base.graph.0,
+            &base.graph.1,
+            &[],
+            BestEffort,
+            &BTreeSet::new(),
+            &["user-stories"],
+            citation_limits(usize::MAX),
+        )
+        .unwrap()
+        .remove(0),
+    );
+    let with_derived = citation_artifact(
+        citation_compile(&base, &facts, BestEffort, &BTreeSet::new(), usize::MAX).unwrap(),
+    );
+    let (legacy_stories, legacy_table) = legacy
+        .content
+        .split_once("\n## Assertions and inline provenance")
+        .unwrap();
+    let (derived_stories, derived_table) = with_derived
+        .content
+        .split_once("\n## Assertions and inline provenance")
+        .unwrap();
+    let (derived_base_stories, derived_story) = derived_stories
+        .split_once("## US-R-0002 — Derived Capability")
+        .unwrap();
+    assert!(derived_story.starts_with("\n\n    "));
+    let derived_table = derived_table
+        .split_once("\n## Derived assertions and provenance")
+        .unwrap()
+        .0;
+    assert_eq!(derived_base_stories, legacy_stories);
+    assert_eq!(derived_table, legacy_table);
+    let strict = citation_artifact(
+        citation_compile(&base, &facts, VerifiedOnly, &BTreeSet::new(), usize::MAX).unwrap(),
+    );
+    assert!(strict.assertions.is_empty());
+    let candidate_hash = capability(&facts[0]).props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let rejected = BTreeSet::from([candidate_hash]);
+    let rejected_artifact = citation_artifact(
+        citation_compile(&base, &facts, BestEffort, &rejected, usize::MAX).unwrap(),
+    );
+    assert!(rejected_artifact.assertions.is_empty());
+    let support_id = facts[0]
+        .cites
+        .iter()
+        .find_map(|cite| match cite {
+            BaseRef::Node(id) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    let support = base
+        .graph
+        .0
+        .iter_mut()
+        .find(|n| &n.id == support_id)
+        .unwrap();
+    support.props["prov"]["confidence_tier"] = serde_json::json!("InferredStrong");
+    let hash = support.props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let artifact = citation_artifact(
+        citation_compile(
+            &base,
+            &facts,
+            BestEffort,
+            &BTreeSet::from([hash]),
+            usize::MAX,
+        )
+        .unwrap(),
+    );
+    assert_eq!(artifact.assertions.len(), 1); // unaffected base story remains
+    assert_eq!(artifact.assertions[0].subject_id, "base-capability");
+    assert!(
+        artifact
+            .content
+            .contains("1 derived stories omitted because supporting facts are filtered.")
+    );
+    assert!(!artifact.content.contains("support:"));
+}
+// AC-0504: an entirely filtered derived set reports omissions, not absent recovery.
+#[test]
+fn capability_stories_all_filtered_do_not_claim_no_recovered_capabilities() {
+    let mut base = fixture(PATH, REPO);
+    let facts = derive_graphql_resolver_capabilities(&base).facts;
+    assert_eq!(facts.len(), 1);
+    let support = base
+        .graph
+        .0
+        .iter_mut()
+        .find(|node| facts[0].cites.contains(&BaseRef::Node(node.id.clone())))
+        .unwrap();
+    // Curation rejects inferred support; Confirmed support cannot be rejected.
+    support.props["prov"]["confidence_tier"] = serde_json::json!("InferredStrong");
+    let rejected = BTreeSet::from([support.props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()]);
+    let compile = |facts: &[OverlayFact]| {
+        citation_artifact(
+            citation_compile(
+                &base,
+                facts,
+                crate::ExportMode::BestEffort,
+                &rejected,
+                usize::MAX,
+            )
+            .unwrap(),
+        )
+    };
+    let filtered = compile(&facts);
+    assert!(filtered.assertions.is_empty());
+    assert!(
+        filtered
+            .content
+            .contains("1 derived stories omitted because supporting facts are filtered.")
+    );
+    assert!(
+        !filtered
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+    let absent = compile(&[]);
+    assert!(
+        absent
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+    assert!(!absent.content.contains("omitted because"));
+}
+#[test]
+fn capability_stories_reject_invalid_or_foreign_support_without_partial_output() {
+    use crate::CapabilityStoryInputError::*;
+    let base = fixture(PATH, REPO);
+    let facts = derive_graphql_resolver_capabilities(&base).facts;
+    let check = |base: &RevisionedSnapshot, facts: &[OverlayFact]| {
+        citation_compile(
+            base,
+            facts,
+            crate::ExportMode::BestEffort,
+            &BTreeSet::new(),
+            usize::MAX,
+        )
+    };
+    assert!(check(&base, &facts).is_ok());
+    assert_eq!(
+        check(&base, &[facts[0].clone(), facts[0].clone()]),
+        Err(DuplicateCandidate)
+    );
+    let mut changed = facts.clone();
+    changed[0].cites = BTreeSet::from([BaseRef::Node("other-revision".into())]);
+    assert_eq!(check(&base, &changed), Err(SupportNotInBase));
+    let support_id = facts[0]
+        .cites
+        .iter()
+        .find_map(|cite| match cite {
+            BaseRef::Node(id) => Some(id),
+            BaseRef::Edge(..) => None,
+        })
+        .unwrap();
+    for invalid_provenance in ["absent", "malformed", "invalid"] {
+        let mut changed_base = base.clone();
+        let support = changed_base
+            .graph
+            .0
+            .iter_mut()
+            .find(|node| &node.id == support_id)
+            .unwrap();
+        match invalid_provenance {
+            "absent" => {
+                support.props.as_object_mut().unwrap().remove("prov");
+            }
+            "malformed" => support.props["prov"] = serde_json::Value::Null,
+            "invalid" => {
+                support.props["prov"]["tier"] = serde_json::json!("Agentic");
+                support.props["prov"]["confidence_tier"] = serde_json::json!("Confirmed");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(check(&changed_base, &facts), Err(InvalidSupportProvenance));
+    }
+    changed[0].cites.clear();
+    assert_eq!(check(&base, &changed), Err(EmptySupport));
+    let mut ambiguous = base.clone();
+    let support = base
+        .graph
+        .0
+        .iter()
+        .find(|n| facts[0].cites.contains(&BaseRef::Node(n.id.clone())))
+        .unwrap();
+    ambiguous.graph.0.push(support.clone());
+    assert_eq!(check(&ambiguous, &facts), Err(AmbiguousSupport));
+    for mutation in ["method", "prov", "label", "shadow"] {
+        let mut changed = facts.clone();
+        let OverlayItem::Node(node) = &mut changed[0].item else {
+            unreachable!()
+        };
+        match mutation {
+            "method" => {
+                node.props["prov"]["method"] =
+                    serde_json::json!({"kind":"model","model":"untrusted"})
+            }
+            "prov" => node.props["prov"] = serde_json::Value::Null,
+            "label" => node.label = "Actor".into(),
+            "shadow" => node.id = base.graph.0[0].id.clone(),
+            _ => unreachable!(),
+        }
+        assert_eq!(check(&base, &changed), Err(Candidate), "{mutation}");
+    }
+}
+#[test]
+fn capability_stories_admit_full_escaped_associations_at_exact_output_boundary() {
+    let mut base = fixture(PATH, REPO);
+    let mut facts = derive_graphql_resolver_capabilities(&base).facts;
+    let hostile = "```\n# injected <script>alert('x')</script> ` & |";
+    let OverlayItem::Node(node) = &mut facts[0].item else {
+        unreachable!()
+    };
+    node.props["title"] = hostile.into();
+    node.props["prov"]["method"]["rule"] = hostile.into();
+    let support = base
+        .graph
+        .0
+        .iter_mut()
+        .find(|n| n.label == "Symbol" && facts[0].cites.contains(&BaseRef::Node(n.id.clone())))
+        .unwrap();
+    support.props["name"] = hostile.into();
+    support.props["prov"]["evidence"][0]["path"] = hostile.into();
+    let compile = |max| {
+        citation_compile(
+            &base,
+            &facts,
+            crate::ExportMode::BestEffort,
+            &BTreeSet::new(),
+            max,
+        )
+        .unwrap()
+    };
+    let artifact = citation_artifact(compile(usize::MAX));
+    assert!(artifact.content.contains("<script>")); // literal inside indented JSON only
+    assert!(!artifact.content.contains("\n# injected"));
+    assert!(!artifact.content.contains("\n```"));
+    for line in artifact.content.lines().filter(|l| l.contains("<script>")) {
+        assert!(line.starts_with("    "), "{line}");
+    }
+    let bytes = artifact.content.len() + serde_json::to_vec(&artifact.assertions).unwrap().len();
+    assert_eq!(
+        compile(bytes),
+        crate::SelectedArtifactOutcome::Produced(artifact)
+    );
+    assert_eq!(
+        compile(bytes - 1),
+        crate::SelectedArtifactOutcome::Limited {
+            artifact_id: "user-stories".into(),
+            limit: crate::SelectedArtifactLimit::OutputBytes {
+                remaining: bytes - 1
+            },
+        }
+    );
+}

@@ -3,7 +3,11 @@
 use crate::TOPOLOGY_EDGE_LABELS;
 pub(crate) mod accounting;
 pub use accounting::{COMPILE_WORKSPACE_MODEL, CompileWorkspaceBound, logical_compile_bound};
+mod capabilities;
 pub(crate) mod diagrams;
+pub use capabilities::{
+    CapabilityStory, CapabilityStoryInputError, compile_capability_user_stories,
+};
 mod partition;
 mod producers;
 pub use partition::{

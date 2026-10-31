@@ -40,31 +40,94 @@ fn relation_value(value: &serde_json::Value) -> String {
 }
 
 pub(super) fn stories(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
+    stories_with_support(nodes, None, max)
+}
+pub(super) fn stories_with_support(
+    nodes: &[&Node],
+    stories: Option<&capabilities::Stories<'_>>,
+    max: Option<usize>,
+) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let mut assertions = Assertions::new(&budget);
-    let capabilities: Vec<_> = nodes
+    let mut capabilities: Vec<_> = nodes
         .iter()
         .copied()
         .filter(|n| n.label == "Capability")
         .filter(nongap)
         .collect();
+    let base_count = capabilities.len();
+    if let Some(stories) = stories {
+        capabilities.extend(stories.included.iter().map(|s| s.node));
+    }
     for node in &capabilities {
         assertions.node(node, None)?;
     }
+    for story in stories.into_iter().flat_map(|s| &s.included) {
+        for (cite, fact) in &story.support {
+            assertions.support(&capabilities::support_id(&story.node.id, cite), fact)?;
+        }
+    }
     let mut content = Text::new(&budget, "# Recovered user stories\n\n")?;
-    if capabilities.is_empty() {
+    if capabilities.is_empty() && !stories.is_some_and(|s| s.filtered > 0) {
         content.push_str("No Capability facts have been recovered yet.\n")?;
     }
     for (index, node) in capabilities.iter().enumerate() {
+        if let Some(story) = stories.and_then(|s| {
+            index
+                .checked_sub(base_count)
+                .and_then(|i| s.included.get(i))
+        }) {
+            // Legacy headings are unchanged. New sidecar prose is JSON text,
+            // never executable Markdown/HTML or a new redaction policy.
+            writeln!(
+                content,
+                "## US-R-{:04} — Derived Capability\n\n    {}\n",
+                index + 1,
+                render::Serialized(&(&node.id, render::DisplayValue(&NodeName(node))))
+            )?;
+            for (cite, _) in &story.support {
+                writeln!(
+                    content,
+                    "    {}",
+                    render::Serialized(&(capabilities::support_id(&node.id, cite), cite))
+                )?;
+            }
+            content.push_str("\n")?;
+        } else {
+            writeln!(
+                content,
+                "## US-R-{:04} — {}\n\n- Recovered capability assertion: `{}`\n",
+                index + 1,
+                NodeName(node),
+                node.id
+            )?;
+        }
+    }
+    if let Some(stories) = stories.filter(|s| s.filtered > 0) {
         writeln!(
             content,
-            "## US-R-{:04} — {}\n\n- Recovered capability assertion: `{}`\n",
-            index + 1,
-            NodeName(node),
-            node.id
+            "{} derived stories omitted because supporting facts are filtered.\n",
+            stories.filtered
         )?;
     }
-    finish(content, assertions)
+    if stories.is_some_and(|s| !s.included.is_empty()) {
+        // Base output retains its existing formatting. Sidecar prose and
+        // provenance are literal JSON, including strings containing HTML,
+        // Markdown fences or headings. The same Text/Budget admits it all.
+        if base_count > 0 {
+            render::inline(&mut content, &assertions.values[..base_count])?;
+        }
+        content.push_str("\n## Derived assertions and provenance\n\n")?;
+        for assertion in &assertions.values[base_count..] {
+            writeln!(content, "    {}", render::Serialized(assertion))?;
+        }
+        Ok(Output {
+            content: content.finish(),
+            assertions: assertions.values,
+        })
+    } else {
+        finish(content, assertions)
+    }
 }
 pub(super) fn flow(
     nodes: &[&Node],

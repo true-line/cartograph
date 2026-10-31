@@ -239,7 +239,7 @@ impl fmt::Display for EdgeName<'_> {
         write!(f, "{} {} {}", self.0.src, self.0.label, self.0.dst)
     }
 }
-struct DisplayValue<'a>(&'a dyn fmt::Display);
+pub(super) struct DisplayValue<'a>(pub(super) &'a dyn fmt::Display);
 impl Serialize for DisplayValue<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(self.0)
@@ -345,6 +345,30 @@ impl Assertions {
             )
         }
     }
+    pub(super) fn support(
+        &mut self,
+        id: &str,
+        support: &capabilities::Support<'_>,
+    ) -> Result<(), RenderLimit> {
+        match support {
+            capabilities::Support::Node(node) => self.add(
+                &id,
+                &node.id,
+                &node.label,
+                &format_args!("{}: {}", node.label, NodeName(node)),
+                provenance(&node.props, &node.id),
+                (None, None),
+            ),
+            capabilities::Support::Edge(edge) => self.add(
+                &id,
+                &EdgeName(edge),
+                &edge.label,
+                &EdgeName(edge),
+                provenance(&edge.props, &edge_identity(edge)),
+                (Some(&edge.label), None),
+            ),
+        }
+    }
     pub(super) fn hop(
         &mut self,
         flow: &Flow,
@@ -422,6 +446,12 @@ pub(super) fn inline(out: &mut impl fmt::Write, assertions: &[SpecAssertion]) ->
 }
 pub(super) struct Json<'a>(pub &'a serde_json::Value);
 impl fmt::Display for Json<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Serialized(self.0).fmt(f)
+    }
+}
+pub(super) struct Serialized<'a, T>(pub &'a T);
+impl<T: Serialize> fmt::Display for Serialized<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Adapter<'a, 'b>(&'a mut fmt::Formatter<'b>);
         impl io::Write for Adapter<'_, '_> {
