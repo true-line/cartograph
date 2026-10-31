@@ -187,5 +187,50 @@ mod tests {
                 node
             );
         }
+
+        // The depth boundary: 127 nested containers (arrays and objects)
+        // pack and unpack exactly; 128 are refused, so every packed fact
+        // unpacks.
+        let nested = |containers: usize| {
+            let mut props = json!(0);
+            for level in 0..containers {
+                props = if level % 2 == 0 {
+                    json!([props])
+                } else {
+                    json!({ "k": props })
+                };
+            }
+            props
+        };
+        assert!(
+            serde_json::from_str::<serde_json::Value>(
+                &serde_json::to_string(&nested(MAX_PROPS_DEPTH + 1)).unwrap()
+            )
+            .is_err()
+        );
+        for (containers, accepted) in [(MAX_PROPS_DEPTH, true), (MAX_PROPS_DEPTH + 1, false)] {
+            let node = Node {
+                id: "deep".into(),
+                label: "L".into(),
+                props: nested(containers),
+            };
+            let edge = Edge {
+                src: "a".into(),
+                dst: "b".into(),
+                label: "L".into(),
+                props: nested(containers),
+            };
+            match (
+                PackedNode::pack(node.clone()),
+                PackedEdge::pack(edge.clone()),
+            ) {
+                (Ok(n), Ok(e)) if accepted => {
+                    assert_eq!(n.unpack().unwrap(), node);
+                    assert_eq!(e.unpack().unwrap(), edge);
+                }
+                (Err(GraphError::FactStore(_)), Err(GraphError::FactStore(_))) if !accepted => {}
+                _ => panic!("{containers} nested containers: accepted should be {accepted}"),
+            }
+        }
     }
 }
