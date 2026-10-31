@@ -1,5 +1,20 @@
 # cartograph
 
+## 0.54.0
+
+### Minor Changes
+
+- ffa850d: Include captured derived Capability stories and their exact cited assertions in complete-session user-stories output, with immutable paging and existing curation/export limits.
+- af8fc01: Bind complete MCP read sessions to the captured store revision, rejecting observed changes during acquisition while preserving existing artifact content identities (#1471).
+
+### Patch Changes
+
+- bae1e88: Add a deterministic library producer for weak BusinessFlow candidates from bounded traces with exact base citations, preserving partial and Gap state. Host publication and rendering remain separate.
+- 715448d: Prepare bounded immutable Capability selections for complete read sessions while preserving existing artifact output.
+- 26b81f7: The GraphQL Capability rule now refuses support whose provenance names an artifact or observation evidence basis, so derived capabilities never relabel non-source evidence as source. The rule version moves to 2, so existing Capability ids and the knowledge recipe change on the next ingest.
+- c48a8cf: Cite the exact Allow decorator and named import bindings for GraphQL permission syntax. Legacy `Endpoint.permissions` narrows: same-file enums, unproved import bindings and multiple Allow sites now omit permission lists. Runtime authorization semantics remain unestablished.
+- 82ca30a: The background knowledge phase also publishes traced BusinessFlow candidates with the knowledge overlay; a producer that cannot finish is reported by name while the others still publish.
+
 ## 0.53.1
 
 ### Patch Changes
