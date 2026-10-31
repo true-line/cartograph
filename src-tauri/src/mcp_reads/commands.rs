@@ -406,6 +406,15 @@ fn runtime_parent(app: &tauri::AppHandle) -> Result<std::path::PathBuf, CommandE
     Ok(data.join("mcp-runtime"))
 }
 
+// Test-only reuse of the exact human IPC decoder and admission validator.
+#[cfg(all(test, unix))]
+pub(super) fn captured_slice_policy(bytes: &[u8]) -> Result<super::service::Policy, &'static str> {
+    serde_json::from_slice::<AdvancedPolicy>(bytes)
+        .map_err(|_| "invalid caller policy")?
+        .into_policy()
+        .map_err(|_| "caller policy admission refused")
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

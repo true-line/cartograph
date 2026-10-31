@@ -261,3 +261,7 @@ fn fits(value: &impl Serialize, cap: usize) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "artifacts/captured_slice_acceptance.rs"]
+mod captured_slice_acceptance;
