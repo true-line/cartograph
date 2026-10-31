@@ -193,7 +193,10 @@ pub fn logical_compile_bound(
     .retained_output_bytes;
     let bytes = sum(&[graph.bytes, compile.adr.max_output_bytes, security.bytes])?;
     let rows = sum(&[graph.rows, compile.adr.max_rows, security.rows])?;
-    let values = sum(&[graph.values, compile.adr.max_output_bytes, security.bytes])?;
+    // Security findings are typed generated rows: their value count has its
+    // own proven bound, rather than one value per serialized byte.
+    let security_values = crate::security_projection_value_bound(graph.rows, graph.values)?;
+    let values = sum(&[graph.values, compile.adr.max_output_bytes, security_values])?;
     let projected_graph_bytes = graph_charge(bytes, rows, values)?;
     let filters = sum(&[
         slots::<&Node>(rows)?,
