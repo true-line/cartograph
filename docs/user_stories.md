@@ -981,6 +981,11 @@
 - **Performance:** Existing per-fact JSON limits reject oversized groups; aggregate publication admission remains separate.
 - **Trace:** P1 (#1445, #1451) · `spec` · ADR-0051, ADR-0037 · T-0500
 
+- **AC-0519** Given otherwise-valid deterministic Endpoint, HANDLES or Method support whose provenance names an explicit artifact or observation evidence basis, when the Capability rule checks support, then that support is refused and no candidate forms, because the derived candidate's own provenance resolves to a source basis; support with no basis or an explicit source basis is unchanged, and the rule version moves to 2 so the changed eligibility changes candidate identity, Rule provenance and the knowledge recipe (#1489).
+- **Security:** Derived facts can no longer relabel artifact or runtime evidence as source evidence; the existing source-backed contract is enforced, not widened.
+- **Performance:** One allocation-free field match per support; no new limits.
+- **Trace:** P1 (#1445, #1489) · `spec` · ADR-0051 · T-0519
+
 - **AC-0517** GraphQL Endpoint permission observations require exactly one stable import-bound Allow site whose nonempty ordered arguments are direct members of one stable named Permission import. Endpoint.permission_site records import-bound syntax, the actual exported/local/module bindings, original member arguments and its own Confirmed deterministic provenance citing the exact Allow decorator, import specifiers and module strings. Query/Mutation Endpoint and HANDLES provenance remain unchanged. Legacy permissions is retained only for these proven observations; unbound lookalikes, type-only/default/namespace or ambiguous/reassigned/shadowed bindings, mixed/computed arguments and multiple Allow sites produce neither permission field, preserving no partial list.
 - **Security:** This establishes source annotation and binding syntax only, without evaluating imported implementations, runtime OR/AND semantics, effective permission checks, authentication, roles or principals. Missing annotation never means anonymous; Owner remains a token.
 - **Performance:** Uses existing lexical bindings and source spans with no dependency reads, providers, new numeric limits or global binder changes.
