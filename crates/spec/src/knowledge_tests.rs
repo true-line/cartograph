@@ -312,3 +312,39 @@ fn capability_fact_size_guard_uses_exact_overlay_boundary_and_json_escaping() {
     assert_eq!(report.facts.len(), 1);
     assert_eq!(report.oversized_groups, 1);
 }
+
+#[test]
+fn graphql_capability_roundtrips_overlay_store_with_exact_base_citations() {
+    // AC-0500: the real overlay admission and persisted representation accept
+    // the producer's actual facts, including every supporting base reference.
+    use core_graph::overlay::{OverlayRead, OverlayRecipe, OverlayStore};
+    let base = fixture(PATH, REPO);
+    let before = base.clone();
+    let report = derive_graphql_resolver_capabilities(&base);
+    assert_eq!(report.oversized_groups, 0);
+    assert_eq!(report.facts.len(), 1);
+    let expected = report.facts.clone();
+    assert_eq!(expected[0].cites.len(), 6);
+    let mut store = OverlayStore::open_in_memory().unwrap();
+    store.bind_instance(&base.revision.graph_instance).unwrap();
+    let recipe = OverlayRecipe {
+        recipe: format!("{CAPABILITY_GRAPHQL_RULE}@{CAPABILITY_GRAPHQL_RULE_VERSION}"),
+        embedding_namespace: None,
+        provider_ran: false,
+    };
+    let published = store.publish(&base, recipe.clone(), report.facts).unwrap();
+    let OverlayRead::Current {
+        identity,
+        basis,
+        facts,
+    } = store.read(&base.revision).unwrap()
+    else {
+        panic!("published capabilities must read as Current");
+    };
+    assert_eq!(identity, published);
+    assert_eq!(basis.base, base.revision);
+    assert_eq!(basis.recipe, recipe);
+    assert_eq!(facts, expected);
+    assert_eq!(facts[0].cites, expected[0].cites);
+    assert_eq!(base, before);
+}
