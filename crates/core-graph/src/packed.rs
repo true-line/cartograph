@@ -108,6 +108,50 @@ impl PackedEdge {
     }
 }
 
+/// A full graph snapshot held packed, in snapshot order (#725).
+#[derive(Debug, Clone, Default)]
+pub struct PackedSnapshot {
+    /// Nodes in id order.
+    pub nodes: Vec<PackedNode>,
+    /// Edges in `(src, dst, label)` order.
+    pub edges: Vec<PackedEdge>,
+}
+
+impl crate::ExpectedSnapshot for PackedSnapshot {
+    fn node_matches(
+        &self,
+        index: usize,
+        id: &str,
+        label: &str,
+        props: &serde_json::Value,
+    ) -> Result<bool, GraphError> {
+        let Some(node) = self.nodes.get(index) else {
+            return Ok(false);
+        };
+        Ok(id == node.id && label == node.label && *props == node.unpack()?.props)
+    }
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+    fn edge_matches(
+        &self,
+        index: usize,
+        (src, dst, label): (&str, &str, &str),
+        props: &serde_json::Value,
+    ) -> Result<bool, GraphError> {
+        let Some(edge) = self.edges.get(index) else {
+            return Ok(false);
+        };
+        Ok(src == edge.src
+            && dst == edge.dst
+            && label == edge.label
+            && *props == edge.unpack()?.props)
+    }
+    fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +319,139 @@ mod tests {
                 _ => panic!("{containers} nested containers: accepted should be {accepted}"),
             }
         }
+    }
+
+    #[test]
+    fn packed_snapshots_and_upserts_publish_the_same_rows() {
+        // AC-0528: a packed snapshot reads the same facts, validates a
+        // conditional publish like the unpacked one (stale is refused), and
+        // packed upserts store the rows unpacked upserts store.
+        use crate::{GraphPatch, GraphStore, SqliteGraphStore};
+        let seeded = || {
+            let mut store = SqliteGraphStore::open_in_memory().unwrap();
+            for (id, n) in [("b", 2), ("a", 1)] {
+                store
+                    .put_node(&Node {
+                        id: id.into(),
+                        label: "Symbol".into(),
+                        props: json!({"n": n, "prov": hostile()["prov"].clone()}),
+                    })
+                    .unwrap();
+            }
+            store
+                .put_edge(&Edge {
+                    src: "a".into(),
+                    dst: "b".into(),
+                    label: "CALLS".into(),
+                    props: hostile(),
+                })
+                .unwrap();
+            store
+        };
+        let new_node = Node {
+            id: "c".into(),
+            label: "Symbol".into(),
+            props: hostile(),
+        };
+        let new_edge = Edge {
+            src: "b".into(),
+            dst: "c".into(),
+            label: "CALLS".into(),
+            props: json!({"z": 1, "a": [2.5, -1]}),
+        };
+
+        let mut plain = seeded();
+        let expected = plain.read_snapshot().unwrap();
+        let unpacked = GraphPatch {
+            upsert_nodes: vec![new_node.clone()],
+            upsert_edges: vec![new_edge.clone()],
+            ..GraphPatch::default()
+        };
+        assert!(
+            plain
+                .apply_patch_if_snapshot_matches(&expected, &unpacked)
+                .unwrap()
+        );
+
+        let mut packed_store = seeded();
+        let snapshot = packed_store.read_packed_snapshot().unwrap();
+        let unpacked_snapshot = (
+            snapshot
+                .nodes
+                .iter()
+                .map(|n| n.unpack().unwrap())
+                .collect::<Vec<_>>(),
+            snapshot
+                .edges
+                .iter()
+                .map(|e| e.unpack().unwrap())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(unpacked_snapshot, expected);
+        let packed = GraphPatch {
+            upsert_packed_nodes: vec![PackedNode::pack(new_node).unwrap()],
+            upsert_packed_edges: vec![PackedEdge::pack(new_edge).unwrap()],
+            ..GraphPatch::default()
+        };
+        assert!(
+            packed_store
+                .apply_patch_if_snapshot_matches(&snapshot, &packed)
+                .unwrap()
+        );
+        assert_eq!(
+            packed_store.read_snapshot().unwrap(),
+            plain.read_snapshot().unwrap()
+        );
+        let rows = |store: &SqliteGraphStore| {
+            store
+                .conn
+                .prepare("SELECT id, props FROM nodes ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows(&packed_store), rows(&plain));
+
+        // The snapshot is now stale: the packed check refuses it unchanged.
+        let before = packed_store.read_snapshot().unwrap();
+        assert!(
+            !packed_store
+                .apply_patch_if_snapshot_matches(&snapshot, &packed)
+                .unwrap()
+        );
+        assert_eq!(packed_store.read_snapshot().unwrap(), before);
+
+        // A mixed patch: an unpacked edge may reference a packed new node
+        // and a packed edge an unpacked one.
+        let mut mixed = seeded();
+        let expected = mixed.read_packed_snapshot().unwrap();
+        let node = |id: &str| Node {
+            id: id.into(),
+            label: "Symbol".into(),
+            props: json!({}),
+        };
+        let link = |src: &str, dst: &str| Edge {
+            src: src.into(),
+            dst: dst.into(),
+            label: "CALLS".into(),
+            props: json!({}),
+        };
+        let patch = GraphPatch {
+            upsert_nodes: vec![node("u")],
+            upsert_edges: vec![link("a", "p")],
+            upsert_packed_nodes: vec![PackedNode::pack(node("p")).unwrap()],
+            upsert_packed_edges: vec![PackedEdge::pack(link("p", "u")).unwrap()],
+            ..GraphPatch::default()
+        };
+        assert!(
+            mixed
+                .apply_patch_if_snapshot_matches(&expected, &patch)
+                .unwrap()
+        );
+        let (_, edges) = mixed.read_snapshot().unwrap();
+        assert!(edges.iter().any(|e| e.src == "a" && e.dst == "p"));
+        assert!(edges.iter().any(|e| e.src == "p" && e.dst == "u"));
     }
 }

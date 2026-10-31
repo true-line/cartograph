@@ -66,6 +66,68 @@ pub struct GraphPatch {
     pub delete_node_ids: Vec<String>,
     /// Individual edge keys `(src, dst, label)` to remove.
     pub delete_edges: Vec<(String, String, String)>,
+    /// Packed nodes upserted after `upsert_nodes`, written byte for byte as
+    /// an unpacked upsert would be (#725).
+    pub upsert_packed_nodes: Vec<packed::PackedNode>,
+    /// Packed edges upserted after `upsert_edges`.
+    pub upsert_packed_edges: Vec<packed::PackedEdge>,
+}
+
+/// A full graph snapshot that a conditional publish validates row by row.
+/// Implemented for an unpacked `(nodes, edges)` snapshot and for
+/// [`packed::PackedSnapshot`]; both compare decoded props for equality.
+pub trait ExpectedSnapshot {
+    /// Whether the `index`th snapshot node, in id order, equals this row.
+    fn node_matches(
+        &self,
+        index: usize,
+        id: &str,
+        label: &str,
+        props: &serde_json::Value,
+    ) -> Result<bool, GraphError>;
+    /// Number of snapshot nodes.
+    fn node_count(&self) -> usize;
+    /// Whether the `index`th snapshot edge, in key order, equals this row.
+    fn edge_matches(
+        &self,
+        index: usize,
+        key: (&str, &str, &str),
+        props: &serde_json::Value,
+    ) -> Result<bool, GraphError>;
+    /// Number of snapshot edges.
+    fn edge_count(&self) -> usize;
+}
+
+impl ExpectedSnapshot for (Vec<Node>, Vec<Edge>) {
+    fn node_matches(
+        &self,
+        index: usize,
+        id: &str,
+        label: &str,
+        props: &serde_json::Value,
+    ) -> Result<bool, GraphError> {
+        Ok(self
+            .0
+            .get(index)
+            .is_some_and(|n| id == n.id && label == n.label && *props == n.props))
+    }
+    fn node_count(&self) -> usize {
+        self.0.len()
+    }
+    fn edge_matches(
+        &self,
+        index: usize,
+        (src, dst, label): (&str, &str, &str),
+        props: &serde_json::Value,
+    ) -> Result<bool, GraphError> {
+        Ok(self
+            .1
+            .get(index)
+            .is_some_and(|e| src == e.src && dst == e.dst && label == e.label && *props == e.props))
+    }
+    fn edge_count(&self) -> usize {
+        self.1.len()
+    }
 }
 
 /// Errors from graph-store operations.
@@ -221,6 +283,31 @@ impl SqliteGraphStore {
         <Self as GraphStore>::read_snapshot(self)
     }
 
+    /// [`Self::read_snapshot`] held packed: each row is decoded, checked and
+    /// packed as it is read, so a large graph never exists as one `Value`
+    /// tree (#725). Same rows, order, decoding failures and test hook.
+    pub fn read_packed_snapshot(&self) -> Result<packed::PackedSnapshot, GraphError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut snapshot = packed::PackedSnapshot::default();
+        self.read_nodes_each(None, |node| {
+            snapshot.nodes.push(packed::PackedNode::pack(node)?);
+            Ok(())
+        })?;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let after_nodes = self.snapshot_after_nodes.borrow_mut().take();
+            if let Some(after_nodes) = after_nodes {
+                after_nodes()?;
+            }
+        }
+        self.read_edges_each(None, |edge| {
+            snapshot.edges.push(packed::PackedEdge::pack(edge)?);
+            Ok(())
+        })?;
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
     /// Atomically validate an ordered full [`Self::read_snapshot`] and apply a
     /// scoped patch. An immediate transaction excludes competing writers before
     /// validation and until commit. A stale snapshot returns `false` without
@@ -229,7 +316,7 @@ impl SqliteGraphStore {
     /// deleted node. This does not make earlier ingestion writes atomic.
     pub fn apply_patch_if_snapshot_matches(
         &mut self,
-        expected: &(Vec<Node>, Vec<Edge>),
+        expected: &impl ExpectedSnapshot,
         patch: &GraphPatch,
     ) -> Result<bool, GraphError> {
         // Shared connection borrowing lets the ordinary private readers/writers
@@ -258,11 +345,19 @@ impl SqliteGraphStore {
                 .prepare_cached("DELETE FROM nodes WHERE id = ?1")?
                 .execute(params![id])?;
         }
+        // Every node, packed or not, lands before any edge, so an edge may
+        // reference a node from either collection.
         for node in &patch.upsert_nodes {
             self.write_node(node)?;
         }
+        for node in &patch.upsert_packed_nodes {
+            self.write_node_json(&node.id, &node.label, node.props_json())?;
+        }
         for edge in &patch.upsert_edges {
             self.write_edge(edge)?;
+        }
+        for edge in &patch.upsert_packed_edges {
+            self.write_edge_json(&edge.src, &edge.dst, &edge.label, edge.props_json())?;
         }
         Ok(())
     }
@@ -305,25 +400,24 @@ impl SqliteGraphStore {
     /// doubled its peak (#725). Same answer as comparing
     /// [`Self::read_snapshot_rows`], including its test hook between nodes
     /// and edges.
-    fn snapshot_matches(&self, expected: &(Vec<Node>, Vec<Edge>)) -> Result<bool, GraphError> {
+    fn snapshot_matches(&self, expected: &impl ExpectedSnapshot) -> Result<bool, GraphError> {
         let mut matches = true;
+        let mut index = 0;
         {
             let mut stmt = self
                 .conn
                 .prepare("SELECT id, label, props FROM nodes ORDER BY id")?;
             let mut rows = stmt.query([])?;
-            let mut expected_nodes = expected.0.iter();
             while let Some(row) = rows.next()? {
                 // Every row is decoded even after a mismatch, so a corrupt
                 // row still surfaces as an error rather than a stale snapshot.
                 let id = row.get::<_, String>(0)?;
                 let label = row.get::<_, String>(1)?;
                 let props = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?)?;
-                matches &= expected_nodes
-                    .next()
-                    .is_some_and(|n| id == n.id && label == n.label && props == n.props);
+                matches &= expected.node_matches(index, &id, &label, &props)?;
+                index += 1;
             }
-            matches &= expected_nodes.next().is_none();
+            matches &= index == expected.node_count();
         }
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -336,20 +430,33 @@ impl SqliteGraphStore {
             .conn
             .prepare("SELECT src, dst, label, props FROM edges ORDER BY src, dst, label")?;
         let mut rows = stmt.query([])?;
-        let mut expected_edges = expected.1.iter();
+        let mut index = 0;
         while let Some(row) = rows.next()? {
             let src = row.get::<_, String>(0)?;
             let dst = row.get::<_, String>(1)?;
             let label = row.get::<_, String>(2)?;
             let props = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)?;
-            matches &= expected_edges.next().is_some_and(|e| {
-                src == e.src && dst == e.dst && label == e.label && props == e.props
-            });
+            matches &= expected.edge_matches(index, (&src, &dst, &label), &props)?;
+            index += 1;
         }
-        Ok(matches && expected_edges.next().is_none())
+        Ok(matches && index == expected.edge_count())
     }
 
     fn read_nodes(&self, labels: Option<&[&str]>) -> Result<Vec<Node>, GraphError> {
+        let mut nodes = Vec::new();
+        self.read_nodes_each(labels, |node| {
+            nodes.push(node);
+            Ok(())
+        })?;
+        Ok(nodes)
+    }
+
+    /// Decode each selected node in id order, handing it to `visit`.
+    fn read_nodes_each(
+        &self,
+        labels: Option<&[&str]>,
+        mut visit: impl FnMut(Node) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT id, label, props FROM nodes {} ORDER BY id",
             label_selection(labels),
@@ -364,19 +471,32 @@ impl SqliteGraphStore {
                 ))
             },
         )?;
-        let mut nodes = Vec::new();
         for row in rows {
             let (id, label, props) = row?;
-            nodes.push(Node {
+            visit(Node {
                 id,
                 label,
                 props: serde_json::from_str(&props)?,
-            });
+            })?;
         }
-        Ok(nodes)
+        Ok(())
     }
 
     fn read_edges(&self, labels: Option<&[&str]>) -> Result<Vec<Edge>, GraphError> {
+        let mut edges = Vec::new();
+        self.read_edges_each(labels, |edge| {
+            edges.push(edge);
+            Ok(())
+        })?;
+        Ok(edges)
+    }
+
+    /// Decode each selected edge in key order, handing it to `visit`.
+    fn read_edges_each(
+        &self,
+        labels: Option<&[&str]>,
+        mut visit: impl FnMut(Edge) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT src, dst, label, props FROM edges {} ORDER BY src, dst, label",
             label_selection(labels),
@@ -392,45 +512,54 @@ impl SqliteGraphStore {
                 ))
             },
         )?;
-        let mut edges = Vec::new();
         for row in rows {
             let (src, dst, label, props) = row?;
-            edges.push(Edge {
+            visit(Edge {
                 src,
                 dst,
                 label,
                 props: serde_json::from_str(&props)?,
-            });
+            })?;
         }
-        Ok(edges)
+        Ok(())
     }
 
     fn write_node(&self, node: &Node) -> Result<(), GraphError> {
+        self.write_node_json(&node.id, &node.label, &serde_json::to_string(&node.props)?)
+    }
+
+    fn write_node_json(&self, id: &str, label: &str, props: &str) -> Result<(), GraphError> {
         self.conn
             .prepare_cached(
                 "INSERT INTO nodes (id, label, props) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET label = excluded.label, props = excluded.props",
             )?
-            .execute(params![
-                node.id,
-                node.label,
-                serde_json::to_string(&node.props)?
-            ])?;
+            .execute(params![id, label, props])?;
         Ok(())
     }
 
     fn write_edge(&self, edge: &Edge) -> Result<(), GraphError> {
+        self.write_edge_json(
+            &edge.src,
+            &edge.dst,
+            &edge.label,
+            &serde_json::to_string(&edge.props)?,
+        )
+    }
+
+    fn write_edge_json(
+        &self,
+        src: &str,
+        dst: &str,
+        label: &str,
+        props: &str,
+    ) -> Result<(), GraphError> {
         self.conn
             .prepare_cached(
                 "INSERT INTO edges (src, dst, label, props) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(src, dst, label) DO UPDATE SET props = excluded.props",
             )?
-            .execute(params![
-                edge.src,
-                edge.dst,
-                edge.label,
-                serde_json::to_string(&edge.props)?
-            ])?;
+            .execute(params![src, dst, label, props])?;
         Ok(())
     }
 
@@ -704,6 +833,7 @@ mod tests {
             delete_node_ids: vec!["b".into()],
             upsert_nodes: vec![updated_node.clone(), node("e", "Symbol")],
             upsert_edges: vec![edge("a", "e", "DECIDES"), updated_edge.clone()],
+            ..GraphPatch::default()
         };
         assert!(
             store
@@ -758,6 +888,7 @@ mod tests {
                 upsert_nodes: vec![node("adr", "ADR")],
                 // Validation must reject stale input before even this bad write.
                 upsert_edges: vec![edge("adr", "missing", "DECIDES")],
+                ..GraphPatch::default()
             };
             assert!(
                 !store
@@ -833,6 +964,7 @@ mod tests {
             delete_node_ids: vec!["b".into()],
             upsert_nodes: vec![node("a", "ADR"), node("new", "Symbol")],
             upsert_edges: vec![edge("a", "new", "DECIDES"), edge("a", "missing", "DECIDES")],
+            ..GraphPatch::default()
         };
         let error = store
             .apply_patch_if_snapshot_matches(&expected, &patch)

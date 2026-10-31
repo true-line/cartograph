@@ -47,6 +47,7 @@ mod task_evidence;
 mod work_packets;
 
 use adapters_fw::events::Registries;
+use core_graph::packed::{PackedEdge, PackedNode};
 use core_graph::{Edge, GraphStore, Node, SqliteGraphStore};
 use findings::{Finding, FindingStore, NewFinding};
 use job_execution::{JobExecution, JobExecutionLocks};
@@ -216,6 +217,14 @@ impl OperationFacts {
         self.nodes
             .extend(patch.upsert_nodes.iter().map(|node| node.id.clone()));
         self.edges.extend(patch.upsert_edges.iter().map(edge_key));
+        self.nodes
+            .extend(patch.upsert_packed_nodes.iter().map(|node| node.id.clone()));
+        self.edges.extend(
+            patch
+                .upsert_packed_edges
+                .iter()
+                .map(|edge| (edge.src.clone(), edge.dst.clone(), edge.label.clone())),
+        );
     }
 
     fn nodes(&self) -> u64 {
@@ -2279,6 +2288,23 @@ fn reclaim_superseded_receipts(
     }
 }
 
+/// `Node` equality on packed facts: equal bytes are equal facts, and only
+/// differing bytes are decoded, so a `-0.0` or other equal-value spelling is
+/// still judged by value exactly as an unpacked comparison would (#725).
+fn same_node(a: &PackedNode, b: &PackedNode) -> Result<bool, core_graph::GraphError> {
+    Ok(a.id == b.id
+        && a.label == b.label
+        && (a.props_json() == b.props_json() || a.unpack()?.props == b.unpack()?.props))
+}
+
+/// [`same_node`] for edges.
+fn same_edge(a: &PackedEdge, b: &PackedEdge) -> Result<bool, core_graph::GraphError> {
+    Ok(a.src == b.src
+        && a.dst == b.dst
+        && a.label == b.label
+        && (a.props_json() == b.props_json() || a.unpack()?.props == b.unpack()?.props))
+}
+
 /// Publish `repo`'s facts, its source bindings, its coverage inventory and its
 /// per-fact receipt omission records in one write transaction.
 #[allow(clippy::too_many_arguments)]
@@ -2309,15 +2335,18 @@ fn load_into_graph_with_bindings_and_omissions(
         }),
     };
     // Last occurrence wins, in deterministic extraction order (SPEC-00 §4.4).
-    // Facts move out of the extraction; none is copied (#1235).
+    // Facts move out of the extraction and are packed as they move, so the
+    // publish holds compact JSON rather than `Value` trees (#1235, #725).
     let adapters_lang_ts::Extraction { nodes, edges, .. } = extraction;
     let extracted_nodes = nodes.len();
-    let mut current_nodes = std::collections::BTreeMap::<String, Node>::new();
+    let pack = |error: core_graph::GraphError| error.to_string();
+    let mut current_nodes = std::collections::BTreeMap::<String, PackedNode>::new();
     let mut colliding_ids = std::collections::BTreeSet::new();
     for node in nodes {
+        let node = PackedNode::pack(node).map_err(pack)?;
         let id = node.id.clone();
         if let Some(previous) = current_nodes.insert(id.clone(), node)
-            && previous != current_nodes[&id]
+            && !same_node(&previous, &current_nodes[&id]).map_err(pack)?
         {
             colliding_ids.insert(id);
         }
@@ -2327,20 +2356,32 @@ fn load_into_graph_with_bindings_and_omissions(
         edges: edges.len() as u64 - distinct_edge_count(&edges),
         node_collisions: colliding_ids.len() as u64,
     };
-    current_nodes.insert(repo_node.id.clone(), repo_node);
-    let current_edges = merge_edge_occurrences(edges);
-    let expected = graph.read_snapshot().map_err(|error| error.to_string())?;
-    // Borrowed, never cloned: the snapshot is the whole graph across every
-    // repo, so a second copy would double the publish peak (#725).
+    current_nodes.insert(
+        repo_node.id.clone(),
+        PackedNode::pack(repo_node).map_err(pack)?,
+    );
+    let current_edges = merge_edge_occurrences(edges)
+        .into_iter()
+        .map(|(key, edge)| Ok((key, PackedEdge::pack(edge)?)))
+        .collect::<Result<std::collections::BTreeMap<_, _>, core_graph::GraphError>>()
+        .map_err(pack)?;
+    // Packed, never decoded whole: the snapshot is the whole graph across
+    // every repo, so a `Value` copy would double the publish peak (#725).
+    let expected = graph.read_packed_snapshot().map_err(pack)?;
     let existing_nodes = expected
-        .0
+        .nodes
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect::<std::collections::BTreeMap<_, _>>();
     let existing_edges = expected
-        .1
+        .edges
         .iter()
-        .map(|edge| (edge_key(edge), edge))
+        .map(|edge| {
+            (
+                (edge.src.clone(), edge.dst.clone(), edge.label.clone()),
+                edge,
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut patch = core_graph::GraphPatch::default();
     let mut stats = ReconcileStats {
@@ -2353,7 +2394,9 @@ fn load_into_graph_with_bindings_and_omissions(
     };
     let mut remaining_edge_keys = std::collections::BTreeSet::new();
     for (key, edge) in &existing_edges {
-        if fact_owned_by_repo(&edge.props, repo) && !current_edges.contains_key(key) {
+        if !current_edges.contains_key(key)
+            && fact_owned_by_repo(&edge.unpack().map_err(pack)?.props, repo)
+        {
             patch
                 .delete_edges
                 .push((edge.src.clone(), edge.dst.clone(), edge.label.clone()));
@@ -2372,10 +2415,11 @@ fn load_into_graph_with_bindings_and_omissions(
         if current_nodes.contains_key(id) {
             continue;
         }
+        let props = node.unpack().map_err(pack)?.props;
         let has_remaining_incident = incident.contains(id);
-        let owned = fact_owned_by_repo(&node.props, repo) || id_explicitly_owned_by_repo(id, repo);
+        let owned = fact_owned_by_repo(&props, repo) || id_explicitly_owned_by_repo(id, repo);
         let orphan_placeholder =
-            node.props["placeholder"].as_bool() == Some(true) && !has_remaining_incident;
+            props["placeholder"].as_bool() == Some(true) && !has_remaining_incident;
         if (owned && (id_explicitly_owned_by_repo(id, repo) || !has_remaining_incident))
             || orphan_placeholder
         {
@@ -2385,19 +2429,21 @@ fn load_into_graph_with_bindings_and_omissions(
     }
     // Only changed facts enter the patch, and they move there.
     for node in current_nodes.into_values() {
-        if existing_nodes.get(node.id.as_str()) == Some(&&node) {
-            stats.unchanged += 1;
-        } else {
-            patch.upsert_nodes.push(node);
-            stats.inserted_or_updated += 1;
+        match existing_nodes.get(node.id.as_str()) {
+            Some(existing) if same_node(existing, &node).map_err(pack)? => stats.unchanged += 1,
+            _ => {
+                patch.upsert_packed_nodes.push(node);
+                stats.inserted_or_updated += 1;
+            }
         }
     }
     for (key, edge) in current_edges {
-        if existing_edges.get(&key) == Some(&&edge) {
-            stats.unchanged += 1;
-        } else {
-            patch.upsert_edges.push(edge);
-            stats.inserted_or_updated += 1;
+        match existing_edges.get(&key) {
+            Some(existing) if same_edge(existing, &edge).map_err(pack)? => stats.unchanged += 1,
+            _ => {
+                patch.upsert_packed_edges.push(edge);
+                stats.inserted_or_updated += 1;
+            }
         }
     }
     if !graph
@@ -7776,6 +7822,7 @@ export function queue() {
             }],
             delete_node_ids: vec!["adr:stale".into()],
             delete_edges: vec![key("adr:a", "sym:x")],
+            ..Default::default()
         });
         assert_eq!(
             published.nodes,
@@ -7851,6 +7898,97 @@ export function queueOrder() {
             store.fact_counts().unwrap(),
             (published.nodes(), published.edges())
         );
+    }
+
+    #[test]
+    fn packed_publication_keeps_value_equality_and_stored_rows() {
+        // AC-0529: publication packs facts as they move. A fact whose stored
+        // bytes spell an equal value differently is unchanged and not
+        // rewritten, a repeated id with differing props is a collision, and
+        // republishing the same extraction changes nothing. Floats the
+        // default fast parser misrounds keep their exact value (#1525).
+        let repo = "local/packed";
+        let hard = serde_json::json!({
+            "a": -2.481203691041865e275,
+            "b": 51.248178375505404,
+            "c": 1.0715660391465826e-75,
+        });
+        let next_up = f64::from_bits((-2.481203691041865e275_f64).to_bits() - 1);
+        let node = |id: &str, props: serde_json::Value| Node {
+            id: format!("sym:{repo}@{id}"),
+            label: "Symbol".into(),
+            props,
+        };
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        store
+            .put_node(&node("zero", serde_json::json!({"x": -0.0})))
+            .unwrap();
+        store.put_node(&node("float", hard.clone())).unwrap();
+        let mut extraction = adapters_lang_ts::Extraction::default();
+        extraction.nodes = vec![
+            node("zero", serde_json::json!({"x": 0.0})),
+            node("dup", serde_json::json!({"n": 1})),
+            node("dup", serde_json::json!({"n": 2})),
+            node("float", hard.clone()),
+            node("ulp", serde_json::json!({"a": -2.481203691041865e275})),
+            node("ulp", serde_json::json!({"a": next_up})),
+            node(
+                "other",
+                serde_json::json!({"nested": {"b": [1, 2.5], "a": null}}),
+            ),
+        ];
+        extraction.edges = vec![
+            Edge {
+                src: format!("sym:{repo}@dup"),
+                dst: format!("sym:{repo}@other"),
+                label: "CALLS".into(),
+                props: serde_json::json!({"w": 1}),
+            };
+            2
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let first =
+            crate::load_into_graph(&mut store, &extraction, repo, dir.path(), "c1").unwrap();
+        assert_eq!(
+            first.unchanged, 2,
+            "-0.0 and 0.0 are the same value; exact floats are unchanged"
+        );
+        assert_eq!(
+            first.published.merged.node_collisions, 2,
+            "a one-ulp difference is a different value"
+        );
+        assert_eq!(first.published.merged.nodes, 2);
+        assert_eq!(first.published.merged.edges, 1);
+        let zero: String = store
+            .read_packed_snapshot()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.id.ends_with("@zero"))
+            .unwrap()
+            .props_json()
+            .to_owned();
+        assert_eq!(zero, r#"{"x":-0.0}"#, "an unchanged fact is not rewritten");
+        let (nodes, _) = store.read_snapshot().unwrap();
+        let dup = nodes.iter().find(|n| n.id.ends_with("@dup")).unwrap();
+        assert_eq!(
+            dup.props,
+            serde_json::json!({"n": 2}),
+            "last occurrence wins"
+        );
+        let float = nodes.iter().find(|n| n.id.ends_with("@float")).unwrap();
+        assert_eq!(float.props, hard);
+        let ulp = nodes.iter().find(|n| n.id.ends_with("@ulp")).unwrap();
+        assert_eq!(
+            ulp.props["a"].as_f64().map(f64::to_bits),
+            Some(next_up.to_bits())
+        );
+
+        let again =
+            crate::load_into_graph(&mut store, &extraction, repo, dir.path(), "c1").unwrap();
+        assert_eq!(again.inserted_or_updated, 0);
+        assert_eq!(again.deleted, 0);
+        assert_eq!(again.unchanged, first.unchanged + first.inserted_or_updated);
     }
 
     #[test]
