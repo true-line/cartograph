@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
-    os::unix::fs::MetadataExt,
+    io::{Read, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -89,6 +89,33 @@ fn hash(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+// Copy only caller-verified buffers, never reopen their mutable source paths.
+// The random private directory isolates caller-path swaps, not hostile same-UID
+// access to harness-owned files. These extra buffers are harness ownership,
+// outside the claimed MCP logical-component evidence and any RSS guarantee.
+fn private_decision_copy(
+    files: &BTreeMap<String, Vec<u8>>,
+) -> (tempfile::TempDir, agents::DecisionLog) {
+    assert_eq!(files.len(), FROZEN_DECISION_STATE_FILES.len());
+    let directory = tempfile::Builder::new()
+        .prefix("cartograph-captured-decisions-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    for (name, _, _) in FROZEN_DECISION_STATE_FILES {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.path().join(name))
+            .unwrap();
+        file.write_all(files.get(name).expect("complete verified state triplet"))
+            .unwrap();
+    }
+    let decisions = agents::DecisionLog::open(directory.path().join("state.db")).unwrap();
+    (directory, decisions)
 }
 
 fn frozen_files() -> Value {
@@ -227,6 +254,87 @@ fn captured_decision_state_identity_is_pinned() {
     assert!(verify_frozen_decision_state(&missing).is_err());
 }
 
+// AC-0513: SQLite consumes the verified WAL bytes despite a later caller-path swap.
+#[test]
+fn captured_decision_copy_survives_caller_path_replacement() {
+    let source = tempfile::tempdir().unwrap();
+    let replacement = tempfile::tempdir().unwrap();
+    let fixture = |directory: &std::path::Path, seed: &str| {
+        let mut log = agents::DecisionLog::open(directory.join("state.db")).unwrap();
+        let assertion = agents::CuratableAssertion {
+            subject_id: format!("symbol:{seed}"),
+            summary: "Synthetic inferred assertion".into(),
+            provenance: core_prov::Provenance::new(
+                core_prov::Tier::Semantic,
+                core_prov::ConfidenceTier::InferredWeak,
+                vec![core_prov::EvidenceRef {
+                    repo: "fixture/repo".into(),
+                    path: "source.ts".into(),
+                    byte_start: 0,
+                    byte_end: 1,
+                    commit_sha: "fixture".into(),
+                }],
+                "fixture",
+                seed.as_bytes(),
+            )
+            .unwrap(),
+        };
+        log.record_assertion(&assertion, agents::AssertionDecision::Rejected, None)
+            .unwrap();
+        let files: BTreeMap<String, Vec<u8>> = FROZEN_DECISION_STATE_FILES
+            .into_iter()
+            .map(|(name, _, _)| (name.to_owned(), fs::read(directory.join(name)).unwrap()))
+            .collect();
+        assert!(files["state.db-wal"].len() > 32);
+        (log, files, assertion.provenance.content_hash)
+    };
+    let (source_log, verified, original_hash) = fixture(source.path(), "original");
+    let (replacement_log, other, replacement_hash) = fixture(replacement.path(), "replacement");
+    // These hashes stand for the initial verification; retain those exact bytes.
+    let frozen_hashes: BTreeMap<_, _> =
+        verified.iter().map(|(n, b)| (n.clone(), hash(b))).collect();
+    drop(source_log);
+    drop(replacement_log);
+    for (name, bytes) in &other {
+        fs::write(source.path().join(name), bytes).unwrap();
+    }
+    assert_ne!(
+        hash(&fs::read(source.path().join("state.db-wal")).unwrap()),
+        frozen_hashes["state.db-wal"]
+    );
+    let (private, decisions) = private_decision_copy(&verified);
+    assert!(!private.path().starts_with(source.path()));
+    assert_eq!(
+        fs::metadata(private.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for (name, _, _) in FROZEN_DECISION_STATE_FILES {
+        assert_eq!(
+            fs::metadata(private.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let observed = decisions.read_curation_observation(&[]).unwrap();
+    assert_eq!(
+        observed.rejected_hashes,
+        [original_hash].into_iter().collect()
+    );
+    let swapped = agents::DecisionLog::open(source.path().join("state.db")).unwrap();
+    assert_eq!(
+        swapped
+            .read_curation_observation(&[])
+            .unwrap()
+            .rejected_hashes,
+        [replacement_hash].into_iter().collect()
+    );
+    drop(decisions);
+    drop(private);
+}
+
 // AC-0513: the stored graph identity is pinned to the historical capture.
 #[test]
 fn captured_graph_snapshot_id_is_pinned() {
@@ -295,6 +403,7 @@ fn captured_seventeen_file_capability_stories_without_provider() {
         "state.db-shm",
     ];
     assert_eq!(receipt.files.len(), required.len());
+    let mut verified_state = BTreeMap::new();
     for name in required {
         let expected = receipt
             .files
@@ -303,6 +412,9 @@ fn captured_seventeen_file_capability_stories_without_provider() {
         let bytes = read(&scratch.join(name), cap);
         assert_eq!(u64::try_from(bytes.len()).unwrap(), expected.bytes);
         assert_eq!(hash(&bytes), expected.sha256);
+        if name.starts_with("state.db") {
+            verified_state.insert(name.to_owned(), bytes);
+        }
     }
     // Receipt copy hashes are not the expected decision state; bind them to the
     // separately reviewed current baseline before opening either SQLite store.
@@ -386,7 +498,10 @@ fn captured_seventeen_file_capability_stories_without_provider() {
         report.omission,
         Some(semantic::knowledge_ingest::NO_PROVIDER)
     );
-    let decisions = Mutex::new(agents::DecisionLog::open(scratch.join("state.db")).unwrap());
+    // Keep the private directory alive until after the DecisionLog/session.
+    let (_decision_directory, decisions) = private_decision_copy(&verified_state);
+    drop(verified_state);
+    let decisions = Mutex::new(decisions);
     let session = ReadSession::acquire_with_overlay(
         &graph,
         Some(overlay.as_ref()),
