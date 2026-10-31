@@ -280,7 +280,11 @@ fn produce(
     edges: &[&Edge],
     flows: &[Flow],
     gaps: usize,
-    (mode, rejected): (ExportMode, &BTreeSet<String>),
+    (mode, rejected, stories): (
+        ExportMode,
+        &BTreeSet<String>,
+        Option<&capabilities::Stories<'_>>,
+    ),
     max: Option<usize>,
 ) -> Result<SpecArtifact, render::RenderLimit> {
     use producers::Output;
@@ -288,7 +292,10 @@ fn produce(
         content,
         assertions,
     } = match a.id {
-        "user-stories" => producers::stories(nodes, max)?,
+        "user-stories" => match stories {
+            Some(stories) => producers::stories_with_support(nodes, Some(stories), max)?,
+            None => producers::stories(nodes, max)?,
+        },
         "flow-dossiers" => producers::flow(nodes, edges, flows, max)?,
         "topology" => producers::topology(nodes, edges, max)?,
         "data-model" => producers::data(nodes, edges, max)?,
@@ -398,7 +405,7 @@ pub fn compile_spec_selected(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, None),
+        (requested_ids, limits, None, None),
     )
 }
 
@@ -425,7 +432,7 @@ pub fn compile_spec_selected_with_security(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, Some(security)),
+        (requested_ids, limits, Some(security), None),
     )
 }
 fn compile_selected(
@@ -438,9 +445,10 @@ fn compile_selected(
         &[&str],
         SelectedCompileLimits,
         Option<crate::SecurityLimits>,
+        Option<&capabilities::Stories<'_>>,
     ),
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
-    let (requested_ids, limits, security) = selection;
+    let (requested_ids, limits, security, stories) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
             return Err(ArtifactSelectionError::UnknownArtifact { index });
@@ -486,7 +494,7 @@ fn compile_selected(
                 &edges,
                 &projection.flows,
                 gaps,
-                (mode, rejected),
+                (mode, rejected, stories),
                 Some(remaining),
             ) {
                 Ok(artifact) => {
@@ -550,3 +558,23 @@ pub(crate) fn bundle_from_filtered(
 #[cfg(test)]
 #[path = "selected_security_tests.rs"]
 mod security_tests;
+
+// Same selected dispatcher and official artifact identity; never a second compiler.
+pub(super) fn compile_stories_with_support(
+    base: &core_graph::RevisionedSnapshot,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    stories: &capabilities::Stories<'_>,
+) -> SelectedArtifactOutcome {
+    compile_selected(
+        &base.graph.0,
+        &base.graph.1,
+        &[],
+        mode,
+        rejected,
+        (&["user-stories"], limits, None, Some(stories)),
+    )
+    .expect("official artifact id")
+    .remove(0)
+}
