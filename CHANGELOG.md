@@ -1,5 +1,14 @@
 # cartograph
 
+## 0.55.2
+
+### Patch Changes
+
+- 1c92daf: Add a library-only weak Actor caller-set producer with an explicit versioned Allow convention and exact import-bound permission-site evidence. Automatic publication and compiler-visible assumption rendering remain separate.
+- 62893d8: Let graph recovery stages select packed facts by identity, such as specific ids or edge endpoints, and decode only those, in preparation for bounding ingest memory on large repositories.
+- e4af230: Read every stored or packed number back with its exact value: JSON floats are now parsed correctly rounded, so a fact never changes by a last digit between writing and reading.
+- 36101cb: Add lossless packed fact types and an order-preserving packed fact store to the graph core, the building block for bounding ingest memory on large repositories.
+
 ## 0.55.1
 
 ### Patch Changes
