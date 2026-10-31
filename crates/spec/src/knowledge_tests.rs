@@ -1,5 +1,5 @@
-//! #1443 Capability-only draft: real existing adapter facts, no live ingestion.
-// AC-0500: Capability support, ordering, abstention and exact per-fact omissions.
+//! #1443 deterministic knowledge producer tests; no live ingestion.
+// Capability and DomainEntity candidates consume existing base extractor facts.
 use super::*;
 use core_graph::StoreRevision;
 const PATH: &str = "packages/core/src/api/resolvers/shop/shop-order.resolver.ts";
@@ -39,6 +39,297 @@ fn capability(fact: &OverlayFact) -> &Node {
     };
     node
 }
+
+fn jpa_entity_fixture() -> RevisionedSnapshot {
+    let source = br#"package com.demo;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+@Entity
+@Table(name = "orders")
+public class Order {
+    @Id private Integer id;
+    private String status;
+}
+"#;
+    let extraction = adapters_lang_java::extract_source(
+        source,
+        "src/main/java/com/demo/Order.java",
+        &adapters_lang_java::SourceId {
+            repo: "local/demo",
+            commit: "fixture-commit",
+        },
+    )
+    .unwrap();
+    RevisionedSnapshot {
+        revision: StoreRevision {
+            graph_instance: "fixture".into(),
+            generation: 1,
+        },
+        graph: (extraction.nodes, extraction.edges),
+    }
+}
+
+fn sqlalchemy_entity_fixture() -> RevisionedSnapshot {
+    // Exact `DataEntity` shape and provenance construction from
+    // adapters-lang-python's SQLAlchemy resolver and users-model fixture.
+    let id = "data:local/python-service@sqlalchemy:users";
+    let repo = "local/python-service";
+    let commit = "abc123";
+    let evidence = [
+        ("app/models.py", 10, 20),
+        ("app/models.py", 30, 40),
+        ("app/models.py", 50, 60),
+        ("app/models.py", 70, 80),
+        ("app/mixins.py", 90, 100),
+    ]
+    .into_iter()
+    .map(|(path, byte_start, byte_end)| EvidenceRef {
+        repo: repo.into(),
+        path: path.into(),
+        byte_start,
+        byte_end,
+        commit_sha: commit.into(),
+    })
+    .collect();
+    let provenance = Provenance::new(
+        Tier::Deterministic,
+        ConfidenceTier::Confirmed,
+        evidence,
+        "t0.adapter-python",
+        format!("DataEntity {id}").as_bytes(),
+    )
+    .unwrap();
+    RevisionedSnapshot {
+        revision: StoreRevision {
+            graph_instance: "fixture-python".into(),
+            generation: 1,
+        },
+        graph: (
+            vec![Node {
+                id: id.into(),
+                label: "DataEntity".into(),
+                props: serde_json::json!({
+                    "name": "User",
+                    "storage": "sqlalchemy",
+                    "store": "users",
+                    "table": "users",
+                    "columns": [
+                        { "name": "id", "type": "Integer", "primary_key": true },
+                        { "name": "email", "type": "String", "nullable": false },
+                        { "name": "active", "type": "Boolean" },
+                        { "name": "created_at", "type": "DateTime", "nullable": false }
+                    ],
+                    "framework": "sqlalchemy",
+                    "language": "python",
+                    "prov": provenance
+                }),
+            }],
+            Vec::new(),
+        ),
+    }
+}
+
+#[test]
+// AC-0511: ORM-derived candidates and mappings stay cited in the overlay; malformed and oversized pairs fail closed.
+fn orm_domain_entities_map_real_jpa_facts_in_the_overlay_only() {
+    use core_graph::overlay::{OverlayRead, OverlayRecipe, OverlayStore};
+
+    let base = jpa_entity_fixture();
+    let before = base.clone();
+    let data = base
+        .graph
+        .0
+        .iter()
+        .find(|node| node.label == "DataEntity")
+        .expect("real JPA adapter emits the persistence fact");
+    assert_eq!(data.id, "data:local/demo@jpa:Order");
+
+    let report = derive_orm_domain_entities(&base);
+    assert_eq!(report.oversized_models, 0);
+    let facts = report.facts.clone();
+    assert_eq!(facts.len(), 2); // candidate plus the spec-required MAPS_TO
+    let candidate = facts
+        .iter()
+        .find_map(|fact| match &fact.item {
+            OverlayItem::Node(node) if node.label == "DomainEntity" => Some(node),
+            _ => None,
+        })
+        .unwrap();
+    let mapping = facts
+        .iter()
+        .find_map(|fact| match &fact.item {
+            OverlayItem::Edge(edge) if edge.label == "MAPS_TO" => Some(edge),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(candidate.props["name"], "Order"); // display only
+    assert_eq!(candidate.props["backing_data_entity_id"], data.id);
+    assert_eq!(mapping.src, candidate.id);
+    assert_eq!(mapping.dst, data.id);
+    for fact in &facts {
+        assert_eq!(fact.cites, BTreeSet::from([BaseRef::Node(data.id.clone())]));
+        let props = match &fact.item {
+            OverlayItem::Node(node) => &node.props,
+            OverlayItem::Edge(edge) => &edge.props,
+        };
+        let provenance: Provenance = serde_json::from_value(props["prov"].clone()).unwrap();
+        assert_eq!(provenance.tier, Tier::Semantic);
+        assert_eq!(provenance.confidence_tier, ConfidenceTier::InferredWeak);
+        assert_eq!(
+            provenance.method,
+            ProducingMethod::Rule {
+                rule: DOMAIN_ENTITY_ORM_RULE.into(),
+                version: DOMAIN_ENTITY_ORM_RULE_VERSION.into(),
+            }
+        );
+        assert_eq!(
+            provenance.evidence,
+            serde_json::from_value::<Provenance>(data.props["prov"].clone())
+                .unwrap()
+                .evidence
+        );
+        assert!(provenance.validate().is_ok());
+    }
+
+    let mut reversed = base.clone();
+    reversed.graph.0.reverse();
+    reversed.graph.1.reverse();
+    assert_eq!(derive_orm_domain_entities(&reversed), report);
+    assert_eq!(base, before);
+
+    let mut overlay = OverlayStore::open_in_memory().unwrap();
+    overlay.bind_instance("fixture").unwrap();
+    let identity = overlay
+        .publish(
+            &base,
+            OverlayRecipe {
+                recipe: DOMAIN_ENTITY_ORM_RULE.into(),
+                embedding_namespace: None,
+                provider_ran: false,
+            },
+            facts.clone(),
+        )
+        .unwrap();
+    match overlay.read(&base.revision).unwrap() {
+        OverlayRead::Current {
+            identity: read_identity,
+            facts: read_facts,
+            ..
+        } => {
+            assert_eq!(read_identity, identity);
+            let key = |fact: &OverlayFact| match &fact.item {
+                OverlayItem::Node(node) => format!("n\0{}", node.id),
+                OverlayItem::Edge(edge) => format!("e\0{}\0{}\0{}", edge.src, edge.dst, edge.label),
+            };
+            let expected: BTreeMap<_, _> = facts.iter().map(|fact| (key(fact), fact)).collect();
+            let actual: BTreeMap<_, _> = read_facts.iter().map(|fact| (key(fact), fact)).collect();
+            assert_eq!(actual, expected);
+        }
+        other => panic!("published overlay must read current: {other:?}"),
+    }
+    assert_eq!(base, before); // candidate and mapping never enter the base graph
+}
+
+#[test]
+fn orm_domain_entities_accept_sqlalchemy_shape_and_reject_wrong_extractor() {
+    let base = sqlalchemy_entity_fixture();
+    let report = derive_orm_domain_entities(&base);
+    assert_eq!(report.oversized_models, 0);
+    assert_eq!(report.facts.len(), 2);
+    let candidate = report
+        .facts
+        .iter()
+        .find_map(|fact| match &fact.item {
+            OverlayItem::Node(node) if node.label == "DomainEntity" => Some(node),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(candidate.props["name"], "User");
+    assert_eq!(candidate.props["storage"], "sqlalchemy");
+    assert_eq!(candidate.props["table"], "users");
+
+    let mut wrong_extractor = base;
+    wrong_extractor.graph.0[0].props["prov"]["extractor_id"] = "t0.adapter-java".into();
+    assert!(
+        derive_orm_domain_entities(&wrong_extractor)
+            .facts
+            .is_empty()
+    );
+}
+
+#[test]
+fn orm_domain_entities_omit_oversized_candidate_and_mapping_together() {
+    let mut base = jpa_entity_fixture();
+    let data = base
+        .graph
+        .0
+        .iter_mut()
+        .find(|node| node.label == "DataEntity")
+        .unwrap();
+    data.props["name"] = serde_json::json!("x".repeat(MAX_FACT_BYTES));
+    let report = derive_orm_domain_entities(&base);
+    assert!(report.facts.is_empty());
+    assert_eq!(report.oversized_models, 1);
+}
+
+#[test]
+fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
+    let original = jpa_entity_fixture();
+    assert_eq!(derive_orm_domain_entities(&original).facts.len(), 2);
+    let data_index = original
+        .graph
+        .0
+        .iter()
+        .position(|node| node.label == "DataEntity")
+        .unwrap();
+    for case in [
+        "missing-provenance",
+        "malformed-provenance",
+        "weak-provenance",
+        "missing-table",
+        "unresolved-table",
+        "empty-fields",
+        "unsupported-storage",
+        "ambiguous-id",
+    ] {
+        let mut base = original.clone();
+        if case == "ambiguous-id" {
+            let duplicate = base.graph.0[data_index].clone();
+            base.graph.0.push(duplicate);
+        } else {
+            let node = &mut base.graph.0[data_index];
+            match case {
+                "missing-provenance" => {
+                    node.props.as_object_mut().unwrap().remove("prov");
+                }
+                "malformed-provenance" => {
+                    node.props["prov"] = serde_json::json!({"tier":"not-a-tier"})
+                }
+                "weak-provenance" => node.props["prov"]["confidence_tier"] = "InferredWeak".into(),
+                "missing-table" => {
+                    node.props.as_object_mut().unwrap().remove("table");
+                }
+                "unresolved-table" => node.props["table_source"] = "unresolved".into(),
+                "empty-fields" => node.props["fields"] = serde_json::json!([]),
+                "unsupported-storage" => node.props["storage"] = "unknown".into(),
+                _ => unreachable!(),
+            }
+        }
+        assert!(derive_orm_domain_entities(&base).facts.is_empty(), "{case}");
+    }
+    let mut no_structural_fact = original;
+    no_structural_fact
+        .graph
+        .0
+        .retain(|node| node.label != "DataEntity");
+    assert!(
+        derive_orm_domain_entities(&no_structural_fact)
+            .facts
+            .is_empty()
+    );
+}
+
 // AC-0500: real adapter pairs retain all support and weak provenance.
 #[test]
 fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {

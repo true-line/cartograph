@@ -21,6 +21,7 @@ blake3 = { workspace = true }
 [dev-dependencies]
 rusqlite = { workspace = true }
 adapters-lang-ts = { workspace = true }
+adapters-lang-java = { workspace = true }
 context-hub = { workspace = true }
 source-capture = { workspace = true }
 tempfile = "3"
