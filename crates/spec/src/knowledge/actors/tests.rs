@@ -821,6 +821,22 @@ fn actor_stories_refuse_invalid_and_count_hidden_candidates() {
             .is_err()
         );
     }
+    // A resealed source site and matching full candidate cannot bypass the
+    // producer's corrected property syntax or escaped-Public exclusion.
+    for argument in ["<script>bad</script>", "Owner Admin", r"\u0050ublic"] {
+        let invalid = base(vec![endpoint("ep:invalid", &[argument])]);
+        let endpoint = &invalid.graph.0[0];
+        let syntax: PermissionSite =
+            serde_json::from_value(endpoint.props["permission_site"].clone()).unwrap();
+        let forged = actor(endpoint, &syntax, ACTOR_ALLOW_ASSUMPTION);
+        assert!(verify_actor(&invalid, &forged).is_none());
+        for mode in [
+            crate::ExportMode::BestEffort,
+            crate::ExportMode::VerifiedOnly,
+        ] {
+            assert!(run(&invalid, std::slice::from_ref(&forged), mode, &rejected).is_err());
+        }
+    }
     let mut duplicate = facts.clone();
     duplicate.push(facts[0].clone());
     assert!(
@@ -868,8 +884,8 @@ fn actor_stories_refuse_invalid_and_count_hidden_candidates() {
 #[test]
 fn actor_stories_bound_workspace_and_complete_escaped_output() {
     let source = base(vec![endpoint(
-        "ep:<img src=x>",
-        &["<script>bad</script>", "Owner", "Owner"],
+        "ep:<img src=x><script>bad</script>",
+        &[r"\u003cscript", "Owner", "Owner"],
     )]);
     let facts = derive_permission_actors(&source).facts;
     assert_eq!(facts.len(), 1);
@@ -886,6 +902,12 @@ fn actor_stories_bound_workspace_and_complete_escaped_output() {
     };
     let artifact = produced(run(usize::MAX));
     assert!(!artifact.content.contains("\n<script>"));
+    assert!(artifact.content.contains(r"\\u003cscript"));
+    assert!(
+        artifact
+            .content
+            .contains("ep:<img src=x><script>bad</script>")
+    );
     assert!(artifact.content.contains("    ["));
     let bytes = artifact.content.len() + serde_json::to_vec(&artifact.assertions).unwrap().len();
     assert_eq!(produced(run(bytes)), artifact);

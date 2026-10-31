@@ -237,6 +237,22 @@ fn compile_capability_stories(
             }
         }
     }
+    let compile = |stories: &Stories<'_>| match security {
+        Some(security) => selected::compile_stories_with_flows_and_security(
+            base,
+            flows,
+            mode,
+            rejected,
+            limits,
+            stories,
+            Some(security),
+        ),
+        None => selected::compile_stories_with_support(base, mode, rejected, limits, stories),
+    };
+    // Preserve the Capability-only workspace: no Actor index is constructed.
+    if actors.is_empty() {
+        return Ok(compile(&stories));
+    }
     let mut actor_order = BTreeMap::new();
     for fact in actors {
         let endpoint = crate::knowledge::actors::verify_actor(base, fact)
@@ -269,18 +285,7 @@ fn compile_capability_stories(
             stories.filtered += 1;
         }
     }
-    Ok(match security {
-        Some(security) => selected::compile_stories_with_flows_and_security(
-            base,
-            flows,
-            mode,
-            rejected,
-            limits,
-            &stories,
-            Some(security),
-        ),
-        None => selected::compile_stories_with_support(base, mode, rejected, limits, &stories),
-    })
+    Ok(compile(&stories))
 }
 
 pub(super) fn support_id(capability: &str, cite: &BaseRef) -> String {
