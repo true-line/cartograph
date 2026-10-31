@@ -2382,6 +2382,58 @@ mod tests {
         }
     }
 
+    // AC-0524 (T-0524): each Markdown register and its JSON index come from
+    // one producer pass in ordinary compilation, with unchanged artifacts.
+    #[test]
+    fn paired_register_artifacts_match_single_artifact_compilation() {
+        let (mut nodes, mut edges, flows) = fixture();
+        let (t, gap) = (Tier::Deterministic, ConfidenceTier::Gap);
+        for i in 0..crate::rules::RULE_EVIDENCE_FLAT_LIMIT + 5 {
+            let id = format!("rule:{i:03}");
+            nodes.push(node(&id, "BusinessRule", t, ConfidenceTier::Confirmed));
+            nodes.push(node(&format!("gap:{i:03}"), "Gap", t, gap));
+            edges.push(edge(&id, &format!("gap:{i:03}"), "GUARDS", t, gap));
+        }
+        let paired = [
+            "us-tm",
+            "us-tm-index",
+            "gap-register",
+            "gap-register-index",
+            "rule-evidence",
+            "rule-evidence-index",
+        ];
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());
+            for id in paired {
+                let artifact = full.artifacts.iter().find(|a| a.id == id).unwrap();
+                let selected = compile_spec_selected(
+                    &nodes,
+                    &edges,
+                    &flows,
+                    mode,
+                    &BTreeSet::new(),
+                    &[id],
+                    selected_limits(usize::MAX),
+                )
+                .unwrap();
+                assert_eq!(
+                    selected,
+                    vec![SelectedArtifactOutcome::Produced(artifact.clone())],
+                    "{id}"
+                );
+            }
+            let rules = full
+                .artifacts
+                .iter()
+                .find(|a| a.id == "rule-evidence")
+                .unwrap();
+            assert!(
+                rules.content.contains("observations from"),
+                "grouped rule Markdown"
+            );
+        }
+    }
+
     fn selected_limits(max_bytes: usize) -> SelectedCompileLimits {
         SelectedCompileLimits {
             max_bytes,

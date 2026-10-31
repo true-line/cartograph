@@ -537,9 +537,65 @@ pub(crate) fn bundle_from_filtered(
         .iter()
         .filter(|n| n.label == "Finding" && n.props["kind"].as_str() == Some("security"))
         .count();
-    let artifacts: Vec<_> = ARTIFACTS
-        .iter()
-        .map(|a| {
+    // Each Markdown register and its JSON index come from one producer pass;
+    // the index artifact follows its Markdown artifact in ARTIFACTS (#1478).
+    let mut artifacts = Vec::with_capacity(ARTIFACTS.len());
+    let mut pending_index: Option<(&str, String)> = None;
+    for a in ARTIFACTS {
+        if let Some((id, content)) = pending_index.take() {
+            assert_eq!(a.id, id, "paired index follows its Markdown artifact");
+            artifacts.push(identified_artifact(
+                a.id,
+                a.file,
+                a.title,
+                a.format,
+                content,
+                Vec::new(),
+            ));
+            continue;
+        }
+        let pair = match a.id {
+            "us-tm" => Some((
+                "us-tm-index",
+                registers::matrix_selected(edges, mode, true, true, None)
+                    .map(|o| (o.markdown, o.index, o.assertions)),
+            )),
+            "gap-register" => Some((
+                "gap-register-index",
+                registers::gap_selected(nodes, edges, flows, gap_count, mode, true, true, None)
+                    .map(|o| (o.markdown, o.index, o.assertions)),
+            )),
+            "rule-evidence" => Some((
+                "rule-evidence-index",
+                crate::rules::inventory_selected(
+                    nodes,
+                    edges,
+                    mode,
+                    crate::rules::InventorySelection {
+                        markdown: true,
+                        index: true,
+                    },
+                    None,
+                )
+                .map(|o| (o.markdown, o.index, o.assertions))
+                .map_err(|_| registers::RegisterLimit),
+            )),
+            _ => None,
+        };
+        if let Some((index_id, output)) = pair {
+            let (markdown, index, assertions) = output.expect("unbounded native artifact");
+            artifacts.push(identified_artifact(
+                a.id,
+                a.file,
+                a.title,
+                a.format,
+                markdown.expect("paired Markdown content"),
+                assertions,
+            ));
+            pending_index = Some((index_id, index.expect("paired index content")));
+            continue;
+        }
+        artifacts.push(
             produce(
                 a,
                 nodes,
@@ -549,9 +605,10 @@ pub(crate) fn bundle_from_filtered(
                 (mode, rejected, None),
                 None,
             )
-            .expect("unbounded native artifact")
-        })
-        .collect();
+            .expect("unbounded native artifact"),
+        );
+    }
+    assert!(pending_index.is_none(), "paired index artifact missing");
     let assertion_count = artifacts.iter().map(|a| a.assertions.len()).sum();
     SpecBundle {
         mode,
