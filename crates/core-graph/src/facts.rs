@@ -59,15 +59,16 @@ impl FactStore {
 
     /// Run `stage` over the nodes whose label is in `labels`, in store order.
     ///
-    /// The first `k` results replace the `k` selected slots in place, and any
-    /// further results are appended after every held node. This equals running
-    /// the stage over the whole node list when the stage only reads the
-    /// selected labels, edits them in place and appends; a stage that removes
-    /// selected nodes must not use it.
+    /// The stage edits the selected nodes in place through a slice, so it
+    /// cannot remove or add any of them, and pushes new nodes onto `added`.
+    /// Edited nodes go back into their slots and added nodes are appended
+    /// after every held node. This equals running the stage over the whole
+    /// node list when the stage reads only the selected labels, edits those
+    /// nodes in place and appends; a stage that removes nodes cannot use it.
     pub fn update_nodes<T>(
         &mut self,
         labels: &[&str],
-        stage: impl FnOnce(&mut Vec<Node>) -> T,
+        stage: impl FnOnce(&mut [Node], &mut Vec<Node>) -> T,
     ) -> Result<T, GraphError> {
         let slots: Vec<usize> = (0..self.nodes.len())
             .filter(|&index| labels.contains(&self.nodes[index].label.as_str()))
@@ -76,17 +77,22 @@ impl FactStore {
             .iter()
             .map(|&index| self.nodes[index].unpack())
             .collect::<Result<Vec<_>, _>>()?;
-        let output = stage(&mut selected);
-        if selected.len() < slots.len() {
-            return Err(GraphError::FactStore("a stage removed selected nodes"));
+        let mut added = Vec::new();
+        let output = stage(&mut selected, &mut added);
+        // Pack everything before writing, so a refused fact leaves the store
+        // as it was.
+        let selected = selected
+            .into_iter()
+            .map(PackedNode::pack)
+            .collect::<Result<Vec<_>, _>>()?;
+        let added = added
+            .into_iter()
+            .map(PackedNode::pack)
+            .collect::<Result<Vec<_>, _>>()?;
+        for (&index, node) in slots.iter().zip(selected) {
+            self.nodes[index] = node;
         }
-        let mut results = selected.into_iter();
-        for (&index, node) in slots.iter().zip(results.by_ref()) {
-            self.nodes[index] = PackedNode::pack(node)?;
-        }
-        for node in results {
-            self.nodes.push(PackedNode::pack(node)?);
-        }
+        self.nodes.extend(added);
         Ok(output)
     }
 
@@ -128,19 +134,20 @@ mod tests {
     }
 
     /// A stage that reads only Endpoints, edits them in place and appends.
-    fn enrich(nodes: &mut Vec<Node>) -> usize {
+    fn enrich(nodes: &mut [Node], added: &mut Vec<Node>) -> usize {
         let endpoints = nodes.iter().filter(|n| n.label == "Endpoint").count();
         for node in nodes.iter_mut().filter(|n| n.label == "Endpoint") {
             node.props["enriched"] = json!(true);
         }
-        nodes.push(node("ep:new", "Endpoint", 9));
+        added.push(node("ep:new", "Endpoint", 9));
         endpoints
     }
 
     #[test]
     fn fact_store_stages_match_whole_list_stages_and_keep_order() {
         // AC-0527: a label-selected stage equals the same stage over the whole
-        // list, slots and order are kept, and removal is refused.
+        // list, slots and order are kept, and a fact that cannot be packed
+        // leaves the store unchanged.
         let nodes = vec![
             node("sym:a", "Symbol", 1),
             node("ep:a", "Endpoint", 2),
@@ -151,7 +158,9 @@ mod tests {
         let edges = vec![edge("sym:a", "ep:a"), edge("dup", "ep:b")];
 
         let mut whole = nodes.clone();
-        let expected_count = enrich(&mut whole);
+        let mut appended = Vec::new();
+        let expected_count = enrich(&mut whole, &mut appended);
+        whole.extend(appended);
 
         let mut store = FactStore::from_facts(nodes, edges.clone()).unwrap();
         let count = store.update_nodes(&["Endpoint"], enrich).unwrap();
@@ -162,8 +171,39 @@ mod tests {
         );
         assert_eq!(store.clone().into_facts().unwrap(), (whole, edges));
 
+        // Reordering selected nodes permutes their slots, as the same
+        // permutation of their positions in the whole list would.
+        let mut reordered = FactStore::from_facts(
+            vec![
+                node("ep:a", "Endpoint", 1),
+                node("sym:s", "Symbol", 2),
+                node("ep:b", "Endpoint", 3),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        reordered
+            .update_nodes(&["Endpoint"], |nodes, added| {
+                nodes.reverse();
+                added.push(node("ep:n", "Endpoint", 4));
+            })
+            .unwrap();
+        let ids: Vec<_> = reordered.nodes().iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["ep:b", "sym:s", "ep:a", "ep:n"]);
+
         let before = store.clone().into_facts().unwrap();
-        let refused = store.update_nodes(&["Endpoint"], |nodes| nodes.truncate(1));
+        let mut deep = json!(0);
+        for _ in 0..=crate::packed::MAX_PROPS_DEPTH {
+            deep = json!([deep]);
+        }
+        let refused = store.update_nodes(&["Endpoint"], |nodes, added| {
+            nodes[0].props["edited"] = json!(true);
+            added.push(Node {
+                id: "ep:deep".into(),
+                label: "Endpoint".into(),
+                props: deep,
+            });
+        });
         assert!(matches!(refused, Err(GraphError::FactStore(_))));
         // A refused stage leaves the store as it was.
         assert_eq!(store.into_facts().unwrap(), before);
