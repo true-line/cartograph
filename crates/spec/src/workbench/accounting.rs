@@ -6,6 +6,7 @@ use flowtracer::{TraceGraphBound, TraceLimits};
 use std::{io, mem::size_of};
 
 mod capability;
+pub(crate) mod typed;
 pub use capability::{CapabilityCompileWorkspaceBound, logical_capability_compile_bound};
 
 /// Version of the compiler's logical accounting currency.
@@ -204,12 +205,14 @@ pub fn logical_compile_bound(
         set_slots::<&str>(rows)?,
         set_slots::<&str>(rows)?,
     ])?;
-    // One current source-property clone, one typed/diagnostic parse role, and
-    // simultaneous names/relation-value formatting roles (four relation fields
-    // appear in one writeln! invocation in data-model).
+    // One current source-property clone, one typed provenance decode, one
+    // current omission with its classifier temporaries, and simultaneous
+    // names/relation-value formatting roles (four relation fields appear in
+    // one writeln! invocation in data-model).
     let current_row = sum(&[
         json(bytes, values)?,
-        json_bytes(bytes)?,
+        typed::provenance_decode(bytes, values)?,
+        typed::omission_current(bytes)?, // one current recorded/fallback omission
         bytes,
         bytes,
         bytes,

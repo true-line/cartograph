@@ -390,7 +390,7 @@ impl Assertions {
         let display = tool.props["display"].as_str().unwrap_or(&tool.id);
         let category = tool.props["category"].as_str().unwrap_or("—");
         let prov = provenance(&tool.props, &tool.id);
-        let omission = gap_omission(&prov, &tool.props, "toolchain fact unresolved");
+        let omission = gap_omission(&prov, &tool.props, TOOLCHAIN_UNRESOLVED);
         self.add(
             &format_args!("tool:{}", tool.id),
             &tool.id,
@@ -485,6 +485,8 @@ impl Serialize for SharedOmission {
         self.0.as_ref().serialize(s)
     }
 }
+/// Fixed Gap omission detail, charged by the typed accounting.
+pub(crate) const TOOLCHAIN_UNRESOLVED: &str = "toolchain fact unresolved";
 pub(super) fn shared_gap(
     prov: &Provenance,
     props: &serde_json::Value,
@@ -571,6 +573,8 @@ pub(super) fn logical_origin_bytes(rows: usize) -> Option<usize> {
         map_slots::<(&str, &str, &str), Option<Origin>>(rows)?,
         map_slots::<&str, Option<Origin>>(rows)?,
         slots::<Omission>(rows)?,
+        slots::<[usize; 2]>(rows)?, // cached Origin Arc counters, beside candidate Arcs
+        super::accounting::typed::omission_heap(0, rows)?, // fixed classifier text per cached omission
     ])
 }
 
@@ -578,6 +582,14 @@ pub(super) fn logical_origin_bytes(rows: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use std::fmt::Write;
+    #[test]
+    fn origin_bound_charges_cached_arcs_beside_candidate_arcs() {
+        // AC-0522: a zero-hop explicit Gap holds a cached Origin Arc and,
+        // separately, its candidate's shared_gap Arc; each owns counters.
+        let one = logical_origin_bytes(1).unwrap() - logical_origin_bytes(0).unwrap();
+        let fixed = super::super::accounting::typed::omission_heap(0, 1).unwrap();
+        assert!(one >= std::mem::size_of::<Omission>() + 2 * std::mem::size_of::<usize>() + fixed);
+    }
     // AC-0258 (T-0258): selected construction and ordinary compatibility.
     #[test]
     fn assertions_refuse_large_owned_fields_before_materialization() {

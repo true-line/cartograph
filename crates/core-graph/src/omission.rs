@@ -367,6 +367,46 @@ const KEYWORDS: &[(OmissionClass, FillSeam, &[&str])] = &[
 /// Prefix marking an omission no rule could classify.
 pub const UNCLASSIFIED_PREFIX: &str = "unclassified: ";
 
+/// Detail of an unclassified omission whose reason is blank.
+const NO_STOP_REASON: &str = "no stop reason recorded";
+
+/// Largest detail [`Omission::classify`] retains for a `reason_bytes` reason:
+/// the reason itself, or [`UNCLASSIFIED_PREFIX`] before it or before the
+/// blank-reason text. Logical bytes, not allocator capacity.
+pub fn classified_detail_bytes(reason_bytes: usize) -> Option<usize> {
+    reason_bytes
+        .max(NO_STOP_REASON.len())
+        .checked_add(UNCLASSIFIED_PREFIX.len())
+}
+
+/// Peak temporary owners of one [`Omission::classify`] call over a
+/// `reason_bytes` reason, excluding the retained detail. Template matching
+/// holds one pattern's parts. `prose_words` holds, in one expression, the
+/// unquoted copy (at most the reason), its whitespace tokens (each nonempty
+/// and followed by whitespace or the end, so at most half the bytes plus
+/// one), their joined copy (at most the unquoted copy) and its lowercase:
+/// ASCII lowercases to one byte, and any other char (two or more bytes)
+/// lowercases to at most three chars of four bytes, so at most six times.
+pub fn classification_workspace_bytes(reason_bytes: usize) -> Option<usize> {
+    let parts = TEMPLATES
+        .iter()
+        .map(|(template, _, _)| template.split('*').count())
+        .max()?
+        .checked_mul(std::mem::size_of::<&str>())?;
+    let tokens = (reason_bytes / 2)
+        .checked_add(1)?
+        .checked_mul(std::mem::size_of::<&str>())?;
+    let prose = [
+        reason_bytes,
+        tokens,
+        reason_bytes,
+        reason_bytes.checked_mul(6)?,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, role| total.checked_add(role))?;
+    Some(parts.max(prose))
+}
+
 /// Whole-string glob match where each `*` matches a non-empty run.
 fn glob_matches(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
@@ -445,7 +485,7 @@ impl Omission {
             class: OmissionClass::UnresolvedRelationship,
             seam: FillSeam::Interpretation,
             detail: if reason.trim().is_empty() {
-                format!("{UNCLASSIFIED_PREFIX}no stop reason recorded")
+                format!("{UNCLASSIFIED_PREFIX}{NO_STOP_REASON}")
             } else {
                 format!("{UNCLASSIFIED_PREFIX}{reason}")
             },
@@ -550,6 +590,32 @@ pub fn gap_query(props: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classification_workspace_covers_tokens_and_lowercase_expansion() {
+        // AC-0522: one-letter words maximize token slots, and U+0130
+        // lowercases to more bytes than it takes; neither exceeds the bound.
+        let size = std::mem::size_of::<&str>();
+        for reason in [
+            "a ".repeat(500),
+            "a".repeat(999),
+            "\u{130} ".repeat(300),
+            "\u{130}".repeat(400),
+            "`quoted` \"x\" 'y' a".repeat(50),
+            String::new(),
+        ] {
+            let r = reason.len();
+            let tokens = reason.split_whitespace().count();
+            let words = prose_words(&reason);
+            let lower = reason.to_lowercase().len();
+            let peak = r + tokens * size + r + words.len().max(lower);
+            assert!(tokens <= r / 2 + 1);
+            assert!(lower <= 6 * r.max(1));
+            assert!(peak <= classification_workspace_bytes(r).unwrap());
+            let detail = Omission::classify(&reason).detail.len();
+            assert!(detail <= classified_detail_bytes(r).unwrap());
+        }
+    }
 
     #[test]
     fn every_recorded_stop_reason_names_a_class_and_seam() {

@@ -552,6 +552,10 @@ impl Serialize for AssertionSequence<'_, '_> {
     }
 }
 
+/// Fixed Gap omission details, charged by the typed accounting.
+pub(crate) const RULE_PAYLOAD_UNAVAILABLE: &str = "source-rule payload unavailable";
+pub(crate) const RULE_RELATIONSHIP_UNRESOLVED: &str = "unresolved source-rule relationship";
+
 fn observations<'a>(
     rules: &[&'a Node],
     relations: &Relationships<'a>,
@@ -573,7 +577,7 @@ fn observations<'a>(
                         crate::workbench::gap_omission(
                             &provenance(&node.props, &node.id),
                             &node.props,
-                            "source-rule payload unavailable",
+                            RULE_PAYLOAD_UNAVAILABLE,
                         )
                     })
                     .flatten(),
@@ -594,7 +598,7 @@ fn observations<'a>(
                                     crate::workbench::gap_omission(
                                         &provenance(&edge.props, &identity),
                                         &edge.props,
-                                        "unresolved source-rule relationship",
+                                        RULE_RELATIONSHIP_UNRESOLVED,
                                     )
                                 })
                                 .flatten(),
@@ -995,15 +999,17 @@ thread_local! {
 }
 
 pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) -> Option<usize> {
-    use crate::workbench::accounting::{json_bytes, map_slots, set_slots, slots, sum};
+    use crate::workbench::accounting::{map_slots, set_slots, slots, sum, typed};
     sum(&[
         map_slots::<&str, &Node>(rows)?,
         slots::<&Node>(rows)?, // visible/rules
         slots::<Observation<'_>>(rows)?,
         slots::<Assertion<'_>>(rows)?,
         slots::<GuardedExitEvidence>(rows)?,
-        json_bytes(bytes)?, // retained parsed rule fields
-        json_bytes(bytes)?, // retained typed assertion provenance and omissions
+        core_graph::rules::decoded_heap_bytes(bytes, values)?, // retained Observation.rule heap
+        core_graph::rules::validation_workspace(bytes, values)?, // one current rule decode
+        typed::provenance_heap(bytes, values, rows)?,          // retained Assertion.provenance heap
+        typed::omission_heap(bytes, rows)?, // retained Assertion.omission details
         slots::<core_graph::omission::Omission>(rows)?,
         set_slots::<String>(rows)?,
         bytes,
