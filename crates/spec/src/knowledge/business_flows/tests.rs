@@ -411,3 +411,74 @@ fn business_flows_bound_shared_support_before_repeated_decode() {
     ));
     assert_eq!(error.code(), "business-flow-trace-hops");
 }
+
+// AC-0516: source-backed support cannot be synthesized from observation/artifact bases.
+#[test]
+fn business_flows_require_source_basis_on_every_support_role() {
+    use core_prov::{ArtifactLocator, ArtifactRef};
+    let original = chain("Endpoint", 1);
+    assert_eq!(
+        derive_business_flows(&original, limits())
+            .unwrap()
+            .facts
+            .len(),
+        1
+    );
+    for role in ["trigger", "participant", "edge"] {
+        for case in [
+            "default-t1",
+            "observation",
+            "artifact",
+            "default-source",
+            "explicit-source",
+        ] {
+            let mut base = original.clone();
+            let props = match role {
+                "trigger" => &mut base.graph.0[0].props,
+                "participant" => &mut base.graph.0[1].props,
+                "edge" => &mut base.graph.1[0].props,
+                _ => unreachable!(),
+            };
+            let mut p = Provenance::deserialize(&props["prov"]).unwrap();
+            p.tier = Tier::Deterministic;
+            p.basis = match case {
+                "default-t1" => {
+                    p.tier = Tier::Dynamic;
+                    None
+                }
+                "observation" => Some(EvidenceBasis::Observation),
+                "artifact" => Some(EvidenceBasis::Artifact {
+                    refs: vec![ArtifactRef {
+                        digest: format!("sha256:{}", "a".repeat(64)),
+                        kind: "js-bundle".into(),
+                        at: ArtifactLocator::Offset { start: 0, end: 1 },
+                    }],
+                }),
+                "default-source" => None,
+                "explicit-source" => {
+                    p.tier = Tier::Dynamic;
+                    Some(EvidenceBasis::Source)
+                }
+                _ => unreachable!(),
+            };
+            p.validate().unwrap(); // non-source inputs are otherwise valid, with source spans
+            assert!(!p.evidence.is_empty());
+            let is_source = matches!(p.basis(), EvidenceBasis::Source);
+            props["prov"] = json!(p);
+            let before = base.clone();
+            let report = derive_business_flows(&base, limits()).unwrap();
+            assert_eq!(
+                report.invalid_flows,
+                usize::from(!is_source),
+                "{role}/{case}"
+            );
+            assert_eq!(report.facts.len(), usize::from(is_source), "{role}/{case}");
+            assert_eq!((report.empty_flows, report.oversized_flows), (0, 0));
+            assert_eq!(base, before);
+            for fact in report.facts {
+                let p = Provenance::deserialize(&candidate(&fact).props["prov"]).unwrap();
+                assert_eq!(p.basis(), EvidenceBasis::Source);
+            }
+        }
+    }
+}

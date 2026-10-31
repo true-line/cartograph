@@ -4,7 +4,7 @@ use core_graph::{
     Node, RevisionedSnapshot,
     overlay::{BaseRef, MAX_FACT_BYTES, OverlayFact, OverlayItem},
 };
-use core_prov::{ConfidenceTier, EvidenceRef, ProducingMethod, Provenance, Tier};
+use core_prov::{ConfidenceTier, EvidenceBasis, EvidenceRef, ProducingMethod, Provenance, Tier};
 use flowtracer::{TraceLimit, TraceLimitExceeded, TraceLimits};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,6 +85,13 @@ fn support(props: &serde_json::Value) -> Option<Provenance> {
     DECODED_SUPPORTS.with(|n| n.set(n.get() + 1));
     let p = Provenance::deserialize(props.get("prov")?).ok()?;
     (p.validate().is_ok()
+        // Match Provenance::basis() without cloning artifact refs: absent T1
+        // resolves to Observation; every other absent basis resolves to Source.
+        && match p.basis.as_ref() {
+            Some(EvidenceBasis::Source) => true,
+            None => p.tier != Tier::Dynamic,
+            _ => false,
+        }
         && !p.extractor_id.trim().is_empty()
         && !p.content_hash.trim().is_empty()
         && !p.evidence.is_empty()
