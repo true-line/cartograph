@@ -20,6 +20,16 @@ const FROZEN_MANIFEST_SHA256: &str =
     "96d2595907c4b1ea05991c7f0f2460df2f7b75267c486d5ee3e96c3d6ae49b83";
 const FROZEN_PROOF_SHA256: &str =
     "22d1cb69a593d6cf87abf1207cac9a50e82e6df61181874f9ab2fbd79e30a763";
+// This fixed historical capture is intentionally adapter-version scoped. A
+// re-ingest with changed extraction code must receive a newly reviewed pin.
+const FROZEN_GRAPH_SNAPSHOT_ID: &str =
+    "context-v1:e002581d7e7a4aa39cc5d54962415cfcea5bb3c492fbe7e6cac2874c727c5af6";
+const FROZEN_SOURCE_ID: &str = "src_5a2efb974cf8eb1674d52655df1e85b4";
+const FROZEN_REPO_KEY: &str = "local/src_5a2efb974cf8eb1674d52655df1e85b4";
+const FROZEN_INGEST_ID: &str = "job:1";
+const FROZEN_CONFIG_HASH: &str = "1e94359386957269770da884f7526d43f2d38f7572694fdac67ed6836c7cdaec";
+const FROZEN_COVERAGE_INVENTORY_SHA256: &str =
+    "a67283739c05cd7206dede1d871bc6e05a7129835a633bd3899b11d3dd4b428b";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +108,14 @@ fn verify_pinned_capture_input(
     Ok(())
 }
 
+fn verify_pinned_graph_snapshot(snapshot_id: &str) -> Result<(), &'static str> {
+    if snapshot_id == FROZEN_GRAPH_SNAPSHOT_ID {
+        Ok(())
+    } else {
+        Err("stored graph does not match the frozen Vendure capture")
+    }
+}
+
 #[test]
 fn pinned_capture_identity_rejects_caller_repaired_proof_pair() {
     let files = frozen_files();
@@ -144,6 +162,13 @@ fn pinned_capture_identity_rejects_caller_repaired_proof_pair() {
     assert!(
         verify_pinned_capture_input(&changed_input, &changed_proof, FROZEN_PROOF_SHA256).is_err()
     );
+}
+
+// AC-0513: the stored graph identity is pinned to the historical capture.
+#[test]
+fn captured_graph_snapshot_id_is_pinned() {
+    assert!(verify_pinned_graph_snapshot(FROZEN_GRAPH_SNAPSHOT_ID).is_ok());
+    assert!(verify_pinned_graph_snapshot("context-v1:other-graph").is_err());
 }
 
 // AC-0513: actual captured facts reach the real no-provider phase, session and official stories.
@@ -226,12 +251,15 @@ fn captured_seventeen_file_capability_stories_without_provider() {
             policy.worker.coverage,
         )
         .unwrap();
-    assert_eq!(
+    let graph_snapshot_id =
         context_hub::ContextSnapshot::new(before.0.graph.0.clone(), before.0.graph.1.clone())
             .unwrap()
-            .id(),
-        preparation["graph"]["graph_snapshot_id"].as_str().unwrap()
-    );
+            .id()
+            .to_owned();
+    verify_pinned_graph_snapshot(&graph_snapshot_id).unwrap();
+    assert_eq!(graph_snapshot_id, preparation["graph"]["graph_snapshot_id"]);
+    assert_eq!(preparation["graph"]["source_id"], FROZEN_SOURCE_ID);
+    assert_eq!(preparation["graph"]["repo_key"], FROZEN_REPO_KEY);
     let record = &preparation["graph"]["coverage"]["record"];
     assert_eq!(record["repo_key"], preparation["graph"]["repo_key"]);
     assert_eq!(
@@ -252,6 +280,17 @@ fn captured_seventeen_file_capability_stories_without_provider() {
     assert_eq!(
         stored.inventory_json,
         record["inventory_json"].as_str().unwrap()
+    );
+    assert_eq!(stored.repo_key, FROZEN_REPO_KEY);
+    assert_eq!(
+        stored.registered_source_id.as_deref(),
+        Some(FROZEN_SOURCE_ID)
+    );
+    assert_eq!(stored.ingest_id, FROZEN_INGEST_ID);
+    assert_eq!(stored.config_hash, FROZEN_CONFIG_HASH);
+    assert_eq!(
+        hash(stored.inventory_json.as_bytes()),
+        FROZEN_COVERAGE_INVENTORY_SHA256
     );
     let inventory: Value = serde_json::from_str(&stored.inventory_json).unwrap();
     let scope = context_hub::coverage::ScopedRepo {
