@@ -6,7 +6,10 @@
 //! recipe whether the provider phase ran and which embedding namespace it
 //! used. The phase never fails or delays the ingest: every outcome,
 //! including no local provider, is reported as a named result.
-use core_graph::overlay::{OverlayRecipe, OverlayStore};
+//!
+//! The deterministic knowledge producers (#1443) derive their facts from the
+//! same snapshot and are published with it; they need no provider.
+use core_graph::overlay::{OverlayError, OverlayFact, OverlayRecipe, OverlayStore};
 use core_graph::{RevisionedSnapshot, SnapshotReadLimits, SqliteGraphStore};
 use llm::LlmProvider;
 use semantic::embedding_cache::EmbeddingCache;
@@ -14,12 +17,16 @@ use semantic::knowledge_ingest::{self, PhaseOutcome};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
-/// Versioned producer recipe recorded in the overlay basis.
-pub(crate) const RECIPE: &str = "knowledge@1";
+/// Versioned phase recipe recorded in the overlay basis; [`recipe_name`]
+/// appends every deterministic producer rule and version to it.
+pub(crate) const RECIPE: &str = "knowledge@2";
 /// Omission when the base is past the bounded snapshot read.
 pub(crate) const BASE_BOUNDS: &str = "knowledge-base-bounds";
 /// Omission when the local provider failed during the phase.
 pub(crate) const PROVIDER_FAILED: &str = "embedding-provider-failed";
+/// Omission when the derived facts were refused as one publication; the
+/// overlay is then published without them and its recipe says so.
+pub(crate) const DERIVED_REJECTED: &str = "knowledge-derived-rejected";
 
 /// What one phase did, reported to the UI; never an ingest failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,6 +38,12 @@ pub(crate) struct KnowledgeReport {
     pub omitted: usize,
     /// Named reason the provider phase did not run, if it did not.
     pub omission: Option<&'static str>,
+    /// Deterministic producer facts published with the overlay.
+    pub derived: usize,
+    /// Producer candidates dropped by their per-fact size cap.
+    pub oversized: usize,
+    /// Named reason the derived facts were not published, if they were not.
+    pub derived_omission: Option<&'static str>,
     /// Whether the overlay was republished for the embedded base revision;
     /// false when the base moved on before publication.
     pub published: bool,
@@ -78,12 +91,7 @@ fn run_within(
         let snapshot = match graph.read_snapshot_with_revision_bounded(limits) {
             Ok(snapshot) => snapshot,
             Err(core_graph::GraphError::SnapshotBounds(_)) => {
-                return Ok(KnowledgeReport {
-                    embedded: 0,
-                    omitted: 0,
-                    omission: Some(BASE_BOUNDS),
-                    published: false,
-                });
+                return Ok(report(0, 0, Some(BASE_BOUNDS)));
             }
             Err(error) => return Err(error.to_string()),
         };
@@ -112,13 +120,42 @@ fn run_within(
             }
             Err(_) => (recipe(None, false), report(0, 0, Some(PROVIDER_FAILED))),
         };
-    report.published = publish(graph, overlay, &snapshot, recipe)?;
+    let (facts, oversized) = derive(&snapshot);
+    report.oversized = oversized;
+    match publish(graph, overlay, &snapshot, recipe, facts)? {
+        Published::Moved => {}
+        Published::Facts(derived) => {
+            report.published = true;
+            report.derived = derived;
+        }
+        Published::WithoutDerived => {
+            report.published = true;
+            report.derived_omission = Some(DERIVED_REJECTED);
+        }
+    }
     Ok(report)
+}
+
+/// Every deterministic producer over one snapshot, in a fixed order, with
+/// the count of candidates each dropped under its per-fact size cap.
+fn derive(snapshot: &RevisionedSnapshot) -> (Vec<OverlayFact>, usize) {
+    let capabilities = spec::derive_graphql_resolver_capabilities(snapshot);
+    (capabilities.facts, capabilities.oversized_groups)
+}
+
+/// The phase recipe with each producer rule, so a rule version change
+/// changes the overlay identity.
+pub(crate) fn recipe_name() -> String {
+    format!(
+        "{RECIPE};{}@{}",
+        spec::CAPABILITY_GRAPHQL_RULE,
+        spec::CAPABILITY_GRAPHQL_RULE_VERSION
+    )
 }
 
 fn recipe(embedding_namespace: Option<String>, provider_ran: bool) -> OverlayRecipe {
     OverlayRecipe {
-        recipe: RECIPE.into(),
+        recipe: recipe_name(),
         embedding_namespace,
         provider_ran,
     }
@@ -130,7 +167,19 @@ fn report(embedded: usize, omitted: usize, omission: Option<&'static str>) -> Kn
         omitted,
         omission,
         published: false,
+        derived: 0,
+        oversized: 0,
+        derived_omission: None,
     }
+}
+
+enum Published {
+    /// The base moved on; nothing was published.
+    Moved,
+    /// Published with this many derived facts.
+    Facts(usize),
+    /// The derived facts were refused; published without them.
+    WithoutDerived,
 }
 
 /// Publish only while `snapshot` is still the current base. Lock order is
@@ -140,18 +189,30 @@ fn publish(
     overlay: &Arc<Mutex<OverlayStore>>,
     snapshot: &RevisionedSnapshot,
     recipe: OverlayRecipe,
-) -> Result<bool, String> {
+    facts: Vec<OverlayFact>,
+) -> Result<Published, String> {
     let graph = graph.lock().map_err(|e| e.to_string())?;
     if graph.read_revision().map_err(|e| e.to_string())? != snapshot.revision {
-        return Ok(false);
+        return Ok(Published::Moved);
     }
-    // Knowledge producers add their facts here as they land (#1443).
-    overlay
-        .lock()
-        .map_err(|e| e.to_string())?
-        .publish(snapshot, recipe, vec![])
-        .map_err(|e| e.to_string())?;
-    Ok(true)
+    let mut overlay = overlay.lock().map_err(|e| e.to_string())?;
+    let derived = facts.len();
+    match overlay.publish(snapshot, recipe.clone(), facts) {
+        Ok(_) => Ok(Published::Facts(derived)),
+        // A refused derived set must not cost the embedding outcome: publish
+        // the phase alone, marked in the recipe so readers can tell.
+        Err(OverlayError::Rejected(_)) if derived > 0 => {
+            let recipe = OverlayRecipe {
+                recipe: format!("{};{DERIVED_REJECTED}", recipe.recipe),
+                ..recipe
+            };
+            overlay
+                .publish(snapshot, recipe, vec![])
+                .map_err(|e| e.to_string())?;
+            Ok(Published::WithoutDerived)
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// At most one background worker. Ingests that finish while it runs are
