@@ -39,13 +39,16 @@ fn orm_model_support(node: &Node) -> Option<(Provenance, String, String)> {
     let name = node.props["name"].as_str()?.trim();
     let table = node.props["table"].as_str()?.trim();
     let store = node.props["store"].as_str()?.trim();
+    let table_source = node.props.get("table_source").and_then(|v| v.as_str());
     if name.is_empty()
         || table.is_empty()
         || table != store
-        || node
-            .props
-            .get("table_source")
-            .is_some_and(|v| !matches!(v.as_str(), Some("explicit" | "default")))
+        // The JPA adapter always classifies the source of the table name.
+        // Missing and unresolved values cannot prove a stable physical table.
+        || (storage == "jpa" && !matches!(table_source, Some("explicit" | "default")))
+        // Preserve fail-closed validation if another extractor supplies this field.
+        || (node.props.contains_key("table_source")
+            && !matches!(table_source, Some("explicit" | "default")))
         || node
             .props
             .get("schema")

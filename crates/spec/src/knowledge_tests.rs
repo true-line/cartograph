@@ -292,6 +292,8 @@ fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
         "weak-provenance",
         "inverted-evidence-span",
         "missing-table",
+        "missing-table-source",
+        "invalid-table-source",
         "unresolved-table",
         "empty-fields",
         "unsupported-storage",
@@ -320,6 +322,10 @@ fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
                 "missing-table" => {
                     node.props.as_object_mut().unwrap().remove("table");
                 }
+                "missing-table-source" => {
+                    node.props.as_object_mut().unwrap().remove("table_source");
+                }
+                "invalid-table-source" => node.props["table_source"] = "guessed".into(),
                 "unresolved-table" => node.props["table_source"] = "unresolved".into(),
                 "empty-fields" => node.props["fields"] = serde_json::json!([]),
                 "unsupported-storage" => node.props["storage"] = "unknown".into(),
