@@ -14,6 +14,8 @@ pub(crate) struct SessionReservation {
     /// ReadSession only. Dispatcher request IDs depend on the transport frame
     /// limit and are exposed separately by request_ids_bytes.
     pub retained_session_bytes: usize,
+    /// Wire Vec, hex-hash String and returned ID String while the session stays live.
+    pub basis_digest_bytes: usize,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScopeReservation {
@@ -199,17 +201,10 @@ impl SessionReservation {
             limits.scope.max_source_registry_bytes.get(),
         )?;
         let rejected = rejection_set_bytes()?;
+        let revision = sum(&[size_of::<core_graph::StoreRevision>(), 32])?;
+        let basis_digest_bytes = ReadBasis::digest_workspace()?;
         let hash = core_prov::content_hash(&[]);
-        let basis = ReadBasis {
-            recovered_graph_id: format!("context-v1:{hash}"),
-            projection_snapshot_id: format!("context-v1:{hash}"),
-            coverage_id: format!("coverage-context-v1:{hash}"),
-            context_id: format!("context-v2:{hash}"),
-            rejection_decision_digest: format!("compiler-rejections-v1:{hash}"),
-            registration_basis_digest: format!("source-registration-basis-v1:{hash}"),
-            export_mode: spec::ExportMode::VerifiedOnly,
-            h3_curated_available: false,
-        };
+        let basis = ReadBasis::reservation_fixture();
         let fixed_basis = sum(&[size_of::<ReadSession>(), count(&basis)?])?;
         let retained_session_bytes = sum(&[
             graph,
@@ -218,6 +213,7 @@ impl SessionReservation {
             rejected,
             coverage.retained,
             fixed_basis,
+            32, // base.revision payload; ReadSession already owns its inline header
         ])?;
         let before_scope = sum(&[rejected, scope.peak_bytes])?;
         let bounded_read = sum(&[
@@ -228,8 +224,10 @@ impl SessionReservation {
             limits.graph.max_bytes,
             coverage.stored,
             coverage.inventory_parse,
+            revision,
         ])?;
         let after_scope = sum(&[
+            revision,
             rejected,
             scope.result_bytes,
             graph,
@@ -237,6 +235,7 @@ impl SessionReservation {
             scope.peak_bytes,
         ])?;
         let comparisons = sum(&[
+            revision,
             rejected,
             rejected,
             scope.result_bytes,
@@ -246,6 +245,7 @@ impl SessionReservation {
             curation_row_peak()?,
         ])?;
         let common_identity = sum(&[
+            revision,
             rejected,
             rejected,
             scope.result_bytes,
@@ -253,6 +253,8 @@ impl SessionReservation {
             graph,
             coverage.stored,
         ])?;
+        let revision_recheck =
+            sum(&[common_identity, revision, super::schema::workspace_bytes()?])?;
         let raw_identity = sum(&[common_identity, snapshot.retained, snapshot.identity_peak])?;
         // Projection first retains borrowed row-reference vectors; owned clones
         // move into ContextSnapshot. Coverage holds the same snapshot through Arc.
@@ -295,15 +297,18 @@ impl SessionReservation {
             bounded_read,
             after_scope,
             comparisons,
+            revision_recheck,
             raw_identity,
             projected_identity,
             finished_basis,
+            sum(&[retained_session_bytes, basis_digest_bytes])?,
         ]
         .into_iter()
         .max()?;
         Some(Self {
             acquisition_peak_bytes,
             retained_session_bytes,
+            basis_digest_bytes,
         })
     }
 }
@@ -411,12 +416,29 @@ mod tests {
         let bound = SessionReservation::for_limits(limits).unwrap();
         let actual = logical::count(&(
             session.basis(),
-            &session.raw_nodes,
-            &session.raw_edges,
+            &session.base.revision,
+            &session.base.graph.0,
+            &session.base.graph.1,
             &session.visible_facts,
             &session.rejected_hashes,
         ))
         .unwrap();
+        // Independently materialize the production tuple, hex hash and returned
+        // basis ID. All three owners coexist during digest's final formatting.
+        let wire = serde_json::to_vec(&("mcp-read-basis-v1", session.basis())).unwrap();
+        let hash = core_prov::content_hash(&wire);
+        let basis_id = session.basis_id().unwrap();
+        assert_eq!(basis_id, format!("mcp-read-basis-v1:{hash}"));
+        let digest_owners = sum(&[
+            std::mem::size_of_val(&wire),
+            wire.len(),
+            std::mem::size_of_val(&hash),
+            hash.len(),
+            std::mem::size_of_val(&basis_id),
+            basis_id.len(),
+        ])
+        .unwrap();
+        assert!(bound.basis_digest_bytes >= digest_owners);
         assert!(bound.retained_session_bytes >= actual);
         assert!(bound.acquisition_peak_bytes >= actual);
     }

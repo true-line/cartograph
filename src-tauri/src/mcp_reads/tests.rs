@@ -76,6 +76,9 @@ fn acquire(
     )
     .unwrap()
 }
+fn inventory() -> CoverageRecord {
+    CoverageRecord {repo_key:"fixture/repo".into(),registered_source_id:Some("src:fixture".into()),ingest_id:"job:1".into(),config_hash:"config".into(),inventory_json:json!({"inventory":"coverage@1","repo":"fixture/repo","commit":"a".repeat(40),"layer_hints":[],"producers":[{"id":"fixture","state":"ran"}],"missing_inputs":[],"unsupported":[],"limited":false}).to_string()}
+}
 fn query() -> QualifiedRequest<QueryRequest> {
     QualifiedRequest {
         request: QueryRequest::default(),
@@ -113,8 +116,8 @@ fn raw_and_filtered_identities_remain_distinct_and_policy_is_frozen() {
     assert_eq!(best.basis().projection_snapshot_id, raw_id);
     assert!(!best.basis().h3_curated_available);
     assert!(verified.qualified.shares_snapshot(&verified.snapshot));
-    assert_eq!(verified.raw_nodes, raw.0);
-    assert_eq!(verified.raw_edges, raw.1);
+    assert_eq!(verified.base.graph.0, raw.0);
+    assert_eq!(verified.base.graph.1, raw.1);
     decisions
         .lock()
         .unwrap()
@@ -309,7 +312,7 @@ fn graph_and_coverage_limits_are_store_admitted_and_errors_are_source_free() {
     assert_eq!(session.query(tiny).unwrap_err(), ReadError::Limit);
     let mut store = graph.lock().unwrap();
     let expected = store.read_snapshot().unwrap();
-    let record=CoverageRecord {repo_key:"fixture/repo".into(),registered_source_id:Some("src:fixture".into()),ingest_id:"job:1".into(),config_hash:"config".into(),inventory_json:json!({"inventory":"coverage@1","repo":"fixture/repo","commit":"a".repeat(40),"layer_hints":[],"producers":[{"id":"fixture","state":"ran"}],"missing_inputs":[],"unsupported":[],"limited":false}).to_string()};
+    let record = inventory();
     assert!(
         store
             .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
@@ -328,6 +331,36 @@ fn graph_and_coverage_limits_are_store_admitted_and_errors_are_source_free() {
         recorded.query(query()).unwrap().coverage.repos[0].status,
         CoverageStatus::Recorded
     );
+    assert_eq!(recorded.base.revision, recorded.basis().base_revision);
+    assert_eq!(
+        recorded.base.graph,
+        graph.lock().unwrap().read_snapshot().unwrap()
+    );
+    // Repeat identical inventory publication: content/coverage identities stay
+    // equal, but the mutation token and complete session basis must advance.
+    let mut store = graph.lock().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &recorded.base.graph,
+                &GraphPatch::default(),
+                "fixture/repo",
+                &[],
+                Some(&record),
+                core_graph::source::SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    drop(store);
+    let repeated = acquire(&graph, &decisions, ExportMode::BestEffort);
+    assert_eq!(recorded.base.graph, repeated.base.graph);
+    assert_eq!(recorded.basis().coverage_id, repeated.basis().coverage_id);
+    assert_eq!(
+        recorded.basis().recovered_graph_id,
+        repeated.basis().recovered_graph_id
+    );
+    assert_ne!(recorded.base.revision, repeated.base.revision);
+    assert_ne!(recorded.basis_id().unwrap(), repeated.basis_id().unwrap());
     let result = ReadSession::acquire(
         &graph,
         &decisions,
@@ -461,4 +494,64 @@ fn frozen_evidence_visibility_preserves_hidden_rule_adjacency_and_policy() {
     assert!(!rejected.visible_facts.contains(&adjacent));
     assert!(best.visible_facts.contains(&hidden));
     assert!(best.visible_facts.contains(&adjacent));
+}
+
+// A writer commits during the production bounded read, not via a sleep/race.
+#[test]
+fn complete_session_refuses_wal_drift_and_then_captures_matching_revision_and_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph.db");
+    let mut reader = SqliteGraphStore::open(&path).unwrap();
+    let original = graph_node(&assertion("module:confirmed", ConfidenceTier::Confirmed));
+    reader.put_node(&original).unwrap();
+    let expected = reader.read_snapshot().unwrap();
+    let before = reader.read_revision().unwrap();
+    let mut writer = SqliteGraphStore::open(&path).unwrap();
+    let mut changed = original;
+    changed.props["name"] = json!("new publication");
+    reader.set_snapshot_after_nodes_hook(move || {
+        assert!(
+            writer.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                &expected,
+                &GraphPatch {
+                    upsert_nodes: vec![changed],
+                    ..GraphPatch::default()
+                },
+                "fixture/repo",
+                &[],
+                Some(&inventory()),
+                core_graph::source::SourceOmissions::NONE,
+            )?
+        );
+        Ok(())
+    });
+    let graph = Mutex::new(reader);
+    let decisions = Mutex::new(DecisionLog::open(":memory:").unwrap());
+    let acquire = || {
+        ReadSession::acquire(
+            &graph,
+            &decisions,
+            || Ok(scopes()),
+            SnapshotReadLimits::default(),
+            CoverageReadLimits::default(),
+            ExportMode::BestEffort,
+        )
+    };
+    assert!(matches!(acquire(), Err(ReadError::StaleBasis)));
+    let current = acquire().unwrap();
+    assert_ne!(current.base.revision, before);
+    assert_eq!(
+        current.base.revision,
+        graph.lock().unwrap().read_revision().unwrap()
+    );
+    assert_eq!(current.base.revision, current.basis().base_revision);
+    assert_eq!(
+        current.base.graph,
+        graph.lock().unwrap().read_snapshot().unwrap()
+    );
+    assert_eq!(current.base.graph.0[0].props["name"], "new publication");
+    assert_eq!(
+        current.query(query()).unwrap().coverage.repos[0].status,
+        CoverageStatus::Recorded
+    );
 }

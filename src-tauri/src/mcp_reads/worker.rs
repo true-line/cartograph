@@ -755,6 +755,17 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn complete_revision_reservation_accepts_exact_floor_and_refuses_one_under() {
+        let mut policy = limits();
+        let required = super::required_reservation(policy).unwrap();
+        policy.reserved_bytes = NonZeroUsize::new(required).unwrap();
+        assert_eq!(super::validate_reservation(policy), Ok(()));
+        policy.reserved_bytes = NonZeroUsize::new(required - 1).unwrap();
+        assert_eq!(super::validate_reservation(policy), Err(ReadError::Limit));
+    }
+
     pub(crate) fn limits() -> WorkerLimits {
         let limits = WorkerLimits {
             acquisition_mode: AcquisitionMode::Complete,

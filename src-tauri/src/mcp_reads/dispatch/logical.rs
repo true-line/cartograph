@@ -6,16 +6,7 @@ use context_hub::logical::{count, json_bytes, slots, string_wire, sum};
 
 pub(crate) fn logical_protocol_workspace_bytes(limits: WorkerLimits) -> Option<usize> {
     let hash = core_prov::content_hash(&[]);
-    let basis = ReadBasis {
-        recovered_graph_id: format!("context-v1:{hash}"),
-        projection_snapshot_id: format!("context-v1:{hash}"),
-        coverage_id: format!("coverage-context-v1:{hash}"),
-        context_id: format!("context-v2:{hash}"),
-        rejection_decision_digest: format!("compiler-rejections-v1:{hash}"),
-        registration_basis_digest: format!("source-registration-basis-v1:{hash}"),
-        export_mode: spec::ExportMode::VerifiedOnly,
-        h3_curated_available: false,
-    };
+    let basis = ReadBasis::reservation_fixture();
     let basis_id = format!("mcp-read-basis-v1:{hash}");
     let tools = [
         ReadTool::Capabilities,
