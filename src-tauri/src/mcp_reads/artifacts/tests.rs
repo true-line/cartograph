@@ -438,3 +438,5 @@ fn mcp_security_artifact_preserves_legacy_compiler_identity() {
 }
 
 mod overlay_capture;
+
+mod overlay_adoption;

@@ -1,4 +1,4 @@
-// AC-0512: immutable bounded overlay capture; official compilation remains legacy.
+// AC-0512: immutable bounded overlay capture; official adoption is tested separately under AC-0513.
 use super::*;
 use crate::mcp_reads::KnowledgeBasis;
 #[cfg(unix)]
@@ -103,7 +103,7 @@ impl Fixture {
 }
 
 #[test]
-fn real_producer_selection_is_immutable_and_keeps_queries_and_compilation_base_only() {
+fn real_producer_selection_is_immutable_and_keeps_base_queries_and_topology_unchanged() {
     let f = Fixture::new();
     let before = f.base();
     let absent = f.best();
@@ -128,17 +128,6 @@ fn real_producer_selection_is_immutable_and_keeps_queries_and_compilation_base_o
         serde_json::to_value(captured.query(request()).unwrap()).unwrap()
     );
     assert_eq!(produced(&absent).artifact, produced(&captured).artifact);
-    // B1 deliberately captures without adopting the sidecar in any compiler.
-    let compile = |s: &ReadSession| {
-        s.compile_artifact("user-stories", trace_limits(), compile_limits())
-            .unwrap()
-    };
-    let (ArtifactCompilation::Produced(a), ArtifactCompilation::Produced(b)) =
-        (compile(&absent), compile(&captured))
-    else {
-        panic!("legacy fits")
-    };
-    assert_eq!(a.artifact, b.artifact); // B2 replaces this non-adoption assertion.
     let old_basis = captured.basis_id().unwrap();
     let ptr = captured.base.graph.0.as_ptr();
     let mut changed = f.facts.clone();

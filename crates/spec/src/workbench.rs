@@ -10,6 +10,7 @@ mod capabilities;
 pub(crate) mod diagrams;
 pub use capabilities::{
     CapabilityStory, CapabilityStoryInputError, compile_capability_user_stories,
+    compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security,
 };
 mod partition;

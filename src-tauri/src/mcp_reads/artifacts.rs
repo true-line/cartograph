@@ -84,23 +84,53 @@ impl ReadSession {
                     });
                 }
             };
-        let outcome = spec::compile_spec_selected_with_security(
-            &self.base.graph.0,
-            &self.base.graph.1,
-            &flows,
-            self.basis.export_mode,
-            &self.rejected_hashes,
-            &[id],
-            compile_limits,
-            spec::SecurityLimits {
-                max_rows: security.rows,
-                max_output_bytes: security.bytes,
-            },
-        )
-        .map_err(|_| ReadError::InvalidRequest)?
-        .into_iter()
-        .next()
-        .ok_or(ReadError::Storage)?;
+        let outcome = if id == "user-stories" {
+            // Trace refusal precedes candidate validation; retained flows remain charged during compilation.
+            let candidates = self
+                .capabilities
+                .iter()
+                .map(|f| match &f.item {
+                    core_graph::overlay::OverlayItem::Node(capability) => {
+                        Ok(spec::CapabilityStory {
+                            capability,
+                            cites: &f.cites,
+                        })
+                    }
+                    _ => Err(ReadError::Storage),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            spec::compile_capability_user_stories_with_flows_and_security(
+                &self.base,
+                &candidates,
+                &flows,
+                self.basis.export_mode,
+                &self.rejected_hashes,
+                compile_limits,
+                spec::SecurityLimits {
+                    max_rows: security.rows,
+                    max_output_bytes: security.bytes,
+                },
+            )
+            .map_err(|_| ReadError::Storage)?
+        } else {
+            spec::compile_spec_selected_with_security(
+                &self.base.graph.0,
+                &self.base.graph.1,
+                &flows,
+                self.basis.export_mode,
+                &self.rejected_hashes,
+                &[id],
+                compile_limits,
+                spec::SecurityLimits {
+                    max_rows: security.rows,
+                    max_output_bytes: security.bytes,
+                },
+            )
+            .map_err(|_| ReadError::InvalidRequest)?
+            .into_iter()
+            .next()
+            .ok_or(ReadError::Storage)?
+        };
         Ok(match outcome {
             spec::SelectedArtifactOutcome::Produced(artifact) => {
                 ArtifactCompilation::Produced(CompiledArtifact {
