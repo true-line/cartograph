@@ -425,9 +425,12 @@ fn revisioned_covered_snapshot_is_coherent_across_wal_publications() {
 // invalid caller limits still win before metadata access.
 #[test]
 fn revisioned_covered_snapshot_refuses_invalid_revision_metadata() {
-    for corrupt in [
-        "DROP TRIGGER graph_generation_nodes_insert",
-        "UPDATE graph_instance SET instance = 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'",
+    for (corrupt, legacy_rejects) in [
+        ("DROP TRIGGER graph_generation_nodes_insert", true),
+        (
+            "UPDATE graph_instance SET instance = 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'",
+            false,
+        ),
     ] {
         let store = SqliteGraphStore::open_in_memory().unwrap();
         store.conn.execute_batch(corrupt).unwrap();
@@ -453,13 +456,22 @@ fn revisioned_covered_snapshot_refuses_invalid_revision_metadata() {
             ))
         ));
         assert!(store.conn.is_autocommit());
-        assert!(
-            store
-                .read_snapshot_with_coverage_bounded(
-                    SnapshotReadLimits::default(),
-                    CoverageReadLimits::default()
-                )
-                .is_ok()
+        // Legacy coverage reads validate generation schema, but do not read
+        // the graph-instance value. Preserve that distinction.
+        let legacy = store.read_snapshot_with_coverage_bounded(
+            SnapshotReadLimits::default(),
+            CoverageReadLimits::default(),
         );
+        if legacy_rejects {
+            assert!(matches!(
+                legacy,
+                Err(GraphError::Generation(
+                    crate::GenerationError::InvalidSchema
+                ))
+            ));
+        } else {
+            assert!(legacy.is_ok());
+        }
+        assert!(store.conn.is_autocommit());
     }
 }
