@@ -68,6 +68,7 @@ fn orm_model_support(node: &Node) -> Option<(Provenance, String, String)> {
         || prov.tier != Tier::Deterministic
         || prov.confidence_tier != ConfidenceTier::Confirmed
         || prov.extractor_id != expected_extractor
+        || !matches!(prov.basis, None | Some(EvidenceBasis::Source))
         || prov.evidence.is_empty()
         || prov.evidence.iter().any(|e| {
             e.repo.trim().is_empty()

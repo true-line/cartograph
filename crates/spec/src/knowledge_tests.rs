@@ -348,6 +348,54 @@ fn orm_domain_entities_reject_unproven_or_ambiguous_models() {
     );
 }
 
+// AC-0511: ORM source evidence cannot be relabelled from Artifact or Observation.
+#[test]
+fn orm_domain_entities_require_source_basis_on_model_support() {
+    let artifact = serde_json::json!({"kind": "artifact", "refs": [{
+        "digest": format!("sha256:{}", "a".repeat(64)),
+        "kind": "orm-schema",
+        "at": {"offset": {"start": 0, "end": 4}}
+    }]});
+    for (storage, original) in [
+        ("jpa", jpa_entity_fixture()),
+        ("sqlalchemy", sqlalchemy_entity_fixture()),
+    ] {
+        let expected = derive_orm_domain_entities(&original);
+        assert_eq!(expected.facts.len(), 2); // Implicit source basis remains admitted.
+        for (basis, admitted) in [
+            (serde_json::json!({"kind": "source"}), true),
+            (artifact.clone(), false),
+            (serde_json::json!({"kind": "observation"}), false),
+        ] {
+            let mut base = original.clone();
+            let model = base
+                .graph
+                .0
+                .iter_mut()
+                .find(|n| n.label == "DataEntity")
+                .unwrap();
+            model.props["prov"]["basis"] = basis.clone();
+            let prov: Provenance = serde_json::from_value(model.props["prov"].clone()).unwrap();
+            assert!(
+                prov.validate().is_ok(),
+                "{storage} {basis} is otherwise valid"
+            );
+            let before = base.clone();
+            let report = derive_orm_domain_entities(&base);
+            if admitted {
+                assert_eq!(
+                    report, expected,
+                    "{storage} explicit source preserves the pair"
+                );
+            } else {
+                assert!(report.facts.is_empty(), "{storage} {basis}");
+                assert_eq!(report.oversized_models, 0);
+            }
+            assert_eq!(base, before);
+        }
+    }
+}
+
 // AC-0500: real adapter pairs retain all support and weak provenance.
 #[test]
 fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {
