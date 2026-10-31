@@ -30,6 +30,27 @@ const FROZEN_INGEST_ID: &str = "job:1";
 const FROZEN_CONFIG_HASH: &str = "1e94359386957269770da884f7526d43f2d38f7572694fdac67ed6836c7cdaec";
 const FROZEN_COVERAGE_INVENTORY_SHA256: &str =
     "a67283739c05cd7206dede1d871bc6e05a7129835a633bd3899b11d3dd4b428b";
+// Independently sampled current curation baseline for the exact fresh-profile
+// path pinned by the preparation. Sampled 2026-10-31T14:18:57.940647Z by raw
+// file reads without SQLite opens; baseline JSON SHA-256 is 839123f004d76d2d5ed3653e04f494e0bc98a83f85040164ad1fb71fed55c942.
+// This is not historical-at-capture proof.
+const FROZEN_DECISION_STATE_FILES: [(&str, u64, &str); 3] = [
+    (
+        "state.db",
+        4_096,
+        "da63a52bdf62b3fc863995d79f497584be3ba97c1de4c55d1d301afbafab6cfc",
+    ),
+    (
+        "state.db-wal",
+        1_545_032,
+        "2cea22c384ffe2926d7cfd89f102414bb4c9f6483386832ddbd6c5c2fc3d1022",
+    ),
+    (
+        "state.db-shm",
+        32_768,
+        "7481c13dd55d11838d91b07ca452a9382267cc96718f9c0abd6a6d8c367d5538",
+    ),
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +61,7 @@ struct Receipt {
     policy_sha256: String,
     files: BTreeMap<String, FileDigest>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct FileDigest {
     bytes: u64,
@@ -108,6 +129,18 @@ fn verify_pinned_capture_input(
     Ok(())
 }
 
+fn verify_frozen_decision_state(files: &BTreeMap<String, FileDigest>) -> Result<(), &'static str> {
+    for (name, bytes, sha256) in FROZEN_DECISION_STATE_FILES {
+        let actual = files
+            .get(name)
+            .ok_or("copied decision state differs from the reviewed current baseline")?;
+        if actual.bytes != bytes || actual.sha256 != sha256 {
+            return Err("copied decision state differs from the reviewed current baseline");
+        }
+    }
+    Ok(())
+}
+
 fn verify_pinned_graph_snapshot(snapshot_id: &str) -> Result<(), &'static str> {
     if snapshot_id == FROZEN_GRAPH_SNAPSHOT_ID {
         Ok(())
@@ -162,6 +195,36 @@ fn pinned_capture_identity_rejects_caller_repaired_proof_pair() {
     assert!(
         verify_pinned_capture_input(&changed_input, &changed_proof, FROZEN_PROOF_SHA256).is_err()
     );
+}
+
+// AC-0513: copied decision state cannot be self-attested by the receipt.
+#[test]
+fn captured_decision_state_identity_is_pinned() {
+    let expected: BTreeMap<String, FileDigest> = FROZEN_DECISION_STATE_FILES
+        .into_iter()
+        .map(|(name, bytes, sha256)| {
+            (
+                name.to_owned(),
+                FileDigest {
+                    bytes,
+                    sha256: sha256.to_owned(),
+                },
+            )
+        })
+        .collect();
+    assert!(verify_frozen_decision_state(&expected).is_ok());
+
+    for (name, _, _) in FROZEN_DECISION_STATE_FILES {
+        let mut changed = expected.clone();
+        changed.get_mut(name).unwrap().sha256 = "0".repeat(64);
+        assert!(verify_frozen_decision_state(&changed).is_err());
+        let mut changed = expected.clone();
+        changed.get_mut(name).unwrap().bytes += 1;
+        assert!(verify_frozen_decision_state(&changed).is_err());
+    }
+    let mut missing = expected;
+    missing.remove("state.db-wal");
+    assert!(verify_frozen_decision_state(&missing).is_err());
 }
 
 // AC-0513: the stored graph identity is pinned to the historical capture.
@@ -241,6 +304,9 @@ fn captured_seventeen_file_capability_stories_without_provider() {
         assert_eq!(u64::try_from(bytes.len()).unwrap(), expected.bytes);
         assert_eq!(hash(&bytes), expected.sha256);
     }
+    // Receipt copy hashes are not the expected decision state; bind them to the
+    // separately reviewed current baseline before opening either SQLite store.
+    verify_frozen_decision_state(&receipt.files).unwrap();
     // Only verified scratch paths reach any SQLite constructor below.
     let graph = Mutex::new(SqliteGraphStore::open(&graph_path).unwrap());
     let before = graph
