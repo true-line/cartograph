@@ -985,3 +985,7 @@
 - **Security:** This establishes source annotation and binding syntax only, without evaluating imported implementations, runtime OR/AND semantics, effective permission checks, authentication, roles or principals. Missing annotation never means anonymous; Owner remains a token.
 - **Performance:** Uses existing lexical bindings and source spans with no dependency reads, providers, new numeric limits or global binder changes.
 - **Trace:** P1 (#1443, #1451) · `adapters-lang-ts` · ADR-0051 · T-0517
+- **AC-0507** Given bounded graph and coverage reads, the caller can capture their store revision, nodes, edges and coverage inventories in one SQLite read transaction. Concurrent publications cannot mix revisions, including coverage-only changes. Existing graph and coverage limits and integrity checks apply without partial output; invalid generation metadata fails closed. Legacy read APIs keep their behavior. The returned revision describes the captured observation, not continued currency (#1461).
+- **Security:** The revisioned covered read validates stored metadata and inventories; it performs no provider call or write.
+- **Performance:** Existing caller-supplied graph and coverage admission limits apply before rows are materialized.
+- **Trace:** P1 (#1445, #1461) · `core-graph`, `app` · ADR-0051, ADR-0037 · T-0498, T-0507

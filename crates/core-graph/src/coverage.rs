@@ -330,6 +330,31 @@ impl SqliteGraphStore {
         Ok((facts, recorded))
     }
 
+    /// Copy the complete bounded graph, coverage and revision from one read
+    /// transaction. The revision describes these rows, not continued currency
+    /// after return; coverage still grants no completeness/registration claim.
+    pub fn read_snapshot_with_coverage_and_revision_bounded(
+        &self,
+        graph: SnapshotReadLimits,
+        coverage: CoverageReadLimits,
+    ) -> Result<(crate::RevisionedSnapshot, Vec<StoredCoverage>), GraphError> {
+        graph.validate()?;
+        coverage.validate()?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let revision = crate::generation::read_store_revision(&transaction)?;
+        preflight(&transaction, coverage)?;
+        let facts = self.read_snapshot_rows_bounded(graph)?;
+        let recorded = read_all(&transaction)?;
+        transaction.commit()?;
+        Ok((
+            crate::RevisionedSnapshot {
+                revision,
+                graph: facts,
+            },
+            recorded,
+        ))
+    }
+
     /// Every recorded inventory, by repo.
     pub fn coverage_records(&self) -> Result<Vec<StoredCoverage>, GraphError> {
         let transaction = self.conn.unchecked_transaction()?;

@@ -167,6 +167,7 @@ fn coverage_schema_is_exact_and_refuses_foreign_objects() {
 // unbounded read when both fit. (T-0239)
 #[test]
 fn bounded_coverage_read_admits_inventories_before_copying_them() {
+    // AC-0507: the revisioned sibling preserves payload and all admission errors.
     let mut store = SqliteGraphStore::open_in_memory().unwrap();
     for repo in ["acme/api", "acme/web"] {
         let body = json!({"inventory": "coverage@1", "repo": repo});
@@ -185,6 +186,11 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
             .unwrap(),
         unbounded
     );
+    let (snapshot, recorded) = store
+        .read_snapshot_with_coverage_and_revision_bounded(graph, CoverageReadLimits::default())
+        .unwrap();
+    assert_eq!((snapshot.graph, recorded), unbounded);
+    assert_eq!(snapshot.revision, store.read_revision().unwrap());
     let stored: usize = unbounded
         .1
         .iter()
@@ -205,6 +211,11 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
     assert!(
         store
             .read_snapshot_with_coverage_bounded(graph, exact)
+            .is_ok()
+    );
+    assert!(
+        store
+            .read_snapshot_with_coverage_and_revision_bounded(graph, exact)
             .is_ok()
     );
     for (limits, error) in [
@@ -241,6 +252,10 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
             store.read_snapshot_with_coverage_bounded(graph, limits),
             Err(GraphError::SnapshotBounds(actual)) if actual == error
         ));
+        assert!(matches!(
+            store.read_snapshot_with_coverage_and_revision_bounded(graph, limits),
+            Err(GraphError::SnapshotBounds(actual)) if actual == error
+        ));
     }
     let tight_graph = SnapshotReadLimits {
         max_rows: 1,
@@ -250,6 +265,21 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
         store.read_snapshot_with_coverage_bounded(tight_graph, exact),
         Err(GraphError::SnapshotBounds(SnapshotBoundsError::RowLimit))
     ));
+    assert!(matches!(
+        store.read_snapshot_with_coverage_and_revision_bounded(tight_graph, exact),
+        Err(GraphError::SnapshotBounds(SnapshotBoundsError::RowLimit))
+    ));
+    assert_eq!(
+        store
+            .read_snapshot_with_coverage_bounded(graph, exact)
+            .unwrap(),
+        unbounded
+    );
+    assert!(
+        store
+            .read_snapshot_with_coverage_and_revision_bounded(graph, exact)
+            .is_ok()
+    );
 }
 
 // Scoped coverage acquisition must not materialize unrelated graph bodies.
@@ -307,4 +337,141 @@ fn revisioned_coverage_is_bounded_and_independent_of_graph_body_size() {
         .unwrap();
     assert_ne!(revision, next);
     assert_eq!(records[0].record.ingest_id, "job-2");
+}
+
+// AC-0507: one WAL snapshot binds revision, nodes, edges and coverage, including
+// a coverage-only commit whose graph content does not change.
+#[test]
+fn revisioned_covered_snapshot_is_coherent_across_wal_publications() {
+    for change_graph in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        let mut reader = SqliteGraphStore::open(&path).unwrap();
+        assert!(publish(
+            &mut reader,
+            "acme/api",
+            &["mod:a"],
+            Some(&record("acme/api", json!({"run":1})))
+        ));
+        reader
+            .put_edge(&Edge {
+                src: "mod:a".into(),
+                dst: "mod:a".into(),
+                label: "CALLS".into(),
+                props: json!({}),
+            })
+            .unwrap();
+        let graph_limits = SnapshotReadLimits::default();
+        let coverage_limits = CoverageReadLimits::default();
+        let before = reader
+            .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
+            .unwrap();
+        let mut writer = SqliteGraphStore::open(&path).unwrap();
+        let expected = before.0.graph.clone();
+        let mut changed_node = expected.0[0].clone();
+        changed_node.props = json!({"run":2});
+        let mut changed_edge = expected.1[0].clone();
+        changed_edge.props = json!({"run":2});
+        let replacement = record("acme/api", json!({"run":2}));
+        let published_record = replacement.clone();
+        reader.set_snapshot_after_nodes_hook(move || {
+            let patch = if change_graph {
+                GraphPatch {
+                    upsert_nodes: vec![changed_node],
+                    upsert_edges: vec![changed_edge],
+                    ..GraphPatch::default()
+                }
+            } else {
+                GraphPatch::default()
+            };
+            assert!(
+                writer.apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                    &expected,
+                    &patch,
+                    "acme/api",
+                    &[],
+                    Some(&published_record),
+                    crate::source::SourceOmissions::NONE,
+                )?
+            );
+            Ok(())
+        });
+        assert_eq!(
+            reader
+                .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
+                .unwrap(),
+            before
+        );
+        let after = reader
+            .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
+            .unwrap();
+        assert_eq!(
+            after.0.revision.graph_instance,
+            before.0.revision.graph_instance
+        );
+        assert!(after.0.revision.generation > before.0.revision.generation);
+        assert_eq!(after.1[0].record, replacement);
+        assert_eq!(after.1[0].inventory_hash, replacement.inventory_hash());
+        if change_graph {
+            assert_eq!(after.0.graph.0[0].props, json!({"run":2}));
+            assert_eq!(after.0.graph.1[0].props, json!({"run":2}));
+        } else {
+            assert_eq!(after.0.graph, before.0.graph);
+        }
+    }
+}
+
+// AC-0507: validate generation/instance metadata for the new revisioned read;
+// invalid caller limits still win before metadata access.
+#[test]
+fn revisioned_covered_snapshot_refuses_invalid_revision_metadata() {
+    for (corrupt, legacy_rejects) in [
+        ("DROP TRIGGER graph_generation_nodes_insert", true),
+        (
+            "UPDATE graph_instance SET instance = 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'",
+            false,
+        ),
+    ] {
+        let store = SqliteGraphStore::open_in_memory().unwrap();
+        store.conn.execute_batch(corrupt).unwrap();
+        assert!(matches!(
+            store.read_snapshot_with_coverage_and_revision_bounded(
+                SnapshotReadLimits::default(),
+                CoverageReadLimits::default()
+            ),
+            Err(GraphError::Generation(
+                crate::GenerationError::InvalidSchema
+            ))
+        ));
+        assert!(matches!(
+            store.read_snapshot_with_coverage_and_revision_bounded(
+                SnapshotReadLimits {
+                    max_bytes: 0,
+                    ..SnapshotReadLimits::default()
+                },
+                CoverageReadLimits::default()
+            ),
+            Err(GraphError::SnapshotBounds(
+                SnapshotBoundsError::InvalidLimits
+            ))
+        ));
+        assert!(store.conn.is_autocommit());
+        // Legacy coverage reads validate generation schema, but do not read
+        // the graph-instance value. Preserve that distinction.
+        let legacy = store.read_snapshot_with_coverage_bounded(
+            SnapshotReadLimits::default(),
+            CoverageReadLimits::default(),
+        );
+        if legacy_rejects {
+            assert!(matches!(
+                legacy,
+                Err(GraphError::Generation(
+                    crate::GenerationError::InvalidSchema
+                ))
+            ));
+        } else {
+            assert!(legacy.is_ok());
+        }
+        assert!(store.conn.is_autocommit());
+    }
 }
