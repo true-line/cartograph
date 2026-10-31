@@ -540,8 +540,16 @@ pub(crate) fn bundle_from_filtered(
     let artifacts: Vec<_> = ARTIFACTS
         .iter()
         .map(|a| {
-            produce(a, nodes, edges, flows, gap_count, (mode, rejected), None)
-                .expect("unbounded native artifact")
+            produce(
+                a,
+                nodes,
+                edges,
+                flows,
+                gap_count,
+                (mode, rejected, None),
+                None,
+            )
+            .expect("unbounded native artifact")
         })
         .collect();
     let assertion_count = artifacts.iter().map(|a| a.assertions.len()).sum();
