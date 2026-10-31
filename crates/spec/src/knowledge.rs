@@ -1,4 +1,9 @@
 //! Pure knowledge-layer candidates; publication remains an overlay operation.
+mod business_flows;
+pub use business_flows::{
+    BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
+    derive_business_flows,
+};
 use core_graph::{
     Node, RevisionedSnapshot,
     overlay::{BaseRef, MAX_FACT_BYTES, OverlayFact, OverlayItem},
