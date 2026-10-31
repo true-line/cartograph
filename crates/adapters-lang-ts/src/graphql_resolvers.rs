@@ -8,6 +8,11 @@
 //! the directory below the nearest `resolvers/` segment and the endpoint is
 //! InferredStrong with that assumption recorded. Field resolvers
 //! (`@ResolveField`) are not operations and are not emitted.
+//!
+//! `Endpoint.permission_site` separately records one stable named-import-bound
+//! Allow/Permission argument site, with exact decorator/import provenance.
+//! Its Confirmed tier describes syntax, not runtime authorization semantics.
+//! Legacy `permissions` is emitted only for that fully proven observation.
 
 use crate::{FileCx, callable, literal_string, object_entries};
 use core_graph::{Edge, Node};
@@ -84,24 +89,111 @@ fn field(cx: &FileCx<'_>, call: Option<TsNode<'_>>, method: &str) -> Field {
     }
 }
 
-/// `@Allow(Permission.A, Permission.B)` → `["A", "B"]` when every argument
-/// is a `Permission.<Ident>` member; otherwise nothing is recorded.
-fn permissions(cx: &FileCx<'_>, call: TsNode<'_>) -> Option<Vec<String>> {
-    let arguments = call.child_by_field_name("arguments")?;
+struct ImportSite<'tree> {
+    specifier: TsNode<'tree>,
+    source: TsNode<'tree>,
+    module: String,
+}
+fn type_only(node: TsNode<'_>) -> bool {
+    let mut walk = node.walk();
+    node.children(&mut walk).any(|n| n.kind() == "type")
+}
+// Import syntax proves the selected binding, not the imported implementation.
+fn named_import<'tree>(
+    cx: &FileCx<'_>,
+    bindings: &callable::Bindings<'tree>,
+    site: TsNode<'_>,
+    local: &str,
+    exported: &str,
+) -> Option<ImportSite<'tree>> {
+    if !bindings.imported(site, local) {
+        return None;
+    }
+    let specifier = bindings.stable_declaration(site, local)?;
+    if specifier.kind() != "import_specifier"
+        || type_only(specifier)
+        || cx.text(&specifier.child_by_field_name("name")?) != exported
+    {
+        return None;
+    }
+    let mut statement = specifier;
+    while statement.kind() != "import_statement" {
+        statement = statement.parent()?;
+    }
+    if type_only(statement) {
+        return None;
+    }
+    let source = statement.child_by_field_name("source")?;
+    Some(ImportSite {
+        specifier,
+        source,
+        module: literal_string(cx, source)?,
+    })
+}
+fn permission_site<'tree>(
+    cx: &FileCx<'_>,
+    decorators: &[TsNode<'tree>],
+    bindings: &callable::Bindings<'tree>,
+) -> Option<serde_json::Value> {
+    let mut sites = decorators.iter().filter_map(|decorator| {
+        let (local, call) = decorator_parts(cx, *decorator)?;
+        let binding = named_import(cx, bindings, *decorator, &local, "Allow")?;
+        Some((*decorator, local, call, binding))
+    });
+    let (decorator, local, call, allow) = sites.next()?;
+    if sites.next().is_some() {
+        return None;
+    }
+    let arguments = call?.child_by_field_name("arguments")?;
     let mut walk = arguments.walk();
-    let mut out = Vec::new();
-    for argument in arguments.named_children(&mut walk) {
-        if argument.kind() == "comment" {
-            continue;
+    let mut members = Vec::new();
+    let mut permission: Option<(String, ImportSite<'_>)> = None;
+    for argument in arguments
+        .named_children(&mut walk)
+        .filter(|n| n.kind() != "comment")
+    {
+        if argument.kind() != "member_expression"
+            || argument.child_by_field_name("optional_chain").is_some()
+        {
+            return None;
         }
         let object = argument.child_by_field_name("object")?;
         let property = argument.child_by_field_name("property")?;
-        if argument.kind() != "member_expression" || cx.text(&object) != "Permission" {
+        if object.kind() != "identifier" || property.kind() != "property_identifier" {
             return None;
         }
-        out.push(cx.text(&property).to_string());
+        let name = cx.text(&object);
+        let binding = named_import(cx, bindings, argument, name, "Permission")?;
+        if permission
+            .as_ref()
+            .is_some_and(|(_, p)| p.specifier.id() != binding.specifier.id())
+        {
+            return None;
+        }
+        permission = Some((name.into(), binding));
+        members.push(cx.text(&property).to_owned());
     }
-    (!out.is_empty()).then_some(out)
+    let (permission_local, permission) = permission?;
+    let mut site = serde_json::json!({
+        "basis":"import-bound-syntax", "arguments":members,
+        "decorator":{"exported":"Allow", "local":local, "module":allow.module},
+        "permission_import":{"exported":"Permission", "local":permission_local, "module":permission.module},
+    });
+    let mut evidence = vec![
+        decorator,
+        allow.specifier,
+        allow.source,
+        permission.specifier,
+        permission.source,
+    ];
+    evidence.sort_by_key(|n| (n.start_byte(), n.end_byte()));
+    evidence.dedup_by_key(|n| (n.start_byte(), n.end_byte()));
+    let fact = format!(
+        "GraphQL permission syntax {}",
+        serde_json::to_string(&site).expect("syntax serializes")
+    );
+    site["prov"] = cx.prov_spanning(&evidence, ConfidenceTier::Confirmed, &fact);
+    Some(site)
 }
 
 /// The decorator's callee identifier and its call expression, if called.
@@ -125,14 +217,13 @@ fn decorator_parts<'tree>(
 /// Emit the operations of one class body whose class is a proven resolver.
 /// `exported` maps a decorator's local binding at a site to the name it was
 /// imported as from [`MODULE`] (`None` when it is not import-proven from it),
-/// and `allow` does the same for a decorator exported as `Allow` from any
-/// module.
-pub(crate) fn operations(
+/// and `bindings` proves permission import syntax without reading dependencies.
+pub(crate) fn operations<'tree>(
     cx: &FileCx<'_>,
     out: &mut crate::Extraction,
-    body: TsNode<'_>,
+    body: TsNode<'tree>,
     exported: &dyn Fn(TsNode<'_>, &str) -> Option<String>,
-    allow: &dyn Fn(TsNode<'_>, &str) -> bool,
+    bindings: &callable::Bindings<'tree>,
 ) {
     let api = api_scope(cx.path);
     let mut walk = body.walk();
@@ -147,11 +238,7 @@ pub(crate) fn operations(
             continue;
         };
         let decorators = crate::leading_decorators(method);
-        let granted = decorators.iter().find_map(|decorator| {
-            let (local, call) = decorator_parts(cx, *decorator)?;
-            allow(*decorator, &local).then_some(())?;
-            permissions(cx, call?)
-        });
+        let permission = permission_site(cx, &decorators, bindings);
         for decorator in &decorators {
             let Some((local, call)) = decorator_parts(cx, *decorator) else {
                 continue;
@@ -216,8 +303,9 @@ pub(crate) fn operations(
                     &format!("Endpoint graphql {api} {kind} {field}"),
                 ),
             });
-            if let Some(granted) = &granted {
-                props["permissions"] = serde_json::json!(granted);
+            if let Some(site) = &permission {
+                props["permissions"] = site["arguments"].clone();
+                props["permission_site"] = site.clone();
             }
             out.nodes.push(Node {
                 id: ep.clone(),
@@ -239,3 +327,6 @@ pub(crate) fn operations(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1989,12 +1989,8 @@ fn extract_source_recording(
                 from_graphql(evidence, &local).as_deref() == Some("Resolver")
             });
         if resolver {
-            let allow = |site: TsNode<'_>, local: &str| {
-                bindings.imported(site, local)
-                    && imported_names.get(local).map_or(local, String::as_str) == "Allow"
-            };
             // A class may also be a controller: its HTTP routes follow.
-            graphql_resolvers::operations(&cx, &mut out, body, &from_graphql, &allow);
+            graphql_resolvers::operations(&cx, &mut out, body, &from_graphql, &bindings);
         }
         let controller = leading_decorators(class_node)
             .into_iter()

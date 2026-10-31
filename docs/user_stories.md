@@ -980,3 +980,8 @@
 - **Security:** Derived candidates preserve cited deterministic support and do not modify the base or call a provider.
 - **Performance:** Existing per-fact JSON limits reject oversized groups; aggregate publication admission remains separate.
 - **Trace:** P1 (#1445, #1451) · `spec` · ADR-0051, ADR-0037 · T-0500
+
+- **AC-0517** GraphQL Endpoint permission observations require exactly one stable import-bound Allow site whose nonempty ordered arguments are direct members of one stable named Permission import. Endpoint.permission_site records import-bound syntax, the actual exported/local/module bindings, original member arguments and its own Confirmed deterministic provenance citing the exact Allow decorator, import specifiers and module strings. Query/Mutation Endpoint and HANDLES provenance remain unchanged. Legacy permissions is retained only for these proven observations; unbound lookalikes, type-only/default/namespace or ambiguous/reassigned/shadowed bindings, mixed/computed arguments and multiple Allow sites produce neither permission field, preserving no partial list.
+- **Security:** This establishes source annotation and binding syntax only, without evaluating imported implementations, runtime OR/AND semantics, effective permission checks, authentication, roles or principals. Missing annotation never means anonymous; Owner remains a token.
+- **Performance:** Uses existing lexical bindings and source spans with no dependency reads, providers, new numeric limits or global binder changes.
+- **Trace:** P1 (#1443, #1451) · `adapters-lang-ts` · ADR-0051 · T-0517
