@@ -14,7 +14,8 @@
 //! declaring file). Everything else is `Unresolved`: an explicit Gap
 //! (R-INT-4). A boundary with no citable evidence fails closed to a Gap.
 
-use crate::{Edge, Node};
+use crate::facts::FactAccess;
+use crate::{Edge, GraphError, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::HashSet;
 
@@ -272,15 +273,58 @@ pub fn close_over_endpoints(
     edges: &[Edge],
     fallback_extractor: &str,
     label_of: impl Fn(&str) -> &'static str,
-    mut classify: impl FnMut(&str, &Edge) -> Option<Boundary>,
+    classify: impl FnMut(&str, &Edge) -> Option<Boundary>,
 ) {
     let known: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+    let placeholders = placeholders_for(
+        |id| known.contains(id),
+        edges,
+        fallback_extractor,
+        label_of,
+        classify,
+    );
+    nodes.extend(placeholders);
+}
+
+/// [`close_over_endpoints`] over [`FactAccess`] facts (#725). Only edges with
+/// an endpoint no node defines are decoded: an edge whose endpoints all exist
+/// contributes nothing to the closure, so the placeholders, their order and
+/// their cited first references are identical.
+pub fn close_over_facts(
+    facts: &mut impl FactAccess,
+    fallback_extractor: &str,
+    label_of: impl Fn(&str) -> &'static str,
+    classify: impl FnMut(&str, &Edge) -> Option<Boundary>,
+) -> Result<(), GraphError> {
+    // The borrowed id set and the referencing edges end before the append.
+    let placeholders = {
+        let known: HashSet<&str> = facts.node_keys().map(|(id, _)| id).collect();
+        let referencing =
+            facts.decode_edges(|src, dst, _| !known.contains(src) || !known.contains(dst))?;
+        placeholders_for(
+            |id| known.contains(id),
+            &referencing,
+            fallback_extractor,
+            label_of,
+            classify,
+        )
+    };
+    facts.append(placeholders, Vec::new())
+}
+
+fn placeholders_for(
+    known: impl Fn(&str) -> bool,
+    edges: &[Edge],
+    fallback_extractor: &str,
+    label_of: impl Fn(&str) -> &'static str,
+    mut classify: impl FnMut(&str, &Edge) -> Option<Boundary>,
+) -> Vec<Node> {
     let mut order: Vec<&str> = Vec::new();
     let mut pending: std::collections::HashMap<&str, (&Edge, Boundary)> =
         std::collections::HashMap::new();
     for edge in edges {
         for id in [edge.src.as_str(), edge.dst.as_str()] {
-            if known.contains(id) {
+            if known(id) {
                 continue;
             }
             let boundary = classify(id, edge).unwrap_or_else(|| Boundary::Unresolved {
@@ -308,16 +352,13 @@ pub fn close_over_endpoints(
             }
         }
     }
-    for id in order {
-        let (edge, boundary) = pending.remove(id).expect("recorded above");
-        nodes.push(placeholder_node(
-            id,
-            label_of(id),
-            edge,
-            boundary,
-            fallback_extractor,
-        ));
-    }
+    order
+        .into_iter()
+        .map(|id| {
+            let (edge, boundary) = pending.remove(id).expect("recorded above");
+            placeholder_node(id, label_of(id), edge, boundary, fallback_extractor)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -555,5 +596,109 @@ mod tests {
         let mut mixed = vec![gap.clone(), parsed.clone()];
         reconcile_placeholders(&mut mixed);
         assert_eq!(mixed, vec![gap, parsed]);
+    }
+
+    #[test]
+    fn packed_closure_matches_list_closure() {
+        // AC-0531: closing over facts through FactAccess, plain or packed,
+        // yields the placeholders, order, cited first references and boundary
+        // judgements of the whole-list closure, while decoding only edges
+        // with an endpoint no node defines.
+        let mut cited = span();
+        cited.byte_start = 40;
+        let mut edges = vec![
+            import_edge("mod:proven", vec![span()]),
+            import_edge("file:r@known.java", vec![span()]),
+            import_edge("mod:disagree", vec![span()]),
+            import_edge("mod:proven", vec![cited.clone()]),
+            import_edge("mod:later_unresolved", vec![span()]),
+            import_edge("mod:disagree", vec![cited.clone()]),
+            import_edge("mod:later_unresolved", vec![cited.clone()]),
+        ];
+        edges.push(Edge {
+            src: "sym:r@gone".into(),
+            dst: "file:r@known.java".into(),
+            label: "CALLS".into(),
+            props: edges[0].props.clone(),
+        });
+        let nodes = vec![
+            Node {
+                id: "file:r@a.java".into(),
+                label: "File".into(),
+                props: serde_json::json!({}),
+            },
+            Node {
+                id: "file:r@known.java".into(),
+                label: "File".into(),
+                props: serde_json::json!({"x": 1.5}),
+            },
+        ];
+        // References disagree on mod:disagree, and the second reference to
+        // mod:later_unresolved is unresolved, so it cites that one.
+        let classify = |id: &str, edge: &Edge| {
+            let second = provenance_of(edge).evidence[0].byte_start == 40;
+            match id {
+                "mod:proven" => Some(Boundary::External {
+                    reason: "not declared".into(),
+                    evidence: vec![],
+                }),
+                "mod:disagree" if second => Some(Boundary::Internal {
+                    reason: "declared".into(),
+                    evidence: vec![],
+                }),
+                "mod:disagree" => Some(Boundary::External {
+                    reason: "not declared".into(),
+                    evidence: vec![],
+                }),
+                "mod:later_unresolved" if !second => Some(Boundary::External {
+                    reason: "not declared".into(),
+                    evidence: vec![],
+                }),
+                _ => None,
+            }
+        };
+
+        let mut whole = nodes.clone();
+        close_over_endpoints(&mut whole, &edges, "t0.test", label_for_id, classify);
+        assert_eq!(whole.len(), 6, "four modules and one symbol were missing");
+
+        let (mut list_nodes, mut list_edges) = (nodes.clone(), edges.clone());
+        let mut lists = crate::facts::FactLists {
+            nodes: &mut list_nodes,
+            edges: &mut list_edges,
+        };
+        close_over_facts(&mut lists, "t0.test", label_for_id, classify).unwrap();
+        assert_eq!((&list_nodes, &list_edges), (&whole, &edges));
+
+        let mut store = crate::facts::FactStore::from_facts(nodes, edges.clone()).unwrap();
+        let mut seen = Vec::new();
+        close_over_facts(
+            &mut store,
+            "t0.test",
+            label_for_id,
+            |id: &str, edge: &Edge| {
+                seen.push((edge.src.clone(), edge.dst.clone()));
+                classify(id, edge)
+            },
+        )
+        .unwrap();
+        assert_eq!(store.into_facts().unwrap(), (whole.clone(), edges));
+        assert!(
+            !seen
+                .iter()
+                .any(|(src, dst)| src == "file:r@a.java" && dst == "file:r@known.java"),
+            "an edge whose endpoints all exist is never classified"
+        );
+        let disagree = whole.iter().find(|n| n.id == "mod:disagree").unwrap();
+        assert_eq!(disagree.props["boundary"], "unresolved");
+        let later = whole
+            .iter()
+            .find(|n| n.id == "mod:later_unresolved")
+            .unwrap();
+        assert_eq!(provenance(later).evidence, vec![cited]);
+    }
+
+    fn provenance_of(edge: &Edge) -> Provenance {
+        serde_json::from_value(edge.props["prov"].clone()).unwrap()
     }
 }
