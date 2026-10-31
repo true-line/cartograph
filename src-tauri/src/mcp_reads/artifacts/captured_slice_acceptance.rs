@@ -102,20 +102,21 @@ fn verify_pinned_capture_input(
 fn pinned_capture_identity_rejects_caller_repaired_proof_pair() {
     let files = frozen_files();
     let proof_files = pinned_proof_files();
-    let mut input = serde_json::json!({
+    let input = serde_json::json!({
         "repo": FROZEN_REPO,
         "commit_sha": FROZEN_COMMIT,
         "manifest_sha256": FROZEN_MANIFEST_SHA256,
         "proof_sha256": FROZEN_PROOF_SHA256,
         "files": files,
     });
-    let mut proof = serde_json::json!({
+    let proof = serde_json::json!({
         "repo": FROZEN_REPO,
         "commit_sha": FROZEN_COMMIT,
         "manifest_sha256": FROZEN_MANIFEST_SHA256,
         "files_sha256": proof_files,
     });
     assert!(verify_pinned_capture_input(&input, &proof, FROZEN_PROOF_SHA256).is_ok());
+    assert!(verify_pinned_capture_input(&input, &proof, "0").is_err());
 
     // A caller who changes both sides to self-consistent alternate identities
     // or contents still cannot replace the compiled-in capture.
@@ -143,7 +144,6 @@ fn pinned_capture_identity_rejects_caller_repaired_proof_pair() {
     assert!(
         verify_pinned_capture_input(&changed_input, &changed_proof, FROZEN_PROOF_SHA256).is_err()
     );
-    assert!(verify_pinned_capture_input(&changed_input, &changed_proof, "0").is_err());
 }
 
 // AC-0513: actual captured facts reach the real no-provider phase, session and official stories.
