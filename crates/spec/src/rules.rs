@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 pub mod journey;
-mod render;
+pub(crate) mod render;
 pub(crate) mod use_case;
 use render::{
     Counter, DisplayString, Escaped, EvidenceText, Formatted, MethodLabel, NestedHeadings,

@@ -81,6 +81,13 @@ function matchLink(text: string, start: number, failUntil: number): LinkMatch {
   return { kind: 'link', label, url: text.slice(urlStart, urlEnd), end: k + 1 };
 }
 
+const ASCII_PUNCTUATION = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~';
+const ENTITIES: ReadonlyArray<readonly [string, string]> = [
+  ['&amp;', '&'],
+  ['&lt;', '<'],
+  ['&gt;', '>'],
+];
+
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   let buffer = '';
@@ -102,10 +109,21 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   while (i < text.length) {
     const ch = text[i];
 
-    if (ch === '\\' && i + 1 < text.length && '|*`\\'.includes(text[i + 1])) {
+    // CommonMark: a backslash before any ASCII punctuation is that character.
+    if (ch === '\\' && i + 1 < text.length && ASCII_PUNCTUATION.includes(text[i + 1])) {
       buffer += text[i + 1];
       i += 2;
       continue;
+    }
+
+    // Exported literal text entity-escapes these (#1453); React re-escapes them.
+    if (ch === '&') {
+      const entity = ENTITIES.find(([name]) => text.startsWith(name, i));
+      if (entity) {
+        buffer += entity[1];
+        i += entity[0].length;
+        continue;
+      }
     }
 
     if (ch === '`') {

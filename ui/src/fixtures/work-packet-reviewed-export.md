@@ -4,7 +4,7 @@ Execution: unoffered. Capability requests confer no authority.
 
 ## Packet identity
 
-    "work-packet-v1:7ad86a09ab05f4d3b9b282c27f89842b47c6b2e5925b07012648e7190c1bc3ef"
+    "work-packet-v1:834c5f93e1b6e03bf2359451dfde61885a820f7a101f84487ce2b95d4a2aea8f"
 
 ## Body schema version
 
@@ -244,11 +244,11 @@ Execution: unoffered. Capability requests confer no authority.
       ],
       "artifacts": [
         {
-          "id": "artifact:b232ca3f4a621d605f843f10f8fb65ec19e68cc2080d726376af327919ac40b0",
+          "id": "artifact:658d85704f080ea6cee0f5b4bc7c6c5218c9a159cd83e4798cd6da9a2ce06529",
           "selection": {
             "id": "user-stories",
             "schema": "cartograph.spec/user-stories@1",
-            "content_id": "spec-artifact-v1:edbb119b2c0a7a1f5363ace1e9ce8c1c8e62a4ab4a53b7af7780f7cbe75d29a0",
+            "content_id": "spec-artifact-v1:36e2189d5a446cd3644162e02290f01c2232a015896d6f8e18e1f05d4e833452",
             "mode": "verified-only"
           },
           "artifact": {
@@ -259,8 +259,8 @@ Execution: unoffered. Capability requests confer no authority.
               "title": "User stories",
               "format": "markdown",
               "schema": "cartograph.spec/user-stories@1",
-              "content_id": "spec-artifact-v1:edbb119b2c0a7a1f5363ace1e9ce8c1c8e62a4ab4a53b7af7780f7cbe75d29a0",
-              "content": "# Recovered user stories\n\n## US-R-0001 — fixture-symbol\n\n- Recovered capability assertion: `fixture-symbol`\n\n\n## Assertions and inline provenance\n\n| Assertion | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n|---|---|---|---|---|---|---|\n| Capability: fixture-symbol | Deterministic | Confirmed | rule fixture@1 | — | `fixture-rule` | `4df38eddb9b2309bdbaef1c5a20c052949f9ebbbc9022fd1ce1980434b2acaf3` |\n",
+              "content_id": "spec-artifact-v1:36e2189d5a446cd3644162e02290f01c2232a015896d6f8e18e1f05d4e833452",
+              "content": "# Recovered user stories\n\n## US-R-0001 — fixture-symbol\n\n- Recovered capability assertion: fixture-symbol\n\n\n## Assertions and inline provenance\n\n| Assertion | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n|---|---|---|---|---|---|---|\n| Capability: fixture-symbol | Deterministic | Confirmed | rule fixture@1 | — | fixture-rule | 4df38eddb9b2309bdbaef1c5a20c052949f9ebbbc9022fd1ce1980434b2acaf3 |\n",
               "assertions": [
                 {
                   "id": "node:fixture-symbol",
@@ -285,7 +285,7 @@ Execution: unoffered. Capability requests confer no authority.
             "origin": {
               "kind": "evidence",
               "evidence_ids": [
-                "artifact:b232ca3f4a621d605f843f10f8fb65ec19e68cc2080d726376af327919ac40b0"
+                "artifact:658d85704f080ea6cee0f5b4bc7c6c5218c9a159cd83e4798cd6da9a2ce06529"
               ]
             }
           }
