@@ -24,6 +24,7 @@ use adapters_fw::events::{
     SdkPattern,
 };
 use adapters_fw::{HTTP_FACTORIES, NEST};
+use core_graph::facts::FactLists;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -43,6 +44,9 @@ pub enum ExtractError {
     /// Filesystem failure while walking a directory.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A recovery stage's fact store refused a fact.
+    #[error("facts: {0}")]
+    Facts(#[from] core_graph::GraphError),
 }
 
 /// Facts extracted from one file or one directory walk.
@@ -3075,9 +3079,11 @@ fn extract_source_recording(
     if let Some(evidence) = service_worker {
         service_worker::mark(
             &BTreeMap::from([(file_id(id.repo, path), vec![evidence])]),
-            &mut out.nodes,
-            &out.edges,
-        );
+            &mut FactLists {
+                nodes: &mut out.nodes,
+                edges: &mut out.edges,
+            },
+        )?;
     }
     Ok(out)
 }
@@ -3304,10 +3310,12 @@ fn complete_directory(
     let registrations = std::mem::take(&mut out.service_worker_registrations);
     service_worker::mark_registered(
         &registrations,
-        &mut out.nodes,
-        &out.edges,
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
         &format!("file:{}@", id.repo),
-    );
+    )?;
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
     let file_prefix = format!("file:{}@", id.repo);
