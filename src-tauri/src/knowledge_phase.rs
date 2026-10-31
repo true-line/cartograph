@@ -9,7 +9,9 @@
 //!
 //! The deterministic knowledge producers (#1443) derive their facts from the
 //! same snapshot and are published with it; they need no provider.
-use core_graph::overlay::{OverlayError, OverlayFact, OverlayRecipe, OverlayStore};
+use core_graph::overlay::{
+    MAX_BYTES, MAX_FACTS, OverlayError, OverlayFact, OverlayRecipe, OverlayStore,
+};
 use core_graph::{RevisionedSnapshot, SnapshotReadLimits, SqliteGraphStore};
 use llm::LlmProvider;
 use semantic::embedding_cache::EmbeddingCache;
@@ -27,6 +29,15 @@ pub(crate) const PROVIDER_FAILED: &str = "embedding-provider-failed";
 /// Omission when the derived facts were refused as one publication; the
 /// overlay is then published without them and its recipe says so.
 pub(crate) const DERIVED_REJECTED: &str = "knowledge-derived-rejected";
+/// BusinessFlow trace limits, numerically aligned with the overlay caps so no
+/// new number is introduced. They are independent budgets: hops count the
+/// whole trace and bytes measure serialized flows, not overlay facts, so the
+/// combined publication can still be refused under DERIVED_REJECTED.
+const FLOW_LIMITS: flowtracer::TraceLimits = flowtracer::TraceLimits {
+    max_flows: MAX_FACTS,
+    max_hops: MAX_FACTS,
+    max_output_bytes: MAX_BYTES,
+};
 
 /// What one phase did, reported to the UI; never an ingest failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -44,6 +55,8 @@ pub(crate) struct KnowledgeReport {
     pub oversized: usize,
     /// Named reason the derived facts were not published, if they were not.
     pub derived_omission: Option<&'static str>,
+    /// Named producers that yielded nothing for this base, in producer order.
+    pub producer_omissions: Vec<&'static str>,
     /// Whether the overlay was republished for the embedded base revision;
     /// false when the base moved on before publication.
     pub published: bool,
@@ -120,9 +133,10 @@ fn run_within(
             }
             Err(_) => (recipe(None, false), report(0, 0, Some(PROVIDER_FAILED))),
         };
-    let (facts, oversized) = derive(&snapshot);
-    report.oversized = oversized;
-    match publish(graph, overlay, &snapshot, recipe, facts)? {
+    let derived = derive(&snapshot);
+    report.oversized = derived.oversized;
+    report.producer_omissions = derived.omissions;
+    match publish(graph, overlay, &snapshot, recipe, derived.facts)? {
         Published::Moved => {}
         Published::Facts(derived) => {
             report.published = true;
@@ -136,20 +150,47 @@ fn run_within(
     Ok(report)
 }
 
-/// Every deterministic producer over one snapshot, in a fixed order, with
-/// the count of candidates each dropped under its per-fact size cap.
-fn derive(snapshot: &RevisionedSnapshot) -> (Vec<OverlayFact>, usize) {
+/// Facts from every deterministic producer over one snapshot.
+struct Derived {
+    facts: Vec<OverlayFact>,
+    /// Candidates dropped under a producer's per-fact size cap.
+    oversized: usize,
+    /// Producers that failed as a whole, by their named omission.
+    omissions: Vec<&'static str>,
+}
+
+/// Every deterministic producer over one snapshot, in a fixed order. A
+/// producer that fails is a named omission; the others still publish.
+fn derive(snapshot: &RevisionedSnapshot) -> Derived {
+    derive_within(snapshot, FLOW_LIMITS)
+}
+
+fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLimits) -> Derived {
     let capabilities = spec::derive_graphql_resolver_capabilities(snapshot);
-    (capabilities.facts, capabilities.oversized_groups)
+    let mut derived = Derived {
+        facts: capabilities.facts,
+        oversized: capabilities.oversized_groups,
+        omissions: Vec::new(),
+    };
+    match spec::derive_business_flows(snapshot, flow_limits) {
+        Ok(flows) => {
+            derived.facts.extend(flows.facts);
+            derived.oversized += flows.oversized_flows;
+        }
+        Err(omission) => derived.omissions.push(omission.code()),
+    }
+    derived
 }
 
 /// The phase recipe with each producer rule, so a rule version change
 /// changes the overlay identity.
 pub(crate) fn recipe_name() -> String {
     format!(
-        "{RECIPE};{}@{}",
+        "{RECIPE};{}@{};{}@{}",
         spec::CAPABILITY_GRAPHQL_RULE,
-        spec::CAPABILITY_GRAPHQL_RULE_VERSION
+        spec::CAPABILITY_GRAPHQL_RULE_VERSION,
+        spec::BUSINESS_FLOW_RULE,
+        spec::BUSINESS_FLOW_RULE_VERSION
     )
 }
 
@@ -170,6 +211,7 @@ fn report(embedded: usize, omitted: usize, omission: Option<&'static str>) -> Kn
         derived: 0,
         oversized: 0,
         derived_omission: None,
+        producer_omissions: Vec::new(),
     }
 }
 
