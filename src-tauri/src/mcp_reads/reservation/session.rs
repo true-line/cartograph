@@ -386,6 +386,7 @@ mod tests {
     }
     #[test]
     fn concrete_acquired_session_serialized_payload_fits_retained_currency() {
+        // AC-0510: acquired revision metadata and digest owners fit retained session currency.
         use core_graph::GraphStore;
         use std::sync::Mutex;
         let limits = limits();

@@ -291,6 +291,7 @@ fn scope_sets_normalize_order_and_hints_without_accepting_duplicate_repos() {
 
 #[test]
 fn graph_and_coverage_limits_are_store_admitted_and_errors_are_source_free() {
+    // AC-0510: stores admit graph/coverage limits before capture and return source-free errors.
     let (graph, decisions) = fixture();
     let result = ReadSession::acquire(
         &graph,
@@ -499,6 +500,7 @@ fn frozen_evidence_visibility_preserves_hidden_rule_adjacency_and_policy() {
 // A writer commits during the production bounded read, not via a sleep/race.
 #[test]
 fn complete_session_refuses_wal_drift_and_then_captures_matching_revision_and_coverage() {
+    // AC-0510: WAL drift is refused before a matching revision, graph and coverage are captured.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.db");
     let mut reader = SqliteGraphStore::open(&path).unwrap();

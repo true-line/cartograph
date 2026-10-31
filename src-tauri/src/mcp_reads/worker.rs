@@ -758,6 +758,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn complete_revision_reservation_accepts_exact_floor_and_refuses_one_under() {
+        // AC-0510: complete revision admission accepts the exact derived floor and refuses one-under.
         let mut policy = limits();
         let required = super::required_reservation(policy).unwrap();
         policy.reserved_bytes = NonZeroUsize::new(required).unwrap();

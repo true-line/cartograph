@@ -73,6 +73,7 @@ fn cap(bytes: usize) -> NonZeroUsize {
 
 #[test]
 fn real_selected_compilation_and_catalog_match_official_compiler() {
+    // AC-0510: the move-owned coherent base preserves official artifact and catalog parity.
     let session = fixture(ExportMode::BestEffort);
     let owned = (session.base.graph.0.as_ptr(), session.base.graph.1.as_ptr());
     let artifact = produced(&session);
