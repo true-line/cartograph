@@ -30,7 +30,8 @@ pub struct CapabilityCompileWorkspaceBound {
 /// serialized OverlayFacts, not JSON value count or decoded container bytes.
 /// All candidates/citations are admitted here, including filtered stories.
 /// The host separately admits its borrowed candidate vector and retained inputs.
-/// `trace` may describe host flows kept alive across this empty-flow compiler.
+/// `trace` covers caller flows retained and projected during shared compilation;
+/// legacy empty-flow callers may conservatively supply the same bound.
 /// The security=None route produces the same bounded-size security rows: the
 /// existing security_projection_bound/current-row roles still cover them.
 pub fn logical_capability_compile_bound(

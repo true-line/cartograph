@@ -576,3 +576,86 @@ fn adopted_stories_preserve_host_security_projection_refusal() {
         ));
     }
 }
+
+// AC-0513: admitted real flows keep the legacy shared ADR byte limit on adopted stories.
+#[test]
+fn adopted_stories_preserve_flow_sensitive_adr_admission() {
+    let f = Fixture::new();
+    let base = f.base();
+    let endpoint = base.graph.0.iter().find(|n| n.label == "Endpoint").unwrap();
+    let handles = base
+        .graph
+        .1
+        .iter()
+        .find(|e| e.src == endpoint.id && e.label == "HANDLES")
+        .unwrap();
+    let adr = core_graph::Node {
+        id: "adr:forbid-handles".into(),
+        label: "ADR".into(),
+        props: json!({"origin":"found", "forbids":["HANDLES"], "prov":endpoint.props["prov"]}),
+    };
+    {
+        let mut graph = f.graph.lock().unwrap();
+        graph.put_node(&adr).unwrap();
+        graph
+            .put_edge(&core_graph::Edge {
+                src: adr.id,
+                dst: endpoint.id.clone(),
+                label: "DECIDES".into(),
+                props: json!({"prov":handles.props["prov"]}),
+            })
+            .unwrap();
+    }
+    let base = f.base();
+    let flows = flowtracer::trace_bounded(&base.graph.0, &base.graph.1, trace_limits()).unwrap();
+    let full = spec::derive_adr_facts(&base.graph.0, &base.graph.1, &flows);
+    assert!(full.nodes.iter().any(|n| {
+        n.props["flow_triggers"]
+            .as_array()
+            .is_some_and(|triggers| !triggers.is_empty())
+    }));
+    let exact = serde_json::to_vec(&full).unwrap().len();
+    let mut limits = compile_limits();
+    limits.adr.max_output_bytes = exact - 1;
+    // The discarded-flow path would fit, so the boundary depends on traced triggers.
+    assert!(spec::derive_adr_facts_bounded(&base.graph.0, &base.graph.1, &[], limits.adr).is_ok());
+    let absent = f.best();
+    let facts = spec::derive_graphql_resolver_capabilities(&base).facts;
+    assert!(!facts.is_empty());
+    f.publish(facts);
+    let current = f.best();
+    for bytes in [exact, exact - 1] {
+        limits.adr.max_output_bytes = bytes;
+        let legacy = spec::compile_spec_selected(
+            &base.graph.0,
+            &base.graph.1,
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            &["user-stories"],
+            limits,
+        )
+        .unwrap()
+        .remove(0);
+        for session in [&absent, &current] {
+            let actual = session
+                .compile_artifact("user-stories", trace_limits(), limits)
+                .unwrap();
+            if bytes == exact {
+                assert!(matches!(legacy, spec::SelectedArtifactOutcome::Produced(_)));
+                assert!(matches!(actual, ArtifactCompilation::Produced(_)));
+            } else {
+                let expected = spec::SelectedArtifactLimit::AdrDerivation(spec::AdrLimitExceeded {
+                    limit: spec::AdrLimit::OutputBytes,
+                    maximum: bytes,
+                });
+                assert!(
+                    matches!(&legacy, spec::SelectedArtifactOutcome::Limited { limit, .. } if limit == &expected)
+                );
+                assert!(
+                    matches!(actual, ArtifactCompilation::Limited { limit: ArtifactLimit::Compiler(limit), .. } if limit == expected)
+                );
+            }
+        }
+    }
+}

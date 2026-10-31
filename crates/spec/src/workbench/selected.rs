@@ -586,10 +586,21 @@ pub(super) fn compile_stories_with_security(
     stories: &capabilities::Stories<'_>,
     security: Option<crate::SecurityLimits>,
 ) -> SelectedArtifactOutcome {
+    compile_stories_with_flows_and_security(base, &[], mode, rejected, limits, stories, security)
+}
+pub(super) fn compile_stories_with_flows_and_security(
+    base: &core_graph::RevisionedSnapshot,
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    stories: &capabilities::Stories<'_>,
+    security: Option<crate::SecurityLimits>,
+) -> SelectedArtifactOutcome {
     compile_selected(
         &base.graph.0,
         &base.graph.1,
-        &[],
+        flows,
         mode,
         rejected,
         (&["user-stories"], limits, security, Some(stories)),

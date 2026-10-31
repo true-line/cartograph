@@ -67,7 +67,7 @@ impl Support<'_> {
 /// Uses the existing selected projection, renderer, identity and output admission.
 /// The caller still proves overlay currency and admits its input graph/sidecar.
 /// Empty candidates preserve the legacy artifact bytes and identity.
-/// Legacy security behavior is unchanged; bounded hosts use the with_security API.
+/// Legacy security behavior is unchanged; bounded hosts can also supply admitted flows.
 pub fn compile_capability_user_stories(
     base: &RevisionedSnapshot,
     candidates: &[CapabilityStory<'_>],
@@ -75,10 +75,11 @@ pub fn compile_capability_user_stories(
     rejected: &BTreeSet<String>,
     limits: SelectedCompileLimits,
 ) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
-    compile_capability_stories(base, candidates, mode, rejected, limits, None)
+    compile_capability_stories(base, candidates, &[], mode, rejected, limits, None)
 }
 /// Compile official Capability stories with the caller's complete security admission.
 /// A security refusal returns Limited with no artifact, through the shared dispatcher.
+/// This compatibility entrypoint retains its empty-flow ADR context.
 pub fn compile_capability_user_stories_with_security(
     base: &RevisionedSnapshot,
     candidates: &[CapabilityStory<'_>],
@@ -87,11 +88,42 @@ pub fn compile_capability_user_stories_with_security(
     limits: SelectedCompileLimits,
     security: crate::SecurityLimits,
 ) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
-    compile_capability_stories(base, candidates, mode, rejected, limits, Some(security))
+    compile_capability_stories(
+        base,
+        candidates,
+        &[],
+        mode,
+        rejected,
+        limits,
+        Some(security),
+    )
+}
+/// Compile official Capability stories with the caller's admitted flows and security limits.
+/// Flows participate in shared ADR derivation and its complete output-byte admission.
+/// Existing entrypoints retain their empty-flow compatibility behavior.
+pub fn compile_capability_user_stories_with_flows_and_security(
+    base: &RevisionedSnapshot,
+    candidates: &[CapabilityStory<'_>],
+    flows: &[flowtracer::Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    security: crate::SecurityLimits,
+) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    compile_capability_stories(
+        base,
+        candidates,
+        flows,
+        mode,
+        rejected,
+        limits,
+        Some(security),
+    )
 }
 fn compile_capability_stories(
     base: &RevisionedSnapshot,
     candidates: &[CapabilityStory<'_>],
+    flows: &[flowtracer::Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     limits: SelectedCompileLimits,
@@ -184,8 +216,9 @@ fn compile_capability_stories(
         }
     }
     Ok(match security {
-        Some(security) => selected::compile_stories_with_security(
+        Some(security) => selected::compile_stories_with_flows_and_security(
             base,
+            flows,
             mode,
             rejected,
             limits,
