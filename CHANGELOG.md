@@ -1,5 +1,14 @@
 # cartograph
 
+## 0.53.1
+
+### Patch Changes
+
+- 1be3e04: Derive provenance-cited Capability candidates from structurally validated GraphQL resolver facts, including adapter-supported API directory names.
+  
+  Accept adapter-proven TypeScript resolver class and member names containing `$` or Unicode while retaining GraphQL field-name rules and exact owner/identity checks.
+- ad2cb96: The background knowledge phase now publishes deterministic knowledge facts, starting with GraphQL Capabilities, in the knowledge overlay after each ingest, with or without a local model.
+
 ## 0.53.0
 
 ### Minor Changes
