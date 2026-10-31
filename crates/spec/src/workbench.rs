@@ -2,7 +2,10 @@
 
 use crate::TOPOLOGY_EDGE_LABELS;
 pub(crate) mod accounting;
-pub use accounting::{COMPILE_WORKSPACE_MODEL, CompileWorkspaceBound, logical_compile_bound};
+pub use accounting::{
+    COMPILE_WORKSPACE_MODEL, CapabilityCompileWorkspaceBound, CompileWorkspaceBound,
+    logical_capability_compile_bound, logical_compile_bound,
+};
 mod capabilities;
 pub(crate) mod diagrams;
 pub use capabilities::{

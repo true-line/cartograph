@@ -5,6 +5,9 @@ use core_prov::EvidenceRef;
 use flowtracer::{TraceGraphBound, TraceLimits};
 use std::{io, mem::size_of};
 
+mod capability;
+pub use capability::{CapabilityCompileWorkspaceBound, logical_capability_compile_bound};
+
 /// Version of the compiler's logical accounting currency.
 pub const COMPILE_WORKSPACE_MODEL: &str = "spec-logical-compile-v1";
 
