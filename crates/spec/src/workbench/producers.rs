@@ -94,12 +94,13 @@ pub(super) fn stories_with_support(
             }
             content.push_str("\n")?;
         } else {
+            // Recovered names and ids are literal text, never Markdown/HTML (#1453).
             writeln!(
                 content,
-                "## US-R-{:04} — {}\n\n- Recovered capability assertion: `{}`\n",
+                "## US-R-{:04} — {}\n\n- Recovered capability assertion: {}\n",
                 index + 1,
-                NodeName(node),
-                node.id
+                render::Literal(NodeName(node)),
+                render::Literal(&node.id)
             )?;
         }
     }
@@ -115,7 +116,7 @@ pub(super) fn stories_with_support(
         // provenance are literal JSON, including strings containing HTML,
         // Markdown fences or headings. The same Text/Budget admits it all.
         if base_count > 0 {
-            render::inline(&mut content, &assertions.values[..base_count])?;
+            render::inline_literal(&mut content, &assertions.values[..base_count])?;
         }
         content.push_str("\n## Derived assertions and provenance\n\n")?;
         for assertion in &assertions.values[base_count..] {
@@ -126,7 +127,11 @@ pub(super) fn stories_with_support(
             assertions: assertions.values,
         })
     } else {
-        finish(content, assertions)
+        render::inline_literal(&mut content, &assertions.values)?;
+        Ok(Output {
+            content: content.finish(),
+            assertions: assertions.values,
+        })
     }
 }
 pub(super) fn flow(

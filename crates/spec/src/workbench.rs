@@ -770,11 +770,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "e7b9e97a6d38150eb6d28276f527554b0908e180ca6ebe120d6f089c524cd7af",
+                "3887723f58220dd2bf282c5ea97cdcf8155aa5298c12b0d251bb285f20d3e58e",
             ),
             (
                 ExportMode::BestEffort,
-                "cd0775f3b3a39ca5fc327b7c2d22e180a7281190930bb019bb702798691c240f",
+                "73caed7f670f05bd7059e5a23d9a7e2a472fd875b651569c124b46ab5881f057",
             ),
         ] {
             let bytes = serde_json::to_vec(&compile_spec(
@@ -788,7 +788,9 @@ mod tests {
             // Frozen native #603 (03d776d) output, with the already-integrated
             // method column, projection stamping and artifact identity seams,
             // plus the test-arrangements (#946) and journeys artifacts; verified-only
-            // journeys state that they withhold InferredWeak candidates.
+            // journeys state that they withhold InferredWeak candidates. User
+            // stories render recovered names, ids and provenance as literal text
+            // (#1453), which intentionally changes those bytes.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
@@ -2430,6 +2432,74 @@ mod tests {
             assert!(
                 rules.content.contains("observations from"),
                 "grouped rule Markdown"
+            );
+        }
+    }
+
+    // AC-0525 (T-0525): recovered base-story text and provenance stay literal.
+    #[test]
+    fn base_stories_render_hostile_text_literally_within_exact_bounds() {
+        let hostile = "Orders\n# Injected\n```\n<script>x</script> `tick` *b* ~~s~~ [l](u) | p";
+        let mut capability = node(
+            &format!("cap:{hostile}"),
+            "Capability",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        capability.props["name"] = serde_json::json!(hostile);
+        capability.props["prov"]["extractor_id"] = serde_json::json!("x<b>`|~~e~~");
+        let nodes = vec![capability];
+        let bundle = compile_spec(&nodes, &[], &[], ExportMode::BestEffort, &BTreeSet::new());
+        let stories = bundle
+            .artifacts
+            .iter()
+            .find(|a| a.id == "user-stories")
+            .unwrap();
+        for raw in [
+            "<script>",
+            "<b>",
+            "```",
+            "`tick`",
+            "\n# Injected",
+            "*b*",
+            "~~",
+            "[l](u)",
+        ] {
+            assert!(
+                !stories.content.contains(raw),
+                "{raw:?} in {}",
+                stories.content
+            );
+        }
+        assert!(stories.content.contains("&lt;script&gt;"));
+        assert_eq!(
+            stories
+                .content
+                .lines()
+                .filter(|l| l.starts_with('#'))
+                .count(),
+            3,
+            "title, story heading, assertions heading and nothing injected"
+        );
+        // Structured assertions keep exact source text and provenance.
+        assert_eq!(stories.assertions[0].subject_id, nodes[0].id);
+        assert_eq!(stories.assertions[0].provenance.extractor_id, "x<b>`|~~e~~");
+        let exact = stories.content.len() + serde_json::to_vec(&stories.assertions).unwrap().len();
+        for (max, produced) in [(exact, true), (exact - 1, false)] {
+            let outcome = compile_spec_selected(
+                &nodes,
+                &[],
+                &[],
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                &["user-stories"],
+                selected_limits(max),
+            )
+            .unwrap();
+            assert_eq!(
+                matches!(&outcome[0], SelectedArtifactOutcome::Produced(a) if a == stories),
+                produced,
+                "{max}"
             );
         }
     }

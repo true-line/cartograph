@@ -444,6 +444,43 @@ pub(super) fn inline(out: &mut impl fmt::Write, assertions: &[SpecAssertion]) ->
     }
     Ok(())
 }
+/// Literal Markdown text for recovered user stories (#1453): the rule
+/// inventory's escaper plus GFM strikethrough `~`, which that shared escaper
+/// leaves alone. Bare-URL autolinks are not suppressed.
+pub(super) struct Literal<T>(pub T);
+impl<T: fmt::Display> fmt::Display for Literal<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Replace(crate::rules::render::Escaped(&self.0), &[('~', "\\~")]).fmt(f)
+    }
+}
+/// [`inline`] for recovered user stories (#1453): every cell is [`Literal`]
+/// Markdown text, so stored HTML, fences, backticks, headings, strikethrough
+/// and newlines stay inert. Structured assertions keep their exact provenance.
+pub(super) fn inline_literal(
+    out: &mut impl fmt::Write,
+    assertions: &[SpecAssertion],
+) -> fmt::Result {
+    out.write_str("\n## Assertions and inline provenance\n\n")?;
+    if assertions.is_empty() {
+        return out.write_str("No graph-backed assertions were recovered for this artifact.\n");
+    }
+    out.write_str("| Assertion | Tier | Confidence | Method | Evidence | Extractor | Content hash |\n|---|---|---|---|---|---|---|\n")?;
+    for a in assertions {
+        let p = &a.provenance;
+        writeln!(
+            out,
+            "| {} | {:?} | {:?} | {} | {} | {} | {} |",
+            Literal(&a.summary),
+            p.tier,
+            p.confidence_tier,
+            Literal(MethodLabel(&p.method)),
+            Literal(EvidenceText(p)),
+            Literal(&p.extractor_id),
+            Literal(&p.content_hash)
+        )?;
+    }
+    Ok(())
+}
 pub(super) struct Json<'a>(pub &'a serde_json::Value);
 impl fmt::Display for Json<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

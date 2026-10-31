@@ -19,7 +19,7 @@ impl<T: fmt::Display> Serialize for DisplayString<T> {
     }
 }
 
-pub(super) struct Escaped<T>(pub(super) T);
+pub(crate) struct Escaped<T>(pub(crate) T);
 impl<T: fmt::Display> fmt::Display for Escaped<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

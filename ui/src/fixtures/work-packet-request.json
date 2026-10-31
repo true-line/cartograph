@@ -32,7 +32,7 @@
   },
   "artifacts": [
     {
-      "content_id": "spec-artifact-v1:edbb119b2c0a7a1f5363ace1e9ce8c1c8e62a4ab4a53b7af7780f7cbe75d29a0",
+      "content_id": "spec-artifact-v1:36e2189d5a446cd3644162e02290f01c2232a015896d6f8e18e1f05d4e833452",
       "id": "user-stories",
       "mode": "verified-only",
       "schema": "cartograph.spec/user-stories@1"

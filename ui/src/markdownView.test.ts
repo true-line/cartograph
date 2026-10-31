@@ -97,6 +97,21 @@ describe('renderArtifactMarkdown (#993)', () => {
     expect(html).not.toContain('href');
   });
 
+  it('shows exported literal story text exactly, decoding punctuation escapes and entities (#1453)', () => {
+    const html = toHtml(
+      [
+        '## US-R-0001 — order\\_service &lt;v&gt; \\~\\~s\\~\\~ \\[l\\](u) \\# &amp;lt;',
+        '',
+        '| Assertion | Extractor |',
+        '|---|---|',
+        '| a\\_b \\| c | x&lt;b&gt;\\`\\! |',
+      ].join('\n'),
+    );
+    expect(html).toContain('<h4>US-R-0001 — order_service &lt;v&gt; ~~s~~ [l](u) # &amp;lt;</h4>');
+    expect(html).toContain('<td>a_b | c</td><td>x&lt;b&gt;`!</td>');
+    expect(html).not.toContain('\\');
+  });
+
   it('escapes raw HTML such as <script> and <img onerror> across text, table cells, and code', () => {
     const untrusted = [
       'Paragraph <script>alert(1)</script> and <img src=x onerror=alert(1)>',
