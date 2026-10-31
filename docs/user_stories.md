@@ -1049,3 +1049,8 @@
 - **Security:** Presentation only, not a redaction guarantee; stored text is shown, not removed. Derived-story sidecar text stays inert JSON as before.
 - **Performance:** Per-character escaping on story text only.
 - **Trace:** P1 (#1453) · `spec`, `work-packets` fixtures · ADR-0037 · T-0525
+
+- **AC-0515** Given a unique GraphQL Endpoint with structurally valid AC-0517 import-bound permission syntax, matching legacy permissions and consistent deterministic source provenance, the pure Actor producer emits one endpoint-scoped Semantic/InferredWeak caller-set candidate. It preserves the exact ordered permission alternatives, including duplicates, under any_of and records the named versioned assumption “Allow(...) admits callers holding any listed permission”. Identity binds the rule, assumption, endpoint and exact site; its evidence is the original site evidence and its BaseRef cites the Endpoint. Absent, Public, malformed, mismatched, ambiguous or unproved observations abstain; oversized candidates are counted under the existing overlay per-fact cap.
+- **Security:** The exported Allow name selects an explicit weak convention, without repository/path/commit/module whitelists or effective runtime authorization, authenticated user, role, principal or anonymous claims; Confirmed syntax is never promoted. Owner remains a token. Compiler-visible assumption rendering is required in a separate slice before user-facing adoption.
+- **Performance:** Deterministic node-key lookup and existing per-fact JSON admission only; callers admit the input and aggregate publication separately. No providers, ingestion, new numeric policy or RSS guarantee.
+- **Trace:** P1 (#1443) · `spec`, `core-graph` · ADR-0051 · T-0515
