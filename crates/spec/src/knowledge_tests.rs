@@ -39,6 +39,7 @@ fn capability(fact: &OverlayFact) -> &Node {
     };
     node
 }
+// AC-0500: real adapter pairs retain all support and weak provenance.
 #[test]
 fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {
     let base = fixture(PATH, REPO);
@@ -119,6 +120,7 @@ fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {
     );
     assert!(prov.validate().is_ok());
 }
+// AC-0500: permutations preserve candidate identity and leave base facts unchanged.
 #[test]
 fn graphql_capability_identity_order_and_base_are_permutation_independent() {
     let mut base = fixture(PATH, REPO);
@@ -192,6 +194,56 @@ fn graphql_capability_accepts_adapter_emitted_hyphenated_api_directory() {
     ));
 }
 
+// AC-0500: TS identity text is adapter-proven; GraphQL field grammar stays separate.
+#[test]
+fn graphql_capability_accepts_adapter_dollar_and_unicode_identity_names() {
+    for (class, member) in [
+        ("$OrdersResolver", "order"),
+        ("注文Resolver", "order"),
+        ("$OrdersResolver", "$order"),
+        ("注文Resolver", "注文"),
+    ] {
+        let source = format!(
+            "import {{Resolver, Query}} from '@nestjs/graphql'; @Resolver() export class {class} {{ @Query('order') {member}() {{}} }}"
+        );
+        let base = fixture_source(source.as_bytes(), PATH, REPO);
+        let before = base.clone();
+        let handler = base
+            .graph
+            .0
+            .iter()
+            .find(|n| n.label == "Symbol" && n.props["kind"] == "Method")
+            .unwrap();
+        assert_eq!(handler.props["class"], class);
+        assert_eq!(handler.props["name"], format!("{class}.{member}"));
+        assert_eq!(handler.id, format!("sym:{REPO}@{PATH}#{class}.{member}"));
+        let report = derive_graphql_resolver_capabilities(&base);
+        assert_eq!(report.facts.len(), 1, "{class}.{member}");
+        assert!(
+            report.facts[0]
+                .cites
+                .contains(&BaseRef::Node(handler.id.clone()))
+        );
+        assert_eq!(
+            capability(&report.facts[0]).props["title"],
+            format!("shop GraphQL operations in {class}")
+        );
+        assert_eq!(base, before);
+    }
+    for field in ["$order", "注文", "order-bad", "../order"] {
+        let source = format!(
+            "import {{Resolver, Query}} from '@nestjs/graphql'; @Resolver() class $OrdersResolver {{ @Query('{field}') order() {{}} }}"
+        );
+        assert!(
+            derive_graphql_resolver_capabilities(&fixture_source(source.as_bytes(), PATH, REPO))
+                .facts
+                .is_empty(),
+            "invalid GraphQL field {field}"
+        );
+    }
+}
+
+// AC-0500: incomplete, ambiguous and foreign support cannot form a candidate.
 #[test]
 fn graphql_capability_excludes_missing_ambiguous_gap_and_foreign_ownership() {
     for case in [
@@ -279,6 +331,7 @@ fn graphql_capability_excludes_missing_ambiguous_gap_and_foreign_ownership() {
     }
 }
 
+// AC-0500: oversized groups are omitted while ordinary groups remain.
 #[test]
 fn graphql_capability_oversized_group_is_counted_without_losing_ordinary_group() {
     let mut base = fixture(PATH, REPO);
@@ -317,6 +370,7 @@ fn graphql_capability_oversized_group_is_counted_without_losing_ordinary_group()
     );
 }
 
+// AC-0500: serialized fact admission accounts for exact boundaries and escaping.
 #[test]
 fn capability_fact_size_guard_uses_exact_overlay_boundary_and_json_escaping() {
     // Representation guard only: start with a real candidate, then size its

@@ -11,6 +11,7 @@ pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver
 /// Changed grouping, support or naming semantics require a new recipe version.
 pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "1";
 
+// GraphQL field names use ASCII Name grammar; TS class/member identities do not.
 fn identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes
@@ -145,8 +146,8 @@ pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> Capabi
         if handler.label != "Symbol"
             || handler.props["kind"] != "Method"
             || owner_class != class
-            || !identifier(class)
-            || !identifier(member)
+            || class.is_empty()
+            || member.is_empty()
         {
             continue;
         }
