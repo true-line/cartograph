@@ -125,6 +125,12 @@ impl NextFixture {
     }
     // Real inner loop only; production start/run/resume gates remain intact.
     fn run_gated_inner(&self, provider: &dyn LlmProvider) {
+        self.run_gated_inner_with_clock(provider, RunClock::new(Instant::now()));
+    }
+    fn run_gated_inner_frozen_active(&self, provider: &dyn LlmProvider) {
+        self.run_gated_inner_with_clock(provider, RunClock::frozen_active(Instant::now()));
+    }
+    fn run_gated_inner_with_clock(&self, provider: &dyn LlmProvider, mut clock: RunClock) {
         let app = self.base.base.app.handle();
         let state = app.state::<AppState>();
         let _cleanup = Cleanup {
@@ -132,7 +138,6 @@ impl NextFixture {
             id: &self.id,
             live: &self.live,
         };
-        let mut clock = RunClock::new(Instant::now());
         let detail = read_detail(&state, &self.id, &self.execution).unwrap();
         let request = FrozenContext::completion_acquisition_request(&self.request).unwrap();
         let mut worker = Worker {
