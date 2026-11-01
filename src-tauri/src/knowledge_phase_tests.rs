@@ -97,6 +97,7 @@ fn no_provider_publishes_the_overlay_as_a_named_omission() {
             oversized: 0,
             derived_omission: None,
             producer_omissions: vec![],
+            published_producer_nodes: ProducerNodeCounts::default(),
         }
     );
     assert_eq!(recipe_of(&host), Some(recipe(None, false)));
@@ -154,6 +155,10 @@ fn a_base_past_the_snapshot_bounds_is_a_named_omission() {
         (Some(BASE_BOUNDS), false)
     );
     assert_eq!(recipe_of(&host), None);
+    assert_eq!(
+        report.published_producer_nodes,
+        ProducerNodeCounts::default()
+    );
 }
 
 #[test]
@@ -237,6 +242,15 @@ fn derived_capabilities_publish_without_a_provider() {
     );
     assert_eq!(report.derived_omission, None);
     assert!(report.producer_omissions.is_empty());
+    assert_eq!(
+        report.published_producer_nodes,
+        ProducerNodeCounts {
+            capabilities: 1,
+            business_flows: 2,
+            domain_entities: 0,
+            actors: 0,
+        }
+    );
     let facts = published_facts(&host);
     let nodes: Vec<_> = facts
         .iter()
@@ -391,6 +405,15 @@ fn permission_actors_publish_with_the_phase() {
         (true, 3, 0)
     );
     assert_eq!(report.derived_omission, None);
+    assert_eq!(
+        report.published_producer_nodes,
+        ProducerNodeCounts {
+            capabilities: 1,
+            business_flows: 1,
+            domain_entities: 0,
+            actors: 1,
+        }
+    );
     let facts = published_facts(&host);
     assert_eq!(labels(&facts), ["Actor", "BusinessFlow", "Capability"]);
     let [(actor, cites)] = facts
@@ -444,6 +467,15 @@ fn a_refused_actor_publishes_none_of_the_derived_facts() {
             "MAPS_TO"
         ]
     );
+    assert_eq!(
+        producer_node_counts(&derived.facts),
+        ProducerNodeCounts {
+            capabilities: 1,
+            business_flows: 1,
+            domain_entities: 1,
+            actors: 1,
+        }
+    );
     let actor = derived
         .facts
         .iter()
@@ -466,6 +498,11 @@ fn a_refused_actor_publishes_none_of_the_derived_facts() {
     assert_eq!(
         (report.published, report.derived, report.derived_omission),
         (true, 0, Some(DERIVED_REJECTED))
+    );
+    // The empty phase overlay published, but none of the attempted producers did.
+    assert_eq!(
+        report.published_producer_nodes,
+        ProducerNodeCounts::default()
     );
     assert!(published_facts(&host).is_empty());
     assert_eq!(
@@ -616,4 +653,30 @@ fn the_phase_follows_the_t2_setting() {
     assert!(!semantic_enabled(&settings));
     settings.lock().unwrap().set_enabled("T3", true).unwrap();
     assert!(!semantic_enabled(&settings));
+}
+
+// AC-0532: a successful full-set census is obtained without another overlay read;
+// all four node categories are counted, while MAPS_TO is a separate edge fact.
+#[test]
+fn published_producer_node_census_counts_all_four_and_skips_edges() {
+    let host = host();
+    put_permission_resolver(&host.graph);
+    put_entity(&host.graph);
+    let report = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert!(report.published);
+    assert_eq!(report.derived_omission, None);
+    assert_eq!(report.derived, 5);
+    assert_eq!(
+        report.published_producer_nodes,
+        ProducerNodeCounts {
+            capabilities: 1,
+            business_flows: 1,
+            domain_entities: 1,
+            actors: 1,
+        }
+    );
+    // Even test-build report serialization retains the existing production schema.
+    let wire = serde_json::to_value(&report).unwrap();
+    assert!(wire.get("publishedProducerNodes").is_none());
+    assert!(wire.get("published_producer_nodes").is_none());
 }

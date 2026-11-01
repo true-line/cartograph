@@ -60,6 +60,11 @@ pub(crate) struct KnowledgeReport {
     /// Whether the overlay was republished for the embedded base revision;
     /// false when the base moved on before publication.
     pub published: bool,
+    /// Test-only census of producer nodes in a successfully published full set.
+    /// Zero for a moved base, refusal fallback or a phase that never derived.
+    #[cfg(test)]
+    #[serde(skip)]
+    pub published_producer_nodes: ProducerNodeCounts,
 }
 
 /// Serializes phases so an older base can never be published after a newer one.
@@ -136,11 +141,19 @@ fn run_within(
     let derived = derive(&snapshot);
     report.oversized = derived.oversized;
     report.producer_omissions = derived.omissions;
+    // Count the already-held vector before publication consumes it; expose the
+    // census only after the complete derived set has committed successfully.
+    #[cfg(test)]
+    let producer_nodes = producer_node_counts(&derived.facts);
     match publish(graph, overlay, &snapshot, recipe, derived.facts)? {
         Published::Moved => {}
         Published::Facts(derived) => {
             report.published = true;
             report.derived = derived;
+            #[cfg(test)]
+            {
+                report.published_producer_nodes = producer_nodes;
+            }
         }
         Published::WithoutDerived => {
             report.published = true;
@@ -148,6 +161,33 @@ fn run_within(
         }
     }
     Ok(report)
+}
+
+/// Constant-size, test-only census; edges such as MAPS_TO are not node yields.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProducerNodeCounts {
+    pub capabilities: usize,
+    pub business_flows: usize,
+    pub domain_entities: usize,
+    pub actors: usize,
+}
+#[cfg(test)]
+fn producer_node_counts(facts: &[OverlayFact]) -> ProducerNodeCounts {
+    let mut counts = ProducerNodeCounts::default();
+    for fact in facts {
+        let core_graph::overlay::OverlayItem::Node(node) = &fact.item else {
+            continue;
+        };
+        match node.label.as_str() {
+            "Capability" => counts.capabilities += 1,
+            "BusinessFlow" => counts.business_flows += 1,
+            "DomainEntity" => counts.domain_entities += 1,
+            "Actor" => counts.actors += 1,
+            _ => {}
+        }
+    }
+    counts
 }
 
 /// Facts from every deterministic producer over one snapshot.
@@ -222,6 +262,8 @@ fn report(embedded: usize, omitted: usize, omission: Option<&'static str>) -> Kn
         oversized: 0,
         derived_omission: None,
         producer_omissions: Vec::new(),
+        #[cfg(test)]
+        published_producer_nodes: ProducerNodeCounts::default(),
     }
 }
 
