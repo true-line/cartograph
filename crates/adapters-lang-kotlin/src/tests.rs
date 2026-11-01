@@ -5239,3 +5239,188 @@ class HolderTest(private val web: WebClient) {
         "{rows:?}"
     );
 }
+
+fn endpoint_ids(out: &Extraction) -> Vec<String> {
+    let mut ids: Vec<String> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn route_gaps(out: &Extraction) -> Vec<(String, String)> {
+    let mut gaps: Vec<(String, String)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .map(|node| {
+            (
+                node.props["method"].as_str().unwrap().to_string(),
+                node.props["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    gaps.dedup();
+    gaps
+}
+
+// AC-0557: function-level @RequestMapping handlers are endpoints or route
+// Gaps, never silently dropped; class and function `method =` restrictions
+// combine by union (Spring RequestMethodsRequestCondition.combine), and
+// literal path arrays are routes (#1605). An empty `[]` argument is not
+// parsed by tree-sitter-kotlin-ng, so it is not exercised here.
+#[test]
+fn spring_function_request_mappings_yield_verbs_or_gaps() {
+    let legacy = br#"package com.demo.web
+
+import org.springframework.stereotype.Controller
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
+import org.springframework.web.bind.annotation.RequestMethod as Verb
+
+@Controller
+@RequestMapping("/legacy")
+class LegacyController {
+    @RequestMapping("/all")
+    fun any(): String = "a"
+
+    @RequestMapping(value = ["/one"], method = [RequestMethod.POST])
+    fun one(): String = "o"
+
+    @RequestMapping(path = ["/two"], method = arrayOf(RequestMethod.PUT, Verb.GET))
+    fun two(): String = "t"
+
+    @RequestMapping(value = ["/single"], method = [org.springframework.web.bind.annotation.RequestMethod.DELETE])
+    fun single(): String = "s"
+
+    @RequestMapping(value = ["/a", "/b"], produces = ["text/plain"])
+    fun many(): String = "m"
+
+    @RequestMapping(value = ["/opaque"], method = METHODS)
+    fun opaque(): String = "x"
+
+    @RequestMapping(value = ["/spread"], method = arrayOf(*METHODS))
+    fun spread(): String = "p"
+}
+"#;
+    let out = extract_source(
+        legacy,
+        "src/main/kotlin/com/demo/web/LegacyController.kt",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint_ids(&out),
+        [
+            "ep:local/demo@ALL:/legacy/a",
+            "ep:local/demo@ALL:/legacy/all",
+            "ep:local/demo@ALL:/legacy/b",
+            "ep:local/demo@DELETE:/legacy/single",
+            "ep:local/demo@GET:/legacy/two",
+            "ep:local/demo@POST:/legacy/one",
+            "ep:local/demo@PUT:/legacy/two",
+        ]
+    );
+    assert_eq!(
+        route_gaps(&out),
+        [(
+            "?".to_string(),
+            "unresolved Spring request method".to_string()
+        )]
+    );
+    assert_eq!(
+        out.nodes
+            .iter()
+            .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+            .count(),
+        2,
+        "the constant and the spread each fail closed"
+    );
+
+    let inherited = br#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+@RequestMapping(value = ["/api"], method = [RequestMethod.POST])
+class PostOnlyController {
+    @RequestMapping("/save")
+    fun save(): String = "s"
+
+    @RequestMapping(value = ["/both"], method = [RequestMethod.PUT])
+    fun both(): String = "b"
+
+    @GetMapping("/read")
+    fun read(): String = "r"
+}
+"#;
+    let out = extract_source(
+        inherited,
+        "src/main/kotlin/com/demo/web/PostOnlyController.kt",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint_ids(&out),
+        [
+            "ep:local/demo@GET:/api/read",
+            "ep:local/demo@POST:/api/both",
+            "ep:local/demo@POST:/api/read",
+            "ep:local/demo@POST:/api/save",
+            "ep:local/demo@PUT:/api/both",
+        ]
+    );
+
+    let opaque_class = br#"package com.demo.web
+
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+@RequestMapping(value = ["/opaque"], method = METHODS)
+class OpaqueController {
+    @GetMapping("/x")
+    fun x(): String = "x"
+}
+"#;
+    let out = extract_source(
+        opaque_class,
+        "src/main/kotlin/com/demo/web/OpaqueController.kt",
+        &id(),
+    )
+    .unwrap();
+    assert!(endpoint_ids(&out).is_empty());
+    assert_eq!(
+        route_gaps(&out),
+        [(
+            "?".to_string(),
+            "unresolved Spring request method".to_string()
+        )]
+    );
+
+    // A lookalike RequestMapping proves nothing.
+    let fake = br#"package com.demo.web
+
+import org.springframework.stereotype.Controller
+import com.other.web.RequestMapping
+
+@Controller
+class FakeController {
+    @RequestMapping("/nope")
+    fun get(): String = "n"
+}
+"#;
+    let out = extract_source(
+        fake,
+        "src/main/kotlin/com/demo/web/FakeController.kt",
+        &id(),
+    )
+    .unwrap();
+    assert!(endpoint_ids(&out).is_empty());
+    assert!(route_gaps(&out).is_empty());
+}

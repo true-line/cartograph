@@ -108,7 +108,9 @@ pub(crate) fn sites(
                 PathArg::Literal(_) | PathArg::Absent => {
                     IdentityExpr::Computed("@Url parameter".into())
                 }
-                PathArg::Dynamic => IdentityExpr::Computed(cx.text(&annotation.node).to_string()),
+                PathArg::Dynamic | PathArg::Literals(_) => {
+                    IdentityExpr::Computed(cx.text(&annotation.node).to_string())
+                }
             };
             let entry = symbol.rsplit('#').next().unwrap_or(symbol).to_string();
             out.push(FetchSite {
