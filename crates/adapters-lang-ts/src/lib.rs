@@ -3313,17 +3313,21 @@ fn complete_directory(
         &index,
         id,
         &out.default_exports,
-        &mut out.nodes,
-        &mut out.edges,
-    );
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     next_api::complete(
         std::mem::take(&mut out.next_routes),
         root,
         &index,
         id,
-        &mut out.nodes,
-        &mut out.edges,
-    );
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     let registrations = std::mem::take(&mut out.service_worker_registrations);
     service_worker::mark_registered(
         &registrations,
