@@ -454,6 +454,18 @@ fn source_prospective_attachment_matches_outcomes_and_reopens() {
             )
             .unwrap();
         assert_eq!(calls.get(), 1);
+        // AC-0489: acquired and unavailable source outcomes preserve exact reread results.
+        {
+            let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+            let task = load_next_prompt_task(&tx, &fixture.f.basis.task_id).unwrap();
+            let attempts = completion::attempts(&tx, &task).unwrap();
+            assert!(attempts.iter().any(|entry| if reason.is_none() {
+                matches!(entry.record.outcome, AttemptOutcome::SourceAcquired { .. })
+            } else {
+                matches!(entry.record.outcome, AttemptOutcome::Unavailable { .. })
+            }));
+            completion::assert_attempt_invocation_reuse(&tx, &task);
+        }
         let reopened = JobStore::open(fixture.f.directory.path().join("state.db")).unwrap();
         let saved = reopened
             .investigation_next_prompt_snapshot(&fixture.f.basis.task_id, &fixture.f.request)
