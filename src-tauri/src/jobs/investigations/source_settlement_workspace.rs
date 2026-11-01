@@ -65,6 +65,9 @@ pub(crate) fn workspace(
         projection,
         projected_task,
         metadata.checked_mul(2)?,
+        // H saved prefix + S derived suffix fit two full attempt currencies
+        // (H+S <= policy maximum). Prefix moves into observation, never clones;
+        // that observation Vec and the retained suffix remain within these roles.
         attempts.checked_mul(2)?,
         ledger.checked_mul(2)?,
         continuation_retained,

@@ -237,3 +237,105 @@ fn source_continuation_rejects_substituted_task_family() {
         .is_err()
     );
 }
+
+#[test]
+fn source_settlement_nonempty_prefix_serialized_observation_matches_and_corruption_refuses() {
+    // AC-0287/#1581: authentic acquired inventory prefix, not an empty first
+    // source admission. The production constructor owns its only loaded prefix.
+    let mut fixture = completion::FinishFixture::new(true);
+    fixture.begin();
+    let before = &fixture.base.f.task;
+    let tx = fixture.base.f.store.conn.unchecked_transaction().unwrap();
+    assert_eq!(completion::attempts(&tx, before).unwrap().len(), 1);
+    let mut terminal = before.clone();
+    terminal.phase = Phase::Terminal;
+    let mut expected = terminal.clone();
+    completion::project_observation(&tx, before, &mut expected, &[]).unwrap();
+    assert!(
+        !expected
+            .detail
+            .completion
+            .as_ref()
+            .unwrap()
+            .assessment
+            .is_empty()
+    );
+    let changes = tx.total_changes();
+    for reread in [false, true] {
+        let mut next = terminal.clone();
+        completion::take_attempt_prefix_reads();
+        let mut build = || {
+            completion::project_observation_with_offset(&tx, before, &mut next, |_, offset| {
+                assert_eq!(offset, 1);
+                Ok(vec![])
+            })
+        };
+        let (offset, suffix) = if reread {
+            completion::with_observation_prefix_reread(build)
+        } else {
+            build()
+        }
+        .unwrap();
+        assert_eq!(offset, 1);
+        assert!(suffix.is_empty());
+        assert_eq!(
+            completion::take_attempt_prefix_reads(),
+            if reread { 2 } else { 1 }
+        );
+        assert_eq!(
+            encode(&next, MAX_RECORD_BYTES).unwrap(),
+            encode(&expected, MAX_RECORD_BYTES).unwrap()
+        );
+        assert_eq!(tx.total_changes(), changes);
+    }
+    let id = &before.detail.summary.investigation_id;
+    let mut row = completion::attempts(&tx, before).unwrap().remove(0);
+    row.record.input_ledger_hash = "0".repeat(64);
+    row.record.attempt_id = row.record.content_id().unwrap();
+    completion::rewrite_test_body(
+        &tx,
+        "completion_attempts",
+        id,
+        "sequence",
+        &1i64,
+        &encode(&row, MAX_RECORD_BYTES).unwrap(),
+    );
+    for reread in [false, true] {
+        let called = std::cell::Cell::new(false);
+        let mut next = terminal.clone();
+        let mut build = || {
+            completion::project_observation_with_offset(&tx, before, &mut next, |_, _| {
+                called.set(true);
+                Ok(vec![])
+            })
+        };
+        let result = if reread {
+            completion::with_observation_prefix_reread(build)
+        } else {
+            build()
+        };
+        assert!(result.is_err());
+        assert!(!called.get());
+        assert_eq!(
+            encode(&next, MAX_RECORD_BYTES).unwrap(),
+            encode(&terminal, MAX_RECORD_BYTES).unwrap()
+        );
+    }
+    drop(tx); // Corruption is rolled back; the old standalone loader stays usable.
+    let mut standalone = terminal.clone();
+    completion::project_observation(&fixture.base.f.store.conn, before, &mut standalone, &[])
+        .unwrap();
+    assert_eq!(
+        encode(&standalone, MAX_RECORD_BYTES).unwrap(),
+        encode(&expected, MAX_RECORD_BYTES).unwrap()
+    );
+    assert!(
+        completion::project_observation_with_offset(
+            &fixture.base.f.store.conn,
+            before,
+            &mut standalone,
+            |_, _| panic!("autocommit constructor must reject before suffix construction")
+        )
+        .is_err()
+    );
+}

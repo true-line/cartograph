@@ -390,3 +390,27 @@ fn source_admission_real_cancellation_and_foreign_execution_cannot_create_reserv
     ));
     assert_eq!(f.snapshot(), cancelled);
 }
+
+#[test]
+fn source_admission_reuses_prefix_once_per_materialization_with_both_fixed_point_envelopes() {
+    // AC-0287/#1581: measure real admission, not a copied enumeration formula.
+    for reread in [false, true] {
+        let mut fixture = Fixture::new();
+        source_settlement::take_envelope_prefix_sweeps();
+        source_settlement::take_materializations();
+        let receipt = if reread {
+            completion::with_observation_prefix_reread(|| fixture.publish())
+        } else {
+            fixture.publish()
+        }
+        .unwrap();
+        let sweeps = source_settlement::take_envelope_prefix_sweeps();
+        assert_eq!(source_settlement::take_materializations(), 30);
+        assert_eq!(sweeps, if reread { vec![31, 31] } else { vec![16, 16] });
+        let reopened = JobStore::open(fixture.f.directory.path().join("state.db")).unwrap();
+        let tx = reopened.conn.unchecked_transaction().unwrap();
+        let task = load_next_prompt_task_base(&tx, &fixture.f.basis.task_id).unwrap();
+        let saved = source_validation::validate_saved_pending(&tx, &task).unwrap();
+        assert!(receipt.matches_saved(&saved.reservation).unwrap());
+    }
+}

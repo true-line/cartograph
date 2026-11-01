@@ -166,6 +166,8 @@ fn materialize(
     reason: Option<UnavailableReason>,
     active_milliseconds: u64,
 ) -> Result<SettlementProjection, InvestigationStoreError> {
+    #[cfg(test)]
+    MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     let acquired = kind == DispositionKind::Acquired;
     let attempt_outcome = if acquired {
         Some(AttemptOutcome::SourceAcquired {
@@ -265,26 +267,32 @@ fn materialize(
         message,
         timestamp(connection)?,
     )?);
-    // Only the validated count survives; observation reloads its own prefix.
-    let prior_count = completion::attempts(connection, before)?.len();
-    let records = match attempt_outcome {
-        Some(ref outcome) => completion::derive_attempt_records(
-            &task,
-            step_id,
-            response,
-            &saved.reservation.binding.original_read,
-            outcome,
-            ledger.as_ref(),
-            prior_count,
-        )?,
-        None => vec![],
-    };
-    let attempts = completion::project_attempt_entries(
-        records,
-        response,
-        task.detail.summary.last_event_sequence,
+    // Keep the authenticated prefix for observation instead of loading it twice.
+    // The builder derives only the same private suffix; it performs no SQL writes.
+    let (prior_count, attempts) = completion::project_observation_with_offset(
+        connection,
+        before,
+        &mut task,
+        |task, prior_count| {
+            let records = match attempt_outcome {
+                Some(ref outcome) => completion::derive_attempt_records(
+                    task,
+                    step_id,
+                    response,
+                    &saved.reservation.binding.original_read,
+                    outcome,
+                    ledger.as_ref(),
+                    prior_count,
+                )?,
+                None => vec![],
+            };
+            completion::project_attempt_entries(
+                records,
+                response,
+                task.detail.summary.last_event_sequence,
+            )
+        },
     )?;
-    completion::project_observation(connection, before, &mut task, &attempts)?;
     let mut plan = SettlementProjection {
         task,
         disposition,
@@ -423,3 +431,12 @@ pub(crate) fn fail_next_publication(lost_ack: bool) {
         storage_writer::SettlementFailure::AfterTaskSave
     });
 }
+
+#[cfg(test)]
+thread_local! { static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn take_materializations() -> usize {
+    MATERIALIZATIONS.with(|count| count.replace(0))
+}
+#[cfg(test)]
+pub(super) use envelope_projection::take_envelope_prefix_sweeps;

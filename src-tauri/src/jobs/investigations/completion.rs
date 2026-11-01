@@ -551,6 +551,8 @@ pub(super) fn attempts(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
+    #[cfg(test)]
+    ATTEMPT_PREFIX_READS.with(|count| count.set(count.get() + 1));
     let policy = saved_policy(task)?;
     let limit = policy.max_completed_attempts();
     let Some(intent) = &task.completion_intent else {
@@ -2019,7 +2021,7 @@ pub(super) use tests::next_prompt_contract_tests::{
 #[path = "completion_settlement_projection.rs"]
 mod settlement_projection;
 pub(super) use settlement_projection::{
-    persist_projected_entries, project_attempt_entries, project_observation,
+    persist_projected_entries, project_attempt_entries, project_observation_with_offset,
     size_attempt_event_sequence,
 };
 
@@ -2031,3 +2033,17 @@ pub(super) use tests::next_prompt_initial_fixture::{InitialFixture, initial_fixt
 #[cfg(test)]
 #[path = "next_prompt_recovery_tests.rs"]
 mod next_prompt_recovery_tests;
+
+#[cfg(test)]
+thread_local! { static ATTEMPT_PREFIX_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn take_attempt_prefix_reads() -> usize {
+    ATTEMPT_PREFIX_READS.with(|count| count.replace(0))
+}
+#[cfg(test)]
+pub(super) use settlement_projection::{project_observation, with_observation_prefix_reread};
+
+#[cfg(test)]
+pub(super) fn attempt_prefix_reads() -> usize {
+    ATTEMPT_PREFIX_READS.with(|count| count.get())
+}
