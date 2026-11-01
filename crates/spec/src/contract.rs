@@ -406,7 +406,7 @@ fn merge_evidence<'a>(provenances: impl IntoIterator<Item = &'a Provenance>) -> 
 
 fn ensure_file_node(
     facts: &mut ContractFacts,
-    existing_candidates: &BTreeMap<&str, &Node>,
+    is_candidate: &dyn Fn(&str) -> bool,
     emitted_files: &mut BTreeSet<String>,
     repo: &str,
     commit: &str,
@@ -414,8 +414,7 @@ fn ensure_file_node(
     byte_len: usize,
 ) -> String {
     let file_id = format!("file:{repo}@{doc_path}");
-    if existing_candidates.contains_key(file_id.as_str()) || !emitted_files.insert(file_id.clone())
-    {
+    if is_candidate(file_id.as_str()) || !emitted_files.insert(file_id.clone()) {
         return file_id;
     }
     let ev = evidence(repo, doc_path, commit, 0, byte_len);
@@ -525,15 +524,31 @@ pub fn extract_contract_facts(
     validation_gaps: &[ContractValidationGap],
     candidates: &[Node],
 ) -> ContractFacts {
+    if docs.is_empty() && validation_gaps.is_empty() {
+        return ContractFacts::default();
+    }
+    let ids: BTreeSet<&str> = candidates.iter().map(|node| node.id.as_str()).collect();
+    extract_contract_facts_among(repo, commit, docs, validation_gaps, candidates, |id| {
+        ids.contains(id)
+    })
+}
+
+/// [`extract_contract_facts`] over the recovered `endpoints` (any other node
+/// in the slice is ignored) and an id membership test for every recovered
+/// fact, so a caller holding packed facts decodes only Endpoint nodes (#1574).
+pub fn extract_contract_facts_among(
+    repo: &str,
+    commit: &str,
+    docs: &[DeclaredApiDoc],
+    validation_gaps: &[ContractValidationGap],
+    endpoints: &[Node],
+    is_candidate: impl Fn(&str) -> bool,
+) -> ContractFacts {
     let mut facts = ContractFacts::default();
     if docs.is_empty() && validation_gaps.is_empty() {
         return facts;
     }
 
-    let existing_candidates: BTreeMap<&str, &Node> = candidates
-        .iter()
-        .map(|node| (node.id.as_str(), node))
-        .collect();
     let mut emitted_files = BTreeSet::new();
 
     for vgap in validation_gaps {
@@ -554,7 +569,7 @@ pub fn extract_contract_facts(
     let mut unusable_endpoints = 0usize;
     // HTTP API docs describe HTTP routes; GraphQL operations (#968) are
     // neither matched against them nor counted as unusable.
-    for node in candidates
+    for node in endpoints
         .iter()
         .filter(|n| n.label == "Endpoint" && n.props["protocol"] != "graphql")
     {
@@ -605,7 +620,7 @@ pub fn extract_contract_facts(
     for doc in docs {
         let file_id = ensure_file_node(
             &mut facts,
-            &existing_candidates,
+            &is_candidate,
             &mut emitted_files,
             repo,
             commit,
@@ -1356,6 +1371,61 @@ mod tests {
                     .unwrap_or("")
                     .contains("expected \"3.x\"")
         }));
+    }
+
+    // AC-0550 (#1574): Endpoint nodes plus an id test give the same facts as
+    // every recovered node: a recovered doc File suppresses the emitted one,
+    // and non-Endpoint nodes are never matched as routes.
+    #[test]
+    fn contract_facts_among_endpoints_and_ids_match_all_candidates() {
+        let docs = vec![
+            DeclaredApiDoc {
+                path: "docs/api.md".into(),
+                prefix: Some("/api".into()),
+                contents: "#### GET /api/orders\n#### POST /api/missing\n".into(),
+            },
+            DeclaredApiDoc {
+                path: "docs/other.md".into(),
+                prefix: None,
+                contents: "#### GET /health\n".into(),
+            },
+        ];
+        let gaps = vec![ContractValidationGap {
+            doc_path: "docs/bad.yaml".into(),
+            reason: "unparseable".into(),
+        }];
+        let mut not_a_route = endpoint_node("acme/svc", "GET", "/api/orders", "app.py");
+        not_a_route.id = "sym:acme/svc@app.py#orders".into();
+        not_a_route.label = "Symbol".into();
+        let candidates = vec![
+            Node {
+                id: "file:acme/svc@docs/api.md".into(),
+                label: "File".into(),
+                props: serde_json::json!({}),
+            },
+            not_a_route,
+            endpoint_node("acme/svc", "GET", "/api/orders", "app.py"),
+            endpoint_node("acme/svc", "DELETE", "/api/orders", "app.py"),
+        ];
+        let all = extract_contract_facts("acme/svc", "abc1234", &docs, &gaps, &candidates);
+        let endpoints: Vec<Node> = candidates
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .cloned()
+            .collect();
+        let ids: BTreeSet<&str> = candidates.iter().map(|node| node.id.as_str()).collect();
+        let among =
+            extract_contract_facts_among("acme/svc", "abc1234", &docs, &gaps, &endpoints, |id| {
+                ids.contains(id)
+            });
+        assert_eq!(among, all);
+        assert!(!all.nodes.is_empty());
+        assert!(
+            !all.nodes
+                .iter()
+                .any(|node| node.id == "file:acme/svc@docs/api.md"),
+            "a recovered doc File is not emitted again"
+        );
     }
 
     // AC-0313 (#739): served-side findings never claim more certainty than the
