@@ -12,7 +12,7 @@ describe('producing method labels', () => {
     expect(methodBadge({ kind: 'model', model: 'local:llm' })).toBe('model');
     expect(methodLabel({ kind: 'model', model: 'local:llm' })).toBe('model local:llm');
     expect(methodLabel({ kind: 'human', actor: 'owner' })).toBe('human owner');
-    expect(methodBadge(undefined)).toBe('method not recorded');
+    expect(methodBadge(undefined)).toBe('producer not recorded');
     expect(methodLabel(undefined)).toBe('not recorded');
     expect(methodLabel({ kind: 'unrecorded' })).toBe('not recorded');
   });

@@ -50,15 +50,34 @@ function lineCol(before: string, windowStartLine: number): { line: number; col: 
   };
 }
 
-const WHY_TIER: Record<Tier, string> = {
-  Confirmed:
-    'Established deterministically (T0/T1): parsed structure or observed execution, with an exact source span. No inference involved.',
-  InferredStrong:
-    'Proposed by the semantic tier (T2) above the calibrated precision floor, with cited evidence. It annotates the graph — it never overwrites or masquerades as T0/T1 (R-INT-1).',
-  InferredWeak:
-    'Proposed by the agentic tier (T3) as a reviewed suggestion with cited evidence. Weakest confidence; excluded from verified-only exports (R-INT-5).',
-  Gap: 'Deterministic recovery attempted this and stopped: the evidence exists but is not statically resolvable. Recorded explicitly with a Resolution Strategy — never guessed (R-INT-4).',
+/** Who produced the fact, read from the recorded producing tier, never from confidence (#1601). */
+const PRODUCER: Record<string, string> = {
+  Deterministic: 'Produced by deterministic static analysis (T0): parsed structure with an exact source span.',
+  Dynamic: 'Produced by observed execution (T1).',
+  Semantic: 'Proposed by the semantic tier (T2) with cited evidence.',
+  Agentic: 'Proposed by the agentic tier (T3) as a reviewed suggestion with cited evidence.',
 };
+const PRODUCER_UNKNOWN = 'The producing tier is not recorded for this fact.';
+
+/** How strongly the fact holds, independent of who produced it. */
+const CONFIDENCE: Record<Tier, string> = {
+  Confirmed: 'Confirmed: proven outright; no inference involved.',
+  InferredStrong:
+    'Inferred (strong): the evidence supports it above the calibrated precision floor but does not prove it, so it is not shown as Confirmed. It annotates the graph and never overwrites or masquerades as T0/T1 (R-INT-1).',
+  InferredWeak:
+    'Inferred (weak): the evidence supports it but does not prove it. Weakest confidence; excluded from verified-only exports (R-INT-5).',
+  Gap: 'Gap: recovery attempted this and stopped; the evidence exists but is not statically resolvable. Recorded explicitly with a Resolution Strategy and never guessed (R-INT-4).',
+};
+
+/** The producer sentence for a recorded producing tier; explicit when absent or unknown. */
+export function producerText(producingTier: string | undefined): string {
+  return (producingTier && PRODUCER[producingTier]) || PRODUCER_UNKNOWN;
+}
+
+/** The "why this tier" text: the recorded producer, then the confidence, stated separately. */
+export function whyTier(confidence: Tier, producingTier: string | undefined): string {
+  return `${producerText(producingTier)} ${CONFIDENCE[confidence]}`;
+}
 
 /**
  * Evidence drawer (handoff §Evidence drawer): read-only, resizable
@@ -81,6 +100,13 @@ export function EvidencePanel({
   const [width, setWidth] = useState(420);
   const [copied, setCopied] = useState(false);
   const dragging = useRef(false);
+  const spanRef = useRef<HTMLElement>(null);
+
+  // Bring the cited span into view: a small file's window starts at line 1,
+  // and the citation may be far below it (#1601).
+  useEffect(() => {
+    spanRef.current?.scrollIntoView?.({ block: 'center' });
+  }, [source, ev?.byte_start]);
 
   // Esc closes from anywhere — the drawer is an overlay, not a route.
   useEffect(() => {
@@ -151,13 +177,13 @@ export function EvidencePanel({
             >
               {prov.confidence_tier === 'Gap'
                 ? 'Why this is a Gap: evidence exists but is not statically resolvable — listed explicitly, never guessed.'
-                : 'Why this is Inferred: proposed by a higher tier with cited evidence; it never overwrites T0/T1.'}
+                : `Why this is Inferred: ${producerText(prov.tier)} The evidence supports but does not prove it; it never overwrites T0/T1.`}
             </p>
           )}
 
           <details className="evidence-why-tier">
             <summary>Why this tier?</summary>
-            <p className="muted">{WHY_TIER[prov.confidence_tier]}</p>
+            <p className="muted">{whyTier(prov.confidence_tier, prov.tier)}</p>
           </details>
 
           {source === 'loading' ? (
@@ -193,7 +219,7 @@ export function EvidencePanel({
                     </pre>
                     <pre className="evidence-source" data-testid="evidence-source">
                       {before}
-                      <mark>{span}</mark>
+                      <mark ref={spanRef}>{span}</mark>
                       {after}
                       {source.truncated ? '\n… (windowed)' : ''}
                     </pre>

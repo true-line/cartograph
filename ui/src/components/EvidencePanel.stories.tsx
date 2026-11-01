@@ -63,7 +63,7 @@ export const WithSource: Story = {
 
     // Why-this-tier explanation is available on demand.
     await userEvent.click(canvas.getByText('Why this tier?'));
-    await expect(canvas.getByText(/Established deterministically/)).toBeInTheDocument();
+    await expect(canvas.getByText(/Produced by deterministic static analysis \(T0\).*Confirmed: proven outright/)).toBeInTheDocument();
 
     // The full 64-hex hash renders, and copy carries exactly that value.
     const hash = canvas.getByTestId('content-hash').textContent;
@@ -134,6 +134,50 @@ export const WindowedLineNumbersAreAbsolute: Story = {
     const gutter = canvasElement.querySelector('.evidence-gutter');
     await expect(gutter?.textContent?.startsWith('120')).toBe(true);
     await expect(within(canvasElement).getByTestId('span-range')).toHaveTextContent('L123:1');
+  },
+};
+
+// AC-0558 (#1601): an Inferred fact from deterministic analysis says so; the
+// cited span is scrolled into view even when the window starts at line 1; a
+// fact with no producing method reads "producer not recorded".
+const FILLER = Array.from({ length: 150 }, (_, i) => `// line ${i + 1}`).join('\n') + '\n';
+export const DeterministicInferredNamesItsTierAndScrollsToSpan: Story = {
+  args: {
+    node: (() => {
+      const node = endpointFixture('DELETE', '/api/aliases/<int:alias_id>');
+      const prov = node.props.prov;
+      if (prov) {
+        prov.confidence_tier = 'InferredStrong';
+        prov.tier = 'Deterministic';
+        delete prov.method;
+        prov.evidence[0].byte_start = bytes(FILLER) + SPAN_START;
+        prov.evidence[0].byte_end = bytes(FILLER) + SPAN_END;
+      }
+      return node;
+    })(),
+    source: { text: FILLER + SOURCE, window_start: 0, window_start_line: 1, truncated: false },
+  },
+  beforeEach: () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: Element[] = [];
+    Element.prototype.scrollIntoView = function (this: Element, ...args) {
+      scrolled.push(this);
+      return original?.apply(this, args);
+    };
+    (window as unknown as { __scrolled: Element[] }).__scrolled = scrolled;
+    return () => {
+      Element.prototype.scrollIntoView = original;
+    };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/Why this is Inferred: Produced by deterministic static analysis/)).toBeInTheDocument();
+    await expect(canvas.queryByText(/semantic tier|agentic tier/)).toBeNull();
+    await userEvent.click(canvas.getByText('Why this tier?'));
+    await expect(canvas.getByText(/static analysis \(T0\).*Inferred \(strong\)/)).toBeInTheDocument();
+    await expect(canvas.getByText('producer not recorded')).toBeInTheDocument();
+    const scrolled = (window as unknown as { __scrolled: Element[] }).__scrolled;
+    await expect(scrolled.some((element) => element.tagName === 'MARK')).toBe(true);
   },
 };
 
