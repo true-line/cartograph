@@ -24,7 +24,7 @@ use adapters_fw::events::{
     SdkPattern,
 };
 use adapters_fw::{HTTP_FACTORIES, NEST};
-use core_graph::facts::FactLists;
+use core_graph::facts::{FactAccess, FactLists};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -3209,6 +3209,80 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.next_routes.extend(ex.next_routes);
 }
 
+/// Link each pending call to its recovered target, or record its Gap. Only
+/// the targets of calls that need an instance method are decoded.
+fn complete_pending_calls(
+    mut pending: Vec<PendingCall>,
+    known_symbols: &std::collections::HashSet<String>,
+    facts: &mut impl FactAccess,
+) -> Result<(), core_graph::GraphError> {
+    for call in &mut pending {
+        if let Some(real) = reconcile_guessed_extension(&call.resolved_edge.dst, known_symbols) {
+            call.resolved_edge.dst = real;
+        }
+    }
+    let targets: BTreeSet<&str> = pending
+        .iter()
+        .filter(|call| call.requires_instance_method)
+        .map(|call| call.resolved_edge.dst.as_str())
+        .collect();
+    let instance_methods: BTreeSet<String> = facts
+        .decode_nodes(|id, _| targets.contains(id))?
+        .into_iter()
+        .filter(|node| node.props["instance_dispatch"] == true)
+        .map(|node| node.id)
+        .collect();
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    for call in pending {
+        if known_symbols.contains(&call.resolved_edge.dst)
+            && (!call.requires_instance_method
+                || instance_methods.contains(&call.resolved_edge.dst))
+        {
+            edges.push(call.resolved_edge);
+        } else {
+            nodes.push(call.gap_node);
+            edges.push(call.gap_edge);
+        }
+    }
+    facts.append(nodes, edges)
+}
+
+/// Append each pending Pulumi relationship whose endpoints resolve.
+fn complete_pulumi_edges(
+    relationships: Vec<PendingPulumiEdge>,
+    bindings: &HashMap<String, String>,
+    facts: &mut impl FactAccess,
+) -> Result<(), core_graph::GraphError> {
+    let mut edges = Vec::new();
+    for pending in relationships {
+        let resolve = |endpoint: PulumiEndpoint| match endpoint {
+            PulumiEndpoint::Resource(id) => Some(id),
+            PulumiEndpoint::ImportedSymbol(symbol) => bindings.get(&symbol).cloned(),
+        };
+        let (Some(src), Some(dst)) = (resolve(pending.src), resolve(pending.dst)) else {
+            continue;
+        };
+        let mut props = pending.props;
+        if let Ok(mut provenance) = serde_json::from_value::<Provenance>(props["prov"].clone()) {
+            let via = props["via"]
+                .as_str()
+                .map(|via| format!(" via {via}"))
+                .unwrap_or_default();
+            provenance.content_hash = core_prov::content_hash(
+                format!("{} {src} -> {dst}{via}", pending.label).as_bytes(),
+            );
+            props["prov"] = serde_json::to_value(provenance).expect("provenance serializes");
+        }
+        edges.push(Edge {
+            src,
+            dst,
+            label: pending.label,
+            props,
+        });
+    }
+    facts.append(Vec::new(), edges)
+}
+
 /// Shared directory completion. Its live configuration inputs are deliberately
 /// outside the captured direct lexical receipt contract.
 fn complete_directory(
@@ -3232,27 +3306,14 @@ fn complete_directory(
     // cache-reused.
     let index = resolution::ResolutionIndex::load(root)?;
     resolution::resolve_bare_imports(out, &index, id, &known_files);
-    let instance_methods: BTreeSet<_> = out
-        .nodes
-        .iter()
-        .filter(|node| node.props["instance_dispatch"] == true)
-        .map(|node| node.id.clone())
-        .collect();
-    for mut pending in std::mem::take(&mut out.pending_calls) {
-        if let Some(real) = reconcile_guessed_extension(&pending.resolved_edge.dst, &known_symbols)
-        {
-            pending.resolved_edge.dst = real;
-        }
-        if known_symbols.contains(&pending.resolved_edge.dst)
-            && (!pending.requires_instance_method
-                || instance_methods.contains(pending.resolved_edge.dst.as_str()))
-        {
-            out.edges.push(pending.resolved_edge);
-        } else {
-            out.nodes.push(pending.gap_node);
-            out.edges.push(pending.gap_edge);
-        }
-    }
+    complete_pending_calls(
+        std::mem::take(&mut out.pending_calls),
+        &known_symbols,
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     target_tests::complete(
         std::mem::take(&mut out.target_tests),
         &mut FactLists {
@@ -3260,32 +3321,14 @@ fn complete_directory(
             edges: &mut out.edges,
         },
     )?;
-    for pending in std::mem::take(&mut out.pending_pulumi_edges) {
-        let resolve = |endpoint: PulumiEndpoint| match endpoint {
-            PulumiEndpoint::Resource(id) => Some(id),
-            PulumiEndpoint::ImportedSymbol(symbol) => out.pulumi_bindings.get(&symbol).cloned(),
-        };
-        let (Some(src), Some(dst)) = (resolve(pending.src), resolve(pending.dst)) else {
-            continue;
-        };
-        let mut props = pending.props;
-        if let Ok(mut provenance) = serde_json::from_value::<Provenance>(props["prov"].clone()) {
-            let via = props["via"]
-                .as_str()
-                .map(|via| format!(" via {via}"))
-                .unwrap_or_default();
-            provenance.content_hash = core_prov::content_hash(
-                format!("{} {src} -> {dst}{via}", pending.label).as_bytes(),
-            );
-            props["prov"] = serde_json::to_value(provenance).expect("provenance serializes");
-        }
-        out.edges.push(Edge {
-            src,
-            dst,
-            label: pending.label,
-            props,
-        });
-    }
+    complete_pulumi_edges(
+        std::mem::take(&mut out.pending_pulumi_edges),
+        &out.pulumi_bindings,
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     out.pulumi_bindings.clear();
     let routes = std::mem::take(&mut out.client_routes);
     let files = routes.files.clone();

@@ -5052,3 +5052,122 @@ fn worker_proofs_reused_at_a_new_commit_match_a_fresh_extraction() {
         );
     }
 }
+
+// AC-0541: pending-call and Pulumi completion over the packed store leave
+// exactly the facts they leave over plain lists: a call to a known symbol
+// links, a guessed `.ts` target is reconciled, an instance call links only
+// to a method marked for instance dispatch, an unknown target records its
+// Gap, and only Pulumi relationships whose endpoints resolve are appended
+// with their content hash recomputed.
+#[test]
+fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
+    use core_graph::facts::{FactLists, FactStore};
+
+    let node = |id: &str, props: serde_json::Value| Node {
+        id: id.into(),
+        label: "Symbol".into(),
+        props,
+    };
+    let edge = |src: &str, dst: &str, label: &str| Edge {
+        src: src.into(),
+        dst: dst.into(),
+        label: label.into(),
+        props: serde_json::json!({}),
+    };
+    let call = |dst: &str, instance: bool, gap: &str| PendingCall {
+        resolved_edge: edge("sym:caller", dst, "CALLS"),
+        gap_node: Node {
+            id: gap.into(),
+            label: "Gap".into(),
+            props: serde_json::json!({}),
+        },
+        gap_edge: edge("sym:caller", gap, "CALLS"),
+        requires_instance_method: instance,
+    };
+    let nodes = vec![
+        node("sym:caller", serde_json::json!({})),
+        node("sym:r@a.tsx#f", serde_json::json!({})),
+        node(
+            "sym:r@a.ts#plain",
+            serde_json::json!({"instance_dispatch": false}),
+        ),
+        node(
+            "sym:r@a.ts#method",
+            serde_json::json!({"instance_dispatch": true}),
+        ),
+    ];
+    let known: std::collections::HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
+    let calls = || {
+        vec![
+            call("sym:r@a.ts#f", false, "gap:1"),
+            call("sym:r@a.ts#plain", true, "gap:2"),
+            call("sym:r@a.ts#method", true, "gap:3"),
+            call("sym:r@missing.ts#g", false, "gap:4"),
+        ]
+    };
+    let prov = serde_json::to_value(
+        core_prov::Provenance::new(
+            core_prov::Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+            vec![],
+            EXTRACTOR_ID,
+            b"stale",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let pulumi = || {
+        vec![
+            PendingPulumiEdge {
+                src: PulumiEndpoint::Resource("res:a".into()),
+                dst: PulumiEndpoint::ImportedSymbol("bucket".into()),
+                label: "DEPENDS_ON".into(),
+                props: serde_json::json!({"prov": prov.clone(), "via": "bucket.arn"}),
+            },
+            PendingPulumiEdge {
+                src: PulumiEndpoint::Resource("res:a".into()),
+                dst: PulumiEndpoint::ImportedSymbol("unbound".into()),
+                label: "DEPENDS_ON".into(),
+                props: serde_json::json!({}),
+            },
+        ]
+    };
+    let bindings = HashMap::from([("bucket".to_string(), "res:bucket".to_string())]);
+    let (mut listed, mut listed_edges) = (nodes.clone(), Vec::new());
+    let mut lists = FactLists {
+        nodes: &mut listed,
+        edges: &mut listed_edges,
+    };
+    complete_pending_calls(calls(), &known, &mut lists).unwrap();
+    complete_pulumi_edges(pulumi(), &bindings, &mut lists).unwrap();
+    let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
+    complete_pending_calls(calls(), &known, &mut store).unwrap();
+    complete_pulumi_edges(pulumi(), &bindings, &mut store).unwrap();
+    assert_eq!(
+        store.into_facts().unwrap(),
+        (listed.clone(), listed_edges.clone())
+    );
+    let gaps: Vec<_> = listed[4..].iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(gaps, ["gap:2", "gap:4"]);
+    let links: Vec<_> = listed_edges
+        .iter()
+        .map(|e| (e.dst.as_str(), e.label.as_str()))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            ("sym:r@a.tsx#f", "CALLS"),
+            ("gap:2", "CALLS"),
+            ("sym:r@a.ts#method", "CALLS"),
+            ("gap:4", "CALLS"),
+            ("res:bucket", "DEPENDS_ON"),
+        ]
+    );
+    let hash = listed_edges[4].props["prov"]["content_hash"].clone();
+    assert_eq!(
+        hash,
+        serde_json::json!(core_prov::content_hash(
+            b"DEPENDS_ON res:a -> res:bucket via bucket.arn"
+        ))
+    );
+}
