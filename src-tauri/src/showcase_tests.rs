@@ -2,6 +2,7 @@
 //! production ingest path and write the official spec bundle plus the recovered
 //! endpoint inventory. No T2 embeddings, no provider calls, no network.
 use crate::*;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn required(name: &str) -> String {
@@ -81,11 +82,12 @@ fn showcase_recover_and_export() {
         for artifact in &bundle.artifacts {
             std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
         }
-        std::fs::write(
-            root.join("bundle.json"),
-            serde_json::to_vec_pretty(&bundle).unwrap(),
-        )
-        .unwrap();
+        // #1582: keep the complete diagnostic bundle, but avoid whitespace
+        // expansion and a second bundle-sized serialization buffer.
+        let mut writer =
+            std::io::BufWriter::new(std::fs::File::create(root.join("bundle.json")).unwrap());
+        serde_json::to_writer(&mut writer, &bundle).unwrap();
+        writer.flush().unwrap();
     }
 
     let (nodes, edges) = graph.read_snapshot().unwrap();
