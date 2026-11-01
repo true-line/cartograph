@@ -19,7 +19,8 @@
 //! and the graph's `Tool` facts can never disagree.
 
 use crate::bundler_alias::{self, BundlerAlias};
-use crate::{Extraction, SOURCE_EXTENSIONS, SourceId};
+use crate::{SOURCE_EXTENSIONS, SourceId};
+use core_graph::facts::FactAccess;
 use core_graph::placeholder::Boundary;
 use core_prov::{EvidenceRef, Provenance};
 use std::collections::HashSet;
@@ -511,42 +512,50 @@ fn resolve_spec(
 /// deciding config file joins the edge's provenance evidence; unmatched
 /// bare specifiers keep their `mod:` node exactly as before.
 pub(crate) fn resolve_bare_imports(
-    extraction: &mut Extraction,
+    facts: &mut impl FactAccess,
     index: &ResolutionIndex,
     id: &SourceId,
     known_files: &HashSet<String>,
-) {
+) -> Result<(), core_graph::GraphError> {
     if index.is_empty() {
-        return;
+        return Ok(());
     }
     let file_prefix = format!("file:{}@", id.repo);
-    for edge in &mut extraction.edges {
-        if edge.label != "IMPORTS" || !edge.dst.starts_with("mod:") {
-            continue;
-        }
-        let spec = edge.dst["mod:".len()..].to_string();
-        let Some(importer) = edge.src.strip_prefix(&file_prefix) else {
-            continue;
-        };
-        let Some(resolved) = resolve_spec(&spec, importer, index, id.repo, known_files) else {
-            continue;
-        };
-        edge.dst = format!("{file_prefix}{}", resolved.rel_path);
-        edge.props["resolved_via"] = serde_json::Value::String(resolved.via.into());
-        // The config that decided the resolution becomes citable evidence
-        // beside the import statement's own span.
-        if let Ok(mut provenance) = serde_json::from_value::<Provenance>(edge.props["prov"].clone())
-        {
-            provenance.evidence.push(EvidenceRef {
-                repo: id.repo.to_string(),
-                path: resolved.config_path,
-                byte_start: resolved.span.0,
-                byte_end: resolved.span.1,
-                commit_sha: id.commit.to_string(),
-            });
-            edge.props["prov"] = serde_json::to_value(provenance).expect("provenance serializes");
-        }
-    }
+    // Only a file's bare `mod:` IMPORTS can resolve; every other edge stays packed.
+    facts.edit_edges(
+        |src, dst, label| {
+            label == "IMPORTS" && dst.starts_with("mod:") && src.starts_with(&file_prefix)
+        },
+        |edges, _| {
+            for edge in edges {
+                let spec = edge.dst["mod:".len()..].to_string();
+                let Some(importer) = edge.src.strip_prefix(&file_prefix) else {
+                    continue;
+                };
+                let Some(resolved) = resolve_spec(&spec, importer, index, id.repo, known_files)
+                else {
+                    continue;
+                };
+                edge.dst = format!("{file_prefix}{}", resolved.rel_path);
+                edge.props["resolved_via"] = serde_json::Value::String(resolved.via.into());
+                // The config that decided the resolution becomes citable evidence
+                // beside the import statement's own span.
+                if let Ok(mut provenance) =
+                    serde_json::from_value::<Provenance>(edge.props["prov"].clone())
+                {
+                    provenance.evidence.push(EvidenceRef {
+                        repo: id.repo.to_string(),
+                        path: resolved.config_path,
+                        byte_start: resolved.span.0,
+                        byte_end: resolved.span.1,
+                        commit_sha: id.commit.to_string(),
+                    });
+                    edge.props["prov"] =
+                        serde_json::to_value(provenance).expect("provenance serializes");
+                }
+            }
+        },
+    )
 }
 
 /// Node.js core modules (`node:`-less spellings); a subpath such as
