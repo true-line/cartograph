@@ -61,13 +61,28 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                 &saved,
                 &response,
                 &fixture.f.step.step_id,
-                ledger,
+                ledger.clone(),
                 kind,
                 reason.clone(),
                 before.detail.usage.active_milliseconds + 1,
             )
-            .unwrap()
-            .additional_bytes;
+            .unwrap();
+            let legacy = completion::with_observation_prefix_reread(|| {
+                materialize(
+                    &tx,
+                    before,
+                    &saved,
+                    &response,
+                    &fixture.f.step.step_id,
+                    ledger,
+                    kind,
+                    reason.clone(),
+                    before.detail.usage.active_milliseconds + 1,
+                )
+            })
+            .unwrap();
+            assert_eq!(projection_contents(&exact), projection_contents(&legacy));
+            let exact = exact.additional_bytes;
             drop(tx);
             fixture.r.storage_claim.settlement_bytes = exact - usize::from(short);
             replace_reservation(&mut fixture.f, &fixture.r);
@@ -320,5 +335,75 @@ fn source_settlement_full_task_capacity_allows_actual_cancel_then_cancelled_rele
             read_reservations::pending_storage_claims(&tx, Some(&fixture.f.basis.task_id)).unwrap(),
             0
         );
+    }
+}
+
+/// Compare every projected DTO/count/byte role; fresh UTC timestamp contents can
+/// differ between independent reads, so retain their validated fixed widths.
+fn projection_contents(projection: &SettlementProjection) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "task": &projection.task, "disposition": &projection.disposition,
+        "events": &projection.events, "ledger": &projection.ledger,
+        "attempts": &projection.attempts, "attempt_offset": projection.attempt_offset,
+        "additional_bytes": projection.additional_bytes,
+        "counts": [projection.counts.events, projection.counts.attempts as u64,
+            projection.counts.input_rows as u64, projection.counts.reference_rows as u64,
+            projection.counts.disposition_rows as u64],
+    });
+    let updated = &mut value["task"]["detail"]["updated_at"];
+    assert_eq!(updated.as_str().unwrap().len(), 20);
+    *updated = "<fresh UTC timestamp>".into();
+    for event in value["events"].as_array_mut().unwrap() {
+        assert_eq!(event["created_at"].as_str().unwrap().len(), 20);
+        event["created_at"] = "<fresh UTC timestamp>".into();
+    }
+    value
+}
+
+#[test]
+fn source_settlement_cancelled_terminal_projections_match_reread_control() {
+    // AC-0287/#1581: the remaining six envelope alternatives, without repeating
+    // the writer/one-less matrix. Acquired/unavailable cancellation is excluded.
+    for (kind, charged) in [
+        (DispositionKind::ReleasedBeforeRead, false),
+        (DispositionKind::ReleasedBeforeRead, true),
+        (DispositionKind::OutcomeUnknown, false),
+        (DispositionKind::OutcomeUnknown, true),
+        (DispositionKind::KnownReadDiscarded, true),
+        (DispositionKind::BoundInvariantDefect, true),
+    ] {
+        let fixture = Fixture::new();
+        let response = fixture.response();
+        let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+        let charge =
+            source_validation::project_validation(&tx, &fixture.f.task, &fixture.r).unwrap();
+        let mut before = if charged {
+            charge.task
+        } else {
+            fixture.f.task.clone()
+        };
+        before.detail.summary.cancel_requested = true;
+        before.detail.summary.actions.can_cancel = false;
+        let saved = SavedRead {
+            reservation: fixture.r.clone(),
+            charge: charged.then_some(charge.charge),
+            disposition: None,
+        };
+        let project = || {
+            materialize(
+                &tx,
+                &before,
+                &saved,
+                &response,
+                &fixture.f.step.step_id,
+                None,
+                kind,
+                None,
+                before.detail.usage.active_milliseconds + 1,
+            )
+        };
+        let actual = project().unwrap();
+        let legacy = completion::with_observation_prefix_reread(project).unwrap();
+        assert_eq!(projection_contents(&actual), projection_contents(&legacy));
     }
 }

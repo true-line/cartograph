@@ -52,6 +52,8 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
     response: &InvestigationResponseMeta,
     core: &admission_contract::SavedCallCore,
 ) -> Result<SettlementEnvelope, InvestigationStoreError> {
+    #[cfg(test)]
+    let prefix_reads_before = completion::attempt_prefix_reads();
     if connection.is_autocommit() {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -179,6 +181,12 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
     {
         return Err(InvestigationStoreError::Capacity);
     }
+    #[cfg(test)]
+    ENVELOPE_PREFIX_SWEEPS.with(|counts| {
+        counts
+            .borrow_mut()
+            .push(completion::attempt_prefix_reads() - prefix_reads_before)
+    });
     Ok(envelope)
 }
 
@@ -222,4 +230,11 @@ pub(super) fn sizing_acquired_ledger(
     });
     acquired.validate_with_policy(&INVESTIGATION_V2_POLICY)?;
     Ok(acquired)
+}
+
+#[cfg(test)]
+thread_local! { static ENVELOPE_PREFIX_SWEEPS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) }; }
+#[cfg(test)]
+pub(in crate::jobs::investigations) fn take_envelope_prefix_sweeps() -> Vec<usize> {
+    ENVELOPE_PREFIX_SWEEPS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
 }
