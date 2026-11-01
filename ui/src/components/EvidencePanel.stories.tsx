@@ -63,7 +63,7 @@ export const WithSource: Story = {
 
     // Why-this-tier explanation is available on demand.
     await userEvent.click(canvas.getByText('Why this tier?'));
-    await expect(canvas.getByText(/Established deterministically/)).toBeInTheDocument();
+    await expect(canvas.getByText(/Produced by deterministic static analysis \(T0\).*Confirmed: proven outright/)).toBeInTheDocument();
 
     // The full 64-hex hash renders, and copy carries exactly that value.
     const hash = canvas.getByTestId('content-hash').textContent;
@@ -171,10 +171,10 @@ export const DeterministicInferredNamesItsTierAndScrollsToSpan: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText(/Why this is Inferred: Found by deterministic analysis/)).toBeInTheDocument();
-    await expect(canvas.queryByText(/proposed by a higher tier/)).toBeNull();
+    await expect(canvas.getByText(/Why this is Inferred: Produced by deterministic static analysis/)).toBeInTheDocument();
+    await expect(canvas.queryByText(/semantic tier|agentic tier/)).toBeNull();
     await userEvent.click(canvas.getByText('Why this tier?'));
-    await expect(canvas.queryByText(/Proposed by the semantic tier/)).toBeNull();
+    await expect(canvas.getByText(/static analysis \(T0\).*Inferred \(strong\)/)).toBeInTheDocument();
     await expect(canvas.getByText('producer not recorded')).toBeInTheDocument();
     const scrolled = (window as unknown as { __scrolled: Element[] }).__scrolled;
     await expect(scrolled.some((element) => element.tagName === 'MARK')).toBe(true);
