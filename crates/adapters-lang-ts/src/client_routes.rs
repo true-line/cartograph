@@ -14,7 +14,8 @@
 //! site; nothing is guessed.
 
 use crate::{FileCx, callable, literal_string};
-use core_graph::{Edge, Node};
+use core_graph::facts::FactAccess;
+use core_graph::{Edge, GraphError, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
@@ -881,7 +882,11 @@ fn push_gap(
 }
 
 /// Resolve every router registration against the directory's route tables.
-pub(crate) fn complete(pending: Pending, repo: &str, nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
+pub(crate) fn complete(
+    pending: Pending,
+    repo: &str,
+    facts: &mut impl FactAccess,
+) -> Result<(), GraphError> {
     let resolve = |import: &Import| {
         file_candidates(import)
             .into_iter()
@@ -1016,10 +1021,95 @@ pub(crate) fn complete(pending: Pending, repo: &str, nodes: &mut Vec<Node>, edge
             }
         }
     }
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
     for (_, (node, renders)) in screens {
         nodes.push(node);
         edges.extend(renders);
     }
     nodes.extend(gap_nodes);
     edges.extend(gap_edges);
+    facts.append(nodes, edges)
+}
+
+#[cfg(test)]
+mod fact_access_tests {
+    use super::*;
+    use core_graph::facts::{FactLists, FactStore};
+
+    fn evidence(byte_start: u64) -> EvidenceRef {
+        EvidenceRef {
+            repo: "r".into(),
+            path: "web/router.ts".into(),
+            byte_start,
+            byte_end: byte_start + 1,
+            commit_sha: "c".into(),
+        }
+    }
+
+    fn route(path: Option<&str>, component: Component, at: u64) -> Route {
+        Route {
+            path: path.map(str::to_string),
+            component,
+            redirect: false,
+            evidence: evidence(at),
+        }
+    }
+
+    fn pending() -> Pending {
+        let home = Import {
+            file: "web/Home.vue".into(),
+            guessed: false,
+        };
+        Pending {
+            tables: HashMap::new(),
+            files: HashSet::from(["web/Home.vue".to_string()]),
+            sites: vec![
+                Site {
+                    table: TableRef::Inline(vec![
+                        route(Some("/home"), Component::File(home), 1),
+                        route(None, Component::Unresolved, 2),
+                        route(Some("/lost"), Component::Unresolved, 3),
+                    ]),
+                    evidence: evidence(10),
+                },
+                Site {
+                    table: TableRef::Unresolved,
+                    evidence: evidence(20),
+                },
+            ],
+        }
+    }
+
+    // AC-0538: completion over the packed store appends exactly what it
+    // appends over plain lists, after the facts already recovered.
+    #[test]
+    fn route_completion_is_identical_over_lists_and_store() {
+        let nodes = vec![Node {
+            id: "file:r@web/Home.vue".into(),
+            label: "File".into(),
+            props: serde_json::json!({}),
+        }];
+        let (mut listed, mut listed_edges) = (nodes.clone(), Vec::new());
+        complete(
+            pending(),
+            "r",
+            &mut FactLists {
+                nodes: &mut listed,
+                edges: &mut listed_edges,
+            },
+        )
+        .unwrap();
+        let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
+        complete(pending(), "r", &mut store).unwrap();
+        assert_eq!(
+            store.into_facts().unwrap(),
+            (listed.clone(), listed_edges.clone())
+        );
+        assert_eq!(listed[0], nodes[0]);
+        let labels: Vec<_> = listed.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(labels, ["File", "Screen", "Screen", "Gap", "Gap", "Gap"]);
+        assert!(listed_edges.iter().any(|e| e.src == "screen:r@/home"
+            && e.dst == "file:r@web/Home.vue"
+            && e.label == "RENDERS"));
+    }
 }
