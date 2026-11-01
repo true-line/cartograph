@@ -17,7 +17,8 @@ export function methodBadge(method: ProducingMethod | undefined): string {
     case 'human':
       return 'human';
     default:
-      return 'method not recorded';
+      // "producer", not "method": beside an Endpoint, "method" reads as the HTTP verb (#1601).
+      return 'producer not recorded';
   }
 }
 

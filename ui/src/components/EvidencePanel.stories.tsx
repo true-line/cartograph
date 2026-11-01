@@ -137,6 +137,50 @@ export const WindowedLineNumbersAreAbsolute: Story = {
   },
 };
 
+// AC-0558 (#1601): an Inferred fact from deterministic analysis says so; the
+// cited span is scrolled into view even when the window starts at line 1; a
+// fact with no producing method reads "producer not recorded".
+const FILLER = Array.from({ length: 150 }, (_, i) => `// line ${i + 1}`).join('\n') + '\n';
+export const DeterministicInferredNamesItsTierAndScrollsToSpan: Story = {
+  args: {
+    node: (() => {
+      const node = endpointFixture('DELETE', '/api/aliases/<int:alias_id>');
+      const prov = node.props.prov;
+      if (prov) {
+        prov.confidence_tier = 'InferredStrong';
+        prov.tier = 'Deterministic';
+        delete prov.method;
+        prov.evidence[0].byte_start = bytes(FILLER) + SPAN_START;
+        prov.evidence[0].byte_end = bytes(FILLER) + SPAN_END;
+      }
+      return node;
+    })(),
+    source: { text: FILLER + SOURCE, window_start: 0, window_start_line: 1, truncated: false },
+  },
+  beforeEach: () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrolled: Element[] = [];
+    Element.prototype.scrollIntoView = function (this: Element, ...args) {
+      scrolled.push(this);
+      return original?.apply(this, args);
+    };
+    (window as unknown as { __scrolled: Element[] }).__scrolled = scrolled;
+    return () => {
+      Element.prototype.scrollIntoView = original;
+    };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/Why this is Inferred: Found by deterministic analysis/)).toBeInTheDocument();
+    await expect(canvas.queryByText(/proposed by a higher tier/)).toBeNull();
+    await userEvent.click(canvas.getByText('Why this tier?'));
+    await expect(canvas.queryByText(/Proposed by the semantic tier/)).toBeNull();
+    await expect(canvas.getByText('producer not recorded')).toBeInTheDocument();
+    const scrolled = (window as unknown as { __scrolled: Element[] }).__scrolled;
+    await expect(scrolled.some((element) => element.tagName === 'MARK')).toBe(true);
+  },
+};
+
 export const WindowedLargeFile: Story = {
   // Large files arrive as a window; span offsets are file-absolute and must
   // be shifted by window_start before highlighting.

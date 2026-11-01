@@ -60,6 +60,25 @@ const WHY_TIER: Record<Tier, string> = {
   Gap: 'Deterministic recovery attempted this and stopped: the evidence exists but is not statically resolvable. Recorded explicitly with a Resolution Strategy — never guessed (R-INT-4).',
 };
 
+/** Inferred facts can come from T0/T1 too, when the evidence supports but does not prove them (#1601). */
+const DETERMINISTIC_INFERRED =
+  'Found by deterministic analysis (T0/T1) with cited evidence, but not proven outright, so it is not shown as Confirmed (R-INT-2).';
+
+function producedDeterministically(tier: string | undefined): boolean {
+  return tier === 'Deterministic' || tier === 'Dynamic';
+}
+
+/** The "why this tier" text, honest about which tier actually produced the fact. */
+export function whyTier(confidence: Tier, producingTier: string | undefined): string {
+  if (
+    (confidence === 'InferredStrong' || confidence === 'InferredWeak') &&
+    producedDeterministically(producingTier)
+  ) {
+    return DETERMINISTIC_INFERRED;
+  }
+  return WHY_TIER[confidence];
+}
+
 /**
  * Evidence drawer (handoff §Evidence drawer): read-only, resizable
  * (320↔560px), full provenance incl. the complete content hash, true
@@ -81,6 +100,13 @@ export function EvidencePanel({
   const [width, setWidth] = useState(420);
   const [copied, setCopied] = useState(false);
   const dragging = useRef(false);
+  const spanRef = useRef<HTMLElement>(null);
+
+  // Bring the cited span into view: a small file's window starts at line 1,
+  // and the citation may be far below it (#1601).
+  useEffect(() => {
+    spanRef.current?.scrollIntoView?.({ block: 'center' });
+  }, [source, ev?.byte_start]);
 
   // Esc closes from anywhere — the drawer is an overlay, not a route.
   useEffect(() => {
@@ -151,13 +177,15 @@ export function EvidencePanel({
             >
               {prov.confidence_tier === 'Gap'
                 ? 'Why this is a Gap: evidence exists but is not statically resolvable — listed explicitly, never guessed.'
-                : 'Why this is Inferred: proposed by a higher tier with cited evidence; it never overwrites T0/T1.'}
+                : producedDeterministically(prov.tier)
+                  ? `Why this is Inferred: ${DETERMINISTIC_INFERRED}`
+                  : 'Why this is Inferred: proposed by a higher tier with cited evidence; it never overwrites T0/T1.'}
             </p>
           )}
 
           <details className="evidence-why-tier">
             <summary>Why this tier?</summary>
-            <p className="muted">{WHY_TIER[prov.confidence_tier]}</p>
+            <p className="muted">{whyTier(prov.confidence_tier, prov.tier)}</p>
           </details>
 
           {source === 'loading' ? (
@@ -193,7 +221,7 @@ export function EvidencePanel({
                     </pre>
                     <pre className="evidence-source" data-testid="evidence-source">
                       {before}
-                      <mark>{span}</mark>
+                      <mark ref={spanRef}>{span}</mark>
                       {after}
                       {source.truncated ? '\n… (windowed)' : ''}
                     </pre>
