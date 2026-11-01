@@ -182,3 +182,51 @@ it('resolves request family from exact advertised role without reinterpreting th
   const oldChanged = structuredClone(expandedCompletionCatalog); oldChanged.policies![0].request_schema_version = 6;
   expect(investigationPolicy(oldChanged, 'investigation-v2', 'domain-analyst@8')).toBeUndefined();
 });
+
+
+it('constructs request7 only after explicit advertised @18 selection without changing defaults (AC-0553)', async () => {
+  const { admissionCatalog, acquisitionCatalog } = await import('./completionFixtures');
+  expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
+  expect(acquisitionCatalog.specialists.slice(0, -1)).toEqual(admissionCatalog.specialists);
+  expect(acquisitionCatalog.policies![0].limits).toEqual(admissionCatalog.policies![0].limits);
+  expect(acquisitionCatalog.policies![0].specialist_ids.slice(0, -1)).toEqual(admissionCatalog.policies![0].specialist_ids);
+  expect(investigationPolicy(admissionCatalog, 'investigation-v2', 'domain-analyst@18')).toBeUndefined();
+  expect(investigationPolicy(acquisitionCatalog, 'investigation-v1', 'domain-analyst@18')).toBeUndefined();
+  const wrong = structuredClone(acquisitionCatalog); wrong.policies![0].request_schema_version = 6;
+  expect(investigationPolicy(wrong, 'investigation-v2', 'domain-analyst@18')).toBeUndefined();
+  const starts: StartInvestigationRequest[] = [];
+  mockIPC((command, args) => { if (command === 'start_investigation') { starts.push((args as {request: StartInvestigationRequest}).request); throw new Error('uncertain'); } return null; });
+  const selected = { ...draft(), specialist_id: 'domain-analyst@18' as const, limit_profile: 'investigation-v2',
+    obligations: obligationEnvelope([inventoryObligation], acquisitionCatalog.policies![0]) };
+  useInvestigationStore.setState({ catalog: admissionCatalog, obligationChoices: completionChoices });
+  await useInvestigationStore.getState().start(selected);
+  expect(starts).toHaveLength(0);
+  useInvestigationStore.setState({ catalog: acquisitionCatalog });
+  await useInvestigationStore.getState().start(selected);
+  expect(starts).toHaveLength(1);
+  expect(starts[0]).toMatchObject({ schema_version: 7, specialist_id: 'domain-analyst@18', limit_profile: 'investigation-v2',
+    obligations: { schema_version: 2, contract: 'investigation-completion-obligations@2' }, expected_context_id: completionChoices.context_id });
+  expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
+});
+
+it('recognizes saved @18 and refuses a mismatched summary schema family (AC-0553)', async () => {
+  const { admissionDetail, admissionResult } = await import('./completionFixtures');
+  const { completionFamily, isCompletionSpecialist, isExpandedSpecialist } = await import('./investigationFamilies');
+  let detail = admissionDetail('saved-analyst-18');
+  detail.last_event_sequence = 0; detail.specialist_id = 'domain-analyst@18';
+  detail.specialist = { ...detail.specialist, id: 'domain-analyst@18', version: 18, prompt_fingerprint: 'fixture-domain-analyst@18' };
+  const result = admissionResult('saved-analyst-18');
+  mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? result :
+    command === 'investigation_events' ? { investigation_id: detail.investigation_id, items: [], next_sequence: 0, has_more: false } : null);
+  expect(completionFamily(7)?.roleVersions).toContain(18);
+  expect(isCompletionSpecialist('domain-analyst@18')).toBe(true);
+  expect(isExpandedSpecialist('domain-analyst@18')).toBe(true);
+  await useInvestigationStore.getState().open(detail.investigation_id);
+  expect(useInvestigationStore.getState().error).toBeNull();
+  expect(useInvestigationStore.getState().detail?.specialist).toMatchObject({ id: 'domain-analyst@18', version: 18 });
+  expect(useInvestigationStore.getState().result).toMatchObject({ schema_version: 7 });
+  detail = structuredClone(detail); detail.schema_version = 6;
+  await useInvestigationStore.getState().refreshSelected();
+  expect(useInvestigationStore.getState().error).toContain('consistently');
+  expect(useInvestigationStore.getState().detail?.specialist.version).toBe(18);
+});

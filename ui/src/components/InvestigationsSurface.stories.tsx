@@ -1,5 +1,5 @@
 import actualAdmission from '../fixtures/completion-v10-supported.json';
-import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult,
+import { acquisitionCatalog, admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult,
   expandedCompletionCatalog, completionCatalog, completionChoices, completionDetail, completionResult,
   gapTriagerDetail, gapTriagerResult, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult,
   specWriterV2Detail, specWriterV2Result } from '../completionFixtures';
@@ -1286,5 +1286,26 @@ export const NarrativeMetadataRejectsMissingSupport: Story = {
     result: { ...specWriterV2Result(), narrative: { text: 'Saved message', finding_ids: ['missing-finding'] } } }) },
   play: async ({ canvasElement }) => {
     await expect(within(canvasElement).getByRole('group', { name: 'Specialist message evidence' })).toHaveTextContent('Citation metadata unavailable');
+  },
+};
+
+
+export const ExplicitAcquisitionVersion: Story = {
+  // AC-0553: append the exact opt-in version, preserve initial and budget defaults.
+  args: { state: state({ catalog: acquisitionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v1');
+    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@10/ })).toBeChecked();
+    await expect(canvas.getByRole('radio', { name: /domain-analyst@18/ })).not.toBeChecked();
+    await expect(args.state.start).not.toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@18/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Inspect explicitly offered acquisition choices.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@18',
+      limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
   },
 };

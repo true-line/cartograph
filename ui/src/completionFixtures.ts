@@ -127,6 +127,14 @@ export const admissionCatalog: InvestigationCatalog = {
   policies: queryHistoryCatalog.policies!.map((policy) => ({ ...policy, request_schema_version: 7,
     specialist_ids: ['domain-analyst@10', 'evidence-auditor@10'] })),
 };
+/** Explicit opt-in option; existing defaults and catalog order are unchanged. */
+export const acquisitionCatalog: InvestigationCatalog = {
+  ...admissionCatalog,
+  specialists: [...admissionCatalog.specialists, { ...admissionCatalog.specialists.find((item) => item.id === 'domain-analyst@10')!,
+    id: 'domain-analyst@18', version: 18, prompt_fingerprint: 'fixture-domain-analyst@18' }],
+  policies: admissionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@18'] })),
+};
+
 export function admissionDetail(id = 'inv-admission'): InvestigationDetail {
   const detail = queryHistoryDetail(id);
   detail.schema_version = 7; detail.specialist_id = 'domain-analyst@10';
