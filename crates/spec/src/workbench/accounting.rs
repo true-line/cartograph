@@ -7,6 +7,14 @@ use std::{io, mem::size_of};
 
 mod capability;
 pub(crate) mod typed;
+pub(crate) use capability::capability_renderer_parts;
+
+/// Persistent appended references and one current renderer occurrence.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RendererWorkspaceParts {
+    pub references_bytes: usize,
+    pub current_bytes: usize,
+}
 pub use capability::{CapabilityCompileWorkspaceBound, logical_capability_compile_bound};
 
 /// Version of the compiler's logical accounting currency.

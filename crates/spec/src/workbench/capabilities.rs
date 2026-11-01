@@ -350,23 +350,13 @@ pub fn logical_actor_story_workspace_bound(
     actor_count: usize,
     actor_json_bytes: usize,
 ) -> Option<ActorStoryWorkspaceBound> {
-    use super::accounting::{slots, sum};
+    use super::accounting::sum;
     let (index_bytes, story_bytes) = actor_retained_parts(actor_count)?;
     let retained_bytes = sum(&[index_bytes, story_bytes])?;
     let canonical_scratch_bytes =
         crate::knowledge::actors::verification_workspace(base_json_bytes, actor_json_bytes)?;
-    let renderer_extra_bytes = sum(&[
-        slots::<&Node>(actor_count)?,
-        super::accounting::json_bytes(actor_json_bytes)?, // current provenance Value
-        super::accounting::json_bytes(actor_json_bytes)?, // simultaneous typed decode
-        super::accounting::json_bytes(base_json_bytes)?,  // current Endpoint provenance Value
-        super::accounting::json_bytes(base_json_bytes)?,  // simultaneous typed support decode
-        actor_json_bytes,
-        base_json_bytes, // current name/id formatting
-        std::mem::size_of::<blake3::Hasher>(),
-        std::mem::size_of::<String>(), // current support occurrence ID
-        support_id("", &BaseRef::Node(String::new())).len(),
-    ])?;
+    let renderer = actor_renderer_parts(base_json_bytes, actor_count, actor_json_bytes)?;
+    let renderer_extra_bytes = sum(&[renderer.references_bytes, renderer.current_bytes])?;
     Some(ActorStoryWorkspaceBound {
         retained_bytes,
         canonical_scratch_bytes,
@@ -375,6 +365,28 @@ pub fn logical_actor_story_workspace_bound(
             retained_bytes,
             canonical_scratch_bytes,
             renderer_extra_bytes,
+        ])?,
+    })
+}
+
+fn actor_renderer_parts(
+    base_json_bytes: usize,
+    actor_count: usize,
+    actor_json_bytes: usize,
+) -> Option<super::accounting::RendererWorkspaceParts> {
+    use super::accounting::{RendererWorkspaceParts, slots, sum};
+    Some(RendererWorkspaceParts {
+        references_bytes: slots::<&Node>(actor_count)?,
+        current_bytes: sum(&[
+            super::accounting::json_bytes(actor_json_bytes)?, // current provenance Value
+            super::accounting::json_bytes(actor_json_bytes)?, // simultaneous typed decode
+            super::accounting::json_bytes(base_json_bytes)?,  // current Endpoint provenance Value
+            super::accounting::json_bytes(base_json_bytes)?,  // simultaneous typed support decode
+            actor_json_bytes,
+            base_json_bytes, // current name/id formatting
+            std::mem::size_of::<blake3::Hasher>(),
+            std::mem::size_of::<String>(), // current support occurrence ID
+            support_id("", &BaseRef::Node(String::new())).len(),
         ])?,
     })
 }
@@ -441,12 +453,24 @@ pub fn logical_knowledge_story_compile_bound(
             .canonical_scratch_bytes
             .max(actor.renderer_extra_bytes),
     ])?;
+    let capability_render =
+        super::accounting::capability_renderer_parts(selected_count, selected_json_bytes)?;
+    let actor_render = actor_renderer_parts(graph.bytes, selected_count, selected_json_bytes)?;
+    // Both appended reference roles persist through rendering. Current item
+    // scratch ends after each node/support assertion. Prior Provenance DTOs
+    // move into output: ordinary.artifact_bytes includes SpecAssertion slots
+    // and json_bytes(output cap) for their strings and nested evidence slots
+    // (the ownership regression below audits the retained complete shape).
+    // Keep two count roles: this helper does not assume a shared total count.
     let rendering_bytes = sum(&[
         ordinary.peak_bytes,
         capability.story_support_bytes,
         actor_stories,
-        capability.renderer_extra_bytes,
-        actor.renderer_extra_bytes,
+        capability_render.references_bytes,
+        actor_render.references_bytes,
+        capability_render
+            .current_bytes
+            .max(actor_render.current_bytes),
     ])?;
     Some(KnowledgeStoryCompileWorkspaceBound {
         capability_validation_bytes,
@@ -700,5 +724,173 @@ mod stage_tests {
             logical_knowledge_story_compile_bound(graph, trace, bound_limits, 1, usize::MAX)
                 .is_none()
         );
+    }
+
+    // Owned nested heap only: the inline fields/enum/Vec/String headers of
+    // each assertion are paid separately by slots::<SpecAssertion>.
+    fn assertion_owned_heap(row: &SpecAssertion) -> usize {
+        use core_prov::{ArtifactLocator, EvidenceBasis};
+        let SpecAssertion {
+            id,
+            subject_id,
+            subject_kind,
+            summary,
+            provenance,
+            edge_label,
+            omission,
+        } = row;
+        let method = match &provenance.method {
+            ProducingMethod::Rule { rule, version } => rule.len() + version.len(),
+            ProducingMethod::Model { model } => model.len(),
+            ProducingMethod::Human { actor } => actor.len(),
+            ProducingMethod::Unrecorded => 0,
+        };
+        let basis = match &provenance.basis {
+            Some(EvidenceBasis::Artifact { refs }) => refs
+                .iter()
+                .map(|r| {
+                    std::mem::size_of::<core_prov::ArtifactRef>()
+                        + r.digest.len()
+                        + r.kind.len()
+                        + match &r.at {
+                            ArtifactLocator::Member { path } => path.len(),
+                            ArtifactLocator::Offset { .. } => 0,
+                        }
+                })
+                .sum(),
+            None | Some(EvidenceBasis::Source | EvidenceBasis::Observation) => 0,
+        };
+        id.len()
+            + subject_id.len()
+            + subject_kind.len()
+            + summary.len()
+            + edge_label.as_ref().map_or(0, String::len)
+            + omission.as_ref().map_or(0, |o| o.detail.len())
+            + provenance.extractor_id.len()
+            + provenance.content_hash.len()
+            + method
+            + basis
+            + provenance
+                .evidence
+                .iter()
+                .map(|e| {
+                    std::mem::size_of::<core_prov::EvidenceRef>()
+                        + e.repo.len()
+                        + e.path.len()
+                        + e.commit_sha.len()
+                })
+                .sum::<usize>()
+    }
+
+    // AC-0518/#1557: mixed successful output keeps the exact common assertion
+    // budget; reducing accounting overlap never changes admission or content.
+    #[test]
+    fn mixed_story_renderer_keeps_exact_output_admission() {
+        let (base, actors, cap, _) = crate::knowledge::actors::tests::admitted_actor_fixture();
+        let candidates = [CapabilityStory {
+            capability: &cap,
+            cites: &actors[0].cites,
+        }];
+        let run = |max_bytes| {
+            let mut selected = limits();
+            selected.max_bytes = max_bytes;
+            compile_knowledge_user_stories(
+                &base,
+                &candidates,
+                &actors,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                selected,
+            )
+            .unwrap()
+        };
+        let SelectedArtifactOutcome::Produced(artifact) = run(limits().max_bytes) else {
+            panic!("mixed fixture must produce")
+        };
+        assert!(artifact.verify_identity());
+        // A JSON value header credit pays each nested collection slot, while
+        // output payload strings have their own serialized byte credit.
+        let currency = std::mem::size_of::<serde_json::Value>()
+            + std::mem::size_of::<String>()
+            + 3 * std::mem::size_of::<usize>();
+        assert!(std::mem::size_of::<core_prov::EvidenceRef>() <= 6 * currency);
+        assert!(std::mem::size_of::<core_prov::ArtifactRef>() <= 5 * currency);
+        let retained = artifact.assertions.len() * std::mem::size_of::<SpecAssertion>()
+            + artifact
+                .assertions
+                .iter()
+                .map(assertion_owned_heap)
+                .sum::<usize>();
+        let wire = serde_json::to_vec(&artifact.assertions).unwrap().len();
+        assert!(
+            retained
+                <= artifact.assertions.len() * std::mem::size_of::<SpecAssertion>()
+                    + super::super::accounting::json_bytes(wire).unwrap()
+        );
+        for kind in ["Capability", "Actor"] {
+            assert!(
+                artifact
+                    .assertions
+                    .iter()
+                    .any(|row| row.subject_kind == kind)
+            );
+        }
+        let bytes =
+            artifact.content.len() + serde_json::to_vec(&artifact.assertions).unwrap().len();
+        assert!(bytes > 0);
+        assert_eq!(run(bytes), SelectedArtifactOutcome::Produced(artifact));
+        assert!(matches!(
+            run(bytes - 1),
+            SelectedArtifactOutcome::Limited { .. }
+        ));
+    }
+
+    // AC-0518/#1557: legacy totals retain every role; only sequential scratch
+    // overlap changes, with persistent references still charged for both caps.
+    #[test]
+    fn renderer_scratch_split_preserves_legacy_and_strictly_improves_peak() {
+        let graph = flowtracer::TraceGraphBound {
+            bytes: 64,
+            rows: 4,
+            values: 16,
+        };
+        let trace = flowtracer::TraceLimits {
+            max_flows: 4,
+            max_hops: 8,
+            max_output_bytes: 512,
+        };
+        let selected = SelectedCompileLimits {
+            max_bytes: 1024,
+            adr: crate::AdrLimits {
+                max_rows: 8,
+                max_output_bytes: 512,
+            },
+        };
+        let ordinary = logical_compile_bound(graph, trace, selected).unwrap();
+        for (count, bytes) in [(0, 0), (1, 64), (8, 512)] {
+            let cap =
+                logical_capability_compile_bound(graph, trace, selected, count, bytes).unwrap();
+            let actor = logical_actor_story_workspace_bound(graph.bytes, count, bytes).unwrap();
+            let (_, actor_stories) = actor_retained_parts(count).unwrap();
+            let old_render = ordinary.peak_bytes
+                + cap.story_support_bytes
+                + actor_stories
+                + cap.renderer_extra_bytes
+                + actor.renderer_extra_bytes;
+            let staged =
+                logical_knowledge_story_compile_bound(graph, trace, selected, count, bytes)
+                    .unwrap();
+            let old_peak = cap
+                .peak_bytes
+                .max(staged.actor_validation_bytes)
+                .max(old_render);
+            assert!(staged.peak_bytes <= old_peak);
+            if count == 8 && bytes == 512 {
+                assert!(staged.rendering_bytes < old_render);
+                assert!(staged.peak_bytes < old_peak);
+            }
+        }
+        assert!(super::super::accounting::capability_renderer_parts(usize::MAX, 1).is_none());
+        assert!(actor_renderer_parts(1, 1, usize::MAX).is_none());
     }
 }
