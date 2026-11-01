@@ -105,12 +105,31 @@ fn collect(prepared: &PreparedState) -> Result<Value, String> {
 pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> {
     collect_role(authority, "analyst")
 }
+fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "domain-analyst@18" || saved == SpecialistId::DomainAnalystV18 {
+        if frozen != "domain-analyst@18"
+            || saved != SpecialistId::DomainAnalystV18
+            || role != "analyst"
+        {
+            return Err("Acquisition receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist18-prompt9-disclosure6-result7");
+    }
+    // Historical receipts, including auditor11, retain their exact family bytes.
+    Ok("request7-specialist10-prompt9-disclosure6-result7")
+}
+
 pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Value, String> {
     let database = authority.app_data.join("state.db");
     let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
-    // This production reader authenticates task3 and historical @10 metadata.
+    // This production reader authenticates the saved task and specialist metadata.
     let (detail, result, ledger, events) =
         super::super::completion::execution::read_expanded_state(&jobs, authority.analyst_id)?;
+    let family = receipt_family(
+        &authority.request.specialist_id,
+        detail.summary.specialist_id,
+        role,
+    )?;
     if !matches!(
         detail.summary.status,
         InvestigationStatus::Completed
@@ -157,8 +176,7 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
             **mode == agents::investigation::staged_refusal::CompletionCallMode::FinishOnly
         })
         .count();
-    Ok(
-        json!({"schema_version":1,"family":"request7-specialist10-prompt9-disclosure6-result7","role":role,
+    Ok(json!({"schema_version":1,"family":family,"role":role,
         "binding":authority.binding,"manifest_hash":authority.manifest_hash,
         "request_hash":authority.request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
         "obligations_hash":authority.request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
@@ -169,8 +187,7 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
         "detail":detail,"result":result,"ledger":ledger,"events":events,
         "invocations":invocations,"capacity_refusals":capacity,"finish_refusals":finish,
         "tokenizer_context_capacity":"unknown","full_obligation_acceptance":"not_established",
-        "auditor":"requires_separate_independent_review_and_execution"}),
-    )
+        "auditor":"requires_separate_independent_review_and_execution"}))
 }
 fn reopen_receipt(directory: &Path, expected: &PreparationBinding) -> Result<Value, String> {
     reopen_control_receipt(directory, expected, CaptureFixture::Baseline)
@@ -342,6 +359,48 @@ mod tests {
     use crate::investigations::worker::tests::{
         Mode, Scripted, completion_tests::expanded_scripted_provider,
     };
+
+    // AC-0554: no provider or fabricated durable state is needed for identity controls.
+    #[test]
+    fn captured_receipt_family_preserves_history_and_binds_acquisition_identity() {
+        let legacy = "request7-specialist10-prompt9-disclosure6-result7";
+        for version in [10, 11, 12, 13, 14, 15, 17] {
+            let id = format!("domain-analyst@{version}");
+            assert_eq!(
+                receipt_family(&id, serde_json::from_value(json!(id)).unwrap(), "analyst").unwrap(),
+                legacy
+            );
+        }
+        assert_eq!(
+            receipt_family(
+                "evidence-auditor@11",
+                SpecialistId::EvidenceAuditorV11,
+                "auditor"
+            )
+            .unwrap(),
+            legacy
+        );
+        assert_eq!(
+            receipt_family(
+                "domain-analyst@18",
+                SpecialistId::DomainAnalystV18,
+                "analyst"
+            )
+            .unwrap(),
+            "request7-specialist18-prompt9-disclosure6-result7"
+        );
+        for (frozen, saved, role) in [
+            ("domain-analyst@18", "domain-analyst@17", "analyst"),
+            ("domain-analyst@17", "domain-analyst@18", "analyst"),
+            ("domain-analyst@18", "domain-analyst@18", "auditor"),
+            ("domain-analyst@18", "evidence-auditor@11", "auditor"),
+        ] {
+            assert!(
+                receipt_family(frozen, serde_json::from_value(json!(saved)).unwrap(), role)
+                    .is_err()
+            );
+        }
+    }
 
     // AC-0287: this scripted analyst evidence leaves semantic review and #598 open.
     #[test]

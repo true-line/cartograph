@@ -72,6 +72,13 @@ fn captured_progress_guidance_role_is_explicit_and_reopen_bound() {
         captured_case(false, Some(role));
     }
 }
+// AC-0554: frozen synthetic preparation only; neither role dispatches a provider.
+#[test]
+fn captured_acquisition_role_prepares_without_execution() {
+    for role in ["domain-analyst@17", "domain-analyst@18"] {
+        captured_case(false, Some(role));
+    }
+}
 fn captured_case(execute: bool, specialist: Option<&str>) {
     let case = Case::new();
     let prepared = if execute {
