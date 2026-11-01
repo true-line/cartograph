@@ -1079,11 +1079,9 @@ fn capability_stories_preserve_base_bytes_and_filter_whole_derived_story() {
     );
     assert_eq!(artifact.assertions.len(), 1); // unaffected base story remains
     assert_eq!(artifact.assertions[0].subject_id, "base-capability");
-    assert!(
-        artifact
-            .content
-            .contains("1 derived stories omitted because supporting facts are filtered.")
-    );
+    assert!(artifact.content.contains(
+        "1 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
     assert!(!artifact.content.contains("support:"));
 }
 // AC-0504: an entirely filtered derived set reports omissions, not absent recovery.
@@ -1118,11 +1116,9 @@ fn capability_stories_all_filtered_do_not_claim_no_recovered_capabilities() {
     };
     let filtered = compile(&facts);
     assert!(filtered.assertions.is_empty());
-    assert!(
-        filtered
-            .content
-            .contains("1 derived stories omitted because supporting facts are filtered.")
-    );
+    assert!(filtered.content.contains(
+        "1 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
     assert!(
         !filtered
             .content
@@ -1265,4 +1261,98 @@ fn capability_stories_admit_full_escaped_associations_at_exact_output_boundary()
             },
         }
     );
+}
+
+// AC-0504: own provenance and support filtering count a valid candidate once;
+// neither mode nor curation may turn hidden recovery into absent recovery.
+#[test]
+fn capability_stories_count_own_filtering_once_and_keep_validation() {
+    let mut base = fixture(PATH, REPO);
+    let facts = derive_graphql_resolver_capabilities(&base).facts;
+    assert_eq!(facts.len(), 1);
+    let own_hash = capability(&facts[0]).props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let support = base
+        .graph
+        .0
+        .iter_mut()
+        .find(|n| facts[0].cites.contains(&BaseRef::Node(n.id.clone())))
+        .unwrap();
+    // Use curation-eligible support as in the existing support-filter regression.
+    support.props["prov"]["confidence_tier"] = serde_json::json!("InferredStrong");
+    let support_hash = support.props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(own_hash, support_hash);
+    let before = base.clone();
+    let visible = citation_artifact(
+        citation_compile(
+            &base,
+            &facts,
+            crate::ExportMode::BestEffort,
+            &BTreeSet::new(),
+            usize::MAX,
+        )
+        .unwrap(),
+    );
+    assert!(!visible.content.contains("derived stories omitted"));
+    assert!(
+        visible
+            .assertions
+            .iter()
+            .any(|a| a.subject_id == capability(&facts[0]).id)
+    );
+    for mode in [
+        crate::ExportMode::VerifiedOnly,
+        crate::ExportMode::BestEffort,
+    ] {
+        let mut rejections = vec![
+            BTreeSet::from([own_hash.clone()]),
+            BTreeSet::from([support_hash.clone()]),
+            BTreeSet::from([own_hash.clone(), support_hash.clone()]),
+        ];
+        if mode == crate::ExportMode::VerifiedOnly {
+            rejections.push(BTreeSet::new());
+        }
+        for rejected in rejections {
+            let artifact = citation_artifact(
+                citation_compile(&base, &facts, mode, &rejected, usize::MAX).unwrap(),
+            );
+            assert!(artifact.content.contains("1 derived stories omitted because candidate facts or their supporting facts are filtered."));
+            assert!(
+                !artifact
+                    .content
+                    .contains("No Capability facts have been recovered yet.")
+            );
+            assert!(artifact.assertions.is_empty());
+            assert!(artifact.verify_identity());
+            let bytes =
+                artifact.content.len() + serde_json::to_vec(&artifact.assertions).unwrap().len();
+            assert_eq!(
+                citation_artifact(citation_compile(&base, &facts, mode, &rejected, bytes).unwrap()),
+                artifact
+            );
+            assert!(matches!(
+                citation_compile(&base, &facts, mode, &rejected, bytes - 1).unwrap(),
+                crate::SelectedArtifactOutcome::Limited { .. }
+            ));
+        }
+        // Even an own-filtered candidate must validate all supporting references.
+        let mut invalid = facts.clone();
+        invalid[0].cites = BTreeSet::from([BaseRef::Node("missing-support".into())]);
+        assert_eq!(
+            citation_compile(
+                &base,
+                &invalid,
+                mode,
+                &BTreeSet::from([own_hash.clone()]),
+                usize::MAX
+            ),
+            Err(crate::CapabilityStoryInputError::SupportNotInBase)
+        );
+    }
+    assert_eq!(base, before);
 }

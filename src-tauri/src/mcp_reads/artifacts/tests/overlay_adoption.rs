@@ -217,12 +217,8 @@ fn captured_modes_staleness_rejection_and_invalid_candidates_fail_closed() {
     let verified = f
         .acquire(ExportMode::VerifiedOnly, SnapshotReadLimits::default())
         .unwrap();
-    assert!(
-        stories(&verified, compile_limits())
-            .artifact
-            .assertions
-            .is_empty()
-    );
+    let filtered = stories(&verified, compile_limits()).artifact;
+    assert!(filtered.assertions.is_empty());
     let verified_base = ReadSession::acquire(
         &f.graph,
         &f.decisions,
@@ -232,10 +228,22 @@ fn captured_modes_staleness_rejection_and_invalid_candidates_fail_closed() {
         ExportMode::VerifiedOnly,
     )
     .unwrap();
-    assert_eq!(
-        stories(&verified, compile_limits()).artifact,
-        stories(&verified_base, compile_limits()).artifact
+    // #1540: hidden recovery is reported as omitted, unlike an absent overlay.
+    let absent = stories(&verified_base, compile_limits()).artifact;
+    assert!(filtered.content.contains(
+        "1 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
+    assert!(
+        !filtered
+            .content
+            .contains("No Capability facts have been recovered yet.")
     );
+    assert!(
+        absent
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+    assert_ne!(filtered.content_id, absent.content_id);
     // Keep the real producer's citations, but make one support curatable to
     // exercise the existing projection rule independently of producer eligibility.
     let BaseRef::Node(id) = f.facts[0]
@@ -283,12 +291,9 @@ fn captured_modes_staleness_rejection_and_invalid_candidates_fail_closed() {
         .unwrap();
     let suppressed = stories(&f.best(), compile_limits());
     assert!(suppressed.artifact.assertions.is_empty());
-    assert!(
-        suppressed
-            .artifact
-            .content
-            .contains("1 derived stories omitted because supporting facts are filtered.")
-    );
+    assert!(suppressed.artifact.content.contains(
+        "1 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
     let mut invalid = f.facts.clone();
     let OverlayItem::Node(n) = &mut invalid[0].item else {
         unreachable!()
