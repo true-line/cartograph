@@ -1,5 +1,19 @@
 # cartograph
 
+## 0.57.0
+
+### Minor Changes
+
+- 6fd3aa5: MCP read sessions now capture permission Actors with Capabilities under one bounded read and compile them into the official user stories, keeping each Actor's ordered assumption alternatives and Endpoint citation (#1539).
+
+### Patch Changes
+
+- 99bc779: Expose the combined Actor and Capability user-stories compiler with explicit caller-admitted flows and security limits. This spec-only entrypoint preserves existing admission behavior; host integration remains separate.
+- 583d3cc: The knowledge overlay offers one bounded read of Capability and Actor facts under a combined charge (#1534).
+- 9922f58: Count derived user stories omitted by their own provenance as well as supporting facts, and explain both cases accurately. Omission-bearing artifact text and content identities change; stored facts and provenance remain unchanged.
+- ff4861e: TypeScript Next.js app-page and route completion now run through the shared fact interface, so they work unchanged over packed facts (#1548).
+- 0319f4a: TypeScript Vue Router route and navigation completion now run through the shared fact interface, so they work unchanged over packed facts (#1543).
+
 ## 0.56.0
 
 ### Minor Changes
