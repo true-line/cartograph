@@ -118,10 +118,13 @@ struct PendingEndpoint {
 }
 
 impl PendingEndpoint {
-    /// Emit the endpoint, or the shadow Gap when a role is obscured.
+    /// Emit the endpoint, or the shadow Gap when a role is obscured. One
+    /// mapping annotation may expand to several verb/route endpoints that
+    /// share one annotation-span Gap; `emitted` keeps that Gap single.
     fn settle(
         self,
         declared: impl Fn(&str, &str) -> bool,
+        emitted: &mut HashSet<String>,
         nodes: &mut Vec<Node>,
         edges: &mut Vec<Edge>,
     ) {
@@ -130,6 +133,9 @@ impl PendingEndpoint {
             .iter()
             .any(|group| group.iter().all(|fqn| declared(fqn, &self.path)));
         let (node, edge) = if shadowed { self.gap } else { self.endpoint };
+        if shadowed && !emitted.insert(node.id.clone()) {
+            return;
+        }
         nodes.push(node);
         edges.push(edge);
     }
@@ -406,6 +412,10 @@ enum PathArg {
     Absent,
     /// A provable string literal.
     Literal(String),
+    /// A non-empty array of provable string literals (`["/a", "/b"]` or
+    /// `arrayOf("/a")`), as Spring's `Array<String>` path elements are
+    /// written in Kotlin when named (#1605).
+    Literals(Vec<String>),
     /// A path argument exists but is not a provable literal.
     Dynamic,
 }
@@ -418,6 +428,26 @@ struct AnnotationUse<'t> {
     spelled: String,
     node: TsNode<'t>,
     path: PathArg,
+    /// The `method =` argument (#1605).
+    method: MethodArg<'t>,
+}
+
+/// A mapping annotation's `method =` argument: absent (no restriction),
+/// a value to resolve, or written in a shape T0 cannot read (fails closed).
+#[derive(Debug, Clone, Copy)]
+enum MethodArg<'t> {
+    Absent,
+    Value(TsNode<'t>),
+    Unreadable,
+}
+
+/// Named children that are not comments: a comment may sit anywhere inside
+/// an argument (`method /* c */ = [...]`) without changing what it says.
+fn code_children(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+        .collect()
 }
 
 /// A string literal with no interpolation — `"/api/users"` yes,
@@ -443,21 +473,90 @@ fn pure_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     Some(text)
 }
 
+impl PathArg {
+    /// The route segments this argument designates: Spring's default `""`
+    /// when absent, `None` when present but unprovable.
+    fn segments(&self) -> Option<Vec<String>> {
+        match self {
+            PathArg::Absent => Some(vec![String::new()]),
+            PathArg::Literal(path) => Some(vec![path.clone()]),
+            PathArg::Literals(paths) => Some(paths.clone()),
+            PathArg::Dynamic => None,
+        }
+    }
+}
+
+/// A path value: one pure literal, or a non-empty collection literal or
+/// `arrayOf(…)` of pure literals; anything else is present but unprovable.
+fn path_value(cx: &FileCx<'_>, value: TsNode<'_>) -> PathArg {
+    if let Some(literal) = pure_string_literal(cx, value) {
+        return PathArg::Literal(literal);
+    }
+    let elements = match value.kind() {
+        "collection_literal" => {
+            let mut walk = value.walk();
+            value
+                .named_children(&mut walk)
+                .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+                .collect::<Vec<_>>()
+        }
+        "call_expression" => match array_of_elements(cx, value) {
+            Some(elements) => elements,
+            None => return PathArg::Dynamic,
+        },
+        _ => return PathArg::Dynamic,
+    };
+    let literals: Option<Vec<String>> = elements
+        .iter()
+        .map(|element| pure_string_literal(cx, *element))
+        .collect();
+    match literals {
+        Some(literals) if !literals.is_empty() => PathArg::Literals(literals),
+        _ => PathArg::Dynamic,
+    }
+}
+
+/// The elements of an `arrayOf(…)` / `arrayOf<T>(…)` call, each a plain
+/// argument; `None` for any other call or a spread argument (fail closed).
+fn array_of_elements<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<Vec<TsNode<'t>>> {
+    let parts = code_children(call);
+    let (callee, arguments) = match parts.as_slice() {
+        [callee, arguments] => (*callee, *arguments),
+        [callee, types, arguments] if types.kind() == "type_arguments" => (*callee, *arguments),
+        _ => return None,
+    };
+    if callee.kind() != "identifier"
+        || cx.text(&callee) != "arrayOf"
+        || arguments.kind() != "value_arguments"
+    {
+        return None;
+    }
+    let mut elements = Vec::new();
+    for argument in code_children(arguments) {
+        match code_children(argument).as_slice() {
+            [element]
+                if argument.kind() == "value_argument"
+                    && !cx.text(&argument).trim_start().starts_with('*') =>
+            {
+                elements.push(*element)
+            }
+            _ => return None,
+        }
+    }
+    Some(elements)
+}
+
 /// The path argument of a mapping annotation's `value_arguments`: a bare
 /// (positional) argument, or a `value =` / `path =` pair. A found argument
 /// that is not a pure string literal is [`PathArg::Dynamic`] — present but
 /// unprovable; other named arguments (`produces = …`, `method = …`) do not
 /// designate a path and leave it [`PathArg::Absent`].
 fn arguments_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> PathArg {
-    let mut walk = arguments.walk();
-    for argument in arguments.named_children(&mut walk) {
+    for argument in code_children(arguments) {
         if argument.kind() != "value_argument" {
             continue;
         }
-        let children: Vec<TsNode<'_>> = {
-            let mut inner = argument.walk();
-            argument.named_children(&mut inner).collect()
-        };
+        let children = code_children(argument);
         match children.as_slice() {
             [value] => {
                 return match pure_string_literal(cx, *value) {
@@ -467,16 +566,101 @@ fn arguments_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> PathArg {
             }
             [key, value] if key.kind() == "identifier" => {
                 if matches!(cx.text(key), "value" | "path") {
-                    return match pure_string_literal(cx, *value) {
-                        Some(literal) => PathArg::Literal(literal),
-                        None => PathArg::Dynamic,
-                    };
+                    return path_value(cx, *value);
                 }
+            }
+            // A path argument in a shape T0 cannot read fails closed rather
+            // than collapsing to the absent default.
+            [key, ..] if key.kind() == "identifier" && matches!(cx.text(key), "value" | "path") => {
+                return PathArg::Dynamic;
             }
             _ => {}
         }
     }
     PathArg::Absent
+}
+
+/// The `method = value` argument in `value_arguments`. An argument that
+/// names `method` but is not one plain `key = value` is unreadable.
+fn method_argument<'t>(cx: &FileCx<'_>, arguments: TsNode<'t>) -> MethodArg<'t> {
+    for argument in code_children(arguments) {
+        if argument.kind() != "value_argument" {
+            continue;
+        }
+        match code_children(argument).as_slice() {
+            [key, value] if key.kind() == "identifier" && cx.text(key) == "method" => {
+                return MethodArg::Value(*value);
+            }
+            [key, ..] if key.kind() == "identifier" && cx.text(key) == "method" => {
+                return MethodArg::Unreadable;
+            }
+            _ => {}
+        }
+    }
+    MethodArg::Absent
+}
+
+/// The `method =` restriction of one `@RequestMapping` (#1605, mirroring
+/// Java #1598): each proven `RequestMethod.X`, sorted and de-duplicated, and
+/// empty when the argument is absent or an empty array (no restriction).
+/// `None` when any element is unprovable (an imported enum entry, a
+/// constant, a spread, a lookalike `RequestMethod`), so the caller emits a
+/// Gap. The flag is whether a proof rests on a star import alone, which a
+/// same-package declaration of that name obscures. Spring combines the
+/// class and method levels by union and an empty union serves every method
+/// (`ALL`); see `RequestMethodsRequestCondition.combine`.
+fn spring_request_methods(
+    cx: &FileCx<'_>,
+    method: MethodArg<'_>,
+    imports: &Imports,
+) -> Option<(BTreeSet<String>, bool)> {
+    let value = match method {
+        MethodArg::Absent => return Some((BTreeSet::new(), false)),
+        MethodArg::Unreadable => return None,
+        MethodArg::Value(value) => value,
+    };
+    let elements: Vec<TsNode<'_>> = match value.kind() {
+        "collection_literal" => code_children(value),
+        "call_expression" => array_of_elements(cx, value)?,
+        _ => vec![value],
+    };
+    let package = "org.springframework.web.bind.annotation";
+    let qualified = format!("{package}.RequestMethod");
+    let mut verbs = BTreeSet::new();
+    let mut star = false;
+    for element in elements {
+        if element.kind() != "navigation_expression" {
+            return None;
+        }
+        let text = spelling(cx.text(&element));
+        let (object, verb) = text.rsplit_once('.')?;
+        let proven_star = if object.contains('.') {
+            if object != qualified {
+                return None;
+            }
+            false
+        } else {
+            match imports.bindings.get(object) {
+                Some(bound) if *bound == qualified => false,
+                Some(_) => return None,
+                None if object == "RequestMethod"
+                    && imports.wildcard_packages.iter().any(|p| p == package) =>
+                {
+                    true
+                }
+                None => return None,
+            }
+        };
+        if !matches!(
+            verb,
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "TRACE"
+        ) {
+            return None;
+        }
+        star |= proven_star;
+        verbs.insert(verb.to_string());
+    }
+    Some((verbs, star))
 }
 
 /// Interpret one grammar `annotation` node: the simple name comes from the
@@ -493,16 +677,21 @@ fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<Annota
                     spelled,
                     node: annotation,
                     path: PathArg::Absent,
+                    method: MethodArg::Absent,
                 });
             }
             "constructor_invocation" => {
                 let mut inner = child.walk();
                 let mut spelled = None;
                 let mut path = PathArg::Absent;
+                let mut method = MethodArg::Absent;
                 for part in child.named_children(&mut inner) {
                     match part.kind() {
                         "user_type" => spelled = Some(spelling(cx.text(&part))),
-                        "value_arguments" => path = arguments_path(cx, part),
+                        "value_arguments" => {
+                            path = arguments_path(cx, part);
+                            method = method_argument(cx, part);
+                        }
                         _ => {}
                     }
                 }
@@ -511,6 +700,7 @@ fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<Annota
                     spelled,
                     node: annotation,
                     path,
+                    method,
                 });
             }
             _ => {}
@@ -1315,9 +1505,11 @@ pub fn extract_source(
     let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
     out.fetch_sites.extend(unjoined_sites);
     let names = out.shadow_names.clone();
+    let mut emitted = HashSet::new();
     for pending in std::mem::take(&mut out.pending_endpoints) {
         pending.settle(
             |fqn, path| names.iter().any(|name| name.obscures(fqn, path)),
+            &mut emitted,
             &mut out.nodes,
             &mut out.edges,
         );
@@ -1634,15 +1826,26 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 "RequestMapping",
             )]);
         }
-        let base = match base_mapping.map(|(annotation, _)| &annotation.path) {
-            None | Some(PathArg::Absent) => Some(String::new()),
-            Some(PathArg::Literal(path)) => Some(path.clone()),
-            Some(PathArg::Dynamic) => None,
+        // The class-level `method =` restriction every handler inherits by
+        // union (#1605); `None` when it cannot be proven.
+        let class_methods = match base_mapping {
+            None => Some((BTreeSet::new(), false)),
+            Some((annotation, _)) => spring_request_methods(&cx, annotation.method, &imports),
+        };
+        if let Some((_, true)) = class_methods {
+            shadowed_by.insert(vec![same_package_name(package.as_deref(), "RequestMethod")]);
+        }
+        let bases = match base_mapping {
+            None => Some(vec![String::new()]),
+            Some((annotation, _)) => annotation.path.segments(),
         };
         for annotation in declaration_annotations(&cx, *function) {
-            let Some(http_method) = mapping_method(&annotation.simple) else {
+            // A function-level `@RequestMapping` binds a handler as much as
+            // the verb shorthands do (#1605); its verbs come from `method =`.
+            let request_mapping = annotation.simple == "RequestMapping";
+            if !request_mapping && mapping_method(&annotation.simple).is_none() {
                 continue;
-            };
+            }
             let Some(star) = spring_proof(&annotation, &imports) else {
                 continue;
             };
@@ -1653,72 +1856,127 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     &annotation.simple,
                 )]);
             }
-            let tail = match &annotation.path {
-                PathArg::Absent => Some(String::new()),
-                PathArg::Literal(path) => Some(path.clone()),
-                PathArg::Dynamic => None,
+            let function_methods = if request_mapping {
+                spring_request_methods(&cx, annotation.method, &imports)
+            } else {
+                mapping_method(&annotation.simple)
+                    .map(|verb| (BTreeSet::from([verb.to_string()]), false))
             };
-            let fact = match (base.clone(), tail) {
-                (Some(base), Some(tail)) => {
-                    let route = join_route(&base, &tail);
-                    let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
-                    let node = Node {
-                        id: endpoint.clone(),
-                        label: "Endpoint".into(),
-                        props: serde_json::json!({
-                            "method": http_method,
-                            "path": route,
-                            "handler_sym": handler,
-                            "framework": "spring",
-                            "language": "kotlin",
-                            "prov": cx.prov(&annotation.node, &format!("Endpoint {endpoint}")),
-                        }),
-                    };
-                    let edge = Edge {
-                        src: endpoint.clone(),
-                        dst: handler.clone(),
-                        label: "HANDLES".into(),
-                        props: serde_json::json!({
-                            "prov": cx.prov(
-                                &annotation.node,
-                                &format!("HANDLES {endpoint} -> {handler}"),
-                            ),
-                        }),
-                    };
-                    (node, edge)
+            let (Some((class_verbs, _)), Some((mut verbs, method_star))) =
+                (class_methods.as_ref(), function_methods)
+            else {
+                // A proven handler whose verb T0 cannot prove, at either
+                // level, is a route Gap, never a guessed method (R-INT-4).
+                let gap = spring_route_gap(
+                    &cx,
+                    annotation.node,
+                    handler,
+                    "?",
+                    "unresolved Spring request method",
+                );
+                if shadowed_by.is_empty() {
+                    out.nodes.push(gap.0);
+                    out.edges.push(gap.1);
+                } else {
+                    // A shadowed binding, not the verb, is then what blocks.
+                    out.pending_endpoints.push(PendingEndpoint {
+                        path: path.to_string(),
+                        shadowed_by: shadowed_by.into_iter().collect(),
+                        endpoint: gap,
+                        gap: spring_route_gap(&cx, annotation.node, handler, "?", SPRING_SHADOWED),
+                    });
+                }
+                continue;
+            };
+            if method_star {
+                shadowed_by.insert(vec![same_package_name(package.as_deref(), "RequestMethod")]);
+            }
+            verbs.extend(class_verbs.iter().cloned());
+            if verbs.is_empty() {
+                verbs.insert("ALL".into());
+            }
+            // Gaps are one per mapping annotation (their id is its span), so
+            // a multi-verb mapping names all of its verbs on one Gap.
+            let gap_method = verbs
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("|");
+            let tails = annotation.path.segments();
+            let facts: Vec<(Node, Edge)> = match (bases.as_ref(), tails) {
+                (Some(bases), Some(tails)) => {
+                    // Sorted and de-duplicated so emission order never
+                    // depends on source order (determinism).
+                    let routes: BTreeSet<String> = bases
+                        .iter()
+                        .flat_map(|base| tails.iter().map(move |tail| join_route(base, tail)))
+                        .collect();
+                    verbs
+                        .iter()
+                        .flat_map(|verb| routes.iter().map(move |route| (verb, route)))
+                        .map(|(http_method, route)| {
+                            let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
+                            let node = Node {
+                                id: endpoint.clone(),
+                                label: "Endpoint".into(),
+                                props: serde_json::json!({
+                                    "method": http_method,
+                                    "path": route,
+                                    "handler_sym": handler,
+                                    "framework": "spring",
+                                    "language": "kotlin",
+                                    "prov": cx.prov(&annotation.node, &format!("Endpoint {endpoint}")),
+                                }),
+                            };
+                            let edge = Edge {
+                                src: endpoint.clone(),
+                                dst: handler.clone(),
+                                label: "HANDLES".into(),
+                                props: serde_json::json!({
+                                    "prov": cx.prov(
+                                        &annotation.node,
+                                        &format!("HANDLES {endpoint} -> {handler}"),
+                                    ),
+                                }),
+                            };
+                            (node, edge)
+                        })
+                        .collect()
                 }
                 // The mapping is proven but its route is a runtime
                 // identity (template/constant/expression path, on the
                 // method or the class base). T0 cannot confirm the route,
                 // so the endpoint is an explicit Gap, never a guessed or
                 // default path presented as Confirmed (R-INT-4).
-                _ => spring_route_gap(
+                _ => vec![spring_route_gap(
                     &cx,
                     annotation.node,
                     handler,
-                    http_method,
+                    &gap_method,
                     "dynamic Spring mapping path",
-                ),
+                )],
             };
-            if shadowed_by.is_empty() {
-                out.nodes.push(fact.0);
-                out.edges.push(fact.1);
-            } else {
-                // A star-only proof waits for the directory join, where a
-                // same-package declaration of that name makes the route a
-                // Gap: the shadowed binding, not the path, then blocks.
-                out.pending_endpoints.push(PendingEndpoint {
-                    path: path.to_string(),
-                    shadowed_by: shadowed_by.into_iter().collect(),
-                    endpoint: fact,
-                    gap: spring_route_gap(
-                        &cx,
-                        annotation.node,
-                        handler,
-                        http_method,
-                        SPRING_SHADOWED,
-                    ),
-                });
+            for fact in facts {
+                if shadowed_by.is_empty() {
+                    out.nodes.push(fact.0);
+                    out.edges.push(fact.1);
+                } else {
+                    // A star-only proof waits for the directory join, where a
+                    // same-package declaration of that name makes the route a
+                    // Gap: the shadowed binding, not the path, then blocks.
+                    out.pending_endpoints.push(PendingEndpoint {
+                        path: path.to_string(),
+                        shadowed_by: shadowed_by.iter().cloned().collect(),
+                        endpoint: fact,
+                        gap: spring_route_gap(
+                            &cx,
+                            annotation.node,
+                            handler,
+                            &gap_method,
+                            SPRING_SHADOWED,
+                        ),
+                    });
+                }
             }
         }
     }
@@ -2295,12 +2553,14 @@ pub fn extract_dir_incremental_with_progress(
             .into_iter()
             .collect()
     };
+    let mut emitted = HashSet::new();
     for pending in std::mem::take(&mut out.pending_endpoints) {
         pending.settle(
             |fqn, path| {
                 java_types.contains(fqn)
                     || out.shadow_names.iter().any(|name| name.obscures(fqn, path))
             },
+            &mut emitted,
             &mut out.nodes,
             &mut out.edges,
         );
