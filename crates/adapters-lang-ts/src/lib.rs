@@ -161,7 +161,9 @@ struct PendingPulumiEdge {
 #[derive(Debug, Clone)]
 struct CachedFile {
     source_hash: String,
+    /// Everything but the facts, which stay packed in `facts` (#725).
     extraction: Extraction,
+    facts: core_graph::facts::FactStore,
 }
 
 /// Reusable per-file T0 parse cache for delta re-ingest (AC-0040).
@@ -3132,6 +3134,7 @@ pub fn extract_dir_incremental_with_progress(
     collect_ts_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
     let mut out = Extraction::default();
+    let mut store = core_graph::facts::FactStore::default();
     let mut stats = IncrementalStats::default();
     let active = files.iter().cloned().collect::<BTreeSet<_>>();
     stats.deleted_files = cache
@@ -3165,23 +3168,33 @@ pub fn extract_dir_incremental_with_progress(
         },
         |rel, (source_hash, fresh)| {
             on_file(rel);
-            let ex = match fresh {
+            let mut ex = match fresh {
                 Some(ex) => {
                     stats.recomputed_files += 1;
                     ex
                 }
                 None => {
                     stats.reused_files += 1;
-                    let mut extraction = cache.files[rel].extraction.clone();
+                    let cached = &cache.files[rel];
+                    let mut extraction = cached.extraction.clone();
+                    (extraction.nodes, extraction.edges) = cached.facts.clone().into_facts()?;
                     retarget_commit(&mut extraction, id.commit);
                     extraction
                 }
             };
+            // Each file packs once (#725): the cache keeps the packed facts and
+            // the walk merges a copy, so no file's facts stay decoded.
+            let facts = core_graph::facts::FactStore::from_facts(
+                std::mem::take(&mut ex.nodes),
+                std::mem::take(&mut ex.edges),
+            )?;
+            store.extend_packed(facts.clone());
             cache.files.insert(
                 rel.to_string(),
                 CachedFile {
                     source_hash,
                     extraction: ex.clone(),
+                    facts,
                 },
             );
             append_extraction(&mut out, ex);
@@ -3189,7 +3202,8 @@ pub fn extract_dir_incremental_with_progress(
         },
     );
     merged?;
-    complete_directory(&mut out, root, id)?;
+    complete_directory(&mut out, &mut store, root, id)?;
+    (out.nodes, out.edges) = store.into_facts()?;
     Ok((out, stats))
 }
 
@@ -3289,133 +3303,56 @@ fn complete_pulumi_edges(
 /// outside the captured direct lexical receipt contract.
 fn complete_directory(
     out: &mut Extraction,
+    facts: &mut impl FactAccess,
     root: &Path,
     id: &SourceId,
 ) -> Result<(), ExtractError> {
     let known_symbols: std::collections::HashSet<String> =
-        out.nodes.iter().map(|node| node.id.clone()).collect();
-    let known_files: std::collections::HashSet<String> = out
-        .nodes
-        .iter()
-        .filter(|node| node.label == "File")
-        .map(|node| node.id.clone())
+        facts.node_keys().map(|(id, _)| id.to_string()).collect();
+    let known_files: std::collections::HashSet<String> = facts
+        .node_keys()
+        .filter(|(_, label)| *label == "File")
+        .map(|(id, _)| id.to_string())
         .collect();
-    reconcile_guessed_edge_targets(
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-        &known_files,
-        &known_symbols,
-    )?;
+    reconcile_guessed_edge_targets(&mut *facts, &known_files, &known_symbols)?;
     // Config-driven bare-specifier resolution (#213): tsconfig paths/baseUrl
     // and workspace-package names rewrite `mod:` IMPORTS targets to real
     // files, citing the deciding config. Reads configs fresh on every walk —
     // a tsconfig edit must take effect even when every source parse is
     // cache-reused.
     let index = resolution::ResolutionIndex::load(root)?;
-    resolution::resolve_bare_imports(
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-        &index,
-        id,
-        &known_files,
-    )?;
+    resolution::resolve_bare_imports(&mut *facts, &index, id, &known_files)?;
     complete_pending_calls(
         std::mem::take(&mut out.pending_calls),
         &known_symbols,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
+        &mut *facts,
     )?;
-    target_tests::complete(
-        std::mem::take(&mut out.target_tests),
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-    )?;
+    target_tests::complete(std::mem::take(&mut out.target_tests), &mut *facts)?;
     complete_pulumi_edges(
         std::mem::take(&mut out.pending_pulumi_edges),
         &out.pulumi_bindings,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
+        &mut *facts,
     )?;
     out.pulumi_bindings.clear();
     let routes = std::mem::take(&mut out.client_routes);
     let files = routes.files.clone();
-    client_routes::complete(
-        routes,
-        id.repo,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-    )?;
+    client_routes::complete(routes, id.repo, &mut *facts)?;
     let navigation = std::mem::take(&mut out.client_navigation);
-    client_navigation::complete(
-        navigation,
-        &files,
-        id.repo,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-    )?;
-    next_pages_screens(
-        &out.default_exports,
-        id,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-    )?;
-    next_api::app_screens(
-        root,
-        &index,
-        id,
-        &out.default_exports,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-    )?;
+    client_navigation::complete(navigation, &files, id.repo, &mut *facts)?;
+    next_pages_screens(&out.default_exports, id, &mut *facts)?;
+    next_api::app_screens(root, &index, id, &out.default_exports, &mut *facts)?;
     next_api::complete(
         std::mem::take(&mut out.next_routes),
         root,
         &index,
         id,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
+        &mut *facts,
     )?;
     let registrations = std::mem::take(&mut out.service_worker_registrations);
-    service_worker::mark_registered(
-        &registrations,
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-        &format!("file:{}@", id.repo),
-    )?;
+    service_worker::mark_registered(&registrations, &mut *facts, &format!("file:{}@", id.repo))?;
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
-    close_directory(
-        &mut FactLists {
-            nodes: &mut out.nodes,
-            edges: &mut out.edges,
-        },
-        root,
-        id,
-        &index,
-        &known_files,
-    )?;
+    close_directory(&mut *facts, root, id, &index, &known_files)?;
     Ok(())
 }
 

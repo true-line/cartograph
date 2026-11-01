@@ -534,7 +534,20 @@ fn extract_captured_dir_bounded(
             Ok(())
         },
     )?;
-    super::complete_directory(&mut extraction, root, id)?;
+    let (mut nodes, mut edges) = (
+        std::mem::take(&mut extraction.nodes),
+        std::mem::take(&mut extraction.edges),
+    );
+    super::complete_directory(
+        &mut extraction,
+        &mut core_graph::facts::FactLists {
+            nodes: &mut nodes,
+            edges: &mut edges,
+        },
+        root,
+        id,
+    )?;
+    (extraction.nodes, extraction.edges) = (nodes, edges);
     let matching = matcher(&extraction);
     receipts.retain(|receipt| matching(receipt));
     // Count an omitted rule only when its fact survived directory completion,

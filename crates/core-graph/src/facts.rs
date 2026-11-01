@@ -23,6 +23,13 @@ impl FactStore {
         Ok(store)
     }
 
+    /// Append another store's facts after every fact already held, in order;
+    /// nothing is decoded or repacked.
+    pub fn extend_packed(&mut self, other: FactStore) {
+        self.nodes.extend(other.nodes);
+        self.edges.extend(other.edges);
+    }
+
     /// Append facts after every fact already held, packing each as it moves.
     pub fn extend(
         &mut self,
@@ -548,6 +555,19 @@ mod tests {
         );
         assert!(matches!(refused, Err(GraphError::FactStore(_))));
         assert_eq!(store.into_facts().unwrap(), before);
+    }
+
+    // AC-0546: merging per-file packed stores keeps every fact and its order.
+    #[test]
+    fn extend_packed_appends_in_order_without_repacking() {
+        let first = (vec![node("a", "File", 1)], vec![edge("a", "b")]);
+        let second = (vec![node("b", "Symbol", 2)], vec![edge("b", "a")]);
+        let mut merged = FactStore::from_facts(first.0.clone(), first.1.clone()).unwrap();
+        merged.extend_packed(FactStore::from_facts(second.0.clone(), second.1.clone()).unwrap());
+        let whole =
+            FactStore::from_facts([first.0, second.0].concat(), [first.1, second.1].concat())
+                .unwrap();
+        assert_eq!(merged.into_facts().unwrap(), whole.into_facts().unwrap());
     }
 
     #[test]
