@@ -3,7 +3,12 @@ use super::*;
 // AC-0320/0322/0327: both completion families derive identity under a live grant.
 #[test]
 fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
-    for next in [false, true] {
+    // AC-0552: explicit18 retains the same grant, namespace and nonce rules.
+    for (next, role) in [
+        (false, None),
+        (true, Some("domain-analyst@10")),
+        (true, Some("domain-analyst@18")),
+    ] {
         let source = if next {
             Fixture::with_family_preparation(
                 InvestigationProviderMode::Local,
@@ -16,9 +21,9 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
         };
         let provider = source.store.investigation(&source.id).unwrap().provider;
         let mut request = source.request.clone();
-        if next {
+        if let Some(role) = role {
             request.schema_version = 7;
-            request.specialist_id = "domain-analyst@10".into();
+            request.specialist_id = role.into();
         }
         let dir = tempfile::tempdir().unwrap();
         let mut store = JobStore::open(dir.path().join("state.db")).unwrap();

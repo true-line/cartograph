@@ -53,6 +53,10 @@ impl LlmProvider for PublicProvider {
             tool_use: false,
         }
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        // This in-process provider consumes and checks the finite response schema.
+        true
+    }
     fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
         panic!("no embeddings in public entry fixture")
     }
@@ -89,7 +93,17 @@ impl LlmProvider for PublicProvider {
         assert_eq!((control.check)(), CallDirective::Continue);
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let text = match call {
+        // AC-0552: @18 uses the exact offered finite object, not the historical
+        // broad query script. The normal host coordinator still admits it.
+        let offered = prompt["turn_progress"]["acquisition_choices"]["entries"]
+            .as_array()
+            .and_then(|entries| entries.first());
+        let text = if let Some(entry) = offered {
+            let action = entry["action"].clone();
+            let schema: Value = serde_json::from_str(request.payload().response_schema.as_deref().unwrap()).unwrap();
+            assert!(schema["anyOf"].as_array().unwrap().iter().filter_map(|branch| branch.get("enum")).any(|finite| finite.as_array().unwrap().contains(&action)));
+            action
+        } else { match call {
             0 => json!({"type":"query_context","context_id":prompt["context_id"],"query":{
                 "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],"max_facts":1,"max_bytes":32768,"cursor":null}}),
             1 => {
@@ -106,7 +120,7 @@ impl LlmProvider for PublicProvider {
                     "limitations":["This result establishes no complete business policy."]}})
             },
             _ => panic!("public entry must not retry or dispatch a fourth call"),
-        }.to_string();
+        }}.to_string();
         Ok(BoundedCompletion {
             text,
             requested_model: "public-scripted-model".into(),
@@ -340,120 +354,125 @@ fn public_completion_start_recovers_committed_request6_after_catalog_replacement
 
 #[test]
 fn public_completion_consent_requires_exact_preview_for_approval_and_decline() {
-    for approve in [true, false] {
-        let seed = Arc::new(PublicProvider::new(false));
-        worker::with_public_start_fixture(seed, false, |app, mut request, _| {
-            let provider = Arc::new(PublicProvider::new(true));
-            let state = app.state::<AppState>();
-            {
-                let mut settings = state.settings.lock().unwrap();
-                settings.set_provider("T3", "cloud").unwrap();
-                settings
-                    .grant_consent(
-                        "T3",
-                        "Scripted public command fixture; no network transport.",
-                    )
-                    .unwrap();
-            }
-            state
-                .investigations
-                .set_test_provider(InvestigationProviderMode::Cloud, provider.clone());
-            request.provider_mode = InvestigationProviderMode::Cloud;
-            let started = completion_start::start(request, app.clone(), Instant::now()).unwrap();
-            let first = wait(|| pending(&state, &started.investigation_id).unwrap());
-            let saved = detail(app, &started.investigation_id);
-            assert_eq!(saved.summary.status, InvestigationStatus::AwaitingConsent);
-            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-            assert!(
-                consent_decision(
-                    app,
-                    &started.investigation_id,
-                    &first.step_id,
-                    first.revision + 1,
-                    &first.preview.payload_hash,
-                    approve
-                )
-                .is_err()
-            );
-            assert!(
-                consent_decision(
-                    app,
-                    &started.investigation_id,
-                    &first.step_id,
-                    first.revision,
-                    &"0".repeat(64),
-                    approve
-                )
-                .is_err()
-            );
-            assert_eq!(detail(app, &started.investigation_id), saved);
-            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-            consent_decision(
-                app,
-                &started.investigation_id,
-                &first.step_id,
-                first.revision,
-                &first.preview.payload_hash,
-                approve,
-            )
-            .unwrap();
-            assert!(
-                consent_decision(
-                    app,
-                    &started.investigation_id,
-                    &first.step_id,
-                    first.revision,
-                    &first.preview.payload_hash,
-                    approve
-                )
-                .is_err()
-            );
-            if approve {
-                // Every later real invocation needs its own exact command approval.
-                for _ in 0..2 {
-                    let next = wait(|| pending(&state, &started.investigation_id).unwrap());
-                    assert_ne!(next.step_id, first.step_id);
+    // AC-0552: the same exact consent boundary applies to explicitly selected18.
+    for role in ["domain-analyst@10", "domain-analyst@18"] {
+        for approve in [true, false] {
+            let seed = Arc::new(PublicProvider::new(false));
+            worker::with_public_start_fixture(seed, false, |app, mut request, _| {
+                let provider = Arc::new(PublicProvider::new(true));
+                let state = app.state::<AppState>();
+                {
+                    let mut settings = state.settings.lock().unwrap();
+                    settings.set_provider("T3", "cloud").unwrap();
+                    settings
+                        .grant_consent(
+                            "T3",
+                            "Scripted public command fixture; no network transport.",
+                        )
+                        .unwrap();
+                }
+                state
+                    .investigations
+                    .set_test_provider(InvestigationProviderMode::Cloud, provider.clone());
+                request.specialist_id = role.into();
+                request.provider_mode = InvestigationProviderMode::Cloud;
+                let started =
+                    completion_start::start(request, app.clone(), Instant::now()).unwrap();
+                let first = wait(|| pending(&state, &started.investigation_id).unwrap());
+                let saved = detail(app, &started.investigation_id);
+                assert_eq!(saved.summary.status, InvestigationStatus::AwaitingConsent);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+                assert!(
                     consent_decision(
                         app,
                         &started.investigation_id,
-                        &next.step_id,
-                        next.revision,
-                        &next.preview.payload_hash,
-                        true,
+                        &first.step_id,
+                        first.revision + 1,
+                        &first.preview.payload_hash,
+                        approve
                     )
-                    .unwrap();
-                }
-            }
-            let final_detail = finished(app, &started.investigation_id);
-            assert_eq!(
-                final_detail.summary.status,
+                    .is_err()
+                );
+                assert!(
+                    consent_decision(
+                        app,
+                        &started.investigation_id,
+                        &first.step_id,
+                        first.revision,
+                        &"0".repeat(64),
+                        approve
+                    )
+                    .is_err()
+                );
+                assert_eq!(detail(app, &started.investigation_id), saved);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+                consent_decision(
+                    app,
+                    &started.investigation_id,
+                    &first.step_id,
+                    first.revision,
+                    &first.preview.payload_hash,
+                    approve,
+                )
+                .unwrap();
+                assert!(
+                    consent_decision(
+                        app,
+                        &started.investigation_id,
+                        &first.step_id,
+                        first.revision,
+                        &first.preview.payload_hash,
+                        approve
+                    )
+                    .is_err()
+                );
                 if approve {
-                    InvestigationStatus::Completed
-                } else {
-                    InvestigationStatus::Cancelled
-                },
-                "{:?}",
-                final_detail.error
-            );
-            assert_eq!(
-                provider.calls.load(Ordering::SeqCst),
-                if approve { 3 } else { 0 }
-            );
-            assert_eq!(
-                final_detail.usage.model_invocations,
-                if approve { 3 } else { 0 }
-            );
-            assert_eq!(
-                state
-                    .jobs
-                    .lock()
-                    .unwrap()
-                    .investigation_result(&started.investigation_id)
-                    .unwrap()
-                    .is_some(),
-                approve
-            );
-        });
+                    // Every later real invocation needs its own exact command approval.
+                    for _ in 0..2 {
+                        let next = wait(|| pending(&state, &started.investigation_id).unwrap());
+                        assert_ne!(next.step_id, first.step_id);
+                        consent_decision(
+                            app,
+                            &started.investigation_id,
+                            &next.step_id,
+                            next.revision,
+                            &next.preview.payload_hash,
+                            true,
+                        )
+                        .unwrap();
+                    }
+                }
+                let final_detail = finished(app, &started.investigation_id);
+                assert_eq!(
+                    final_detail.summary.status,
+                    if approve {
+                        InvestigationStatus::Completed
+                    } else {
+                        InvestigationStatus::Cancelled
+                    },
+                    "{:?}",
+                    final_detail.error
+                );
+                assert_eq!(
+                    provider.calls.load(Ordering::SeqCst),
+                    if approve { 3 } else { 0 }
+                );
+                assert_eq!(
+                    final_detail.usage.model_invocations,
+                    if approve { 3 } else { 0 }
+                );
+                assert_eq!(
+                    state
+                        .jobs
+                        .lock()
+                        .unwrap()
+                        .investigation_result(&started.investigation_id)
+                        .unwrap()
+                        .is_some(),
+                    approve
+                );
+            });
+        }
     }
 }
 
@@ -690,148 +709,155 @@ fn mcp_adapter_runs_all_task_operations_and_preserves_principal_replay() {
     use crate::mcp_reads::{ReadError, task_reservation::TaskReservations};
     use mcp_local::work_budget::{WorkBudget, WorkLimits};
     use mcp_wire::tools::TaskTool;
-    let provider = Arc::new(PublicProvider::new(false));
-    worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
-        let state = app.state::<AppState>();
-        state
-            .investigations
-            .set_test_provider(request.provider_mode, provider.clone());
-        let one = std::num::NonZeroUsize::new(1).unwrap();
-        let mut jobs = state.jobs.lock().unwrap();
-        let owner_task = jobs.investigation_history(None, None).unwrap().items[0]
-            .investigation_id
-            .clone();
-        let client_capacity = std::num::NonZeroUsize::new(2).unwrap();
-        let client = jobs.create_mcp_client(client_capacity).unwrap();
-        let foreign = jobs.create_mcp_client(client_capacity).unwrap();
-        drop(jobs);
-        let grant = McpTaskActivation::granted(client, one);
-        let foreign_grant = McpTaskActivation::granted(foreign, one);
-        let make_dispatch = |session| {
-            // Unit permit tests lifetime plumbing, not aggregate admission.
-            let budget = WorkBudget::new(WorkLimits {
-                max_workers: one,
-                max_reserved_bytes: one,
-                max_cumulative_read_bytes: 0,
-            });
-            TaskDispatcher::new(
-                session,
-                TaskReservations::from(Arc::new(budget.try_acquire(one, 0).unwrap())),
-            )
-        };
-        let dispatcher = make_dispatch(grant.session());
-        let other = make_dispatch(foreign_grant.session());
-        let call = |dispatcher: &TaskDispatcher, tool, args: Value| {
-            dispatcher.call(
-                app,
-                &json!("request"),
-                tool,
-                args.as_object().unwrap().clone(),
-                crate::mcp_reads::worker::tests::task_read_limits(),
-                256 * 1024,
-            )
-        };
-        // AC-0327: source admission must retain its task-specific refusal code.
-        let mut bounded_scope = crate::mcp_reads::worker::tests::task_read_limits();
-        bounded_scope.scope.max_source_registry_bytes = one;
-        let refused = dispatcher
-            .call(
-                app,
-                &json!("bounded-source"),
-                TaskTool::Start,
-                json!({"request":request}).as_object().unwrap().clone(),
-                bounded_scope,
-                256 * 1024,
-            )
-            .unwrap_err();
-        assert_eq!(refused, ReadError::AdmissionLimit);
-        assert_eq!(refused.to_string(), "limit_exceeded");
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-        let started = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
-        let id = started["result"]["structuredContent"]["investigation_id"]
-            .as_str()
-            .unwrap();
-        let terminal = finished(app, id);
-        assert_eq!(terminal.summary.status, InvestigationStatus::Completed);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
-        let status = call(&dispatcher, TaskTool::Status, json!({"task_id":id})).unwrap();
-        assert_eq!(
-            status["result"]["structuredContent"],
-            serde_json::to_value(&terminal.summary).unwrap()
-        );
-        let events = call(
-            &dispatcher,
-            TaskTool::Events,
-            json!({"task_id":id,"after":0}),
-        )
-        .unwrap();
-        let owner_events = state
-            .jobs
-            .lock()
-            .unwrap()
-            .investigation_events(id, 0)
-            .unwrap();
-        assert_eq!(
-            events["result"]["structuredContent"],
-            serde_json::to_value(&owner_events).unwrap()
-        );
-        assert!(!owner_events.items.is_empty());
-        assert!(
-            owner_events
-                .items
-                .windows(2)
-                .all(|pair| pair[1].sequence == pair[0].sequence + 1)
-        );
-        let result = call(&dispatcher, TaskTool::Result, json!({"task_id":id})).unwrap();
-        let saved = state.jobs.lock().unwrap().investigation_result(id).unwrap();
-        assert!(saved.is_some());
-        assert_eq!(
-            result["result"]["structuredContent"]["result"],
-            serde_json::to_value(&saved).unwrap()
-        );
-        let cancelled = call(&dispatcher, TaskTool::Cancel, json!({"task_id":id})).unwrap();
-        assert_eq!(
-            cancelled["result"]["structuredContent"],
-            status["result"]["structuredContent"]
-        );
-        // A saved nonce survives a now-unavailable provider without another call.
-        provider.available.store(false, Ordering::SeqCst);
-        let profiles = provider.profiles.load(Ordering::SeqCst);
-        let replay = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
-        assert_eq!(
-            replay["result"]["structuredContent"]["investigation_id"],
-            id
-        );
-        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
-        let mut changed = request.clone();
-        changed.question.push_str(" changed");
-        assert!(call(&dispatcher, TaskTool::Start, json!({"request":changed})).is_err());
-        for tool in [
-            TaskTool::Status,
-            TaskTool::Events,
-            TaskTool::Result,
-            TaskTool::Cancel,
-        ] {
-            let args = |id| {
-                if tool == TaskTool::Events {
-                    json!({"task_id":id,"after":0})
-                } else {
-                    json!({"task_id":id})
-                }
+    // AC-0552: supported completion families share the same granted adapter.
+    for role in ["domain-analyst@10", "domain-analyst@18"] {
+        let provider = Arc::new(PublicProvider::new(false));
+        worker::with_public_start_fixture(provider.clone(), false, |app, mut request, _| {
+            request.specialist_id = role.into();
+            request = request
+                .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+                .unwrap();
+            let state = app.state::<AppState>();
+            state
+                .investigations
+                .set_test_provider(request.provider_mode, provider.clone());
+            let one = std::num::NonZeroUsize::new(1).unwrap();
+            let mut jobs = state.jobs.lock().unwrap();
+            let owner_task = jobs.investigation_history(None, None).unwrap().items[0]
+                .investigation_id
+                .clone();
+            let client_capacity = std::num::NonZeroUsize::new(2).unwrap();
+            let client = jobs.create_mcp_client(client_capacity).unwrap();
+            let foreign = jobs.create_mcp_client(client_capacity).unwrap();
+            drop(jobs);
+            let grant = McpTaskActivation::granted(client, one);
+            let foreign_grant = McpTaskActivation::granted(foreign, one);
+            let make_dispatch = |session| {
+                // Unit permit tests lifetime plumbing, not aggregate admission.
+                let budget = WorkBudget::new(WorkLimits {
+                    max_workers: one,
+                    max_reserved_bytes: one,
+                    max_cumulative_read_bytes: 0,
+                });
+                TaskDispatcher::new(
+                    session,
+                    TaskReservations::from(Arc::new(budget.try_acquire(one, 0).unwrap())),
+                )
             };
-            assert_eq!(call(&other, tool, args(id)), Err(ReadError::InvalidRequest));
+            let dispatcher = make_dispatch(grant.session());
+            let other = make_dispatch(foreign_grant.session());
+            let call = |dispatcher: &TaskDispatcher, tool, args: Value| {
+                dispatcher.call(
+                    app,
+                    &json!("request"),
+                    tool,
+                    args.as_object().unwrap().clone(),
+                    crate::mcp_reads::worker::tests::task_read_limits(),
+                    256 * 1024,
+                )
+            };
+            // AC-0327: source admission must retain its task-specific refusal code.
+            let mut bounded_scope = crate::mcp_reads::worker::tests::task_read_limits();
+            bounded_scope.scope.max_source_registry_bytes = one;
+            let refused = dispatcher
+                .call(
+                    app,
+                    &json!("bounded-source"),
+                    TaskTool::Start,
+                    json!({"request":request}).as_object().unwrap().clone(),
+                    bounded_scope,
+                    256 * 1024,
+                )
+                .unwrap_err();
+            assert_eq!(refused, ReadError::AdmissionLimit);
+            assert_eq!(refused.to_string(), "limit_exceeded");
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            let started = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
+            let id = started["result"]["structuredContent"]["investigation_id"]
+                .as_str()
+                .unwrap();
+            let terminal = finished(app, id);
+            assert_eq!(terminal.summary.status, InvestigationStatus::Completed);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+            let status = call(&dispatcher, TaskTool::Status, json!({"task_id":id})).unwrap();
             assert_eq!(
-                call(&dispatcher, tool, args(&owner_task)),
+                status["result"]["structuredContent"],
+                serde_json::to_value(&terminal.summary).unwrap()
+            );
+            let events = call(
+                &dispatcher,
+                TaskTool::Events,
+                json!({"task_id":id,"after":0}),
+            )
+            .unwrap();
+            let owner_events = state
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation_events(id, 0)
+                .unwrap();
+            assert_eq!(
+                events["result"]["structuredContent"],
+                serde_json::to_value(&owner_events).unwrap()
+            );
+            assert!(!owner_events.items.is_empty());
+            assert!(
+                owner_events
+                    .items
+                    .windows(2)
+                    .all(|pair| pair[1].sequence == pair[0].sequence + 1)
+            );
+            let result = call(&dispatcher, TaskTool::Result, json!({"task_id":id})).unwrap();
+            let saved = state.jobs.lock().unwrap().investigation_result(id).unwrap();
+            assert!(saved.is_some());
+            assert_eq!(
+                result["result"]["structuredContent"]["result"],
+                serde_json::to_value(&saved).unwrap()
+            );
+            let cancelled = call(&dispatcher, TaskTool::Cancel, json!({"task_id":id})).unwrap();
+            assert_eq!(
+                cancelled["result"]["structuredContent"],
+                status["result"]["structuredContent"]
+            );
+            // A saved nonce survives a now-unavailable provider without another call.
+            provider.available.store(false, Ordering::SeqCst);
+            let profiles = provider.profiles.load(Ordering::SeqCst);
+            let replay = call(&dispatcher, TaskTool::Start, json!({"request":request})).unwrap();
+            assert_eq!(
+                replay["result"]["structuredContent"]["investigation_id"],
+                id
+            );
+            assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+            let mut changed = request.clone();
+            changed.question.push_str(" changed");
+            assert!(call(&dispatcher, TaskTool::Start, json!({"request":changed})).is_err());
+            for tool in [
+                TaskTool::Status,
+                TaskTool::Events,
+                TaskTool::Result,
+                TaskTool::Cancel,
+            ] {
+                let args = |id| {
+                    if tool == TaskTool::Events {
+                        json!({"task_id":id,"after":0})
+                    } else {
+                        json!({"task_id":id})
+                    }
+                };
+                assert_eq!(call(&other, tool, args(id)), Err(ReadError::InvalidRequest));
+                assert_eq!(
+                    call(&dispatcher, tool, args(&owner_task)),
+                    Err(ReadError::InvalidRequest)
+                );
+            }
+            grant.revoke();
+            assert_eq!(
+                call(&dispatcher, TaskTool::Start, json!({"request":request})),
                 Err(ReadError::InvalidRequest)
             );
-        }
-        grant.revoke();
-        assert_eq!(
-            call(&dispatcher, TaskTool::Start, json!({"request":request})),
-            Err(ReadError::InvalidRequest)
-        );
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
-    });
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        });
+    }
 }
 
 #[cfg(unix)]
@@ -842,9 +868,9 @@ mod task_relay;
 #[path = "activation_tests/service_relay.rs"]
 mod service_relay;
 
-// AC-0480: actual public/store boundaries reject before source/provider/writes.
+// AC-0552: exact version opt-in uses ordinary start/worker/store and reopen.
 #[test]
-fn gated_analyst_dispatch_refuses_before_provider_and_writes() {
+fn explicit_acquisition_start_reopens_and_recovers_nonce() {
     let provider = Arc::new(PublicProvider::new(false));
     worker::with_public_start_fixture(provider.clone(), false, |app, mut request, app_data| {
         let state = app.state::<AppState>();
@@ -852,22 +878,6 @@ fn gated_analyst_dispatch_refuses_before_provider_and_writes() {
             .investigations
             .set_test_provider(InvestigationProviderMode::Local, provider.clone());
         request.specialist_id = "domain-analyst@18".into();
-        for item in &mut request.obligations.obligations {
-            if let Obligation::Source {
-                target,
-                obligation_id,
-            } = item
-            {
-                target.receipt_id = format!("ts-primary-v2:{}", "0".repeat(64));
-                target.target_id = target.content_id().unwrap();
-                *obligation_id = Obligation::Source {
-                    target: target.clone(),
-                    obligation_id: String::new(),
-                }
-                .content_id()
-                .unwrap();
-            }
-        }
         request = request
             .normalized_with_policy(&INVESTIGATION_V2_POLICY)
             .unwrap();
@@ -882,38 +892,53 @@ fn gated_analyst_dispatch_refuses_before_provider_and_writes() {
         };
         let before = version();
         let profiles = provider.profiles.load(Ordering::SeqCst);
-        let error = completion_start::start_access(
-            request.clone(),
-            app.clone(),
-            Instant::now(),
-            None,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, InvestigationStartError::Rejected { code: "unavailable", ref message, definitive: true } if message == GATED_ANALYST_DISPATCH_REASON)
-        );
-        let mut jobs = state.jobs.lock().unwrap();
-        assert_eq!(
-            jobs.start_next_prompt_investigation(&request, None)
-                .unwrap_err(),
-            crate::jobs::investigations::InvestigationStoreError::DispatchDisabled
-        );
-        assert_eq!(
-            jobs.start_completion_access(&request, None, true, None)
-                .unwrap_err()
-                .to_string(),
-            GATED_ANALYST_DISPATCH_REASON
-        );
-        assert!(
-            jobs.existing_investigation_completion(&request)
-                .unwrap()
-                .is_none()
-        );
-        drop(jobs);
+        let mut wrong = request.clone();
+        wrong.schema_version = 6;
+        assert!(completion_start::start(wrong, app.clone(), Instant::now()).is_err());
         assert_eq!(version(), before);
         assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let started =
+            completion_start::start(request.clone(), app.clone(), Instant::now()).unwrap();
+        let terminal = finished(app, &started.investigation_id);
+        assert_eq!(
+            terminal.summary.specialist_id,
+            SpecialistId::DomainAnalystV18
+        );
+        assert_eq!(
+            terminal.summary.status,
+            InvestigationStatus::Completed,
+            "{:?}",
+            terminal.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        let reopened = crate::jobs::JobStore::open(app_data.join("state.db")).unwrap();
+        assert_eq!(
+            reopened.investigation(&started.investigation_id).unwrap(),
+            terminal
+        );
+        assert!(
+            reopened
+                .investigation_result(&started.investigation_id)
+                .unwrap()
+                .is_some()
+        );
+        let mut jobs = state.jobs.lock().unwrap();
+        let prior = jobs
+            .start_next_prompt_investigation(&request, None)
+            .unwrap();
+        assert!(!prior.created);
+        assert_eq!(prior.detail, terminal);
+        assert!(jobs.start_completion_investigation(&request, None).is_err()); // no generic-family bypass
+        drop(jobs);
+        provider.available.store(false, Ordering::SeqCst);
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        let replay = completion_start::start(request.clone(), app.clone(), Instant::now()).unwrap();
+        assert_eq!(replay, terminal.summary);
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        let mut changed = request;
+        changed.question.push('?');
+        assert!(completion_start::start(changed, app.clone(), Instant::now()).is_err());
     });
 }

@@ -36,6 +36,7 @@ fn available_specialists() -> Vec<SpecialistId> {
             SpecialistId::DomainAnalystV11,
             SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
+            SpecialistId::DomainAnalystV18, // Exact opt-in; preserve prior ordering/defaults.
         ]);
     }
     specialists
@@ -67,6 +68,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                         SpecialistId::DomainAnalystV11,
                         SpecialistId::DomainAnalystV12,
                         SpecialistId::EvidenceAuditorV11,
+                        SpecialistId::DomainAnalystV18,
                     ]
                 } else {
                     vec![
@@ -853,6 +855,7 @@ mod policy_catalog_tests {
             SpecialistId::DomainAnalystV11,
             SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
+            SpecialistId::DomainAnalystV18,
         ] {
             assert_eq!(
                 available_specialists().contains(&role),
