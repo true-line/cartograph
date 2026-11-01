@@ -466,3 +466,71 @@ fn query_history_transport_bound_covers_existing_selector_field_limits() {
             .is_err()
     );
 }
+
+// AC-0286: batching preserves saved history bytes and fail-closed errors,
+// including the historical zero-query legacy-ledger path.
+#[test]
+fn disclosed_history_batch_matches_per_reference_validation() {
+    fn prior(
+        hash: &str,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<DisclosedQueryHistory, InvestigationError> {
+        let refs = (0..ledger.queries.len())
+            .map(|index| QueryHistoryReference::from_ledger(hash, ledger, index, policy))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !crate::source_basis::hash(hash) || policy.profile() != INVESTIGATION_V2_POLICY.profile()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(DisclosedQueryHistory {
+            request_hash: hash.into(),
+            registry_hash: super::query_history::registry_hash(hash, ledger, policy, &refs)?,
+            query_ids: refs.into_iter().map(|item| item.query_id).collect(),
+        })
+    }
+    for count in [0, 1, 7] {
+        let (context, mut basis) = fixture(1);
+        let mut pages = vec![];
+        for _ in 0..count {
+            acquire(
+                &context,
+                &mut basis,
+                &mut pages,
+                query(vec!["missing".into()]),
+            );
+        }
+        let mut variants = vec![basis.clone()];
+        let mut legacy = basis.clone();
+        legacy.schema_version = 1;
+        legacy.coverage = None;
+        variants.push(legacy);
+        let mut corrupt = basis.clone();
+        corrupt.scope_snapshot_id = "corrupt".into();
+        variants.push(corrupt);
+        let mut missing = basis.clone();
+        missing.coverage = None;
+        variants.push(missing);
+        let mut oversized = basis.clone();
+        oversized.supplied_history_bytes = 16 * 1024 + 1;
+        variants.push(oversized);
+        if count != 0 {
+            let mut malformed = basis.clone();
+            malformed.queries[0].response_hash = "not-a-hash".into();
+            variants.push(malformed);
+        }
+        for ledger in variants {
+            for hash in [REQUEST_HASH, "invalid"] {
+                for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+                    let before = prior(hash, &ledger, policy)
+                        .map(|value| serde_json::to_vec(&value).unwrap())
+                        .map_err(|error| format!("{error:?}"));
+                    let after = DisclosedQueryHistory::from_ledger(hash, &ledger, policy)
+                        .map(|value| serde_json::to_vec(&value).unwrap())
+                        .map_err(|error| format!("{error:?}"));
+                    assert_eq!(after, before, "queries={count}, hash={hash}");
+                }
+            }
+        }
+    }
+}
