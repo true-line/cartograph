@@ -23,6 +23,9 @@ mod ownership_tests;
 use serde::Serialize;
 use std::path::Path;
 
+/// How long a job-store connection waits for a competing writer's lock.
+const JOB_STORE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A durable job row.
 #[derive(Debug, Clone, Serialize)]
 pub struct Job {
@@ -97,7 +100,10 @@ impl JobStore {
     /// Open (creating if absent) the state spine at `path`, in WAL mode.
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let mut conn = Connection::open(path.as_ref())?;
-        conn.busy_timeout(std::time::Duration::from_secs(1))?;
+        // Competing app/MCP connections serialize on IMMEDIATE transactions
+        // (AC-0322); give the current writer time to commit on a loaded host
+        // instead of surfacing SQLITE_BUSY as a storage failure.
+        conn.busy_timeout(JOB_STORE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS jobs (
