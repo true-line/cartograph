@@ -250,3 +250,14 @@ A separately frozen child definition binds the exact reviewed saved-parent recei
 ### Captured auditor execution and receipts (#1354, AC-0463)
 
 Explicit execution revalidates the frozen reviewed parent and child authority, consumes one durable attempt before claiming the queued child, and delegates through the existing worker with the exact frozen provider. Actual prompt9 source/inventory/history observations bind to disclosure6, including the saved parent result ID/body hash. Immutable auditor observations and terminal receipts preserve failed or unknown outcomes; reopen re-derives durable evidence without constructing a provider or dispatching. Reopen rejects observation-count, payload/disclosure, request/context or exact-parent binding mismatches even if both artifact files are rewritten together. Representation quality and missing acquisitions remain diagnostic; no-invocation outcomes require an empty observation set. Preparation remains separately available and provider-free. External review authentication and subsequent auditor semantic review remain operator gates; synthetic host tests do not establish actual-model or native acceptance. Historical analyst artifacts, roles and numeric limits remain unchanged.
+
+## Scoped investigation acquisition basis (#1602, preparation only)
+
+A separately domain-separated host basis binds a valid store instance/generation,
+the digest of a normalized exact-node or induced-neighborhood request, the
+acquired projection digest and the coverage qualification digest. Its fixed-size
+inputs do not include graph bodies. It identifies a requested scoped acquisition;
+it does not certify whole-graph completeness, source authorization or semantic
+coverage. Paged All is an explicit extent with no aggregate projection digest: each page must bind its own projection and continuation to this immutable basis. Its exhaustion proves raw traversal only, not semantic recovery or absence. Runtime paging still requires a separate implementation. Construction is
+host-only and output-only; historical complete snapshot and ledger formats are
+unchanged. Runtime activation requires the ledger, evidence and replay integration.
