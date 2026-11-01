@@ -150,13 +150,22 @@ pub fn extract_found_adrs(
     commit: &str,
     candidates: &[Node],
 ) -> std::io::Result<AdrFacts> {
+    let ids: BTreeSet<&str> = candidates.iter().map(|node| node.id.as_str()).collect();
+    extract_found_adrs_among(root, repo, commit, |id| ids.contains(id))
+}
+
+/// [`extract_found_adrs`] that asks `is_candidate` whether an id names a
+/// recovered fact, so a caller holding packed facts never decodes them: a
+/// governed target is matched by id alone (#1574).
+pub fn extract_found_adrs_among(
+    root: &Path,
+    repo: &str,
+    commit: &str,
+    is_candidate: impl Fn(&str) -> bool,
+) -> std::io::Result<AdrFacts> {
     let mut files = Vec::new();
     collect_adr_files(root, &mut files)?;
     files.sort();
-    let candidates: BTreeMap<&str, &Node> = candidates
-        .iter()
-        .map(|node| (node.id.as_str(), node))
-        .collect();
     let mut facts = AdrFacts::default();
     for file in files {
         if file.metadata()?.len() > 1024 * 1024 {
@@ -212,14 +221,14 @@ pub fn extract_found_adrs(
 
         let mut mentions: BTreeMap<String, (usize, usize)> = BTreeMap::new();
         for target in list_field(&markdown, "Governs") {
-            if candidates.contains_key(target.as_str())
+            if is_candidate(target.as_str())
                 && let Some(span) = field_target_span(&markdown, "Governs", &target)
             {
                 mentions.insert(target, span);
             }
         }
         for (target, start, end) in inline_code(&markdown) {
-            if candidates.contains_key(target.as_str()) {
+            if is_candidate(target.as_str()) {
                 mentions.entry(target).or_insert((start, end));
             }
         }

@@ -47,6 +47,7 @@ mod task_evidence;
 mod work_packets;
 
 use adapters_fw::events::Registries;
+use core_graph::facts::FactStore;
 use core_graph::packed::{PackedEdge, PackedNode};
 use core_graph::{Edge, GraphStore, Node, SqliteGraphStore};
 use findings::{Finding, FindingStore, NewFinding};
@@ -126,6 +127,61 @@ impl LayerSummary {
 /// (SPEC-00 §4.4), so counts quote distinct keys, never raw occurrences —
 /// otherwise the ingest summary and the Workspace graph counts disagree
 /// (AC-0195, #242).
+fn pack_err(error: core_graph::GraphError) -> String {
+    error.to_string()
+}
+
+/// Ids of `label` nodes without a `placeholder` prop, in order with repeats.
+/// Only nodes whose packed props mention the key are decoded (#1574).
+fn unplaceholdered<'a>(facts: &'a FactStore, label: &str) -> Result<Vec<&'a str>, String> {
+    let mut ids = Vec::new();
+    for node in facts.nodes().iter().filter(|node| node.label == label) {
+        if node.props_json().contains("\"placeholder\"")
+            && node
+                .unpack()
+                .map_err(pack_err)?
+                .props
+                .get("placeholder")
+                .is_some()
+        {
+            continue;
+        }
+        ids.push(node.id.as_str());
+    }
+    Ok(ids)
+}
+
+/// [`unplaceholdered`] as an owned set.
+fn unplaceholdered_set(
+    facts: &FactStore,
+    label: &str,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    Ok(unplaceholdered(facts, label)?
+        .into_iter()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// [`distinct_node_count`] over packed nodes.
+fn distinct_packed_node_count(facts: &FactStore) -> u64 {
+    facts
+        .nodes()
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64
+}
+
+/// [`distinct_edge_count`] over packed edges.
+fn distinct_packed_edge_count(facts: &FactStore) -> u64 {
+    facts
+        .edges()
+        .iter()
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64
+}
+
 fn distinct_node_count(nodes: &[Node]) -> u64 {
     nodes
         .iter()
@@ -1439,7 +1495,9 @@ fn extract_tree_with_registries(
     let ts_id = adapters_lang_ts::SourceId { repo, commit };
     let mut layers = LayerBreakdown::default();
     let mut delta = DeltaSummary::default();
-    let mut extraction = if wants_application || wants_infra {
+    // Facts stay packed from the TS walk until the end of recovery: each
+    // later pass decodes only what it reads (#1574, #725).
+    let (mut extraction, mut facts) = if wants_application || wants_infra {
         // #209 live detail: the TS pass covers application code when that
         // layer is wanted, otherwise it's only running for Pulumi infra
         // bindings — say which one is actually happening.
@@ -1449,24 +1507,30 @@ fn extract_tree_with_registries(
             "Reading infrastructure (Pulumi)"
         };
         let mut ts_progress = |path: &str| on_file(&format!("{ts_phase} — {path}"));
-        let (mut extraction, stats) = if let Some(capture) = primary {
-            let (extraction, produced, stats) = adapters_lang_ts::captured::extract_captured_dir(
-                root,
-                &ts_id,
-                capture,
-                registries,
-                &mut ts_progress,
-            )
-            .map_err(|e| e.to_string())?;
+        let (mut extraction, mut facts, stats) = if let Some(capture) = primary {
+            let (mut extraction, produced, stats) =
+                adapters_lang_ts::captured::extract_captured_dir(
+                    root,
+                    &ts_id,
+                    capture,
+                    registries,
+                    &mut ts_progress,
+                )
+                .map_err(|e| e.to_string())?;
             receipts.extend(produced);
             reads.omitted_declaration_receipts = stats.omitted_declaration_receipts.clone();
             reads.omitted_rule_receipts = stats.omitted_rule_receipts.clone();
             reads.omitted_receipt_facts = stats.omitted_receipt_facts.clone();
             reads.omitted_receipt_facts_complete = stats.omitted_receipt_facts_complete;
             reads.captured_ts_ran = true;
-            (extraction, stats)
+            let facts = FactStore::from_facts(
+                std::mem::take(&mut extraction.nodes),
+                std::mem::take(&mut extraction.edges),
+            )
+            .map_err(pack_err)?;
+            (extraction, facts, stats)
         } else {
-            adapters_lang_ts::extract_dir_incremental_with_progress(
+            adapters_lang_ts::extract_dir_incremental_packed(
                 root,
                 &ts_id,
                 &mut cache.ts,
@@ -1480,32 +1544,33 @@ fn extract_tree_with_registries(
             stats.reused_files,
             stats.deleted_files,
         );
-        reads.ts_files = extraction
-            .nodes
-            .iter()
-            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
-            .count() as u64;
+        reads.ts_files = unplaceholdered(&facts, "File")?.len() as u64;
         if !wants_application {
+            (extraction.nodes, extraction.edges) = facts.into_facts().map_err(pack_err)?;
             extraction.retain_only_pulumi();
+            facts = FactStore::from_facts(
+                std::mem::take(&mut extraction.nodes),
+                std::mem::take(&mut extraction.edges),
+            )
+            .map_err(pack_err)?;
         }
-        extraction
+        (extraction, facts)
     } else {
-        adapters_lang_ts::Extraction::default()
+        (
+            adapters_lang_ts::Extraction::default(),
+            FactStore::default(),
+        )
     };
     layers.ts = LayerSummary {
-        files: extraction
-            .nodes
-            .iter()
-            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
-            .count() as u64,
-        nodes: distinct_node_count(&extraction.nodes),
-        edges: distinct_edge_count(&extraction.edges),
+        files: unplaceholdered(&facts, "File")?.len() as u64,
+        nodes: distinct_packed_node_count(&facts),
+        edges: distinct_packed_edge_count(&facts),
     };
     if wants_application {
         // WebExtension manifests (US-0016): topology + permission facts.
         // Runs after the TS pass so entry bindings reuse its File nodes.
-        let known_files: std::collections::BTreeSet<String> = extraction
-            .nodes
+        let known_files: std::collections::BTreeSet<String> = facts
+            .nodes()
             .iter()
             .filter(|node| node.label == "File")
             .map(|node| node.id.clone())
@@ -1518,8 +1583,7 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&webext.nodes),
             edges: distinct_edge_count(&webext.edges),
         };
-        extraction.nodes.extend(webext.nodes);
-        extraction.edges.extend(webext.edges);
+        facts.extend(webext.nodes, webext.edges).map_err(pack_err)?;
         // Chrome runtime messaging sites join the same channel stitch as
         // SDK event sites: literals confirm, computed identities gap.
         extraction.event_sites.extend(
@@ -1548,8 +1612,7 @@ fn extract_tree_with_registries(
             adapters_lang_ts::indexeddb::extract_dir(root, &ts_id).map_err(|e| e.to_string())?;
         layers.webext.nodes += distinct_node_count(&idb.nodes);
         layers.webext.edges += distinct_edge_count(&idb.edges);
-        extraction.nodes.extend(idb.nodes);
-        extraction.edges.extend(idb.edges);
+        facts.extend(idb.nodes, idb.edges).map_err(pack_err)?;
         // Observed infrastructure (#734): storage, SDK and auth clients the
         // code proves it talks to, beside any IaC-declared resources.
         let observed = match primary {
@@ -1562,8 +1625,9 @@ fn extract_tree_with_registries(
         };
         layers.ts.nodes += distinct_node_count(&observed.nodes);
         layers.ts.edges += distinct_edge_count(&observed.edges);
-        extraction.nodes.extend(observed.nodes);
-        extraction.edges.extend(observed.edges);
+        facts
+            .extend(observed.nodes, observed.edges)
+            .map_err(pack_err)?;
     }
     // Python carries server routes, `requests`/`httpx`/`aiohttp` client calls and
     // boto3/kafka-python event sites, so a client- or events-only Python
@@ -1592,8 +1656,7 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&python.nodes),
             edges: distinct_edge_count(&python.edges),
         };
-        extraction.nodes.extend(python.nodes);
-        extraction.edges.extend(python.edges);
+        facts.extend(python.nodes, python.edges).map_err(pack_err)?;
         // Observed infrastructure from Python (#734): registry clients the
         // code proves it talks to (boto3, redis, smtplib, SQLAlchemy), and
         // `requests`/`httpx`/`aiohttp` calls as fetch sites (AC-0424, AC-0496), and boto3 /
@@ -1606,8 +1669,9 @@ fn extract_tree_with_registries(
         extraction.event_sites.extend(observed.event_sites);
         layers.python.nodes += distinct_node_count(&observed.nodes);
         layers.python.edges += distinct_edge_count(&observed.edges);
-        extraction.nodes.extend(observed.nodes);
-        extraction.edges.extend(observed.edges);
+        facts
+            .extend(observed.nodes, observed.edges)
+            .map_err(pack_err)?;
     }
     // Go carries server routes and `net/http` client calls (AC-0434), so a
     // client-only Go repository runs it too.
@@ -1635,8 +1699,7 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&go.nodes),
             edges: distinct_edge_count(&go.edges),
         };
-        extraction.nodes.extend(go.nodes);
-        extraction.edges.extend(go.edges);
+        facts.extend(go.nodes, go.edges).map_err(pack_err)?;
         extraction.fetch_sites.extend(go.fetch_sites);
         extraction.event_sites.extend(go.event_sites);
     }
@@ -1666,8 +1729,7 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&rust.nodes),
             edges: distinct_edge_count(&rust.edges),
         };
-        extraction.nodes.extend(rust.nodes);
-        extraction.edges.extend(rust.edges);
+        facts.extend(rust.nodes, rust.edges).map_err(pack_err)?;
         extraction.fetch_sites.extend(rust.fetch_sites);
         extraction.event_sites.extend(rust.event_sites);
     }
@@ -1697,8 +1759,7 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&java.nodes),
             edges: distinct_edge_count(&java.edges),
         };
-        extraction.nodes.extend(java.nodes);
-        extraction.edges.extend(java.edges);
+        facts.extend(java.nodes, java.edges).map_err(pack_err)?;
         extraction.fetch_sites.extend(java.fetch_sites);
         extraction.event_sites.extend(java.event_sites);
 
@@ -1725,8 +1786,7 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&kotlin.nodes),
             edges: distinct_edge_count(&kotlin.edges),
         };
-        extraction.nodes.extend(kotlin.nodes);
-        extraction.edges.extend(kotlin.edges);
+        facts.extend(kotlin.nodes, kotlin.edges).map_err(pack_err)?;
         extraction.fetch_sites.extend(kotlin.fetch_sites);
         extraction.event_sites.extend(kotlin.event_sites);
     }
@@ -1762,30 +1822,37 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&tf.nodes),
             edges: distinct_edge_count(&tf.edges),
         };
-        extraction.nodes.extend(tf.nodes);
-        extraction.edges.extend(tf.edges);
+        facts.extend(tf.nodes, tf.edges).map_err(pack_err)?;
         // T1: observed state supersedes ambiguous T0 refs (AC-0009).
         if let Some(state_path) = state_json {
             let raw = std::fs::read_to_string(state_path)
                 .map_err(|e| format!("state_json {}: {e}", state_path.display()))?;
             let observed = dynamic::parse_state(&raw).map_err(|e| e.to_string())?;
-            dynamic::enrich_resources(
-                &mut extraction.nodes,
-                repo,
-                &observed,
-                &state_path.to_string_lossy(),
-                &raw,
-            );
+            facts
+                .update_nodes(&["Resource"], |nodes, _| {
+                    dynamic::enrich_resources(
+                        nodes,
+                        repo,
+                        &observed,
+                        &state_path.to_string_lossy(),
+                        &raw,
+                    )
+                })
+                .map_err(pack_err)?;
         }
         if let Some(pulumi_path) = pulumi_json {
             let raw = std::fs::read_to_string(pulumi_path)
                 .map_err(|error| format!("pulumi_json {}: {error}", pulumi_path.display()))?;
             let deployment = dynamic::parse_pulumi_json(&raw).map_err(|error| error.to_string())?;
-            dynamic::enrich_pulumi_resources(
-                &mut extraction.nodes,
-                &deployment,
-                &pulumi_path.to_string_lossy(),
-            );
+            facts
+                .update_nodes(&["Resource"], |nodes, _| {
+                    dynamic::enrich_pulumi_resources(
+                        nodes,
+                        &deployment,
+                        &pulumi_path.to_string_lossy(),
+                    )
+                })
+                .map_err(pack_err)?;
         }
     }
     let mut cfg = events::ConfigIndex::from_dir(root).map_err(|e| e.to_string())?;
@@ -1804,17 +1871,13 @@ fn extract_tree_with_registries(
     let stitched = events::stitch(&extraction.event_sites, &cfg, &ev_id);
     layers.events.nodes += distinct_node_count(&stitched.nodes);
     layers.events.edges += distinct_edge_count(&stitched.edges);
-    extraction.nodes.extend(stitched.nodes);
-    extraction.edges.extend(stitched.edges);
-    let endpoint_ids: Vec<String> = extraction
-        .nodes
-        .iter()
-        .filter(|n| n.label == "Endpoint")
-        .map(|n| n.id.clone())
-        .collect();
+    facts
+        .extend(stitched.nodes, stitched.edges)
+        .map_err(pack_err)?;
+    let endpoints = facts.nodes_labeled(&["Endpoint"]).map_err(pack_err)?;
+    let endpoint_ids: Vec<String> = endpoints.iter().map(|n| n.id.clone()).collect();
     // Go's `ServeMux` serves HEAD from a GET pattern (AC-0434).
-    let get_serves_head: std::collections::BTreeSet<String> = extraction
-        .nodes
+    let get_serves_head: std::collections::BTreeSet<String> = endpoints
         .iter()
         .filter(|n| {
             n.label == "Endpoint"
@@ -1824,7 +1887,8 @@ fn extract_tree_with_registries(
         })
         .map(|n| n.id.clone())
         .collect();
-    let prefix_kinds = events::prefix_kinds(&extraction.nodes);
+    let prefix_kinds = events::prefix_kinds(&endpoints);
+    drop(endpoints);
     let fetched = events::stitch_fetches_with(
         &extraction.fetch_sites,
         &endpoint_ids,
@@ -1835,8 +1899,9 @@ fn extract_tree_with_registries(
     );
     layers.events.nodes += distinct_node_count(&fetched.nodes);
     layers.events.edges += distinct_edge_count(&fetched.edges);
-    extraction.nodes.extend(fetched.nodes);
-    extraction.edges.extend(fetched.edges);
+    facts
+        .extend(fetched.nodes, fetched.edges)
+        .map_err(pack_err)?;
     // T1: observed messaging identities fill only explicit channel Gaps;
     // observed HTTP attributes enrich T0 endpoints beside their provenance.
     // All trace files are applied together so an EventBridge identity
@@ -1852,19 +1917,41 @@ fn extract_tree_with_registries(
         .iter()
         .map(|(trace, path)| (trace, path.as_str()))
         .collect();
-    dynamic::apply_traces(&mut extraction.nodes, &mut extraction.edges, &traces);
+    let gaps = facts.nodes_labeled(&["Gap"]).map_err(pack_err)?;
+    if dynamic::traces_apply(&gaps, &traces) {
+        // The pass reads and edits across labels, so it runs decoded, and
+        // only when it can change anything.
+        let (mut nodes, mut edges) = std::mem::take(&mut facts).into_facts().map_err(pack_err)?;
+        dynamic::apply_traces(&mut nodes, &mut edges, &traces);
+        facts = FactStore::from_facts(nodes, edges).map_err(pack_err)?;
+    }
+    drop(gaps);
     // Found ADR/RFC files are T0 facts. They are parsed after all code/infra
     // layers so explicit `Governs:` ids can link to existing graph targets.
-    let adr_facts = spec::extract_found_adrs(root, repo, commit, &extraction.nodes)
-        .map_err(|error| error.to_string())?;
-    extraction.nodes.extend(adr_facts.nodes);
-    extraction.edges.extend(adr_facts.edges);
-    let contract_facts = extract_repo_contracts(root, repo, commit, api_docs, &extraction.nodes);
-    extraction.nodes.extend(contract_facts.nodes);
-    extraction.edges.extend(contract_facts.edges);
-    let test_drift = spec::derive_test_drift(&extraction.nodes, &extraction.edges);
-    extraction.nodes.extend(test_drift.nodes);
-    extraction.edges.extend(test_drift.edges);
+    let adr_facts = {
+        let ids: std::collections::BTreeSet<&str> =
+            facts.nodes().iter().map(|node| node.id.as_str()).collect();
+        spec::extract_found_adrs_among(root, repo, commit, |id| ids.contains(id))
+            .map_err(|error| error.to_string())?
+    };
+    facts
+        .extend(adr_facts.nodes, adr_facts.edges)
+        .map_err(pack_err)?;
+    let contract_facts = extract_repo_contracts(root, repo, commit, api_docs, &facts)?;
+    facts
+        .extend(contract_facts.nodes, contract_facts.edges)
+        .map_err(pack_err)?;
+    let test_drift = spec::derive_test_drift(
+        &facts
+            .nodes_labeled(&["TestCase", "Endpoint"])
+            .map_err(pack_err)?,
+        &facts
+            .edges_where(|edge| edge.label == "REQUESTS")
+            .map_err(pack_err)?,
+    );
+    facts
+        .extend(test_drift.nodes, test_drift.edges)
+        .map_err(pack_err)?;
     // Toolchain facts (#215): config files become Tool nodes with cited
     // settings, DEFINED_IN the config File that proves them. Runs for every
     // layer selection — the toolchain is cross-cutting evidence.
@@ -1883,24 +1970,26 @@ fn extract_tree_with_registries(
         // the DEFINED_IN edge targets the same id either way. An import
         // placeholder (an imported `package.json`, #237) owns nothing: the
         // parsed config's File node supersedes it (last occurrence wins).
-        let known_files: std::collections::BTreeSet<String> = extraction
-            .nodes
-            .iter()
-            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
-            .map(|node| node.id.clone())
-            .collect();
-        extraction.nodes.extend(
-            tool_facts
-                .nodes
-                .into_iter()
-                .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
-        );
-        extraction.edges.extend(tool_facts.edges);
+        let known_files = unplaceholdered_set(&facts, "File")?;
+        facts
+            .extend(
+                tool_facts
+                    .nodes
+                    .into_iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
+                tool_facts.edges,
+            )
+            .map_err(pack_err)?;
         // An env-referenced observed resource (#734) names the env files
         // that declare its key; key names only, never values (AC-0097).
-        let env_links = ingest::toolchain::link_env_resources(&extraction.nodes, &tool_id);
+        let env_links = ingest::toolchain::link_env_resources(
+            &facts
+                .nodes_labeled(&["Tool", "Resource"])
+                .map_err(pack_err)?,
+            &tool_id,
+        );
         layers.tools.edges += distinct_edge_count(&env_links);
-        extraction.edges.extend(env_links);
+        facts.extend([], env_links).map_err(pack_err)?;
     }
     // Scheduled jobs (#770): declared schedule files become Schedule flow
     // triggers with an ENTRY into the file each job runs, or into the
@@ -1908,12 +1997,7 @@ fn extract_tree_with_registries(
     // adapter's File node for that file supersedes the schedule reader's.
     {
         let schedule_id = ingest::schedules::SourceId { repo, commit };
-        let symbols: std::collections::BTreeSet<String> = extraction
-            .nodes
-            .iter()
-            .filter(|node| node.label == "Symbol" && node.props.get("placeholder").is_none())
-            .map(|node| node.id.clone())
-            .collect();
+        let symbols = unplaceholdered_set(&facts, "Symbol")?;
         let schedule_facts = ingest::schedules::extract_dir(root, &schedule_id, &symbols)
             .map_err(|e| e.to_string())?;
         layers.schedules = LayerSummary {
@@ -1921,19 +2005,16 @@ fn extract_tree_with_registries(
             nodes: distinct_node_count(&schedule_facts.nodes),
             edges: distinct_edge_count(&schedule_facts.edges),
         };
-        let known_files: std::collections::BTreeSet<String> = extraction
-            .nodes
-            .iter()
-            .filter(|node| node.label == "File" && node.props.get("placeholder").is_none())
-            .map(|node| node.id.clone())
-            .collect();
-        extraction.nodes.extend(
-            schedule_facts
-                .nodes
-                .into_iter()
-                .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
-        );
-        extraction.edges.extend(schedule_facts.edges);
+        let known_files = unplaceholdered_set(&facts, "File")?;
+        facts
+            .extend(
+                schedule_facts
+                    .nodes
+                    .into_iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
+                schedule_facts.edges,
+            )
+            .map_err(pack_err)?;
     }
     // Gated plugin adapters (#201): route the files each active plugin
     // claims via its golden-corpus extensions. Every fact arrives pinned to
@@ -1959,7 +2040,7 @@ fn extract_tree_with_registries(
             let loaded = host
                 .load(&wasm_bytes, &plugin.plugin_id)
                 .map_err(|e| e.to_string())?;
-            let (facts, files_read) = adapters_plugin_host::route::extract_claimed_counted(
+            let (plugin_facts, files_read) = adapters_plugin_host::route::extract_claimed_counted(
                 &host,
                 &loaded,
                 root,
@@ -1972,20 +2053,22 @@ fn extract_tree_with_registries(
                 adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash),
                 ingest::coverage::ProducerCount {
                     files: files_read,
-                    nodes: distinct_node_count(&facts.nodes),
-                    edges: distinct_edge_count(&facts.edges),
+                    nodes: distinct_node_count(&plugin_facts.nodes),
+                    edges: distinct_edge_count(&plugin_facts.edges),
                 },
             ));
-            extraction.nodes.extend(facts.nodes);
-            extraction.edges.extend(facts.edges);
+            facts
+                .extend(plugin_facts.nodes, plugin_facts.edges)
+                .map_err(pack_err)?;
         }
     }
-    extraction.close_over_endpoints();
+    adapters_lang_ts::close_over_fact_endpoints(&mut facts).map_err(pack_err)?;
     // Each language adapter closed over its own extraction; a shared id
     // (`mod:foo` imported from TS and Go) can now carry one adapter's Gap
     // and another's Confirmed boundary. The store keeps the last duplicate,
     // so reconcile first: a Gap is never shown as Confirmed (#237 review).
-    core_graph::placeholder::reconcile_placeholders(&mut extraction.nodes);
+    facts.reconcile_placeholders().map_err(pack_err)?;
+    (extraction.nodes, extraction.edges) = facts.into_facts().map_err(pack_err)?;
     Ok((extraction, layers, delta))
 }
 
@@ -2041,12 +2124,15 @@ fn extract_repo_contracts(
     repo: &str,
     commit: &str,
     manifest_api_docs: &[ingest::api_docs::ApiDocDeclaration],
-    candidates: &[Node],
-) -> spec::ContractFacts {
+    facts: &FactStore,
+) -> Result<spec::ContractFacts, String> {
     let loaded = ingest::api_docs::load_api_docs(root, manifest_api_docs);
     if !loaded.declared {
-        return spec::ContractFacts::default();
+        return Ok(spec::ContractFacts::default());
     }
+    // Declared API docs match recovered facts by id and Endpoint attributes;
+    // nodes are decoded only for a repository that declares them (#1574).
+    let candidates = facts.nodes_where(|_| true).map_err(pack_err)?;
     let docs: Vec<spec::DeclaredApiDoc> = loaded
         .docs
         .into_iter()
@@ -2064,7 +2150,13 @@ fn extract_repo_contracts(
             reason: gap.reason,
         })
         .collect();
-    spec::extract_contract_facts(repo, commit, &docs, &gaps, candidates)
+    Ok(spec::extract_contract_facts(
+        repo,
+        commit,
+        &docs,
+        &gaps,
+        &candidates,
+    ))
 }
 
 fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
@@ -7897,6 +7989,77 @@ export function queueOrder() {
         assert_eq!(
             store.fact_counts().unwrap(),
             (published.nodes(), published.edges())
+        );
+    }
+
+    #[test]
+    fn packed_recovery_helpers_match_the_decoded_reads() {
+        // AC-0548 (#1574): the packed pipeline's id and count reads equal the
+        // decoded ones. A value that merely mentions "placeholder" is decoded
+        // and kept; a real placeholder flag is excluded.
+        let node = |id: &str, label: &str, props: serde_json::Value| Node {
+            id: id.into(),
+            label: label.into(),
+            props,
+        };
+        let nodes = vec![
+            node("file:r@a.ts", "File", serde_json::json!({})),
+            node(
+                "file:r@b.ts",
+                "File",
+                serde_json::json!({ "note": "placeholder" }),
+            ),
+            node(
+                "file:r@c.ts",
+                "File",
+                serde_json::json!({ "placeholder": true }),
+            ),
+            node("file:r@a.ts", "File", serde_json::json!({ "n": 2 })),
+            node(
+                "sym:r@a.ts#f",
+                "Symbol",
+                serde_json::json!({ "placeholder": false }),
+            ),
+            node("sym:r@a.ts#g", "Symbol", serde_json::json!({})),
+        ];
+        let edge = |src: &str, dst: &str, label: &str| Edge {
+            src: src.into(),
+            dst: dst.into(),
+            label: label.into(),
+            props: serde_json::json!({}),
+        };
+        let edges = vec![
+            edge("file:r@a.ts", "file:r@b.ts", "IMPORTS"),
+            edge("file:r@a.ts", "file:r@b.ts", "IMPORTS"),
+            edge("file:r@a.ts", "file:r@b.ts", "CALLS"),
+        ];
+        let facts = super::FactStore::from_facts(nodes.clone(), edges.clone()).unwrap();
+        for label in ["File", "Symbol", "Endpoint"] {
+            let decoded: Vec<&str> = nodes
+                .iter()
+                .filter(|node| node.label == label && node.props.get("placeholder").is_none())
+                .map(|node| node.id.as_str())
+                .collect();
+            assert_eq!(super::unplaceholdered(&facts, label).unwrap(), decoded);
+            assert_eq!(
+                super::unplaceholdered_set(&facts, label).unwrap(),
+                decoded.iter().map(|id| id.to_string()).collect()
+            );
+        }
+        assert_eq!(
+            super::distinct_packed_node_count(&facts),
+            super::distinct_node_count(&nodes)
+        );
+        assert_eq!(
+            super::distinct_packed_edge_count(&facts),
+            super::distinct_edge_count(&edges)
+        );
+        assert_eq!(
+            (
+                super::distinct_node_count(&nodes),
+                super::distinct_edge_count(&edges)
+            ),
+            (5, 2)
         );
     }
 
