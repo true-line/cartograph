@@ -171,6 +171,7 @@ fn validate_bound<'a>(
             | "domain-analyst@14"
             | "domain-analyst@15"
             | "domain-analyst@17"
+            | "domain-analyst@18"
     ) {
         return Err("unsupported captured analyst specialist".into());
     }

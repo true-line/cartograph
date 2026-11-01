@@ -794,6 +794,9 @@
 - **AC-0553** Given an exact saved @18 request7-family DTO or a test-supplied prospective compatible catalog, UI type/family/policy validation recognizes @18, requires explicit advertised selection to construct request7, and rejects absent/incompatible policy or a mismatched summary schema. Existing selection/order, the @3 default, historical @17 recognition and numeric limits remain unchanged. Fake advertised-catalog, mocked IPC and saved-DTO tests establish preparation only: the live backend catalog and public/store/run/resume gates remain unchanged and @18 dispatch stays unavailable. This does not authorize provider, captured-profile or acceptance execution (#1586; preparation for #1385).
 - **Trace:** H4 · `ui` · — · T-0553
 
+- **AC-0554** Given an explicit domain-analyst@18 acceptance preparation, the existing local-only bounded fixture adapter freezes and reopens that exact request with zero model invocations. Omitted selection remains @10 and historical definition/receipt bytes remain unchanged. Receipt assembly labels @18 only when the frozen analyst request and authenticated saved specialist both match @18 and the role is analyst; mismatched @18 identities are refused. Existing analyst versions and shared evidence-auditor@11 collection retain their historical receipt family. Ordinary synthetic preparation and identity tests establish tooling support only, not captured-profile execution, provider authorization or #598 acceptance (#1589).
+- **Trace:** H4 · `app` · — · T-0554
+
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
