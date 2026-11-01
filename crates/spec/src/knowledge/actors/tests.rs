@@ -935,3 +935,260 @@ fn actor_stories_bound_workspace_and_complete_escaped_output() {
     assert!(crate::logical_actor_story_workspace_bound(usize::MAX, 1, 1).is_none());
     assert!(crate::logical_actor_story_workspace_bound(0, usize::MAX, 0).is_none());
 }
+
+// Shared AC-0534 source-shaped fixture: canonical Actor, Capability, security
+// finding, and an ADR drift whose serialized context depends on a real flow.
+fn admitted_actor_fixture() -> (
+    RevisionedSnapshot,
+    Vec<OverlayFact>,
+    Node,
+    Vec<flowtracer::Flow>,
+) {
+    let mut endpoint = endpoint("ep:admitted", &["Read"]);
+    endpoint.props["authenticated"] = json!(false);
+    endpoint.props["method"] = json!("GET");
+    endpoint.props["path"] = json!("/orders");
+    let prov: Provenance = serde_json::from_value(endpoint.props["prov"].clone()).unwrap();
+    let mut source = base(vec![endpoint]);
+    source.graph.0.extend([
+        Node { id: "sym:target".into(), label: "Symbol".into(), props: json!({"prov":prov}) },
+        Node { id: "adr:guard".into(), label: "ADR".into(), props: json!({"origin":"found", "title":"No direct call", "forbids":["CALLS"], "prov":prov}) },
+    ]);
+    source.graph.1.extend([
+        core_graph::Edge {
+            src: "adr:guard".into(),
+            dst: "ep:admitted".into(),
+            label: "DECIDES".into(),
+            props: json!({"prov":prov}),
+        },
+        core_graph::Edge {
+            src: "ep:admitted".into(),
+            dst: "sym:target".into(),
+            label: "CALLS".into(),
+            props: json!({"prov":prov}),
+        },
+    ]);
+    let actors = derive_permission_actors(&source).facts;
+    assert_eq!(actors.len(), 1);
+    let mut capability = actor_node(&actors[0]).clone();
+    capability.id = "cap:admitted".into();
+    capability.label = "Capability".into();
+    let flows = vec![flowtracer::Flow {
+        trigger: "ep:admitted".into(),
+        trigger_kind: "Endpoint".into(),
+        trigger_name: "orders".into(),
+        hops: vec![flowtracer::Hop {
+            src: "ep:admitted".into(),
+            dst: "sym:target".into(),
+            label: "CALLS".into(),
+            src_name: "orders".into(),
+            dst_name: "target".into(),
+            tier: "Deterministic".into(),
+            confidence: "InferredStrong".into(),
+            evidence: None,
+            provenance: prov,
+            gap_reason: None,
+            attempted_tiers: vec![],
+        }],
+        status: flowtracer::FlowStatus::Verified,
+        score: 0.8,
+        depth_limited: false,
+    }];
+    (source, actors, capability, flows)
+}
+fn admitted_actor_limits() -> crate::SelectedCompileLimits {
+    crate::SelectedCompileLimits {
+        max_bytes: usize::MAX,
+        adr: crate::AdrLimits {
+            max_rows: usize::MAX,
+            max_output_bytes: usize::MAX,
+        },
+    }
+}
+fn admitted_actor_compile(
+    source: &RevisionedSnapshot,
+    actors: &[OverlayFact],
+    caps: &[crate::CapabilityStory<'_>],
+    flows: &[flowtracer::Flow],
+    limits: crate::SelectedCompileLimits,
+    security: crate::SecurityLimits,
+) -> Result<crate::SelectedArtifactOutcome, crate::CapabilityStoryInputError> {
+    crate::compile_knowledge_user_stories_with_flows_and_security(
+        source,
+        caps,
+        actors,
+        flows,
+        crate::ExportMode::BestEffort,
+        &BTreeSet::new(),
+        limits,
+        security,
+    )
+}
+fn admitted_actor_security() -> crate::SecurityLimits {
+    crate::SecurityLimits {
+        max_rows: usize::MAX,
+        max_output_bytes: usize::MAX,
+    }
+}
+
+// AC-0534: empty Actors preserve the explicit flows/security API's exact artifact.
+#[test]
+fn admitted_actor_empty_input_preserves_flow_security_artifact_identity() {
+    let (source, actors, cap, flows) = admitted_actor_fixture();
+    let caps = [crate::CapabilityStory {
+        capability: &cap,
+        cites: &actors[0].cites,
+    }];
+    let legacy = produced(
+        crate::compile_capability_user_stories_with_flows_and_security(
+            &source,
+            &caps,
+            &flows,
+            crate::ExportMode::BestEffort,
+            &BTreeSet::new(),
+            admitted_actor_limits(),
+            admitted_actor_security(),
+        )
+        .unwrap(),
+    );
+    let admitted = produced(
+        admitted_actor_compile(
+            &source,
+            &[],
+            &caps,
+            &flows,
+            admitted_actor_limits(),
+            admitted_actor_security(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(admitted.content, legacy.content);
+    assert_eq!(admitted.content_id, legacy.content_id);
+    assert_eq!(admitted, legacy);
+}
+
+// AC-0534: Actors and Capabilities retain the caller's flow-sensitive ADR admission.
+#[test]
+fn admitted_actor_combined_stories_preserve_flow_sensitive_adr_limit() {
+    let (source, actors, cap, flows) = admitted_actor_fixture();
+    let before = source.clone();
+    let caps = [crate::CapabilityStory {
+        capability: &cap,
+        cites: &actors[0].cites,
+    }];
+    let artifact = produced(
+        admitted_actor_compile(
+            &source,
+            &actors,
+            &caps,
+            &flows,
+            admitted_actor_limits(),
+            admitted_actor_security(),
+        )
+        .unwrap(),
+    );
+    assert!(artifact.content.contains("Derived Capability"));
+    assert!(artifact.content.contains("Actor caller set"));
+    assert!(
+        artifact
+            .assertions
+            .iter()
+            .any(|a| a.subject_id == actor_node(&actors[0]).id)
+    );
+    let empty = crate::derive_adr_facts(&source.graph.0, &source.graph.1, &[]);
+    let contextual = crate::derive_adr_facts(&source.graph.0, &source.graph.1, &flows);
+    let mut limits = admitted_actor_limits();
+    limits.adr.max_output_bytes = serde_json::to_vec(&empty).unwrap().len();
+    assert!(serde_json::to_vec(&contextual).unwrap().len() > limits.adr.max_output_bytes);
+    assert!(matches!(
+        admitted_actor_compile(
+            &source,
+            &actors,
+            &caps,
+            &[],
+            limits,
+            admitted_actor_security()
+        )
+        .unwrap(),
+        crate::SelectedArtifactOutcome::Produced(_)
+    ));
+    assert!(matches!(
+        admitted_actor_compile(
+            &source,
+            &actors,
+            &caps,
+            &flows,
+            limits,
+            admitted_actor_security()
+        )
+        .unwrap(),
+        crate::SelectedArtifactOutcome::Limited {
+            limit: crate::SelectedArtifactLimit::AdrDerivation(_),
+            ..
+        }
+    ));
+    assert_eq!(source, before);
+}
+
+// AC-0534: restrictive explicit security admission returns no partial artifact.
+#[test]
+fn admitted_actor_security_refusal_returns_only_limited() {
+    let (source, actors, cap, flows) = admitted_actor_fixture();
+    let caps = [crate::CapabilityStory {
+        capability: &cap,
+        cites: &actors[0].cites,
+    }];
+    assert!(
+        crate::security_projection_size(&source.graph.0, &source.graph.1)
+            .unwrap()
+            .rows
+            > 0
+    );
+    let outcome = admitted_actor_compile(
+        &source,
+        &actors,
+        &caps,
+        &flows,
+        admitted_actor_limits(),
+        crate::SecurityLimits {
+            max_rows: 0,
+            max_output_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::SelectedArtifactOutcome::Limited {
+            limit: crate::SelectedArtifactLimit::SecurityDerivation(_),
+            ..
+        }
+    ));
+}
+
+// AC-0534: invalid Actor sidecars fail atomically despite valid Capability/context.
+#[test]
+fn admitted_actor_invalid_sidecar_refuses_complete_artifact() {
+    let (source, actors, cap, flows) = admitted_actor_fixture();
+    let before = source.clone();
+    let caps = [crate::CapabilityStory {
+        capability: &cap,
+        cites: &actors[0].cites,
+    }];
+    let mut invalid = actors.clone();
+    let OverlayItem::Node(node) = &mut invalid[0].item else {
+        unreachable!()
+    };
+    node.props["assumption"]["statement"] = json!("forged");
+    assert_eq!(
+        admitted_actor_compile(
+            &source,
+            &invalid,
+            &caps,
+            &flows,
+            admitted_actor_limits(),
+            admitted_actor_security()
+        ),
+        Err(crate::CapabilityStoryInputError::Candidate)
+    );
+    assert_eq!(source, before);
+}

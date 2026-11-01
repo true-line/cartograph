@@ -1069,3 +1069,8 @@
 - **Security:** The rule is pure and deterministic over the local snapshot and makes no provider call; the candidates keep their weak provenance and named assumption, which do not attest effective runtime authorization. Derived facts are not embedded.
 - **Performance:** One node-key pass over the already bounded snapshot; the combined derived set is still admitted, or refused whole, by the existing overlay caps. No new numeric limit.
 - **Trace:** P1 (#1530) · `app` · ADR-0051 · T-0532
+
+- **AC-0534** Given canonical Actor and Capability sidecars plus caller-admitted flows and explicit security limits, the spec-only combined user-stories entrypoint uses the existing shared dispatcher: empty Actor input preserves the Capability flow/security artifact bytes and identity, combined output retains flow-sensitive ADR admission, restrictive security admission returns Limited without an artifact, and an invalid Actor refuses the whole compilation.
+- **Security:** Caller input, currency and compiler/Actor workspace admission remain required; no host route, provider, overlay selection or graph write is connected by this slice.
+- **Performance:** Thin wrapper over existing validation and rendering; no budget, numeric policy or workspace formula changes.
+- **Trace:** P1 (#1443, #1532) · `spec` · ADR-0051 · T-0534
