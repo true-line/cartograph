@@ -929,6 +929,69 @@ fn next_pages_completion_is_identical_over_lists_and_store() {
     assert_eq!(list_edges.last().unwrap().label, "RENDERS");
 }
 
+// AC-0543: guessed IMPORTS/RENDERS targets are reconciled against the known
+// file and symbol sets identically over plain lists and the column store,
+// rewriting only proven targets in their slots.
+#[test]
+fn guessed_target_reconciliation_is_identical_over_lists_and_store() {
+    use core_graph::facts::{FactLists, FactStore};
+    let node = |id: &str, label: &str| Node {
+        id: id.into(),
+        label: label.into(),
+        props: serde_json::json!({}),
+    };
+    let edge = |src: &str, dst: &str, label: &str| Edge {
+        src: src.into(),
+        dst: dst.into(),
+        label: label.into(),
+        props: serde_json::json!({}),
+    };
+    let (a, b) = ("file:qwtm/example@src/a.ts", "file:qwtm/example@src/b.tsx");
+    let comp = "sym:qwtm/example@src/b.tsx#Comp";
+    let nodes = vec![node(a, "File"), node(b, "File"), node(comp, "Function")];
+    let edges = vec![
+        edge(a, "file:qwtm/example@src/b.ts", "IMPORTS"),
+        edge(a, "sym:qwtm/example@src/b.ts#Comp", "RENDERS"),
+        edge(a, "file:qwtm/example@src/missing.ts", "IMPORTS"),
+        edge(a, "mod:react", "IMPORTS"),
+        edge(a, comp, "CALLS"),
+    ];
+    let known_symbols: std::collections::HashSet<String> =
+        nodes.iter().map(|n| n.id.clone()).collect();
+    let known_files: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter(|n| n.label == "File")
+        .map(|n| n.id.clone())
+        .collect();
+    let (mut list_nodes, mut list_edges) = (nodes.clone(), edges.clone());
+    reconcile_guessed_edge_targets(
+        &mut FactLists {
+            nodes: &mut list_nodes,
+            edges: &mut list_edges,
+        },
+        &known_files,
+        &known_symbols,
+    )
+    .unwrap();
+    let mut store = FactStore::from_facts(nodes, edges).unwrap();
+    reconcile_guessed_edge_targets(&mut store, &known_files, &known_symbols).unwrap();
+    assert_eq!(
+        store.into_facts().unwrap(),
+        (list_nodes, list_edges.clone())
+    );
+    let targets: Vec<&str> = list_edges.iter().map(|e| e.dst.as_str()).collect();
+    assert_eq!(
+        targets,
+        [
+            b,
+            comp,
+            "file:qwtm/example@src/missing.ts",
+            "mod:react",
+            comp
+        ]
+    );
+}
+
 #[test]
 fn next_pages_convention_covers_plain_js_and_excludes_api_routes() {
     // Real-world Next.js apps commonly write JSX pages in plain .js without
@@ -2309,6 +2372,149 @@ fn nodenext_js_extension_import_resolves_to_the_ts_source() {
         "sym:qwtm/example@app.ts#run",
         "sym:qwtm/example@old.js#legacy"
     )));
+}
+
+// AC-0544: config-driven bare-import resolution selects only a file's `mod:`
+// IMPORTS and rewrites them identically over plain lists and the column store.
+#[test]
+fn bare_import_resolution_is_identical_over_lists_and_store() {
+    use core_graph::facts::{FactLists, FactStore};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src/components")).unwrap();
+    std::fs::write(
+        dir.path().join("src/components/Button.tsx"),
+        "export function Button() { return null; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/app.tsx"),
+        "import react from 'react';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let react = out
+        .edges
+        .iter()
+        .find(|e| e.label == "IMPORTS" && e.dst == "mod:react")
+        .unwrap()
+        .clone();
+    let mut alias = react.clone();
+    alias.dst = "mod:@/components/Button".into();
+    let mut foreign = alias.clone();
+    foreign.src = "sym:qwtm/example@src/app.tsx#a".into();
+    let nodes = out.nodes.clone();
+    let edges = vec![alias, react.clone(), foreign.clone()];
+    let known_files: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter(|n| n.label == "File")
+        .map(|n| n.id.clone())
+        .collect();
+    let index = resolution::ResolutionIndex::load(dir.path()).unwrap();
+    let (mut list_nodes, mut list_edges) = (nodes.clone(), edges.clone());
+    resolution::resolve_bare_imports(
+        &mut FactLists {
+            nodes: &mut list_nodes,
+            edges: &mut list_edges,
+        },
+        &index,
+        &id(),
+        &known_files,
+    )
+    .unwrap();
+    let mut store = FactStore::from_facts(nodes, edges).unwrap();
+    resolution::resolve_bare_imports(&mut store, &index, &id(), &known_files).unwrap();
+    assert_eq!(
+        store.into_facts().unwrap(),
+        (list_nodes, list_edges.clone())
+    );
+    assert_eq!(
+        list_edges[0].dst,
+        "file:qwtm/example@src/components/Button.tsx"
+    );
+    assert_eq!(list_edges[0].props["resolved_via"], "tsconfig-paths");
+    let prov: Provenance = serde_json::from_value(list_edges[0].props["prov"].clone()).unwrap();
+    assert_eq!(prov.evidence.last().unwrap().path, "tsconfig.json");
+    assert_eq!(list_edges[1], react);
+    assert_eq!(list_edges[2], foreign);
+}
+
+// AC-0545: the directory closure decodes only edges with an open endpoint and
+// appends the same classified placeholders over plain lists and the store.
+#[test]
+fn directory_closure_is_identical_over_lists_and_store() {
+    use core_graph::facts::{FactLists, FactStore};
+    use core_prov::ConfidenceTier::{Confirmed, Gap};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/style.css"), "a {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/app.tsx"),
+        "import react from 'react';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let react = out
+        .edges
+        .iter()
+        .find(|e| e.label == "IMPORTS" && e.dst == "mod:react")
+        .unwrap()
+        .clone();
+    let relative = |path: &str, spec: &str| {
+        let mut edge = react.clone();
+        edge.dst = format!("file:qwtm/example@src/{path}");
+        edge.props["specifier"] = serde_json::json!(spec);
+        edge
+    };
+    let nodes: Vec<Node> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "File")
+        .cloned()
+        .collect();
+    let edges = vec![
+        relative("style.css", "./style.css"),
+        react.clone(),
+        relative("missing.ts", "./missing"),
+    ];
+    let known_files: std::collections::HashSet<String> =
+        nodes.iter().map(|n| n.id.clone()).collect();
+    let index = resolution::ResolutionIndex::load(dir.path()).unwrap();
+    let (mut list_nodes, mut list_edges) = (nodes.clone(), edges.clone());
+    close_directory(
+        &mut FactLists {
+            nodes: &mut list_nodes,
+            edges: &mut list_edges,
+        },
+        dir.path(),
+        &id(),
+        &index,
+        &known_files,
+    )
+    .unwrap();
+    let mut store = FactStore::from_facts(nodes.clone(), edges).unwrap();
+    close_directory(&mut store, dir.path(), &id(), &index, &known_files).unwrap();
+    assert_eq!(
+        store.into_facts().unwrap(),
+        (list_nodes.clone(), list_edges)
+    );
+    let tier = |id: &str| {
+        let node = list_nodes[nodes.len()..]
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap();
+        serde_json::from_value::<Provenance>(node.props["prov"].clone())
+            .unwrap()
+            .confidence_tier
+    };
+    assert_eq!(list_nodes.len(), nodes.len() + 3);
+    assert_eq!(tier("file:qwtm/example@src/style.css"), Confirmed);
+    assert_eq!(tier("mod:react"), Confirmed);
+    assert_eq!(tier("file:qwtm/example@src/missing.ts"), Gap);
 }
 
 #[test]

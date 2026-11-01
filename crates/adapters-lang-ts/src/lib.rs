@@ -319,19 +319,12 @@ impl Extraction {
     /// `resolution::classify_bare_import`); this pass closes whatever a
     /// merged extraction still leaves open.
     pub fn close_over_endpoints(&mut self) {
-        self.close_over_endpoints_with(|_, _| None);
-    }
-
-    fn close_over_endpoints_with(
-        &mut self,
-        classify: impl FnMut(&str, &Edge) -> Option<core_graph::placeholder::Boundary>,
-    ) {
         core_graph::placeholder::close_over_endpoints(
             &mut self.nodes,
             &self.edges,
             EXTRACTOR_ID,
             core_graph::placeholder::label_for_id,
-            classify,
+            |_, _| None,
         );
     }
 }
@@ -1013,22 +1006,31 @@ fn reconcile_guessed_extension(
 /// as is a target with genuinely nothing behind it (later turned into an
 /// explicit placeholder by `close_over_endpoints`).
 fn reconcile_guessed_edge_targets(
-    edges: &mut [Edge],
+    facts: &mut impl FactAccess,
     known_files: &std::collections::HashSet<String>,
     known_symbols: &std::collections::HashSet<String>,
-) {
-    for edge in edges {
-        let known = if edge.dst.starts_with("file:") {
+) -> Result<(), core_graph::GraphError> {
+    let reconciled = |dst: &str| {
+        let known = if dst.starts_with("file:") {
             known_files
-        } else if edge.dst.starts_with("sym:") {
+        } else if dst.starts_with("sym:") {
             known_symbols
         } else {
-            continue;
+            return None;
         };
-        if let Some(real) = reconcile_guessed_extension(&edge.dst, known) {
-            edge.dst = real;
-        }
-    }
+        reconcile_guessed_extension(dst, known)
+    };
+    // Only edges whose target is proven elsewhere are decoded and rewritten.
+    facts.edit_edges(
+        |_, dst, _| reconciled(dst).is_some(),
+        |edges, _| {
+            for edge in edges {
+                if let Some(real) = reconciled(&edge.dst) {
+                    edge.dst = real;
+                }
+            }
+        },
+    )
 }
 
 /// Walk ancestors to the enclosing named function (or anonymous handler)
@@ -3298,14 +3300,29 @@ fn complete_directory(
         .filter(|node| node.label == "File")
         .map(|node| node.id.clone())
         .collect();
-    reconcile_guessed_edge_targets(&mut out.edges, &known_files, &known_symbols);
+    reconcile_guessed_edge_targets(
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+        &known_files,
+        &known_symbols,
+    )?;
     // Config-driven bare-specifier resolution (#213): tsconfig paths/baseUrl
     // and workspace-package names rewrite `mod:` IMPORTS targets to real
     // files, citing the deciding config. Reads configs fresh on every walk —
     // a tsconfig edit must take effect even when every source parse is
     // cache-reused.
     let index = resolution::ResolutionIndex::load(root)?;
-    resolution::resolve_bare_imports(out, &index, id, &known_files);
+    resolution::resolve_bare_imports(
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+        &index,
+        id,
+        &known_files,
+    )?;
     complete_pending_calls(
         std::mem::take(&mut out.pending_calls),
         &known_symbols,
@@ -3389,41 +3406,68 @@ fn complete_directory(
     )?;
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
-    let file_prefix = format!("file:{}@", id.repo);
-    out.close_over_endpoints_with(|endpoint, edge| {
-        if edge.label != "IMPORTS" {
-            return None;
-        }
-        // A relative import of a file T0 does not parse (a stylesheet, an
-        // image, JSON) is the repository's own when that file exists.
-        if let Some(path) = endpoint.strip_prefix(&file_prefix) {
-            let asset = ASSET_EXTENSIONS.iter().any(|ext| path.ends_with(ext));
-            let escapes = match (
-                edge.src.strip_prefix(&file_prefix),
-                edge.props["specifier"].as_str(),
-            ) {
-                (Some(importer), Some(spec)) => escapes_root(importer, spec),
-                // Without the spelled specifier the path is unproven.
-                _ => true,
-            };
-            return (asset && !escapes && root.join(path).is_file()).then(|| {
-                core_graph::placeholder::Boundary::Internal {
-                    reason: "non-source file in this repository (not parsed at T0)".into(),
-                    evidence: vec![],
-                }
-            });
-        }
-        let spec = endpoint.strip_prefix("mod:")?;
-        let importer = edge.src.strip_prefix(&file_prefix)?;
-        Some(resolution::classify_bare_import(
-            spec,
-            importer,
-            &index,
-            id,
-            &known_files,
-        ))
-    });
+    close_directory(
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+        root,
+        id,
+        &index,
+        &known_files,
+    )?;
     Ok(())
+}
+
+/// Close the directory walk over its endpoints (#237): an unresolved endpoint
+/// becomes a placeholder, classified as the repository's own asset or a
+/// bare-module boundary against the same resolution index (#725).
+fn close_directory(
+    facts: &mut impl FactAccess,
+    root: &Path,
+    id: &SourceId,
+    index: &resolution::ResolutionIndex,
+    known_files: &std::collections::HashSet<String>,
+) -> Result<(), core_graph::GraphError> {
+    let file_prefix = format!("file:{}@", id.repo);
+    core_graph::placeholder::close_over_facts(
+        facts,
+        EXTRACTOR_ID,
+        core_graph::placeholder::label_for_id,
+        |endpoint, edge| {
+            if edge.label != "IMPORTS" {
+                return None;
+            }
+            // A relative import of a file T0 does not parse (a stylesheet, an
+            // image, JSON) is the repository's own when that file exists.
+            if let Some(path) = endpoint.strip_prefix(&file_prefix) {
+                let asset = ASSET_EXTENSIONS.iter().any(|ext| path.ends_with(ext));
+                let escapes = match (
+                    edge.src.strip_prefix(&file_prefix),
+                    edge.props["specifier"].as_str(),
+                ) {
+                    (Some(importer), Some(spec)) => escapes_root(importer, spec),
+                    // Without the spelled specifier the path is unproven.
+                    _ => true,
+                };
+                return (asset && !escapes && root.join(path).is_file()).then(|| {
+                    core_graph::placeholder::Boundary::Internal {
+                        reason: "non-source file in this repository (not parsed at T0)".into(),
+                        evidence: vec![],
+                    }
+                });
+            }
+            let spec = endpoint.strip_prefix("mod:")?;
+            let importer = edge.src.strip_prefix(&file_prefix)?;
+            Some(resolution::classify_bare_import(
+                spec,
+                importer,
+                index,
+                id,
+                known_files,
+            ))
+        },
+    )
 }
 
 /// Next.js pages-router convention (SPEC-00 §3.5): a `.tsx` file under a
