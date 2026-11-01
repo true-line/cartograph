@@ -1997,6 +1997,45 @@ pub(crate) struct PrimaryInput {
     _guard: Option<RetentionGuard>,
 }
 
+/// [`matching_bindings`] over packed facts: only the nodes and edges a
+/// receipt names are decoded, every occurrence of a named edge included, so
+/// the merged edge view and last-value node winners are the same (#1574).
+pub(crate) fn matching_bindings_packed(
+    facts: &core_graph::facts::FactStore,
+    receipts: &[impl Citable],
+) -> Result<Vec<SourceBinding>, String> {
+    if receipts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut node_ids = std::collections::BTreeSet::<&str>::new();
+    let mut edge_keys = std::collections::BTreeSet::<(&str, &str, &str)>::new();
+    for receipt in receipts {
+        match receipt.fact_key() {
+            FactKey::Node { id } => {
+                node_ids.insert(id.as_str());
+            }
+            FactKey::Edge {
+                source,
+                label,
+                destination,
+            } => {
+                edge_keys.insert((source.as_str(), destination.as_str(), label.as_str()));
+            }
+        }
+    }
+    let error = |error: core_graph::GraphError| error.to_string();
+    let mut named = adapters_lang_ts::Extraction::default();
+    named.nodes = facts
+        .nodes_where(|node| node_ids.contains(node.id.as_str()))
+        .map_err(error)?;
+    named.edges = facts
+        .edges_where(|edge| {
+            edge_keys.contains(&(edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
+        })
+        .map_err(error)?;
+    Ok(matching_bindings(&named, receipts))
+}
+
 pub(crate) fn matching_bindings(
     extraction: &adapters_lang_ts::Extraction,
     receipts: &[impl Citable],
@@ -2940,8 +2979,23 @@ mod tests {
     #[test]
     fn primary_matching_uses_final_duplicate_fact_winners() {
         let (_directory, _, _, mut extraction, receipts) = fixture();
+        // AC-0549 (#1574): packed facts bind exactly as decoded ones.
+        let packed = |extraction: &adapters_lang_ts::Extraction| {
+            let facts = core_graph::facts::FactStore::from_facts(
+                extraction.nodes.clone(),
+                extraction.edges.clone(),
+            )
+            .unwrap();
+            matching_bindings_packed(&facts, &receipts).unwrap()
+        };
         let before = matching_bindings(&extraction, &receipts);
         assert!(!before.is_empty());
+        assert_eq!(packed(&extraction), before);
+        assert!(
+            matching_bindings_packed(&core_graph::facts::FactStore::default(), &[] as &[Receipt])
+                .unwrap()
+                .is_empty()
+        );
         for binding in &before {
             match &binding.fact {
                 FactKey::Node { id } => {
@@ -2973,6 +3027,7 @@ mod tests {
             }
         }
         assert!(matching_bindings(&extraction, &receipts).is_empty());
+        assert!(packed(&extraction).is_empty());
     }
 
     // AC-0153: private storage rejects known symlink/hardlink substitutions and
