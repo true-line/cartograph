@@ -12,7 +12,8 @@
 //! Gap naming why. Static references only: nothing here executes a test.
 
 use crate::{FileCx, callable, literal_string};
-use core_graph::{Edge, Node};
+use core_graph::facts::FactAccess;
+use core_graph::{Edge, GraphError, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
@@ -681,17 +682,20 @@ pub(crate) fn explicit_candidates(file: &str) -> Vec<String> {
 }
 
 /// Resolve every pending request against the directory's documents and
-/// recovered GraphQL operations.
-pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
-    let operations: BTreeMap<(String, String, String), String> = nodes
-        .iter()
-        .filter(|n| n.label == "Endpoint" && n.props["protocol"] == "graphql")
+/// recovered GraphQL operations. Only Endpoint nodes are decoded, and none
+/// when no test requested anything; resolved facts are appended.
+pub(crate) fn complete(pending: Pending, facts: &mut impl FactAccess) -> Result<(), GraphError> {
+    if pending.requests.is_empty() {
+        return Ok(());
+    }
+    let operations: BTreeMap<(String, String, String), String> = facts
+        .decode_nodes(|_, label| label == "Endpoint")?
+        .into_iter()
+        .filter(|n| n.props["protocol"] == "graphql")
         .filter_map(|n| {
             let key = |k: &str| n.props[k].as_str().map(str::to_string);
-            Some((
-                (key("api")?, key("operation")?, key("field")?),
-                n.id.clone(),
-            ))
+            let operation = (key("api")?, key("operation")?, key("field")?);
+            Some((operation, n.id))
         })
         .collect();
     let operation = |api: &str, kind: &str, field: &str| {
@@ -778,8 +782,7 @@ pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<
             }
         }
     }
-    nodes.extend(gap_nodes);
-    edges.extend(gap_edges);
+    let mut edges = gap_edges;
     for ((test, endpoint), link) in links {
         // A default-scoped operation was assumed to serve this client's API.
         let (confidence, assumption) = if link.fallback {
@@ -800,6 +803,7 @@ pub(crate) fn complete(pending: Pending, nodes: &mut Vec<Node>, edges: &mut Vec<
             }),
         });
     }
+    facts.append(gap_nodes, edges)
 }
 
 /// One lexical token of a GraphQL document.
@@ -998,4 +1002,101 @@ pub(crate) fn root_fields(text: &str) -> Result<(&'static str, Vec<String>), &'s
         return Err("GraphQL operation selects no root field");
     }
     Ok((kind, fields.into_iter().collect()))
+}
+
+#[cfg(test)]
+mod fact_access_tests {
+    use super::*;
+    use core_graph::facts::{FactLists, FactStore};
+    use serde_json::json;
+
+    fn evidence(byte_start: u64) -> EvidenceRef {
+        EvidenceRef {
+            repo: "r".into(),
+            path: "web/order.test.ts".into(),
+            byte_start,
+            byte_end: byte_start + 1,
+            commit_sha: "c".into(),
+        }
+    }
+
+    fn literal(text: &str, at: u64) -> PendingRequest {
+        PendingRequest {
+            test: "test:order".into(),
+            api: DEFAULT_API,
+            document: DocumentRef::Literal(Document {
+                text: text.into(),
+                evidence: evidence(at + 100),
+            }),
+            evidence: vec![evidence(at)],
+        }
+    }
+
+    // AC-0537: completion over the packed store appends exactly what it
+    // appends over plain lists; with no request every fact is unchanged.
+    #[test]
+    fn completion_is_identical_over_lists_and_store() {
+        let nodes = vec![
+            Node {
+                id: "ep:order".into(),
+                label: "Endpoint".into(),
+                props: json!({"protocol": "graphql", "api": DEFAULT_API, "operation": "query", "field": "order"}),
+            },
+            Node {
+                id: "ep:rest".into(),
+                label: "Endpoint".into(),
+                props: json!({"protocol": "http"}),
+            },
+            Node {
+                id: "test:order".into(),
+                label: "Test".into(),
+                props: json!({}),
+            },
+        ];
+        let requests = || {
+            vec![
+                literal("query { order { id } }", 1),
+                literal("query { missing }", 2),
+                PendingRequest {
+                    document: DocumentRef::Imported {
+                        file: "web/gone.ts".into(),
+                        name: "DOC".into(),
+                        guessed: true,
+                    },
+                    ..literal("", 3)
+                },
+            ]
+        };
+        for requests in [requests(), Vec::new()] {
+            let pending = || Pending {
+                documents: HashMap::new(),
+                files: HashSet::new(),
+                requests: requests.clone(),
+            };
+            let (mut listed, mut listed_edges) = (nodes.clone(), Vec::new());
+            complete(
+                pending(),
+                &mut FactLists {
+                    nodes: &mut listed,
+                    edges: &mut listed_edges,
+                },
+            )
+            .unwrap();
+            let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
+            complete(pending(), &mut store).unwrap();
+            assert_eq!(
+                store.into_facts().unwrap(),
+                (listed.clone(), listed_edges.clone())
+            );
+            if requests.is_empty() {
+                assert_eq!((listed, listed_edges), (nodes.clone(), Vec::new()));
+            } else {
+                let gaps = listed.iter().filter(|n| n.label == "Gap").count();
+                assert_eq!(gaps, 2);
+                assert!(listed_edges.iter().any(|e| e.src == "test:order"
+                    && e.dst == "ep:order"
+                    && e.label == "REQUESTS"));
+            }
+        }
+    }
 }
