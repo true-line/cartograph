@@ -86,7 +86,18 @@ impl NextFixture {
         }
     }
     fn gated(provider: &dyn LlmProvider) -> Self {
-        let mut f = Self::new(provider, SpecialistId::DomainAnalystV17);
+        Self::new(provider, SpecialistId::DomainAnalystV17).into_gated()
+    }
+    fn gated_from_completion_base(
+        provider: &dyn LlmProvider,
+        base: CompletionFixture,
+        request: StagedObligationRequest,
+    ) -> Self {
+        Self::from_completion_base(provider, SpecialistId::DomainAnalystV17, base, request)
+            .into_gated()
+    }
+    fn into_gated(mut self) -> Self {
+        let f = &mut self;
         f.request.specialist_id = "domain-analyst@18".into();
         let hash = f
             .request
@@ -121,7 +132,7 @@ impl NextFixture {
             )
             .unwrap();
         drop(connection);
-        f
+        self
     }
     // Real inner loop only; production start/run/resume gates remain intact.
     fn run_gated_inner(&self, provider: &dyn LlmProvider) {
@@ -193,6 +204,7 @@ enum SourceScenario {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatedFlow {
+    OfferedTargets,
     Repair,
     Repeat,
     Cancel,
@@ -310,7 +322,12 @@ impl LlmProvider for NextProvider {
         let text = if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            if call == 0 || flow != GatedFlow::Repair {
+            if flow == GatedFlow::OfferedTargets {
+                let schema: Value =
+                    serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
+                        .unwrap();
+                exact_node_tests::next_offered_action(prompt, &schema).to_string()
+            } else if call == 0 || flow != GatedFlow::Repair {
                 json!({"type":"query_context","context_id":prompt["context_id"],"query":{
                     "scope":{"type":"all"},"kind":null,"labels":[],
                     "max_facts":12,"max_bytes":16384,"cursor":null}})

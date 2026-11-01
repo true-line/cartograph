@@ -53,6 +53,11 @@ pub(super) fn next_action(prompt: &Value) -> Value {
             .unwrap()["target"];
         return json!({"type":"read_coverage_inventory","context_id":target["context_id"],"repo":target["repo"],"inventory_hash":target["inventory_hash"],"max_bytes":32768});
     }
+    finish_action(prompt)
+}
+
+fn finish_action(prompt: &Value) -> Value {
+    let citations = prompt["citations"].as_array().unwrap();
     json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{
         "claim_kind":"inferred_interpretation","title":"Seven distinct retained source selections",
         "statement":"The selected callables and local declaration were acquired as bounded source evidence.",
@@ -61,11 +66,47 @@ pub(super) fn next_action(prompt: &Value) -> Value {
         "knowledge_completeness":"partial","limitations":["Only the caller-selected source set was inspected."]}})
 }
 
+// AC-0489: choose the exact supplied finite object; never reconstruct query,
+// range, receipt or inventory authority from descriptive obligation fields.
+pub(super) fn next_offered_action(prompt: &Value, schema: &Value) -> Value {
+    assert!(prompt["turn_progress"]["capacity_feedback"].is_null());
+    assert!(prompt["turn_progress"]["action_feedback"].is_null());
+    let choices = &prompt["turn_progress"]["acquisition_choices"];
+    if let Some(entry) = choices["entries"].as_array().unwrap().first() {
+        let action = entry["action"].clone();
+        let finite = schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|branch| branch.get("enum"))
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(finite.contains(&action));
+        return action;
+    }
+    assert!(choices["blocked"].as_array().unwrap().is_empty());
+    assert_eq!(choices["deferred"], 0);
+    finish_action(prompt)
+}
+
 #[test]
 fn exact_node_worker_acquires_seven_mixed_targets_inventory_finishes_and_reopens() {
     let mut scripted = NextProvider::new(false);
     scripted.exact_targets = true;
     let provider = Arc::new(scripted);
+    let (base, request) = seven_target_base(provider.as_ref());
+    let fixture = NextFixture::from_completion_base(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV17,
+        base,
+        request,
+    );
+    fixture.run(provider.clone());
+    assert_seven_completed(&fixture, provider.as_ref());
+}
+
+fn seven_target_base(provider: &dyn LlmProvider) -> (CompletionFixture, StagedObligationRequest) {
     let source = (0..6).map(|i| format!("export function exact_{i}(input: {{ enabled: boolean }}) {{ const {} = input.enabled; if ({} === false) return false; return true; }}\n",
         if i==0 {"exactFlag"} else {"guard"}, if i==0 {"exactFlag"} else {"guard"})).collect::<String>();
     // Only oversized callable interiors emit direct local Declaration facts.
@@ -74,7 +115,7 @@ fn exact_node_worker_acquires_seven_mixed_targets_inventory_finishes_and_reopens
         "fixture comment ".repeat(600)
     );
     let base = CompletionFixture::with_original(
-        provider.as_ref(),
+        provider,
         SpecialistId::DomainAnalystV9,
         false,
         true,
@@ -147,21 +188,21 @@ fn exact_node_worker_acquires_seven_mixed_targets_inventory_finishes_and_reopens
         .obligations
         .normalized_with_policy(&INVESTIGATION_V2_POLICY)
         .unwrap();
-    let fixture = NextFixture::from_completion_base(
-        provider.as_ref(),
-        SpecialistId::DomainAnalystV17,
-        base,
-        request,
-    );
-    fixture.run(provider.clone());
+    (base, request)
+}
+
+fn assert_seven_completed(fixture: &NextFixture, provider: &NextProvider) {
     let state = fixture.base.base.app.state::<AppState>();
     let jobs = state.jobs.lock().unwrap();
     let detail = jobs.investigation(&fixture.id).unwrap();
     assert_eq!(
         detail.summary.status,
         InvestigationStatus::Completed,
-        "{:?}",
-        detail.error
+        "error={:?}; usage={:?}; limits={:?}; provider_calls={}",
+        detail.error,
+        detail.usage,
+        detail.limits,
+        provider.observed.calls.load(Ordering::SeqCst)
     );
     assert_eq!(
         detail.summary.completion_outcome,
@@ -256,5 +297,76 @@ fn exact_node_worker_acquires_seven_mixed_targets_inventory_finishes_and_reopens
     assert_eq!(
         serde_json::to_string(&state.graph.lock().unwrap().read_snapshot().unwrap()).unwrap(),
         fixture.base.base.graph_before
+    );
+}
+
+// AC-0489: compose all seven real retained source acquisitions with the gated
+// initial writer/private worker, preserving public/store/run/resume closure.
+#[test]
+fn gated_exact_node_worker_selects_seven_offered_targets_and_reopens() {
+    let mut scripted = NextProvider::new(false);
+    scripted.gated_flow = Some(GatedFlow::OfferedTargets);
+    let provider = Arc::new(scripted);
+    let (base, request) = seven_target_base(provider.as_ref());
+    let fixture = NextFixture::gated_from_completion_base(provider.as_ref(), base, request);
+    let state = fixture.base.base.app.state::<AppState>();
+    let before = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation(&fixture.id)
+        .unwrap();
+    assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV18);
+    assert_eq!(before.usage.model_invocations, 0);
+    // Real active and wall clocks: no fixture-only frozen-clock shortcut.
+    fixture.run_gated_inner(provider.as_ref());
+    assert_seven_completed(&fixture, provider.as_ref());
+    let prompts = provider.observed.prompts.lock().unwrap();
+    let payloads = provider.received_payloads.lock().unwrap();
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 16);
+    assert_eq!(prompts.len(), 16);
+    assert_eq!(payloads.len(), prompts.len());
+    assert_eq!(prompts[0]["consumed_budgets"]["model_invocations"], 0);
+    assert_eq!(
+        prompts[0]["turn_progress"]["acquisition_choices"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    for (ordinal, (prompt, payload)) in prompts.iter().zip(payloads.iter()).enumerate() {
+        assert_eq!(payload.system, SpecialistId::DomainAnalystV18.prompt());
+        assert_eq!(prompt["consumed_budgets"]["model_invocations"], ordinal);
+        let schema: Value =
+            serde_json::from_str(payload.response_schema.as_deref().unwrap()).unwrap();
+        let action = next_offered_action(prompt, &schema);
+        if ordinal < 15 {
+            assert!(
+                prompt["turn_progress"]["acquisition_choices"]["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["action"] == action)
+            );
+            if action["type"] == "query_context" {
+                assert_eq!(action["query"]["scope"]["type"], "node");
+                assert_eq!(action["query"]["max_facts"], 1);
+            }
+        } else {
+            assert_eq!(action["action"]["type"], "finish");
+        }
+    }
+    let connection =
+        rusqlite::Connection::open(fixture.base.base.app_data.join("state.db")).unwrap();
+    let invocations: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM investigation_invocations WHERE task_id=?1",
+            [&fixture.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        usize::try_from(invocations).unwrap(),
+        provider.observed.calls.load(Ordering::SeqCst)
     );
 }
