@@ -869,6 +869,66 @@ fn next_pages_convention_yields_screens() {
         && e.dst == "sym:qwtm/example@pages/users/[id].tsx#UserDetail"));
 }
 
+// AC-0542: pages-router screens decode only File nodes and append the same
+// Screens and RENDERS edges over plain lists and the column store.
+#[test]
+fn next_pages_completion_is_identical_over_lists_and_store() {
+    use core_graph::facts::{FactLists, FactStore};
+    let file = |path: &str| Node {
+        id: format!("file:qwtm/example@{path}"),
+        label: "File".into(),
+        props: serde_json::json!({ "path": path }),
+    };
+    let nodes = vec![
+        file("pages/index.tsx"),
+        file("web/pages/users/[id].tsx"),
+        file("pages/_app.tsx"),
+        file("pages/api/hello.js"),
+        file("lib/util.ts"),
+        Node {
+            id: "sym:qwtm/example@pages/index.tsx#Home".into(),
+            label: "Function".into(),
+            props: serde_json::json!({}),
+        },
+    ];
+    let edges = vec![Edge {
+        src: "file:qwtm/example@pages/index.tsx".into(),
+        dst: "sym:qwtm/example@pages/index.tsx#Home".into(),
+        label: "DEFINES".into(),
+        props: serde_json::json!({}),
+    }];
+    let exports = HashMap::from([(
+        "pages/index.tsx".to_string(),
+        "sym:qwtm/example@pages/index.tsx#Home".to_string(),
+    )]);
+    let (mut list_nodes, mut list_edges) = (nodes.clone(), edges.clone());
+    next_pages_screens(
+        &exports,
+        &id(),
+        &mut FactLists {
+            nodes: &mut list_nodes,
+            edges: &mut list_edges,
+        },
+    )
+    .unwrap();
+    let mut store = FactStore::from_facts(nodes, edges).unwrap();
+    next_pages_screens(&exports, &id(), &mut store).unwrap();
+    assert_eq!(
+        store.into_facts().unwrap(),
+        (list_nodes.clone(), list_edges.clone())
+    );
+    let screens: Vec<&str> = list_nodes
+        .iter()
+        .filter(|n| n.label == "Screen")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(
+        screens,
+        ["screen:qwtm/example@/", "screen:qwtm/example@/users/[id]"]
+    );
+    assert_eq!(list_edges.last().unwrap().label, "RENDERS");
+}
+
 #[test]
 fn next_pages_convention_covers_plain_js_and_excludes_api_routes() {
     // Real-world Next.js apps commonly write JSX pages in plain .js without

@@ -3350,7 +3350,14 @@ fn complete_directory(
             edges: &mut out.edges,
         },
     )?;
-    next_pages_screens(out, id);
+    next_pages_screens(
+        &out.default_exports,
+        id,
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     next_api::app_screens(
         root,
         &index,
@@ -3423,12 +3430,13 @@ fn complete_directory(
 /// `pages/` directory *is* a screen — `pages/users/[id].tsx` → route
 /// `/users/[id]`, rendering the file's default export. File-structural,
 /// so it runs over the whole walk rather than per file.
-fn next_pages_screens(out: &mut Extraction, id: &SourceId) {
+fn next_pages_screens(
+    default_exports: &HashMap<String, String>,
+    id: &SourceId,
+    facts: &mut impl FactAccess,
+) -> Result<(), core_graph::GraphError> {
     let mut screens = Vec::new();
-    for node in &out.nodes {
-        if node.label != "File" {
-            continue;
-        }
+    for node in facts.decode_nodes(|_, label| label == "File")? {
         let Some(path) = node.props["path"].as_str() else {
             continue;
         };
@@ -3485,8 +3493,9 @@ fn next_pages_screens(out: &mut Extraction, id: &SourceId) {
         .expect("Deterministic/Confirmed is always within ceiling");
         screens.push((screen_id, route, path.to_string(), prov));
     }
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
     for (screen_id, route, path, prov) in screens {
-        out.nodes.push(Node {
+        nodes.push(Node {
             id: screen_id.clone(),
             label: "Screen".into(),
             props: serde_json::json!({
@@ -3495,7 +3504,7 @@ fn next_pages_screens(out: &mut Extraction, id: &SourceId) {
                 "prov": serde_json::to_value(prov).expect("provenance serializes"),
             }),
         });
-        if let Some(comp) = out.default_exports.get(&path).cloned() {
+        if let Some(comp) = default_exports.get(&path).cloned() {
             let edge_prov = Provenance::new(
                 Tier::Deterministic,
                 ConfidenceTier::Confirmed,
@@ -3510,7 +3519,7 @@ fn next_pages_screens(out: &mut Extraction, id: &SourceId) {
                 format!("RENDERS {screen_id} -> {comp}").as_bytes(),
             )
             .expect("within ceiling");
-            out.edges.push(Edge {
+            edges.push(Edge {
                 src: screen_id,
                 dst: comp,
                 label: "RENDERS".into(),
@@ -3520,6 +3529,7 @@ fn next_pages_screens(out: &mut Extraction, id: &SourceId) {
             });
         }
     }
+    facts.append(nodes, edges)
 }
 
 /// AST-level `eval()` / `new Function()` classification for every source
