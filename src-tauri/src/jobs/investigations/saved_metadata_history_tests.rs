@@ -372,8 +372,47 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
         for index in 0..2 {
             let tx = reopened.conn.unchecked_transaction().unwrap();
             let task = load_next_prompt_task(&tx, &id).unwrap();
+            if role == SpecialistId::DomainAnalystV18 {
+                INVOCATION_SWEEPS.with(|count| count.set(0));
+            }
             let core =
                 admission_contract::load_saved_call_basis_core(&tx, &task, &calls[index]).unwrap();
+            if role == SpecialistId::DomainAnalystV18 {
+                // AC-0489/#1573: preserve every historical cutoff, including
+                // one before the real inventory attempt, with one replay.
+                let expected =
+                    admission_journal::derive_at(&tx, &task, &calls[index].step_id).unwrap();
+                INVOCATION_SWEEPS.with(|count| assert_eq!(count.get(), 2));
+                INVOCATION_SWEEPS.with(|count| count.set(0));
+                let (paired, capacity) =
+                    admission_contract::load_saved_call_basis_core_and_capacity(
+                        &tx,
+                        &task,
+                        &calls[index],
+                    )
+                    .unwrap();
+                INVOCATION_SWEEPS.with(|count| assert_eq!(count.get(), 1));
+                assert_eq!(paired.step, core.step);
+                assert_eq!(paired.ledger, core.ledger);
+                assert_eq!(paired.metadata, core.metadata);
+                assert_eq!(paired.ordinal, core.ordinal);
+                assert_eq!(capacity, expected);
+                let mut foreign = calls[index].clone();
+                foreign.step_id = "foreign-step".into();
+                assert!(matches!(
+                    admission_contract::load_saved_call_basis_core_and_capacity(
+                        &tx, &task, &foreign,
+                    ),
+                    Err(InvestigationStoreError::Invalid)
+                ));
+                foreign.invocation_ordinal = u32::MAX;
+                assert!(matches!(
+                    admission_contract::load_saved_call_basis_core_and_capacity(
+                        &tx, &task, &foreign,
+                    ),
+                    Err(InvestigationStoreError::Missing)
+                ));
+            }
             assert_eq!(core.metadata.completed_attempt_ids.len(), index);
             assert_eq!(core.ledger, witnesses[index].2);
             if role == SpecialistId::DomainAnalystV18 {
@@ -449,6 +488,13 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
                 admission_contract::load_saved_call_basis_core(&tx, &task, &call).is_err(),
                 "{mutation}"
             );
+            if role == SpecialistId::DomainAnalystV18 {
+                assert!(
+                    admission_contract::load_saved_call_basis_core_and_capacity(&tx, &task, &call,)
+                        .is_err(),
+                    "paired {mutation}"
+                );
+            }
             assert!(load_next_prompt_task(&tx, &id).is_err(), "{mutation}");
             // Dropping each transaction preserves the independently passing control.
         }
@@ -513,4 +559,64 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
             assert!(next_prompt_saved_call_workspace().unwrap().1 >= history + transient);
         }
     }
+}
+
+// AC-0489/#1573: genuine initial writer and real acquired inventory; the saved
+// call validator reuses one full replay without accepting caller-made authority.
+#[test]
+fn paired_saved_call_validation_uses_one_authenticated_sweep() {
+    use completion::next_prompt_snapshot::tests::fixture::Fixture;
+    let mut fixture = Fixture::customized(false, |f| {
+        f.request.specialist_id = "domain-analyst@18".into();
+        let intent = completion::host_fixture_intent(&f.request).unwrap();
+        f.task.intent_hash = intent.request_hash.clone();
+        f.task.detail.completion = Some(completion::initial_detail(&intent));
+        f.task.completion_intent = Some(intent);
+        f.task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
+        f.task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+        f.metadata = completion::derive_protected_metadata(&f.task, vec![], &[]).unwrap();
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        admission_journal::tests::save_task(&tx, &f.task);
+        tx.commit().unwrap();
+    });
+    let mut saved = None;
+    fixture.acquire_inventory_observed(|fixture| {
+        let task = &fixture.f.task;
+        let call = task
+            .admission_state
+            .as_ref()
+            .unwrap()
+            .current_call
+            .as_ref()
+            .unwrap();
+        let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+        let changes = tx.total_changes();
+        INVOCATION_SWEEPS.with(|count| count.set(0));
+        call.validate_saved(&tx, task).unwrap();
+        INVOCATION_SWEEPS.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(tx.total_changes(), changes);
+        saved = Some(call.clone());
+    });
+    let call = saved.unwrap();
+    // A later transaction must authenticate fresh rows; no replay cache escapes
+    // the paired call. The historical cutoff still excludes the later attempt.
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let task = &fixture.f.task;
+    let core = admission_contract::load_saved_call_basis_core(&tx, task, &call).unwrap();
+    let expected = admission_journal::derive_at(&tx, task, &call.step_id).unwrap();
+    let (paired, capacity) =
+        admission_contract::load_saved_call_basis_core_and_capacity(&tx, task, &call).unwrap();
+    assert_eq!(paired.ledger, core.ledger);
+    assert_eq!(paired.metadata, core.metadata);
+    assert_eq!(capacity, expected);
+    assert!(paired.metadata.completed_attempt_ids.is_empty());
+    tx.commit().unwrap();
+    assert!(matches!(
+        admission_contract::load_saved_call_basis_core_and_capacity(
+            &fixture.f.store.conn,
+            task,
+            &call,
+        ),
+        Err(InvestigationStoreError::Invalid)
+    ));
 }

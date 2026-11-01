@@ -861,6 +861,29 @@ pub(super) fn saved_core(
     }
     Ok(witness.core)
 }
+/// Reuse one authenticated local replay for the exact core and capacity cutoff.
+/// Project before removing the witness: capacity observes the complete timeline.
+pub(super) fn saved_core_and_capacity(
+    connection: &Connection,
+    task: &StoredTask,
+    basis: &SavedCallBasis,
+) -> Result<(SavedCallCore, CapacityState), InvestigationStoreError> {
+    let (mut line, entries) = replay(connection, task)?;
+    let witness = line
+        .calls
+        .get(&basis.invocation_ordinal)
+        .ok_or(InvestigationStoreError::Missing)?;
+    if witness.call != *basis {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let capacity = project(&entries, &line, Some(basis.invocation_ordinal));
+    let witness = line
+        .calls
+        .remove(&basis.invocation_ordinal)
+        .ok_or(InvestigationStoreError::Missing)?;
+    Ok((witness.core, capacity))
+}
+
 /// Saved provenance for the pure agents witness. Only the same-transaction
 /// replay below can construct this owner; no caller role/stamp is authority.
 pub(super) struct AuthenticatedCompletionBasis {

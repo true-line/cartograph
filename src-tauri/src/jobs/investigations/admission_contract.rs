@@ -378,6 +378,20 @@ impl SavedCallBasis {
         if state.current_call.as_ref() != Some(self) {
             return Err(InvestigationStoreError::Invalid);
         }
+        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            let (
+                SavedCallCore {
+                    step,
+                    ledger,
+                    metadata,
+                    ..
+                },
+                capacity,
+            ) = load_saved_call_basis_core_and_capacity(connection, task, self)?;
+            drop((ledger, metadata));
+            self.validate_capacity_state(&capacity)?;
+            return self.validate_charged_usage(task, &step);
+        }
         let SavedCallCore {
             step,
             ledger,
@@ -398,6 +412,22 @@ pub(super) struct SavedCallCore {
     /// Explicit immutable within-task ordinal. Never SQLite rowid.
     pub ordinal: u32,
 }
+/// Same-transaction @18 core and strict-cutoff capacity from one full replay.
+/// No replay cache survives this call; standalone loaders remain available.
+pub(super) fn load_saved_call_basis_core_and_capacity(
+    connection: &Connection,
+    task: &StoredTask,
+    basis: &SavedCallBasis,
+) -> Result<(SavedCallCore, admission_journal::CapacityState), InvestigationStoreError> {
+    if connection.is_autocommit()
+        || task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_pairing(task)?;
+    admission_journal::saved_core_and_capacity(connection, task, basis)
+}
+
 /// Exact named ledger/step/cutoff; @18 authenticates the full journal prefix.
 /// The caller owns the DB transaction and separately authenticates task/lease.
 pub(super) fn load_saved_call_basis_core(
