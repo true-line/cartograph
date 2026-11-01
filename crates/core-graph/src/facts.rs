@@ -133,6 +133,46 @@ impl FactStore {
         )
     }
 
+    /// Move the packed facts out, in order, without decoding them.
+    pub fn into_packed(self) -> (Vec<PackedNode>, Vec<PackedEdge>) {
+        (self.nodes, self.edges)
+    }
+
+    /// [`crate::placeholder::reconcile_placeholders`] over packed nodes: only
+    /// nodes whose id occurs more than once are decoded. The survivor takes
+    /// the first duplicate's slot and the rest are removed, so the store ends
+    /// identical to the list form (#1574, #725).
+    pub fn reconcile_placeholders(&mut self) -> Result<(), GraphError> {
+        let mut groups = std::collections::BTreeMap::<&str, Vec<usize>>::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            groups.entry(node.id.as_str()).or_default().push(index);
+        }
+        let mut replace = std::collections::HashMap::<usize, PackedNode>::new();
+        let mut drop = std::collections::HashSet::<usize>::new();
+        for indices in groups.values().filter(|indices| indices.len() > 1) {
+            let group = indices
+                .iter()
+                .map(|&index| self.nodes[index].unpack())
+                .collect::<Result<Vec<_>, _>>()?;
+            let group: Vec<&Node> = group.iter().collect();
+            if let Some(survivor) = crate::placeholder::placeholder_survivor(&group) {
+                replace.insert(indices[0], PackedNode::pack(survivor)?);
+                drop.extend(indices[1..].iter().copied());
+            }
+        }
+        if replace.is_empty() {
+            return Ok(());
+        }
+        let old = std::mem::take(&mut self.nodes);
+        self.nodes = old
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !drop.contains(index))
+            .map(|(index, node)| replace.remove(&index).unwrap_or(node))
+            .collect();
+        Ok(())
+    }
+
     /// Decode every fact, in order.
     pub fn into_facts(self) -> Result<(Vec<Node>, Vec<Edge>), GraphError> {
         Ok((
