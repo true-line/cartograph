@@ -49,7 +49,8 @@ fn count(value: &impl Serialize) -> Option<usize> {
     Some(serde_json::to_vec(value).ok()?.len())
 }
 
-/// Derive ownership from the exact selection caps passed to read_capabilities_bounded.
+/// Derive ownership from the exact selection caps passed to read_capabilities_bounded
+/// or read_capabilities_and_actors_bounded, which share one combined charge.
 /// Caps above publication maxima cannot enlarge the result. Even zero selection
 /// caps require full single-row verification; neither metadata nor row scratch
 /// scales down with the selected-byte limit. Checked overflow returns None.

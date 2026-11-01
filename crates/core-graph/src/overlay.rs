@@ -379,6 +379,28 @@ impl OverlayStore {
         max_facts: usize,
         max_bytes: usize,
     ) -> Result<OverlayRead, OverlayError> {
+        self.read_nodes_bounded(current, &["Capability"], max_facts, max_bytes)
+    }
+
+    /// As [`Self::read_capabilities_bounded`], retaining Capability and Actor
+    /// nodes in key order under one combined count and byte charge, so the
+    /// same [`capability_read_workspace`] bounds it.
+    pub fn read_capabilities_and_actors_bounded(
+        &self,
+        current: &StoreRevision,
+        max_facts: usize,
+        max_bytes: usize,
+    ) -> Result<OverlayRead, OverlayError> {
+        self.read_nodes_bounded(current, &["Capability", "Actor"], max_facts, max_bytes)
+    }
+
+    fn read_nodes_bounded(
+        &self,
+        current: &StoreRevision,
+        labels: &[&str],
+        max_facts: usize,
+        max_bytes: usize,
+    ) -> Result<OverlayRead, OverlayError> {
         let tx = self.connection.unchecked_transaction()?;
         let meta: Option<(Option<String>, Option<String>)> = tx
             .query_row(
@@ -432,7 +454,8 @@ impl OverlayStore {
                 if fact.cites.is_empty() || check_provenance(&fact.item).is_err() {
                     return Err(OverlayError::Schema("overlay fact shape"));
                 }
-                if !limited && matches!(&fact.item, OverlayItem::Node(n) if n.label == "Capability")
+                if !limited
+                    && matches!(&fact.item, OverlayItem::Node(n) if labels.contains(&n.label.as_str()))
                 {
                     if selected.len() >= max_facts
                         || json.len() > max_bytes.saturating_sub(selected_bytes)

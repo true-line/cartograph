@@ -896,3 +896,106 @@ fn capability_workspace_admits_stale_revision_strings_up_to_the_stored_basis_cap
     let canonical = serde_json::to_string(&basis).unwrap();
     assert!(bound.metadata_peak_bytes >= raw.len() + canonical.len() + stale.graph_instance.len());
 }
+
+fn with_actor_and_other() -> Vec<OverlayFact> {
+    let mut input = facts();
+    for (id, label) in [("actor:owner", "Actor"), ("zz:other", "Other")] {
+        input.push(OverlayFact {
+            item: OverlayItem::Node(node(id, label)),
+            cites: input[0].cites.clone(),
+        });
+    }
+    input
+}
+
+// AC-0533: Capability and Actor nodes share one count and byte charge, in key
+// order; limits never return partial facts and the Capability read is unchanged.
+#[test]
+fn combined_read_charges_capabilities_and_actors_together() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    let read = |s: &OverlayStore, count, bytes| {
+        s.read_capabilities_and_actors_bounded(&base.revision, count, bytes)
+    };
+    assert_eq!(read(&store, 0, 0).unwrap(), OverlayRead::Absent);
+    let input = with_actor_and_other();
+    store.publish(&base, recipe(), input.clone()).unwrap();
+    let mut expected = vec![input[0].clone(), input[2].clone()];
+    expected.sort_by_key(|a| a.key());
+    let bytes: usize = expected
+        .iter()
+        .map(|f| serde_json::to_string(f).unwrap().len())
+        .sum();
+    let (identity, basis, selected) = current(read(&store, 2, bytes).unwrap());
+    assert_eq!(selected, expected);
+    for (count, cap) in [(1, MAX_BYTES), (2, bytes - 1), (0, 0)] {
+        assert!(matches!(
+            read(&store, count, cap),
+            Err(OverlayError::SelectionLimit)
+        ));
+    }
+    let capability_bytes = serde_json::to_string(&input[0]).unwrap().len();
+    assert_eq!(
+        store
+            .read_capabilities_bounded(&base.revision, 1, capability_bytes)
+            .unwrap(),
+        OverlayRead::Current {
+            identity,
+            basis,
+            facts: vec![input[0].clone()],
+        }
+    );
+    let mut other = base.revision.clone();
+    other.graph_instance = "different-instance".into();
+    assert_eq!(
+        store
+            .read_capabilities_and_actors_bounded(&other, 0, 0)
+            .unwrap(),
+        store.read(&other).unwrap()
+    );
+    assert_eq!(snapshot(&graph).graph, base.graph);
+    assert_eq!(graph.read_revision().unwrap(), base.revision);
+}
+
+// AC-0533: corruption in any row wins over a selection overflow, as for the
+// Capability read.
+#[test]
+fn combined_read_rejects_corruption_after_overflow() {
+    let graph = base();
+    let base = snapshot(&graph);
+    let mut store = store(&graph);
+    let input = with_actor_and_other();
+    for target in ["actor:owner", "zz:other"] {
+        for (assignment, resealed) in [
+            ("key = key || 'wrong'", true),
+            ("fact = json_set(fact, '$.cites', json('[]'))", true),
+            ("fact = json_remove(fact, '$.item.Node.props.prov')", true),
+            ("fact = '{'", true),
+            ("fact = replace(fact, 'name', 'nome')", false),
+        ] {
+            store.publish(&base, recipe(), input.clone()).unwrap();
+            store
+                .connection
+                .execute(
+                    &format!("UPDATE overlay_facts SET {assignment} WHERE fact LIKE '%{target}%'"),
+                    [],
+                )
+                .unwrap();
+            if resealed {
+                reseal(&store);
+            }
+            for count in [0, 1, 2] {
+                let result =
+                    store.read_capabilities_and_actors_bounded(&base.revision, count, MAX_BYTES);
+                assert!(
+                    matches!(
+                        result,
+                        Err(OverlayError::Schema(_) | OverlayError::Encoding(_))
+                    ),
+                    "{target} {assignment}: {result:?}"
+                );
+            }
+        }
+    }
+}
