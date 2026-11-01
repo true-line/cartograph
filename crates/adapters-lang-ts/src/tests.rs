@@ -2566,6 +2566,41 @@ fn packed_walk_and_cache_reuse_match_a_fresh_walk() {
 }
 
 #[test]
+fn packed_walk_returns_the_decoded_walks_facts_packed() {
+    // AC-0547 (#1574): the packed walk hands back the same facts, in order,
+    // without decoding them, and leaves the extraction's lists empty.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.ts"),
+        "import { b } from './b';\nimport x from 'left-pad';\nexport function a() { return b(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.ts"),
+        "export function b() { return 1; }\n",
+    )
+    .unwrap();
+    let id = SourceId {
+        repo: "qwtm/example",
+        commit: "c1",
+    };
+    let (decoded, _) =
+        extract_dir_incremental(dir.path(), &id, &mut IncrementalCache::default()).unwrap();
+    let (rest, store, stats) = extract_dir_incremental_packed(
+        dir.path(),
+        &id,
+        &mut IncrementalCache::default(),
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(stats.recomputed_files, 2);
+    assert!(rest.nodes.is_empty() && rest.edges.is_empty());
+    assert_eq!(rest.default_exports, decoded.default_exports);
+    assert_eq!(store.into_facts().unwrap(), (decoded.nodes, decoded.edges));
+}
+
+#[test]
 fn tsconfig_paths_alias_resolves_to_a_real_file_with_the_config_cited() {
     // #213 (AC-0100): a `paths` alias is applied before the specifier is
     // classified as an opaque package, and the tsconfig that decided the

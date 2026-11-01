@@ -3125,6 +3125,23 @@ pub fn extract_dir_incremental_with_progress(
     registries: &Registries,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    let (mut out, store, stats) =
+        extract_dir_incremental_packed(root, id, cache, registries, on_file)?;
+    (out.nodes, out.edges) = store.into_facts()?;
+    Ok((out, stats))
+}
+
+/// [`extract_dir_incremental_with_progress`] without the final decode: the
+/// facts come back packed in walk order and the returned extraction's
+/// `nodes` and `edges` are empty, so a caller that keeps the pipeline packed
+/// never holds a decoded copy (#1574, #725).
+pub fn extract_dir_incremental_packed(
+    root: &Path,
+    id: &SourceId,
+    cache: &mut IncrementalCache,
+    registries: &Registries,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<(Extraction, core_graph::facts::FactStore, IncrementalStats), ExtractError> {
     let identity = registries.identity();
     if cache.registries.as_ref() != Some(&identity) {
         cache.files.clear();
@@ -3203,8 +3220,7 @@ pub fn extract_dir_incremental_with_progress(
     );
     merged?;
     complete_directory(&mut out, &mut store, root, id)?;
-    (out.nodes, out.edges) = store.into_facts()?;
-    Ok((out, stats))
+    Ok((out, store, stats))
 }
 
 fn append_extraction(out: &mut Extraction, ex: Extraction) {

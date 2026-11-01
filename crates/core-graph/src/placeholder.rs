@@ -215,38 +215,14 @@ pub fn reconcile_placeholders(nodes: &mut Vec<Node>) {
     let mut replace: std::collections::HashMap<usize, Node> = Default::default();
     let mut drop: HashSet<usize> = HashSet::new();
     for indices in groups.values() {
-        if indices.len() < 2 || !indices.iter().all(|&index| is_placeholder(&nodes[index])) {
+        if indices.len() < 2 {
             continue;
         }
-        let first = indices[0];
-        let survivor = if let Some(&gap) = indices.iter().find(|&&index| is_gap(&nodes[index])) {
-            nodes[gap].clone()
-        } else if indices
-            .iter()
-            .all(|&index| nodes[index].props["boundary"] == nodes[first].props["boundary"])
-        {
-            nodes[first].clone()
-        } else {
-            let node = &nodes[first];
-            let prov: Option<Provenance> = node
-                .props
-                .get("prov")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok());
-            let (evidence, extractor_id) = prov
-                .map(|prov| (prov.evidence, prov.extractor_id))
-                .unwrap_or_default();
-            mint(
-                &node.id,
-                &node.label,
-                Boundary::Unresolved {
-                    reason: "references disagree on the boundary".into(),
-                },
-                evidence,
-                extractor_id,
-            )
+        let group: Vec<&Node> = indices.iter().map(|&index| &nodes[index]).collect();
+        let Some(survivor) = placeholder_survivor(&group) else {
+            continue;
         };
-        replace.insert(first, survivor);
+        replace.insert(indices[0], survivor);
         drop.extend(indices[1..].iter().copied());
     }
     if replace.is_empty() {
@@ -259,6 +235,42 @@ pub fn reconcile_placeholders(nodes: &mut Vec<Node>) {
         }
         nodes.push(replace.remove(&index).unwrap_or(node));
     }
+}
+
+/// The node that replaces one id's duplicates (two or more, in extraction
+/// order) under [`reconcile_placeholders`], or `None` when any duplicate is
+/// not a placeholder and the group stays as it is.
+pub(crate) fn placeholder_survivor(group: &[&Node]) -> Option<Node> {
+    if !group.iter().all(|node| is_placeholder(node)) {
+        return None;
+    }
+    let first = group[0];
+    Some(if let Some(gap) = group.iter().find(|node| is_gap(node)) {
+        (*gap).clone()
+    } else if group
+        .iter()
+        .all(|node| node.props["boundary"] == first.props["boundary"])
+    {
+        first.clone()
+    } else {
+        let prov: Option<Provenance> = first
+            .props
+            .get("prov")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let (evidence, extractor_id) = prov
+            .map(|prov| (prov.evidence, prov.extractor_id))
+            .unwrap_or_default();
+        mint(
+            &first.id,
+            &first.label,
+            Boundary::Unresolved {
+                reason: "references disagree on the boundary".into(),
+            },
+            evidence,
+            extractor_id,
+        )
+    })
 }
 
 /// Ensure every edge endpoint exists as a node. Each missing endpoint
@@ -700,5 +712,89 @@ mod tests {
 
     fn provenance_of(edge: &Edge) -> Provenance {
         serde_json::from_value(edge.props["prov"].clone()).unwrap()
+    }
+
+    #[test]
+    fn packed_reconcile_matches_list_reconcile() {
+        // AC-0547 (#1574): reconciling packed nodes keeps the list form's
+        // survivors, slots and drops: a Gap wins, disagreeing proofs become a
+        // Gap, agreeing proofs keep the first, a parsed node is untouched.
+        let gap = placeholder_from(
+            "t0.adapter-ts",
+            Boundary::Unresolved {
+                reason: "unresolved import target".into(),
+            },
+        );
+        let internal = placeholder_from(
+            "t0.adapter-ts",
+            Boundary::Internal {
+                reason: "workspace package foo".into(),
+                evidence: vec![],
+            },
+        );
+        let confirmed = placeholder_from("t0.adapter-go", external());
+        let file = |id: &str| Node {
+            id: id.into(),
+            label: "File".into(),
+            props: serde_json::json!({ "n": id }),
+        };
+        let parsed = Node {
+            id: "mod:foo".into(),
+            label: "Module".into(),
+            props: serde_json::json!({ "declared": true }),
+        };
+        let cases = [
+            vec![
+                confirmed.clone(),
+                file("file:r@a"),
+                gap.clone(),
+                file("file:r@b"),
+            ],
+            vec![internal.clone(), file("file:r@a"), confirmed.clone()],
+            vec![
+                confirmed.clone(),
+                file("file:r@a"),
+                confirmed.clone(),
+                confirmed.clone(),
+            ],
+            vec![gap.clone(), parsed.clone(), file("file:r@a")],
+            vec![file("file:r@a"), file("file:r@a"), file("file:r@b")],
+            vec![file("file:r@a")],
+            vec![],
+        ];
+        for case in cases {
+            let mut listed = case.clone();
+            reconcile_placeholders(&mut listed);
+            let mut packed = crate::facts::FactStore::from_facts(case, vec![]).unwrap();
+            packed.reconcile_placeholders().unwrap();
+            assert_eq!(packed.into_facts().unwrap().0, listed);
+        }
+    }
+
+    #[test]
+    fn into_packed_moves_facts_in_order() {
+        let nodes = vec![
+            Node {
+                id: "b".into(),
+                label: "File".into(),
+                props: serde_json::json!({ "x": 1 }),
+            },
+            Node {
+                id: "a".into(),
+                label: "File".into(),
+                props: serde_json::json!({}),
+            },
+        ];
+        let edges = vec![Edge {
+            src: "b".into(),
+            dst: "a".into(),
+            label: "IMPORTS".into(),
+            props: serde_json::json!({ "y": [2] }),
+        }];
+        let store = crate::facts::FactStore::from_facts(nodes.clone(), edges.clone()).unwrap();
+        let (packed_nodes, packed_edges) = store.into_packed();
+        let unpacked: Vec<Node> = packed_nodes.iter().map(|n| n.unpack().unwrap()).collect();
+        let unpacked_edges: Vec<Edge> = packed_edges.iter().map(|e| e.unpack().unwrap()).collect();
+        assert_eq!((unpacked, unpacked_edges), (nodes, edges));
     }
 }
