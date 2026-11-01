@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.58.0
+
+### Minor Changes
+
+- 6630f29: Enable explicitly selected domain-analyst@18 investigations through the existing App and owner-granted MCP coordinator, with finite acquisition choices, durable continuation and existing per-step consent. Preserve historical versions, default selection and resource limits (#1385).
+
+### Patch Changes
+
+- 87a8d6c: Prepare exact @18 UI family recognition and conditional version selection for a future compatible catalog. Runtime dispatch and current default/catalog exposure remain unchanged (#1586).
+- 2f34767: Job-store connections now wait up to 5 seconds (was 1 second) for a competing writer before reporting a storage error. This reduces spurious storage failures when app and MCP requests contend on a busy machine, for example concurrent identical MCP retries. Contention beyond 5 seconds can still fail.
+
 ## 0.57.1
 
 ### Patch Changes
