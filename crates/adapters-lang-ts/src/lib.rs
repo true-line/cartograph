@@ -331,6 +331,20 @@ impl Extraction {
     }
 }
 
+/// [`Extraction::close_over_endpoints`] over facts held through
+/// [`core_graph::facts::FactAccess`], plain or packed: only edges with an
+/// endpoint no node defines are decoded (#1574, AC-0531).
+pub fn close_over_fact_endpoints(
+    facts: &mut impl core_graph::facts::FactAccess,
+) -> Result<(), core_graph::GraphError> {
+    core_graph::placeholder::close_over_facts(
+        facts,
+        EXTRACTOR_ID,
+        core_graph::placeholder::label_for_id,
+        |_, _| None,
+    )
+}
+
 /// Identity of the source being extracted; lands in every `EvidenceRef`.
 pub struct SourceId<'a> {
     /// Repository identifier (e.g. `owner/name`, or `local` for a bare dir).

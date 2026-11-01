@@ -945,6 +945,20 @@ pub fn apply_trace(
     apply_traces(nodes, edges, &[(trace, trace_path)])
 }
 
+/// Whether [`apply_traces`] can change anything: it has traces to apply, or
+/// `gaps` (the recovered `Gap` nodes) hold an EventBridge detail-type Gap,
+/// which records its attempted T1 tier even when no trace observed it. A
+/// caller holding packed facts decodes everything for the pass only then
+/// (#1574).
+pub fn traces_apply(gaps: &[Node], traces: &[(&ObservedTrace, &str)]) -> bool {
+    !traces.is_empty()
+        || gaps.iter().any(|node| {
+            node.label == "Gap"
+                && node.props.get("kind").and_then(serde_json::Value::as_str)
+                    == Some(eventbridge::GAP_KIND)
+        })
+}
+
 /// Apply several OTLP trace files, each `(trace, path)`. HTTP enrichment
 /// and the generic channel match run per file in the given order;
 /// EventBridge Gaps are decided once over every file's spans, so a conflict
@@ -1477,6 +1491,58 @@ mod tests {
             nodes
                 .iter()
                 .all(|node| { node.props["attempted_tiers"] == serde_json::json!(["T0", "T1"]) })
+        );
+    }
+
+    #[test]
+    fn traces_apply_is_false_only_when_the_pass_cannot_change_anything() {
+        // AC-0548 (#1574): with no traces and no EventBridge Gap the pass
+        // leaves every fact as it was; an EventBridge Gap still records its
+        // attempted T1 tier, so the predicate must say the pass applies.
+        let evidence = |start: u64| {
+            serde_json::json!({ "evidence": [{
+                "repo": "r", "path": "a.ts", "byte_start": start, "byte_end": start + 5,
+                "commit_sha": "c1"
+            }] })
+        };
+        let file = Node {
+            id: "file:r@a.ts".into(),
+            label: "File".into(),
+            props: serde_json::json!({}),
+        };
+        let fetch_gap = Node {
+            id: "gap:fetch".into(),
+            label: "Gap".into(),
+            props: serde_json::json!({ "kind": "unresolved-fetch", "prov": evidence(1) }),
+        };
+        let bridge_gap = Node {
+            id: "gap:bridge".into(),
+            label: "Gap".into(),
+            props: serde_json::json!({
+                "kind": eventbridge::GAP_KIND, "raw": "order.placed", "prov": evidence(4)
+            }),
+        };
+        let edge = |dst: &str| Edge {
+            src: "file:r@a.ts".into(),
+            dst: dst.into(),
+            label: "PUBLISHES".into(),
+            props: serde_json::json!({}),
+        };
+
+        let mut nodes = vec![file.clone(), fetch_gap.clone()];
+        let mut edges = vec![edge("gap:fetch")];
+        assert!(!traces_apply(&[fetch_gap], &[]));
+        let before = (nodes.clone(), edges.clone());
+        apply_traces(&mut nodes, &mut edges, &[]);
+        assert_eq!((nodes, edges), before);
+
+        let mut nodes = vec![file, bridge_gap.clone()];
+        let mut edges = vec![edge("gap:bridge")];
+        assert!(traces_apply(&[bridge_gap], &[]));
+        apply_traces(&mut nodes, &mut edges, &[]);
+        assert_eq!(
+            nodes[1].props["attempted_tiers"],
+            serde_json::json!(["T0", "T1"])
         );
     }
 }

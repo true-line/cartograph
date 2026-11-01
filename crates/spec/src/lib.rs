@@ -62,7 +62,7 @@ mod views;
 mod workbench;
 pub use adr::{
     AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, derive_adr_facts, derive_adr_facts_bounded,
-    extract_found_adrs,
+    extract_found_adrs, extract_found_adrs_among,
 };
 pub use contract::{
     CONTRACT_DRIFT_EXTRACTOR_ID, CONTRACT_EXTRACTOR_ID, CONTRACT_METHODS, ContractFacts,
