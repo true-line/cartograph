@@ -5424,3 +5424,108 @@ class FakeController {
     assert!(endpoint_ids(&out).is_empty());
     assert!(route_gaps(&out).is_empty());
 }
+
+// AC-0557: comments inside an argument never change what it says; a method or
+// path argument T0 cannot read fails closed; under a star-only proof an
+// unresolved verb settles through shadowing, and one shadowed annotation that
+// expands to several verbs and routes yields a single shadow Gap.
+#[test]
+fn spring_request_mapping_arguments_survive_comments_and_shadowing() {
+    let commented = br#"package com.demo.web
+
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+@RequestMapping(value = ["/api"], method /* class */ = [RequestMethod.POST])
+class CommentedController {
+    @RequestMapping(value = ["/save"], method /* fn */ = [RequestMethod.PUT])
+    fun save(): String = "s"
+
+    @RequestMapping(value /* path */ = ["/plain"])
+    fun plain(): String = "p"
+}
+"#;
+    let out = extract_source(
+        commented,
+        "src/main/kotlin/com/demo/web/CommentedController.kt",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint_ids(&out),
+        [
+            "ep:local/demo@POST:/api/plain",
+            "ep:local/demo@POST:/api/save",
+            "ep:local/demo@PUT:/api/save",
+        ]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let controller = |package: &str| {
+        format!(
+            "package {package}\n\nimport org.springframework.web.bind.annotation.*\n\n@RestController\nclass Legacy {{\n    @RequestMapping(value = [\"/x\"], method = METHODS)\n    fun x(): String = \"x\"\n\n    @RequestMapping(value = [\"/a\", \"/b\"], method = [RequestMethod.GET, RequestMethod.POST])\n    fun many(): String = \"m\"\n}}\n"
+        )
+    };
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/Legacy.kt",
+        &controller("com.demo.web"),
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/web/RequestMapping.kt",
+        "package com.demo.web\n\nannotation class RequestMapping(val value: Array<String> = [])\n",
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/plain/Legacy.kt",
+        &controller("com.demo.plain"),
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut gaps: Vec<(String, String, String)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .map(|node| {
+            (
+                node.id.split('@').nth(1).unwrap_or_default().to_string(),
+                node.props["method"].as_str().unwrap().to_string(),
+                node.props["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    let shadowed =
+        "Spring annotation proven only by a star import is shadowed by a same-package declaration";
+    assert_eq!(
+        gaps,
+        [
+            (
+                "src/main/kotlin/com/demo/plain/Legacy.kt".to_string(),
+                "?".to_string(),
+                "unresolved Spring request method".to_string()
+            ),
+            (
+                "src/main/kotlin/com/demo/web/Legacy.kt".to_string(),
+                "?".to_string(),
+                shadowed.to_string()
+            ),
+            (
+                "src/main/kotlin/com/demo/web/Legacy.kt".to_string(),
+                "GET|POST".to_string(),
+                shadowed.to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        endpoint_ids(&out),
+        [
+            "ep:local/demo@GET:/a",
+            "ep:local/demo@GET:/b",
+            "ep:local/demo@POST:/a",
+            "ep:local/demo@POST:/b",
+        ]
+    );
+}

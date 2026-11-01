@@ -118,10 +118,13 @@ struct PendingEndpoint {
 }
 
 impl PendingEndpoint {
-    /// Emit the endpoint, or the shadow Gap when a role is obscured.
+    /// Emit the endpoint, or the shadow Gap when a role is obscured. One
+    /// mapping annotation may expand to several verb/route endpoints that
+    /// share one annotation-span Gap; `emitted` keeps that Gap single.
     fn settle(
         self,
         declared: impl Fn(&str, &str) -> bool,
+        emitted: &mut HashSet<String>,
         nodes: &mut Vec<Node>,
         edges: &mut Vec<Edge>,
     ) {
@@ -130,6 +133,9 @@ impl PendingEndpoint {
             .iter()
             .any(|group| group.iter().all(|fqn| declared(fqn, &self.path)));
         let (node, edge) = if shadowed { self.gap } else { self.endpoint };
+        if shadowed && !emitted.insert(node.id.clone()) {
+            return;
+        }
         nodes.push(node);
         edges.push(edge);
     }
@@ -422,8 +428,26 @@ struct AnnotationUse<'t> {
     spelled: String,
     node: TsNode<'t>,
     path: PathArg,
-    /// The `method =` argument's value, when one is written (#1605).
-    method: Option<TsNode<'t>>,
+    /// The `method =` argument (#1605).
+    method: MethodArg<'t>,
+}
+
+/// A mapping annotation's `method =` argument: absent (no restriction),
+/// a value to resolve, or written in a shape T0 cannot read (fails closed).
+#[derive(Debug, Clone, Copy)]
+enum MethodArg<'t> {
+    Absent,
+    Value(TsNode<'t>),
+    Unreadable,
+}
+
+/// Named children that are not comments: a comment may sit anywhere inside
+/// an argument (`method /* c */ = [...]`) without changing what it says.
+fn code_children(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let mut walk = node.walk();
+    node.named_children(&mut walk)
+        .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+        .collect()
 }
 
 /// A string literal with no interpolation — `"/api/users"` yes,
@@ -495,13 +519,7 @@ fn path_value(cx: &FileCx<'_>, value: TsNode<'_>) -> PathArg {
 /// The elements of an `arrayOf(…)` / `arrayOf<T>(…)` call, each a plain
 /// argument; `None` for any other call or a spread argument (fail closed).
 fn array_of_elements<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<Vec<TsNode<'t>>> {
-    fn children(node: TsNode<'_>) -> Vec<TsNode<'_>> {
-        let mut walk = node.walk();
-        node.named_children(&mut walk)
-            .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
-            .collect()
-    }
-    let parts = children(call);
+    let parts = code_children(call);
     let (callee, arguments) = match parts.as_slice() {
         [callee, arguments] => (*callee, *arguments),
         [callee, types, arguments] if types.kind() == "type_arguments" => (*callee, *arguments),
@@ -514,8 +532,8 @@ fn array_of_elements<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<Vec<TsNode
         return None;
     }
     let mut elements = Vec::new();
-    for argument in children(arguments) {
-        match children(argument).as_slice() {
+    for argument in code_children(arguments) {
+        match code_children(argument).as_slice() {
             [element]
                 if argument.kind() == "value_argument"
                     && !cx.text(&argument).trim_start().starts_with('*') =>
@@ -534,15 +552,11 @@ fn array_of_elements<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<Vec<TsNode
 /// unprovable; other named arguments (`produces = …`, `method = …`) do not
 /// designate a path and leave it [`PathArg::Absent`].
 fn arguments_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> PathArg {
-    let mut walk = arguments.walk();
-    for argument in arguments.named_children(&mut walk) {
+    for argument in code_children(arguments) {
         if argument.kind() != "value_argument" {
             continue;
         }
-        let children: Vec<TsNode<'_>> = {
-            let mut inner = argument.walk();
-            argument.named_children(&mut inner).collect()
-        };
+        let children = code_children(argument);
         match children.as_slice() {
             [value] => {
                 return match pure_string_literal(cx, *value) {
@@ -555,29 +569,35 @@ fn arguments_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> PathArg {
                     return path_value(cx, *value);
                 }
             }
+            // A path argument in a shape T0 cannot read fails closed rather
+            // than collapsing to the absent default.
+            [key, ..] if key.kind() == "identifier" && matches!(cx.text(key), "value" | "path") => {
+                return PathArg::Dynamic;
+            }
             _ => {}
         }
     }
     PathArg::Absent
 }
 
-/// The value of the `name = value` argument in `value_arguments`, if any.
-fn named_argument<'t>(cx: &FileCx<'_>, arguments: TsNode<'t>, name: &str) -> Option<TsNode<'t>> {
-    let mut walk = arguments.walk();
-    arguments
-        .named_children(&mut walk)
-        .filter(|argument| argument.kind() == "value_argument")
-        .find_map(|argument| {
-            let mut inner = argument.walk();
-            match argument
-                .named_children(&mut inner)
-                .collect::<Vec<_>>()
-                .as_slice()
-            {
-                [key, value] if key.kind() == "identifier" && cx.text(key) == name => Some(*value),
-                _ => None,
+/// The `method = value` argument in `value_arguments`. An argument that
+/// names `method` but is not one plain `key = value` is unreadable.
+fn method_argument<'t>(cx: &FileCx<'_>, arguments: TsNode<'t>) -> MethodArg<'t> {
+    for argument in code_children(arguments) {
+        if argument.kind() != "value_argument" {
+            continue;
+        }
+        match code_children(argument).as_slice() {
+            [key, value] if key.kind() == "identifier" && cx.text(key) == "method" => {
+                return MethodArg::Value(*value);
             }
-        })
+            [key, ..] if key.kind() == "identifier" && cx.text(key) == "method" => {
+                return MethodArg::Unreadable;
+            }
+            _ => {}
+        }
+    }
+    MethodArg::Absent
 }
 
 /// The `method =` restriction of one `@RequestMapping` (#1605, mirroring
@@ -591,20 +611,16 @@ fn named_argument<'t>(cx: &FileCx<'_>, arguments: TsNode<'t>, name: &str) -> Opt
 /// (`ALL`); see `RequestMethodsRequestCondition.combine`.
 fn spring_request_methods(
     cx: &FileCx<'_>,
-    value: Option<TsNode<'_>>,
+    method: MethodArg<'_>,
     imports: &Imports,
 ) -> Option<(BTreeSet<String>, bool)> {
-    let Some(value) = value else {
-        return Some((BTreeSet::new(), false));
+    let value = match method {
+        MethodArg::Absent => return Some((BTreeSet::new(), false)),
+        MethodArg::Unreadable => return None,
+        MethodArg::Value(value) => value,
     };
-    fn children(node: TsNode<'_>) -> Vec<TsNode<'_>> {
-        let mut walk = node.walk();
-        node.named_children(&mut walk)
-            .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
-            .collect()
-    }
     let elements: Vec<TsNode<'_>> = match value.kind() {
-        "collection_literal" => children(value),
+        "collection_literal" => code_children(value),
         "call_expression" => array_of_elements(cx, value)?,
         _ => vec![value],
     };
@@ -661,20 +677,20 @@ fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<Annota
                     spelled,
                     node: annotation,
                     path: PathArg::Absent,
-                    method: None,
+                    method: MethodArg::Absent,
                 });
             }
             "constructor_invocation" => {
                 let mut inner = child.walk();
                 let mut spelled = None;
                 let mut path = PathArg::Absent;
-                let mut method = None;
+                let mut method = MethodArg::Absent;
                 for part in child.named_children(&mut inner) {
                     match part.kind() {
                         "user_type" => spelled = Some(spelling(cx.text(&part))),
                         "value_arguments" => {
                             path = arguments_path(cx, part);
-                            method = named_argument(cx, part, "method");
+                            method = method_argument(cx, part);
                         }
                         _ => {}
                     }
@@ -1489,9 +1505,11 @@ pub fn extract_source(
     let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
     out.fetch_sites.extend(unjoined_sites);
     let names = out.shadow_names.clone();
+    let mut emitted = HashSet::new();
     for pending in std::mem::take(&mut out.pending_endpoints) {
         pending.settle(
             |fqn, path| names.iter().any(|name| name.obscures(fqn, path)),
+            &mut emitted,
             &mut out.nodes,
             &mut out.edges,
         );
@@ -1856,8 +1874,18 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                     "?",
                     "unresolved Spring request method",
                 );
-                out.nodes.push(gap.0);
-                out.edges.push(gap.1);
+                if shadowed_by.is_empty() {
+                    out.nodes.push(gap.0);
+                    out.edges.push(gap.1);
+                } else {
+                    // A shadowed binding, not the verb, is then what blocks.
+                    out.pending_endpoints.push(PendingEndpoint {
+                        path: path.to_string(),
+                        shadowed_by: shadowed_by.into_iter().collect(),
+                        endpoint: gap,
+                        gap: spring_route_gap(&cx, annotation.node, handler, "?", SPRING_SHADOWED),
+                    });
+                }
                 continue;
             };
             if method_star {
@@ -2525,12 +2553,14 @@ pub fn extract_dir_incremental_with_progress(
             .into_iter()
             .collect()
     };
+    let mut emitted = HashSet::new();
     for pending in std::mem::take(&mut out.pending_endpoints) {
         pending.settle(
             |fqn, path| {
                 java_types.contains(fqn)
                     || out.shadow_names.iter().any(|name| name.obscures(fqn, path))
             },
+            &mut emitted,
             &mut out.nodes,
             &mut out.edges,
         );
