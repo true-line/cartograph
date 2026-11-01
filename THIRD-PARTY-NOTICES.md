@@ -4388,7 +4388,7 @@ Used by:
 - regex 1.13.1 — https://github.com/rust-lang/regex
 - rustc-demangle 0.1.28 — https://github.com/rust-lang/rustc-demangle
 - rustix-linux-procfs 0.1.1 — https://github.com/sunfishcode/rustix-linux-procfs
-- rustix 1.1.5 — https://github.com/bytecodealliance/rustix
+- rustix 1.1.6 — https://github.com/bytecodealliance/rustix
 - rustls 0.23.46 — https://github.com/rustls/rustls
 - scopeguard 1.2.0 — https://github.com/bluss/scopeguard
 - security-framework-sys 2.17.0 — https://github.com/kornelski/rust-security-framework
@@ -7753,7 +7753,7 @@ Used by:
 - aho-corasick 1.1.4 — https://github.com/BurntSushi/aho-corasick
 - byteorder 1.5.0 — https://github.com/BurntSushi/byteorder
 - globset 0.4.19 — https://github.com/BurntSushi/ripgrep/tree/master/crates/globset
-- ignore 0.4.33 — https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore
+- ignore 0.4.34 — https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore
 - memchr 2.8.2 — https://github.com/BurntSushi/memchr
 - termcolor 1.4.1 — https://github.com/BurntSushi/termcolor
 - walkdir 2.5.0 — https://github.com/BurntSushi/walkdir
