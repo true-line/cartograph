@@ -162,10 +162,23 @@ fn unplaceholdered_set(
         .collect())
 }
 
+/// The nodes [`repo_coverage`] counts, decoded from packed facts: Resource,
+/// Endpoint and Channel nodes and any node whose packed props mention
+/// `pulumi`, a superset of every node its predicates select (#1574).
+fn coverage_view(facts: &FactStore) -> Result<adapters_lang_ts::Extraction, String> {
+    let mut view = adapters_lang_ts::Extraction::default();
+    view.nodes = facts
+        .nodes_where(|node| {
+            matches!(node.label.as_str(), "Resource" | "Endpoint" | "Channel")
+                || node.props_json().contains("pulumi")
+        })
+        .map_err(pack_err)?;
+    Ok(view)
+}
+
 /// [`distinct_node_count`] over packed nodes.
-fn distinct_packed_node_count(facts: &FactStore) -> u64 {
-    facts
-        .nodes()
+fn distinct_packed_node_count(nodes: &[PackedNode]) -> u64 {
+    nodes
         .iter()
         .map(|node| node.id.as_str())
         .collect::<std::collections::BTreeSet<_>>()
@@ -173,9 +186,8 @@ fn distinct_packed_node_count(facts: &FactStore) -> u64 {
 }
 
 /// [`distinct_edge_count`] over packed edges.
-fn distinct_packed_edge_count(facts: &FactStore) -> u64 {
-    facts
-        .edges()
+fn distinct_packed_edge_count(edges: &[PackedEdge]) -> u64 {
+    edges
         .iter()
         .map(|edge| (edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
         .collect::<std::collections::BTreeSet<_>>()
@@ -1464,6 +1476,7 @@ fn extract_tree_with_primary(
 
 /// Extract one tree. Event sites are recognized under `registries`, the
 /// one registry snapshot of the whole ingest (#594).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn extract_tree_with_registries(
     root: &std::path::Path,
@@ -1485,6 +1498,62 @@ fn extract_tree_with_registries(
     receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
     reads: &mut ProducerReads,
 ) -> Result<(adapters_lang_ts::Extraction, LayerBreakdown, DeltaSummary), String> {
+    let (mut extraction, facts, layers, delta) = extract_tree_packed(
+        root,
+        repo,
+        commit,
+        layers,
+        manifest_env,
+        deferred_origins,
+        state_json,
+        pulumi_json,
+        otel_jsonl,
+        api_docs,
+        cache,
+        plugins,
+        registries,
+        on_file,
+        primary,
+        receipts,
+        reads,
+    )?;
+    (extraction.nodes, extraction.edges) = facts.into_facts().map_err(pack_err)?;
+    Ok((extraction, layers, delta))
+}
+
+/// Recovery's packed result: the extraction's sites and pending state (its
+/// `nodes` and `edges` empty), the facts packed in recovery order, and the
+/// layer and delta summaries. Publication takes the facts as they are
+/// (#1574, #725).
+type PackedRecovery = (
+    adapters_lang_ts::Extraction,
+    FactStore,
+    LayerBreakdown,
+    DeltaSummary,
+);
+
+/// [`extract_tree_with_registries`] without the final decode.
+#[allow(clippy::too_many_arguments)]
+fn extract_tree_packed(
+    root: &std::path::Path,
+    repo: &str,
+    commit: &str,
+    layers: &[String],
+    manifest_env: &std::collections::BTreeMap<String, String>,
+    // Origins the system manifest binds (#589); empty outside a system add.
+    deferred_origins: &std::collections::BTreeSet<String>,
+    state_json: Option<&std::path::Path>,
+    pulumi_json: Option<&std::path::Path>,
+    otel_jsonl: &[std::path::PathBuf],
+    api_docs: &[ingest::api_docs::ApiDocDeclaration],
+    cache: &mut RepoExtractionCache,
+    plugins: &[ActivePlugin],
+    registries: &Registries,
+    on_file: &mut dyn FnMut(&str),
+    primary: Option<&source_capture::Capture>,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
+    reads: &mut ProducerReads,
+) -> Result<PackedRecovery, String> {
     // Layer hints gate extractors (AC-0002): empty means everything; the
     // The TS pass covers server/events/client plus Pulumi infra/cloud; the HCL
     // pass covers Terraform infra/cloud.
@@ -1563,8 +1632,8 @@ fn extract_tree_with_registries(
     };
     layers.ts = LayerSummary {
         files: unplaceholdered(&facts, "File")?.len() as u64,
-        nodes: distinct_packed_node_count(&facts),
-        edges: distinct_packed_edge_count(&facts),
+        nodes: distinct_packed_node_count(facts.nodes()),
+        edges: distinct_packed_edge_count(facts.edges()),
     };
     if wants_application {
         // WebExtension manifests (US-0016): topology + permission facts.
@@ -2068,8 +2137,7 @@ fn extract_tree_with_registries(
     // and another's Confirmed boundary. The store keeps the last duplicate,
     // so reconcile first: a Gap is never shown as Confirmed (#237 review).
     facts.reconcile_placeholders().map_err(pack_err)?;
-    (extraction.nodes, extraction.edges) = facts.into_facts().map_err(pack_err)?;
-    Ok((extraction, layers, delta))
+    Ok((extraction, facts, layers, delta))
 }
 
 #[cfg(test)]
@@ -2212,6 +2280,39 @@ fn merge_edge_occurrences(edges: Vec<Edge>) -> std::collections::BTreeMap<EdgeKe
                 replacement.apply(&mut merged);
             }
             (key, merged)
+        })
+        .collect()
+}
+
+/// [`merge_edge_occurrences`] over packed edges: a key with one occurrence
+/// keeps its packed edge as it is; only repeated keys are decoded, merged and
+/// repacked (#1574).
+fn merge_packed_edge_occurrences(
+    edges: Vec<PackedEdge>,
+) -> Result<std::collections::BTreeMap<EdgeKey, PackedEdge>, core_graph::GraphError> {
+    let mut groups = std::collections::BTreeMap::<EdgeKey, Vec<usize>>::new();
+    for (index, edge) in edges.iter().enumerate() {
+        groups
+            .entry((edge.src.clone(), edge.dst.clone(), edge.label.clone()))
+            .or_default()
+            .push(index);
+    }
+    let mut slots = edges.into_iter().map(Some).collect::<Vec<_>>();
+    groups
+        .into_iter()
+        .map(|(key, indices)| {
+            let mut take = |index: usize| slots[index].take().expect("each index is grouped once");
+            if let [only] = indices[..] {
+                return Ok((key, take(only)));
+            }
+            let occurrences = indices
+                .iter()
+                .map(|&index| take(index).unpack())
+                .collect::<Result<Vec<_>, _>>()?;
+            let merged = merge_edge_occurrences(occurrences)
+                .remove(&key)
+                .expect("every occurrence shares the key");
+            Ok((key, PackedEdge::pack(merged)?))
         })
         .collect()
 }
@@ -2399,10 +2500,32 @@ fn same_edge(a: &PackedEdge, b: &PackedEdge) -> Result<bool, core_graph::GraphEr
 
 /// Publish `repo`'s facts, its source bindings, its coverage inventory and its
 /// per-fact receipt omission records in one write transaction.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn load_into_graph_with_bindings_and_omissions(
     graph: &mut SqliteGraphStore,
     extraction: adapters_lang_ts::Extraction,
+    repo: &str,
+    root: &std::path::Path,
+    commit: &str,
+    bindings: &[core_graph::source::SourceBinding],
+    coverage: Option<&core_graph::coverage::CoverageRecord>,
+    omissions: core_graph::source::SourceOmissions<'_>,
+) -> Result<ReconcileStats, String> {
+    let adapters_lang_ts::Extraction { nodes, edges, .. } = extraction;
+    let facts = FactStore::from_facts(nodes, edges).map_err(pack_err)?;
+    load_packed_into_graph(
+        graph, facts, repo, root, commit, bindings, coverage, omissions,
+    )
+}
+
+/// [`load_into_graph_with_bindings_and_omissions`] for facts already packed
+/// in recovery order: nothing is decoded but repeated edges, whose evidence
+/// is merged (#1574, #725).
+#[allow(clippy::too_many_arguments)]
+fn load_packed_into_graph(
+    graph: &mut SqliteGraphStore,
+    facts: FactStore,
     repo: &str,
     _root: &std::path::Path,
     commit: &str,
@@ -2429,13 +2552,12 @@ fn load_into_graph_with_bindings_and_omissions(
     // Last occurrence wins, in deterministic extraction order (SPEC-00 §4.4).
     // Facts move out of the extraction and are packed as they move, so the
     // publish holds compact JSON rather than `Value` trees (#1235, #725).
-    let adapters_lang_ts::Extraction { nodes, edges, .. } = extraction;
+    let (nodes, edges) = facts.into_packed();
     let extracted_nodes = nodes.len();
     let pack = |error: core_graph::GraphError| error.to_string();
     let mut current_nodes = std::collections::BTreeMap::<String, PackedNode>::new();
     let mut colliding_ids = std::collections::BTreeSet::new();
     for node in nodes {
-        let node = PackedNode::pack(node).map_err(pack)?;
         let id = node.id.clone();
         if let Some(previous) = current_nodes.insert(id.clone(), node)
             && !same_node(&previous, &current_nodes[&id]).map_err(pack)?
@@ -2445,18 +2567,14 @@ fn load_into_graph_with_bindings_and_omissions(
     }
     let merged = MergedFacts {
         nodes: (extracted_nodes - current_nodes.len()) as u64,
-        edges: edges.len() as u64 - distinct_edge_count(&edges),
+        edges: edges.len() as u64 - distinct_packed_edge_count(&edges),
         node_collisions: colliding_ids.len() as u64,
     };
     current_nodes.insert(
         repo_node.id.clone(),
         PackedNode::pack(repo_node).map_err(pack)?,
     );
-    let current_edges = merge_edge_occurrences(edges)
-        .into_iter()
-        .map(|(key, edge)| Ok((key, PackedEdge::pack(edge)?)))
-        .collect::<Result<std::collections::BTreeMap<_, _>, core_graph::GraphError>>()
-        .map_err(pack)?;
+    let current_edges = merge_packed_edge_occurrences(edges).map_err(pack)?;
     // Packed, never decoded whole: the snapshot is the whole graph across
     // every repo, so a `Value` copy would double the publish peak (#725).
     let expected = graph.read_packed_snapshot().map_err(pack)?;
@@ -4421,14 +4539,14 @@ fn run_ingest<R: tauri::Runtime>(
         unfollowed_links: primary.unfollowed.clone(),
         ..ProducerReads::default()
     };
-    let (extraction, layers, delta) = {
+    let (extraction, facts, layers, delta) = {
         let mut caches = state
             .extraction_caches
             .lock()
             .map_err(|e| fail(e.to_string()))?;
         ensure_running_job(state, execution)?;
         let cache = caches.repos.entry(repo.clone()).or_default();
-        extract_tree_with_registries(
+        extract_tree_packed(
             root,
             &repo,
             commit,
@@ -4458,7 +4576,7 @@ fn run_ingest<R: tauri::Runtime>(
         .keep_retained(&mut receipts);
     reads.omitted_stored_receipts = omitted_stored_receipts;
     reads.record_stored_omissions(omitted_stored_facts);
-    let bindings = primary_source::matching_bindings(&extraction, &receipts);
+    let bindings = primary_source::matching_bindings_packed(&facts, &receipts).map_err(&fail)?;
     // Scanned before publication so the inventory is published with the
     // facts it describes (AC-0239). Findings are still persisted only once
     // the graph holds the recovered facts and the job has settled.
@@ -4476,7 +4594,7 @@ fn run_ingest<R: tauri::Runtime>(
         local.commit_note(),
         &[],
         &layers,
-        &extraction,
+        &coverage_view(&facts).map_err(&fail)?,
         &DeclaredInputs::default(),
         &reads,
     )
@@ -4514,9 +4632,9 @@ fn run_ingest<R: tauri::Runtime>(
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(state, execution)?;
         published.record_load(
-            load_into_graph_with_bindings_and_omissions(
+            load_packed_into_graph(
                 &mut graph,
-                extraction,
+                facts,
                 &repo,
                 root,
                 commit,
@@ -4867,14 +4985,14 @@ fn add_repo_blocking<R: tauri::Runtime>(
         unfollowed_links: primary.unfollowed.clone(),
         ..ProducerReads::default()
     };
-    let (extraction, layers, delta) = {
+    let (extraction, facts, layers, delta) = {
         let mut caches = state
             .extraction_caches
             .lock()
             .map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
         let cache = caches.repos.entry(source.repo_key.clone()).or_default();
-        extract_tree_with_registries(
+        extract_tree_packed(
             root,
             &source.repo_key,
             &cloned.commit_sha,
@@ -4905,7 +5023,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         .keep_retained(&mut receipts);
     reads.omitted_stored_receipts = omitted_stored_receipts;
     reads.record_stored_omissions(omitted_stored_facts);
-    let bindings = primary_source::matching_bindings(&extraction, &receipts);
+    let bindings = primary_source::matching_bindings_packed(&facts, &receipts).map_err(&fail)?;
     // As for a local recovery (AC-0200, AC-0209, AC-0239): scanned from the
     // captured bytes the claims were proven on, before publication so the
     // inventory is published with its facts; findings persist only later.
@@ -4922,7 +5040,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         None,
         &[],
         &layers,
-        &extraction,
+        &coverage_view(&facts).map_err(&fail)?,
         &DeclaredInputs::default(),
         &reads,
     )
@@ -4956,9 +5074,9 @@ fn add_repo_blocking<R: tauri::Runtime>(
         let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
         ensure_running_job(&state, &execution)?;
         published.record_load(
-            load_into_graph_with_bindings_and_omissions(
+            load_packed_into_graph(
                 &mut graph,
-                extraction,
+                facts,
                 &source.repo_key,
                 root,
                 &cloned.commit_sha,
@@ -5172,14 +5290,14 @@ fn add_system_blocking<R: tauri::Runtime>(
             unfollowed_links: primary.unfollowed.clone(),
             ..ProducerReads::default()
         };
-        let (extraction, repo_layers, repo_delta) = {
+        let (extraction, facts, repo_layers, repo_delta) = {
             let mut caches = state
                 .extraction_caches
                 .lock()
                 .map_err(|e| fail(e.to_string()))?;
             ensure_running_job(&state, &execution)?;
             let cache = caches.repos.entry(repo.clone()).or_default();
-            extract_tree_with_registries(
+            extract_tree_packed(
                 root,
                 &repo,
                 &commit,
@@ -5208,7 +5326,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             .keep_retained(&mut receipts);
         reads.omitted_stored_receipts = omitted_stored_receipts;
         reads.record_stored_omissions(omitted_stored_facts);
-        let bindings = primary_source::matching_bindings(&extraction, &receipts);
+        let bindings =
+            primary_source::matching_bindings_packed(&facts, &receipts).map_err(&fail)?;
         // Scanned before publication so each inventory is published with its
         // facts (AC-0239); findings persist only once the system is in.
         let report = reconciled_preflight_report(
@@ -5226,7 +5345,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 .and_then(local_commit::LocalCommit::commit_note),
             &entry.layers,
             &repo_layers,
-            &extraction,
+            &coverage_view(&facts).map_err(&fail)?,
             &DeclaredInputs {
                 state_json: entry.state_json.clone(),
                 pulumi_json: entry.pulumi_json.clone(),
@@ -5274,9 +5393,9 @@ fn add_system_blocking<R: tauri::Runtime>(
             let mut graph = state.graph.lock().map_err(|e| fail(e.to_string()))?;
             ensure_running_job(&state, &execution)?;
             published.record_load(
-                load_into_graph_with_bindings_and_omissions(
+                load_packed_into_graph(
                     &mut graph,
-                    extraction,
+                    facts,
                     &repo,
                     root,
                     &commit,
@@ -7637,6 +7756,22 @@ resource "aws_sqs_queue" "orders" {
         ];
         let view = crate::merged_edge_view(&edges);
         let owned = crate::merge_edge_occurrences(edges.clone());
+        // AC-0549 (#1574): merging packed edges equals merging decoded ones.
+        let packed = crate::merge_packed_edge_occurrences(
+            edges
+                .iter()
+                .cloned()
+                .map(|edge| core_graph::packed::PackedEdge::pack(edge).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            packed
+                .into_iter()
+                .map(|(key, edge)| (key, edge.unpack().unwrap()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            owned
+        );
         assert_eq!(
             view.iter()
                 .map(|(key, edge)| (key.clone(), edge.as_ref().clone()))
@@ -8047,11 +8182,11 @@ export function queueOrder() {
             );
         }
         assert_eq!(
-            super::distinct_packed_node_count(&facts),
+            super::distinct_packed_node_count(facts.nodes()),
             super::distinct_node_count(&nodes)
         );
         assert_eq!(
-            super::distinct_packed_edge_count(&facts),
+            super::distinct_packed_edge_count(facts.edges()),
             super::distinct_edge_count(&edges)
         );
         assert_eq!(
