@@ -136,9 +136,7 @@ impl DisclosedQueryHistory {
         ledger: &InvestigationInputLedger,
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
-        let references = (0..ledger.queries.len())
-            .map(|index| QueryHistoryReference::from_ledger(request_hash, ledger, index, policy))
-            .collect::<Result<Vec<_>, _>>()?;
+        let references = super::query_history::disclosure_references(request_hash, ledger, policy)?;
         if !crate::source_basis::hash(request_hash)
             || policy.profile() != INVESTIGATION_V2_POLICY.profile()
         {

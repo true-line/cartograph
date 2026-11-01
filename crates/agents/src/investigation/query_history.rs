@@ -420,6 +420,20 @@ fn reference(
     })
 }
 
+// The disclosure constructor previously validated this immutable basis once
+// per reference. Keep the zero-query path unchanged: its caller still checks
+// the request/policy before registry hashing validates the ledger.
+pub(super) fn disclosure_references(
+    request_hash: &str,
+    ledger: &InvestigationInputLedger,
+    policy: &InvestigationPolicy,
+) -> Result<Vec<QueryHistoryReference>, InvestigationError> {
+    if !ledger.queries.is_empty() {
+        validate_basis(request_hash, ledger, policy)?;
+    }
+    references(request_hash, ledger)
+}
+
 fn references(
     request_hash: &str,
     ledger: &InvestigationInputLedger,
