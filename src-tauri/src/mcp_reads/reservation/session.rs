@@ -212,14 +212,19 @@ impl SessionReservation {
         let hash = core_prov::content_hash(&[]);
         let (n, bytes) = crate::mcp_reads::capability_caps(limits.graph);
         let overlay = core_graph::overlay::capability_read_workspace(n, bytes)?;
-        let capability_selection_bytes = overlay.retained_selection_bytes;
+        // The Actor vector moved out of the selection holds at most n slots.
+        let capability_selection_bytes = sum(&[
+            overlay.retained_selection_bytes,
+            slots::<core_graph::overlay::OverlayFact>(n)?,
+        ])?;
         // The output recipe is dropped. Basis payload is already charged in
         // fixed_basis; pre-construction enum/vector headers still have owners.
         let captured = sum(&[
             capability_selection_bytes,
             count(&basis.knowledge)?,
             size_of::<crate::mcp_reads::KnowledgeBasis>(),
-            size_of::<Vec<core_graph::overlay::OverlayFact>>(),
+            // Capability and Actor vectors split one combined selection.
+            slots::<Vec<core_graph::overlay::OverlayFact>>(2)?,
         ])?;
         let fixed_basis = sum(&[size_of::<ReadSession>(), count(&basis)?])?;
         let retained_session_bytes = sum(&[

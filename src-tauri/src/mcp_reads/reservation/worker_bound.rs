@@ -28,10 +28,13 @@ impl WorkerReservation {
             n,
             bytes,
         )?;
+        // Actors share the captured selection's count and byte caps.
+        let actors = spec::logical_actor_story_workspace_bound(limits.graph.max_bytes, n, bytes)?;
         // Borrowed candidate input belongs to the host, not the compiler helper.
         // It drops before basis_id, alongside compiler validation scratch.
         let capability_compile_bytes = sum(&[
             capability.peak_bytes,
+            actors.peak_extra_bytes,
             slots::<spec::CapabilityStory<'_>>(n)?,
             std::mem::size_of::<Vec<spec::CapabilityStory<'_>>>(),
         ])?;

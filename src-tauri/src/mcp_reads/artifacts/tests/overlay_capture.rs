@@ -19,10 +19,31 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let source = br#"import {Resolver, Query, Mutation} from '@nestjs/graphql';
+        let fixture = Self::from_source(
+            br#"import {Resolver, Query, Mutation} from '@nestjs/graphql';
 @Resolver() export class ShopOrderResolver {
-@Query() order() {} @Mutation() addItemToOrder() {} }"#;
+@Query() order() {} @Mutation() addItemToOrder() {} }"#,
+        );
+        assert_eq!(fixture.facts.len(), 1);
+        fixture
+    }
+    /// AC-0535: a permission-gated resolver; its facts are the Capability and
+    /// the one Actor the real producers derive.
+    pub(super) fn with_permission() -> Self {
+        Self::with_allow("Permission.Owner")
+    }
+    /// The permission-gated resolver with `allow` as its decorator arguments.
+    pub(super) fn with_allow(allow: &str) -> Self {
+        let mut fixture = Self::from_source(
+            format!("import {{ Query, Resolver }} from '@nestjs/graphql';\nimport {{ Permission }} from '@vendure/common/lib/generated-shop-types';\nimport {{ Allow }} from '../../decorators/allow.decorator';\n@Resolver() export class ShopOrderResolver {{ @Query()\n@Allow({allow})\nactiveOrder() {{}} }}").as_bytes(),
+        );
+        let actors = spec::derive_permission_actors(&fixture.base()).facts;
+        assert_eq!((fixture.facts.len(), actors.len()), (1, 1));
+        fixture.facts.extend(actors);
+        fixture
+    }
+    fn from_source(source: &[u8]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
         let mut extraction = adapters_lang_ts::extract_source(
             source,
             "packages/core/src/api/resolvers/shop/shop-order.resolver.ts",
@@ -45,7 +66,6 @@ impl Fixture {
             .read_snapshot_with_revision_bounded(SnapshotReadLimits::default())
             .unwrap();
         let facts = spec::derive_graphql_resolver_capabilities(&base).facts;
-        assert_eq!(facts.len(), 1);
         let mut overlay = OverlayStore::open(dir.path().join("overlay.db")).unwrap();
         overlay
             .bind_instance(&base.revision.graph_instance)
@@ -296,9 +316,11 @@ fn captured_selection_fits_named_admission_and_every_basis_variant_digest_owner(
     let bound = SessionReservation::for_limits(limits).unwrap();
     let (n, bytes) = crate::mcp_reads::capability_caps(limits.graph);
     let storage = core_graph::overlay::capability_read_workspace(n, bytes).unwrap();
+    // AC-0535: plus the slots of the Actor vector split from the selection.
     assert_eq!(
         bound.capability_selection_bytes,
         storage.retained_selection_bytes
+            + n * std::mem::size_of::<core_graph::overlay::OverlayFact>()
     );
     let wire_bytes: usize = captured
         .capabilities
@@ -316,6 +338,7 @@ fn captured_selection_fits_named_admission_and_every_basis_variant_digest_owner(
         &captured.base.revision,
         &captured.base.graph,
         &captured.capabilities,
+        &captured.actors,
         &captured.visible_facts,
         &captured.rejected_hashes,
     ))
