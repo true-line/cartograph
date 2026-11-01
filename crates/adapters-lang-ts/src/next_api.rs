@@ -29,7 +29,8 @@
 
 use crate::callable::{self, Bindings};
 use crate::{EXTRACTOR_ID, FileCx, SourceId, file_id, resolution::ResolutionIndex};
-use core_graph::{Edge, Node};
+use core_graph::facts::FactAccess;
+use core_graph::{Edge, GraphError, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -302,10 +303,13 @@ pub(crate) fn complete(
     root: &Path,
     index: &ResolutionIndex,
     id: &SourceId,
-    nodes: &mut Vec<Node>,
-    edges: &mut Vec<Edge>,
-) {
-    let mut seen: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
+    facts: &mut impl FactAccess,
+) -> Result<(), GraphError> {
+    let mut seen: HashSet<String> = facts.node_keys().map(|(id, _)| id.to_string()).collect();
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    // Endpoints already held that another site also routes: each with the
+    // site's matching, checked in site order once they are decoded.
+    let mut held = Vec::new();
     for site in sites {
         let Some((dir, manifest, span)) = index.declaring_manifest(&site.file, "next") else {
             continue;
@@ -390,19 +394,9 @@ pub(crate) fn complete(
                 props,
             });
         } else if let Some(node) = nodes.iter_mut().find(|node| node.id == ep) {
-            // Producers that disagree on one endpoint's matching (overlapping
-            // catch-alls, or a node-http exact or prefix route) leave it
-            // matching nothing.
-            let kind = (node.props["match"] == "prefix").then(|| {
-                node.props["prefix_kind"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string()
-            });
-            if kind.as_deref() != prefix {
-                node.props["match"] = serde_json::json!("prefix");
-                node.props["prefix_kind"] = serde_json::json!("conflict");
-            }
+            reconcile_match(node, prefix);
+        } else {
+            held.push((ep.clone(), prefix));
         }
         edges.push(Edge {
             src: ep,
@@ -412,6 +406,35 @@ pub(crate) fn complete(
                 "prov": prov(ConfidenceTier::Confirmed, &format!("HANDLES {method} {path}")),
             }),
         });
+    }
+    let ids: HashSet<&str> = held.iter().map(|(ep, _)| ep.as_str()).collect();
+    facts.edit_nodes(
+        |id, _| ids.contains(id),
+        |selected, added| {
+            for (ep, prefix) in &held {
+                if let Some(node) = selected.iter_mut().find(|node| node.id == *ep) {
+                    reconcile_match(node, *prefix);
+                }
+            }
+            added.append(&mut nodes);
+        },
+    )?;
+    facts.append(Vec::new(), edges)
+}
+
+/// Producers that disagree on one endpoint's matching (overlapping
+/// catch-alls, or a node-http exact or prefix route) leave it matching
+/// nothing.
+fn reconcile_match(node: &mut Node, prefix: Option<&str>) {
+    let kind = (node.props["match"] == "prefix").then(|| {
+        node.props["prefix_kind"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    });
+    if kind.as_deref() != prefix {
+        node.props["match"] = serde_json::json!("prefix");
+        node.props["prefix_kind"] = serde_json::json!("conflict");
     }
 }
 
@@ -457,15 +480,15 @@ pub(crate) fn app_screens(
     index: &ResolutionIndex,
     id: &SourceId,
     default_exports: &HashMap<String, String>,
-    nodes: &mut Vec<Node>,
-    edges: &mut Vec<Edge>,
-) {
-    let mut seen: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
-    let files: Vec<String> = nodes
-        .iter()
-        .filter(|node| node.label == "File")
+    facts: &mut impl FactAccess,
+) -> Result<(), GraphError> {
+    let mut seen: HashSet<String> = facts.node_keys().map(|(id, _)| id.to_string()).collect();
+    let files: Vec<String> = facts
+        .decode_nodes(|_, label| label == "File")?
+        .into_iter()
         .filter_map(|node| node.props["path"].as_str().map(str::to_string))
         .collect();
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
     for file in &files {
         let Some((dir, manifest, span)) = index.declaring_manifest(file, "next") else {
             continue;
@@ -529,6 +552,7 @@ pub(crate) fn app_screens(
             });
         }
     }
+    facts.append(nodes, edges)
 }
 
 #[cfg(test)]
@@ -1139,5 +1163,122 @@ mod tests {
         for (rel, root_router, want) in cases {
             assert_eq!(app_screen_route(rel, root_router).as_deref(), want, "{rel}");
         }
+    }
+
+    // AC-0540: Next.js route and app-page completion over the packed store
+    // leave exactly the facts they leave over plain lists: an endpoint
+    // already held that a site routes with other matching is reconciled in
+    // place, a repeated site edits its own new endpoint, an unbound export
+    // is a Gap, and an app page already emitted as a screen is kept.
+    #[test]
+    fn next_completion_is_identical_over_lists_and_store() {
+        use super::{Site, app_screens, complete};
+        use crate::resolution::ResolutionIndex;
+        use core_graph::facts::{FactLists, FactStore};
+        use core_graph::{Edge, Node};
+        use core_prov::EvidenceRef;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "web/package.json",
+            r#"{ "dependencies": { "next": "15.0.0" } }"#,
+        );
+        let index = ResolutionIndex::load(root).unwrap();
+        let id = SourceId {
+            repo: "r",
+            commit: "c",
+        };
+        let node = |id: &str, label: &str, props: serde_json::Value| Node {
+            id: id.into(),
+            label: label.into(),
+            props,
+        };
+        let site = |file: &str, method: &str, handler: Option<&str>, at: u64| Site {
+            file: file.into(),
+            app: true,
+            method: Some(method.into()),
+            handler: handler.map(str::to_string),
+            evidence: EvidenceRef {
+                repo: "r".into(),
+                path: file.into(),
+                byte_start: at,
+                byte_end: at + 1,
+                commit_sha: "c".into(),
+            },
+        };
+        let items = "web/app/api/items/route.ts";
+        let users = "web/app/api/users/route.ts";
+        let sites = || {
+            vec![
+                site(items, "GET", Some("sym:list"), 1),
+                site(items, "POST", None, 2),
+                site(users, "GET", Some("sym:users"), 3),
+                site(users, "GET", Some("sym:users2"), 4),
+            ]
+        };
+        let held = node(
+            "ep:r@GET:/api/items",
+            "Endpoint",
+            serde_json::json!({"match": "prefix", "prefix_kind": "catch-all"}),
+        );
+        let nodes = vec![
+            held.clone(),
+            node("screen:r@/about", "Screen", serde_json::json!({})),
+            node(
+                "file:r@web/app/page.tsx",
+                "File",
+                serde_json::json!({"path": "web/app/page.tsx"}),
+            ),
+            node(
+                "file:r@web/app/about/page.tsx",
+                "File",
+                serde_json::json!({"path": "web/app/about/page.tsx"}),
+            ),
+        ];
+        let exports = HashMap::from([("web/app/page.tsx".to_string(), "sym:home".to_string())]);
+        let (mut listed, mut listed_edges): (Vec<Node>, Vec<Edge>) = (nodes.clone(), Vec::new());
+        let mut lists = FactLists {
+            nodes: &mut listed,
+            edges: &mut listed_edges,
+        };
+        app_screens(root, &index, &id, &exports, &mut lists).unwrap();
+        complete(sites(), root, &index, &id, &mut lists).unwrap();
+        let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
+        app_screens(root, &index, &id, &exports, &mut store).unwrap();
+        complete(sites(), root, &index, &id, &mut store).unwrap();
+        assert_eq!(
+            store.into_facts().unwrap(),
+            (listed.clone(), listed_edges.clone())
+        );
+        assert_eq!(listed[0].props["prefix_kind"], "conflict");
+        let ids: Vec<_> = listed[4..].iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "screen:r@/",
+                "gap:next-route:r@web/app/api/items/route.ts@2",
+                "ep:r@GET:/api/users",
+            ]
+        );
+        let handles: Vec<_> = listed_edges
+            .iter()
+            .map(|e| (e.label.as_str(), e.dst.as_str()))
+            .collect();
+        assert_eq!(
+            handles,
+            [
+                ("RENDERS", "sym:home"),
+                ("HANDLES", "sym:list"),
+                (
+                    "DEPENDS_ON",
+                    "gap:next-route:r@web/app/api/items/route.ts@2"
+                ),
+                ("HANDLES", "sym:users"),
+                ("HANDLES", "sym:users2"),
+            ]
+        );
     }
 }
