@@ -68,7 +68,7 @@ pub use contract::{
     CONTRACT_DRIFT_EXTRACTOR_ID, CONTRACT_EXTRACTOR_ID, CONTRACT_METHODS, ContractFacts,
     ContractValidationGap, DOCUMENTED_NOT_SERVED_REASON, DeclaredApiDoc, EMPTY_DOC_REASON,
     UNSUPPORTED_YAML_REASON, canonical_endpoint, documented_endpoints_markdown,
-    extract_contract_facts,
+    extract_contract_facts, extract_contract_facts_among,
 };
 pub use views::{
     DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,

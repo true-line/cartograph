@@ -2198,9 +2198,12 @@ fn extract_repo_contracts(
     if !loaded.declared {
         return Ok(spec::ContractFacts::default());
     }
-    // Declared API docs match recovered facts by id and Endpoint attributes;
-    // nodes are decoded only for a repository that declares them (#1574).
-    let candidates = facts.nodes_where(|_| true).map_err(pack_err)?;
+    // Declared API docs match recovered facts by id and Endpoint attributes:
+    // only Endpoint nodes are decoded, and only for a repository that
+    // declares docs (#1574).
+    let endpoints = facts.nodes_labeled(&["Endpoint"]).map_err(pack_err)?;
+    let ids: std::collections::BTreeSet<&str> =
+        facts.nodes().iter().map(|node| node.id.as_str()).collect();
     let docs: Vec<spec::DeclaredApiDoc> = loaded
         .docs
         .into_iter()
@@ -2218,12 +2221,13 @@ fn extract_repo_contracts(
             reason: gap.reason,
         })
         .collect();
-    Ok(spec::extract_contract_facts(
+    Ok(spec::extract_contract_facts_among(
         repo,
         commit,
         &docs,
         &gaps,
-        &candidates,
+        &endpoints,
+        |id| ids.contains(id),
     ))
 }
 
