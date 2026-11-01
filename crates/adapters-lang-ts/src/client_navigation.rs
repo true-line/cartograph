@@ -24,7 +24,8 @@ use crate::client_routes::{
     locally_bound, member_root, parameter_names, path_value, prov,
 };
 use crate::{FileCx, callable};
-use core_graph::{Edge, Node};
+use core_graph::facts::FactAccess;
+use core_graph::{Edge, GraphError, Node};
 use core_prov::{ConfidenceTier, EvidenceRef};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
@@ -389,16 +390,16 @@ pub(crate) fn complete(
     pending: Pending,
     files: &HashSet<String>,
     repo: &str,
-    nodes: &mut Vec<Node>,
-    edges: &mut Vec<Edge>,
-) {
-    let screens: HashSet<String> = nodes
-        .iter()
-        .filter(|n| n.label == "Screen" && n.props["router"] == client_routes::ROUTER)
-        .map(|n| n.id.clone())
+    facts: &mut impl FactAccess,
+) -> Result<(), GraphError> {
+    let screens: HashSet<String> = facts
+        .decode_nodes(|_, label| label == "Screen")?
+        .into_iter()
+        .filter(|n| n.props["router"] == client_routes::ROUTER)
+        .map(|n| n.id)
         .collect();
     if screens.is_empty() {
-        return;
+        return Ok(());
     }
     let resolve = |import: &Import| {
         file_candidates(import)
@@ -433,6 +434,7 @@ pub(crate) fn complete(
     }
     let mut links: BTreeMap<(String, String), Link> = BTreeMap::new();
     let (mut gap_nodes, mut gap_edges) = (Vec::new(), Vec::new());
+    let mut edges = Vec::new();
     for call in pending.calls {
         let (arg, mut cited, via) = match &call.callee {
             None => (call.args.first(), vec![call.evidence.clone()], "direct"),
@@ -545,6 +547,88 @@ pub(crate) fn complete(
             }),
         });
     }
-    nodes.extend(gap_nodes);
     edges.extend(gap_edges);
+    facts.append(gap_nodes, edges)
+}
+
+#[cfg(test)]
+mod fact_access_tests {
+    use super::*;
+    use core_graph::facts::{FactLists, FactStore};
+
+    fn evidence(byte_start: u64) -> EvidenceRef {
+        EvidenceRef {
+            repo: "r".into(),
+            path: "web/Nav.vue".into(),
+            byte_start,
+            byte_end: byte_start + 1,
+            commit_sha: "c".into(),
+        }
+    }
+
+    fn call(target: Target, at: u64) -> Call {
+        Call {
+            callee: None,
+            args: vec![target],
+            source: "sym:nav".into(),
+            conditional: false,
+            evidence: evidence(at),
+        }
+    }
+
+    fn pending() -> Pending {
+        Pending {
+            calls: vec![
+                call(Target::Path("/home".into()), 1),
+                call(Target::Path("/missing".into()), 2),
+                call(Target::Other, 3),
+            ],
+            ..Pending::default()
+        }
+    }
+
+    fn screen(id: &str, router: &str) -> Node {
+        Node {
+            id: id.into(),
+            label: "Screen".into(),
+            props: serde_json::json!({"router": router}),
+        }
+    }
+
+    // AC-0539: navigation resolves the same Vue Router screens over the
+    // packed store as over plain lists, and appends identical facts; a
+    // screen from another router is not a target.
+    #[test]
+    fn navigation_completion_is_identical_over_lists_and_store() {
+        let nodes = vec![
+            screen("screen:r@/home", client_routes::ROUTER),
+            screen("screen:r@/missing", "next-pages"),
+        ];
+        let files = HashSet::new();
+        let (mut listed, mut listed_edges) = (nodes.clone(), Vec::new());
+        complete(
+            pending(),
+            &files,
+            "r",
+            &mut FactLists {
+                nodes: &mut listed,
+                edges: &mut listed_edges,
+            },
+        )
+        .unwrap();
+        let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
+        complete(pending(), &files, "r", &mut store).unwrap();
+        assert_eq!(
+            store.into_facts().unwrap(),
+            (listed.clone(), listed_edges.clone())
+        );
+        assert_eq!(listed[..2], nodes[..]);
+        assert_eq!(listed.iter().filter(|n| n.label == "Gap").count(), 2);
+        let navigates: Vec<_> = listed_edges
+            .iter()
+            .map(|e| (e.dst.as_str(), e.label.as_str()))
+            .collect();
+        assert_eq!(navigates[0], ("screen:r@/home", "NAVIGATES_TO"));
+        assert_eq!(navigates.len(), 3);
+    }
 }

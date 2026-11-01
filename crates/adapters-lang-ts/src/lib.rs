@@ -3289,9 +3289,24 @@ fn complete_directory(
     out.pulumi_bindings.clear();
     let routes = std::mem::take(&mut out.client_routes);
     let files = routes.files.clone();
-    client_routes::complete(routes, id.repo, &mut out.nodes, &mut out.edges);
+    client_routes::complete(
+        routes,
+        id.repo,
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     let navigation = std::mem::take(&mut out.client_navigation);
-    client_navigation::complete(navigation, &files, id.repo, &mut out.nodes, &mut out.edges);
+    client_navigation::complete(
+        navigation,
+        &files,
+        id.repo,
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     next_pages_screens(out, id);
     next_api::app_screens(
         root,
