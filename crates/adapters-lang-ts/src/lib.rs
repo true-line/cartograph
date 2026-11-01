@@ -3255,9 +3255,11 @@ fn complete_directory(
     }
     target_tests::complete(
         std::mem::take(&mut out.target_tests),
-        &mut out.nodes,
-        &mut out.edges,
-    );
+        &mut FactLists {
+            nodes: &mut out.nodes,
+            edges: &mut out.edges,
+        },
+    )?;
     for pending in std::mem::take(&mut out.pending_pulumi_edges) {
         let resolve = |endpoint: PulumiEndpoint| match endpoint {
             PulumiEndpoint::Resource(id) => Some(id),
