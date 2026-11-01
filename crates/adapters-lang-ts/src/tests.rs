@@ -2517,6 +2517,54 @@ fn directory_closure_is_identical_over_lists_and_store() {
     assert_eq!(tier("file:qwtm/example@src/missing.ts"), Gap);
 }
 
+// AC-0546: the directory walk packs each file's facts as it merges and the
+// incremental cache holds them packed; a re-ingest under a new commit that
+// reuses one file and reparses another equals a fresh walk.
+#[test]
+fn packed_walk_and_cache_reuse_match_a_fresh_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.ts"),
+        "import { b } from './b';\nexport function a() { return b(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.ts"),
+        "export function b() { return 1; }\n",
+    )
+    .unwrap();
+    let at = |commit| SourceId {
+        repo: "qwtm/example",
+        commit,
+    };
+    let mut cache = IncrementalCache::default();
+    let facts = |ex: &Extraction| (ex.nodes.clone(), ex.edges.clone());
+    let (first, _) = extract_dir_incremental(dir.path(), &at("c1"), &mut cache).unwrap();
+    let fresh = extract_dir(dir.path(), &at("c1")).unwrap();
+    assert_eq!(facts(&first), facts(&fresh));
+    assert_eq!(first.default_exports, fresh.default_exports);
+    std::fs::write(
+        dir.path().join("b.ts"),
+        "export function b() { return 2; }\nexport function c() {}\n",
+    )
+    .unwrap();
+    let (again, stats) = extract_dir_incremental(dir.path(), &at("c2"), &mut cache).unwrap();
+    assert_eq!((stats.reused_files, stats.recomputed_files), (1, 1));
+    let fresh = extract_dir(dir.path(), &at("c2")).unwrap();
+    assert_eq!(facts(&again), facts(&fresh));
+    assert!(
+        !serde_json::to_string(&again.nodes)
+            .unwrap()
+            .contains("\"c1\"")
+    );
+    assert!(
+        again
+            .nodes
+            .iter()
+            .any(|n| n.id == "sym:qwtm/example@b.ts#c")
+    );
+}
+
 #[test]
 fn tsconfig_paths_alias_resolves_to_a_real_file_with_the_config_cited() {
     // #213 (AC-0100): a `paths` alias is applied before the specifier is
