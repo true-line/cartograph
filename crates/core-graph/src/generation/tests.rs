@@ -598,7 +598,7 @@ fn generation_waiting_opener_rechecks_version_after_competing_migration_commit()
     store.conn.pragma_update(None, "user_version", 0).unwrap();
     drop(store);
     let mut first = Connection::open(&path).unwrap();
-    let second = Connection::open(&path).unwrap();
+    let mut second = Connection::open(&path).unwrap();
     second
         .busy_handler(Some(|_| {
             WAITING.store(true, Ordering::SeqCst);
