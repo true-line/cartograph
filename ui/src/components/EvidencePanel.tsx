@@ -71,7 +71,9 @@ const CONFIDENCE: Record<Tier, string> = {
 
 /** The producer sentence for a recorded producing tier; explicit when absent or unknown. */
 export function producerText(producingTier: string | undefined): string {
-  return (producingTier && PRODUCER[producingTier]) || PRODUCER_UNKNOWN;
+  return producingTier !== undefined && Object.hasOwn(PRODUCER, producingTier)
+    ? PRODUCER[producingTier]
+    : PRODUCER_UNKNOWN;
 }
 
 /** The "why this tier" text: the recorded producer, then the confidence, stated separately. */

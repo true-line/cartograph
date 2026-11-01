@@ -27,5 +27,8 @@ describe('evidence drawer tier explanation', () => {
   it('says so when the producing tier is absent or unknown', () => {
     expect(whyTier('InferredWeak', undefined)).toMatch(/^The producing tier is not recorded/);
     expect(whyTier('InferredStrong', 'Mystery')).toMatch(/^The producing tier is not recorded/);
+    for (const inherited of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      expect(whyTier('InferredWeak', inherited)).toMatch(/^The producing tier is not recorded/);
+    }
   });
 });
