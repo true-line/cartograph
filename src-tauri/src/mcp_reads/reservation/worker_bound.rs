@@ -21,20 +21,17 @@ impl WorkerReservation {
         let compile =
             spec::logical_compile_bound(graph, limits.dispatch.trace, limits.dispatch.compile)?;
         let (n, bytes) = crate::mcp_reads::capability_caps(limits.graph);
-        let capability = spec::logical_capability_compile_bound(
+        let knowledge = spec::logical_knowledge_story_compile_bound(
             graph,
             limits.dispatch.trace,
             limits.dispatch.compile,
             n,
             bytes,
         )?;
-        // Actors share the captured selection's count and byte caps.
-        let actors = spec::logical_actor_story_workspace_bound(limits.graph.max_bytes, n, bytes)?;
         // Borrowed candidate input belongs to the host, not the compiler helper.
-        // It drops before basis_id, alongside compiler validation scratch.
+        // It stays through compilation and drops before basis_id.
         let capability_compile_bytes = sum(&[
-            capability.peak_bytes,
-            actors.peak_extra_bytes,
+            knowledge.peak_bytes,
             slots::<spec::CapabilityStory<'_>>(n)?,
             std::mem::size_of::<Vec<spec::CapabilityStory<'_>>>(),
         ])?;

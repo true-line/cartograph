@@ -249,4 +249,4 @@ pub(crate) fn verification_workspace(base_bytes: usize, actor_bytes: usize) -> O
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

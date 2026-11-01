@@ -10,9 +10,11 @@ mod capabilities;
 pub(crate) mod diagrams;
 pub use capabilities::{
     ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
-    compile_capability_user_stories, compile_capability_user_stories_with_flows_and_security,
+    KnowledgeStoryCompileWorkspaceBound, compile_capability_user_stories,
+    compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, logical_actor_story_workspace_bound,
+    logical_knowledge_story_compile_bound,
 };
 mod partition;
 mod producers;

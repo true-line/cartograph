@@ -174,7 +174,31 @@ fn compile_capability_stories(
     rejected: &BTreeSet<String>,
     limits: SelectedCompileLimits,
 ) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    let stories = validated_stories(base, candidates, actors, mode, rejected)?;
     let (flows, security) = context;
+    Ok(match security {
+        Some(security) => selected::compile_stories_with_flows_and_security(
+            base,
+            flows,
+            mode,
+            rejected,
+            limits,
+            &stories,
+            Some(security),
+        ),
+        None => selected::compile_stories_with_support(base, mode, rejected, limits, &stories),
+    })
+}
+
+// Returning only borrowed stories drops every lookup/projection/ordering index
+// before selected compilation; support Vecs stay owned by the returned stories.
+fn validated_stories<'a>(
+    base: &'a RevisionedSnapshot,
+    candidates: &[CapabilityStory<'a>],
+    actors: &'a [core_graph::overlay::OverlayFact],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> Result<Stories<'a>, CapabilityStoryInputError> {
     let mut nodes = BTreeMap::new();
     for n in &base.graph.0 {
         nodes
@@ -259,21 +283,9 @@ fn compile_capability_stories(
             stories.filtered += 1;
         }
     }
-    let compile = |stories: &Stories<'_>| match security {
-        Some(security) => selected::compile_stories_with_flows_and_security(
-            base,
-            flows,
-            mode,
-            rejected,
-            limits,
-            stories,
-            Some(security),
-        ),
-        None => selected::compile_stories_with_support(base, mode, rejected, limits, stories),
-    };
     // Preserve the Capability-only workspace: no Actor index is constructed.
     if actors.is_empty() {
-        return Ok(compile(&stories));
+        return Ok(stories);
     }
     let mut actor_order = BTreeMap::new();
     for fact in actors {
@@ -292,7 +304,7 @@ fn compile_capability_stories(
             return Err(CapabilityStoryInputError::DuplicateCandidate);
         }
     }
-    for (node, endpoint, fact) in actor_order.values() {
+    for &(node, endpoint, fact) in actor_order.values() {
         let p = Provenance::deserialize(&node.props["prov"]).expect("canonical Actor provenance");
         let support = Support::Node(endpoint);
         if included(&p, mode, rejected)
@@ -307,7 +319,7 @@ fn compile_capability_stories(
             stories.filtered += 1;
         }
     }
-    Ok(compile(&stories))
+    Ok(stories)
 }
 
 pub(super) fn support_id(capability: &str, cite: &BaseRef) -> String {
@@ -338,14 +350,9 @@ pub fn logical_actor_story_workspace_bound(
     actor_count: usize,
     actor_json_bytes: usize,
 ) -> Option<ActorStoryWorkspaceBound> {
-    use super::accounting::{map_slots, slots, sum};
-    use core_graph::overlay::OverlayFact;
-    let retained_bytes = sum(&[
-        map_slots::<&str, (&Node, &Node, &OverlayFact)>(actor_count)?,
-        std::mem::size_of::<BTreeMap<(), ()>>(),
-        slots::<Story<'_>>(actor_count)?,
-        slots::<(&BaseRef, Support<'_>)>(actor_count)?,
-    ])?;
+    use super::accounting::{slots, sum};
+    let (index_bytes, story_bytes) = actor_retained_parts(actor_count)?;
+    let retained_bytes = sum(&[index_bytes, story_bytes])?;
     let canonical_scratch_bytes =
         crate::knowledge::actors::verification_workspace(base_json_bytes, actor_json_bytes)?;
     let renderer_extra_bytes = sum(&[
@@ -370,4 +377,328 @@ pub fn logical_actor_story_workspace_bound(
             renderer_extra_bytes,
         ])?,
     })
+}
+
+fn actor_retained_parts(actor_count: usize) -> Option<(usize, usize)> {
+    use super::accounting::{map_slots, slots, sum};
+    use core_graph::overlay::OverlayFact;
+    Some((
+        sum(&[
+            map_slots::<&str, (&Node, &Node, &OverlayFact)>(actor_count)?,
+            std::mem::size_of::<BTreeMap<(), ()>>(),
+        ])?,
+        sum(&[
+            slots::<Story<'_>>(actor_count)?,
+            slots::<(&BaseRef, Support<'_>)>(actor_count)?,
+        ])?,
+    ))
+}
+
+/// Logical peaks at the validator-return boundary, excluding host-owned inputs.
+/// No allocator-capacity or RSS guarantee; all arithmetic is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnowledgeStoryCompileWorkspaceBound {
+    /// Existing complete Capability peak, conservatively retained before Actors.
+    pub capability_validation_bytes: usize,
+    /// Capability lookups/stories, Actor index/stories and current verification.
+    pub actor_validation_bytes: usize,
+    /// Ordinary compiler and retained stories, after validation indexes drop.
+    pub rendering_bytes: usize,
+    /// Maximum of the three disjoint stages.
+    pub peak_bytes: usize,
+}
+
+/// Compose the actual combined story compiler stages under shared sidecar caps.
+/// Existing Capability/Actor bounds and caller admission remain unchanged.
+pub fn logical_knowledge_story_compile_bound(
+    graph: flowtracer::TraceGraphBound,
+    trace: flowtracer::TraceLimits,
+    compile: SelectedCompileLimits,
+    selected_count: usize,
+    selected_json_bytes: usize,
+) -> Option<KnowledgeStoryCompileWorkspaceBound> {
+    use super::accounting::sum;
+    let ordinary = logical_compile_bound(graph, trace, compile)?;
+    let capability = logical_capability_compile_bound(
+        graph,
+        trace,
+        compile,
+        selected_count,
+        selected_json_bytes,
+    )?;
+    let actor =
+        logical_actor_story_workspace_bound(graph.bytes, selected_count, selected_json_bytes)?;
+    let (actor_index, actor_stories) = actor_retained_parts(selected_count)?;
+    let capability_validation_bytes = capability.peak_bytes;
+    // Visibility can hold Actor and Endpoint decoded provenance together; the
+    // unchanged renderer role conservatively covers those decodes/tag buffers.
+    let actor_validation_bytes = sum(&[
+        capability.lookup_bytes,
+        capability.story_support_bytes,
+        actor_index,
+        actor_stories,
+        actor
+            .canonical_scratch_bytes
+            .max(actor.renderer_extra_bytes),
+    ])?;
+    let rendering_bytes = sum(&[
+        ordinary.peak_bytes,
+        capability.story_support_bytes,
+        actor_stories,
+        capability.renderer_extra_bytes,
+        actor.renderer_extra_bytes,
+    ])?;
+    Some(KnowledgeStoryCompileWorkspaceBound {
+        capability_validation_bytes,
+        actor_validation_bytes,
+        rendering_bytes,
+        peak_bytes: capability_validation_bytes
+            .max(actor_validation_bytes)
+            .max(rendering_bytes),
+    })
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+    use core_graph::overlay::{OverlayFact, OverlayItem};
+    use core_prov::{EvidenceRef, ProducingMethod};
+    use serde_json::json;
+
+    fn fixture() -> (RevisionedSnapshot, Node, BTreeSet<BaseRef>) {
+        let evidence = vec![EvidenceRef {
+            repo: "sample".into(),
+            path: "orders.ts".into(),
+            byte_start: 0,
+            byte_end: 1,
+            commit_sha: "fixed".into(),
+        }];
+        let endpoint = Node {
+            id: "endpoint:orders".into(),
+            label: "Endpoint".into(),
+            props: json!({"prov": Provenance::new(Tier::Deterministic,
+                ConfidenceTier::Confirmed, evidence.clone(), "t0.adapter-ts", b"endpoint").unwrap()}),
+        };
+        let cap = Node {
+            id: "capability:orders".into(),
+            label: "Capability".into(),
+            props: json!({"name":"Orders", "prov": Provenance::new(Tier::Semantic,
+                ConfidenceTier::InferredWeak, evidence, "test", b"capability").unwrap()
+                .with_method(ProducingMethod::Rule {rule:"test".into(), version:"1".into()})}),
+        };
+        let cites = BTreeSet::from([BaseRef::Node(endpoint.id.clone())]);
+        (
+            RevisionedSnapshot {
+                revision: core_graph::StoreRevision {
+                    graph_instance: "stage-test".into(),
+                    generation: 1,
+                },
+                graph: (vec![endpoint], vec![]),
+            },
+            cap,
+            cites,
+        )
+    }
+    fn limits() -> SelectedCompileLimits {
+        // Same finite output/ADR limits as the existing Capability bound fixtures.
+        SelectedCompileLimits {
+            max_bytes: 32768,
+            adr: crate::AdrLimits {
+                max_rows: 30,
+                max_output_bytes: 4096,
+            },
+        }
+    }
+
+    // AC-0518: both canonical Actor and Capability supports borrow source facts,
+    // never validator indexes or temporary descriptors, and render after return.
+    #[test]
+    fn story_support_survives_validator_and_descriptor_scopes() {
+        let (base, actors, cap, _) = crate::knowledge::actors::tests::admitted_actor_fixture();
+        let cites = &actors[0].cites;
+        let OverlayItem::Node(actor) = &actors[0].item else {
+            panic!("Actor node")
+        };
+        let rejected = BTreeSet::new();
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            let stories = {
+                let descriptors = [CapabilityStory {
+                    capability: &cap,
+                    cites,
+                }];
+                validated_stories(&base, &descriptors, &actors, mode, &rejected).unwrap()
+            };
+            if mode == ExportMode::BestEffort {
+                assert_eq!(stories.included.len(), 2);
+                for (story, expected) in stories.included.iter().zip([&cap, actor]) {
+                    assert!(std::ptr::eq(story.node, expected));
+                    assert_eq!(story.support.len(), 1);
+                    let Support::Node(endpoint) = &story.support[0].1 else {
+                        panic!("node support")
+                    };
+                    assert!(std::ptr::eq(*endpoint, &base.graph.0[0]));
+                    assert_eq!(story.support[0].0, cites.first().unwrap());
+                }
+            } else {
+                assert!(stories.included.is_empty());
+                assert_eq!(stories.filtered, 2);
+            }
+            let SelectedArtifactOutcome::Produced(rendered) =
+                selected::compile_stories_with_support(&base, mode, &rejected, limits(), &stories)
+            else {
+                panic!("finite fixture must produce an artifact")
+            };
+            assert!(rendered.verify_identity());
+            if mode == ExportMode::BestEffort {
+                for node in [&cap, actor] {
+                    assert!(
+                        rendered
+                            .assertions
+                            .iter()
+                            .any(|row| row.id == format!("node:{}", node.id))
+                    );
+                    let id = support_id(&node.id, cites.first().unwrap());
+                    let support = rendered.assertions.iter().find(|row| row.id == id).unwrap();
+                    assert_eq!(support.subject_id, base.graph.0[0].id);
+                    assert_eq!(
+                        support.provenance,
+                        Provenance::deserialize(&base.graph.0[0].props["prov"]).unwrap()
+                    );
+                }
+                assert!(rendered.content.contains("Actor caller set"));
+                assert!(rendered.content.contains(
+                    "not effective runtime authorization or an identified user, role or principal"
+                ));
+            } else {
+                assert!(!rendered.content.contains("Actor caller set"));
+                assert!(rendered.content.contains("2 derived stories omitted"));
+            }
+            let descriptors = [CapabilityStory {
+                capability: &cap,
+                cites,
+            }];
+            let SelectedArtifactOutcome::Produced(combined) = compile_knowledge_user_stories(
+                &base,
+                &descriptors,
+                &actors,
+                mode,
+                &rejected,
+                limits(),
+            )
+            .unwrap() else {
+                panic!("combined fixture must produce")
+            };
+            assert_eq!(rendered, combined);
+            let SelectedArtifactOutcome::Produced(legacy) =
+                compile_capability_user_stories(&base, &descriptors, mode, &rejected, limits())
+                    .unwrap()
+            else {
+                panic!("legacy fixture must produce")
+            };
+            let empty =
+                compile_knowledge_user_stories(&base, &descriptors, &[], mode, &rejected, limits())
+                    .unwrap();
+            assert_eq!(empty, SelectedArtifactOutcome::Produced(legacy));
+        }
+    }
+
+    // AC-0518: a valid Capability cannot escape as output when a later Actor is
+    // malformed, even when export/own curation would otherwise omit that Actor.
+    #[test]
+    fn invalid_filtered_actor_never_returns_validated_stories() {
+        let (base, cap, cites) = fixture();
+        let descriptors = [CapabilityStory {
+            capability: &cap,
+            cites: &cites,
+        }];
+        let mut actor = cap.clone();
+        actor.id = "actor:invalid".into();
+        actor.label = "Actor".into();
+        let hash = actor.props["prov"]["content_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let facts = [OverlayFact {
+            item: OverlayItem::Node(actor),
+            cites: cites.clone(),
+        }];
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            for rejected in [BTreeSet::new(), BTreeSet::from([hash.clone()])] {
+                assert!(matches!(
+                    validated_stories(&base, &descriptors, &facts, mode, &rejected),
+                    Err(CapabilityStoryInputError::Candidate)
+                ));
+                assert!(matches!(
+                    compile_knowledge_user_stories(
+                        &base,
+                        &descriptors,
+                        &facts,
+                        mode,
+                        &rejected,
+                        limits()
+                    ),
+                    Err(CapabilityStoryInputError::Candidate)
+                ));
+            }
+        }
+    }
+
+    // AC-0518: checked staged composition retains conservative existing owners
+    // and never exceeds their previous fully additive bound.
+    #[test]
+    fn knowledge_story_stages_preserve_existing_bounds_and_refuse_overflow() {
+        let graph = flowtracer::TraceGraphBound {
+            bytes: 64,
+            rows: 4,
+            values: 16,
+        };
+        let trace = flowtracer::TraceLimits {
+            max_flows: 4,
+            max_hops: 8,
+            max_output_bytes: 512,
+        };
+        let bound_limits = SelectedCompileLimits {
+            max_bytes: 1024,
+            adr: crate::AdrLimits {
+                max_rows: 8,
+                max_output_bytes: 512,
+            },
+        };
+        for (count, bytes) in [(0, 0), (1, 64), (8, 512)] {
+            let capability =
+                logical_capability_compile_bound(graph, trace, bound_limits, count, bytes).unwrap();
+            let actor = logical_actor_story_workspace_bound(graph.bytes, count, bytes).unwrap();
+            let staged =
+                logical_knowledge_story_compile_bound(graph, trace, bound_limits, count, bytes)
+                    .unwrap();
+            assert_eq!(staged.capability_validation_bytes, capability.peak_bytes);
+            assert!(
+                staged.actor_validation_bytes
+                    >= actor.retained_bytes + actor.canonical_scratch_bytes
+            );
+            assert!(
+                staged.rendering_bytes
+                    >= capability.story_support_bytes + actor.renderer_extra_bytes
+            );
+            assert_eq!(
+                staged.peak_bytes,
+                staged
+                    .capability_validation_bytes
+                    .max(staged.actor_validation_bytes)
+                    .max(staged.rendering_bytes)
+            );
+            assert!(staged.peak_bytes <= capability.peak_bytes + actor.peak_extra_bytes);
+            if count == 8 && bytes == 512 {
+                assert!(staged.peak_bytes < capability.peak_bytes + actor.peak_extra_bytes);
+            }
+        }
+        assert!(
+            logical_knowledge_story_compile_bound(graph, trace, bound_limits, usize::MAX, 1)
+                .is_none()
+        );
+        assert!(
+            logical_knowledge_story_compile_bound(graph, trace, bound_limits, 1, usize::MAX)
+                .is_none()
+        );
+    }
 }

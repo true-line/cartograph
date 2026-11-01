@@ -77,17 +77,19 @@ pub use views::{
 pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,
     CapabilityCompileWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
-    CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS, ExportMode, PartitionAcquisition,
-    PartitionArtifact, PartitionArtifactKind, PartitionError, PartitionWorkspaceBound,
-    SelectedArtifactLimit, SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact,
-    SpecAssertion, SpecBundle, artifact_catalog, compile_capability_user_stories,
+    CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS, ExportMode,
+    KnowledgeStoryCompileWorkspaceBound, PartitionAcquisition, PartitionArtifact,
+    PartitionArtifactKind, PartitionError, PartitionWorkspaceBound, SelectedArtifactLimit,
+    SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle,
+    artifact_catalog, compile_capability_user_stories,
     compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, compile_partition_selected,
     compile_spec, compile_spec_selected, compile_spec_selected_with_security, count_gap_findings,
     count_interpretation_backlog, is_drift_edge, is_drift_node, is_gap_edge, is_gap_node,
     logical_actor_story_workspace_bound, logical_capability_compile_bound, logical_compile_bound,
-    logical_partition_bound, project_recovered_facts, provenance,
+    logical_knowledge_story_compile_bound, logical_partition_bound, project_recovered_facts,
+    provenance,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query
