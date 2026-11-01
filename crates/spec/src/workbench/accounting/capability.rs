@@ -71,21 +71,11 @@ pub fn logical_capability_compile_bound(
         slots::<EvidenceRef>(graph.values)?,
         size_of::<Provenance>(),
     ])?;
-    let selected_provenance = sum(&[
-        json_bytes(selected_json_bytes)?,
-        slots::<EvidenceRef>(selected_json_bytes.checked_add(1)?)?,
-        size_of::<Provenance>(),
-    ])?;
+    let selected_provenance = selected_provenance_bytes(selected_json_bytes)?;
     let validation_scratch_bytes = base_provenance.max(selected_provenance);
     let validation_peak_bytes = sum(&[validation_retained_bytes, validation_scratch_bytes])?;
-    let renderer_extra_bytes = sum(&[
-        slots::<&Node>(selected_facts)?,  // appended derived capabilities
-        json_bytes(selected_json_bytes)?, // current provenance Value clone
-        selected_provenance,              // simultaneous typed decode
-        selected_json_bytes,              // current node ID/name formatting
-        crate::workbench::capabilities::support_id("", &BaseRef::Node(String::new())).len(),
-        size_of::<blake3::Hasher>(),
-    ])?;
+    let renderer = capability_renderer_parts(selected_facts, selected_json_bytes)?;
+    let renderer_extra_bytes = sum(&[renderer.references_bytes, renderer.current_bytes])?;
     let peak_bytes = validation_peak_bytes.max(sum(&[
         ordinary.peak_bytes,
         validation_retained_bytes,
@@ -105,3 +95,27 @@ pub fn logical_capability_compile_bound(
 
 #[cfg(test)]
 mod tests;
+
+fn selected_provenance_bytes(bytes: usize) -> Option<usize> {
+    sum(&[
+        json_bytes(bytes)?,
+        slots::<EvidenceRef>(bytes.checked_add(1)?)?,
+        size_of::<Provenance>(),
+    ])
+}
+
+pub(crate) fn capability_renderer_parts(
+    count: usize,
+    bytes: usize,
+) -> Option<RendererWorkspaceParts> {
+    Some(RendererWorkspaceParts {
+        references_bytes: slots::<&Node>(count)?,
+        current_bytes: sum(&[
+            json_bytes(bytes)?,                // current provenance Value clone
+            selected_provenance_bytes(bytes)?, // simultaneous typed decode
+            bytes,                             // current node ID/name formatting
+            crate::workbench::capabilities::support_id("", &BaseRef::Node(String::new())).len(),
+            size_of::<blake3::Hasher>(),
+        ])?,
+    })
+}
