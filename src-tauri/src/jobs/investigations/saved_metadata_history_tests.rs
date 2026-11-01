@@ -620,3 +620,41 @@ fn paired_saved_call_validation_uses_one_authenticated_sweep() {
         Err(InvestigationStoreError::Invalid)
     ));
 }
+
+// AC-0489: actual canonical row reads, same-transaction parity and hash corruption.
+#[test]
+fn saved_metadata_history_reuses_invocation_rows_and_rejects_hash_substitution() {
+    let mut fixture = FinishFixture::new(true);
+    fixture.begin();
+    let f = &fixture.base.f;
+    completion::assert_attempt_invocation_reuse(&f.store.conn, &f.task);
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    completion::assert_attempt_invocation_reuse(&tx, &f.task);
+    let id = &f.task.detail.summary.investigation_id;
+    let entries = completion::attempts(&tx, &f.task).unwrap();
+    assert!(matches!(
+        entries[0].record.outcome,
+        AttemptOutcome::InventoryAcquired { .. }
+    ));
+    let mut step: PendingInvestigationStep = read_body(
+        &tx,
+        "investigation_invocations",
+        "step_id",
+        id,
+        &entries[0].record.step_id,
+    )
+    .unwrap()
+    .unwrap();
+    step.input_ledger_hash = "0".repeat(64);
+    step.disclosure.as_mut().unwrap().input_ledger_hash = step.input_ledger_hash.clone();
+    validate_step(&step, &f.task.detail.limits).unwrap();
+    completion::rewrite_test_body(
+        &tx,
+        "investigation_invocations",
+        id,
+        "step_id",
+        &step.step_id,
+        &encode(&step, MAX_RECORD_BYTES).unwrap(),
+    );
+    completion::assert_attempt_invocation_refusal(&tx, &f.task);
+}

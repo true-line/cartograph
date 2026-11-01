@@ -551,6 +551,13 @@ pub(super) fn attempts(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
+    attempts_with_invocation_reread::<false>(connection, task)
+}
+
+fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
+    connection: &Connection,
+    task: &StoredTask,
+) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
     #[cfg(test)]
     ATTEMPT_PREFIX_READS.with(|count| count.set(count.get() + 1));
     let policy = saved_policy(task)?;
@@ -596,6 +603,8 @@ pub(super) fn attempts(
             &entry.record.step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
+        #[cfg(test)]
+        ATTEMPT_INVOCATION_READS.with(|count| count.set(count.get() + 1));
         let actual_step: PendingInvestigationStep = read_body(
             connection,
             "investigation_invocations",
@@ -650,15 +659,24 @@ pub(super) fn attempts(
                         .checked_sub(1)
                         .ok_or(InvestigationStoreError::Invalid)?,
                 )?;
-                let step: PendingInvestigationStep = read_body(
-                    connection,
-                    "investigation_invocations",
-                    "step_id",
-                    id,
-                    &entry.record.step_id,
-                )?
-                .ok_or(InvestigationStoreError::Invalid)?;
-                if step.input_ledger_hash != before.fingerprint_with_policy(policy)? {
+                // No writes or callbacks intervene after actual_step authentication.
+                // A transaction pins this exact row; autocommit keeps its old reread.
+                let matches_input = if FORCE_REREAD || connection.is_autocommit() {
+                    #[cfg(test)]
+                    ATTEMPT_INVOCATION_READS.with(|count| count.set(count.get() + 1));
+                    let step: PendingInvestigationStep = read_body(
+                        connection,
+                        "investigation_invocations",
+                        "step_id",
+                        id,
+                        &entry.record.step_id,
+                    )?
+                    .ok_or(InvestigationStoreError::Invalid)?;
+                    step.input_ledger_hash == before.fingerprint_with_policy(policy)?
+                } else {
+                    actual_step.input_ledger_hash == before.fingerprint_with_policy(policy)?
+                };
+                if !matches_input {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 let basis = InvestigationTurnBasis {
@@ -2046,4 +2064,49 @@ pub(super) use settlement_projection::{project_observation, with_observation_pre
 #[cfg(test)]
 pub(super) fn attempt_prefix_reads() -> usize {
     ATTEMPT_PREFIX_READS.with(|count| count.get())
+}
+
+#[cfg(test)]
+thread_local! { static ATTEMPT_INVOCATION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+pub(super) fn assert_attempt_invocation_reuse(connection: &Connection, task: &StoredTask) {
+    let changes = connection.total_changes();
+    ATTEMPT_INVOCATION_READS.with(|count| count.set(0));
+    let actual = attempts(connection, task).unwrap();
+    let acquired = actual
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.record.outcome,
+                AttemptOutcome::SourceAcquired { .. } | AttemptOutcome::InventoryAcquired { .. }
+            )
+        })
+        .count();
+    assert!(!actual.is_empty());
+    ATTEMPT_INVOCATION_READS.with(|count| {
+        assert_eq!(
+            count.get(),
+            actual.len()
+                + if connection.is_autocommit() {
+                    acquired
+                } else {
+                    0
+                }
+        )
+    });
+    ATTEMPT_INVOCATION_READS.with(|count| count.set(0));
+    let reread = attempts_with_invocation_reread::<true>(connection, task).unwrap();
+    ATTEMPT_INVOCATION_READS.with(|count| assert_eq!(count.get(), actual.len() + acquired));
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(reread).unwrap()
+    );
+    assert_eq!(connection.total_changes(), changes);
+}
+
+#[cfg(test)]
+pub(super) fn assert_attempt_invocation_refusal(connection: &Connection, task: &StoredTask) {
+    assert!(attempts(connection, task).is_err());
+    assert!(attempts_with_invocation_reread::<true>(connection, task).is_err());
 }
