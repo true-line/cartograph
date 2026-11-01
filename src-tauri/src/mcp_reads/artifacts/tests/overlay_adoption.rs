@@ -484,14 +484,20 @@ fn capability_worker_role_admits_real_candidates_and_grows_with_selection() {
         std::mem::size_of_val(&candidates) + std::mem::size_of_val(candidates.as_slice());
     let bound = WorkerReservation::for_limits(policy).unwrap();
     assert!(bound.capability_compile_bytes >= compiler.peak_bytes + actual_candidate_owners);
-    // AC-0535: Actors share the same captured count and byte caps.
-    let actors =
-        spec::logical_actor_story_workspace_bound(policy.graph.max_bytes, n, bytes).unwrap();
+    // AC-0535/#1555: shared sidecar caps compose validation/rendering stages;
+    // the host's borrowed descriptors remain charged exactly once.
+    let knowledge = spec::logical_knowledge_story_compile_bound(
+        graph,
+        policy.dispatch.trace,
+        policy.dispatch.compile,
+        n,
+        bytes,
+    )
+    .unwrap();
     assert_eq!(
         bound.capability_compile_bytes,
         sum(&[
-            compiler.peak_bytes,
-            actors.peak_extra_bytes,
+            knowledge.peak_bytes,
             slots::<spec::CapabilityStory<'_>>(n).unwrap(),
             std::mem::size_of_val(&candidates)
         ])

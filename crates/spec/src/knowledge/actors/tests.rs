@@ -1001,7 +1001,7 @@ fn actor_stories_bound_workspace_and_complete_escaped_output() {
 
 // Shared AC-0534 source-shaped fixture: canonical Actor, Capability, security
 // finding, and an ADR drift whose serialized context depends on a real flow.
-fn admitted_actor_fixture() -> (
+pub(crate) fn admitted_actor_fixture() -> (
     RevisionedSnapshot,
     Vec<OverlayFact>,
     Node,
