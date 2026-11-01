@@ -1,5 +1,17 @@
 # cartograph
 
+## 0.56.0
+
+### Minor Changes
+
+- 90b16f4: Show weak Actor caller-set assumptions with ordered alternatives and exact source citations in the official user-stories compiler. Preserve Capability-only output; host adoption remains separate.
+- ce01ddb: The knowledge phase publishes permission Actor candidates beside the other deterministic producers (#1530).
+
+### Patch Changes
+
+- c99b07a: Give graph recovery passes one interface over plain and packed facts, and close over missing edge endpoints while decoding only the edges that reference them, in preparation for bounding ingest memory on large repositories.
+- f13ce31: Publish recovered facts packed: ingest holds each fact as compact JSON from merge through the conditional graph write, decoding only the facts it needs to compare, so publishing a large repository uses less memory with identical rows.
+
 ## 0.55.2
 
 ### Patch Changes
