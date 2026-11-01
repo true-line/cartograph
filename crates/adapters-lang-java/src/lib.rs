@@ -599,6 +599,77 @@ fn spring_proof(
     spring_proven(name, imports).then(|| !imports.bindings.contains_key(name))
 }
 
+/// The `method =` restriction of one `@RequestMapping` (#1598): each proven
+/// `RequestMethod.X`, sorted and de-duplicated, and empty when the element
+/// is absent or `{}` (no restriction). `None` when any named verb is
+/// unprovable (a static import, a constant or a lookalike `RequestMethod`),
+/// so the caller emits a Gap. The flag is whether a verb's `RequestMethod`
+/// rests on a wildcard import alone, which a same-package type of that name
+/// obscures (JLS §6.4.1). Spring combines the class and method levels by
+/// union, and an empty union serves every method (`ALL`, the TS adapter's
+/// convention); see `RequestMethodsRequestCondition::combine`.
+fn spring_request_methods(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'_>,
+    imports: &Imports,
+) -> Option<(BTreeSet<String>, bool)> {
+    let Some(value) = retrofit::element(cx, annotation, "method") else {
+        return Some((BTreeSet::new(), false));
+    };
+    let constants: Vec<TsNode<'_>> = if value.kind() == "element_value_array_initializer" {
+        let mut walk = value.walk();
+        value
+            .named_children(&mut walk)
+            .filter(|element| !matches!(element.kind(), "line_comment" | "block_comment"))
+            .collect()
+    } else {
+        vec![value]
+    };
+    let qualified = "org.springframework.web.bind.annotation.RequestMethod";
+    let mut verbs = BTreeSet::new();
+    let mut wildcard = false;
+    for constant in &constants {
+        if constant.kind() != "field_access" {
+            return None;
+        }
+        let object = constant.child_by_field_name("object")?;
+        let field = constant.child_by_field_name("field")?;
+        let spelling: String = cx
+            .text(&object)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let proven_wildcard = if spelling == qualified {
+            false
+        } else if spelling == "RequestMethod" {
+            match imports.bindings.get("RequestMethod") {
+                Some(bound) if bound == qualified => false,
+                Some(_) => return None,
+                None if imports
+                    .wildcard_packages
+                    .iter()
+                    .any(|package| package == "org.springframework.web.bind.annotation") =>
+                {
+                    true
+                }
+                None => return None,
+            }
+        } else {
+            return None;
+        };
+        let verb = cx.text(&field);
+        if !matches!(
+            verb,
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "TRACE"
+        ) {
+            return None;
+        }
+        wildcard |= proven_wildcard;
+        verbs.insert(verb.to_string());
+    }
+    Some((verbs, wildcard))
+}
+
 const SPRING_SHADOWED: &str =
     "Spring annotation proven only by a wildcard import is shadowed by a same-package type";
 
@@ -1076,14 +1147,26 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             )]);
         }
         let base_mapping = base_mapping.map(|(node, _)| node);
+        // The class-level `method =` restriction every handler inherits
+        // (union semantics); `None` when it cannot be proven.
+        let class_methods = match base_mapping {
+            None => Some((BTreeSet::new(), false)),
+            Some(node) => spring_request_methods(&cx, node, &imports),
+        };
+        if let Some((_, true)) = class_methods {
+            shadowed_by.insert(vec![same_package_type(package.as_deref(), "RequestMethod")]);
+        }
         let bases = match base_mapping {
             None => Some(vec![String::new()]),
             Some(node) => annotation_path(&cx, node).segments(),
         };
         for (name, annotation) in declaration_annotations(&cx, *method) {
-            let Some(http_method) = mapping_method(&name) else {
+            // A method-level `@RequestMapping` binds a handler as much as the
+            // verb shorthands do (#1598); its verbs come from `method =`.
+            let request_mapping = name == "RequestMapping";
+            if !request_mapping && mapping_method(&name).is_none() {
                 continue;
-            };
+            }
             let Some(wildcard) = spring_proof(&cx, annotation, &name, &imports) else {
                 continue;
             };
@@ -1091,6 +1174,56 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             if wildcard {
                 shadowed_by.insert(vec![same_package_type(package.as_deref(), &name)]);
             }
+            let method_methods = if request_mapping {
+                spring_request_methods(&cx, annotation, &imports)
+            } else {
+                mapping_method(&name).map(|verb| (BTreeSet::from([verb.to_string()]), false))
+            };
+            let (Some((class_verbs, _)), Some((mut verbs, method_wildcard))) =
+                (class_methods.as_ref(), method_methods)
+            else {
+                // A proven handler whose verb T0 cannot prove, at either
+                // level, is a route Gap, never a guessed method (R-INT-4).
+                let evidence: Vec<TsNode<'_>> = match (class_methods.is_none(), base_mapping) {
+                    (true, Some(base)) => vec![base, annotation],
+                    _ => vec![annotation],
+                };
+                let gap = spring_route_gap(
+                    &cx,
+                    &evidence,
+                    handler,
+                    "?",
+                    "unresolved Spring request method",
+                );
+                if shadowed_by.is_empty() {
+                    out.nodes.push(gap.0);
+                    out.edges.push(gap.1);
+                } else {
+                    // A shadowed binding, not the verb, is then what blocks.
+                    let shadowed = spring_route_gap(&cx, &evidence, handler, "?", SPRING_SHADOWED);
+                    out.pending_endpoints.push(jaxrs::Pending::new(
+                        shadowed_by.iter().cloned().collect(),
+                        gap,
+                        shadowed,
+                    ));
+                }
+                continue;
+            };
+            if method_wildcard {
+                shadowed_by.insert(vec![same_package_type(package.as_deref(), "RequestMethod")]);
+            }
+            verbs.extend(class_verbs.iter().cloned());
+            if verbs.is_empty() {
+                verbs.insert("ALL".into());
+            }
+            // Gaps are one per mapping annotation (their id is its span), so
+            // a multi-verb mapping names all of its verbs on one Gap.
+            let gap_method = verbs
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("|");
+            let http_method = gap_method.as_str();
             let tails = annotation_path(&cx, annotation).segments();
             let (Some(bases), Some(tails)) = (bases.as_ref(), tails) else {
                 // The mapping is proven but its route is a runtime identity
@@ -1143,7 +1276,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             // same-package type of that name turns the route into a Gap.
             let shadow_gap = (!shadowed_by.is_empty())
                 .then(|| spring_route_gap(&cx, &evidence, handler, http_method, SPRING_SHADOWED));
-            for route in routes {
+            // One endpoint per proven verb and route.
+            for (http_method, route) in verbs.iter().flat_map(|verb| {
+                routes
+                    .iter()
+                    .map(move |route| (verb.as_str(), route.clone()))
+            }) {
                 let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
                 let node = Node {
                     id: endpoint.clone(),

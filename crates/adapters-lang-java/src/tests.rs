@@ -483,6 +483,196 @@ public class Store {
     );
 }
 
+// AC-0555: method-level @RequestMapping handlers are endpoints or route Gaps,
+// never silently dropped (#1598).
+#[test]
+fn spring_method_request_mappings_yield_verbs_or_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/LegacyController.java",
+        r#"package com.demo.web;
+
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@Controller
+@RequestMapping("/legacy")
+public class LegacyController {
+    @RequestMapping(value = "/all")
+    public String any() { return "a"; }
+
+    @RequestMapping(value = "/one", method = RequestMethod.POST)
+    public String one() { return "o"; }
+
+    @RequestMapping(value = "/two", method = { RequestMethod.PUT, RequestMethod.GET })
+    public String two() { return "t"; }
+
+    @RequestMapping(value = "/opaque", method = METHODS)
+    public String opaque() { return "x"; }
+
+    @RequestMapping(value = Paths.DYNAMIC, method = { RequestMethod.GET, RequestMethod.POST })
+    public String dynamic() { return "d"; }
+}
+"#,
+    );
+    // A lookalike RequestMapping with no Spring import proves nothing.
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/FakeController.java",
+        r#"package com.demo.web;
+
+import org.springframework.stereotype.Controller;
+import com.other.web.RequestMapping;
+
+@Controller
+public class FakeController {
+    @RequestMapping("/nope")
+    public String get() { return "n"; }
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let mut endpoints: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        vec![
+            "ep:local/demo@ALL:/legacy/all",
+            "ep:local/demo@GET:/legacy/two",
+            "ep:local/demo@POST:/legacy/one",
+            "ep:local/demo@PUT:/legacy/two",
+        ]
+    );
+    edge(
+        &out.edges,
+        "ep:local/demo@POST:/legacy/one",
+        "sym:local/demo@src/main/java/com/demo/web/LegacyController.java#LegacyController.one()",
+        "HANDLES",
+    );
+    let route_gaps: Vec<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .map(|node| {
+            (
+                node.props["method"].as_str().unwrap(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(route_gaps.len(), 2, "{route_gaps:?}");
+    assert!(route_gaps.contains(&("?", "unresolved Spring request method")));
+    // A dynamic path is one Gap naming both verbs, not one Gap per verb.
+    assert!(route_gaps.contains(&("GET|POST", "dynamic Spring mapping path")));
+}
+
+// AC-0555: a handler inherits the class-level `method =` restriction by union
+// (Spring's RequestMethodsRequestCondition::combine); an empty `{}` is no
+// restriction; an unprovable class restriction fails every handler closed.
+#[test]
+fn spring_class_request_methods_combine_by_union() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/PostOnlyController.java",
+        r#"package com.demo.web;
+
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@Controller
+@RequestMapping(value = "/api", method = RequestMethod.POST)
+public class PostOnlyController {
+    @RequestMapping("/save")
+    public String save() { return "s"; }
+
+    @RequestMapping(value = "/both", method = RequestMethod.PUT)
+    public String both() { return "b"; }
+
+    @GetMapping("/read")
+    public String read() { return "r"; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/EmptyController.java",
+        r#"package com.demo.web;
+
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+@Controller
+@RequestMapping(value = "/empty", method = {})
+public class EmptyController {
+    @RequestMapping(value = "/any", method = {})
+    public String any() { return "a"; }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/OpaqueController.java",
+        r#"package com.demo.web;
+
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+@Controller
+@RequestMapping(value = "/opaque", method = METHODS)
+public class OpaqueController {
+    @GetMapping("/x")
+    public String x() { return "x"; }
+}
+"#,
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+
+    let mut endpoints: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.as_str())
+        .collect();
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        vec![
+            "ep:local/demo@ALL:/empty/any",
+            "ep:local/demo@GET:/api/read",
+            "ep:local/demo@POST:/api/both",
+            "ep:local/demo@POST:/api/read",
+            "ep:local/demo@POST:/api/save",
+            "ep:local/demo@PUT:/api/both",
+        ]
+    );
+    let route_gaps: Vec<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .map(|node| {
+            (
+                node.props["method"].as_str().unwrap(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(route_gaps, vec![("?", "unresolved Spring request method")]);
+}
+
 #[test]
 fn spring_endpoints_compose_class_and_method_paths_and_fail_closed_without_import() {
     let dir = tempfile::tempdir().unwrap();
@@ -4850,4 +5040,58 @@ class ClientTest {
         ),
     ]);
     assert_eq!(webclient_rows(&sites), Vec::<[&str; 3]>::new());
+}
+
+// AC-0555: an unresolved verb under a wildcard-only Spring proof waits for the
+// shadow join, so a same-package type yields the shadow Gap, not a verb Gap.
+#[test]
+fn spring_unresolved_method_settles_through_wildcard_shadowing() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = |package: &str| {
+        format!(
+            "package {package};\n\nimport org.springframework.stereotype.Controller;\nimport org.springframework.web.bind.annotation.*;\n\n@Controller\npublic class Legacy {{\n    @RequestMapping(value = \"/x\", method = METHODS)\n    public String x() {{ return \"\"; }}\n}}\n"
+        )
+    };
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/Legacy.java",
+        &source("com.demo.web"),
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/web/RequestMapping.java",
+        "package com.demo.web;\n\npublic @interface RequestMapping { String value() default \"\"; }\n",
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/demo/plain/Legacy.java",
+        &source("com.demo.plain"),
+    );
+    let (out, _) =
+        extract_dir_incremental(dir.path(), &id(), &mut IncrementalCache::default()).unwrap();
+    let mut gaps: Vec<(String, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.id.starts_with("gap:route:"))
+        .map(|node| {
+            (
+                node.id.split('@').nth(1).unwrap_or_default().to_string(),
+                node.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        vec![
+            (
+                "src/main/java/com/demo/plain/Legacy.java".to_string(),
+                "unresolved Spring request method"
+            ),
+            (
+                "src/main/java/com/demo/web/Legacy.java".to_string(),
+                "Spring annotation proven only by a wildcard import is shadowed by a same-package type"
+            ),
+        ]
+    );
 }
