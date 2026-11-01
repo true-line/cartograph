@@ -547,3 +547,6 @@ mod tests;
 
 mod adjacency;
 pub use adjacency::{AdjacencyPage, ScopedGraphReader, ScopedReadUsage};
+
+mod neighborhood;
+pub use neighborhood::NeighborhoodGraph;

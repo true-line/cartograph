@@ -264,4 +264,52 @@ mod tests {
             assert_eq!(logical::reference_selection_workspace(oversized), None);
         }
     }
+
+    // #1602 / AC-0304: storage acquisition must preserve the existing scope oracle.
+    #[test]
+    fn indexed_neighborhood_matches_full_context_scope() {
+        use core_graph::{GraphStore, SqliteGraphStore};
+        for seed in 0..4 {
+            let mut store = SqliteGraphStore::open_in_memory().unwrap();
+            for i in 0..8 {
+                store.put_node(&node(&format!("n{i}"))).unwrap();
+            }
+            for src in 0..8 {
+                for dst in 0..8 {
+                    if (src * 7 + dst * 3 + seed) % 5 == 0 {
+                        store
+                            .put_edge(&edge(&format!("n{src}"), &format!("n{dst}")))
+                            .unwrap();
+                    }
+                }
+            }
+            let (nodes, edges) = store.read_snapshot().unwrap();
+            let complete = ContextSnapshot::new(nodes, edges).unwrap();
+            let revision = store.read_revision().unwrap();
+            for anchor in ["n0", "n3", "n7"] {
+                for hops in 1..=MAX_NEIGHBORHOOD_HOPS {
+                    let expected = complete
+                        .references_in_scope(QueryScope::Neighborhood {
+                            anchor: anchor.into(),
+                            hops,
+                        })
+                        .unwrap();
+                    let graph = store
+                        .with_scoped_reader(&revision, SnapshotReadLimits::default(), |reader| {
+                            reader.neighborhood(anchor, hops)
+                        })
+                        .unwrap()
+                        .unwrap();
+                    let actual = ContextSnapshot::new(graph.0, graph.1)
+                        .unwrap()
+                        .references_in_scope(QueryScope::All)
+                        .unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "seed={seed}, anchor={anchor}, hops={hops}"
+                    );
+                }
+            }
+        }
+    }
 }
