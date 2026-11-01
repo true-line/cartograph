@@ -66,9 +66,6 @@ pub(super) fn start_access<R: tauri::Runtime>(
     let request = request
         .normalized_with_policy(policy)
         .map_err(|error| rejected("invalid_input", error))?;
-    if request.specialist_id == "domain-analyst@18" {
-        return Err(rejected("unavailable", GATED_ANALYST_DISPATCH_REASON));
-    }
     let state = app.state::<AppState>();
     let _admission = reservations
         .map(|reservations| reservations.admission())

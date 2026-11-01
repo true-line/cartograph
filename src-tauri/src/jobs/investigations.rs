@@ -162,7 +162,6 @@ const MAX_INVOCATION_BYTES: usize = MAX_DISCLOSURE_BYTES + 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InvestigationStoreError {
-    DispatchDisabled,
     Invalid,
     Missing,
     Conflict,
@@ -177,7 +176,6 @@ pub(crate) enum InvestigationStoreError {
 impl std::fmt::Display for InvestigationStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::DispatchDisabled => GATED_ANALYST_DISPATCH_REASON,
             Self::Invalid => "Investigation metadata is invalid; work stopped.",
             Self::Missing => "Investigation history was not found.",
             Self::Conflict => "This investigation request identity already names different input.",
@@ -840,9 +838,6 @@ impl JobStore {
         next_prompt: bool,
         mcp: Option<&McpRequestIdentity>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        if request.specialist_id == SpecialistId::DomainAnalystV18 {
-            return Err(InvestigationStoreError::DispatchDisabled);
-        }
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
         if request.specialist_id.uses_next_prompt_admission() != next_prompt

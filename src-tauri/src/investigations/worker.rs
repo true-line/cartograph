@@ -243,10 +243,6 @@ fn run_inner<R: tauri::Runtime>(
     let outcome = (|| {
         let request = request?;
         let detail = read_detail(&state, &id, &execution)?;
-        // Start gates do not cover resuming an already saved cold @18 task.
-        if detail.summary.specialist_id == agents::investigation::SpecialistId::DomainAnalystV18 {
-            return Err(Failure::Stop(InvestigationStopReason::PreparationFailed));
-        }
         let mut worker = Worker {
             app: &app,
             state: &state,

@@ -1920,27 +1920,48 @@ fn next_prompt_unadmitted_source_fact_stops_before_preparation() {
 #[path = "exact_node_tests.rs"]
 mod exact_node_tests;
 
-// AC-0484: a valid saved @18 task cannot bypass the closed start gate by resume.
+// AC-0552: normal run_inner accepts the exact saved family/request, but never a
+// mismatched request. This intentionally does not call the private inner seam.
 #[test]
-fn gated_saved_acquisition_task_stops_before_provider() {
-    let provider = Arc::new(Scripted::new(Mode::Malformed));
-    let f = NextFixture::gated(provider.as_ref());
-    let state = f.base.base.app.state::<AppState>();
-    let before = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
-    assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV18);
-    assert_eq!(before.usage.model_invocations, 0);
-    f.run(provider.clone());
-    let detail = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
-    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
-    assert_eq!(
-        detail.error.as_deref(),
-        Some(InvestigationStopReason::PreparationFailed.test_message())
-    );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(detail.usage.model_invocations, 0);
-    assert_eq!(detail.usage.tool_actions, 0);
-    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
-    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+fn explicit_acquisition_saved_task_runs_normal_worker() {
+    for mismatched in [false, true] {
+        let mut scripted = NextProvider::new(false);
+        scripted.gated_flow = Some(GatedFlow::Repair);
+        let provider = Arc::new(scripted);
+        let mut f = NextFixture::gated(provider.as_ref());
+        if mismatched {
+            f.request.specialist_id = "domain-analyst@17".into();
+        }
+        f.run(provider.clone());
+        let state = f.base.base.app.state::<AppState>();
+        let detail = state.jobs.lock().unwrap().investigation(&f.id).unwrap();
+        assert_eq!(detail.summary.specialist_id, SpecialistId::DomainAnalystV18);
+        assert_eq!(
+            provider.observed.calls.load(Ordering::SeqCst),
+            if mismatched { 0 } else { 3 }
+        );
+        assert_eq!(
+            detail.usage.model_invocations,
+            if mismatched { 0 } else { 3 }
+        );
+        assert_eq!(detail.usage.tool_actions, u32::from(!mismatched));
+        assert_eq!(
+            detail.summary.status,
+            if mismatched {
+                InvestigationStatus::Failed
+            } else {
+                InvestigationStatus::Completed
+            },
+            "{:?}",
+            detail.error
+        );
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+        assert_eq!(
+            reopened.investigation_result(&f.id).unwrap().is_some(),
+            !mismatched
+        );
+    }
 }
 
 #[path = "initial_acquisition_tests.rs"]
