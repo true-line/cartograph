@@ -532,10 +532,39 @@ fn captured_seventeen_file_capability_stories_without_provider() {
     };
     assert!(artifact.artifact.verify_identity());
     let mut rendered = 0;
-    for fact in &session.capabilities {
+    let mut rendered_actors = 0;
+    for (fact, is_actor) in session
+        .capabilities
+        .iter()
+        .map(|fact| (fact, false))
+        .chain(session.actors.iter().map(|fact| (fact, true)))
+    {
         let core_graph::overlay::OverlayItem::Node(node) = &fact.item else {
-            panic!("Capability node expected")
+            panic!("producer node expected")
         };
+        assert_eq!(node.label, if is_actor { "Actor" } else { "Capability" });
+        if is_actor {
+            assert_eq!(fact.cites.len(), 1);
+            let core_graph::overlay::BaseRef::Node(endpoint_id) = fact.cites.first().unwrap()
+            else {
+                panic!("Actor must cite its base Endpoint")
+            };
+            assert_eq!(
+                node.props["endpoint_id"].as_str(),
+                Some(endpoint_id.as_str())
+            );
+            assert_eq!(
+                before
+                    .0
+                    .graph
+                    .0
+                    .iter()
+                    .find(|node| &node.id == endpoint_id)
+                    .unwrap()
+                    .label,
+                "Endpoint"
+            );
+        }
         let candidate = artifact
             .artifact
             .assertions
@@ -543,7 +572,42 @@ fn captured_seventeen_file_capability_stories_without_provider() {
             .find(|a| a.id == format!("node:{}", node.id));
         let visible = candidate.is_some();
         if let Some(row) = candidate {
-            rendered += 1;
+            if is_actor {
+                rendered_actors += 1;
+                assert_eq!(
+                    node.props["assumption"],
+                    serde_json::json!({
+                        "name": "allow-any-listed-permission",
+                        "statement": spec::ACTOR_ALLOW_ASSUMPTION,
+                        "rule": spec::ACTOR_ALLOW_RULE,
+                        "version": spec::ACTOR_ALLOW_RULE_VERSION
+                    })
+                );
+                let caller_set = serde_json::to_string(&(
+                    &node.id,
+                    &node.props["any_of"],
+                    &node.props["assumption"],
+                    &node.props["permission_site"]["prov"]["evidence"],
+                ))
+                .unwrap();
+                assert!(
+                    artifact
+                        .artifact
+                        .content
+                        .contains(&format!("    {caller_set}\n"))
+                );
+                assert!(
+                    artifact
+                        .artifact
+                        .content
+                        .contains("## Actor caller set — Semantic / InferredWeak convention")
+                );
+                assert!(artifact.artifact.content.contains(
+                    "Assumed caller set; not effective runtime authorization or an identified user, role or principal."
+                ));
+            } else {
+                rendered += 1;
+            }
             assert_eq!(
                 row.provenance,
                 serde_json::from_value::<core_prov::Provenance>(node.props["prov"].clone())
@@ -592,6 +656,11 @@ fn captured_seventeen_file_capability_stories_without_provider() {
         "selected={}, rendered={rendered}, filtered={}",
         session.capabilities.len(),
         session.capabilities.len() - rendered
+    );
+    eprintln!(
+        "actors_selected={}, actors_rendered={rendered_actors}, actors_filtered={}",
+        session.actors.len(),
+        session.actors.len() - rendered_actors
     );
     let page = artifact
         .page(
