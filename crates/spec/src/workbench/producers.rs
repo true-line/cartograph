@@ -121,7 +121,7 @@ pub(super) fn stories_with_support(
     if let Some(stories) = stories.filter(|s| s.filtered > 0) {
         writeln!(
             content,
-            "{} derived stories omitted because supporting facts are filtered.\n",
+            "{} derived stories omitted because candidate facts or their supporting facts are filtered.\n",
             stories.filtered
         )?;
     }

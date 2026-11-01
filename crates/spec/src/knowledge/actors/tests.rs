@@ -785,6 +785,41 @@ fn actor_stories_render_canonical_assumptions_and_preserve_capability_bytes() {
         ),
         combined
     );
+    // A mixed set retains the visible Actor's exact provenance while the other
+    // is omitted by its own curation decision, without claiming absent recovery.
+    let hidden = actor_node(&facts[0]).props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mixed = produced(
+        compile_actors(
+            &source,
+            &facts,
+            &[],
+            crate::ExportMode::BestEffort,
+            &BTreeSet::from([hidden]),
+            usize::MAX,
+        )
+        .unwrap(),
+    );
+    assert!(mixed.content.contains(
+        "1 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
+    assert!(
+        !mixed
+            .assertions
+            .iter()
+            .any(|a| a.subject_id == actor_node(&facts[0]).id)
+    );
+    let assertion = mixed
+        .assertions
+        .iter()
+        .find(|a| a.subject_id == actor_node(&facts[1]).id)
+        .unwrap();
+    assert_eq!(
+        assertion.provenance,
+        serde_json::from_value::<Provenance>(actor_node(&facts[1]).props["prov"].clone()).unwrap()
+    );
     assert_eq!(source, before);
 }
 
@@ -837,6 +872,22 @@ fn actor_stories_refuse_invalid_and_count_hidden_candidates() {
             assert!(run(&invalid, std::slice::from_ref(&forged), mode, &rejected).is_err());
         }
     }
+    // Own curation must not hide malformed Actor input from full validation.
+    let own_hash = actor_node(&facts[0]).props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut invalid = facts.clone();
+    let OverlayItem::Node(node) = &mut invalid[0].item else {
+        unreachable!()
+    };
+    node.props["assumption"]["statement"] = json!("forged");
+    for mode in [
+        crate::ExportMode::VerifiedOnly,
+        crate::ExportMode::BestEffort,
+    ] {
+        assert!(run(&source, &invalid, mode, &BTreeSet::from([own_hash.clone()])).is_err());
+    }
     let mut duplicate = facts.clone();
     duplicate.push(facts[0].clone());
     assert!(
@@ -864,13 +915,25 @@ fn actor_stories_refuse_invalid_and_count_hidden_candidates() {
     for (mode, rejected) in [
         (crate::ExportMode::VerifiedOnly, BTreeSet::new()),
         (
+            crate::ExportMode::VerifiedOnly,
+            BTreeSet::from([own_hash.clone()]),
+        ),
+        (
+            crate::ExportMode::BestEffort,
+            BTreeSet::from([own_hash.clone()]),
+        ),
+        (
+            crate::ExportMode::BestEffort,
+            BTreeSet::from([own_hash, endpoint_hash.clone()]),
+        ),
+        (
             crate::ExportMode::BestEffort,
             BTreeSet::from([endpoint_hash]),
         ),
     ] {
         let artifact = produced(run(&source, &facts, mode, &rejected).unwrap());
         assert!(artifact.assertions.is_empty());
-        assert!(artifact.content.contains("1 derived stories omitted"));
+        assert!(artifact.content.contains("1 derived stories omitted because candidate facts or their supporting facts are filtered."));
         assert!(
             !artifact
                 .content

@@ -250,15 +250,13 @@ fn compile_capability_stories(
         }
         let p = Provenance::deserialize(&candidate.capability.props["prov"])
             .expect("candidate provenance validated above");
-        if included(&p, mode, rejected) {
-            if visible {
-                stories.included.push(Story {
-                    node: candidate.capability,
-                    support,
-                });
-            } else {
-                stories.filtered += 1;
-            }
+        if included(&p, mode, rejected) && visible {
+            stories.included.push(Story {
+                node: candidate.capability,
+                support,
+            });
+        } else {
+            stories.filtered += 1;
         }
     }
     let compile = |stories: &Stories<'_>| match security {
