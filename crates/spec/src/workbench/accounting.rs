@@ -178,6 +178,25 @@ pub fn logical_compile_bound(
     trace: TraceLimits,
     compile: SelectedCompileLimits,
 ) -> Option<CompileWorkspaceBound> {
+    compile_bound_for_renderer(graph, trace, compile, false)
+}
+
+// Only compile_stories_with_flows_and_security's fixed user-stories selection
+// may use this helper. Generic public accounting retains every renderer branch.
+pub(crate) fn logical_story_compile_bound(
+    graph: TraceGraphBound,
+    trace: TraceLimits,
+    compile: SelectedCompileLimits,
+) -> Option<CompileWorkspaceBound> {
+    compile_bound_for_renderer(graph, trace, compile, true)
+}
+
+fn compile_bound_for_renderer(
+    graph: TraceGraphBound,
+    trace: TraceLimits,
+    compile: SelectedCompileLimits,
+    stories_only: bool,
+) -> Option<CompileWorkspaceBound> {
     let security = crate::security_projection_bound(graph.bytes, graph.rows, graph.values)?;
     let (gap_template, identity_template) = projection_templates()?;
     let projected_flow_payload = trace
@@ -244,25 +263,33 @@ pub fn logical_compile_bound(
         graph.bytes,
         graph.values.checked_mul(size_of::<String>())?,
     ])?;
-    let native = sum(&[
-        current_row,
-        filters,
-        super::producers::logical_index_bytes(rows, values)?,
-        super::diagrams::logical_index_bytes(bytes, rows, trace.max_hops)?,
-        graph_charge(bytes, rows, values)?,
-    ])?; // topology alone owns a second selected graph
-    let registers = super::registers::logical_workspace_bytes(
-        bytes,
-        rows,
-        values,
-        projected_flow_payload,
-        trace.max_hops,
-        trace.max_flows,
-    )?
-    .checked_add(current_row)?;
-    let rules =
-        crate::rules::logical_workspace_bytes(bytes, rows, values)?.checked_add(current_row)?;
-    let renderer_workspace_bytes = native.max(registers).max(rules);
+    let renderer_workspace_bytes = if stories_only {
+        sum(&[
+            current_row, // base provenance/omission/name formatting is unchanged
+            filters,     // selected references, visibility and gap-count sets
+            super::producers::logical_story_index_bytes(rows)?,
+        ])?
+    } else {
+        let native = sum(&[
+            current_row,
+            filters,
+            super::producers::logical_index_bytes(rows, values)?,
+            super::diagrams::logical_index_bytes(bytes, rows, trace.max_hops)?,
+            graph_charge(bytes, rows, values)?,
+        ])?; // topology alone owns a second selected graph
+        let registers = super::registers::logical_workspace_bytes(
+            bytes,
+            rows,
+            values,
+            projected_flow_payload,
+            trace.max_hops,
+            trace.max_flows,
+        )?
+        .checked_add(current_row)?;
+        let rules =
+            crate::rules::logical_workspace_bytes(bytes, rows, values)?.checked_add(current_row)?;
+        native.max(registers).max(rules)
+    };
     let assertions = compile
         .max_bytes
         .checked_div(minimum_assertion_bytes()?.max(1))?;

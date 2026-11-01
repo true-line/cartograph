@@ -430,7 +430,7 @@ pub fn logical_knowledge_story_compile_bound(
     selected_json_bytes: usize,
 ) -> Option<KnowledgeStoryCompileWorkspaceBound> {
     use super::accounting::sum;
-    let ordinary = logical_compile_bound(graph, trace, compile)?;
+    let ordinary = super::accounting::logical_story_compile_bound(graph, trace, compile)?;
     let capability = logical_capability_compile_bound(
         graph,
         trace,
@@ -892,5 +892,139 @@ mod stage_tests {
         }
         assert!(super::super::accounting::capability_renderer_parts(usize::MAX, 1).is_none());
         assert!(actor_renderer_parts(1, 1, usize::MAX).is_none());
+    }
+
+    // AC-0518: the fixed selected route retains base Capability rendering,
+    // canonical sidecars, caller flows/security and atomic admission outcomes.
+    #[test]
+    fn selected_story_route_keeps_base_sidecars_and_admission() {
+        let (mut base, actors, cap, flows) =
+            crate::knowledge::actors::tests::admitted_actor_fixture();
+        let mut base_cap = base.graph.0[0].clone();
+        base_cap.id = "base:capability".into();
+        base_cap.label = "Capability".into();
+        base_cap.props["name"] = json!("Orders <script>\n");
+        base.graph.0.push(base_cap);
+        let candidates = [CapabilityStory {
+            capability: &cap,
+            cites: &actors[0].cites,
+        }];
+        let rejected = BTreeSet::new();
+        let security = crate::SecurityLimits {
+            max_rows: 64,
+            max_output_bytes: 32768,
+        };
+        let run = |selected, security| {
+            compile_knowledge_user_stories_with_flows_and_security(
+                &base,
+                &candidates,
+                &actors,
+                &flows,
+                ExportMode::BestEffort,
+                &rejected,
+                selected,
+                security,
+            )
+            .unwrap()
+        };
+        let SelectedArtifactOutcome::Produced(artifact) = run(limits(), security) else {
+            panic!("mixed selected story must produce")
+        };
+        assert!(artifact.verify_identity());
+        for id in ["node:base:capability", "node:cap:admitted"] {
+            assert!(artifact.assertions.iter().any(|row| row.id == id));
+        }
+        assert!(
+            artifact
+                .assertions
+                .iter()
+                .any(|row| row.subject_kind == "Actor")
+        );
+        assert!(artifact.content.contains("Actor caller set"));
+        let stories = validated_stories(
+            &base,
+            &candidates,
+            &actors,
+            ExportMode::BestEffort,
+            &rejected,
+        )
+        .unwrap();
+        assert_eq!(
+            SelectedArtifactOutcome::Produced(artifact.clone()),
+            selected::compile_stories_with_flows_and_security(
+                &base,
+                &flows,
+                ExportMode::BestEffort,
+                &rejected,
+                limits(),
+                &stories,
+                Some(security)
+            )
+        );
+        let mut exact = limits();
+        exact.max_bytes =
+            artifact.content.len() + serde_json::to_vec(&artifact.assertions).unwrap().len();
+        assert_eq!(
+            run(exact, security),
+            SelectedArtifactOutcome::Produced(artifact)
+        );
+        exact.max_bytes -= 1;
+        assert!(matches!(
+            run(exact, security),
+            SelectedArtifactOutcome::Limited { .. }
+        ));
+        assert!(matches!(
+            run(
+                limits(),
+                crate::SecurityLimits {
+                    max_rows: 0,
+                    max_output_bytes: 0
+                }
+            ),
+            SelectedArtifactOutcome::Limited {
+                limit: SelectedArtifactLimit::SecurityDerivation(_),
+                ..
+            }
+        ));
+    }
+
+    // AC-0518: narrowing a known selected renderer must strictly remove unrelated
+    // workspace without weakening checked limits or changing generic accounting.
+    #[test]
+    fn selected_story_workspace_is_strictly_smaller_and_checked() {
+        let graph = flowtracer::TraceGraphBound {
+            bytes: 4096,
+            rows: 20,
+            values: 100,
+        };
+        let trace = flowtracer::TraceLimits {
+            max_flows: 4,
+            max_hops: 8,
+            max_output_bytes: 8192,
+        };
+        let generic = logical_compile_bound(graph, trace, limits()).unwrap();
+        let story =
+            super::super::accounting::logical_story_compile_bound(graph, trace, limits()).unwrap();
+        assert!(story.renderer_workspace_bytes < generic.renderer_workspace_bytes);
+        assert!(story.peak_bytes <= generic.peak_bytes);
+        assert!(story.artifact_bytes > limits().max_bytes);
+        let combined =
+            logical_knowledge_story_compile_bound(graph, trace, limits(), 8, 512).unwrap();
+        // The pre-Actor stage deliberately retains the complete legacy peak.
+        assert!(
+            combined.peak_bytes
+                >= logical_capability_compile_bound(graph, trace, limits(), 8, 512)
+                    .unwrap()
+                    .peak_bytes
+        );
+        let overflow = flowtracer::TraceGraphBound {
+            bytes: usize::MAX,
+            ..graph
+        };
+        assert!(
+            super::super::accounting::logical_story_compile_bound(overflow, trace, limits())
+                .is_none()
+        );
+        assert!(super::super::producers::logical_story_index_bytes(usize::MAX).is_none());
     }
 }

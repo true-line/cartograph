@@ -1203,6 +1203,16 @@ pub(super) fn journeys(
     finish(content, assertions)
 }
 
+/// Base Capability references retained by stories_with_support. Appended
+/// sidecar references belong to the combined bound, not this base-only role.
+pub(super) fn logical_story_index_bytes(rows: usize) -> Option<usize> {
+    super::accounting::sum(&[
+        super::accounting::slots::<&Node>(rows)?,
+        std::mem::size_of::<Vec<&Node>>(),
+        std::mem::size_of::<BTreeSet<&str>>(), // common gap-count set header
+    ])
+}
+
 /// Explicit borrowed index roles; input properties are not cloned by these
 /// vectors/maps. Topology's owned selected graph is charged by the caller.
 pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
