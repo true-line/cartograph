@@ -823,8 +823,7 @@ fn session_actor_stories_keep_assumption_order_and_endpoint_citation() {
     assert!(kinds.contains(&"Actor") && kinds.contains(&"Endpoint"));
 }
 
-// AC-0535: VerifiedOnly omits the weak Actor and counts it; the same
-// session's Capability-only overlay counts nothing.
+// AC-0535: VerifiedOnly counts the filtered Capability and weak Actor separately.
 #[test]
 fn verified_only_sessions_omit_and_count_the_weak_actor() {
     let f = Fixture::with_permission();
@@ -835,14 +834,15 @@ fn verified_only_sessions_omit_and_count_the_weak_actor() {
         stories(&session, compile_limits()).artifact
     };
     f.publish(f.facts[..1].to_vec());
-    assert!(!verified(&f).content.contains("derived stories omitted"));
+    // The Capability-only set still counts its own filtered provenance once.
+    assert!(verified(&f).content.contains(
+        "1 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
     f.publish(f.facts.clone());
     let artifact = verified(&f);
-    assert!(
-        artifact
-            .content
-            .contains("1 derived stories omitted because supporting facts are filtered.")
-    );
+    assert!(artifact.content.contains(
+        "2 derived stories omitted because candidate facts or their supporting facts are filtered."
+    ));
     assert!(!artifact.content.contains("Actor caller set"));
     assert!(
         artifact
