@@ -712,3 +712,43 @@ fn generation_oversized_instance_refuses_before_bounded_snapshot_text_copy() {
     ));
     assert!(store.conn.is_autocommit());
 }
+
+// AC-0304: coverage followed by a scoped read must reject binding-only drift,
+// even when node/edge content is byte-identical between the two acquisitions.
+#[test]
+fn coverage_to_scoped_acquisition_rejects_binding_only_mutation() {
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    store.put_node(&node("a")).unwrap();
+    let graph = store.read_snapshot().unwrap();
+    let (before, _) = store
+        .read_coverage_records_with_revision_bounded(crate::coverage::CoverageReadLimits::default())
+        .unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_if_snapshot_matches(
+                &graph,
+                &GraphPatch::default(),
+                "repo/a",
+                &[binding(&node("a"))],
+            )
+            .unwrap()
+    );
+    assert_eq!(store.read_snapshot().unwrap(), graph);
+    let stale: Result<Option<Node>, GraphError> =
+        store.with_scoped_reader(&before, SnapshotReadLimits::default(), |reader| {
+            reader.node("a")
+        });
+    assert!(matches!(
+        stale,
+        Err(GraphError::Generation(GenerationError::Changed))
+    ));
+    let (after, _) = store
+        .read_coverage_records_with_revision_bounded(crate::coverage::CoverageReadLimits::default())
+        .unwrap();
+    assert_ne!(before, after);
+    let current: Result<Option<Node>, GraphError> =
+        store.with_scoped_reader(&after, SnapshotReadLimits::default(), |reader| {
+            reader.node("a")
+        });
+    assert_eq!(current.unwrap(), Some(node("a")));
+}

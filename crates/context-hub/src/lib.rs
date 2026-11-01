@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod discovery;
+pub mod investigation_basis;
 pub mod scoped;
 pub use discovery::{
     DISCOVERY_POLICY, DiscoveryCandidate, DiscoveryCursor, DiscoveryQuery, DiscoveryRequest,
