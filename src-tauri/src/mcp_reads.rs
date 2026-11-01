@@ -107,21 +107,21 @@ fn read_knowledge(
     overlay: Option<&Mutex<OverlayStore>>,
     revision: &StoreRevision,
     limits: SnapshotReadLimits,
-) -> Result<(KnowledgeBasis, Vec<OverlayFact>), ReadError> {
+) -> Result<(KnowledgeBasis, Vec<OverlayFact>, Vec<OverlayFact>), ReadError> {
     let Some(overlay) = overlay else {
-        return Ok((KnowledgeBasis::Absent, Vec::new()));
+        return Ok((KnowledgeBasis::Absent, Vec::new(), Vec::new()));
     };
     let (n, bytes) = capability_caps(limits);
     let captured = overlay
         .lock()
         .map_err(|_| ReadError::Storage)?
-        .read_capabilities_bounded(revision, n, bytes)
+        .read_capabilities_and_actors_bounded(revision, n, bytes)
         .map_err(|e| match e {
             core_graph::overlay::OverlayError::SelectionLimit => ReadError::AdmissionLimit,
             _ => ReadError::Storage,
         })?;
     match captured {
-        OverlayRead::Absent => Ok((KnowledgeBasis::Absent, Vec::new())),
+        OverlayRead::Absent => Ok((KnowledgeBasis::Absent, Vec::new(), Vec::new())),
         OverlayRead::Stale { base } => {
             // Stored stale metadata is deserialized before publication-name
             // validation; reject malformed revision shape before retaining it.
@@ -134,11 +134,23 @@ fn read_knowledge(
             {
                 return Err(ReadError::Storage);
             }
-            Ok((KnowledgeBasis::Stale(base), Vec::new()))
+            Ok((KnowledgeBasis::Stale(base), Vec::new(), Vec::new()))
         }
         OverlayRead::Current {
-            identity, facts, ..
-        } => Ok((KnowledgeBasis::Current(identity), facts)),
+            identity,
+            mut facts,
+            ..
+        } => {
+            // One captured selection: Actors move to their own vector and the
+            // Capabilities keep the selection's buffer; no fact is copied.
+            let actors = facts
+                .extract_if(
+                    ..,
+                    |f| matches!(&f.item, core_graph::overlay::OverlayItem::Node(n) if n.label == "Actor"),
+                )
+                .collect();
+            Ok((KnowledgeBasis::Current(identity), facts, actors))
+        }
     }
 }
 
@@ -193,6 +205,7 @@ pub(crate) struct ReadSession {
     visible_facts: BTreeSet<context_hub::FactReference>,
     base: RevisionedSnapshot,
     capabilities: Vec<OverlayFact>,
+    actors: Vec<OverlayFact>,
     rejected_hashes: BTreeSet<String>,
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
@@ -241,7 +254,8 @@ impl ReadSession {
             .map_err(graph_error)?;
         // The graph temporary has dropped; no overlay guard survives this call.
         // This keeps reset's graph -> overlay lock order and the later recheck safe.
-        let (knowledge, capabilities) = read_knowledge(overlay, &base.revision, graph_limits)?;
+        let (knowledge, capabilities, actors) =
+            read_knowledge(overlay, &base.revision, graph_limits)?;
         let after_scope = normalized_scope(scope()?)?;
         let after_rejected = rejected(decisions)?;
         if before_scope != after_scope || rejected_hashes != after_rejected {
@@ -306,6 +320,7 @@ impl ReadSession {
             visible_facts,
             base,
             capabilities,
+            actors,
             rejected_hashes,
             #[cfg(test)]
             snapshot,

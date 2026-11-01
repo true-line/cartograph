@@ -479,10 +479,14 @@ fn capability_worker_role_admits_real_candidates_and_grows_with_selection() {
         std::mem::size_of_val(&candidates) + std::mem::size_of_val(candidates.as_slice());
     let bound = WorkerReservation::for_limits(policy).unwrap();
     assert!(bound.capability_compile_bytes >= compiler.peak_bytes + actual_candidate_owners);
+    // AC-0535: Actors share the same captured count and byte caps.
+    let actors =
+        spec::logical_actor_story_workspace_bound(policy.graph.max_bytes, n, bytes).unwrap();
     assert_eq!(
         bound.capability_compile_bytes,
         sum(&[
             compiler.peak_bytes,
+            actors.peak_extra_bytes,
             slots::<spec::CapabilityStory<'_>>(n).unwrap(),
             std::mem::size_of_val(&candidates)
         ])
@@ -658,4 +662,206 @@ fn adopted_stories_preserve_flow_sensitive_adr_admission() {
             }
         }
     }
+}
+
+// AC-0535: a real permission Actor captured beside its Capability reaches the
+// official stories from the same session, and Actors count in the one charge.
+#[test]
+fn captured_actors_reach_official_stories_under_the_shared_charge() {
+    let f = Fixture::with_permission();
+    f.publish(f.facts.clone());
+    let current = f.best();
+    assert_eq!(current.capabilities, f.facts[..1]);
+    assert_eq!(current.actors, f.facts[1..]);
+    let artifact = stories(&current, compile_limits()).artifact;
+    assert!(artifact.verify_identity());
+    assert!(artifact.content.contains("Actor caller set"));
+    let OverlayItem::Node(actor) = &f.facts[1].item else {
+        unreachable!()
+    };
+    assert!(artifact.assertions.iter().any(|a| a.subject_id == actor.id));
+    // The same session's input, compiled directly, is the same artifact.
+    let OverlayItem::Node(capability) = &f.facts[0].item else {
+        unreachable!()
+    };
+    let base = f.base();
+    let flows = flowtracer::trace_bounded(&base.graph.0, &base.graph.1, trace_limits()).unwrap();
+    let security = spec::security_projection_bound(
+        SnapshotReadLimits::default().max_bytes,
+        SnapshotReadLimits::default().max_rows,
+        SnapshotReadLimits::default().max_values,
+    )
+    .unwrap();
+    let spec::SelectedArtifactOutcome::Produced(direct) =
+        spec::compile_knowledge_user_stories_with_flows_and_security(
+            &base,
+            &[spec::CapabilityStory {
+                capability,
+                cites: &f.facts[0].cites,
+            }],
+            &f.facts[1..],
+            &flows,
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            compile_limits(),
+            spec::SecurityLimits {
+                max_rows: security.rows,
+                max_output_bytes: security.bytes,
+            },
+        )
+        .unwrap()
+    else {
+        panic!("fixture fits")
+    };
+    assert_eq!(artifact, direct);
+    // Fill the row cap with Capabilities: the Actor is what overflows it.
+    let rows = base.graph.0.len() + base.graph.1.len();
+    let mut facts = f.facts.clone();
+    facts.extend((1..rows).map(|i| {
+        let mut fact = f.facts[0].clone();
+        let OverlayItem::Node(n) = &mut fact.item else {
+            unreachable!()
+        };
+        n.id = format!("capcopy:{i}");
+        fact
+    }));
+    f.publish(facts);
+    let limit = |max_rows| SnapshotReadLimits {
+        max_rows,
+        ..SnapshotReadLimits::default()
+    };
+    let admitted = f.acquire(ExportMode::BestEffort, limit(rows + 1)).unwrap();
+    assert_eq!(
+        (admitted.capabilities.len(), admitted.actors.len()),
+        (rows, 1)
+    );
+    assert!(matches!(
+        f.acquire(ExportMode::BestEffort, limit(rows)),
+        Err(crate::mcp_reads::ReadError::AdmissionLimit)
+    ));
+}
+
+// AC-0535: the Actor workspace's base_json_bytes is graph.max_bytes because
+// capture admits exactly the complete serialized base graph, escapes and
+// structure included: at that length it is admitted, one byte under refused.
+#[test]
+fn capture_admits_exactly_the_serialized_base_graph_bytes() {
+    let f = Fixture::with_permission();
+    f.graph
+        .lock()
+        .unwrap()
+        .put_node(&core_graph::Node {
+            id: "sym:é\"\\\n\u{1}".into(),
+            label: "Symbol".into(),
+            props: json!({"name": "é\"\\\n\u{1}", "nested": [{"k": "\u{2028}"}]}),
+        })
+        .unwrap();
+    f.publish(f.facts.clone());
+    let base = f.base();
+    let bytes = serde_json::to_vec(&base.graph).unwrap().len();
+    let limit = |max_bytes| SnapshotReadLimits {
+        max_bytes,
+        ..SnapshotReadLimits::default()
+    };
+    let admitted = f.acquire(ExportMode::BestEffort, limit(bytes)).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&admitted.base.graph).unwrap().len(),
+        bytes
+    );
+    assert_eq!(admitted.actors, f.facts[1..]);
+    assert!(matches!(
+        f.acquire(ExportMode::BestEffort, limit(bytes - 1)),
+        Err(crate::mcp_reads::ReadError::Limit)
+    ));
+}
+
+// AC-0535: through the official session, the Actor renders its exact named,
+// versioned assumption, keeps the decorator's permission order, cites exactly
+// its Endpoint, and says it is not effective authorization.
+#[test]
+fn session_actor_stories_keep_assumption_order_and_endpoint_citation() {
+    let f = Fixture::with_allow("Permission.UpdateOrder, Permission.Owner");
+    f.publish(f.facts.clone());
+    let artifact = stories(&f.best(), compile_limits()).artifact;
+    let OverlayItem::Node(actor) = &f.facts[1].item else {
+        unreachable!()
+    };
+    let endpoint = actor.props["endpoint_id"].as_str().unwrap();
+    assert_eq!(
+        f.facts[1].cites,
+        BTreeSet::from([BaseRef::Node(endpoint.into())])
+    );
+    assert!(
+        artifact
+            .content
+            .contains("## Actor caller set — Semantic / InferredWeak convention")
+    );
+    let assumption = json!({
+        "name": "allow-any-listed-permission",
+        "rule": spec::ACTOR_ALLOW_RULE,
+        "statement": spec::ACTOR_ALLOW_ASSUMPTION,
+        "version": spec::ACTOR_ALLOW_RULE_VERSION,
+    });
+    assert!(artifact.content.contains(&format!(
+        "[{},[\"UpdateOrder\",\"Owner\"],{assumption}",
+        json!(actor.id)
+    )));
+    assert!(artifact.content.contains(
+        "Assumed caller set; not effective runtime authorization or an identified user, role or principal."
+    ));
+    let kinds: Vec<_> = artifact
+        .assertions
+        .iter()
+        .filter(|a| a.subject_id == actor.id || a.subject_id == endpoint)
+        .map(|a| a.subject_kind.as_str())
+        .collect();
+    assert!(kinds.contains(&"Actor") && kinds.contains(&"Endpoint"));
+}
+
+// AC-0535: VerifiedOnly omits the weak Actor and counts it; the same
+// session's Capability-only overlay counts nothing.
+#[test]
+fn verified_only_sessions_omit_and_count_the_weak_actor() {
+    let f = Fixture::with_permission();
+    let verified = |f: &Fixture| {
+        let session = f
+            .acquire(ExportMode::VerifiedOnly, SnapshotReadLimits::default())
+            .unwrap();
+        stories(&session, compile_limits()).artifact
+    };
+    f.publish(f.facts[..1].to_vec());
+    assert!(!verified(&f).content.contains("derived stories omitted"));
+    f.publish(f.facts.clone());
+    let artifact = verified(&f);
+    assert!(
+        artifact
+            .content
+            .contains("1 derived stories omitted because supporting facts are filtered.")
+    );
+    assert!(!artifact.content.contains("Actor caller set"));
+    assert!(
+        artifact
+            .assertions
+            .iter()
+            .all(|a| a.subject_kind != "Actor")
+    );
+}
+
+// AC-0535: a captured Actor that is not the canonical producer output fails
+// the whole compilation as Storage; no artifact is returned.
+#[test]
+fn a_canonical_invalid_session_actor_returns_storage() {
+    let f = Fixture::with_permission();
+    let mut facts = f.facts.clone();
+    let OverlayItem::Node(actor) = &mut facts[1].item else {
+        unreachable!()
+    };
+    actor.props["any_of"] = json!(["Owner", "Forged"]);
+    f.publish(facts);
+    let session = f.best();
+    assert_eq!(session.actors.len(), 1);
+    assert!(matches!(
+        session.compile_artifact("user-stories", trace_limits(), compile_limits()),
+        Err(crate::mcp_reads::ReadError::Storage)
+    ));
 }

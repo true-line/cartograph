@@ -1078,3 +1078,8 @@
 - **Security:** Caller input, currency and compiler/Actor workspace admission remain required; no host route, provider, overlay selection or graph write is connected by this slice.
 - **Performance:** Thin wrapper over existing validation and rendering; no budget, numeric policy or workspace formula changes.
 - **Trace:** P1 (#1443, #1532) · `spec` · ADR-0051 · T-0534
+
+- **AC-0535** Given a current knowledge overlay holding canonical Actor and Capability facts, when an MCP read session captures the overlay and compiles the official `user-stories` artifact, then the session reads Capabilities and Actors together through the bounded combined overlay read under one shared count and byte charge, and compiles them through the admitted combined compiler with the session's flows and security limits. Each Actor story keeps its ordered assumption alternatives and Endpoint citation. Under VerifiedOnly the weak Actor is omitted and counted, never claimed absent. A canonically invalid captured Actor returns a storage error without an artifact. The capture's byte bound admits exactly the serialized base graph, and the logical Actor workspace is added to the session's capability compile reservation (#1539, #1443).
+- **Security:** Assumed caller sets stay Semantic/InferredWeak conventions; no provider call, graph write or new route is added.
+- **Performance:** The existing capture and compile reservations are extended by the retained Actor slots and the logical Actor workspace bound; no new numeric policy or RSS guarantee.
+- **Trace:** P1 (#1443, #1539) · `app`, `core-graph`, `spec` · ADR-0051, ADR-0037 · T-0535

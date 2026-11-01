@@ -99,9 +99,10 @@ impl ReadSession {
                     _ => Err(ReadError::Storage),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            spec::compile_capability_user_stories_with_flows_and_security(
+            spec::compile_knowledge_user_stories_with_flows_and_security(
                 &self.base,
                 &candidates,
+                &self.actors,
                 &flows,
                 self.basis.export_mode,
                 &self.rejected_hashes,
