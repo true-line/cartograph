@@ -1,5 +1,24 @@
 # cartograph
 
+## 0.57.1
+
+### Patch Changes
+
+- b018b89: Repository ingest keeps recovered facts packed after the TypeScript walk: later passes decode only the labels they read, so recovery holds far less memory on large repositories (#1574).
+- 07b676e: Declared API doc contracts decode only recovered Endpoint nodes, matching every other fact by id (#1574).
+- 0234e23: Repository ingest publishes recovered facts packed, so the app no longer holds a decoded copy of every fact between recovery and the graph write (#1574).
+- 7bdda70: Placeholder reconciliation can run over packed facts, decoding only duplicated ids, and the TypeScript walk can return its facts packed, so the app pipeline can stay packed until publication (#1574).
+- 5499e97: Reuse one authenticated same-transaction replay for saved @18 call core and capacity validation, preserving standalone checks, historical behavior and existing limits (#1573).
+- 7e02cd1: Reserve the selected user-stories renderer workspace on the combined knowledge path while retaining common compiler owners and legacy generic bounds.
+- 29cb1ed: Compose sequential Capability and Actor renderer scratch by peak while retaining both persistent reference roles and existing output admission (#1557).
+- e2ae719: Reuse each settlement materialization's validated attempt prefix for count and observation, preserving exact reservation bounds, corruption checks and existing resource limits (#1581).
+- b268421: Fetching one full spec artifact compiles only that artifact instead of the whole bundle (#1582).
+- c6e852f: Drop story validation indexes before rendering and compose the logical worker reservation over the actual validation/rendering stages without changing story output or admission limits (#1555).
+- b895259: TypeScript pending-call and Pulumi relationship completion now run through the shared fact interface, so they work unchanged over packed facts (#1551).
+- e60107e: TypeScript guessed-target reconciliation, config-driven bare-import resolution and the directory endpoint closure now run through the shared fact interface, so they work unchanged over packed facts (#1566).
+- 4a152d2: Next.js pages-router Screen completion now runs through the shared fact interface, so it works unchanged over packed facts (#1562).
+- a8d6b1b: The TypeScript directory walk now packs each file's facts once and keeps the incremental cache packed, cutting peak extraction memory on large repositories (#1571).
+
 ## 0.57.0
 
 ### Minor Changes
