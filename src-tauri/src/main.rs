@@ -5876,6 +5876,52 @@ fn build_spec_bundle(
     ))
 }
 
+/// One official artifact compiled alone through the selected compiler, which
+/// produces the same bytes, content id and assertions as that artifact in
+/// `build_spec_bundle` without building the other fifteen (#1582).
+fn build_spec_artifact(
+    graph: &impl GraphStore,
+    decisions: &agents::DecisionLog,
+    mode: spec::ExportMode,
+    artifact_id: &str,
+) -> Result<spec::SpecArtifact, String> {
+    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
+    let flows = flowtracer::trace(&nodes, &edges);
+    let rejected_hashes = decisions
+        .list_assertions()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+        .map(|record| record.assertion.provenance.content_hash)
+        .collect();
+    let unbounded = spec::SelectedCompileLimits {
+        max_bytes: usize::MAX,
+        adr: spec::AdrLimits {
+            max_rows: usize::MAX,
+            max_output_bytes: usize::MAX,
+        },
+    };
+    let unknown = || format!("unknown spec artifact id: {artifact_id}");
+    let outcome = spec::compile_spec_selected(
+        &nodes,
+        &edges,
+        &flows,
+        mode,
+        &rejected_hashes,
+        &[artifact_id],
+        unbounded,
+    )
+    .map_err(|_| unknown())?
+    .pop()
+    .ok_or_else(unknown)?;
+    match outcome {
+        spec::SelectedArtifactOutcome::Produced(artifact) => Ok(artifact),
+        spec::SelectedArtifactOutcome::Limited { artifact_id, limit } => Err(format!(
+            "spec artifact {artifact_id} could not be compiled: {limit:?}"
+        )),
+    }
+}
+
 fn build_spec_with_views(
     graph: &impl GraphStore,
     decisions: &agents::DecisionLog,
@@ -6089,13 +6135,7 @@ fn read_spec_artifact(
 ) -> Result<SpecArtifactPreview, String> {
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let bundle = build_spec_bundle(&*graph, &decisions, mode)?;
-    bundle
-        .artifacts
-        .into_iter()
-        .find(|artifact| artifact.id == artifact_id)
-        .map(full_artifact_preview)
-        .ok_or_else(|| format!("unknown spec artifact id: {artifact_id}"))
+    build_spec_artifact(&*graph, &decisions, mode, &artifact_id).map(full_artifact_preview)
 }
 
 /// Nodes carrying `label` (e.g. `Endpoint`, `Repo`), ordered by id.
@@ -6660,6 +6700,26 @@ mod tests {
                 super::build_spec_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
             )
             .unwrap()
+        );
+        // AC-0551: each artifact compiled alone equals its bundle entry.
+        for artifact in &bundle.artifacts {
+            assert_eq!(
+                &super::build_spec_artifact(
+                    &graph,
+                    &decisions,
+                    spec::ExportMode::BestEffort,
+                    &artifact.id
+                )
+                .unwrap(),
+                artifact,
+                "{}",
+                artifact.id
+            );
+        }
+        assert_eq!(
+            super::build_spec_artifact(&graph, &decisions, spec::ExportMode::BestEffort, "nope")
+                .unwrap_err(),
+            "unknown spec artifact id: nope"
         );
         let topology_art = bundle
             .artifacts
