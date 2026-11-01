@@ -141,6 +141,30 @@ pub fn compile_knowledge_user_stories(
         limits,
     )
 }
+/// Compile Actor and Capability sidecars with the caller's admitted flows and
+/// complete security limits. Callers also admit inputs, overlay currency and
+/// the existing compiler/Actor workspace; this does not connect a host route.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_knowledge_user_stories_with_flows_and_security(
+    base: &RevisionedSnapshot,
+    candidates: &[CapabilityStory<'_>],
+    actors: &[core_graph::overlay::OverlayFact],
+    flows: &[flowtracer::Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    limits: SelectedCompileLimits,
+    security: crate::SecurityLimits,
+) -> Result<SelectedArtifactOutcome, CapabilityStoryInputError> {
+    compile_capability_stories(
+        base,
+        candidates,
+        actors,
+        (flows, Some(security)),
+        mode,
+        rejected,
+        limits,
+    )
+}
 fn compile_capability_stories(
     base: &RevisionedSnapshot,
     candidates: &[CapabilityStory<'_>],
