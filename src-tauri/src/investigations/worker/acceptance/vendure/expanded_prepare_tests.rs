@@ -105,7 +105,8 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
                 .is_empty()
         })
         .unwrap();
-    let expected = Definition {
+    let mut expected = Definition {
+        start_sha256: None,
         specialist_id: specialist.map(str::to_owned),
         binding: super::super::completion::prepare::PreparationBinding {
             run_id: "captured-test".into(),
@@ -171,6 +172,7 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
         assert_eq!(serde_json::to_vec(&restored).unwrap(), wire);
     }
     let manifest = run(&expected).unwrap();
+    expected.start_sha256 = Some(sha(&std::fs::read(output.join("start.json")).unwrap()));
     // AC-0463 (#1626): actual staging seals its original start measurement.
     let timing_bytes = std::fs::read(output.join("start-latency.json")).unwrap();
     let timing: Value = serde_json::from_slice(&timing_bytes).unwrap();
@@ -438,6 +440,7 @@ fn captured_v12_canonical_query_continuation_repro() {
     assert_eq!(prepared.input, before);
     let fresh = serde_json::to_value(&prepared.graph).unwrap();
     let mut expected = prior.clone();
+    expected.start_sha256 = None;
     expected.selections = prior
         .selections
         .iter()
@@ -503,6 +506,7 @@ fn captured_v12_canonical_query_continuation_repro() {
         InputPolicy::FrozenVendure,
     )
     .unwrap();
+    expected.start_sha256 = Some(sha(&std::fs::read(output.join("start.json")).unwrap()));
     let result = vendure_prepare::reopen_bound(
         [&case.config, &receipt, &definition, &output],
         &expected,

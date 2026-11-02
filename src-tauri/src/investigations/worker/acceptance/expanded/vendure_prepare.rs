@@ -20,6 +20,10 @@ pub(in super::super) struct Selection {
 #[serde(deny_unknown_fields)]
 pub(in super::super) struct Definition {
     pub binding: PreparationBinding,
+    /// Out-of-band caller authority, intentionally absent from frozen definition bytes.
+    /// None permits fresh staging only; every reopen needs the independently retained pin.
+    #[serde(skip)]
+    pub start_sha256: Option<String>,
     pub preparation_sha256: String,
     pub provider: InvestigationProvider,
     pub selections: Vec<Selection>,
@@ -365,6 +369,9 @@ fn bound_with_scope<T>(
             {
                 return Err("fresh capture nonce already consumed".into());
             }
+            if preparing && !output.exists() && expected.start_sha256.is_some() {
+                return Err("Fresh start cannot reuse a prior start pin".into());
+            }
             let fresh = if !preparing {
                 false
             } else {
@@ -409,7 +416,14 @@ fn bound_with_scope<T>(
             let start = serde_json::json!({"definition_sha256":sha(&definition), "request_sha256":sha(&wire),
                 "intent_hash":request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
                 "analyst_id":task.summary.investigation_id});
-            super::start_timing::seal_or_validate(output, &start, "analyst", &sha(&wire), elapsed)?;
+            super::start_timing::seal_or_validate(
+                output,
+                &start,
+                "analyst",
+                &sha(&wire),
+                elapsed,
+                expected.start_sha256.as_deref(),
+            )?;
             if task.provider != expected.provider
                 || (preparing
                     && (task.summary.status != InvestigationStatus::Queued
@@ -463,10 +477,11 @@ fn bound_with_scope<T>(
 fn vendure_prepare_captured_analyst() {
     let path = |name| std::path::PathBuf::from(super::super::required(name));
     let definition_path = path("CARTOGRAPH_VENDURE_ANALYST_DEFINITION");
-    let expected: Definition = agents::investigation::decode_record(
+    let mut expected: Definition = agents::investigation::decode_record(
         std::str::from_utf8(&read(&definition_path).unwrap()).unwrap(),
     )
     .unwrap();
+    expected.start_sha256 = std::env::var("CARTOGRAPH_VENDURE_ANALYST_START_SHA256").ok();
     prepare_bound(
         &path("CARTOGRAPH_VENDURE_NATIVE_CONFIG"),
         &path("CARTOGRAPH_VENDURE_PREPARATION_RECEIPT"),

@@ -14,6 +14,10 @@ use tauri::Manager;
 #[serde(deny_unknown_fields)]
 pub(super) struct Definition {
     pub binding: PreparationBinding,
+    /// Out-of-band caller authority, intentionally absent from frozen definition bytes.
+    /// None permits fresh staging only; every reopen needs the independently retained pin.
+    #[serde(skip)]
+    pub start_sha256: Option<String>,
     pub parent_revision: u64,
     pub parent_result_id: String,
     pub parent_result_hash: String,
@@ -153,6 +157,9 @@ pub(super) fn stage(
         .map_err(|e| e.to_string())?;
     let fresh_output = preparing && !output.exists();
     if fresh_output {
+        if expected.start_sha256.is_some() {
+            return Err("Fresh start cannot reuse a prior start pin".into());
+        }
         if jobs
             .existing_investigation_completion(request)
             .map_err(|e| e.to_string())?
@@ -195,6 +202,7 @@ pub(super) fn stage(
         "auditor",
         &sha(&wire(request)?),
         elapsed,
+        expected.start_sha256.as_deref(),
     )?;
     if detail.provider != expected.provider
         || (preparing
@@ -403,7 +411,8 @@ mod tests {
         let review = wire(&json!({"schema":"cartograph-v7-semantic-review-attestation@1","binding":review_binding,
             "review":review_body,"comment":{"database_id":123,"url":"https://github.com/true-line/cartograph/issues/598#issuecomment-123",
                 "created_at":"2026-10-29T00:00:00Z","body_sha256":"e".repeat(64)}})).unwrap();
-        let expected = Definition {
+        let mut expected = Definition {
+            start_sha256: None,
             binding: parent.binding.clone(),
             parent_revision: receipt["detail"]["revision"].as_u64().unwrap(),
             parent_result_id: result.result_id.clone(),
@@ -460,6 +469,7 @@ mod tests {
         assert!(!output.exists());
         std::fs::write(&definition_path, wire(&expected).unwrap()).unwrap();
         let id = stage(&parent, &artifacts, &expected, true).unwrap();
+        expected.start_sha256 = Some(sha(&read(&output.join("start.json")).unwrap()));
         // AC-0463 (#1626): real auditor staging and reopen preserve timing.
         let timing_bytes = read(&output.join("start-latency.json")).unwrap();
         let timing: Value = serde_json::from_slice(&timing_bytes).unwrap();

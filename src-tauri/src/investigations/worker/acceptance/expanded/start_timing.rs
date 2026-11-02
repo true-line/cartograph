@@ -36,7 +36,8 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// `elapsed` exists only for a newly created task. Old start bytes remain valid
-/// with unknown timing; a sealed timing receipt cannot disappear on reopen.
+/// with unknown timing only under their independently supplied exact start pin.
+/// The expected pin must never be read from the artifacts being checked.
 /// The start binding contains the definition hash and the returned task ID.
 pub(super) fn seal_or_validate(
     directory: &Path,
@@ -44,6 +45,7 @@ pub(super) fn seal_or_validate(
     role: &str,
     request_sha256: &str,
     elapsed: Option<Duration>,
+    expected_start_sha256: Option<&str>,
 ) -> Result<Option<Timing>, String> {
     if !matches!(role, "analyst" | "auditor")
         || request_sha256.len() != 64
@@ -57,6 +59,9 @@ pub(super) fn seal_or_validate(
     let timing_path = directory.join("start-latency.json");
     let start_path = directory.join("start.json");
     if let Some(elapsed) = elapsed {
+        if expected_start_sha256.is_some() {
+            return Err("Fresh start cannot reuse a prior start pin".into());
+        }
         let timing = Timing {
             schema: "cartograph-captured-start-latency@1".into(),
             role: role.into(),
@@ -74,10 +79,17 @@ pub(super) fn seal_or_validate(
         write(&timing_path, &bytes)?;
         let mut sealed = start.clone();
         sealed[FIELD] = Value::String(hash(&bytes));
-        write(&start_path, &wire(&sealed)?)?;
+        let start_bytes = wire(&sealed)?;
+        write(&start_path, &start_bytes)?;
+        // Retain this staging output independently before any later reopen.
+        eprintln!("captured-{role}-start-sha256={}", hash(&start_bytes));
         return Ok(Some(timing));
     }
+    let expected = expected_start_sha256.ok_or("Independent start SHA256 required for reopen")?;
     let bytes = read(&start_path)?;
+    if expected != hash(&bytes) {
+        return Err("Pinned start bytes changed".into());
+    }
     let mut sealed: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let digest = sealed
         .as_object_mut()
@@ -130,12 +142,20 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let start = json!({"definition_sha256":"a".repeat(64),"task_id":"task1"});
             let request = "b".repeat(64);
-            let first =
-                seal_or_validate(dir.path(), &start, role, &request, Some(Duration::ZERO)).unwrap();
+            let first = seal_or_validate(
+                dir.path(),
+                &start,
+                role,
+                &request,
+                Some(Duration::ZERO),
+                None,
+            )
+            .unwrap();
             let before = read(&dir.path().join("start.json")).unwrap();
+            let pin = hash(&before);
             assert_eq!(
                 first,
-                seal_or_validate(dir.path(), &start, role, &request, None).unwrap()
+                seal_or_validate(dir.path(), &start, role, &request, None, Some(&pin)).unwrap()
             );
             assert_eq!(before, read(&dir.path().join("start.json")).unwrap());
             assert_eq!(first.unwrap().elapsed_ns, 0);
@@ -143,16 +163,23 @@ mod tests {
                 json!({"definition_sha256":"c".repeat(64),"task_id":"task1"}),
                 json!({"definition_sha256":"a".repeat(64),"task_id":"task2"}),
             ] {
-                assert!(seal_or_validate(dir.path(), &changed, role, &request, None).is_err());
+                assert!(
+                    seal_or_validate(dir.path(), &changed, role, &request, None, Some(&pin))
+                        .is_err()
+                );
             }
-            assert!(seal_or_validate(dir.path(), &start, role, &"c".repeat(64), None).is_err());
+            assert!(
+                seal_or_validate(dir.path(), &start, role, &"c".repeat(64), None, Some(&pin))
+                    .is_err()
+            );
             assert!(
                 seal_or_validate(
                     dir.path(),
                     &start,
                     role,
                     &request,
-                    Some(Duration::from_secs(1))
+                    Some(Duration::from_secs(1)),
+                    None
                 )
                 .is_err()
             );
@@ -161,9 +188,55 @@ mod tests {
             let mut tampered: Value = serde_json::from_slice(&original).unwrap();
             tampered["elapsed_ns"] = json!(123);
             std::fs::write(&sidecar, wire(&tampered).unwrap()).unwrap();
-            assert!(seal_or_validate(dir.path(), &start, role, &request, None).is_err());
+            assert!(
+                seal_or_validate(dir.path(), &start, role, &request, None, Some(&pin)).is_err()
+            );
             std::fs::remove_file(&sidecar).unwrap();
-            assert!(seal_or_validate(dir.path(), &start, role, &request, None).is_err());
+            assert!(
+                seal_or_validate(dir.path(), &start, role, &request, None, Some(&pin)).is_err()
+            );
+        }
+    }
+
+    // AC-0463: neither a self-consistent rewrite nor removal can replace
+    // independently retained staging authority for either role.
+    #[test]
+    fn captured_start_latency_rejects_paired_rewrite_and_removal() {
+        for role in ["analyst", "auditor"] {
+            let dir = tempfile::tempdir().unwrap();
+            let start = json!({"definition_sha256":"a".repeat(64),"task_id":"task1"});
+            let request = "b".repeat(64);
+            seal_or_validate(
+                dir.path(),
+                &start,
+                role,
+                &request,
+                Some(Duration::ZERO),
+                None,
+            )
+            .unwrap();
+            let start_path = dir.path().join("start.json");
+            let sidecar = dir.path().join("start-latency.json");
+            let pin = hash(&read(&start_path).unwrap());
+            assert!(seal_or_validate(dir.path(), &start, role, &request, None, None).is_err());
+            let mut timing: Value = serde_json::from_slice(&read(&sidecar).unwrap()).unwrap();
+            timing["elapsed_ns"] = json!(123);
+            let changed = wire(&timing).unwrap();
+            std::fs::write(&sidecar, &changed).unwrap();
+            let mut sealed = start.clone();
+            sealed[FIELD] = json!(hash(&changed));
+            std::fs::write(&start_path, wire(&sealed).unwrap()).unwrap();
+            assert_eq!(
+                seal_or_validate(dir.path(), &start, role, &request, None, Some(&pin)).unwrap_err(),
+                "Pinned start bytes changed"
+            );
+            std::fs::remove_file(&sidecar).unwrap();
+            std::fs::write(&start_path, wire(&start).unwrap()).unwrap();
+            assert_eq!(
+                seal_or_validate(dir.path(), &start, role, &request, None, Some(&pin)).unwrap_err(),
+                "Pinned start bytes changed"
+            );
+            assert!(seal_or_validate(dir.path(), &start, role, &request, None, None).is_err());
         }
     }
 
@@ -175,21 +248,34 @@ mod tests {
         let start = json!({"definition_sha256":"a".repeat(64),"task_id":"task1"});
         let request = "b".repeat(64);
         assert!(
-            seal_or_validate(dir.path(), &start, "analyst", &request, Some(Duration::MAX)).is_err()
+            seal_or_validate(
+                dir.path(),
+                &start,
+                "analyst",
+                &request,
+                Some(Duration::MAX),
+                None
+            )
+            .is_err()
         );
         assert!(!dir.path().join("start-latency.json").exists());
         write(&dir.path().join("start.json"), &wire(&start).unwrap()).unwrap();
+        let pin = hash(&wire(&start).unwrap());
         assert!(
-            seal_or_validate(dir.path(), &start, "analyst", &request, None)
+            seal_or_validate(dir.path(), &start, "analyst", &request, None, Some(&pin))
                 .unwrap()
                 .is_none()
         );
         let malformed = br#"{"elapsed_ns":-1}"#;
         std::fs::write(dir.path().join("start-latency.json"), malformed).unwrap();
-        assert!(seal_or_validate(dir.path(), &start, "analyst", &request, None).is_err());
+        assert!(
+            seal_or_validate(dir.path(), &start, "analyst", &request, None, Some(&pin)).is_err()
+        );
         let mut sealed = start.clone();
         sealed[FIELD] = json!(hash(malformed));
         std::fs::write(dir.path().join("start.json"), wire(&sealed).unwrap()).unwrap();
-        assert!(seal_or_validate(dir.path(), &start, "analyst", &request, None).is_err());
+        assert!(
+            seal_or_validate(dir.path(), &start, "analyst", &request, None, Some(&pin)).is_err()
+        );
     }
 }
