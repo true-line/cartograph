@@ -362,3 +362,59 @@ fn prepared_admission_rejects_duplicate_memberships_and_invalid_legacy_spans() {
         assert!(PreparedAgentTask::new(task, original.source_basis().clone()).is_err());
     }
 }
+
+#[test]
+fn unescalatable_preview_validation_shares_every_constructor_check_but_the_allowlist() {
+    // AC-0231 (#1639): the non-escalatable gap preview runs the same tier,
+    // metadata, aggregate-evidence, identity and basis checks as `new`, from
+    // one shared validator, so the two cannot drift.
+    let original = fixture();
+    assert!(
+        PreparedAgentTask::validate_unescalatable(original.task(), original.source_basis()).is_ok()
+    );
+    let task_mutations: [fn(&mut AgentTask); 8] = [
+        |task| task.existing_confidence = ConfidenceTier::Confirmed,
+        |task| task.candidates[0].label = "x".repeat(257),
+        |task| task.edge_label = "x".repeat(257),
+        |task| {
+            // Seven full spans: each within its own bound, together over the
+            // 48 KiB aggregate evidence bound.
+            let first = task.evidence[0].clone();
+            task.evidence = (0..7)
+                .map(|i| {
+                    let mut item = first.clone();
+                    item.id = format!("span{i}");
+                    item.text = "x".repeat(8192);
+                    item.source.byte_end = 8192;
+                    item
+                })
+                .collect();
+            task.source_evidence_ids = vec!["span0".into()];
+            task.candidates[0].evidence_ids = vec!["span1".into()];
+        },
+        |task| {
+            task.source_evidence_ids
+                .push(task.source_evidence_ids[0].clone())
+        },
+        |task| task.candidates[0].evidence_ids.push("target".into()),
+        |task| task.evidence[1].source.byte_end = task.evidence[1].source.byte_start,
+        |task| task.action_id = "x".repeat(8193),
+    ];
+    for mutation in task_mutations {
+        let mut task = original.task().clone();
+        mutation(&mut task);
+        assert!(PreparedAgentTask::new(task.clone(), original.source_basis().clone()).is_err());
+        assert!(PreparedAgentTask::validate_unescalatable(&task, original.source_basis()).is_err());
+    }
+    let basis_mutations: [fn(&mut TaskSourceBasisV2); 3] = [
+        |b| b.selected_facts.reverse(),
+        |b| b.selection.metadata_preselected_not_read = 1,
+        |b| b.evidence.truncate(1),
+    ];
+    for mutation in basis_mutations {
+        let mut basis = original.source_basis().clone();
+        mutation(&mut basis);
+        assert!(PreparedAgentTask::new(original.task().clone(), basis.clone()).is_err());
+        assert!(PreparedAgentTask::validate_unescalatable(original.task(), &basis).is_err());
+    }
+}

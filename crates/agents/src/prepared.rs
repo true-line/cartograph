@@ -15,6 +15,27 @@ impl PreparedAgentTask {
     /// Establish bounded internal consistency. Only host preparation establishes
     /// source authority; this pure constructor performs no I/O or provider work.
     pub fn new(task: AgentTask, source_basis: TaskSourceBasisV2) -> Result<Self, AgentError> {
+        validate(&task, &source_basis, true)?;
+        Ok(Self { task, source_basis })
+    }
+
+    /// Every check [`Self::new`] makes except the broker's edge-label
+    /// allowlist, for a gap preview that reports escalation unavailable
+    /// (#1639). Nothing is constructed; the basis is validated unchanged.
+    pub fn validate_unescalatable(
+        task: &AgentTask,
+        source_basis: &TaskSourceBasisV2,
+    ) -> Result<(), AgentError> {
+        validate(task, source_basis, false)
+    }
+}
+
+fn validate(
+    task: &AgentTask,
+    source_basis: &TaskSourceBasisV2,
+    require_allowlisted: bool,
+) -> Result<(), AgentError> {
+    {
         // Bound caller-owned metadata before cloning it into a fingerprint
         // manifest; the constructor itself must not amplify oversized strings.
         if task.evidence.len() > 12
@@ -37,13 +58,22 @@ impl PreparedAgentTask {
         {
             return Err(invalid());
         }
-        validate_summary_bound(&task)?;
-        AgentBroker::bounded_default().validate_task(&task)?;
-        let manifest = manifest(&task, 2);
+        validate_summary_bound(task)?;
+        let broker = AgentBroker::bounded_default();
+        if require_allowlisted {
+            broker.validate_task(task)?;
+        } else {
+            broker.validate_task_tier(task)?;
+            broker.validate_task_bounds(task)?;
+        }
+        let manifest = manifest(task, 2);
         validate_manifest_metadata(&manifest)?;
         source_basis.validate(&manifest)?;
-        Ok(Self { task, source_basis })
+        Ok(())
     }
+}
+
+impl PreparedAgentTask {
     pub fn task(&self) -> &AgentTask {
         &self.task
     }

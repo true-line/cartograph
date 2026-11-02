@@ -358,12 +358,17 @@ pub(crate) fn preview(state: &AppState, gap_id: &str) -> Result<StrategyPreview,
             .map(StrategyPreview::Escalatable)
             .map_err(|error| error.to_string())
     } else {
+        // Same contract as PreparedAgentTask::new minus the allowlist (#1639).
+        PreparedAgentTask::validate_unescalatable(&assembled.task, &assembled.basis)
+            .map_err(|_| CONTRACT_FAILURE.to_string())?;
         Ok(StrategyPreview::NotEscalatable {
             task: assembled.task,
             basis: assembled.basis,
         })
     }
 }
+
+const CONTRACT_FAILURE: &str = "Prepared task exceeds its bounded evidence or metadata contract.";
 
 fn broker_allows(task: &AgentTask) -> bool {
     agents::AgentBroker::bounded_default()
@@ -414,10 +419,7 @@ fn finalize(assembled: AssembledTask) -> Result<PreparedTask, TaskPreparationErr
         .map_err(|_| {
             let mut report = report;
             report.stop_reason = SelectionStopReason::InvalidSelection;
-            failure(
-                &report,
-                "Prepared task exceeds its bounded evidence or metadata contract.",
-            )
+            failure(&report, CONTRACT_FAILURE)
         })
 }
 
