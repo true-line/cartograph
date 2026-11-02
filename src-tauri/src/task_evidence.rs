@@ -331,6 +331,54 @@ pub(crate) fn prepare(
     prepare_from_snapshot(state, graph, gap_id, action_id, || {}).map_err(|error| error.to_string())
 }
 
+/// What the gap strategy preview can show (#1635): a prepared task, or, for a
+/// gap whose relation the bounded broker cannot propose, the same assembled
+/// evidence with escalation reported unavailable instead of an error.
+pub(crate) enum StrategyPreview {
+    Escalatable(PreparedTask),
+    NotEscalatable {
+        task: AgentTask,
+        basis: TaskSourceBasisV2,
+    },
+}
+
+/// Assemble the preview for one gap without failing on an edge label the
+/// broker cannot propose; every other preparation bound still applies.
+pub(crate) fn preview(state: &AppState, gap_id: &str) -> Result<StrategyPreview, String> {
+    let graph = state
+        .graph
+        .lock()
+        .map_err(|_| INVALID)?
+        .read_snapshot()
+        .map_err(|_| INVALID)?;
+    let assembled = assemble_from_snapshot(state, graph, gap_id, "escalate:preview", || {})
+        .map_err(|error| error.to_string())?;
+    if broker_allows(&assembled.task) {
+        finalize(assembled)
+            .map(StrategyPreview::Escalatable)
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(StrategyPreview::NotEscalatable {
+            task: assembled.task,
+            basis: assembled.basis,
+        })
+    }
+}
+
+fn broker_allows(task: &AgentTask) -> bool {
+    agents::AgentBroker::bounded_default()
+        .allowed_edge_labels()
+        .contains(&task.edge_label)
+}
+
+/// Evidence assembled for one gap, before the bounded task contract is checked.
+struct AssembledTask {
+    task: AgentTask,
+    basis: TaskSourceBasisV2,
+    report: SelectionReport,
+    pin: crate::primary_source::InFlightPin,
+}
+
 fn prepare_from_snapshot(
     state: &AppState,
     graph: (Vec<Node>, Vec<Edge>),
@@ -338,6 +386,48 @@ fn prepare_from_snapshot(
     action_id: &str,
     after_guards: impl FnOnce(),
 ) -> Result<PreparedTask, TaskPreparationError> {
+    finalize(assemble_from_snapshot(
+        state,
+        graph,
+        gap_id,
+        action_id,
+        after_guards,
+    )?)
+}
+
+fn finalize(assembled: AssembledTask) -> Result<PreparedTask, TaskPreparationError> {
+    let AssembledTask {
+        task,
+        basis,
+        report,
+        pin,
+    } = assembled;
+    if !broker_allows(&task) {
+        // A clear reason instead of the generic contract failure (#1635).
+        return Err(failure(
+            &report,
+            &crate::escalation::edge_label_unavailable_reason(&task.edge_label),
+        ));
+    }
+    PreparedAgentTask::new(task, basis)
+        .map(|task| PreparedTask { task, _pin: pin })
+        .map_err(|_| {
+            let mut report = report;
+            report.stop_reason = SelectionStopReason::InvalidSelection;
+            failure(
+                &report,
+                "Prepared task exceeds its bounded evidence or metadata contract.",
+            )
+        })
+}
+
+fn assemble_from_snapshot(
+    state: &AppState,
+    graph: (Vec<Node>, Vec<Edge>),
+    gap_id: &str,
+    action_id: &str,
+    after_guards: impl FnOnce(),
+) -> Result<AssembledTask, TaskPreparationError> {
     let plan = planning::plan(&graph.0, &graph.1, gap_id, action_id)?;
     let mut selection_report = report(&plan);
     let mut keys: Vec<_> = plan
@@ -491,7 +581,18 @@ fn prepare_from_snapshot(
             };
             (text, origin)
         } else {
-            let Some(text) = guards.legacy_text(reference) else {
+            // A working-tree span the task cannot carry (longer than one span,
+            // or past the combined evidence cap) is omitted like an unreadable
+            // one instead of failing the whole task later (#1635).
+            let carried: usize = evidence
+                .iter()
+                .map(|item: &AgentEvidence| item.text.len())
+                .sum();
+            let limits = &selection_report.limits;
+            let Some(text) = guards.legacy_text(reference).filter(|text| {
+                text.len() <= limits.span_bytes
+                    && carried.saturating_add(text.len()) <= limits.total_evidence_bytes
+            }) else {
                 selection_report.omissions.push(SelectionOmission {
                     request_index,
                     fact: task_fact(&request.fact),
@@ -573,16 +674,12 @@ fn prepare_from_snapshot(
         .map_err(|_| failure(&validation_report, INVALID))?;
     // Leases are explicitly out of scope before a caller can invoke a provider.
     drop(guards);
-    PreparedAgentTask::new(task, basis)
-        .map(|task| PreparedTask { task, _pin: pin })
-        .map_err(|_| {
-            let mut report = validation_report;
-            report.stop_reason = SelectionStopReason::InvalidSelection;
-            failure(
-                &report,
-                "Prepared task exceeds its bounded evidence or metadata contract.",
-            )
-        })
+    Ok(AssembledTask {
+        task,
+        basis,
+        report: validation_report,
+        pin,
+    })
 }
 
 #[cfg(test)]

@@ -656,6 +656,117 @@ fn legacy_preparation_scans_past_ten_unreadable_candidates() {
 }
 
 #[test]
+fn oversized_legacy_spans_are_omitted_instead_of_failing_the_task() {
+    // AC-0174 (#1635): a working-tree span longer than one evidence span (a
+    // whole-file candidate) or past the combined evidence cap is omitted as
+    // unreadable; the gap still opens with the evidence that fits.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let state = app_state(&app_data);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    std::fs::write(source.root().join("source.txt"), "source").unwrap();
+    std::fs::write(source.root().join("whole.txt"), "w".repeat(9_000)).unwrap();
+    std::fs::write(source.root().join("large.txt"), "l".repeat(8_000)).unwrap();
+    std::fs::write(source.root().join("small.txt"), "small!").unwrap();
+    let owner = fixture_node(
+        "source:legacy",
+        "Symbol",
+        Some(reference(&source, "source.txt", 6)),
+    );
+    let mut files = vec![("whole.txt", 9_000)];
+    files.extend([("large.txt", 8_000); 7]);
+    files.push(("small.txt", 6));
+    let candidates: Vec<_> = files
+        .iter()
+        .enumerate()
+        .map(|(index, (path, len))| {
+            fixture_node(
+                &format!("candidate:{index:03}"),
+                "Symbol",
+                Some(reference(&source, path, *len)),
+            )
+        })
+        .collect();
+    install_task(&state, &owner, &candidates);
+    let prepared = prepare(&state, GAP, "task:legacy-oversize").unwrap();
+    let limits = SelectionLimits::default();
+    let task = prepared.task();
+    assert!(
+        task.evidence
+            .iter()
+            .all(|item| item.text.len() <= limits.span_bytes)
+    );
+    let total: usize = task.evidence.iter().map(|item| item.text.len()).sum();
+    assert!(total <= limits.total_evidence_bytes);
+    let kept: Vec<_> = task.candidates.iter().map(|c| c.node_id.as_str()).collect();
+    assert!(
+        !kept.contains(&"candidate:000"),
+        "the whole-file span is omitted"
+    );
+    assert!(
+        kept.contains(&"candidate:008"),
+        "a later small span still fits"
+    );
+    assert!(kept.len() < files.len());
+    let report = &prepared.source_basis().selection;
+    assert!(report.omissions.iter().any(|omission| omission.fact
+        == task_fact(&FactKey::Node {
+            id: "candidate:000".into()
+        })
+        && omission.reason == SelectionOmissionReason::LegacyReadUnavailable));
+    assert_eq!(
+        report.omissions.len() + report.supplied_evidence,
+        report.acquisition_attempts
+    );
+}
+
+#[test]
+fn gap_with_a_relation_the_broker_cannot_propose_still_previews_its_evidence() {
+    // AC-0174 (#1635): a DEPENDS_ON gap opens with its assembled evidence and
+    // escalation reported unavailable; escalating it gives the user-level
+    // reason, not the generic contract failure.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let state = app_state(&app_data);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    legacy_task(&state, &source, &[true, true]);
+    {
+        let mut graph = state.graph.lock().unwrap();
+        graph.delete_edge("source:legacy", GAP, "CALLS").unwrap();
+        graph
+            .put_edge(&Edge {
+                src: "source:legacy".into(),
+                dst: GAP.into(),
+                label: "DEPENDS_ON".into(),
+                props: json!({}),
+            })
+            .unwrap();
+    }
+    assert!(
+        !agents::AgentBroker::bounded_default()
+            .allowed_edge_labels()
+            .contains("DEPENDS_ON")
+    );
+    let Ok(StrategyPreview::NotEscalatable { task, basis }) = preview(&state, GAP) else {
+        panic!("expected a non-escalatable preview with evidence");
+    };
+    assert_eq!(task.edge_label, "DEPENDS_ON");
+    assert_eq!(task.candidates.len(), 2);
+    assert_eq!(basis.evidence.len(), task.evidence.len());
+    let error = prepare(&state, GAP, "task:depends-on").unwrap_err();
+    assert!(
+        error.contains("can't propose a DEPENDS_ON relation"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("bounded evidence or metadata contract"),
+        "{error}"
+    );
+}
+
+#[test]
 fn legacy_preparation_stops_at_sixty_four_attempts_and_reports_uninspected_tail() {
     // AC-0173, AC-0174: the explicit cap includes source and Gap; a late good
     // candidate beyond the window is neither read nor staged as unavailable.

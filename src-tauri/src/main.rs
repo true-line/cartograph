@@ -3859,7 +3859,13 @@ async fn gap_strategies(
 ) -> Result<escalation::GapStrategyReport, String> {
     off_ui_thread(move || {
         let state = app.state::<AppState>();
-        let task = task_evidence::prepare(&state, &gap_id, "escalate:preview")?;
+        let preview = task_evidence::preview(&state, &gap_id)?;
+        let (agent_task, source_basis, prepared) = match &preview {
+            task_evidence::StrategyPreview::Escalatable(task) => {
+                (task.task(), task.source_basis(), Some(task))
+            }
+            task_evidence::StrategyPreview::NotEscalatable { task, basis } => (task, basis, None),
+        };
         // Strategy text is derived from the same graph basis as the prepared
         // task; a concurrent recovery requires a new preview.
         let (nodes, edges) = state
@@ -3870,7 +3876,7 @@ async fn gap_strategies(
             .map_err(|e| e.to_string())?;
         let snapshot =
             context_hub::ContextSnapshot::new(nodes.clone(), edges).map_err(|e| e.to_string())?;
-        if snapshot.id() != task.source_basis().graph_snapshot_id {
+        if snapshot.id() != source_basis.graph_snapshot_id {
             return Err("Task evidence changed; refresh the strategy preview.".into());
         }
         let gap = nodes
@@ -3891,12 +3897,12 @@ async fn gap_strategies(
         // validation, surfacing its internal error text to the UI.
         let edge_label_allowed = broker
             .allowed_edge_labels()
-            .contains(&task.task().edge_label);
-        let payload_bytes = if edge_label_allowed {
+            .contains(&agent_task.edge_label);
+        let payload_bytes = if let Some(task) = prepared.filter(|_| edge_label_allowed) {
             let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
             let local = llm::OllamaProvider::local_default().map_err(|e| e.to_string())?;
             let preview = broker
-                .preview_prepared(&local, &firewall, &task)
+                .preview_prepared(&local, &firewall, task)
                 .map_err(|e| e.to_string())?;
             serde_json::to_vec(&preview.payload)
                 .map_err(|e| e.to_string())?
@@ -3905,13 +3911,13 @@ async fn gap_strategies(
             0
         };
         let mut report = escalation::strategies(
-            task.task(),
+            agent_task,
             gap,
             cloud_allowed,
             payload_bytes,
             edge_label_allowed,
         );
-        report.source_basis = Some(task.source_basis().clone());
+        report.source_basis = Some(source_basis.clone());
         Ok(report)
     })
     .await
