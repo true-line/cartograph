@@ -41,6 +41,16 @@ const initialComposer: InvestigationComposer = {
   specialistId: 'domain-analyst@3', providerMode: 'local', question: '',
   scopeType: 'all', anchor: '', hops: 1, parent: null,
 };
+/** Desktop default when the host advertises it (#1618): a schema-backed analyst. */
+export const DESKTOP_DEFAULT_SPECIALIST: SpecialistId = 'domain-analyst@18';
+const DESKTOP_DEFAULT_PROFILE = 'investigation-v2';
+/** An untouched composer adopts the schema-backed default; explicit choices are kept. */
+export function desktopDefaultComposer(composer: InvestigationComposer, catalog: InvestigationCatalog): InvestigationComposer | null {
+  if (composer.limitProfile !== undefined || composer.specialistId !== initialComposer.specialistId || composer.parent !== null) return null;
+  if (!catalog.specialists.some((item) => item.id === DESKTOP_DEFAULT_SPECIALIST) ||
+      !investigationPolicy(catalog, DESKTOP_DEFAULT_PROFILE, DESKTOP_DEFAULT_SPECIALIST)) return null;
+  return { ...composer, specialistId: DESKTOP_DEFAULT_SPECIALIST, limitProfile: DESKTOP_DEFAULT_PROFILE };
+}
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown']);
 const ACTIVE_HISTORY_STATUSES = new Set(['queued', 'preparing', 'running', 'awaiting_consent']);
 export const INVESTIGATION_PAGE_LIMIT = 50;
@@ -754,7 +764,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         const catalog = await invokeOr<InvestigationCatalog | null>('investigation_specialists', null);
         if (!catalog || catalog.schema_version !== 1 || !Array.isArray(catalog.specialists) ||
             !Array.isArray(catalog.providers)) throw new Error('Catalog unavailable.');
-        if (request === catalogRequest) set({ catalog, catalogLoading: false });
+        if (request === catalogRequest) set((state) => {
+          const composer = state.starting || state.pendingStart ? null : desktopDefaultComposer(state.composer, catalog);
+          return composer ? { catalog, catalogLoading: false, composer } : { catalog, catalogLoading: false };
+        });
       } catch {
         if (request === catalogRequest) set({ catalogLoading: false,
           catalogError: 'Specialists are unavailable. Connect to the app core and refresh.' });
