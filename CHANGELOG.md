@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.59.1
+
+### Patch Changes
+
+- 052ae7f: The desktop Investigations composer now defaults to the schema-backed domain-analyst@18 under the Expanded budget when the app offers it, so local models get a structured action schema. Older analysts stay selectable (#1618).
+- 046286b: Recover from rejected investigation queries with bounded feedback while preserving charged attempts and durable history. Invalid host state remains terminal.
+
 ## 0.59.0
 
 ### Minor Changes
