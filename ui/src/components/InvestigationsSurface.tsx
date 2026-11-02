@@ -4,6 +4,7 @@ import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
 import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistActivityItem, SpecialistId } from '../investigationTypes';
 import { InvestigationActivity } from './InvestigationActivity';
+import { InvestigationProgress } from './InvestigationProgress';
 import { InvestigationFindings } from './InvestigationFindings';
 import { EgressConsentDialog } from './EgressConsentDialog';
 import { InspectionAssessment } from './InspectionAssessment';
@@ -370,6 +371,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
           {state.loading && !state.detail && <p role="status">Loading saved investigation…</p>}
           {state.error && <p className="error-text" role="alert">{state.error}</p>}
           {state.actionError && <p className="error-text" role="alert">{state.actionError}</p>}
+          {state.detail && <InvestigationProgress status={state.detail.status} cancelRequested={state.detail.cancel_requested}
+            events={state.events} usage={state.detail.usage} limits={state.detail.limits} />}
           {state.detail && <>
             {[3, 4, 5, 6, 7].includes(state.detail.schema_version) && <InvestigationCoverage context={state.detail.coverage_context}
               attestation={state.result?.coverage} />}
