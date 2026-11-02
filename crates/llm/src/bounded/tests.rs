@@ -1654,3 +1654,57 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         Err(ProviderError::Unsupported("legacy response schema"))
     ));
 }
+
+// AC-0560 (#1624): with a debug sink installed, each bounded call records a
+// SENT entry carrying the exact wire request before the response arrives,
+// and a RECEIVED entry with the exact response body or the failure code.
+#[test]
+fn bounded_calls_record_sent_then_received_in_the_debug_log() {
+    crate::debug_log::test_support::capture();
+    let limits = CompletionLimits::new(CompletionLimitValues::default()).unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let run = |marker: &str, response: Vec<u8>| {
+        let (endpoint, server) = http(response);
+        let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+        let mut selected = action();
+        selected.payload.prompt = format!("Investigate {marker}.");
+        let prepared = firewall
+            .prepare_bounded(&local, &selected, &limits)
+            .unwrap();
+        let authorized = firewall.authorize_bounded(&local, &prepared, None).unwrap();
+        let result = local.complete_bounded(&authorized, &control());
+        let request = server.join().unwrap();
+        (result, request, endpoint)
+    };
+
+    let body = ollama_body(r#"{"type":"replay_query"}"#);
+    let (result, request, endpoint) = run("debug-1624-ok", framed(&body));
+    assert!(result.is_ok());
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-ok");
+    assert_eq!(calls.len(), 1);
+    let (sent, received) = &calls[0];
+    assert_eq!(sent.path, "bounded");
+    assert_eq!(sent.target, format!("{endpoint}api/chat"));
+    assert_eq!(
+        sent.request.as_deref().unwrap().as_bytes(),
+        request.body.as_slice()
+    );
+    let received = received.as_ref().expect("received entry");
+    assert_eq!(received.phase, crate::debug_log::Phase::Received);
+    assert_eq!(
+        received.response.as_deref().unwrap().as_bytes(),
+        body.as_slice()
+    );
+    assert_eq!(received.error, None);
+    assert!(received.call == sent.call && received.request.is_none());
+
+    let failure =
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec();
+    let (result, _, _) = run("debug-1624-fail", failure);
+    assert!(result.is_err());
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-fail");
+    let received = calls[0].1.as_ref().expect("received entry");
+    assert_eq!(received.error.as_deref(), Some("HttpStatus"));
+    assert_eq!(received.response, None);
+}

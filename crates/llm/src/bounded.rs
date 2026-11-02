@@ -845,11 +845,40 @@ fn user_message(request: &AuthorizedBoundedCompletion) -> Result<String, Bounded
     ))
 }
 
+/// Send one bounded call. When the host installed a debug log (#1624), the
+/// exact request body is recorded as it leaves and the exact response body
+/// (or the failure code) when the call ends.
 fn acquire(
     builder: RequestBuilder,
     body: Vec<u8>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
+) -> Result<(Vec<u8>, u64), BoundedCallError> {
+    let logged = crate::debug_log::enabled().then(|| String::from_utf8_lossy(&body).into_owned());
+    let mut call = None;
+    let result = acquire_unlogged(builder, body, request, control, logged, &mut call);
+    if let Some(call) = call {
+        call.finish(
+            result
+                .as_ref()
+                .ok()
+                .map(|(bytes, _)| String::from_utf8_lossy(bytes).into_owned()),
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{:?}", error.code)),
+        );
+    }
+    result
+}
+
+fn acquire_unlogged(
+    builder: RequestBuilder,
+    body: Vec<u8>,
+    request: &AuthorizedBoundedCompletion,
+    control: &CompletionControl<'_>,
+    logged: Option<String>,
+    call: &mut Option<crate::debug_log::Call>,
 ) -> Result<(Vec<u8>, u64), BoundedCallError> {
     check_control(control, false)?;
     let remaining = control.deadline.saturating_duration_since(Instant::now());
@@ -869,6 +898,13 @@ fn acquire(
     check_control(control, false)?;
     *built.timeout_mut() =
         Some(timeout.min(control.deadline.saturating_duration_since(Instant::now())));
+    if let Some(sent) = logged {
+        *call = Some(crate::debug_log::begin(
+            "bounded",
+            built.url().to_string(),
+            sent,
+        ));
+    }
     let mut response = client.execute(built).map_err(|error| {
         unknown(if error.is_timeout() {
             FailureCode::DeadlineExceeded

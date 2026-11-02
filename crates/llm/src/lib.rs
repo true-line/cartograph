@@ -9,6 +9,7 @@
 pub mod anthropic;
 pub mod bounded;
 pub mod catalog;
+pub mod debug_log;
 pub mod openai_compatible;
 
 use reqwest::Url;
@@ -393,7 +394,30 @@ impl EgressFirewall {
         let request = ProviderCompletionRequest {
             payload: preview.payload,
         };
-        let completion = provider.complete(&request)?;
+        let call = debug_log::enabled().then(|| {
+            debug_log::begin(
+                "firewall",
+                preview.provider_id.clone(),
+                format!(
+                    "SYSTEM:\n{}\n\nUSER:\n{}",
+                    request.system(),
+                    request
+                        .user_message()
+                        .unwrap_or_else(|error| error.to_string())
+                ),
+            )
+        });
+        let result = provider.complete(&request);
+        if let Some(call) = call {
+            call.finish(
+                result
+                    .as_ref()
+                    .ok()
+                    .map(|completion| completion.text.clone()),
+                result.as_ref().err().map(ToString::to_string),
+            );
+        }
+        let completion = result?;
         if completion.text.trim().is_empty() {
             return Err(ProviderError::EmptyCompletion);
         }
@@ -912,6 +936,37 @@ mod tests {
                 text: r#"{"target_id":"chan:orders"}"#.into(),
             })
         }
+    }
+
+    #[test]
+    fn firewall_completion_records_redacted_request_and_text_in_debug_log() {
+        // AC-0560 (#1624): a single-shot completion records the redacted
+        // messages as SENT and the completion text as RECEIVED; the secret
+        // never reaches the debug log.
+        debug_log::test_support::capture();
+        let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
+        let provider = FakeCloud {
+            calls: AtomicUsize::new(0),
+        };
+        let request = action("debug-1624-firewall password=super-secret");
+        let preview = firewall.preview(&provider, &request).unwrap();
+        let grant = ConsentGrant::from_preview(&preview);
+        firewall
+            .complete(&provider, &request, Some(&grant))
+            .unwrap();
+        let calls = debug_log::test_support::calls_with("debug-1624-firewall");
+        assert_eq!(calls.len(), 1);
+        let (sent, received) = &calls[0];
+        assert_eq!(sent.path, "firewall");
+        assert_eq!(sent.target, "cloud:test");
+        let sent_text = sent.request.as_deref().unwrap();
+        assert!(sent_text.starts_with("SYSTEM:\n"));
+        assert!(!sent_text.contains("super-secret"));
+        let received = received.as_ref().expect("received entry");
+        assert_eq!(
+            received.response.as_deref(),
+            Some(r#"{"target_id":"chan:orders"}"#)
+        );
     }
 
     #[test]

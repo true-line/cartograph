@@ -24,6 +24,7 @@ mod knowledge_phase;
 mod local_commit;
 mod mcp_reads;
 mod metrics;
+mod model_debug;
 #[cfg(test)]
 mod name_unique_tests;
 mod paths;
@@ -6202,6 +6203,31 @@ fn open_external(url: &str) {
         );
         return;
     };
+    launch(program, args, url);
+}
+
+/// Help → Debug Viewer (#1624): open the model debug log in the platform's
+/// plain text editor, creating it with its header first if needed.
+fn open_model_debug_log(app: &tauri::AppHandle) {
+    let Some(log) = app.try_state::<Arc<model_debug::ModelDebugLog>>() else {
+        return;
+    };
+    if let Err(error) = log.ensure_exists() {
+        eprintln!("cartograph: could not create the model debug log: {error}");
+        return;
+    }
+    let path = log.path().to_path_buf();
+    match model_debug::text_viewer(std::env::consts::OS, &path) {
+        Some((program, args)) => launch(program, args, &path.to_string_lossy()),
+        None => eprintln!(
+            "cartograph: no text viewer for {}; the log is at {}",
+            std::env::consts::OS,
+            path.display()
+        ),
+    }
+}
+
+fn launch(program: &str, args: Vec<String>, url: &str) {
     let mut command = std::process::Command::new(program);
     command.args(args);
     // A GUI app spawning a console program flashes a console window on
@@ -6258,6 +6284,7 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
                 None::<&str>,
             )?,
             &MenuItem::with_id(handle, "help:issue", "Report an issue", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "help:debug", "Debug Viewer", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::about(
                 handle,
@@ -6289,6 +6316,7 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
         }
         "help:guide" => open_external("https://github.com/qwts/cartograph/wiki"),
         "help:issue" => open_external("https://github.com/qwts/cartograph/issues/new"),
+        "help:debug" => open_model_debug_log(app),
         _ => {}
     });
     Ok(())
@@ -6300,6 +6328,10 @@ fn main() {
             install_help_menu(app)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            // #1624: record every model exchange locally for Help → Debug Viewer.
+            let model_debug_log = Arc::new(model_debug::ModelDebugLog::new(&data_dir.join("logs")));
+            model_debug_log.clone().install();
+            app.manage(model_debug_log);
             let embedding_cache = Arc::new(Mutex::new(
                 semantic::embedding_cache::EmbeddingCache::open_disposable(&data_dir)?,
             ));
