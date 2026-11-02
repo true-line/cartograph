@@ -67,8 +67,24 @@ Memory is binary: 1 GiB = 2^30 bytes. `Gap` nodes are graph facts. They are not 
 - **JAX-RS endpoints were neither recovered nor reported (#1257).** Kafka has 49 JAX-RS files and recovered 0 endpoints, with no gap saying so. Fixed in #1264: at Cartograph `7b57678d` the same Kafka pin recovers 43 JAX-RS endpoints (29 in Connect runtime, 14 in Trogdor). It also emits 2 route Gaps for `InternalClusterResource` methods, which are served only through subclasses. One of the 43 is a test-source resource in Connect's integration tests, the #1250 class. The results table above predates this fix.
 - **The Go adapter silently skips files (#1258).** Preflight counts 17,994 Go files in Kubernetes. Of those, 4,339 are vendored and most of the rest are `_test.go` files, which leaves 10,073 non-vendor, non-test files. About 145 of them are platform-suffixed and about 1,179 carry a `//go:build` constraint, and the adapter skipped both kinds without disclosure. The other 8,758 were recovered. Fixed in #1262: preflight now names both skip classes with their counts. Re-measured at `7b57678d`, the recovered Kubernetes graph counts are unchanged.
 
+## Estate: 61 OpenMRS repositories in one profile
+
+This is a single-profile estate, not separate lanes. The machine was a Mac Studio M2 Max (32 GB), and only deterministic tiers ran. The executable was the release-profile showcase harness built from v0.58.0 source plus the #1600 Java change. The repository pins and run receipts are listed in [the v1.0 readiness report](../release/v1.0-readiness.md#1-large-estate-run).
+
+| | v0.58.0 | with #1600 |
+|---|---:|---:|
+| Wall time | 1,001.20 s | 993.33 s |
+| Max RSS | 9.12 GiB | 9.98 GiB |
+| Graph nodes | 330,061 | 330,628 |
+| Endpoints | 2 | 360 |
+| `Gap` nodes | 74,844 | 75,053 |
+
+- **Method-level Spring `@RequestMapping` handlers were dropped (#1598).** Fixed for Java in #1600 and for Kotlin in #1606.
+- 34 of 603 annotated handlers are still not reconciled against endpoints and route Gaps.
+- At 330k nodes the estate was above the 50,000-row graph limit for desktop investigations (#1602). ADR-0052 raised that ceiling in #1603.
+
 ## Limits
 
 - No T2 or T3 tiers ran. These are deterministic costs only.
-- These are separate lanes on a single machine, not a 50-repo estate in one profile.
+- The lane results above are separate lanes on a single machine. The estate section is the one-profile run.
 - Wall times are from a loaded machine (see the caveat above). Rerun on an idle machine before quoting them as numbers to hold to.
