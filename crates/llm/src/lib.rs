@@ -395,20 +395,34 @@ impl EgressFirewall {
             payload: preview.payload,
         };
         let call = debug_log::enabled().then(|| {
-            debug_log::begin(
-                "firewall",
-                preview.provider_id.clone(),
-                debug_log::excerpt(
+            // Borrowed parts: the redacted texts are not copied before the
+            // debug log reserves room for them.
+            let heads: Vec<String> = request
+                .spans()
+                .iter()
+                .map(|span| {
                     format!(
-                        "SYSTEM:\n{}\n\nUSER:\n{}",
-                        request.system(),
-                        request
-                            .user_message()
-                            .unwrap_or_else(|error| error.to_string())
+                        "\n\n--- span {} {}/{}@{} [{}..{}] ---\n",
+                        span.id,
+                        span.repo,
+                        span.path,
+                        span.commit_sha,
+                        span.byte_start,
+                        span.byte_end
                     )
-                    .as_bytes(),
-                ),
-            )
+                })
+                .collect();
+            let mut parts: Vec<&[u8]> = vec![
+                b"SYSTEM:\n",
+                request.system().as_bytes(),
+                b"\n\nPROMPT:\n",
+                request.prompt().as_bytes(),
+            ];
+            for (head, span) in heads.iter().zip(request.spans()) {
+                parts.push(head.as_bytes());
+                parts.push(span.text.as_bytes());
+            }
+            debug_log::begin("firewall", &preview.provider_id, &parts)
         });
         let result = provider.complete(&request);
         if let Some(call) = call {
@@ -416,7 +430,7 @@ impl EgressFirewall {
                 result
                     .as_ref()
                     .ok()
-                    .map(|completion| debug_log::excerpt(completion.text.as_bytes())),
+                    .map(|completion| completion.text.as_bytes()),
                 result.as_ref().err().map(ToString::to_string),
             );
         }

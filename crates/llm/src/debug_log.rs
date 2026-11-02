@@ -7,20 +7,28 @@
 //! never writes files, sends data or records headers (API keys travel only in
 //! headers, never in the recorded bodies).
 //!
-//! Recording never blocks a provider call and its memory is a fixed constant
-//! outside every bounded workspace: `begin`/`finish` copy at most
-//! [`MAX_BODY_BYTES`] of each body and push it onto an in-memory queue capped
-//! at [`QUEUE_BYTES`]; a dedicated writer thread hands queued entries to the
-//! sink. An entry that would exceed the cap is dropped and counted, and the
-//! next admitted entry reports the count in `dropped_before`.
+//! Recording never blocks a provider call, and every byte it owns comes from
+//! one process pool of [`QUEUE_BYTES`]. Before anything is copied, a call
+//! reserves the entry's worst-case charge: [`ENTRY_OVERHEAD`] plus the target
+//! plus at most [`MAX_BODY_BYTES`] + [`MARKER_BYTES`] of text per body. If the
+//! pool cannot cover it, nothing is copied; the entry is dropped and counted,
+//! and the next admitted entry reports the count in `dropped_before`. The
+//! reservation is released only after a dedicated writer thread has handed
+//! the entry to the sink, so queued and in-delivery entries are both charged.
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Most bytes of one request or response body copied into an entry.
+/// Most bytes of decoded text kept from one request or response body.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
-/// Most bytes of entries waiting for (or being handed to) the sink.
+/// Most bytes of the truncation note appended to a clipped body.
+pub const MARKER_BYTES: usize = 96;
+/// Fixed charge per entry for its struct and queue slot, so even empty
+/// entries consume pool budget.
+pub const ENTRY_OVERHEAD: usize = std::mem::size_of::<ModelExchange>() + 64;
+/// The process pool every recorded byte is charged to.
 pub const QUEUE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Which half of a call an entry records.
@@ -48,37 +56,29 @@ pub struct ModelExchange {
     /// Endpoint URL (bounded) or provider id (firewall).
     pub target: String,
     /// The request as sent (bounded) or the redacted messages (firewall),
-    /// truncated to [`MAX_BODY_BYTES`] with a stated omission.
+    /// decoded as UTF-8 and clipped to [`MAX_BODY_BYTES`] with a stated note.
     pub request: Option<String>,
-    /// The response body or completion text, truncated like `request`.
+    /// The response body or completion text, bounded like `request`.
     pub response: Option<String>,
     /// A short error description when the call did not succeed.
     pub error: Option<String>,
-    /// Entries dropped (queue full) between the previous admitted entry and this one.
+    /// Entries dropped (pool full) between the previous admitted entry and
+    /// this one.
     pub dropped_before: u64,
-}
-
-impl ModelExchange {
-    fn size(&self) -> usize {
-        self.target.len()
-            + self.request.as_ref().map_or(0, String::len)
-            + self.response.as_ref().map_or(0, String::len)
-            + self.error.as_ref().map_or(0, String::len)
-    }
 }
 
 type Sink = dyn Fn(&ModelExchange) + Send + Sync;
 
 #[derive(Default)]
 struct Queue {
-    entries: VecDeque<ModelExchange>,
-    /// Bytes of queued entries plus the one being delivered.
+    entries: VecDeque<(ModelExchange, usize)>,
+    /// Bytes reserved by producers, queued, or being delivered.
     bytes: usize,
     dropped: u64,
     delivering: bool,
 }
 
-/// A bounded queue drained by one writer thread into the installed sink.
+/// A byte-bounded pool and queue drained by one writer thread into the sink.
 pub(crate) struct Recorder {
     capacity: usize,
     enabled: AtomicBool,
@@ -87,6 +87,11 @@ pub(crate) struct Recorder {
     ready: Condvar,
     idle: Condvar,
     writer: std::sync::Once,
+}
+
+/// Pool bytes reserved for one entry before anything is copied.
+pub(crate) struct Reservation {
+    charge: usize,
 }
 
 impl Recorder {
@@ -123,28 +128,37 @@ impl Recorder {
         self.enabled.load(Ordering::Acquire)
     }
 
-    /// Queue an entry without blocking on the sink; drop it when full.
-    pub(crate) fn push(&self, mut exchange: ModelExchange) {
+    /// Reserve `charge` pool bytes, or count a drop and return `None`.
+    pub(crate) fn reserve(&self, charge: usize) -> Option<Reservation> {
         if !self.enabled() {
-            return;
+            return None;
         }
-        let size = exchange.size();
+        let mut queue = self.queue.lock().ok()?;
+        match queue.bytes.checked_add(charge) {
+            Some(total) if total <= self.capacity => {
+                queue.bytes = total;
+                Some(Reservation { charge })
+            }
+            _ => {
+                queue.dropped += 1;
+                None
+            }
+        }
+    }
+
+    /// Queue an entry built inside `reservation`; never blocks on the sink.
+    pub(crate) fn push(&self, reservation: Reservation, mut exchange: ModelExchange) {
         let Ok(mut queue) = self.queue.lock() else {
             return;
         };
-        if queue.bytes + size > self.capacity {
-            queue.dropped += 1;
-            return;
-        }
-        queue.bytes += size;
         exchange.dropped_before = std::mem::take(&mut queue.dropped);
-        queue.entries.push_back(exchange);
+        queue.entries.push_back((exchange, reservation.charge));
         self.ready.notify_one();
     }
 
     fn deliver(&self) {
         loop {
-            let (mut exchange, size) = {
+            let (exchange, charge) = {
                 let Ok(mut queue) = self.queue.lock() else {
                     return;
                 };
@@ -154,19 +168,16 @@ impl Recorder {
                         Err(_) => return,
                     };
                 }
-                let exchange = queue.entries.pop_front().expect("non-empty");
                 queue.delivering = true;
-                let size = exchange.size();
-                (exchange, size)
+                queue.entries.pop_front().expect("non-empty")
             };
             let sink = self.sink.read().ok().and_then(|slot| slot.clone());
             if let Some(sink) = sink {
                 sink(&exchange);
             }
-            exchange.request = None;
-            exchange.response = None;
+            drop(exchange);
             if let Ok(mut queue) = self.queue.lock() {
-                queue.bytes -= size;
+                queue.bytes -= charge;
                 queue.delivering = false;
                 if queue.entries.is_empty() {
                     self.idle.notify_all();
@@ -187,6 +198,11 @@ impl Recorder {
             .map(|(_, result)| !result.timed_out())
             .unwrap_or(false)
     }
+
+    #[cfg(test)]
+    fn reserved_bytes(&self) -> usize {
+        self.queue.lock().unwrap().bytes
+    }
 }
 
 static RECORDER: LazyLock<Arc<Recorder>> = LazyLock::new(|| Recorder::new(QUEUE_BYTES));
@@ -203,22 +219,56 @@ pub fn flush(timeout: Duration) -> bool {
     RECORDER.flush(timeout)
 }
 
-/// Whether a sink is installed, so callers can skip copying request bodies.
+/// Whether a sink is installed, so callers can skip recording entirely.
 pub(crate) fn enabled() -> bool {
     RECORDER.enabled()
 }
 
-/// Copy at most [`MAX_BODY_BYTES`] of `bytes` as text, stating any omission.
-pub(crate) fn excerpt(bytes: &[u8]) -> String {
-    if bytes.len() <= MAX_BODY_BYTES {
-        return String::from_utf8_lossy(bytes).into_owned();
+/// Worst-case pool charge of one entry.
+fn charge(target: &str, bodies: usize) -> usize {
+    ENTRY_OVERHEAD + target.len() + bodies * (MAX_BODY_BYTES + MARKER_BYTES)
+}
+
+/// Decode `parts` (one logical body) as UTF-8, replacing invalid sequences,
+/// keeping at most [`MAX_BODY_BYTES`] of output and stating any omission in
+/// at most [`MARKER_BYTES`]. The output never exceeds the sum of both bounds,
+/// whatever the input, and no larger temporary is made.
+pub(crate) fn excerpt(parts: &[&[u8]]) -> String {
+    let total: usize = parts.iter().map(|part| part.len()).sum();
+    // Exactly the worst-case output, so pushing never reallocates past the
+    // charge reserved for it (a replacement char is 3 bytes per input byte).
+    let mut out = String::with_capacity(total.saturating_mul(3).min(MAX_BODY_BYTES) + MARKER_BYTES);
+    let mut consumed = 0_usize;
+    'parts: for part in parts {
+        for chunk in part.utf8_chunks() {
+            let valid = chunk.valid();
+            let room = MAX_BODY_BYTES - out.len();
+            let mut end = valid.len().min(room);
+            while !valid.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.push_str(&valid[..end]);
+            consumed += end;
+            if end < valid.len() {
+                break 'parts;
+            }
+            let invalid = chunk.invalid();
+            if !invalid.is_empty() {
+                if MAX_BODY_BYTES - out.len() < char::REPLACEMENT_CHARACTER.len_utf8() {
+                    break 'parts;
+                }
+                out.push(char::REPLACEMENT_CHARACTER);
+                consumed += invalid.len();
+            }
+        }
     }
-    let mut text = String::from_utf8_lossy(&bytes[..MAX_BODY_BYTES]).into_owned();
-    text.push_str(&format!(
-        "\n[debug log: truncated, first {MAX_BODY_BYTES} of {} bytes shown]",
-        bytes.len()
-    ));
-    text
+    if consumed < total {
+        let _ = write!(
+            out,
+            "\n[debug log: truncated, first {consumed} of {total} bytes shown]"
+        );
+    }
+    out
 }
 
 /// An in-flight call whose `Sent` entry has been queued.
@@ -229,46 +279,58 @@ pub(crate) struct Call {
     clock: Instant,
 }
 
-/// Queue the `Sent` entry now. Never blocks on the sink or fails the call.
-pub(crate) fn begin(path: &'static str, target: String, request: String) -> Call {
+/// Queue the `Sent` entry for a request made of `parts`. Copies nothing
+/// unless the pool covers the entry's worst case; never blocks on the sink.
+pub(crate) fn begin(path: &'static str, target: &str, parts: &[&[u8]]) -> Call {
     let call = NEXT_CALL.fetch_add(1, Ordering::Relaxed);
     #[cfg(test)]
     test_support::BEGUN_ON_THREAD.with(|begun| begun.set(begun.get() + 1));
-    RECORDER.push(ModelExchange {
-        call,
-        phase: Phase::Sent,
-        at: SystemTime::now(),
-        duration: Duration::ZERO,
-        path,
-        target: target.clone(),
-        request: Some(request),
-        response: None,
-        error: None,
-        dropped_before: 0,
-    });
+    if let Some(reservation) = RECORDER.reserve(charge(target, 1)) {
+        RECORDER.push(
+            reservation,
+            ModelExchange {
+                call,
+                phase: Phase::Sent,
+                at: SystemTime::now(),
+                duration: Duration::ZERO,
+                path,
+                target: target.to_owned(),
+                request: Some(excerpt(parts)),
+                response: None,
+                error: None,
+                dropped_before: 0,
+            },
+        );
+    }
     Call {
         call,
         path,
-        target,
+        target: target.to_owned(),
         clock: Instant::now(),
     }
 }
 
 impl Call {
-    /// Queue the matching `Received` entry.
-    pub(crate) fn finish(self, response: Option<String>, error: Option<String>) {
-        RECORDER.push(ModelExchange {
-            call: self.call,
-            phase: Phase::Received,
-            at: SystemTime::now(),
-            duration: self.clock.elapsed(),
-            path: self.path,
-            target: self.target,
-            request: None,
-            response,
-            error,
-            dropped_before: 0,
-        });
+    /// Queue the matching `Received` entry, under the same pool rule.
+    pub(crate) fn finish(self, response: Option<&[u8]>, error: Option<String>) {
+        let Some(reservation) = RECORDER.reserve(charge(&self.target, 1)) else {
+            return;
+        };
+        RECORDER.push(
+            reservation,
+            ModelExchange {
+                call: self.call,
+                phase: Phase::Received,
+                at: SystemTime::now(),
+                duration: self.clock.elapsed(),
+                path: self.path,
+                target: self.target,
+                request: None,
+                response: response.map(|body| excerpt(&[body])),
+                error,
+                dropped_before: 0,
+            },
+        );
     }
 }
 
@@ -277,12 +339,12 @@ pub(crate) mod test_support {
     use super::*;
 
     static RECORDED: Mutex<Vec<ModelExchange>> = Mutex::new(Vec::new());
+    static INSTALL: std::sync::Once = std::sync::Once::new();
     thread_local! {
-        /// `Sent` entries queued by this thread, so a test's control check
+        /// `Sent` entries begun by this thread, so a test's control check
         /// can act at the instant after the request was logged.
         pub(crate) static BEGUN_ON_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
-    static INSTALL: std::sync::Once = std::sync::Once::new();
     /// While set, the capturing sink blocks on entries containing
     /// `debug-1624-slow-sink`, standing in for a slow disk.
     pub(crate) static HOLD_SLOW_SINK: AtomicBool = AtomicBool::new(false);
@@ -329,7 +391,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
 
-    fn entry(call: u64, body: usize) -> ModelExchange {
+    fn entry(call: u64) -> ModelExchange {
         ModelExchange {
             call,
             phase: Phase::Sent,
@@ -337,21 +399,26 @@ mod tests {
             duration: Duration::ZERO,
             path: "bounded",
             target: String::new(),
-            request: Some("x".repeat(body)),
+            request: None,
             response: None,
             error: None,
             dropped_before: 0,
         }
     }
 
-    // AC-0560 (#1624): a slow sink never blocks the caller; past the byte
-    // cap entries are dropped and counted, and the count is reported on the
-    // next admitted entry, so debug memory stays a fixed constant.
+    // AC-0560 (#1624): a slow sink never blocks the caller. Every entry,
+    // even an empty one, is charged at least ENTRY_OVERHEAD before it is
+    // built; past the pool entries are dropped without copying and counted
+    // on the next admitted entry; delivery releases exactly the charge.
     #[test]
-    fn debug_queue_is_byte_bounded_and_never_blocks_on_the_sink() {
+    fn debug_pool_charges_every_entry_and_never_blocks_on_the_sink() {
         let gate = Arc::new(AtomicBool::new(true));
         let seen = Arc::new(Mutex::new(Vec::<(u64, u64)>::new()));
-        let recorder = Recorder::new(100);
+        let recorder = Recorder::new(2 * ENTRY_OVERHEAD + 10);
+        assert!(
+            recorder.reserve(1).is_none(),
+            "disabled pool admits nothing"
+        );
         let (hold, log) = (Arc::clone(&gate), Arc::clone(&seen));
         recorder.set_sink(Some(Arc::new(move |exchange: &ModelExchange| {
             while hold.load(Ordering::Acquire) {
@@ -363,28 +430,56 @@ mod tests {
         })));
         let started = Instant::now();
         for call in 1..=5 {
-            recorder.push(entry(call, 40));
+            // Empty entries: the overhead alone bounds how many are held.
+            if let Some(reservation) = recorder.reserve(ENTRY_OVERHEAD) {
+                recorder.push(reservation, entry(call));
+            }
         }
         assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(recorder.reserved_bytes(), 2 * ENTRY_OVERHEAD);
         assert!(!recorder.flush(Duration::from_millis(50)));
         gate.store(false, Ordering::Release);
         assert!(recorder.flush(Duration::from_secs(10)));
-        recorder.push(entry(6, 40));
+        assert_eq!(recorder.reserved_bytes(), 0);
+        let reservation = recorder.reserve(ENTRY_OVERHEAD).unwrap();
+        recorder.push(reservation, entry(6));
         assert!(recorder.flush(Duration::from_secs(10)));
-        // 100 bytes admit two 40-byte entries; calls 3..=5 are dropped and
-        // reported on the next entry admitted after them.
         assert_eq!(*seen.lock().unwrap(), vec![(1, 0), (2, 0), (6, 3)]);
+        assert!(recorder.reserve(usize::MAX).is_none());
     }
 
+    // AC-0560: decoded output never exceeds MAX_BODY_BYTES + MARKER_BYTES,
+    // even when every input byte is invalid UTF-8 (each would otherwise
+    // become a 3-byte replacement), and it never splits a character.
     #[test]
-    fn debug_excerpt_states_truncation() {
-        assert_eq!(excerpt(b"short"), "short");
-        let long = vec![b'a'; MAX_BODY_BYTES + 7];
-        let text = excerpt(&long);
-        assert!(text.ends_with(&format!(
-            "[debug log: truncated, first {MAX_BODY_BYTES} of {} bytes shown]",
-            MAX_BODY_BYTES + 7
-        )));
-        assert!(text.len() < MAX_BODY_BYTES + 100);
+    fn debug_excerpt_bounds_decoded_output_for_any_input() {
+        assert_eq!(excerpt(&[b"short"]), "short");
+        assert_eq!(excerpt(&[b"a", b"\xff", b"b"]), "a\u{FFFD}b");
+        let note = |shown: usize, total: usize| {
+            format!("\n[debug log: truncated, first {shown} of {total} bytes shown]")
+        };
+        let invalid = vec![0xff_u8; MAX_BODY_BYTES];
+        let text = excerpt(&[&invalid]);
+        let kept = MAX_BODY_BYTES / 3;
+        assert!(text.ends_with(&note(kept, MAX_BODY_BYTES)));
+        assert_eq!(text.len(), kept * 3 + note(kept, MAX_BODY_BYTES).len());
+
+        let mut multibyte = vec![b'a'; MAX_BODY_BYTES - 1];
+        multibyte.extend_from_slice("é".as_bytes());
+        let text = excerpt(&[&multibyte]);
+        assert!(text.ends_with(&note(MAX_BODY_BYTES - 1, MAX_BODY_BYTES + 1)));
+
+        let max_note = note(usize::MAX, usize::MAX);
+        assert!(max_note.len() <= MARKER_BYTES);
+        for input in [
+            &invalid,
+            &multibyte,
+            &vec![b'x'; 3 * MAX_BODY_BYTES],
+            &vec![0xff; 7],
+        ] {
+            let text = excerpt(&[input]);
+            assert!(text.capacity() <= MAX_BODY_BYTES + MARKER_BYTES);
+            assert!(text.len() <= text.capacity());
+        }
     }
 }

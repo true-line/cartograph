@@ -845,10 +845,11 @@ fn user_message(request: &AuthorizedBoundedCompletion) -> Result<String, Bounded
     ))
 }
 
-/// Send one bounded call. When the host installed a debug log (#1624), an
-/// excerpt of the exact request body is queued before the final control
-/// check and an excerpt of the exact response body (or the failure code)
-/// when the call ends. Queuing never blocks on the log writer.
+/// Send one bounded call. When the host installed a debug log (#1624), a
+/// bounded excerpt of the exact request body is queued before the final
+/// control check and of the exact response body (or the failure code) when
+/// the call ends. Copies are made only inside the debug log's own fixed
+/// pool, and queuing never blocks on the log writer.
 fn acquire(
     builder: RequestBuilder,
     body: Vec<u8>,
@@ -859,10 +860,7 @@ fn acquire(
     let result = acquire_unlogged(builder, body, request, control, &mut call);
     if let Some(call) = call {
         call.finish(
-            result
-                .as_ref()
-                .ok()
-                .map(|(bytes, _)| crate::debug_log::excerpt(bytes)),
+            result.as_ref().ok().map(|(bytes, _)| bytes.as_slice()),
             result
                 .as_ref()
                 .err()
@@ -898,12 +896,11 @@ fn acquire_unlogged(
         let sent = built
             .body()
             .and_then(reqwest::blocking::Body::as_bytes)
-            .map(crate::debug_log::excerpt)
             .unwrap_or_default();
         *call = Some(crate::debug_log::begin(
             "bounded",
-            built.url().to_string(),
-            sent,
+            built.url().as_str(),
+            &[sent],
         ));
     }
     // Checked after the debug entry is queued, so neither cancellation nor

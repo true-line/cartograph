@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use llm::debug_log::{ModelExchange, Phase};
-use serde_json::Value;
 
 pub(crate) const FILE_NAME: &str = "model-debug.log";
 pub(crate) const PREVIOUS_FILE_NAME: &str = "model-debug.previous.log";
@@ -150,65 +149,235 @@ pub(crate) fn format_entry(exchange: &ModelExchange) -> String {
     }
     if let Some(request) = &exchange.request {
         out.push_str("--- request ---\n");
-        out.push_str(&pretty(request));
-        if let Some(messages) = serde_json::from_str::<Value>(request)
-            .ok()
-            .as_ref()
-            .and_then(|value| value.get("messages"))
-            .and_then(Value::as_array)
-        {
-            for message in messages {
-                let role = message.get("role").and_then(Value::as_str).unwrap_or("?");
-                if let Some(content) = message.get("content").and_then(Value::as_str) {
-                    out.push_str(&format!("--- request message: {role} ---\n"));
-                    out.push_str(&pretty(content));
-                }
-            }
-        }
+        push_line(&mut out, request);
+        decode::request_messages(request, &mut out);
     }
     if let Some(response) = &exchange.response {
         out.push_str("--- response ---\n");
-        out.push_str(&pretty(response));
-        if let Some(text) = model_output(response) {
-            out.push_str("--- model output ---\n");
-            out.push_str(&pretty(&text));
-        }
+        push_line(&mut out, response);
+        decode::model_output(response, &mut out);
     }
     out.push('\n');
     out
 }
 
-/// The assistant text inside an Ollama, OpenAI-compatible or Anthropic body.
-fn model_output(response: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(response).ok()?;
-    if let Some(text) = value.pointer("/message/content").and_then(Value::as_str) {
-        return Some(text.to_string());
-    }
-    if let Some(text) = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-    {
-        return Some(text.to_string());
-    }
-    let blocks = value.get("content").and_then(Value::as_array)?;
-    let text: String = blocks
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .collect();
-    (!text.is_empty()).then_some(text)
-}
-
-/// Pretty-print JSON text; anything else is written as-is.
-fn pretty(text: &str) -> String {
-    let mut out = serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| text.to_string());
-    if !out.ends_with('\n') {
+fn push_line(out: &mut String, text: &str) {
+    out.push_str(text);
+    if !text.ends_with('\n') {
         out.push('\n');
     }
-    out
+}
+
+/// Streaming decoders for the readable sections. They never build a JSON
+/// tree: each message or output string is unescaped once and written
+/// straight into the entry text, so formatting one entry holds at most the
+/// raw body, its decoded strings and one string in flight (#1624 review).
+mod decode {
+    use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    /// `--- request message: role ---` sections for a chat request body.
+    pub(super) fn request_messages(body: &str, out: &mut String) {
+        let mut de = serde_json::Deserializer::from_str(body);
+        let _ = de::Deserializer::deserialize_map(&mut de, top(out, true));
+    }
+
+    /// `--- model output ---` for Ollama, OpenAI-compatible or Anthropic
+    /// response bodies.
+    pub(super) fn model_output(body: &str, out: &mut String) {
+        let mut de = serde_json::Deserializer::from_str(body);
+        let _ = de::Deserializer::deserialize_map(&mut de, top(out, false));
+    }
+
+    fn section(out: &mut String, title: &str, text: &str) {
+        out.push_str("--- ");
+        out.push_str(title);
+        out.push_str(" ---\n");
+        super::push_line(out, text);
+    }
+
+    /// A string value, or `None` for any other JSON value (skipped).
+    struct Text;
+
+    impl<'de> DeserializeSeed<'de> for Text {
+        type Value = Option<String>;
+        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Text {
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_owned()))
+        }
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+    }
+
+    /// What a map visitor does with the keys it recognises.
+    #[derive(Clone, Copy)]
+    enum Kind {
+        /// Top-level body: `messages` (request) or `message`, `choices`,
+        /// `content` (response).
+        Top { request: bool },
+        /// One chat message: `role` + string `content`, written as a section.
+        Message { title: &'static str },
+        /// One Anthropic content block: `text` when `type` is `text`.
+        Block,
+    }
+
+    struct Map<'o> {
+        out: &'o mut String,
+        kind: Kind,
+    }
+
+    fn top(out: &mut String, request: bool) -> Map<'_> {
+        Map {
+            out,
+            kind: Kind::Top { request },
+        }
+    }
+
+    impl<'de> DeserializeSeed<'de> for Map<'_> {
+        type Value = ();
+        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_map(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Map<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let (mut role, mut content, mut is_text) = (None, None, None);
+            while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                match (self.kind, key.as_ref()) {
+                    (Kind::Top { request: true }, "messages") => map.next_value_seed(Seq {
+                        out: self.out,
+                        kind: SeqKind::Messages,
+                    })?,
+                    (Kind::Top { request: false }, "message") => map.next_value_seed(Map {
+                        out: self.out,
+                        kind: Kind::Message {
+                            title: "model output",
+                        },
+                    })?,
+                    (Kind::Top { request: false }, "choices") => map.next_value_seed(Seq {
+                        out: self.out,
+                        kind: SeqKind::FirstChoice,
+                    })?,
+                    (Kind::Top { request: false }, "content") => map.next_value_seed(Seq {
+                        out: self.out,
+                        kind: SeqKind::Blocks,
+                    })?,
+                    (Kind::Message { .. }, "role") => role = map.next_value_seed(Text)?,
+                    (Kind::Message { .. } | Kind::Block, "content" | "text") => {
+                        content = map.next_value_seed(Text)?
+                    }
+                    (Kind::Block, "type") => {
+                        is_text = Some(map.next_value_seed(Text)?.as_deref() == Some("text"))
+                    }
+                    _ => {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+            }
+            match (self.kind, content) {
+                (Kind::Message { title }, Some(text)) if title == "model output" => {
+                    section(self.out, title, &text)
+                }
+                (Kind::Message { .. }, Some(text)) => {
+                    let role = role.unwrap_or_else(|| "?".into());
+                    section(self.out, &format!("request message: {role}"), &text)
+                }
+                (Kind::Block, Some(text)) if is_text == Some(true) => {
+                    section(self.out, "model output", &text)
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SeqKind {
+        Messages,
+        FirstChoice,
+        Blocks,
+    }
+
+    struct Seq<'o> {
+        out: &'o mut String,
+        kind: SeqKind,
+    }
+
+    impl<'de> DeserializeSeed<'de> for Seq<'_> {
+        type Value = ();
+        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_seq(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Seq<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a JSON array")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            let mut first = true;
+            loop {
+                let kind = match (self.kind, first) {
+                    (SeqKind::Messages, _) => Kind::Message {
+                        title: "request message",
+                    },
+                    (SeqKind::FirstChoice, true) => Kind::Top { request: false },
+                    (SeqKind::FirstChoice, false) => {
+                        while seq.next_element::<IgnoredAny>()?.is_some() {}
+                        return Ok(());
+                    }
+                    (SeqKind::Blocks, _) => Kind::Block,
+                };
+                let element = Map {
+                    out: &mut *self.out,
+                    kind,
+                };
+                if seq.next_element_seed(element)?.is_none() {
+                    return Ok(());
+                }
+                first = false;
+            }
+        }
+    }
 }
 
 pub(crate) fn utc_timestamp(time: SystemTime) -> String {
@@ -281,9 +450,8 @@ mod tests {
         ));
         for part in [
             "--- request ---",
-            "\"num_predict\": 2048",
-            "--- request message: user ---",
-            "\"q\": \"aliases\"",
+            r#""options":{"num_predict":2048}"#,
+            "--- request message: user ---\n{\"q\":\"aliases\"}\n",
         ] {
             assert!(out.contains(part), "missing {part}\n{out}");
         }
@@ -292,9 +460,8 @@ mod tests {
         assert!(back.starts_with("==== #12 RECEIVED  2026-11-02T07:38:15.103Z  29.98 s  OK ===="));
         for part in [
             "--- response ---",
-            "\"done_reason\": \"stop\"",
-            "--- model output ---",
-            "\"type\": \"replay_query\"",
+            r#""done_reason":"stop""#,
+            "--- model output ---\n{\"type\":\"replay_query\",\"query_index\":2}\n",
         ] {
             assert!(back.contains(part), "missing {part}\n{back}");
         }
@@ -319,18 +486,18 @@ mod tests {
         assert_eq!(first, HEADER);
         log.append(&sent(1, "{\"n\":1}")).unwrap();
         let text = fs::read_to_string(log.path()).unwrap();
-        assert!(text.starts_with(HEADER) && text.contains("\"n\": 1"));
+        assert!(text.starts_with(HEADER) && text.contains("{\"n\":1}"));
         let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(5000));
         log.append(&sent(2, &big)).unwrap();
         let previous = dir.path().join(PREVIOUS_FILE_NAME);
-        assert!(fs::read_to_string(&previous).unwrap().contains("\"n\": 1"));
+        assert!(fs::read_to_string(&previous).unwrap().contains("{\"n\":1}"));
         assert!(!log.path().exists());
         log.append(&sent(3, "{\"n\":3}")).unwrap();
         let fresh = fs::read_to_string(log.path()).unwrap();
-        assert!(fresh.starts_with(HEADER) && fresh.contains("\"n\": 3"));
+        assert!(fresh.starts_with(HEADER) && fresh.contains("{\"n\":3}"));
         log.append(&sent(2, &big)).unwrap();
         let replaced = fs::read_to_string(&previous).unwrap();
-        assert!(replaced.contains("\"n\": 3") && !replaced.contains("\"n\": 1"));
+        assert!(replaced.contains("{\"n\":3}") && !replaced.contains("{\"n\":1}"));
     }
 
     #[test]
@@ -353,5 +520,33 @@ mod tests {
             Some("xdg-open")
         );
         assert_eq!(text_viewer("ios", path), None);
+    }
+
+    #[test]
+    fn model_debug_decoding_streams_every_provider_shape_within_a_fixed_bound() {
+        // AC-0560 (#1624 review): decoding never builds a JSON tree. OpenAI
+        // uses only the first choice, Anthropic joins text blocks, non-string
+        // content is skipped, and malformed or hostile bodies only lose the
+        // decoded section, so an entry stays within header + 2 x its body.
+        let openai = r#"{"choices":[{"message":{"role":"assistant","content":"first"}},{"message":{"content":"second"}}]}"#;
+        let out = format_entry(&received(1, Some(openai), None));
+        assert!(out.contains("--- model output ---\nfirst\n") && !out.contains("second\n---"));
+        assert_eq!(out.matches("--- model output ---").count(), 1);
+        let anthropic = r#"{"content":[{"type":"text","text":"alpha"},{"text":"skip","type":"tool_use"},{"type":"text","text":"beta"}]}"#;
+        let out = format_entry(&received(2, Some(anthropic), None));
+        assert!(out.contains("--- model output ---\nalpha\n--- model output ---\nbeta\n"));
+        assert!(!out.contains("skip\n---"));
+        let blocks = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"x"}]},{"role":"system","content":"plain"}]}"#;
+        let out = format_entry(&sent(3, blocks));
+        assert!(out.contains("--- request message: system ---\nplain\n"));
+        assert_eq!(out.matches("--- request message").count(), 1);
+        for hostile in [
+            format!(r#"{{"messages":[{}]}}"#, vec!["{}"; 50_000].join(",")),
+            format!(r#"{{"messages":{}"#, "[".repeat(10_000)),
+            "not json".to_string(),
+        ] {
+            let out = format_entry(&sent(4, &hostile));
+            assert!(out.len() <= 2 * hostile.len() + 256, "{}", out.len());
+        }
     }
 }
