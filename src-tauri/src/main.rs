@@ -3759,6 +3759,28 @@ fn set_ingest_parallelism(
     Ok(applied)
 }
 
+/// The user's last explicit Investigations budget and specialist (#1636).
+#[tauri::command]
+fn get_investigation_choice(
+    state: State<'_, AppState>,
+) -> Result<Option<settings::InvestigationChoice>, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.investigation_choice().map_err(|e| e.to_string())
+}
+
+/// Persist an explicit Investigations budget and specialist choice (#1636).
+#[tauri::command]
+fn set_investigation_choice(
+    specialist_id: String,
+    limit_profile: String,
+    state: State<'_, AppState>,
+) -> Result<Option<settings::InvestigationChoice>, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .set_investigation_choice(&specialist_id, &limit_profile)
+        .map_err(|e| e.to_string())
+}
+
 /// Live egress summary for the status bar (#103's seam, now real).
 #[tauri::command]
 fn egress_summary(state: State<'_, AppState>) -> Result<settings::EgressSummary, String> {
@@ -6482,6 +6504,8 @@ fn main() {
             egress_summary,
             get_ingest_parallelism,
             set_ingest_parallelism,
+            get_investigation_choice,
+            set_investigation_choice,
             cloud_disclosure,
             ingest_history,
             extractor_coverage,

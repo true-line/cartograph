@@ -110,6 +110,7 @@ pub enum SettingsError {
     NotCloudProvider,
     InvalidProvider(String),
     InvalidParallelism(u32),
+    InvalidInvestigationChoice,
     Store(rusqlite::Error),
 }
 
@@ -133,6 +134,10 @@ impl std::fmt::Display for SettingsError {
                 "ingest parallelism must be Auto (0) or 1..={} workers, got {workers}",
                 max_workers()
             ),
+            Self::InvalidInvestigationChoice => write!(
+                f,
+                "investigation choice must name a specialist and a budget profile (1..=128 of a-z, 0-9, @ . _ -)"
+            ),
             Self::Store(error) => write!(f, "settings store: {error}"),
         }
     }
@@ -144,6 +149,22 @@ impl From<rusqlite::Error> for SettingsError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Store(error)
     }
+}
+
+/// The user's last explicit Investigations budget and specialist (#1636).
+/// The host stores identifiers only; the UI applies them only when the
+/// current catalog still offers that pair, otherwise the first-run default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InvestigationChoice {
+    pub specialist_id: String,
+    pub limit_profile: String,
+}
+
+fn choice_identifier(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"@._-".contains(&b))
 }
 
 /// Store for tier settings and the egress log, on the state spine.
@@ -187,6 +208,14 @@ impl SettingsStore {
                  parallelism INTEGER NOT NULL CHECK (parallelism >= 0)
              ) STRICT;
              INSERT OR IGNORE INTO ingest_settings (id, parallelism) VALUES (1, 0);
+             -- Outside `investigation_*`, which the investigations store owns
+             -- and validates as a closed set.
+             CREATE TABLE IF NOT EXISTS settings_investigation_choice (
+                 id            INTEGER PRIMARY KEY CHECK (id = 1),
+                 specialist_id TEXT,
+                 limit_profile TEXT
+             ) STRICT;
+             INSERT OR IGNORE INTO settings_investigation_choice (id) VALUES (1);
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -472,6 +501,43 @@ impl SettingsStore {
         Ok(self.ingest_parallelism()?)
     }
 
+    /// The persisted Investigations choice, if the user has made one (#1636).
+    /// A row that is incomplete or malformed reads as no choice.
+    pub fn investigation_choice(&self) -> rusqlite::Result<Option<InvestigationChoice>> {
+        let (specialist_id, limit_profile): (Option<String>, Option<String>) = self.conn.query_row(
+            "SELECT specialist_id, limit_profile FROM settings_investigation_choice WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(match (specialist_id, limit_profile) {
+            (Some(specialist_id), Some(limit_profile))
+                if choice_identifier(&specialist_id) && choice_identifier(&limit_profile) =>
+            {
+                Some(InvestigationChoice {
+                    specialist_id,
+                    limit_profile,
+                })
+            }
+            _ => None,
+        })
+    }
+
+    /// Persist the user's explicit Investigations choice.
+    pub fn set_investigation_choice(
+        &mut self,
+        specialist_id: &str,
+        limit_profile: &str,
+    ) -> Result<Option<InvestigationChoice>, SettingsError> {
+        if !choice_identifier(specialist_id) || !choice_identifier(limit_profile) {
+            return Err(SettingsError::InvalidInvestigationChoice);
+        }
+        self.conn.execute(
+            "UPDATE settings_investigation_choice SET specialist_id = ?1, limit_profile = ?2 WHERE id = 1",
+            params![specialist_id, limit_profile],
+        )?;
+        Ok(self.investigation_choice()?)
+    }
+
     /// Derive the egress firewall policy from persisted settings: cloud is
     /// allowed only for enabled LLM tiers whose provider is `cloud` **and**
     /// which hold standing consent. Everything else stays local-only.
@@ -496,6 +562,40 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn investigation_choice_persists_across_reopen_and_rejects_malformed_ids() {
+        // AC-0563 (#1636): no choice on a fresh profile; an explicit choice
+        // survives reopen; malformed identifiers are refused without writing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.investigation_choice().unwrap(), None);
+        let chosen = store
+            .set_investigation_choice("domain-analyst@3", "investigation-v1")
+            .unwrap();
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.investigation_choice().unwrap(), chosen);
+        assert_eq!(
+            chosen,
+            Some(InvestigationChoice {
+                specialist_id: "domain-analyst@3".into(),
+                limit_profile: "investigation-v1".into(),
+            })
+        );
+        for (specialist, profile) in [
+            ("", "investigation-v1"),
+            ("Domain Analyst", "investigation-v1"),
+            ("domain-analyst@3", &*"x".repeat(129)),
+        ] {
+            assert!(matches!(
+                store.set_investigation_choice(specialist, profile),
+                Err(SettingsError::InvalidInvestigationChoice)
+            ));
+        }
+        assert_eq!(store.investigation_choice().unwrap(), chosen);
+    }
 
     #[test]
     fn ingest_parallelism_defaults_to_auto_persists_and_rejects_out_of_range() {

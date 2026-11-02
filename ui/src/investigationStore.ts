@@ -51,6 +51,24 @@ export function desktopDefaultComposer(composer: InvestigationComposer, catalog:
       !investigationPolicy(catalog, DESKTOP_DEFAULT_PROFILE, DESKTOP_DEFAULT_SPECIALIST)) return null;
   return { ...composer, specialistId: DESKTOP_DEFAULT_SPECIALIST, limitProfile: DESKTOP_DEFAULT_PROFILE };
 }
+/** The user's last explicit budget and specialist, persisted in the app profile (#1636). */
+export interface StoredInvestigationChoice { specialist_id: string; limit_profile: string }
+/** An untouched composer restores a stored choice the catalog still offers, else the desktop default. */
+export function restoredComposer(composer: InvestigationComposer, catalog: InvestigationCatalog,
+  stored: StoredInvestigationChoice | null): InvestigationComposer | null {
+  const untouched = composer.limitProfile === undefined && composer.specialistId === initialComposer.specialistId &&
+    composer.parent === null;
+  if (untouched && stored && catalog.specialists.some((item) => item.id === stored.specialist_id) &&
+      investigationPolicy(catalog, stored.limit_profile, stored.specialist_id as SpecialistId))
+    return { ...composer, specialistId: stored.specialist_id as SpecialistId, limitProfile: stored.limit_profile };
+  return desktopDefaultComposer(composer, catalog);
+}
+async function storedChoice(): Promise<StoredInvestigationChoice | null> {
+  try {
+    const value = await invokeOr<StoredInvestigationChoice | null>('get_investigation_choice', null);
+    return value && typeof value.specialist_id === 'string' && typeof value.limit_profile === 'string' ? value : null;
+  } catch { return null; }
+}
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown']);
 const ACTIVE_HISTORY_STATUSES = new Set(['queued', 'preparing', 'running', 'awaiting_consent']);
 export const INVESTIGATION_PAGE_LIMIT = 50;
@@ -640,9 +658,13 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       // Standard), so a later catalog refresh treats it as chosen (AC-0559).
       const pinned = 'specialistId' in patch && !('limitProfile' in patch) && get().composer.limitProfile === undefined
         ? { limitProfile: 'investigation-v1' } : {};
-      if (!get().starting && !get().pendingStart) set((state) => ({
-        composer: { ...state.composer, ...structuredClone(patch), ...pinned },
-      }));
+      if (!get().starting && !get().pendingStart) {
+        set((state) => ({ composer: { ...state.composer, ...structuredClone(patch), ...pinned } }));
+        // Remember an explicit budget or specialist choice across restarts (#1636).
+        const { specialistId, limitProfile } = get().composer;
+        if (('specialistId' in patch || 'limitProfile' in patch) && limitProfile !== undefined)
+          invokeOr('set_investigation_choice', null, { specialistId, limitProfile }).catch(() => undefined);
+      }
     },
     loadObligationChoices: async (scope) => {
       if (get().starting || get().pendingStart) return;
@@ -765,11 +787,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       const request = ++catalogRequest;
       set({ catalogLoading: true, catalogError: null });
       try {
-        const catalog = await invokeOr<InvestigationCatalog | null>('investigation_specialists', null);
+        const [catalog, stored] = await Promise.all([
+          invokeOr<InvestigationCatalog | null>('investigation_specialists', null), storedChoice()]);
         if (!catalog || catalog.schema_version !== 1 || !Array.isArray(catalog.specialists) ||
             !Array.isArray(catalog.providers)) throw new Error('Catalog unavailable.');
         if (request === catalogRequest) set((state) => {
-          const composer = state.starting || state.pendingStart ? null : desktopDefaultComposer(state.composer, catalog);
+          const composer = state.starting || state.pendingStart ? null : restoredComposer(state.composer, catalog, stored);
           return composer ? { catalog, catalogLoading: false, composer } : { catalog, catalogLoading: false };
         });
       } catch {
