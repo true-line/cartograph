@@ -1,5 +1,20 @@
 # cartograph
 
+## 0.59.0
+
+### Minor Changes
+
+- 27fb17e: Desktop investigations read the frozen graph under a new investigation ceiling (4 GiB / 10M rows) so real estates no longer stop at "Investigation limit reached"; MCP tasks keep their default limits and reservations (ADR-0052).
+
+### Patch Changes
+
+- 391a6e0: Evidence drawer: Inferred facts from deterministic analysis no longer claim they were proposed by a higher tier, the cited span scrolls into view, and a missing producing method reads "producer not recorded" instead of looking like a missing HTTP method.
+- 922e859: The evidence drawer treats an unknown producing tier named like a built-in object property (for example `constructor`) as not recorded.
+- 251e2b8: Avoid decoding the same saved invocation twice during transactional source and inventory history validation while retaining all ledger and binding checks.
+- c5cdc98: Kotlin Spring controllers: function-level `@RequestMapping` handlers become endpoints, with verbs that union the class-level and function-level `method =` restrictions, and literal path arrays become routes. Unprovable verbs become route Gaps instead of being dropped.
+- cde1594: Avoid repeating full immutable-ledger validation for every query when constructing disclosed investigation history. Preserve existing reference identities, registry validation, and empty-history behavior (#1596).
+- bd226a1: Java Spring controllers that declare handlers with method-level `@RequestMapping` (classic Spring MVC) now produce endpoints, one per proven verb, or an honest route gap. Before, they were silently dropped: a 61-repo OpenMRS estate recovered 2 endpoints from 592 such handlers.
+
 ## 0.58.0
 
 ### Minor Changes
