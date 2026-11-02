@@ -41,3 +41,20 @@ export const CapacityRefusal: Story = {
     await expect(canvas.queryByText('Unsupported event')).not.toBeInTheDocument();
   },
 };
+
+export const ProposedVersusExecuted: Story = {
+  args: { events: [
+    ...investigationEvents().slice(3, 4),
+    { ...investigationEvents()[3], sequence: 5, kind: 'model_completed', summary: 'Model replied.' },
+    { ...investigationEvents()[3], sequence: 6, kind: 'action_admitted', summary: 'Admitted read_evidence.' },
+    { ...investigationEvents()[4], sequence: 7 },
+    { ...investigationEvents()[6], sequence: 8 },
+    { ...investigationEvents()[3], sequence: 9, kind: 'capacity_refused', summary: 'Refused.' },
+  ] },
+  // AC-0561: each step says whether the model's action was proposed, running, executed or not executed.
+  play: async ({ canvasElement }) => {
+    const rows = within(canvasElement).getAllByRole('listitem');
+    await expect(rows.map((row) => row.querySelector('.investigation-stage')?.textContent?.trim())).toEqual([
+      'Waiting for model', 'Model replied', 'Proposed by model · accepted', 'Running', 'Executed', 'Not executed']);
+  },
+};

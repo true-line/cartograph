@@ -1,3 +1,4 @@
+import { EVENT_STAGE_LABELS, eventStage } from '../investigationProgress';
 import type { InvestigationEvent } from '../investigationTypes';
 
 const LABELS: Record<InvestigationEvent['kind'], string> = {
@@ -21,12 +22,14 @@ export interface InvestigationActivityProps { events: InvestigationEvent[] }
 export function InvestigationActivity({ events }: InvestigationActivityProps) {
   return <section className="investigation-section" aria-label="Investigation activity">
     <h3>Activity</h3>
-    <p className="muted">Recorded tool and execution events, in host sequence order.</p>
+    <p className="muted">Recorded tool and execution events, in host sequence order. An action the model proposes runs only after it is accepted; refused proposals are marked Not executed.</p>
     {events.length === 0 ? <p className="muted">No activity loaded yet.</p> :
       <ol className="investigation-events">
         {events.map((event) => <li key={event.sequence}>
           <span className="investigation-sequence" aria-label={`Event ${event.sequence}`}>{event.sequence}</span>
           <div><strong>{LABELS[event.kind] ?? 'Unsupported event'}</strong>
+            {eventStage(event.kind) && <span className={`investigation-stage investigation-stage-${eventStage(event.kind)}`}>
+              {EVENT_STAGE_LABELS[eventStage(event.kind)!]}</span>}
             {event.tool && <code className="investigation-tool">{event.tool}</code>}
             <p>{event.summary}</p>
             <p className="muted"><time>{event.created_at}</time>{event.step_id && <> · step <code>{event.step_id}</code></>}</p>
