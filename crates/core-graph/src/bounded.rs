@@ -12,7 +12,8 @@ use std::io::{self, Write};
 
 /// Narrowable limits for the complete `(nodes, edges)` JSON graph content.
 ///
-/// Defaults are the SPEC-10 ceilings. They bound admitted structure and bytes,
+/// Defaults are the SPEC-10 interactive profile; the hard maxima admit
+/// whole estates for desktop investigations (#1602). They bound admitted structure and bytes,
 /// not SQLite's page cache, allocator overhead or exact process resident memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotReadLimits {
@@ -29,13 +30,36 @@ pub struct SnapshotReadLimits {
 
 impl SnapshotReadLimits {
     /// Hard maximum raw and canonical graph bytes, independently enforced.
-    pub const MAX_BYTES: usize = 32 * 1024 * 1024;
+    /// Sized for whole multi-repo estates on a dedicated machine (#1602,
+    /// owner decision 2026-11-01). Only [`Self::investigation`] selects it by
+    /// default; every other reader keeps the interactive [`Default`].
+    pub const MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
     /// Hard maximum combined graph rows.
-    pub const MAX_ROWS: usize = 50_000;
+    pub const MAX_ROWS: usize = 10_000_000;
     /// Hard maximum complete-graph JSON depth.
     pub const MAX_DEPTH: usize = 32;
     /// Hard maximum cumulative complete-graph JSON values.
-    pub const MAX_VALUES: usize = 1_000_000;
+    pub const MAX_VALUES: usize = 500_000_000;
+
+    /// Interactive default graph bytes (the SPEC-10 profile before #1602).
+    pub const DEFAULT_BYTES: usize = 32 * 1024 * 1024;
+    /// Interactive default combined graph rows.
+    pub const DEFAULT_ROWS: usize = 50_000;
+    /// Interactive default cumulative JSON values.
+    pub const DEFAULT_VALUES: usize = 1_000_000;
+
+    /// The complete-graph ceiling for a desktop-started specialist
+    /// investigation (#1602): the hard maximum, so a real system's graph is
+    /// admitted on a dedicated machine. Reads whose memory is reserved in
+    /// advance (MCP sessions and MCP-started tasks) keep [`Default`].
+    pub const fn investigation() -> Self {
+        Self {
+            max_bytes: Self::MAX_BYTES,
+            max_rows: Self::MAX_ROWS,
+            max_depth: Self::MAX_DEPTH,
+            max_values: Self::MAX_VALUES,
+        }
+    }
 
     pub(crate) fn validate(self) -> Result<(), GraphError> {
         if self.max_bytes == 0
@@ -55,10 +79,10 @@ impl SnapshotReadLimits {
 impl Default for SnapshotReadLimits {
     fn default() -> Self {
         Self {
-            max_bytes: Self::MAX_BYTES,
-            max_rows: Self::MAX_ROWS,
+            max_bytes: Self::DEFAULT_BYTES,
+            max_rows: Self::DEFAULT_ROWS,
             max_depth: Self::MAX_DEPTH,
-            max_values: Self::MAX_VALUES,
+            max_values: Self::DEFAULT_VALUES,
         }
     }
 }

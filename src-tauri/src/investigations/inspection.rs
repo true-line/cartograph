@@ -45,7 +45,7 @@ impl From<crate::primary_source::PinnedReadError> for InspectionError {
     }
 }
 fn snapshot(state: &AppState, fact: &TaskFactKey) -> Result<(String, SourceBinding), String> {
-    snapshot_typed(state, fact, SnapshotReadLimits::default()).map_err(|_| REFRESH.into())
+    snapshot_typed(state, fact, SnapshotReadLimits::investigation()).map_err(|_| REFRESH.into())
 }
 fn snapshot_typed(
     state: &AppState,
@@ -230,9 +230,37 @@ pub(crate) fn resolve(
     expected_receipt: &str,
     ordinal: usize,
 ) -> Result<(InvestigationInspectionTarget, RetentionGuard), String> {
-    resolve_typed(state, fact, expected_snapshot, expected_receipt, ordinal)
-        .map_err(|_| REFRESH.into())
+    resolve_with_limits(
+        state,
+        fact,
+        expected_snapshot,
+        expected_receipt,
+        ordinal,
+        SnapshotReadLimits::investigation(),
+    )
 }
+
+/// [`resolve`] under an explicit complete-graph ceiling: an MCP-started task
+/// resolves under the limits its reservation was computed from (#1602).
+pub(crate) fn resolve_with_limits(
+    state: &AppState,
+    fact: &TaskFactKey,
+    expected_snapshot: &str,
+    expected_receipt: &str,
+    ordinal: usize,
+    limits: SnapshotReadLimits,
+) -> Result<(InvestigationInspectionTarget, RetentionGuard), String> {
+    resolve_typed_bounded(
+        state,
+        fact,
+        expected_snapshot,
+        expected_receipt,
+        ordinal,
+        limits,
+    )
+    .map_err(|_| REFRESH.into())
+}
+#[cfg(test)]
 pub(crate) fn resolve_typed(
     state: &AppState,
     fact: &TaskFactKey,
@@ -246,7 +274,7 @@ pub(crate) fn resolve_typed(
         expected_snapshot,
         expected_receipt,
         ordinal,
-        SnapshotReadLimits::default(),
+        SnapshotReadLimits::investigation(),
     )
 }
 

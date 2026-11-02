@@ -233,6 +233,12 @@ fn bounded_snapshot_hard_limits_and_empty_graph_are_validated_before_access() {
     assert_eq!(SnapshotReadLimits::default().max_rows, 50_000);
     assert_eq!(SnapshotReadLimits::default().max_depth, 32);
     assert_eq!(SnapshotReadLimits::default().max_values, 1_000_000);
+    // The investigation ceiling is the hard maximum (#1602).
+    let hard = SnapshotReadLimits::investigation();
+    assert_eq!(hard.max_bytes, 4 * 1024 * 1024 * 1024);
+    assert_eq!(hard.max_rows, 10_000_000);
+    assert_eq!(hard.max_depth, 32);
+    assert_eq!(hard.max_values, 500_000_000);
     assert_eq!(
         store
             .read_snapshot_bounded(SnapshotReadLimits {
@@ -245,7 +251,7 @@ fn bounded_snapshot_hard_limits_and_empty_graph_are_validated_before_access() {
         (vec![], vec![]),
     );
     store.conn.execute("DROP TABLE edges", []).unwrap();
-    let defaults = SnapshotReadLimits::default();
+    let defaults = SnapshotReadLimits::investigation();
     for limits in [
         SnapshotReadLimits {
             max_bytes: 0,
@@ -497,4 +503,39 @@ fn bounded_snapshot_default_depth_stops_deep_properties_before_recursive_allocat
         }
         assert!(store.conn.is_autocommit());
     }
+}
+
+// AC-0556 (#1602): a real system's graph (SimpleLogin is about 70k rows) is
+// admitted under the desktop investigation ceiling, while the interactive
+// default used by reserved readers still refuses it with a row-limit error.
+#[test]
+fn investigation_ceiling_admits_a_real_system_graph() {
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let tx = store.conn.transaction().unwrap();
+    {
+        let mut node = tx
+            .prepare("INSERT INTO nodes (id, label, props) VALUES (?1, 'Symbol', '{}')")
+            .unwrap();
+        for n in 0..30_000 {
+            node.execute([format!("n{n}")]).unwrap();
+        }
+        let mut edge = tx
+            .prepare("INSERT INTO edges (src, dst, label, props) VALUES (?1, ?2, 'CALLS', '{}')")
+            .unwrap();
+        for n in 0..40_000usize {
+            let src = n % 30_000;
+            let dst = (src + 1 + n / 30_000) % 30_000;
+            edge.execute([format!("n{src}"), format!("n{dst}")])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let (nodes, edges) = store
+        .read_snapshot_bounded(SnapshotReadLimits::investigation())
+        .unwrap();
+    assert_eq!((nodes.len(), edges.len()), (30_000, 40_000));
+    assert_bounds(
+        store.read_snapshot_bounded(SnapshotReadLimits::default()),
+        SnapshotBoundsError::RowLimit,
+    );
 }

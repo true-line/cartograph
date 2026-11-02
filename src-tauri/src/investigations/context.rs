@@ -81,6 +81,9 @@ pub(super) struct FrozenContext {
     qualified: Option<CoverageContext>,
     pub(super) policy: &'static InvestigationPolicy,
     specialist: SpecialistId,
+    /// The complete-graph ceiling this context was prepared under; later
+    /// evidence selection rereads under the same bound (#1602).
+    graph_limits: SnapshotReadLimits,
 }
 
 /// Owned local preparation, never a deserialized or cloneable publication token.
@@ -288,6 +291,37 @@ fn projection(nodes: Vec<Node>, edges: Vec<Edge>) -> Result<ContextSnapshot, Hos
     ContextSnapshot::new(nodes, edges).map_err(|_| HostError::InvalidInput)
 }
 
+/// The complete-graph ceiling for one investigation task (#1602). A task
+/// started through MCP runs under MCP scope limits and keeps the interactive
+/// default that its reservation was computed from; a desktop-started task may
+/// read a whole estate up to the investigation ceiling.
+pub(crate) fn task_graph_limits(mcp_started: bool) -> SnapshotReadLimits {
+    if mcp_started {
+        SnapshotReadLimits::default()
+    } else {
+        SnapshotReadLimits::investigation()
+    }
+}
+
+#[cfg(test)]
+mod graph_limit_tests {
+    use super::*;
+
+    // AC-0556 (#1602): MCP-started tasks keep the limits their worker
+    // reservation was sized from; only desktop starts get the estate ceiling.
+    #[test]
+    fn mcp_started_tasks_keep_the_reserved_default_graph_limits() {
+        let mcp = task_graph_limits(true);
+        let desktop = task_graph_limits(false);
+        assert_eq!(mcp, SnapshotReadLimits::default());
+        assert_eq!(mcp.max_rows, 50_000);
+        assert_eq!(mcp.max_bytes, 32 * 1024 * 1024);
+        assert_eq!(desktop, SnapshotReadLimits::investigation());
+        assert_eq!(desktop.max_rows, SnapshotReadLimits::MAX_ROWS);
+        assert!(desktop.max_bytes > mcp.max_bytes);
+    }
+}
+
 impl FrozenContext {
     pub(super) fn completion_acquisition_request(
         request: &obligations::StagedObligationRequest,
@@ -418,10 +452,21 @@ impl FrozenContext {
         }
     }
 
+    /// Desktop-ceiling preparation, kept for fixtures and tests.
+    #[cfg(test)]
     pub(super) fn prepare(
         state: &AppState,
         request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
+    ) -> Result<Self, HostError> {
+        Self::prepare_bounded(state, request, history, SnapshotReadLimits::investigation())
+    }
+
+    fn prepare_bounded(
+        state: &AppState,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
+        history: &[String],
+        graph_limits: SnapshotReadLimits,
     ) -> Result<Self, HostError> {
         let request = request.try_into()?;
         if request.specialist_id.uses_coverage_qualification() {
@@ -431,9 +476,11 @@ impl FrozenContext {
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
-            .read_snapshot_bounded(SnapshotReadLimits::default())
+            .read_snapshot_bounded(graph_limits)
             .map_err(graph_error)?;
-        Self::from_graph(graph, &request, history)
+        let mut prepared = Self::from_graph(graph, &request, history)?;
+        prepared.graph_limits = graph_limits;
+        Ok(prepared)
     }
 
     /// The app-backed path brackets registration/plugin discovery around one
@@ -457,12 +504,18 @@ impl FrozenContext {
         scope_limits: Option<crate::mcp_reads::scope::ScopeLimits>,
     ) -> Result<Self, HostError> {
         let request = request.try_into()?;
+        let graph_limits = task_graph_limits(scope_limits.is_some());
         if !request.specialist_id.uses_coverage_qualification() {
-            return Self::prepare(state, &request, history);
+            return Self::prepare_bounded(state, &request, history, graph_limits);
         }
         let archive_capacity = archive_capacity.ok_or(HostError::InvalidInput)?;
-        Self::prepare_qualified_with_scope(state, &request, history, archive_capacity, || {
-            match scope_limits {
+        Self::prepare_qualified_bounded(
+            state,
+            &request,
+            history,
+            archive_capacity,
+            graph_limits,
+            || match scope_limits {
                 Some(limits) => crate::mcp_reads::scope::coverage_scope(app, state, limits)
                     .map_err(|error| match error {
                         crate::mcp_reads::ReadError::Limit => HostError::LimitExceeded,
@@ -471,15 +524,34 @@ impl FrozenContext {
                 None => {
                     crate::context::coverage_scope(app, state).map_err(|_| HostError::Operational)
                 }
-            }
-        })
+            },
+        )
     }
 
+    #[cfg(test)]
     fn prepare_qualified_with_scope(
         state: &AppState,
         request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
         archive_capacity: usize,
+        scope: impl FnMut() -> Result<Vec<ScopedRepo>, HostError>,
+    ) -> Result<Self, HostError> {
+        Self::prepare_qualified_bounded(
+            state,
+            request,
+            history,
+            archive_capacity,
+            SnapshotReadLimits::investigation(),
+            scope,
+        )
+    }
+
+    fn prepare_qualified_bounded(
+        state: &AppState,
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
+        history: &[String],
+        archive_capacity: usize,
+        graph_limits: SnapshotReadLimits,
         mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, HostError>,
     ) -> Result<Self, HostError> {
         let request = request.try_into()?;
@@ -492,12 +564,13 @@ impl FrozenContext {
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
-            .read_snapshot_with_coverage_bounded(SnapshotReadLimits::default(), coverage_limits)
+            .read_snapshot_with_coverage_bounded(graph_limits, coverage_limits)
             .map_err(graph_error)?;
         let stable = crate::context::stable_scope(&before, scope()?);
         let qualification =
             CoverageQualification::new(&stable, &recorded).map_err(context_error)?;
         let mut prepared = Self::from_graph(graph, &request, history)?;
+        prepared.graph_limits = graph_limits;
         // Both paths retain the one already-authorized immutable scoped
         // projection from this same bounded graph read.
         let qualified =
@@ -581,6 +654,7 @@ impl FrozenContext {
             qualified: None,
             policy: request.policy,
             specialist: request.specialist_id,
+            graph_limits: SnapshotReadLimits::investigation(),
         })
     }
 
@@ -1032,7 +1106,7 @@ impl FrozenContext {
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
-            .read_source_selection_snapshot_bounded(keys, SnapshotReadLimits::default())
+            .read_source_selection_snapshot_bounded(keys, self.graph_limits)
             .map_err(graph_error)?;
         if read.graph != self.graph {
             return Err(HostError::InputChanged);

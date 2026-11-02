@@ -385,8 +385,10 @@ figures are specific to that head; the native report records later measurements.
 Artifact pages currently repeat the full trace and compilation. The wire-byte
 measurements above exclude that CPU/allocation cost and do not establish that
 pagination reduces total retrieval cost. Smaller pages do not reduce compilation
-work. Session graph admission also has a 50,000-row ceiling: larger graphs cannot
-open a read session, regardless of how narrow the later query would be.
+work. Session graph admission defaults to 50,000 rows; operators may raise it up
+to the 10,000,000-row hard ceiling (ADR-0052), and the worker reservation grows
+with the configured limit. Larger graphs cannot open a read session at the
+default, regardless of how narrow the later query would be.
 Tracked by [#731](https://github.com/true-line/cartograph/issues/731).
 Packaged skill discovery is tracked separately in
 [#732](https://github.com/true-line/cartograph/issues/732).
