@@ -636,8 +636,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false,
           obligationDraftError: get().draftObligations.length ? 'Scope changed. Select the evidence to inspect in this scope.' : null });
       }
+      // An explicit specialist choice also fixes the current budget (unset means
+      // Standard), so a later catalog refresh treats it as chosen (AC-0559).
+      const pinned = 'specialistId' in patch && !('limitProfile' in patch) && get().composer.limitProfile === undefined
+        ? { limitProfile: 'investigation-v1' } : {};
       if (!get().starting && !get().pendingStart) set((state) => ({
-        composer: { ...state.composer, ...structuredClone(patch) },
+        composer: { ...state.composer, ...structuredClone(patch), ...pinned },
       }));
     },
     loadObligationChoices: async (scope) => {

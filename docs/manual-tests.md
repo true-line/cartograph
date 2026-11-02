@@ -1499,10 +1499,17 @@ Select `CARTOGRAPH_VENDURE_AUDITOR_ACTION=reopen` to compare durable observation
 **Status: Pending the v0.59.1 SimpleLogin pilot rerun.** AC-0559; #1618.
 It is run as step 8 of the release pilot ([readiness report](release/v1.0-readiness.md#2-simplelogin-pilot)), with a local provider only.
 
-1. On a fresh profile of the signed release build, open Investigations before
-   touching any control. Record whether the composer shows `domain-analyst@18`
-   under the Expanded budget, and the advertised policy limits.
-2. Choose the Standard budget, refresh investigations and confirm the explicit
-   choice is kept: the composer returns to a Standard specialist, not @18.
-3. Record the provider, model and digest, and the outcome of a default @18 start.
-   A failure is recorded as a failure.
+**Fresh default.** On a fresh profile of the signed release build:
+
+1. Open Investigations before touching any control. Record whether the composer
+   shows `domain-analyst@18` under the Expanded budget, and the advertised
+   policy limits.
+2. @18 needs at least one completion obligation. Use Refresh completion choices
+   and select the app repository's coverage inventory.
+3. Ask the question and start. Record the provider, the model and its digest,
+   and the outcome. A failure is recorded as a failure.
+
+**Explicit choice.** Separately, after the fresh-default check:
+
+4. Choose the Standard budget, or select `domain-analyst@3` explicitly. Refresh
+   investigations and confirm the explicit choice is kept and is not replaced by @18.

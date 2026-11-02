@@ -2065,4 +2065,16 @@ describe('desktop default specialist (AC-0559, #1618)', () => {
     expect(desktopDefaultComposer({ ...base, specialistId: 'domain-analyst@7' }, acquisitionCatalog)).toBeNull();
     expect(desktopDefaultComposer({ ...base, parent: { conversation_id: 'c', parent_id: 'p' } }, acquisitionCatalog)).toBeNull();
   });
+
+  it('keeps an explicitly reselected @3 across a refresh that advertises @18', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return acquisitionCatalog; throw new Error('Unexpected command.'); });
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@7' });
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3' });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
+    useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3' });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
+  });
 });
