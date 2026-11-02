@@ -68,6 +68,8 @@ pub struct FactWindow<T, K> {
     pub raw_bytes: usize,
     /// Canonical complete-graph tuple encoding of these rows only.
     pub canonical_bytes: usize,
+    /// Decoded JSON values including envelopes and duplicate input properties.
+    pub json_values: usize,
     /// Last delivered key when More; None when Exhausted.
     pub next_key: Option<K>,
     /// Explicit remaining raw coverage at this revision.
@@ -350,6 +352,7 @@ impl SqliteGraphStore {
             rows: graph.0,
             raw_bytes: request.limits.max_bytes - remaining_bytes,
             canonical_bytes,
+            json_values: budget.consumed_values(),
             next_key: if has_more { last } else { None },
             remaining: if has_more {
                 Remaining::More
@@ -408,6 +411,7 @@ impl SqliteGraphStore {
             rows: graph.1,
             raw_bytes: request.limits.max_bytes - remaining_bytes,
             canonical_bytes,
+            json_values: budget.consumed_values(),
             next_key: if has_more { last } else { None },
             remaining: if has_more {
                 Remaining::More

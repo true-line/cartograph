@@ -1,4 +1,6 @@
 //! Host-observed scoped investigation identity; never a whole-graph claim.
+pub mod paging;
+
 use crate::{ContextError, content_identity};
 use core_graph::StoreRevision;
 use serde::Serialize;
