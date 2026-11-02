@@ -100,7 +100,7 @@ fn scoped_worker_refuses_invalid_graph_limits_before_reserving_or_advertising() 
         max_reserved_bytes: base.reserved_bytes,
         max_cumulative_read_bytes: 100_000,
     });
-    let maximum = core_graph::SnapshotReadLimits::default();
+    let maximum = core_graph::SnapshotReadLimits::investigation(); // the hard ceilings
     for field in 0..4 {
         for above in [false, true] {
             let mut limits = base;

@@ -28,12 +28,13 @@ fn validate_targets<R: tauri::Runtime>(
         .sources_with_policy(policy)
         .map_err(|error| error.to_string())?
     {
-        let (actual, guard) = super::super::inspection::resolve(
+        let (actual, guard) = super::super::inspection::resolve_with_limits(
             state,
             &target.fact,
             &target.graph_snapshot_id,
             &target.receipt_id,
             target.receipt_inventory_index as usize,
+            super::super::context::task_graph_limits(scope_limits.is_some()),
         )?;
         if actual != target {
             return Err("Completion source changed; refresh the selection."

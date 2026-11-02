@@ -321,12 +321,13 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         let history = self.parent_history(request)?;
         let mut _inspection_guards = Vec::new();
         for target in request.inspection_requirements.as_deref().unwrap_or(&[]) {
-            let (actual, guard) = super::inspection::resolve(
+            let (actual, guard) = super::inspection::resolve_with_limits(
                 self.state,
                 &target.fact,
                 &target.graph_snapshot_id,
                 &target.receipt_id,
                 target.receipt_inventory_index as usize,
+                super::context::task_graph_limits(self.task_limits.is_some()),
             )
             .map_err(|_| Failure::Stop(InvestigationStopReason::InputChanged))?;
             if actual != *target {

@@ -358,7 +358,7 @@ Initial hard ceiling profile (the host may narrow it, never silently enlarge it)
 | Retained tasks / conversations per state.db | 128 / 128 |
 | Logical reservation per admitted task / total coordinator capacity | 2 MiB / 256 MiB |
 | Reserved terminal publication headroom within each task | 256 KiB |
-| Frozen canonical graph / combined node and edge rows | 32 MiB / 50,000 |
+| Frozen canonical graph / combined node and edge rows | MCP-started tasks: 32 MiB / 50,000 (default, or operator/scope limits); desktop-started investigations: 4 GiB / 10,000,000, depth 32, 500,000,000 values (ADR-0052) |
 | Graph JSON depth / cumulative JSON values | 32 / 1,000,000 |
 
 Saved-history search (AC-0368) is a read-only filter over the complete retained

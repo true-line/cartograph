@@ -7,7 +7,7 @@ use context_hub::{
     ContextSnapshot, FactReference, QueryRequest, QueryScope,
     coverage::{CoverageQualification, CoverageStatus},
 };
-use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
+use core_graph::coverage::CoverageReadLimits;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use tauri::Manager;
@@ -213,7 +213,7 @@ fn current_choices_with_scope<R: tauri::Runtime>(
         .lock()
         .map_err(|_| "Graph store is unavailable.".to_owned())?
         .read_snapshot_with_coverage_bounded(
-            SnapshotReadLimits::default(),
+            super::context::task_graph_limits(limits.is_some()),
             CoverageReadLimits::default(),
         )
         .map_err(|error| error.to_string())?;
