@@ -4,7 +4,7 @@ import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
 import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import backendQualified from './fixtures/investigation-coverage-backend.json';
-import { desktopDefaultComposer, mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
+import { desktopDefaultComposer, mergeInvestigationEvents, restoredComposer, useInvestigationStore } from './investigationStore';
 import { qualifiedCoverageContext, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
 import type { InvestigationCapturedLocation, InvestigationChat, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, InvestigationResult, StartInvestigationRequest } from './investigationTypes';
 
@@ -2037,6 +2037,46 @@ it('searches all saved history in one request while ordinary searches preserve a
   useInvestigationStore.setState({ historyActiveOnly: true });
   await useInvestigationStore.getState().searchHistory('ordinary');
   expect(calls[1]).toEqual({ search: 'ordinary', activeOnly: true });
+});
+
+describe('remembered budget and specialist (AC-0563, #1636)', () => {
+  it('restores the stored explicit choice after a restart when the catalog still offers it', async () => {
+    const saved: unknown[] = [];
+    let stored: unknown = null;
+    mockIPC((command, args) => {
+      if (command === 'investigation_specialists') return acquisitionCatalog;
+      if (command === 'get_investigation_choice') return stored;
+      if (command === 'set_investigation_choice') {
+        saved.push(args);
+        const { specialistId, limitProfile } = args as { specialistId: string; limitProfile: string };
+        stored = { specialist_id: specialistId, limit_profile: limitProfile };
+        return stored;
+      }
+      throw new Error('Unexpected command.');
+    });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@18', limitProfile: 'investigation-v2' });
+    expect(saved).toEqual([]);
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
+    await vi.waitFor(() => expect(saved).toEqual([{ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' }]));
+    // Restart: fresh store state, same profile.
+    useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
+  });
+
+  it('falls back to the first-run default when the stored pair is no longer offered', () => {
+    const composer = useInvestigationStore.getState().composer;
+    expect(restoredComposer(composer, acquisitionCatalog, { specialist_id: 'domain-analyst@99', limit_profile: 'investigation-v1' }))
+      .toMatchObject({ specialistId: 'domain-analyst@18', limitProfile: 'investigation-v2' });
+    expect(restoredComposer(composer, acquisitionCatalog, null))
+      .toMatchObject({ specialistId: 'domain-analyst@18', limitProfile: 'investigation-v2' });
+  });
+
+  it('never overrides a choice made in this session', () => {
+    const chosen = { ...useInvestigationStore.getState().composer, specialistId: 'domain-analyst@7' as const, limitProfile: 'investigation-v1' };
+    expect(restoredComposer(chosen, acquisitionCatalog, { specialist_id: 'domain-analyst@3', limit_profile: 'investigation-v1' })).toBeNull();
+  });
 });
 
 describe('desktop default specialist (AC-0559, #1618)', () => {

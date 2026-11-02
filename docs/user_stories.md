@@ -816,6 +816,9 @@
 - **AC-0561** Given a selected investigation that is queued, preparing, running or awaiting consent, then a live status line above its details states the current step in plain words (for example "Waiting for the model to reply", "Running: searching the code graph", "The model's proposal was refused (not executed)"), how long the current step and the whole task have taken, ticking every second, the model calls and actions charged so far against the admitted limits, and separately the number of actions actually executed (a refused proposal can be charged without running). It also points to Help → Debug Viewer for each request and reply. Cancellation and pending consent take precedence over the last event. The line is derived only from recorded events and usage, with no simulated progress or model reasoning, and disappears once the task finishes. Each activity row is labelled with its stage: Waiting for model, Model replied, Proposed by model · accepted, Running, Executed or Not executed. This makes clear whether a model-proposed action was only proposed, is running, or actually ran. This is an owner request before v1.0.0, made while watching the v0.60.0 pilot (#1631).
 - **Trace:** H4 · `ui` · — · T-0561
 
+- **AC-0563** Given the desktop Investigations composer, when the user explicitly chooses a budget or specialist, then that pair is saved in the app profile's settings database and restored after the app restarts, as long as the current catalog still offers it; otherwise the first-run default of AC-0559 applies. A fresh profile, or one that never made a choice, still starts with domain-analyst@18 under Expanded. A choice made in the current session is never replaced by a stored one. Only the identifiers are stored. Found by the v0.60.0 pilot step 8f (#1636).
+- **Trace:** H4 · `app`, `ui` · — · T-0563
+
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
