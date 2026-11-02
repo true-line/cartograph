@@ -2088,3 +2088,6 @@ fn desktop_v18_cancelled_query_does_not_publish_refusal_or_retry() {
     assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
     assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
 }
+
+#[path = "next_prompt_timeout_witness.rs"]
+mod timeout_witness;

@@ -1544,3 +1544,23 @@ the timing sidecar. A paired sidecar/start rewrite or removal fails closed.
 Historical unknown timing requires an independently retained historical start
 pin; missing timing alone never authorizes a downgrade. A lost staging pin is
 an explicit evidence recovery problem, not permission to restage or run again.
+
+### Controlled admitted-worker timeout witness (#1630, AC-0185)
+
+After the release cut, bind this ignored test's source to the release tag and
+verify zero non-test runtime source delta. Obtain separate authorization before
+executing `admitted_analyst_elapsed_timeout_reopens_without_next_call` with
+`--ignored --exact --nocapture` and its fully qualified test name. Compile-only
+validation does not authorize or establish a timeout observation.
+
+The test uses a disposable fixture, genuine analyst@18 admission and ordinary
+worker dispatch against a loopback HTTP server that withholds its response.
+It uses unchanged production request limits and takes at least the production
+request timeout. Preserve the complete JSON receipt and process exit status,
+source/binary hashes and execution authorization outside the disposable fixture.
+The receipt records request hash, elapsed time, configured request timeout, unchanged admitted task limits,
+charged token reservations and unknown reported usage, durable outcome/events and equal reopen. One request, no generated
+finding, no semantic query refusal and no subsequent call are required.
+Any failed assertion or missing receipt remains failed/unexecuted as appropriate;
+never rerun implicitly. This is controlled transport evidence, not model
+robustness, positive analyst acceptance or native restart evidence.
