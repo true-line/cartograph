@@ -35,7 +35,11 @@ export const RefusedProposal: Story = {
   args: { events: [...running, { ...running[3], sequence: 5, kind: 'finish_refused', summary: 'Finish refused.' }] },
   // AC-0561: a refused proposal is reported as not executed.
   play: async ({ canvasElement }) => {
-    await expect(within(canvasElement).getByRole('status')).toHaveTextContent('refused (not executed)');
+    const status = within(canvasElement).getByRole('status');
+    await expect(status).toHaveTextContent('refused (not executed)');
+    // A refusal can be charged without running anything: executed counts completed tools only.
+    await expect(status).toHaveTextContent(`actions charged: ${detail.usage.tool_actions} of ${detail.limits.tool_actions}`);
+    await expect(status).toHaveTextContent('(executed: 0)');
   },
 };
 

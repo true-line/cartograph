@@ -30,7 +30,8 @@ export function InvestigationProgress({ status, cancelRequested, events, usage, 
     </p>
     <p className="muted">
       {view.totalMs !== null && <>Working for {formatDuration(view.totalMs)} · </>}
-      Model calls: {usage.model_invocations} of {limits.model_invocations} · actions run: {usage.tool_actions} of {limits.tool_actions}
+      Model calls: {usage.model_invocations} of {limits.model_invocations} · actions charged: {usage.tool_actions} of {limits.tool_actions}
+      {' '}(executed: {events.filter((event) => event.kind === 'tool_completed').length})
     </p>
     <p className="muted">Each model request and reply is logged as it happens: Help → Debug Viewer.</p>
   </section>;
