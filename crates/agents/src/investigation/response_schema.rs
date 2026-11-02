@@ -94,7 +94,11 @@ pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
         json_bytes(MAX_MANIFEST_BYTES)?, // decoded exact keys
         json_bytes(MAX_INPUT_BYTES)?,    // finite @18 enum and projection validation
         json_bytes(CHOICE.len().checked_add(EXACT_NODE_SCOPE.len())?)?, // compiled template tree
-        MAX_INPUT_BYTES,                 // bounded schema encoding (also on rejection)
+        // @18 complete replay branches coexist with the specialized schema.
+        // Each includes two 64-byte hashes, an index and the full closed shape.
+        json_bytes((policy.limits().tool_actions as usize).checked_mul(1024)?)?,
+        slots::<QueryHistoryReference>(1)?.checked_add(64)?,
+        MAX_INPUT_BYTES, // bounded schema encoding (also on rejection)
         slots::<Vec<u8>>(2)?,
     ])
 }
@@ -126,12 +130,63 @@ pub(super) fn select_acquisition(
     mode: CompletionCallMode,
     choices: &acquisition_choices::AcquisitionChoices,
     ledger: &InvestigationInputLedger,
+    request_hash: &str,
 ) -> Result<Option<String>, InvestigationError> {
     if mode == CompletionCallMode::FinishOnly {
         return Ok(Some(FINISH.into()));
     }
     if choices.attempts_complete() {
-        return select_admitted(SpecialistId::DomainAnalystV17, mode, ledger);
+        let selected = select_admitted(SpecialistId::DomainAnalystV17, mode, ledger)?;
+        // Inventory/source attempts do not create query manifests. Keep the
+        // historical @17 schema intact and narrow only current @18 exploration.
+        let mut schema: Value = serde_json::from_str(
+            selected
+                .as_deref()
+                .ok_or(InvestigationError::InvalidInput)?,
+        )
+        .map_err(|_| InvestigationError::InvalidInput)?;
+        drop(selected);
+        let actions = schema["anyOf"]
+            .as_array_mut()
+            .ok_or(InvestigationError::InvalidInput)?;
+        let replay = actions
+            .iter()
+            .position(|action| action["properties"]["type"]["const"] == "replay_query")
+            .ok_or(InvestigationError::InvalidInput)?;
+        actions.remove(replay);
+        if !ledger.queries.is_empty() {
+            let context = &ledger
+                .coverage
+                .as_ref()
+                .ok_or(InvestigationError::InvalidInput)?
+                .context_id;
+            for index in 0..ledger.queries.len() {
+                let reference = QueryHistoryReference::from_ledger(
+                    request_hash,
+                    ledger,
+                    index,
+                    &INVESTIGATION_V2_POLICY,
+                )?;
+                // Ollama converts anyOf before sibling properties: each
+                // alternative must carry the complete required action shape.
+                let branch = serde_json::json!({
+                    "type":"object",
+                    "properties": {
+                        "type":{"const":"replay_query"},
+                        "context_id":{"const":context},
+                        "query_id":{"const":reference.query_id},
+                        "query_index":{"const":reference.query_index}
+                    },
+                    "required":["type","context_id","query_id","query_index"],
+                    "additionalProperties":false
+                });
+                bounded_bytes(&branch, 1024)?;
+                actions.push(branch);
+            }
+        }
+        return String::from_utf8(bounded_bytes(&schema, MAX_INPUT_BYTES)?)
+            .map(Some)
+            .map_err(|_| InvestigationError::InvalidInput);
     }
     if choices.entries().is_empty() {
         return Ok(Some(FINISH.into()));

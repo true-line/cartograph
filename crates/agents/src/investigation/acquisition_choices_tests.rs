@@ -529,11 +529,148 @@ fn gated_acquisition_schema_never_broadens_empty_pending_choices() {
             staged_refusal::CompletionCallMode::FinishOnly,
         ] {
             assert_eq!(
-                super::super::response_schema::select_acquisition(mode, &sizing_only, &f.ledger)
-                    .unwrap()
-                    .as_deref(),
+                super::super::response_schema::select_acquisition(
+                    mode,
+                    &sizing_only,
+                    &f.ledger,
+                    &f.contract.request_hash
+                )
+                .unwrap()
+                .as_deref(),
                 Some(super::super::response_schema::FINISH)
             );
         }
     }
+}
+
+// AC-0480: completed inventory/source obligations do not invent query history.
+#[test]
+fn completed_acquisitions_without_queries_do_not_offer_replay() {
+    let f = Fixture::new();
+    let mut complete = f.derive(&f.empty(), &[]).unwrap();
+    complete.entries.clear();
+    complete.blocked.clear();
+    complete.deferred = 0;
+    assert!(complete.attempts_complete());
+    let ledger = f.empty();
+    assert!(ledger.queries.is_empty());
+    let wire = super::super::response_schema::select_acquisition(
+        staged_refusal::CompletionCallMode::Choice,
+        &complete,
+        &ledger,
+        &f.contract.request_hash,
+    )
+    .unwrap()
+    .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let actions = schema["anyOf"].as_array().unwrap();
+    assert!(
+        !actions
+            .iter()
+            .any(|a| a["properties"]["type"]["const"] == "replay_query")
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| a["properties"]["type"]["const"] == "query_context")
+    );
+}
+
+// AC-0480: pair IDs with positions, including the latest recorded query.
+#[test]
+fn completed_acquisitions_offer_only_resolvable_replay_pairs() {
+    let mut f = Fixture::new();
+    assert!(!f.ledger.queries.is_empty());
+    f.ledger.queries.push(f.ledger.queries[0].clone());
+    f.ledger.validate_with_policy(POLICY).unwrap();
+    let mut complete = f.derive(&f.ledger, &[]).unwrap();
+    complete.entries.clear();
+    complete.blocked.clear();
+    complete.deferred = 0;
+    let wire = super::super::response_schema::select_acquisition(
+        staged_refusal::CompletionCallMode::Choice,
+        &complete,
+        &f.ledger,
+        &f.contract.request_hash,
+    )
+    .unwrap()
+    .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let pairs: Vec<_> = schema["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["properties"]["type"]["const"] == "replay_query")
+        .collect();
+    fn grammar_compatible(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                assert!(
+                    !(map.contains_key("properties")
+                        && (map.contains_key("anyOf") || map.contains_key("oneOf")))
+                );
+                for value in map.values() {
+                    grammar_compatible(value);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    grammar_compatible(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    grammar_compatible(&schema);
+    assert_eq!(pairs.len(), f.ledger.queries.len());
+    let first =
+        QueryHistoryReference::from_ledger(&f.contract.request_hash, &f.ledger, 0, POLICY).unwrap();
+    let swapped = QueryHistoryReference {
+        query_index: 1,
+        query_id: first.query_id.clone(),
+    };
+    assert!(
+        swapped
+            .resolve(&f.contract.request_hash, &f.ledger, POLICY)
+            .is_err()
+    );
+    assert!(!pairs.iter().any(
+        |pair| pair["properties"]["query_id"]["const"] == swapped.query_id
+            && pair["properties"]["query_index"]["const"] == swapped.query_index
+    ));
+
+    for (index, pair) in pairs.iter().enumerate() {
+        let reference =
+            QueryHistoryReference::from_ledger(&f.contract.request_hash, &f.ledger, index, POLICY)
+                .unwrap();
+        assert_eq!(pair["properties"]["query_id"]["const"], reference.query_id);
+        assert_eq!(pair["properties"]["query_index"]["const"], index);
+        assert_eq!(pair["properties"]["type"]["const"], "replay_query");
+        assert_eq!(
+            pair["properties"]["context_id"]["const"],
+            f.ledger.coverage.as_ref().unwrap().context_id
+        );
+        assert_eq!(
+            pair["required"],
+            serde_json::json!(["type", "context_id", "query_id", "query_index"])
+        );
+        assert_eq!(pair["additionalProperties"], false);
+        assert!(bounded_bytes(pair, 1024).is_ok());
+        assert!(
+            reference
+                .resolve(&f.contract.request_hash, &f.ledger, POLICY)
+                .is_ok()
+        );
+    }
+    assert_eq!(
+        super::super::response_schema::select_acquisition(
+            staged_refusal::CompletionCallMode::FinishOnly,
+            &complete,
+            &f.ledger,
+            &f.contract.request_hash,
+        )
+        .unwrap()
+        .as_deref(),
+        Some(super::super::response_schema::FINISH)
+    );
 }
