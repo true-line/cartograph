@@ -807,6 +807,9 @@
 - **AC-0556** Given a desktop-started investigation over a real estate (more than 50,000 combined graph rows), when it prepares, reads coverage or inspects evidence, then the frozen graph is read under the investigation ceiling (4 GiB, 10,000,000 rows, depth 32, 500,000,000 values) instead of failing with a limit error; MCP-started investigation tasks keep the fixed default limits for acquisition and the corresponding worker reservation, so their admission is unchanged; separately configured MCP read-session graph limits do not change investigation task acquisition (ADR-0052, #1602).
 - **Trace:** H4 · `core-graph`, `app` · ADR-0052 · T-0556
 
+- **AC-0559** Given the desktop Investigations composer in its untouched initial state (no explicit budget, the initial specialist and no captured parent), when the host catalog advertises domain-analyst@18 with a valid Expanded (`investigation-v2`) request7 policy, then the composer preselects @18 under Expanded. @18 is a schema-backed analyst, so a local model receives a structured action schema. When @18 or its policy is not advertised, the composer keeps @3 under Standard. An explicit budget or specialist choice, a captured parent, an in-flight start or a pending start is never overridden, including on later catalog refreshes. Older specialists stay selectable, and catalog order, numeric limits and saved requests are unchanged. Owner decision on #1618 after the v0.59.0 pilot step 8 failure. For new composer state this supersedes the "@3 default" statements in AC-0552 and AC-0553. Quick dispatch keeps its own Standard-only list. Unit tests establish the selection; the pilot rerun establishes the actual-model behaviour (#1618).
+- **Trace:** H4 · `ui` · — · T-0559
+
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer

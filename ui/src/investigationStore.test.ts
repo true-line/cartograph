@@ -1,10 +1,10 @@
-import { queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from './completionFixtures';
+import { acquisitionCatalog, admissionCatalog, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from './completionFixtures';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
 import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import backendQualified from './fixtures/investigation-coverage-backend.json';
-import { mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
+import { desktopDefaultComposer, mergeInvestigationEvents, useInvestigationStore } from './investigationStore';
 import { qualifiedCoverageContext, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
 import type { InvestigationCapturedLocation, InvestigationChat, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, InvestigationResult, StartInvestigationRequest } from './investigationTypes';
 
@@ -2037,4 +2037,44 @@ it('searches all saved history in one request while ordinary searches preserve a
   useInvestigationStore.setState({ historyActiveOnly: true });
   await useInvestigationStore.getState().searchHistory('ordinary');
   expect(calls[1]).toEqual({ search: 'ordinary', activeOnly: true });
+});
+
+describe('desktop default specialist (AC-0559, #1618)', () => {
+  it('adopts schema-backed @18 under Expanded when the host advertises it', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return acquisitionCatalog; throw new Error('Unexpected command.'); });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@18', limitProfile: 'investigation-v2' });
+  });
+
+  it('keeps @3 and Standard when @18 or its policy is not advertised', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return admissionCatalog; throw new Error('Unexpected command.'); });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
+    expect(useInvestigationStore.getState().composer.limitProfile).toBeUndefined();
+    const noPolicy = { ...acquisitionCatalog, policies: acquisitionCatalog.policies!.map((policy) =>
+      ({ ...policy, specialist_ids: policy.specialist_ids.filter((id) => id !== 'domain-analyst@18') })) };
+    expect(desktopDefaultComposer(useInvestigationStore.getState().composer, noPolicy)).toBeNull();
+  });
+
+  it('never overrides an explicit choice or a captured parent on a later catalog refresh', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return acquisitionCatalog; throw new Error('Unexpected command.'); });
+    useInvestigationStore.getState().updateComposer({ limitProfile: 'investigation-v1' });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
+    const base = { ...useInvestigationStore.getState().composer, limitProfile: undefined };
+    expect(desktopDefaultComposer({ ...base, specialistId: 'domain-analyst@7' }, acquisitionCatalog)).toBeNull();
+    expect(desktopDefaultComposer({ ...base, parent: { conversation_id: 'c', parent_id: 'p' } }, acquisitionCatalog)).toBeNull();
+  });
+
+  it('keeps an explicitly reselected @3 across a refresh that advertises @18', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return acquisitionCatalog; throw new Error('Unexpected command.'); });
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@7' });
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3' });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
+    useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+    useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3' });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
+  });
 });

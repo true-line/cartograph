@@ -1493,3 +1493,23 @@ The ignored `vendure_captured_local_auditor_prepare` entrypoint reopens the froz
 Use the same independently frozen parent/child definition and separate output from preparation. Immediately before explicit execute, freshly authenticate the exact independent analyst review through the existing semantic-review verifier and preserve the unchanged content-bound attestation; local JSON authenticates nobody. Select the ignored `vendure_captured_local_auditor_action` entrypoint with `CARTOGRAPH_VENDURE_AUDITOR_ACTION=execute` and the exact frozen `CARTOGRAPH_ACCEPTANCE_URL`/`CARTOGRAPH_ACCEPTANCE_MODEL`. Invoke exactly `cargo test --offline -p app investigations::worker::tests::acceptance::expanded::captured_local::vendure_captured_local_auditor_action -- --exact --ignored` so preparation is not selected by a substring filter. It revalidates before provider construction and consumes one attempt before any dispatch. Preserve failures, unknown outcomes and receipt-writing errors; never retry a consumed or ambiguous attempt.
 
 Select `CARTOGRAPH_VENDURE_AUDITOR_ACTION=reopen` to compare durable observations/receipt without a provider. Require the auditor's own source/inventory observations and exact supplied parent result ID/body/history hashes against disclosure6, then obtain separate authenticated auditor semantic review. Synthetic helper success is not actual-model, full captured-case or native acceptance; existing limits and the 16 KiB parent-history bound remain authoritative.
+
+## MT-1618-01 — Desktop default specialist on a release build
+
+**Status: Pending the v0.59.1 SimpleLogin pilot rerun.** AC-0559; #1618.
+It is run as step 8 of the release pilot ([readiness report](release/v1.0-readiness.md#2-simplelogin-pilot)), with a local provider only.
+
+**Fresh default.** On a fresh profile of the signed release build:
+
+1. Open Investigations before touching any control. Record whether the composer
+   shows `domain-analyst@18` under the Expanded budget, and the advertised
+   policy limits.
+2. @18 needs at least one completion obligation. Use Refresh completion choices
+   and select the app repository's coverage inventory.
+3. Ask the question and start. Record the provider, the model and its digest,
+   and the outcome. A failure is recorded as a failure.
+
+**Explicit choice.** Separately, after the fresh-default check:
+
+4. Choose the Standard budget, or select `domain-analyst@3` explicitly. Refresh
+   investigations and confirm the explicit choice is kept and is not replaced by @18.
