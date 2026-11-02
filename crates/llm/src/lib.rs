@@ -9,6 +9,7 @@
 pub mod anthropic;
 pub mod bounded;
 pub mod catalog;
+pub mod debug_log;
 pub mod openai_compatible;
 
 use reqwest::Url;
@@ -393,10 +394,53 @@ impl EgressFirewall {
         let request = ProviderCompletionRequest {
             payload: preview.payload,
         };
-        let completion = provider.complete(&request)?;
-        if completion.text.trim().is_empty() {
-            return Err(ProviderError::EmptyCompletion);
+        let call = debug_log::enabled().then(|| {
+            // Borrowed parts: the redacted texts are not copied before the
+            // debug log reserves room for them.
+            let heads: Vec<String> = request
+                .spans()
+                .iter()
+                .map(|span| {
+                    format!(
+                        "\n\n--- span {} {}/{}@{} [{}..{}] ---\n",
+                        span.id,
+                        span.repo,
+                        span.path,
+                        span.commit_sha,
+                        span.byte_start,
+                        span.byte_end
+                    )
+                })
+                .collect();
+            let mut parts: Vec<&[u8]> = vec![
+                b"SYSTEM:\n",
+                request.system().as_bytes(),
+                b"\n\nPROMPT:\n",
+                request.prompt().as_bytes(),
+            ];
+            for (head, span) in heads.iter().zip(request.spans()) {
+                parts.push(head.as_bytes());
+                parts.push(span.text.as_bytes());
+            }
+            debug_log::begin("firewall", &preview.provider_id, &parts)
+        });
+        let result = provider.complete(&request).and_then(|completion| {
+            if completion.text.trim().is_empty() {
+                Err(ProviderError::EmptyCompletion)
+            } else {
+                Ok(completion)
+            }
+        });
+        if let Some(call) = call {
+            call.finish(
+                result
+                    .as_ref()
+                    .ok()
+                    .map(|completion| completion.text.as_bytes()),
+                result.as_ref().err().map(ToString::to_string),
+            );
         }
+        let completion = result?;
         Ok(completion)
     }
 }
@@ -412,6 +456,39 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
+    /// The `/api/embed` exchange itself; `embed` adds the debug log entries.
+    fn embed_unlogged(
+        &self,
+        endpoint: reqwest::Url,
+        batch: &[String],
+    ) -> Result<Vec<Embedding>, ProviderError> {
+        let mut response = self
+            .client
+            .post(endpoint)
+            .json(&EmbedRequest {
+                model: &self.embedding_model,
+                input: batch,
+                truncate: false,
+            })
+            .send()?
+            .error_for_status()?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        response
+            .by_ref()
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| ProviderError::InvalidEmbeddings(e.to_string()))?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(ProviderError::InvalidEmbeddings(
+                "embedding response bounds".into(),
+            ));
+        }
+        let response: EmbedResponse = serde_json::from_slice(&bytes)?;
+        validate_embeddings(batch.len(), &response.embeddings)?;
+        Ok(response.embeddings)
+    }
+
     /// Default loopback endpoint used by Ollama.
     pub const DEFAULT_URL: &'static str = "http://127.0.0.1:11434/";
     /// Default local embedding model.
@@ -735,31 +812,31 @@ impl LlmProvider for OllamaProvider {
                 "embedding request bounds".into(),
             ));
         }
-        let mut response = self
-            .client
-            .post(endpoint)
-            .json(&EmbedRequest {
-                model: &self.embedding_model,
-                input: batch,
-                truncate: false,
-            })
-            .send()?
-            .error_for_status()?;
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        response
-            .by_ref()
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| ProviderError::InvalidEmbeddings(e.to_string()))?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            return Err(ProviderError::InvalidEmbeddings(
-                "embedding response bounds".into(),
-            ));
+        // #1624: input texts as SENT; the vectors themselves are summarized.
+        let call = debug_log::enabled().then(|| {
+            let head = format!("EMBED model={} texts={}", self.embedding_model, batch.len());
+            let mut parts: Vec<&[u8]> = vec![head.as_bytes()];
+            for text in batch {
+                parts.push(b"\n--- text ---\n");
+                parts.push(text.as_bytes());
+            }
+            debug_log::begin("embed", endpoint.as_str(), &parts)
+        });
+        let result = self.embed_unlogged(endpoint, batch);
+        if let Some(call) = call {
+            let summary = result.as_ref().ok().map(|vectors| {
+                format!(
+                    "{} vectors of {} dimensions (values not shown)",
+                    vectors.len(),
+                    vectors.first().map_or(0, Vec::len)
+                )
+            });
+            call.finish(
+                summary.as_deref().map(str::as_bytes),
+                result.as_ref().err().map(ToString::to_string),
+            );
         }
-        let response: EmbedResponse = serde_json::from_slice(&bytes)?;
-        validate_embeddings(batch.len(), &response.embeddings)?;
-        Ok(response.embeddings)
+        result
     }
 
     fn complete(&self, request: &ProviderCompletionRequest) -> Result<Completion, ProviderError> {
@@ -907,11 +984,69 @@ mod tests {
             request: &ProviderCompletionRequest,
         ) -> Result<Completion, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            assert!(!request.user_message()?.contains("super-secret"));
+            let user = request.user_message()?;
+            assert!(!user.contains("super-secret"));
             Ok(Completion {
-                text: r#"{"target_id":"chan:orders"}"#.into(),
+                text: if user.contains("debug-1624-empty") {
+                    "  ".into()
+                } else {
+                    r#"{"target_id":"chan:orders"}"#.into()
+                },
             })
         }
+    }
+
+    #[test]
+    fn firewall_completion_records_redacted_request_and_text_in_debug_log() {
+        // AC-0560 (#1624): a single-shot completion records the redacted
+        // messages as SENT and the completion text as RECEIVED; the secret
+        // never reaches the debug log.
+        debug_log::test_support::capture();
+        let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
+        let provider = FakeCloud {
+            calls: AtomicUsize::new(0),
+        };
+        let request = action("debug-1624-firewall password=super-secret");
+        let preview = firewall.preview(&provider, &request).unwrap();
+        let grant = ConsentGrant::from_preview(&preview);
+        firewall
+            .complete(&provider, &request, Some(&grant))
+            .unwrap();
+        let calls = debug_log::test_support::calls_with("debug-1624-firewall");
+        assert_eq!(calls.len(), 1);
+        let (sent, received) = &calls[0];
+        assert_eq!(sent.path, "firewall");
+        assert_eq!(sent.target, "cloud:test");
+        let sent_text = sent.request.as_deref().unwrap();
+        assert!(sent_text.starts_with("SYSTEM:\n"));
+        assert!(!sent_text.contains("super-secret"));
+        let received = received.as_ref().expect("received entry");
+        assert_eq!(
+            received.response.as_deref(),
+            Some(r#"{"target_id":"chan:orders"}"#)
+        );
+    }
+
+    #[test]
+    fn firewall_debug_log_records_an_empty_completion_as_the_error_returned() {
+        // AC-0560 (#1624 review): the RECEIVED entry matches the caller's
+        // outcome, so whitespace-only text is logged as EmptyCompletion.
+        debug_log::test_support::capture();
+        let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
+        let provider = FakeCloud {
+            calls: AtomicUsize::new(0),
+        };
+        let request = action("debug-1624-empty");
+        let preview = firewall.preview(&provider, &request).unwrap();
+        let grant = ConsentGrant::from_preview(&preview);
+        let error = firewall
+            .complete(&provider, &request, Some(&grant))
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::EmptyCompletion));
+        let calls = debug_log::test_support::calls_with("debug-1624-empty");
+        let received = calls[0].1.as_ref().expect("received entry");
+        assert_eq!(received.error, Some(error.to_string()));
+        assert_eq!(received.response, None);
     }
 
     #[test]

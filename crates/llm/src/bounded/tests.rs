@@ -1654,3 +1654,163 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         Err(ProviderError::Unsupported("legacy response schema"))
     ));
 }
+
+// AC-0560 (#1624): with a debug sink installed, each bounded call records a
+// SENT entry carrying the exact wire request before the response arrives,
+// and a RECEIVED entry with the exact response body or the failure code.
+#[test]
+fn bounded_calls_record_sent_then_received_in_the_debug_log() {
+    crate::debug_log::test_support::capture();
+    let limits = CompletionLimits::new(CompletionLimitValues::default()).unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let run = |marker: &str, response: Vec<u8>| {
+        let (endpoint, server) = http(response);
+        let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+        let mut selected = action();
+        selected.payload.prompt = format!("Investigate {marker}.");
+        let prepared = firewall
+            .prepare_bounded(&local, &selected, &limits)
+            .unwrap();
+        let authorized = firewall.authorize_bounded(&local, &prepared, None).unwrap();
+        let result = local.complete_bounded(&authorized, &control());
+        let request = server.join().unwrap();
+        (result, request, endpoint)
+    };
+
+    let body = ollama_body(r#"{"type":"replay_query"}"#);
+    let (result, request, endpoint) = run("debug-1624-ok", framed(&body));
+    assert!(result.is_ok());
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-ok");
+    assert_eq!(calls.len(), 1);
+    let (sent, received) = &calls[0];
+    assert_eq!(sent.path, "bounded");
+    assert_eq!(sent.target, format!("{endpoint}api/chat"));
+    assert_eq!(
+        sent.request.as_deref().unwrap().as_bytes(),
+        request.body.as_slice()
+    );
+    let received = received.as_ref().expect("received entry");
+    assert_eq!(received.phase, crate::debug_log::Phase::Received);
+    assert_eq!(
+        received.response.as_deref().unwrap().as_bytes(),
+        body.as_slice()
+    );
+    assert_eq!(received.error, None);
+    assert!(received.call == sent.call && received.request.is_none());
+
+    let failure =
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec();
+    let (result, _, _) = run("debug-1624-fail", failure);
+    assert!(result.is_err());
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-fail");
+    let received = calls[0].1.as_ref().expect("received entry");
+    assert_eq!(received.error.as_deref(), Some("HttpStatus"));
+    assert_eq!(received.response, None);
+
+    // #1624 review: a 200 whose envelope admission refuses is logged with
+    // that refusal and the exact body, not as OK.
+    let malformed = br#"{"model":"test-model","done":false}"#;
+    let (result, _, _) = run("debug-1624-envelope", framed(malformed));
+    let code = format!("{:?}", result.unwrap_err().code);
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-envelope");
+    let received = calls[0].1.as_ref().expect("received entry");
+    assert_eq!(received.error.as_deref(), Some(code.as_str()));
+    assert_eq!(
+        received.response.as_deref().unwrap().as_bytes(),
+        malformed.as_slice()
+    );
+}
+
+// AC-0560 (#1624 review): embedding calls are logged too, with the input
+// texts as SENT and a vector summary (not the values) as RECEIVED.
+#[test]
+fn embedding_calls_record_texts_and_a_vector_summary_in_the_debug_log() {
+    crate::debug_log::test_support::capture();
+    let body = br#"{"model":"test-model","embeddings":[[0.5,0.25,0.125],[1.0,0.0,0.0]]}"#;
+    let (endpoint, server) = http(framed(body));
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let texts = vec!["debug-1624-embed alpha".to_string(), "beta".to_string()];
+    let vectors = local.embed(&texts).unwrap();
+    server.join().unwrap();
+    assert_eq!(vectors.len(), 2);
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-embed");
+    let (sent, received) = &calls[0];
+    assert_eq!(sent.path, "embed");
+    assert_eq!(sent.target, format!("{endpoint}api/embed"));
+    let request = sent.request.as_deref().unwrap();
+    assert!(request.contains("texts=2") && request.contains("--- text ---\nbeta"));
+    let received = received.as_ref().expect("received entry");
+    assert_eq!(
+        received.response.as_deref(),
+        Some("2 vectors of 3 dimensions (values not shown)")
+    );
+    assert_eq!(received.error, None);
+}
+
+// AC-0560 (#1624): the control check and deadline run after the debug entry
+// is queued, so cancellation arriving at that instant sends nothing, and a
+// slow log writer never delays or blocks a provider call.
+#[test]
+fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
+    use crate::debug_log::test_support::{BEGUN_ON_THREAD, HOLD_SLOW_SINK};
+    crate::debug_log::test_support::capture();
+    let limits = CompletionLimits::new(CompletionLimitValues::default()).unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let authorized = |local: &OllamaProvider, marker: &str| {
+        let mut selected = action();
+        selected.payload.prompt = format!("Investigate {marker}.");
+        let prepared = firewall.prepare_bounded(local, &selected, &limits).unwrap();
+        firewall.authorize_bounded(local, &prepared, None).unwrap()
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let local = OllamaProvider::new(
+        &format!("http://{}/", listener.local_addr().unwrap()),
+        "test-model",
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let request = authorized(&local, "debug-1624-cancel-after-log");
+    let before = BEGUN_ON_THREAD.with(std::cell::Cell::get);
+    let check = || {
+        if BEGUN_ON_THREAD.with(std::cell::Cell::get) > before {
+            CallDirective::Cancelled
+        } else {
+            CallDirective::Continue
+        }
+    };
+    let control = CompletionControl {
+        deadline: Instant::now() + Duration::from_secs(5),
+        check: &check,
+    };
+    assert_eq!(
+        local.complete_bounded(&request, &control).unwrap_err(),
+        not_sent(FailureCode::Cancelled)
+    );
+    assert_no_request(&listener);
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-cancel-after-log");
+    assert_eq!(calls.len(), 1);
+    let received = calls[0].1.as_ref().expect("received entry");
+    assert_eq!(received.error.as_deref(), Some("Cancelled"));
+
+    let (endpoint, server) = http(framed(&ollama_body(r#"{"action":"finish"}"#)));
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let request = authorized(&local, "debug-1624-slow-sink");
+    HOLD_SLOW_SINK.store(true, Ordering::Release);
+    let started = Instant::now();
+    let result = local.complete_bounded(
+        &request,
+        &CompletionControl {
+            deadline: Instant::now() + Duration::from_secs(2),
+            check: &proceed,
+        },
+    );
+    let elapsed = started.elapsed();
+    HOLD_SLOW_SINK.store(false, Ordering::Release);
+    server.join().unwrap();
+    assert_eq!(result.unwrap().text, r#"{"action":"finish"}"#);
+    assert!(elapsed < Duration::from_secs(2));
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-slow-sink");
+    assert!(calls[0].1.as_ref().is_some_and(|r| r.error.is_none()));
+}

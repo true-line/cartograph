@@ -845,11 +845,50 @@ fn user_message(request: &AuthorizedBoundedCompletion) -> Result<String, Bounded
     ))
 }
 
-fn acquire(
+/// Send one bounded call and admit its response with `admit`. When the host
+/// installed a debug log (#1624), a bounded excerpt of the exact request
+/// body is queued before the final control check, and the RECEIVED entry is
+/// queued only once `admit` has decided the call's final outcome, so a
+/// transport success the envelope checks refuse is logged as that error.
+/// Copies are made only inside the debug log's own fixed pool, and queuing
+/// never blocks on the log writer.
+fn acquire<T>(
     builder: RequestBuilder,
     body: Vec<u8>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
+    admit: impl FnOnce(&[u8], u64) -> Result<T, BoundedCallError>,
+) -> Result<T, BoundedCallError> {
+    let mut call = None;
+    match acquire_unlogged(builder, body, request, control, &mut call) {
+        Ok((bytes, request_bytes)) => {
+            let result = admit(&bytes, request_bytes);
+            if let Some(call) = call {
+                call.finish(
+                    Some(&bytes),
+                    result
+                        .as_ref()
+                        .err()
+                        .map(|error| format!("{:?}", error.code)),
+                );
+            }
+            result
+        }
+        Err(error) => {
+            if let Some(call) = call {
+                call.finish(None, Some(format!("{:?}", error.code)));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn acquire_unlogged(
+    builder: RequestBuilder,
+    body: Vec<u8>,
+    request: &AuthorizedBoundedCompletion,
+    control: &CompletionControl<'_>,
+    call: &mut Option<crate::debug_log::Call>,
 ) -> Result<(Vec<u8>, u64), BoundedCallError> {
     check_control(control, false)?;
     let remaining = control.deadline.saturating_duration_since(Instant::now());
@@ -866,6 +905,19 @@ fn acquire(
         .body(body)
         .build_split();
     let mut built = built.map_err(|_| not_sent(FailureCode::InvalidInput))?;
+    if crate::debug_log::enabled() {
+        let sent = built
+            .body()
+            .and_then(reqwest::blocking::Body::as_bytes)
+            .unwrap_or_default();
+        *call = Some(crate::debug_log::begin(
+            "bounded",
+            built.url().as_str(),
+            &[sent],
+        ));
+    }
+    // Checked after the debug entry is queued, so neither cancellation nor
+    // the deadline can be missed while it was recorded.
     check_control(control, false)?;
     *built.timeout_mut() =
         Some(timeout.min(control.deadline.saturating_duration_since(Instant::now())));
@@ -1040,36 +1092,41 @@ pub(super) fn complete_ollama(
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
     )?;
-    let (bytes, request_bytes) =
-        acquire(client.post(&profile.endpoint_id), body, request, control)?;
-    preflight_response(&bytes)?;
-    let response: response_wire::OllamaResponse =
-        serde_json::from_slice(&bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
-    if !response.done || response.done_reason != "stop" {
-        return Err(rejected(FailureCode::IncompleteResponse));
-    }
-    if response.message.role != "assistant"
-        || !response.message.tool_calls.is_empty()
-        || !response.message.images.is_empty()
-    {
-        return Err(rejected(FailureCode::InvalidResponse));
-    }
-    let usage = (response.prompt_eval_count.is_some() || response.eval_count.is_some()).then_some(
-        ReportedUsage {
-            input_tokens: response.prompt_eval_count,
-            output_tokens: response.eval_count,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
-        },
-    );
-    finish(
-        response.message.content,
-        response.model,
-        None,
-        usage,
+    acquire(
+        client.post(&profile.endpoint_id),
+        body,
         request,
-        request_bytes,
-        bytes.len(),
+        control,
+        |bytes, request_bytes| {
+            preflight_response(bytes)?;
+            let response: response_wire::OllamaResponse = serde_json::from_slice(bytes)
+                .map_err(|_| rejected(FailureCode::InvalidResponse))?;
+            if !response.done || response.done_reason != "stop" {
+                return Err(rejected(FailureCode::IncompleteResponse));
+            }
+            if response.message.role != "assistant"
+                || !response.message.tool_calls.is_empty()
+                || !response.message.images.is_empty()
+            {
+                return Err(rejected(FailureCode::InvalidResponse));
+            }
+            let usage = (response.prompt_eval_count.is_some() || response.eval_count.is_some())
+                .then_some(ReportedUsage {
+                    input_tokens: response.prompt_eval_count,
+                    output_tokens: response.eval_count,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                });
+            finish(
+                response.message.content,
+                response.model,
+                None,
+                usage,
+                request,
+                request_bytes,
+                bytes.len(),
+            )
+        },
     )
 }
 
@@ -1154,10 +1211,16 @@ pub(super) fn complete_openai_compatible(
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
     )?;
-    let (bytes, request_bytes) =
-        acquire(client.post(&profile.endpoint_id), body, request, control)?;
-    let (text, model, id, usage) = openai_compatible_envelope(&bytes)?;
-    finish(text, model, id, usage, request, request_bytes, bytes.len())
+    acquire(
+        client.post(&profile.endpoint_id),
+        body,
+        request,
+        control,
+        |bytes, request_bytes| {
+            let (text, model, id, usage) = openai_compatible_envelope(bytes)?;
+            finish(text, model, id, usage, request, request_bytes, bytes.len())
+        },
+    )
 }
 
 pub(super) fn complete_anthropic(
@@ -1192,61 +1255,63 @@ pub(super) fn complete_anthropic(
         .post(&profile.endpoint_id)
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01");
-    let (bytes, request_bytes) = acquire(builder, body, request, control)?;
-    preflight_response(&bytes)?;
-    let response: response_wire::AnthropicResponse =
-        serde_json::from_slice(&bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
-    if response.stop_reason == "refusal"
-        || response
-            .stop_details
-            .is_some_and(|details| details.kind.as_deref() == Some("refusal"))
-    {
-        return Err(rejected(FailureCode::Refused));
-    }
-    if response.stop_reason != "end_turn" {
-        return Err(rejected(FailureCode::IncompleteResponse));
-    }
-    if response.kind != "message" || response.role != "assistant" || response.content.len() > 32 {
-        return Err(rejected(FailureCode::InvalidResponse));
-    }
-    let mut text = String::new();
-    for block in response.content {
-        match block.kind.as_str() {
-            "text" => {
-                let part = block
-                    .text
-                    .ok_or_else(|| rejected(FailureCode::InvalidResponse))?;
-                if part.len() as u64
-                    > request
-                        .limits()
-                        .0
-                        .output_text_bytes
-                        .saturating_sub(text.len() as u64)
-                {
-                    return Err(rejected(FailureCode::OutputTooLarge));
-                }
-                text.push_str(&part);
-            }
-            // Ignored private thinking still counted in the complete body cap.
-            "thinking" | "redacted_thinking" => (),
-            _ => return Err(rejected(FailureCode::InvalidResponse)),
+    acquire(builder, body, request, control, |bytes, request_bytes| {
+        preflight_response(bytes)?;
+        let response: response_wire::AnthropicResponse =
+            serde_json::from_slice(bytes).map_err(|_| rejected(FailureCode::InvalidResponse))?;
+        if response.stop_reason == "refusal"
+            || response
+                .stop_details
+                .is_some_and(|details| details.kind.as_deref() == Some("refusal"))
+        {
+            return Err(rejected(FailureCode::Refused));
         }
-    }
-    let usage = response.usage.map(|usage| ReportedUsage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_read_input_tokens: usage.cache_read_input_tokens,
-        cache_creation_input_tokens: usage.cache_creation_input_tokens,
-    });
-    finish(
-        text,
-        response.model,
-        response.id,
-        usage,
-        request,
-        request_bytes,
-        bytes.len(),
-    )
+        if response.stop_reason != "end_turn" {
+            return Err(rejected(FailureCode::IncompleteResponse));
+        }
+        if response.kind != "message" || response.role != "assistant" || response.content.len() > 32
+        {
+            return Err(rejected(FailureCode::InvalidResponse));
+        }
+        let mut text = String::new();
+        for block in response.content {
+            match block.kind.as_str() {
+                "text" => {
+                    let part = block
+                        .text
+                        .ok_or_else(|| rejected(FailureCode::InvalidResponse))?;
+                    if part.len() as u64
+                        > request
+                            .limits()
+                            .0
+                            .output_text_bytes
+                            .saturating_sub(text.len() as u64)
+                    {
+                        return Err(rejected(FailureCode::OutputTooLarge));
+                    }
+                    text.push_str(&part);
+                }
+                // Ignored private thinking still counted in the complete body cap.
+                "thinking" | "redacted_thinking" => (),
+                _ => return Err(rejected(FailureCode::InvalidResponse)),
+            }
+        }
+        let usage = response.usage.map(|usage| ReportedUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        });
+        finish(
+            text,
+            response.model,
+            response.id,
+            usage,
+            request,
+            request_bytes,
+            bytes.len(),
+        )
+    })
 }
 
 #[cfg(test)]

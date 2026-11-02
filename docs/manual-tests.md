@@ -1513,3 +1513,16 @@ It is run as step 8 of the release pilot ([readiness report](release/v1.0-readin
 
 4. Choose the Standard budget, or select `domain-analyst@3` explicitly. Refresh
    investigations and confirm the explicit choice is kept and is not replaced by @18.
+
+## MT-1624-01 — Debug Viewer on a release build
+
+**Status: Pending the next release pilot.** AC-0560; #1624.
+
+1. On the signed release build, choose **Help → Debug Viewer** before any model
+   call. TextEdit opens `logs/model-debug.log` in the app profile, showing only
+   the header.
+2. Run one investigation against a local provider. Reopen the viewer (or keep
+   watching the file with `tail -f`) and confirm a `SENT` entry appears as the
+   call starts and a matching `RECEIVED` entry, with duration and OK or ERROR,
+   when it finishes.
+3. Confirm that no API key or request header appears in the log.
