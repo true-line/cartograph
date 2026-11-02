@@ -57,6 +57,7 @@ export function ConfigureWindow({ api }: ConfigureWindowProps) {
   return <main className="configure-window" aria-label="Run limits">
     <h1>Run limits</h1>
     <p className="muted">How long an agent investigation may work before it stops. Raise these for slow local models.
+      They apply to new desktop investigations by the default (next-prompt) specialists; explicitly selected older versions keep the defaults.
       Other limits (model calls, actions, evidence) are fixed.</p>
     <form onSubmit={(event) => { event.preventDefault(); save(); }}>
       <label className="configure-field">

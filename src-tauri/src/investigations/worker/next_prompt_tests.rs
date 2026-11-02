@@ -2358,16 +2358,22 @@ fn desktop_v18_authenticated_query_replay_executes_and_reopens() {
 // query/inventory continuations, a settings change, finish and durable reopen.
 #[test]
 fn configured_desktop_worker_preserves_time_limits_across_calls_and_reopen() {
-    configured_desktop_worker_time_limits(false);
+    configured_desktop_worker_time_limits(false, 0);
 }
 
 // AC-0187, AC-0562: a valid late finish is retained without another tool action.
 #[test]
 fn configured_desktop_worker_late_cancel_retains_valid_finish_and_time_limits() {
-    configured_desktop_worker_time_limits(true);
+    configured_desktop_worker_time_limits(true, 0);
 }
 
-fn configured_desktop_worker_time_limits(cancel_finish: bool) {
+// AC-0188, AC-0562: the real worker clock must honor the saved active limit.
+#[test]
+fn configured_desktop_worker_continues_after_default_active_deadline() {
+    configured_desktop_worker_time_limits(false, 601);
+}
+
+fn configured_desktop_worker_time_limits(cancel_finish: bool, elapsed_seconds: u64) {
     let mut scripted = NextProvider::new(false);
     scripted.expected_timeout_ms = 600_000;
     // The current family requires inventory before exploratory queries.
@@ -2411,7 +2417,14 @@ fn configured_desktop_worker_time_limits(cancel_finish: bool) {
                 .unwrap();
         }));
     }
-    f.run(provider.clone());
+    f.base.base.app.run_completion(
+        f.id.clone(),
+        f.request.clone(),
+        f.execution.clone(),
+        provider.clone(),
+        f.live.clone(),
+        Instant::now() - Duration::from_secs(elapsed_seconds),
+    );
     let state = f.base.base.app.state::<AppState>();
     let (detail, timeout) = state
         .jobs

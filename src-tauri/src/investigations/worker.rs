@@ -255,6 +255,7 @@ fn run_inner<R: tauri::Runtime>(
             .lock()
             .map_err(|_| HostError::Operational)?
             .investigation_owned_runtime(&execution, &id)?;
+        clock.set_active_limit(detail.limits.active_seconds);
         let mut worker = Worker {
             app: &app,
             state: &state,
