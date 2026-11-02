@@ -776,11 +776,22 @@ fn source_preview_bounds_last_pending_source_fallback() {
                 &prior,
             );
             let action = actual.action("next:2".into()).unwrap();
-            assert_eq!(
-                action.payload.response_schema,
+            // Completed @18 choices retain @17 exploration except that replay
+            // is narrowed to the exact durable references (#1623).
+            let historical =
                 response_schema::select_admitted(SpecialistId::DomainAnalystV17, mode, &f.ledger)
                     .unwrap()
-            );
+                    .unwrap();
+            let mut historical: Value = serde_json::from_str(&historical).unwrap();
+            let mut current: Value =
+                serde_json::from_str(action.payload.response_schema.as_deref().unwrap()).unwrap();
+            for schema in [&mut historical, &mut current] {
+                schema["anyOf"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|branch| branch["properties"]["type"]["const"] != "replay_query");
+            }
+            assert_eq!(current, historical);
             let measured =
                 measure_bounded_action(&profile(), &action, &CompletionLimits::default()).unwrap();
             assert_dominates(
@@ -907,8 +918,13 @@ fn source_preview_projects_deferred_choices_without_authority() {
     assert_eq!(projected, expected);
     assert_eq!(
         schema,
-        response_schema::select_acquisition(CompletionCallMode::Choice, &actual, &f.ledger)
-            .unwrap()
+        response_schema::select_acquisition(
+            CompletionCallMode::Choice,
+            &actual,
+            &f.ledger,
+            &f.metadata.request_hash
+        )
+        .unwrap()
     );
     assert!(bounded_bytes(&projected, MAX_ACTION_BYTES).is_ok());
 }

@@ -306,7 +306,12 @@ impl InvestigationInput {
                     prompt["turn_progress"]["acquisition_choices"] = future;
                     schema
                 } else {
-                    response_schema::select_acquisition(mode, choices, &self.ledger)?
+                    response_schema::select_acquisition(
+                        mode,
+                        choices,
+                        &self.ledger,
+                        &contract.request_hash,
+                    )?
                 }
             } else if let Some(role) = schema_role {
                 response_schema::select_admitted(role, mode, &self.ledger)?
@@ -974,8 +979,14 @@ impl InvestigationInput {
         self.action_feedback = feedback;
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
-        self.payload.response_schema =
-            response_schema::select_acquisition(mode, &choices, &self.ledger)?;
+        self.payload.response_schema = response_schema::select_acquisition(
+            mode,
+            &choices,
+            &self.ledger,
+            prompt["completion_contract"]["request_hash"]
+                .as_str()
+                .ok_or(InvestigationError::InvalidInput)?,
+        )?;
         self.acquisition_choices = Some(choices);
         self.acquisition_mode = Some(mode);
         wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
@@ -1048,7 +1059,12 @@ impl InvestigationInput {
                         .map_err(|_| InvestigationError::InvalidInput)?,
                 )
             || self.payload.response_schema
-                != response_schema::select_acquisition(mode, choices, &self.ledger)?
+                != response_schema::select_acquisition(
+                    mode,
+                    choices,
+                    &self.ledger,
+                    &contract.request_hash,
+                )?
         {
             return Err(InvestigationError::InvalidInput);
         }
