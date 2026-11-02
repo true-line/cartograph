@@ -27,12 +27,13 @@ pub(super) fn read(
         .map_err(|_| HostError::Operational)?
         .investigation(investigation_id)
         .map_err(|_| HostError::InvalidInput)?;
-    let policy = InvestigationPolicy::for_limits(&detail.limits).ok_or(HostError::InvalidInput)?;
+    let policy = crate::jobs::investigations::policy_for_detail(&detail)
+        .map_err(|_| HostError::InvalidInput)?;
     read_saved(
         &state.primary_sources,
         investigation_id,
         ledger,
-        policy,
+        &policy,
         citation_id,
     )
 }

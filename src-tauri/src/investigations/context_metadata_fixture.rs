@@ -73,7 +73,7 @@ impl Fixture {
             expected_context_id: None,
             conversation_id: None,
             parent_id: None,
-            policy: &INVESTIGATION_V2_POLICY,
+            policy: std::sync::Arc::new(INVESTIGATION_V2_POLICY.clone()),
         };
         let context = FrozenContext::prepare_qualified_with_scope(
             &state,
@@ -149,7 +149,7 @@ impl Fixture {
                 let turn = InvestigationTurnBasis {
                     input_ledger_hash: context
                         .ledger
-                        .fingerprint_with_policy(context.policy)
+                        .fingerprint_with_policy(&context.policy)
                         .unwrap(),
                     previous_ledger: None,
                     completed_tool: None,
@@ -169,7 +169,7 @@ impl Fixture {
                     CompletionCallMode::Choice,
                     0,
                     None,
-                    context.policy,
+                    &context.policy,
                 )
                 .unwrap();
                 let action = current
@@ -179,7 +179,7 @@ impl Fixture {
                     .prepare_bounded(&provider(), &action, &CompletionLimits::default())
                     .unwrap();
                 let disclosure = current
-                    .seal_disclosure_with_policy(&prepared, context.policy)
+                    .seal_disclosure_with_policy(&prepared, &context.policy)
                     .unwrap()
                     .unwrap();
                 let step = PendingInvestigationStep {
@@ -275,7 +275,7 @@ impl Fixture {
         let turn = InvestigationTurnBasis {
             input_ledger_hash: view
                 .ledger
-                .fingerprint_with_policy(self.context.policy)
+                .fingerprint_with_policy(&self.context.policy)
                 .unwrap(),
             previous_ledger: Some(self.context.ledger.clone()),
             completed_tool: Some(tool),
@@ -295,7 +295,7 @@ impl Fixture {
             CompletionCallMode::Choice,
             0,
             None,
-            self.context.policy,
+            &self.context.policy,
         )
         .unwrap();
         let action_id = format!("{}:step-2", self.seed.detail.summary.investigation_id);
@@ -316,7 +316,7 @@ impl Fixture {
                 &provider().bounded_profile().unwrap(),
                 &CompletionLimits::default(),
                 &action_id,
-                self.context.policy,
+                &self.context.policy,
             )
             .unwrap();
         Publication {

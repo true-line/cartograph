@@ -185,7 +185,7 @@ impl RetainedOutcome {
                 input.current_prepared.profile(),
                 input.current_prepared.limits(),
                 snapshot.next_action_id(),
-                context.policy,
+                &context.policy,
             )
             .map_err(HostError::from)?;
         let mut evidence = context.evidence.clone();
@@ -221,7 +221,7 @@ impl RetainedOutcome {
             snapshot.mode(),
             snapshot.capacity_refusal_count(),
             snapshot.capacity_feedback(),
-            context.policy,
+            &context.policy,
         )
         .map_err(|error| {
             if error == InvestigationError::LimitExceeded {
@@ -267,7 +267,7 @@ impl RetainedOutcome {
             return Err(HostError::InvalidInput.into());
         }
         let disclosure = candidate
-            .seal_disclosure_with_policy(&prepared, context.policy)
+            .seal_disclosure_with_policy(&prepared, &context.policy)
             .map_err(|_| SourcePublicationError::BoundInvariant)?
             .ok_or(SourcePublicationError::BoundInvariant)?;
         if serde_json::to_vec(&disclosure)

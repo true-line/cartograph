@@ -383,7 +383,7 @@ fn source_prospective_attachment_matches_outcomes_and_reopens() {
             )
             .unwrap()
             .unwrap();
-        validate_acquisition(&choices, &admission).unwrap();
+        validate_acquisition(&choices, &admission, &INVESTIGATION_V2_POLICY).unwrap();
         #[cfg(unix)]
         {
             let retained = snapshot_workspace::workspace().unwrap().0;
@@ -522,9 +522,19 @@ fn source_prospective_attachment_rejects_reason_swap_before_retained_callback() 
         )
         .unwrap()
         .unwrap();
-    validate_acquisition(&expected_b, &sealed_admission(&candidate_b, &prepared_b)).unwrap();
+    validate_acquisition(
+        &expected_b,
+        &sealed_admission(&candidate_b, &prepared_b),
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
     assert!(
-        validate_acquisition(&expected_b, &sealed_admission(&candidate_a, &prepared_a)).is_err()
+        validate_acquisition(
+            &expected_b,
+            &sealed_admission(&candidate_a, &prepared_a),
+            &INVESTIGATION_V2_POLICY
+        )
+        .is_err()
     );
     drop(tx);
     let before = source_rows(&fixture);

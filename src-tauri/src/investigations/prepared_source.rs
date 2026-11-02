@@ -136,7 +136,7 @@ impl FrozenContext {
         target: &InvestigationInspectionTarget,
     ) -> Result<PreparedCapturedSource, HostError> {
         target.validate()?;
-        self.ledger.validate_with_policy(self.policy)?;
+        self.ledger.validate_with_policy(&self.policy)?;
         if self.evidence.len() >= self.policy.limits().evidence_items {
             return Err(HostError::LimitExceeded);
         }
@@ -145,7 +145,7 @@ impl FrozenContext {
             .checked_add(1)
             .ok_or(HostError::LimitExceeded)?;
         let evidence_bytes = source_headroom(self, target)?;
-        let base_ledger_hash = self.ledger.fingerprint_with_policy(self.policy)?;
+        let base_ledger_hash = self.ledger.fingerprint_with_policy(&self.policy)?;
         let selection = self
             .ledger
             .selected_facts

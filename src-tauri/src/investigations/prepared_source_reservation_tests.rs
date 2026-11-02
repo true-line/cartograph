@@ -42,7 +42,7 @@ fn fixture_for(
             .unwrap();
         context.ledger.schema_version = 2;
         context.ledger.coverage = Some(proof.clone());
-        context.policy = &INVESTIGATION_V2_POLICY;
+        context.policy = std::sync::Arc::new(INVESTIGATION_V2_POLICY.clone());
         for (raw, manifest) in context
             .query_pages
             .iter_mut()
@@ -57,7 +57,10 @@ fn fixture_for(
         }
         let archive = InvestigationCoverageArchive::new(proof, vec![]).unwrap();
         context.coverage_archive = Some(archive.clone());
-        context.ledger.validate_with_policy(context.policy).unwrap();
+        context
+            .ledger
+            .validate_with_policy(&context.policy)
+            .unwrap();
         let data = SourceValidationInitialData {
             ledger: context.ledger.clone(),
             query_pages: context.query_pages.clone(),

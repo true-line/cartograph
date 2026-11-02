@@ -177,7 +177,7 @@ pub(super) fn validate_saved_pending(
         || b.prior_completion_hash
             != core
                 .metadata
-                .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)?
+                .fingerprint_with_policy(&super::policy_for_detail(&task.detail)?)?
         || response.step_id != b.step_id
         || response.response_hash != b.original_response_hash
         || response.action_hash != b.original_action_hash

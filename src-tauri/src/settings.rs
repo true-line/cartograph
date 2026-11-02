@@ -111,6 +111,12 @@ pub enum SettingsError {
     InvalidProvider(String),
     InvalidParallelism(u32),
     InvalidInvestigationChoice,
+    InvalidRunLimit {
+        field: &'static str,
+        value: u64,
+        min: u64,
+        max: u64,
+    },
     Store(rusqlite::Error),
 }
 
@@ -138,6 +144,12 @@ impl std::fmt::Display for SettingsError {
                 f,
                 "investigation choice must name a specialist and a budget profile (1..=128 of a-z, 0-9, @ . _ -)"
             ),
+            Self::InvalidRunLimit {
+                field,
+                value,
+                min,
+                max,
+            } => write!(f, "{field} must be {min}..={max}, got {value}"),
             Self::Store(error) => write!(f, "settings store: {error}"),
         }
     }
@@ -165,6 +177,80 @@ fn choice_identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"@._-".contains(&b))
+}
+
+/// Largest task active-time budget the Configure window accepts (owner
+/// decision on #1633: 60 minutes).
+pub const MAX_ACTIVE_SECONDS: u64 = 3_600;
+/// Largest per-model-call timeout the Configure window accepts (owner
+/// decision on #1633: 10 minutes).
+pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
+
+/// Shipped task active-time budget: the registry's investigation default.
+pub fn default_active_seconds() -> u64 {
+    agents::investigation::INVESTIGATION_V2_POLICY
+        .limits()
+        .active_seconds
+}
+
+/// Shipped per-model-call timeout: the bounded-completion default.
+pub fn default_request_timeout_ms() -> u64 {
+    llm::bounded::CompletionLimitValues::default().request_timeout_ms
+}
+
+/// The time limits an investigation runs under (#1633). Only these two are
+/// tunable; every other cap stays fixed in the policy registry. A stored
+/// `NULL` means "use the shipped default", so a later default change still
+/// reaches profiles that never touched the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RunLimits {
+    /// Effective active-time budget per task, in seconds.
+    pub active_seconds: u64,
+    /// Effective timeout for one model call, in milliseconds.
+    pub request_timeout_ms: u64,
+    pub default_active_seconds: u64,
+    pub default_request_timeout_ms: u64,
+    pub max_active_seconds: u64,
+    pub max_request_timeout_ms: u64,
+    /// Whether either value differs from the shipped default.
+    pub customized: bool,
+}
+
+impl RunLimits {
+    fn describe(active: Option<u64>, timeout: Option<u64>) -> Self {
+        let default_active_seconds = default_active_seconds();
+        let default_request_timeout_ms = default_request_timeout_ms();
+        let active_seconds = active.unwrap_or(default_active_seconds);
+        let request_timeout_ms = timeout.unwrap_or(default_request_timeout_ms);
+        Self {
+            active_seconds,
+            request_timeout_ms,
+            default_active_seconds,
+            default_request_timeout_ms,
+            max_active_seconds: MAX_ACTIVE_SECONDS,
+            max_request_timeout_ms: MAX_REQUEST_TIMEOUT_MS,
+            customized: active_seconds != default_active_seconds
+                || request_timeout_ms != default_request_timeout_ms,
+        }
+    }
+}
+
+fn check_run_limit(
+    field: &'static str,
+    value: u64,
+    min: u64,
+    max: u64,
+) -> Result<(), SettingsError> {
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(SettingsError::InvalidRunLimit {
+            field,
+            value,
+            min,
+            max,
+        })
+    }
 }
 
 /// Store for tier settings and the egress log, on the state spine.
@@ -216,6 +302,12 @@ impl SettingsStore {
                  limit_profile TEXT
              ) STRICT;
              INSERT OR IGNORE INTO settings_investigation_choice (id) VALUES (1);
+             CREATE TABLE IF NOT EXISTS run_limit_settings (
+                 id                 INTEGER PRIMARY KEY CHECK (id = 1),
+                 active_seconds     INTEGER CHECK (active_seconds > 0),
+                 request_timeout_ms INTEGER CHECK (request_timeout_ms > 0)
+             ) STRICT;
+             INSERT OR IGNORE INTO run_limit_settings (id) VALUES (1);
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -538,6 +630,85 @@ impl SettingsStore {
         Ok(self.investigation_choice()?)
     }
 
+    /// The persisted investigation time limits (#1633); shipped defaults
+    /// until the owner changes them in Configure → Run Limits.
+    /// A stored value outside [default, maximum] (a hand-edited or
+    /// future-version profile) is reported as an error, never returned as
+    /// effective (#1637 review).
+    pub fn run_limits(&self) -> Result<RunLimits, SettingsError> {
+        let (active, timeout): (Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT active_seconds, request_timeout_ms FROM run_limit_settings WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let stored = |field: &'static str, value: Option<i64>, min: u64, max: u64| {
+            value
+                .map(|v| {
+                    let checked = u64::try_from(v).unwrap_or(0);
+                    check_run_limit(field, checked, min, max).map(|()| checked)
+                })
+                .transpose()
+        };
+        let active = stored(
+            "active_seconds",
+            active,
+            default_active_seconds(),
+            MAX_ACTIVE_SECONDS,
+        )?;
+        let timeout = stored(
+            "request_timeout_ms",
+            timeout,
+            default_request_timeout_ms(),
+            MAX_REQUEST_TIMEOUT_MS,
+        )?;
+        Ok(RunLimits::describe(active, timeout))
+    }
+
+    /// Persist both time limits. Each must lie between its shipped default
+    /// and its maximum; a value equal to the default is stored as `NULL`.
+    /// Nothing is written unless both values are valid.
+    pub fn set_run_limits(
+        &mut self,
+        active_seconds: u64,
+        request_timeout_ms: u64,
+    ) -> Result<RunLimits, SettingsError> {
+        let (active_default, timeout_default) =
+            (default_active_seconds(), default_request_timeout_ms());
+        check_run_limit(
+            "active_seconds",
+            active_seconds,
+            active_default,
+            MAX_ACTIVE_SECONDS,
+        )?;
+        check_run_limit(
+            "request_timeout_ms",
+            request_timeout_ms,
+            timeout_default,
+            MAX_REQUEST_TIMEOUT_MS,
+        )?;
+        let stored = |value: u64, default: u64| {
+            (value != default).then(|| i64::try_from(value).unwrap_or(i64::MAX))
+        };
+        self.conn.execute(
+            "UPDATE run_limit_settings SET active_seconds = ?1, request_timeout_ms = ?2 WHERE id = 1",
+            params![
+                stored(active_seconds, active_default),
+                stored(request_timeout_ms, timeout_default)
+            ],
+        )?;
+        self.run_limits()
+    }
+
+    /// Return both time limits to the shipped defaults. This also clears a
+    /// stored value that [`Self::run_limits`] refuses.
+    pub fn reset_run_limits(&mut self) -> Result<RunLimits, SettingsError> {
+        self.conn.execute(
+            "UPDATE run_limit_settings SET active_seconds = NULL, request_timeout_ms = NULL WHERE id = 1",
+            [],
+        )?;
+        self.run_limits()
+    }
+
     /// Derive the egress firewall policy from persisted settings: cloud is
     /// allowed only for enabled LLM tiers whose provider is `cloud` **and**
     /// which hold standing consent. Everything else stays local-only.
@@ -595,6 +766,86 @@ mod tests {
             ));
         }
         assert_eq!(store.investigation_choice().unwrap(), chosen);
+    }
+
+    #[test]
+    fn run_limits_default_persist_bound_and_reset() {
+        // AC-0562 (#1633): shipped defaults until changed; a valid change
+        // persists across reopen; values outside [default, max] are refused
+        // without writing either field; reset restores the defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        let shipped = store.run_limits().unwrap();
+        assert_eq!(shipped.active_seconds, 600);
+        assert_eq!(shipped.request_timeout_ms, 180_000);
+        assert_eq!(
+            (shipped.max_active_seconds, shipped.max_request_timeout_ms),
+            (3_600, 600_000)
+        );
+        assert!(!shipped.customized);
+
+        let raised = store.set_run_limits(3_600, 600_000).unwrap();
+        assert_eq!(
+            (raised.active_seconds, raised.request_timeout_ms),
+            (3_600, 600_000)
+        );
+        assert!(raised.customized);
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.run_limits().unwrap(), raised);
+
+        for (active, timeout, field) in [
+            (3_601, 600_000, "active_seconds"),
+            (599, 600_000, "active_seconds"),
+            (1_200, 600_001, "request_timeout_ms"),
+            (1_200, 179_999, "request_timeout_ms"),
+        ] {
+            assert!(matches!(
+                store.set_run_limits(active, timeout),
+                Err(SettingsError::InvalidRunLimit { field: f, .. }) if f == field
+            ));
+            assert_eq!(store.run_limits().unwrap(), raised);
+        }
+
+        let partly = store.set_run_limits(1_200, 180_000).unwrap();
+        assert_eq!(
+            (partly.active_seconds, partly.request_timeout_ms),
+            (1_200, 180_000)
+        );
+        let reset = store.reset_run_limits().unwrap();
+        assert_eq!(reset, shipped);
+    }
+
+    #[test]
+    fn out_of_range_stored_run_limits_are_refused_on_read() {
+        // AC-0562 (#1637 review): a persisted value outside [default, max]
+        // is never reported as effective, after reopen too; reset clears it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        for (column, value, field) in [
+            ("active_seconds", 3_601_i64, "active_seconds"),
+            ("active_seconds", 599, "active_seconds"),
+            ("request_timeout_ms", 600_001, "request_timeout_ms"),
+            ("request_timeout_ms", 1, "request_timeout_ms"),
+        ] {
+            let store = SettingsStore::open(&path).unwrap();
+            store
+                .conn
+                .execute(
+                    &format!("UPDATE run_limit_settings SET {column} = ?1 WHERE id = 1"),
+                    params![value],
+                )
+                .unwrap();
+            drop(store);
+            let mut store = SettingsStore::open(&path).unwrap();
+            assert!(matches!(
+                store.run_limits(),
+                Err(SettingsError::InvalidRunLimit { field: f, .. }) if f == field
+            ));
+            let reset = store.reset_run_limits().unwrap();
+            assert!(!reset.customized);
+        }
     }
 
     #[test]

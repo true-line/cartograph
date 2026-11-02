@@ -788,6 +788,17 @@ struct StoredTask {
     action_tool: Option<InvestigationTool>,
 }
 
+/// Reconstruct only saved desktop time overrides; MCP stays on static policy.
+pub(crate) fn policy_for_detail(
+    detail: &InvestigationDetail,
+) -> Result<InvestigationPolicy, InvestigationStoreError> {
+    let policy = match detail.origin {
+        InvestigationOrigin::App => InvestigationPolicy::for_effective_limits(&detail.limits),
+        InvestigationOrigin::Mcp { .. } => InvestigationPolicy::for_limits(&detail.limits).cloned(),
+    };
+    policy.ok_or(InvestigationStoreError::Invalid)
+}
+
 /// Host-derived storage identity, never deserialized from transport arguments.
 /// The transport must separately authenticate the runtime task grant.
 struct McpRequestIdentity {
@@ -844,8 +855,18 @@ impl JobStore {
         next_prompt: bool,
         mcp: Option<&McpRequestIdentity>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+        let base = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
+        let active_seconds = completion_intent
+            .as_ref()
+            .and_then(|intent| intent.active_seconds);
+        if active_seconds.is_some() && (mcp.is_some() || !next_prompt) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let effective_policy = base
+            .with_active_seconds(active_seconds.unwrap_or(base.limits().active_seconds))
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let policy = &effective_policy;
         if request.specialist_id.uses_next_prompt_admission() != next_prompt
             || (next_prompt
                 && (request.schema_version != 7
@@ -1172,6 +1193,16 @@ impl JobStore {
         execution: &JobExecution,
         id: &str,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.investigation_owned_runtime(execution, id)
+            .map(|(detail, _)| detail)
+    }
+
+    /// One validated task snapshot; never consult mutable application settings.
+    pub(crate) fn investigation_owned_runtime(
+        &self,
+        execution: &JobExecution,
+        id: &str,
+    ) -> Result<(InvestigationDetail, u64), InvestigationStoreError> {
         execution.verify()?;
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
@@ -1180,8 +1211,17 @@ impl JobStore {
         validate(&tx, &self.namespace)?;
         let task = load_execution_task(&tx, id)?;
         transitions::check_identity(&task, execution)?;
+        let timeout = task
+            .completion_intent
+            .as_ref()
+            .map(|intent| intent.effective_request_timeout_ms())
+            .unwrap_or_else(|| {
+                llm::bounded::CompletionLimits::default()
+                    .values()
+                    .request_timeout_ms
+            });
         tx.commit()?;
-        Ok(task.detail)
+        Ok((task.detail, timeout))
     }
 
     pub(crate) fn investigation_ledger(

@@ -241,7 +241,7 @@ fn prepared_context_reads_reject_stale_equal_revision_and_policy_before_sink() {
                     context.ledger.supplied_history_bytes = 2;
                     assert_eq!(context.ledger.revision, candidate.base_ledger().revision);
                 }
-                _ => context.policy = &INVESTIGATION_V2_POLICY,
+                _ => context.policy = std::sync::Arc::new(INVESTIGATION_V2_POLICY.clone()),
             }
             let before = snapshot(&context);
             assert!(matches!(
@@ -582,7 +582,7 @@ fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
     let mut context = fixture.prepare();
     let read = fixture.inventory(&context);
     let wire = count(&context.ledger).unwrap();
-    let model = inventory_preparation_workspace(context.policy, wire).unwrap();
+    let model = inventory_preparation_workspace(&context.policy, wire).unwrap();
     let prepared = context.prepare_inventory(read.clone()).unwrap();
     let actual = sum(&[
         slots::<InvestigationInputLedger>(2).unwrap(),
@@ -596,7 +596,8 @@ fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
     {
         let wrapper = std::mem::size_of::<PreparedContextRead>();
         assert!(inventory_admission_workspace(0).unwrap() >= actual + wrapper);
-        let admitted = inventory_preparation_workspace(context.policy, MAX_MANIFEST_BYTES).unwrap();
+        let admitted =
+            inventory_preparation_workspace(&context.policy, MAX_MANIFEST_BYTES).unwrap();
         // AC-0327: replay dominates so preparation cannot mask a missing owner.
         let replay = admitted
             .peak
@@ -614,7 +615,7 @@ fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
     }
     assert!(model.retained >= actual);
     assert!(model.peak >= model.retained);
-    assert!(inventory_preparation_workspace(context.policy, usize::MAX).is_none());
+    assert!(inventory_preparation_workspace(&context.policy, usize::MAX).is_none());
     let remaining = context.policy.limits().tool_actions as usize - context.ledger.queries.len();
     context.ledger.coverage_reads = vec![
         InvestigationCoverageReadManifest {
@@ -624,7 +625,10 @@ fn inventory_workspace_covers_host_preparation_and_candidate_refusal() {
         };
         remaining
     ];
-    context.ledger.validate_with_policy(context.policy).unwrap();
+    context
+        .ledger
+        .validate_with_policy(&context.policy)
+        .unwrap();
     let before = context.ledger.clone();
     assert!(matches!(
         context.prepare_inventory(read),
@@ -656,7 +660,7 @@ fn retained_context_workspace_covers_published_query_and_inventory() {
                 slots::<String>(pages.count()).unwrap(),
             ])
             .unwrap();
-            assert!(preparation_workspace::retained_read_bytes(context.policy).unwrap() >= actual);
+            assert!(preparation_workspace::retained_read_bytes(&context.policy).unwrap() >= actual);
         }
     }
     assert_eq!(context.query_pages.len(), 2);

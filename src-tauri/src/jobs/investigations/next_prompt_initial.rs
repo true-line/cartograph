@@ -35,7 +35,9 @@ impl JobStore {
             return Err(InvestigationStoreError::Cancelled);
         }
         transitions::check_job(&tx, execution, false)?;
-        if request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY)? != task.intent_hash {
+        if request.intent_hash_with_policy(&super::policy_for_detail(&task.detail)?)?
+            != task.intent_hash
+        {
             return Err(InvestigationStoreError::Conflict);
         }
         if task.ledger_revision.is_some() || task.ledger_hash.is_some() {
@@ -99,7 +101,8 @@ impl JobStore {
         {
             return Err(InvestigationStoreError::Stale);
         }
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
         admission_contract::validate_pairing(&task)?;
         let ledger = input.input.ledger();
         InvestigationTurnBasis {

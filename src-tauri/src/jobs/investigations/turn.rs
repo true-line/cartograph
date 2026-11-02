@@ -66,8 +66,7 @@ pub(super) fn basis(
     task: &StoredTask,
 ) -> Result<InvestigationTurnBasis, InvestigationStoreError> {
     let id = &task.detail.summary.investigation_id;
-    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-        .ok_or(InvestigationStoreError::Invalid)?;
+    let policy = super::policy_for_detail(&task.detail)?;
     let current = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
     let previous_ledger = if let Some(revision) = current.revision.checked_sub(1) {
         Some(
@@ -85,11 +84,11 @@ pub(super) fn basis(
     };
     let completed_tool = completed_tool(connection, task, current.revision)?;
     let basis = InvestigationTurnBasis {
-        input_ledger_hash: current.fingerprint_with_policy(policy)?,
+        input_ledger_hash: current.fingerprint_with_policy(&policy)?,
         previous_ledger,
         completed_tool,
     };
-    basis.validate_with_policy(&current, policy)?;
+    basis.validate_with_policy(&current, &policy)?;
     Ok(basis)
 }
 

@@ -120,7 +120,8 @@ pub(super) fn authenticate_saved_response(
     prepared: &PreparedBoundedCompletion,
     active_milliseconds: u64,
 ) -> Result<AuthenticatedResponse, InvestigationStoreError> {
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let id = &task.detail.summary.investigation_id;
     // A saved call cannot make malformed earlier finish/refusal history usable
     // by a later acquisition. This replay uses the journal-independent core and
@@ -197,7 +198,8 @@ fn publish(
         &crate::sources::RetainedSourceView<'_>,
     ) -> Result<(), InvestigationStoreError>,
 ) -> Result<StoredTask, InvestigationStoreError> {
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let expected_revision = task.detail.summary.revision;
     let id = task.detail.summary.investigation_id.clone();
     let authenticated = authenticate_response(

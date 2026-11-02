@@ -361,6 +361,16 @@ Initial hard ceiling profile (the host may narrow it, never silently enlarge it)
 | Frozen canonical graph / combined node and edge rows | MCP-started tasks: fixed 32 MiB / 50,000 defaults; desktop-started investigations: 4 GiB / 10,000,000, depth 32, 500,000,000 values (ADR-0052) |
 | Graph JSON depth / cumulative JSON values | MCP-started tasks: 32 / 1,000,000; desktop-started investigations: 32 / 500,000,000 (ADR-0052) |
 
+For the owner-approved desktop time configuration (#1633), 600 s active time
+and 180 s request timeout remain the defaults. An explicitly configured task
+may freeze active time up to 3,600 s and request timeout up to 600 s at start.
+All non-time policy fields remain exact registry values, including the 3,600 s
+wall deadline. Reopening uses the saved effective limits, never current settings.
+The static registry lookup remains exact; effective-policy lookup must reject
+changes to any other field. Transport validation may admit shorter positive
+timeouts for controlled callers; the desktop setting cannot lower its defaults.
+
+
 Saved-history search (AC-0368) is a read-only filter over the complete retained
 investigation summary set, not just rows already loaded by the UI. It matches
 literal substrings in the saved question and specialist ID with ASCII-only case

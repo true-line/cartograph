@@ -3781,6 +3781,34 @@ fn set_investigation_choice(
         .map_err(|e| e.to_string())
 }
 
+/// Investigation time limits for Configure → Run Limits (#1633).
+#[tauri::command]
+fn get_run_limits(state: State<'_, AppState>) -> Result<settings::RunLimits, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.run_limits().map_err(|e| e.to_string())
+}
+
+/// Persist both time limits; each must lie in [shipped default, maximum].
+/// Applies to investigations started afterwards (#1633).
+#[tauri::command]
+fn set_run_limits(
+    active_seconds: u64,
+    request_timeout_ms: u64,
+    state: State<'_, AppState>,
+) -> Result<settings::RunLimits, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .set_run_limits(active_seconds, request_timeout_ms)
+        .map_err(|e| e.to_string())
+}
+
+/// Return both time limits to the shipped defaults (#1633).
+#[tauri::command]
+fn reset_run_limits(state: State<'_, AppState>) -> Result<settings::RunLimits, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.reset_run_limits().map_err(|e| e.to_string())
+}
+
 /// Live egress summary for the status bar (#103's seam, now real).
 #[tauri::command]
 fn egress_summary(state: State<'_, AppState>) -> Result<settings::EgressSummary, String> {
@@ -6295,6 +6323,27 @@ fn url_launcher(os: &str, url: &str) -> Option<(&'static str, Vec<String>)> {
 /// Native Help submenu (#154): in-app Help, the wiki user guide, issue
 /// reporting, and About — appended to the platform-default menu so the
 /// standard Edit/Window items survive.
+/// Show the Configure window (#1633), creating it on first use.
+fn open_configure_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("configure") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return;
+    }
+    let built = tauri::WebviewWindowBuilder::new(
+        app,
+        "configure",
+        tauri::WebviewUrl::App("index.html?view=configure".into()),
+    )
+    .title("Configure — Run Limits")
+    .inner_size(520.0, 420.0)
+    .resizable(true)
+    .build();
+    if let Err(error) = built {
+        eprintln!("configure window: {error}");
+    }
+}
+
 fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
     let handle = app.handle();
@@ -6336,6 +6385,21 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
             menu.remove(&item)?;
         }
     }
+    // #1633: tunable run parameters live in their own window, apart from
+    // the app Settings page.
+    let configure = Submenu::with_items(
+        handle,
+        "Configure",
+        true,
+        &[&MenuItem::with_id(
+            handle,
+            "configure:run-limits",
+            "Run Limits…",
+            true,
+            None::<&str>,
+        )?],
+    )?;
+    menu.append(&configure)?;
     menu.append(&help)?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| match event.id().0.as_str() {
@@ -6345,6 +6409,7 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
         "help:guide" => open_external("https://github.com/qwts/cartograph/wiki"),
         "help:issue" => open_external("https://github.com/qwts/cartograph/issues/new"),
         "help:debug" => open_model_debug_log(app),
+        "configure:run-limits" => open_configure_window(app),
         _ => {}
     });
     Ok(())
@@ -6506,6 +6571,9 @@ fn main() {
             set_ingest_parallelism,
             get_investigation_choice,
             set_investigation_choice,
+            get_run_limits,
+            set_run_limits,
+            reset_run_limits,
             cloud_disclosure,
             ingest_history,
             extractor_coverage,

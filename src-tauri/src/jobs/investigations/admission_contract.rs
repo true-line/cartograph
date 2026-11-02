@@ -39,7 +39,7 @@ pub(super) fn validate_pairing(task: &StoredTask) -> Result<(), InvestigationSto
             .summary
             .specialist_id
             .uses_next_prompt_admission()
-        || task.detail.limits != INVESTIGATION_V2_POLICY.limits()
+        || super::policy_for_detail(&task.detail)?.profile() != INVESTIGATION_V2_POLICY.profile()
         || intent.schema_version != 4
         || intent.request_schema_version != Some(7)
     {
@@ -67,7 +67,10 @@ impl StoredAdmissionState {
             return Err(InvestigationStoreError::Invalid);
         }
         if let Some(call) = &self.current_call {
-            call.validate_saved_shape(task.detail.summary.specialist_id)?;
+            call.validate_saved_shape(
+                task.detail.summary.specialist_id,
+                &super::policy_for_detail(&task.detail)?,
+            )?;
             if call.task_id != task.detail.summary.investigation_id
                 || call.request_hash != task.intent_hash
                 || task.ledger_hash.as_ref() != Some(&call.input_ledger_hash)
@@ -92,6 +95,7 @@ impl SavedCallBasis {
     fn validate_saved_shape(
         &self,
         saved_role: SpecialistId,
+        policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationStoreError> {
         if self.schema_version != 1
             || !id_valid(&self.task_id)
@@ -107,16 +111,13 @@ impl SavedCallBasis {
                     .model_invocations
                     .checked_add(1)
                     .ok_or(InvestigationStoreError::Capacity)?
-            || self.invocation_ordinal > INVESTIGATION_V2_POLICY.limits().model_invocations
+            || self.invocation_ordinal > policy.limits().model_invocations
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        validate_usage(
-            &self.admission.consumed_budgets,
-            &INVESTIGATION_V2_POLICY.limits(),
-        )?;
+        validate_usage(&self.admission.consumed_budgets, &policy.limits())?;
         self.admission
-            .validate_saved_role_shape(saved_role, &INVESTIGATION_V2_POLICY)?;
+            .validate_saved_role_shape(saved_role, policy)?;
         encode(self, MAX_INVOCATION_BYTES)?;
         Ok(())
     }
@@ -131,6 +132,8 @@ impl SavedCallBasis {
         capacity: &admission_journal::CapacityState,
     ) -> Result<Self, InvestigationStoreError> {
         validate_pairing(task)?;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
         let admission = step
             .disclosure
             .as_ref()
@@ -146,9 +149,9 @@ impl SavedCallBasis {
                 .model_invocations
                 .checked_add(1)
                 .ok_or(InvestigationStoreError::Capacity)?,
-            input_ledger_hash: ledger.fingerprint_with_policy(&INVESTIGATION_V2_POLICY)?,
+            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
             input_revision: ledger.revision,
-            completion_metadata_hash: metadata.fingerprint_with_policy(&INVESTIGATION_V2_POLICY)?,
+            completion_metadata_hash: metadata.fingerprint_with_policy(policy)?,
             admission,
         };
         value.validate_core(task, step, ledger, metadata)?;
@@ -237,11 +240,11 @@ impl SavedCallBasis {
         metadata: &ProtectedCompletionMetadata,
     ) -> Result<(), InvestigationStoreError> {
         validate_pairing(task)?;
-        ledger
-            .validate_for_specialist(task.detail.summary.specialist_id, &INVESTIGATION_V2_POLICY)?;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
+        ledger.validate_for_specialist(task.detail.summary.specialist_id, policy)?;
         let role = task.detail.summary.specialist_id;
-        self.validate_saved_shape(role)?;
-        let policy = &INVESTIGATION_V2_POLICY;
+        self.validate_saved_shape(role, policy)?;
         let intent = task
             .completion_intent
             .as_ref()

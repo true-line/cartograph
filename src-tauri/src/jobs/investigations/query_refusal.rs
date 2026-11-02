@@ -43,7 +43,7 @@ pub(super) fn validate_event(
         &response.action_hash,
         &ledger,
         task.detail.summary.specialist_id,
-        policy,
+        &policy,
     )?;
     if step.input_ledger_hash != record.input_ledger_hash || response.step_id != step.step_id {
         return Err(InvestigationStoreError::Invalid);
@@ -218,7 +218,7 @@ impl JobStore {
             &input.response.action_hash,
             &authenticated.core.ledger,
             task.detail.summary.specialist_id,
-            &INVESTIGATION_V2_POLICY,
+            &super::policy_for_detail(&task.detail)?,
         )?;
         if !input
             .current

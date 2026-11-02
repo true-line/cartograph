@@ -26,6 +26,6 @@ pub(in super::super) fn derive_protected_metadata(
         last_refusal_id: last.map(|record| record.refusal_id.clone()),
         feedback: last.map(|record| record.feedback.clone()),
     };
-    metadata.validate_with_policy(policy)?;
+    metadata.validate_with_policy(&policy)?;
     Ok(metadata)
 }

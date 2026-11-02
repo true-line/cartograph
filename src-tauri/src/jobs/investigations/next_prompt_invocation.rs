@@ -79,7 +79,8 @@ impl JobStore {
             | (false, InvestigationProviderMode::Cloud, Phase::Consent) => {}
             _ => return Err(InvestigationStoreError::Stale),
         }
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
         let (step, basis) = prepare_saved_call(&tx, &mut task, input)?;
         if waiting {
             if task.pending.is_some()
@@ -220,8 +221,14 @@ pub(super) fn prepare_saved_call(
     input: &NextPromptInvocation<'_>,
 ) -> Result<(PendingInvestigationStep, SavedCallBasis), InvestigationStoreError> {
     admission_contract::validate_pairing(task)?;
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let mut expected_limits = CompletionLimits::default().values();
+    expected_limits.request_timeout_ms = task
+        .completion_intent
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?
+        .effective_request_timeout_ms();
     expected_limits.max_output_tokens = policy.limits().generated_tokens_per_invocation;
     expected_limits.max_spans = u32::try_from(policy.limits().evidence_items)
         .map_err(|_| InvestigationStoreError::Invalid)?;

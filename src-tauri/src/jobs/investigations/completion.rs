@@ -23,6 +23,11 @@ pub(super) struct CompletionIntent {
     pub request_schema_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     limit_profile: Option<String>,
+    /// Frozen at desktop task creation; absent on historical and MCP tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) request_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) active_seconds: Option<u64>,
     pub request_hash: String,
     pub obligations: ObligationEnvelope,
     pub obligations_hash: String,
@@ -57,6 +62,8 @@ impl CompletionIntent {
             request_schema_version: specialist.uses_next_prompt_admission().then_some(7),
             limit_profile: (policy.profile() != "investigation-v1")
                 .then(|| policy.profile().into()),
+            request_timeout_ms: None,
+            active_seconds: None,
             request_hash: request.intent_hash_with_policy(policy)?,
             obligations: request.obligations.clone(),
             obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
@@ -73,9 +80,50 @@ impl CompletionIntent {
             ),
         })
     }
+    pub(super) fn effective_request_timeout_ms(&self) -> u64 {
+        self.request_timeout_ms.unwrap_or_else(|| {
+            llm::bounded::CompletionLimits::default()
+                .values()
+                .request_timeout_ms
+        })
+    }
+
+    fn validate_frozen_timeout(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
+        let default = llm::bounded::CompletionLimits::default()
+            .values()
+            .request_timeout_ms;
+        let base = InvestigationPolicy::for_profile(&task.detail.limits.profile)
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if self.active_seconds.is_none()
+            && task.detail.limits.active_seconds != base.limits().active_seconds
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if self.active_seconds.is_some() != self.request_timeout_ms.is_some()
+            || self
+                .active_seconds
+                .is_some_and(|seconds| seconds != task.detail.limits.active_seconds)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if let Some(timeout) = self.request_timeout_ms
+            && (task.detail.origin != InvestigationOrigin::App
+                || !task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_next_prompt_admission()
+                || !(default..=llm::bounded::MAX_REQUEST_TIMEOUT_MS).contains(&timeout))
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
+
     pub(super) fn validate(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
         let policy = saved_policy(task)?;
         let legacy = policy.profile() == "investigation-v1";
+        self.validate_frozen_timeout(task)?;
         let summary = &task.detail.summary;
         if self.schema_version
             != if summary.specialist_id.uses_next_prompt_admission() {
@@ -98,8 +146,8 @@ impl CompletionIntent {
             || summary.specialist_id.uses_policy_selection() == legacy
             || !hash_valid(&self.request_hash)
             || self.request_hash != task.intent_hash
-            || self.obligations != self.obligations.normalized_with_policy(policy)?
-            || self.obligations.fingerprint_with_policy(policy)? != self.obligations_hash
+            || self.obligations != self.obligations.normalized_with_policy(&policy)?
+            || self.obligations.fingerprint_with_policy(&policy)? != self.obligations_hash
             || self.expected_graph != task.expected_graph_revision
             || self.nonce != task.nonce
             || self.specialist != summary.specialist_id
@@ -237,7 +285,8 @@ impl JobStore {
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         self.start_completion_access(request, provider, false, None)
     }
-    /// Factory for the exact next-prompt request family.
+    /// Default-policy factory for scripted and manually authorized test harnesses.
+    #[cfg(test)]
     pub(crate) fn start_next_prompt_investigation(
         &mut self,
         request: &StagedObligationRequest,
@@ -269,10 +318,56 @@ impl JobStore {
         next_prompt: bool,
         mcp: Option<&McpRequestIdentity>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        let policy = InvestigationPolicy::for_profile(&request.limit_profile)
+        self.start_completion_family_configured(request, provider, next_prompt, mcp, None)
+    }
+
+    /// Host-only desktop settings, frozen before the atomic task insertion.
+    pub(crate) fn start_configured_next_prompt_investigation(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+        active_seconds: u64,
+        request_timeout_ms: u64,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        self.start_completion_family_configured(
+            request,
+            provider,
+            true,
+            None,
+            Some((active_seconds, request_timeout_ms)),
+        )
+    }
+
+    fn start_completion_family_configured(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+        next_prompt: bool,
+        mcp: Option<&McpRequestIdentity>,
+        configured: Option<(u64, u64)>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        let base = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
+        let effective = base
+            .with_active_seconds(configured.map_or(base.limits().active_seconds, |v| v.0))
+            .ok_or(InvestigationStoreError::Invalid)?;
+        let policy = &effective;
         let request = request.normalized_with_policy(policy)?;
-        let intent = CompletionIntent::new(&request)?;
+        let mut intent = CompletionIntent::new(&request)?;
+        if let Some((active, timeout)) = configured {
+            let minimum = llm::bounded::CompletionLimits::default()
+                .values()
+                .request_timeout_ms;
+            if mcp.is_some()
+                || !next_prompt
+                || !intent.specialist.uses_next_prompt_admission()
+                || !(minimum..=llm::bounded::MAX_REQUEST_TIMEOUT_MS).contains(&timeout)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            intent.active_seconds = Some(active);
+            intent.request_timeout_ms = Some(timeout);
+        }
         let sources = request.obligations.sources_with_policy(policy)?;
         let projected = StartInvestigationRequest {
             schema_version: request.schema_version,
@@ -338,7 +433,13 @@ impl JobStore {
             .optional()?;
         let detail = if let Some(id) = id {
             let task = load_execution_task(&tx, &id)?;
-            let expected = CompletionIntent::new(request)?;
+            let mut expected = CompletionIntent::new(request)?;
+            // A nonce retry observes its original frozen configuration. New
+            // application settings cannot rewrite an existing task.
+            if let Some(saved) = &task.completion_intent {
+                expected.active_seconds = saved.active_seconds;
+                expected.request_timeout_ms = saved.request_timeout_ms;
+            }
             let schema = if expected.specialist.uses_next_prompt_admission() {
                 3
             } else {
@@ -601,7 +702,7 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
             &intent.obligations,
             id,
             &ledger,
-            policy,
+            &policy,
         )?;
         let response: InvestigationResponseMeta = read_body(
             connection,
@@ -680,19 +781,19 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
                         &entry.record.step_id,
                     )?
                     .ok_or(InvestigationStoreError::Invalid)?;
-                    step.input_ledger_hash == before.fingerprint_with_policy(policy)?
+                    step.input_ledger_hash == before.fingerprint_with_policy(&policy)?
                 } else {
-                    actual_step.input_ledger_hash == before.fingerprint_with_policy(policy)?
+                    actual_step.input_ledger_hash == before.fingerprint_with_policy(&policy)?
                 };
                 if !matches_input {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 let basis = InvestigationTurnBasis {
-                    input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+                    input_ledger_hash: ledger.fingerprint_with_policy(&policy)?,
                     previous_ledger: Some(before),
                     completed_tool: Some(expected_tool),
                 };
-                basis.validate_with_policy(&ledger, policy)?;
+                basis.validate_with_policy(&ledger, &policy)?;
                 let before = basis
                     .previous_ledger
                     .as_ref()
@@ -716,7 +817,7 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
                 }
             }
             AttemptOutcome::Unavailable { reason } => {
-                if actual_step.input_ledger_hash != ledger.fingerprint_with_policy(policy)? {
+                if actual_step.input_ledger_hash != ledger.fingerprint_with_policy(&policy)? {
                     return Err(InvestigationStoreError::Invalid);
                 }
                 if let ReadIntent::Inventory {
@@ -883,7 +984,7 @@ pub(super) fn append_next_prompt_attempt_at_step(
             .map(|(ordinal, _)| *ordinal)
             != Some(core.ordinal)
         || task.ledger_revision != Some(ledger.revision)
-        || task.ledger_hash.as_ref() != Some(&ledger.fingerprint_with_policy(policy)?)
+        || task.ledger_hash.as_ref() != Some(&ledger.fingerprint_with_policy(&policy)?)
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -940,11 +1041,11 @@ pub(super) fn append_next_prompt_attempt_at_step(
         _ => return Err(InvestigationStoreError::Invalid),
     };
     InvestigationTurnBasis {
-        input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+        input_ledger_hash: ledger.fingerprint_with_policy(&policy)?,
         previous_ledger: Some(core.ledger),
         completed_tool: Some(tool),
     }
-    .validate_with_policy(ledger, policy)?;
+    .validate_with_policy(ledger, &policy)?;
     let event: InvestigationEvent = read_body(
         tx,
         "investigation_events",
@@ -1240,7 +1341,7 @@ pub(super) fn next_prompt_invocations(
             .as_ref()
             .and_then(|value| value.admission.as_ref())
             .ok_or(InvestigationStoreError::Invalid)?
-            .validate_with_policy(saved_policy(task)?)?;
+            .validate_with_policy(&saved_policy(task)?)?;
     }
     Ok(steps)
 }
@@ -1286,7 +1387,7 @@ fn raw_next_prompt_invocations(
             .admission
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
-        admission.validate_saved_role_shape(task.detail.summary.specialist_id, policy)?;
+        admission.validate_saved_role_shape(task.detail.summary.specialist_id, &policy)?;
         let ordinal = admission
             .consumed_budgets
             .model_invocations
@@ -1423,9 +1524,9 @@ pub(super) fn validate_step_metadata(
             .map(|binding| binding.request_hash.as_str())
             != progressive.then_some(intent.request_hash.as_str())
         || disclosure.completion_contract_hash.as_deref()
-            != Some(intent.contract().fingerprint_with_policy(policy)?.as_str())
+            != Some(intent.contract().fingerprint_with_policy(&policy)?.as_str())
         || disclosure.completion_metadata_hash.as_deref()
-            != Some(metadata.fingerprint_with_policy(policy)?.as_str())
+            != Some(metadata.fingerprint_with_policy(&policy)?.as_str())
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -1441,8 +1542,8 @@ fn validated_intent(task: &StoredTask) -> Result<&CompletionIntent, Investigatio
 }
 pub(super) fn saved_policy(
     task: &StoredTask,
-) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
-    InvestigationPolicy::for_limits(&task.detail.limits).ok_or(InvestigationStoreError::Invalid)
+) -> Result<InvestigationPolicy, InvestigationStoreError> {
+    super::policy_for_detail(&task.detail)
 }
 fn observed_assessment(
     intent: &CompletionIntent,
@@ -1521,7 +1622,7 @@ fn observation_from_entries(
             step_id: last.record.step_id.clone(),
             input_ledger_hash: last.record.input_ledger_hash.clone(),
             disclosure_hash: last.record.disclosure_hash.clone(),
-            finishing_attempts_hash: completed_attempt_ids_hash_with_policy(&ids, policy)?,
+            finishing_attempts_hash: completed_attempt_ids_hash_with_policy(&ids, &policy)?,
         }
     } else {
         CompletionAssessmentBasis::TerminalObservation {
@@ -1530,7 +1631,7 @@ fn observation_from_entries(
                     .iter()
                     .map(|entry| entry.record.attempt_id.as_str())
                     .collect::<Vec<_>>(),
-                policy,
+                &policy,
             )?,
             last_refusal_id: last.map(|entry| entry.record.refusal_id.clone()),
             last_refusal_basis: last.map(|entry| CompletionRefusalBasis {
@@ -1574,7 +1675,7 @@ pub(super) fn refresh_observation(
         return Ok(());
     }
     let detail = observation_detail(connection, task)?;
-    task.detail.summary.obligation_status = Some(detail.validate_with_policy(policy)?);
+    task.detail.summary.obligation_status = Some(detail.validate_with_policy(&policy)?);
     task.detail.completion = Some(detail);
     Ok(())
 }
@@ -1637,7 +1738,7 @@ pub(super) fn validate_result(
                 .as_ref()
                 .ok_or(InvestigationStoreError::Invalid)?,
             &evidence,
-            policy,
+            &policy,
         )?;
     }
     Ok(())
@@ -1668,7 +1769,7 @@ pub(super) fn accepted(
         step.disclosure
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?
-            .fingerprint_with_policy(ledger, policy)?
+            .fingerprint_with_policy(ledger, &policy)?
     };
     let detail = InvestigationCompletionDetail {
         schema_version: 1,
@@ -1678,7 +1779,7 @@ pub(super) fn accepted(
         refusal_count: refusals.len() as u32,
         assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
             step_id: step.step_id.clone(),
-            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+            input_ledger_hash: ledger.fingerprint_with_policy(&policy)?,
             disclosure_hash,
             finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
         },
@@ -1690,7 +1791,7 @@ pub(super) fn accepted(
             InvestigationCompletionOutcome::InsufficientEvidence
         }
     });
-    task.detail.summary.obligation_status = Some(detail.validate_with_policy(policy)?);
+    task.detail.summary.obligation_status = Some(detail.validate_with_policy(&policy)?);
     task.detail.completion = Some(detail);
     Ok(())
 }
@@ -1810,7 +1911,7 @@ pub(super) fn validate_saved(
             step.disclosure
                 .as_ref()
                 .ok_or(InvestigationStoreError::Invalid)?
-                .fingerprint_with_policy(&ledger, policy)?
+                .fingerprint_with_policy(&ledger, &policy)?
         };
         let expected = InvestigationCompletionDetail {
             schema_version: 1,
@@ -1820,7 +1921,7 @@ pub(super) fn validate_saved(
             refusal_count: refusals.len() as u32,
             assessment_basis: CompletionAssessmentBasis::FinishingDisclosure {
                 step_id: step_id.clone(),
-                input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+                input_ledger_hash: ledger.fingerprint_with_policy(&policy)?,
                 disclosure_hash,
                 finishing_attempts_hash: completion.finishing_attempts_hash.clone(),
             },
@@ -1903,7 +2004,7 @@ pub(super) fn reserve_invocation(
     if count >= 2 {
         return Err(InvestigationStoreError::Capacity);
     }
-    check_invocation_capacity(connection, task, policy)
+    check_invocation_capacity(connection, task, &policy)
 }
 fn check_invocation_capacity(
     connection: &Connection,

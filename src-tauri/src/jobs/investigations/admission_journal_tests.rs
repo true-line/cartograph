@@ -673,7 +673,8 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
             &finish_response,
             &f.ledger,
             &f.basis,
-            f.task.detail.summary.specialist_id
+            f.task.detail.summary.specialist_id,
+            &INVESTIGATION_V2_POLICY,
         ),
         Err(InvestigationStoreError::Invalid)
     ));
@@ -687,7 +688,8 @@ fn admission_journal_capacity_class_never_accepts_finish_or_finish_only_tool() {
             &response,
             &f.ledger,
             &call,
-            f.task.detail.summary.specialist_id
+            f.task.detail.summary.specialist_id,
+            &INVESTIGATION_V2_POLICY,
         ),
         Err(InvestigationStoreError::Invalid)
     ));
@@ -961,4 +963,104 @@ fn next_prompt_query_refusal_replay_consumes_attempt_without_publication() {
     assert_eq!(f.task.ledger_revision, Some(f.ledger.revision));
     derive_current(&tx, &f.task).unwrap();
     tx.commit().unwrap();
+}
+
+#[test]
+fn frozen_request_timeout_preserves_historical_bytes_and_rejects_invalid_origins() {
+    let mut f = internal_next_prompt_fixture();
+    let mut intent = f.task.completion_intent.clone().unwrap();
+    let original = serde_json::to_vec(&intent).unwrap();
+    assert!(
+        serde_json::to_value(&intent)
+            .unwrap()
+            .get("request_timeout_ms")
+            .is_none()
+    );
+    assert_eq!(intent.effective_request_timeout_ms(), 180_000);
+    intent.validate(&f.task).unwrap();
+    for timeout in [180_000, 180_001, 600_000] {
+        intent.active_seconds = Some(f.task.detail.limits.active_seconds);
+        intent.request_timeout_ms = Some(timeout);
+        intent.validate(&f.task).unwrap();
+        let saved = serde_json::to_vec(&intent).unwrap();
+        let reopened: completion::CompletionIntent = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(reopened.effective_request_timeout_ms(), timeout);
+        reopened.validate(&f.task).unwrap();
+        f.task.detail.origin = InvestigationOrigin::Mcp {
+            client_id: McpClientId::from_host_bytes([8; 16]),
+        };
+        assert!(reopened.validate(&f.task).is_err());
+        f.task.detail.origin = InvestigationOrigin::App;
+    }
+    for timeout in [0, 179_999, 600_001, u64::MAX] {
+        intent.active_seconds = Some(f.task.detail.limits.active_seconds);
+        intent.request_timeout_ms = Some(timeout);
+        assert!(intent.validate(&f.task).is_err());
+    }
+    intent.request_timeout_ms = None;
+    intent.active_seconds = None;
+    assert_eq!(serde_json::to_vec(&intent).unwrap(), original);
+    f.task.detail.limits.active_seconds = 3600;
+    assert!(intent.validate(&f.task).is_err());
+    intent.active_seconds = Some(3600);
+    assert!(intent.validate(&f.task).is_err());
+    intent.request_timeout_ms = Some(600_000);
+    intent.validate(&f.task).unwrap();
+}
+
+#[test]
+fn configured_desktop_start_freezes_time_limits_and_nonce_retry_keeps_them() {
+    let mut f = internal_next_prompt_fixture();
+    let mut request = f.request.clone();
+    request.specialist_id = "domain-analyst@18".into();
+    request.request_nonce = "configured-time-start".into();
+    let provider = f.task.detail.provider.clone();
+    let started = f
+        .store
+        .start_configured_next_prompt_investigation(&request, Some(&provider), 3600, 600_000)
+        .unwrap();
+    assert!(started.created);
+    assert_eq!(started.detail.limits.active_seconds, 3600);
+    assert_eq!(started.detail.limits.wall_seconds, 3600);
+    let id = &started.detail.summary.investigation_id;
+    let tx = f.store.conn.unchecked_transaction().unwrap();
+    let task = load_execution_task(&tx, id).unwrap();
+    let intent = task.completion_intent.as_ref().unwrap();
+    assert_eq!(intent.active_seconds, Some(3600));
+    assert_eq!(intent.effective_request_timeout_ms(), 600_000);
+    tx.commit().unwrap();
+    let retried = f
+        .store
+        .start_configured_next_prompt_investigation(&request, Some(&provider), 600, 180_000)
+        .unwrap();
+    assert!(!retried.created);
+    assert_eq!(retried.detail, started.detail);
+    assert_eq!(
+        f.store.existing_investigation_completion(&request).unwrap(),
+        Some(started.detail)
+    );
+    request.request_nonce = "invalid-time-start".into();
+    for (active, timeout) in [
+        (599, 180_000),
+        (3601, 180_000),
+        (600, 179_999),
+        (600, 600_001),
+    ] {
+        assert!(
+            f.store
+                .start_configured_next_prompt_investigation(
+                    &request,
+                    Some(&provider),
+                    active,
+                    timeout,
+                )
+                .is_err()
+        );
+        assert!(
+            f.store
+                .existing_investigation_completion(&request)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

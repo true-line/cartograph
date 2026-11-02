@@ -167,7 +167,7 @@ fn prepared_source_candidate_matches_existing_read_without_publication() {
         assert_eq!(request.target, &target);
         assert_eq!(
             request.base_ledger_hash,
-            base.fingerprint_with_policy(context.policy).unwrap()
+            base.fingerprint_with_policy(&context.policy).unwrap()
         );
         charges.push(request.validation_bytes);
         Ok(())
@@ -204,7 +204,7 @@ fn prepared_source_candidate_matches_existing_read_without_publication() {
         ])
         .unwrap();
         assert!(
-            crate::investigations::preparation_workspace::retained_read_bytes(old.policy).unwrap()
+            crate::investigations::preparation_workspace::retained_read_bytes(&old.policy).unwrap()
                 >= actual
         );
     }
@@ -324,7 +324,7 @@ fn prepared_source_rejects_equal_revision_changed_basis_and_policy_before_charge
             .unwrap();
         reset_reads();
         if policy_swap {
-            context.policy = &INVESTIGATION_V2_POLICY;
+            context.policy = std::sync::Arc::new(INVESTIGATION_V2_POLICY.clone());
         } else {
             context.ledger.supplied_history_hash = Some("a".repeat(64));
         }

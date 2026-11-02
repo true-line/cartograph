@@ -1814,3 +1814,79 @@ fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
     let calls = crate::debug_log::test_support::calls_with("debug-1624-slow-sink");
     assert!(calls[0].1.as_ref().is_some_and(|r| r.error.is_none()));
 }
+
+#[test]
+fn bounded_timeout_ceiling_is_separate_from_unchanged_default() {
+    // AC-0188: saved completion limits round-trip with unchanged default bytes.
+    assert_eq!(
+        CompletionLimits::default().values().request_timeout_ms,
+        180_000
+    );
+    for timeout in [1, 180_000, 180_001, 600_000] {
+        let values = CompletionLimitValues {
+            request_timeout_ms: timeout,
+            ..Default::default()
+        };
+        let admitted = CompletionLimits::new(values).unwrap();
+        let wire = serde_json::to_string(&admitted).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CompletionLimits>(&wire).unwrap(),
+            admitted
+        );
+    }
+    for timeout in [0, 600_001, u64::MAX] {
+        let values = CompletionLimitValues {
+            request_timeout_ms: timeout,
+            ..Default::default()
+        };
+        assert!(CompletionLimits::new(values).is_err());
+        assert!(
+            serde_json::from_str::<CompletionLimits>(&serde_json::to_string(&values).unwrap())
+                .is_err()
+        );
+    }
+    let mut values = CompletionLimitValues {
+        request_timeout_ms: 600_000,
+        ..Default::default()
+    };
+    values.input_bytes += 1;
+    assert!(CompletionLimits::new(values).is_err());
+}
+
+#[test]
+fn configured_timeout_changes_consent_identity_without_provider_execution() {
+    // AC-0188: widening time cannot reuse consent for the original limits.
+    let cloud = AnthropicProvider::with_endpoint(
+        ClaudeLane::Opus,
+        "fixture-key",
+        "https://example.invalid/".into(),
+    )
+    .unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
+    let input = action();
+    let baseline = firewall
+        .prepare_bounded(&cloud, &input, &CompletionLimits::default())
+        .unwrap();
+    let grant = ConsentGrant::from_preview(&baseline.preview().egress);
+    let limits = CompletionLimits::new(CompletionLimitValues {
+        request_timeout_ms: MAX_REQUEST_TIMEOUT_MS,
+        ..Default::default()
+    })
+    .unwrap();
+    let changed = firewall.prepare_bounded(&cloud, &input, &limits).unwrap();
+    assert_ne!(
+        baseline.preview().egress.payload_hash,
+        changed.preview().egress.payload_hash
+    );
+    assert_eq!(
+        firewall
+            .authorize_bounded(&cloud, &changed, Some(&grant))
+            .err()
+            .unwrap(),
+        not_sent(FailureCode::ConsentMismatch)
+    );
+    let fresh = ConsentGrant::from_preview(&changed.preview().egress);
+    firewall
+        .authorize_bounded(&cloud, &changed, Some(&fresh))
+        .unwrap();
+}

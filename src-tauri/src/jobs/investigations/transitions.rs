@@ -465,8 +465,7 @@ impl JobStore {
                 task.action_tool = None;
                 task.phase = Phase::Ready;
                 task.detail.summary.status = InvestigationStatus::Running;
-                let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-                    .ok_or(InvestigationStoreError::Invalid)?;
+                let policy = super::policy_for_detail(&task.detail)?;
                 let has_invocation_budget =
                     task.detail.usage.model_invocations < task.detail.limits.model_invocations;
                 let has_token_budget = task
@@ -967,7 +966,7 @@ pub(super) fn admit_input(
     let policy = validate_input_candidate(connection, task, ledger, &usage)?;
     persist_input_rows(connection, task, ledger)?;
     task.ledger_revision = Some(ledger.revision);
-    task.ledger_hash = Some(ledger.fingerprint_with_policy(policy)?);
+    task.ledger_hash = Some(ledger.fingerprint_with_policy(&policy)?);
     task.detail.summary.graph_snapshot_id = Some(ledger.graph_snapshot_id.clone());
     task.detail.scope_snapshot_id = Some(ledger.scope_snapshot_id.clone());
     task.detail.coverage_context =
@@ -1013,15 +1012,14 @@ pub(super) fn validate_input_candidate(
     task: &StoredTask,
     ledger: &InvestigationInputLedger,
     usage: &InvestigationUsage,
-) -> Result<&'static InvestigationPolicy, InvestigationStoreError> {
-    let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-        .ok_or(InvestigationStoreError::Invalid)?;
-    ledger.validate_for_specialist(task.detail.summary.specialist_id, policy)?;
+) -> Result<InvestigationPolicy, InvestigationStoreError> {
+    let policy = super::policy_for_detail(&task.detail)?;
+    ledger.validate_for_specialist(task.detail.summary.specialist_id, &policy)?;
     let archive = coverage::load(connection, &task.detail.summary.investigation_id)?;
     match (&ledger.coverage, archive.as_ref()) {
         (None, None) => {}
         (Some(proof), Some(archive)) if proof == archive.proof() => {
-            archive.validate_reads_with_policy(&ledger.coverage_reads, policy)?;
+            archive.validate_reads_with_policy(&ledger.coverage_reads, &policy)?;
         }
         _ => return Err(InvestigationStoreError::Invalid),
     }
@@ -1100,11 +1098,11 @@ pub(super) fn validate_input_candidate(
     }
     if ledger.schema_version == 2 {
         InvestigationTurnBasis {
-            input_ledger_hash: ledger.fingerprint_with_policy(policy)?,
+            input_ledger_hash: ledger.fingerprint_with_policy(&policy)?,
             previous_ledger: load_ledger(connection, task)?,
             completed_tool: task.action_tool,
         }
-        .validate_with_policy(ledger, policy)?;
+        .validate_with_policy(ledger, &policy)?;
     }
     Ok(policy)
 }
