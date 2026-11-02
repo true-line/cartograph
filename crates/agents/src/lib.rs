@@ -376,18 +376,30 @@ impl AgentBroker {
     }
 
     fn validate_task(&self, task: &AgentTask) -> Result<(), AgentError> {
-        if !may_overwrite(Tier::Agentic, task.existing_confidence) {
-            return Err(AgentError::Integrity(format!(
-                "T3 cannot propose over {:?}",
-                task.existing_confidence
-            )));
-        }
+        self.validate_task_tier(task)?;
         if !self.limits.allowed_edge_labels.contains(&task.edge_label) {
             return Err(AgentError::InvalidTask(format!(
                 "edge label {} is outside the broker allowlist",
                 task.edge_label
             )));
         }
+        self.validate_task_bounds(task)
+    }
+
+    pub(crate) fn validate_task_tier(&self, task: &AgentTask) -> Result<(), AgentError> {
+        if !may_overwrite(Tier::Agentic, task.existing_confidence) {
+            return Err(AgentError::Integrity(format!(
+                "T3 cannot propose over {:?}",
+                task.existing_confidence
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every bounded-task check except the confidence tier and the edge-label
+    /// allowlist. Shared by [`Self::validate_task`] and the non-escalatable
+    /// preview so the two can never drift (#1639).
+    pub(crate) fn validate_task_bounds(&self, task: &AgentTask) -> Result<(), AgentError> {
         if task.action_id.trim().is_empty()
             || task.gap_id.trim().is_empty()
             || task.source_id.trim().is_empty()
