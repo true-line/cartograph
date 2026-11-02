@@ -398,12 +398,15 @@ impl EgressFirewall {
             debug_log::begin(
                 "firewall",
                 preview.provider_id.clone(),
-                format!(
-                    "SYSTEM:\n{}\n\nUSER:\n{}",
-                    request.system(),
-                    request
-                        .user_message()
-                        .unwrap_or_else(|error| error.to_string())
+                debug_log::excerpt(
+                    format!(
+                        "SYSTEM:\n{}\n\nUSER:\n{}",
+                        request.system(),
+                        request
+                            .user_message()
+                            .unwrap_or_else(|error| error.to_string())
+                    )
+                    .as_bytes(),
                 ),
             )
         });
@@ -413,7 +416,7 @@ impl EgressFirewall {
                 result
                     .as_ref()
                     .ok()
-                    .map(|completion| completion.text.clone()),
+                    .map(|completion| debug_log::excerpt(completion.text.as_bytes())),
                 result.as_ref().err().map(ToString::to_string),
             );
         }

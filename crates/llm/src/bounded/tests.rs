@@ -1708,3 +1708,70 @@ fn bounded_calls_record_sent_then_received_in_the_debug_log() {
     assert_eq!(received.error.as_deref(), Some("HttpStatus"));
     assert_eq!(received.response, None);
 }
+
+// AC-0560 (#1624): the control check and deadline run after the debug entry
+// is queued, so cancellation arriving at that instant sends nothing, and a
+// slow log writer never delays or blocks a provider call.
+#[test]
+fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
+    use crate::debug_log::test_support::{BEGUN_ON_THREAD, HOLD_SLOW_SINK};
+    crate::debug_log::test_support::capture();
+    let limits = CompletionLimits::new(CompletionLimitValues::default()).unwrap();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let authorized = |local: &OllamaProvider, marker: &str| {
+        let mut selected = action();
+        selected.payload.prompt = format!("Investigate {marker}.");
+        let prepared = firewall.prepare_bounded(local, &selected, &limits).unwrap();
+        firewall.authorize_bounded(local, &prepared, None).unwrap()
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let local = OllamaProvider::new(
+        &format!("http://{}/", listener.local_addr().unwrap()),
+        "test-model",
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let request = authorized(&local, "debug-1624-cancel-after-log");
+    let before = BEGUN_ON_THREAD.with(std::cell::Cell::get);
+    let check = || {
+        if BEGUN_ON_THREAD.with(std::cell::Cell::get) > before {
+            CallDirective::Cancelled
+        } else {
+            CallDirective::Continue
+        }
+    };
+    let control = CompletionControl {
+        deadline: Instant::now() + Duration::from_secs(5),
+        check: &check,
+    };
+    assert_eq!(
+        local.complete_bounded(&request, &control).unwrap_err(),
+        not_sent(FailureCode::Cancelled)
+    );
+    assert_no_request(&listener);
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-cancel-after-log");
+    assert_eq!(calls.len(), 1);
+    let received = calls[0].1.as_ref().expect("received entry");
+    assert_eq!(received.error.as_deref(), Some("Cancelled"));
+
+    let (endpoint, server) = http(framed(&ollama_body(r#"{"action":"finish"}"#)));
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let request = authorized(&local, "debug-1624-slow-sink");
+    HOLD_SLOW_SINK.store(true, Ordering::Release);
+    let started = Instant::now();
+    let result = local.complete_bounded(
+        &request,
+        &CompletionControl {
+            deadline: Instant::now() + Duration::from_secs(2),
+            check: &proceed,
+        },
+    );
+    let elapsed = started.elapsed();
+    HOLD_SLOW_SINK.store(false, Ordering::Release);
+    server.join().unwrap();
+    assert_eq!(result.unwrap().text, r#"{"action":"finish"}"#);
+    assert!(elapsed < Duration::from_secs(2));
+    let calls = crate::debug_log::test_support::calls_with("debug-1624-slow-sink");
+    assert!(calls[0].1.as_ref().is_some_and(|r| r.error.is_none()));
+}

@@ -845,24 +845,24 @@ fn user_message(request: &AuthorizedBoundedCompletion) -> Result<String, Bounded
     ))
 }
 
-/// Send one bounded call. When the host installed a debug log (#1624), the
-/// exact request body is recorded as it leaves and the exact response body
-/// (or the failure code) when the call ends.
+/// Send one bounded call. When the host installed a debug log (#1624), an
+/// excerpt of the exact request body is queued before the final control
+/// check and an excerpt of the exact response body (or the failure code)
+/// when the call ends. Queuing never blocks on the log writer.
 fn acquire(
     builder: RequestBuilder,
     body: Vec<u8>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<(Vec<u8>, u64), BoundedCallError> {
-    let logged = crate::debug_log::enabled().then(|| String::from_utf8_lossy(&body).into_owned());
     let mut call = None;
-    let result = acquire_unlogged(builder, body, request, control, logged, &mut call);
+    let result = acquire_unlogged(builder, body, request, control, &mut call);
     if let Some(call) = call {
         call.finish(
             result
                 .as_ref()
                 .ok()
-                .map(|(bytes, _)| String::from_utf8_lossy(bytes).into_owned()),
+                .map(|(bytes, _)| crate::debug_log::excerpt(bytes)),
             result
                 .as_ref()
                 .err()
@@ -877,7 +877,6 @@ fn acquire_unlogged(
     body: Vec<u8>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
-    logged: Option<String>,
     call: &mut Option<crate::debug_log::Call>,
 ) -> Result<(Vec<u8>, u64), BoundedCallError> {
     check_control(control, false)?;
@@ -895,16 +894,23 @@ fn acquire_unlogged(
         .body(body)
         .build_split();
     let mut built = built.map_err(|_| not_sent(FailureCode::InvalidInput))?;
-    check_control(control, false)?;
-    *built.timeout_mut() =
-        Some(timeout.min(control.deadline.saturating_duration_since(Instant::now())));
-    if let Some(sent) = logged {
+    if crate::debug_log::enabled() {
+        let sent = built
+            .body()
+            .and_then(reqwest::blocking::Body::as_bytes)
+            .map(crate::debug_log::excerpt)
+            .unwrap_or_default();
         *call = Some(crate::debug_log::begin(
             "bounded",
             built.url().to_string(),
             sent,
         ));
     }
+    // Checked after the debug entry is queued, so neither cancellation nor
+    // the deadline can be missed while it was recorded.
+    check_control(control, false)?;
+    *built.timeout_mut() =
+        Some(timeout.min(control.deadline.saturating_duration_since(Instant::now())));
     let mut response = client.execute(built).map_err(|error| {
         unknown(if error.is_timeout() {
             FailureCode::DeadlineExceeded

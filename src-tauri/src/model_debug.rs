@@ -1,6 +1,7 @@
 //! Model debug log (#1624): every model request and response, appended as
 //! readable text to a local file that Help → Debug Viewer opens in the
-//! system text editor. Nothing here leaves the machine; request headers
+//! system text editor. Entries arrive on the `llm` crate's writer thread,
+//! never on a provider call, with bodies already capped at 1 MiB. Nothing here leaves the machine; request headers
 //! (where API keys travel) are never recorded.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -138,6 +139,12 @@ pub(crate) fn format_entry(exchange: &ModelExchange) -> String {
             }
         ),
     };
+    if exchange.dropped_before > 0 {
+        out.push_str(&format!(
+            "[{} earlier entries dropped: debug log queue full]\n",
+            exchange.dropped_before
+        ));
+    }
     if let Some(error) = &exchange.error {
         out.push_str(&format!("error: {error}\n"));
     }
@@ -243,6 +250,7 @@ mod tests {
             request: Some(request.into()),
             response: None,
             error: None,
+            dropped_before: 0,
         }
     }
 
@@ -257,6 +265,7 @@ mod tests {
             request: None,
             response: response.map(Into::into),
             error: error.map(Into::into),
+            dropped_before: 0,
         }
     }
 
