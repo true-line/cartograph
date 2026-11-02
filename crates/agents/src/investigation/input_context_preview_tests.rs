@@ -760,3 +760,69 @@ fn context_preview_preserves_mixed_history_and_clears_only_latest_capacity_slot(
     )
     .unwrap();
 }
+
+// AC-0260: repeated metadata identity is exact, never fuzzy evidence equality.
+#[test]
+fn repeated_metadata_identity_preserves_context_and_all_read_parameters() {
+    let f = Fixture::new(SpecialistId::DomainAnalystV18, "{}");
+    let mut ledger = f.ledger.clone();
+    let read = f.read.clone();
+    let action = QualifiedInvestigationAction::ReadCoverageInventory(read.clone());
+    assert!(!action.repeats_acquired_metadata(&ledger));
+    ledger
+        .coverage_reads
+        .push(InvestigationCoverageReadManifest {
+            request: read.clone(),
+            response_hash: "a".repeat(64),
+            response_bytes: 1,
+        });
+    assert!(action.repeats_acquired_metadata(&ledger));
+    let mut changed = read.clone();
+    changed.max_bytes += 1;
+    assert!(
+        !QualifiedInvestigationAction::ReadCoverageInventory(changed)
+            .repeats_acquired_metadata(&ledger)
+    );
+    let mut changed = read;
+    changed.context_id.push('x');
+    assert!(
+        !QualifiedInvestigationAction::ReadCoverageInventory(changed)
+            .repeats_acquired_metadata(&ledger)
+    );
+    let query: InvestigationQuery = serde_json::from_value(json!({
+        "scope":{"type":"all"}, "kind":null, "labels":[],
+        "max_facts":12, "max_bytes":16384, "cursor":null
+    }))
+    .unwrap();
+    let context_id = ledger.coverage.as_ref().unwrap().context_id.clone();
+    let action = QualifiedInvestigationAction::QueryContext {
+        context_id: context_id.clone(),
+        query: query.clone(),
+    };
+    assert!(!action.repeats_acquired_metadata(&ledger));
+    ledger.queries.push(InvestigationQueryManifest {
+        query: query.clone(),
+        response_hash: "b".repeat(64),
+        response_bytes: 1,
+        returned_facts: 0,
+        total_selected: 0,
+        has_more: false,
+    });
+    assert!(action.repeats_acquired_metadata(&ledger));
+    let mut changed = query.clone();
+    changed.max_bytes += 1;
+    assert!(
+        !QualifiedInvestigationAction::QueryContext {
+            context_id: context_id.clone(),
+            query: changed
+        }
+        .repeats_acquired_metadata(&ledger)
+    );
+    assert!(
+        !QualifiedInvestigationAction::QueryContext {
+            context_id: format!("{context_id}x"),
+            query
+        }
+        .repeats_acquired_metadata(&ledger)
+    );
+}

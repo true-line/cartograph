@@ -115,7 +115,21 @@ fn refuse(
         // must never create feedback or permit another model call.
         return Err(InvestigationStoreError::Invalid);
     }
-    let (_, usage) = transitions::validate_response(tx, task, response)?;
+    let (_, mut usage) = transitions::validate_response(tx, task, response)?;
+    if matches!(
+        reason,
+        admission_journal::RefusalReason::Action(
+            agents::investigation::ActionRefusalReason::RepeatedRead
+        )
+    ) {
+        // The saved journal proves this is an already acquired read. Charge
+        // this proposal once without claiming another tool execution/result.
+        usage.tool_actions = usage
+            .tool_actions
+            .checked_add(1)
+            .ok_or(InvestigationStoreError::Capacity)?;
+        validate_usage(&usage, &task.detail.limits)?;
+    }
     admission_journal::initialize(tx)?;
     insert_body(
         tx,
@@ -162,6 +176,12 @@ fn refuse(
         admission_journal::RefusalReason::Capacity(_) => (
             InvestigationEventKind::CapacityRefused,
             "The proposed acquisition could not be admitted within the proven continuation capacity.",
+        ),
+        admission_journal::RefusalReason::Action(
+            agents::investigation::ActionRefusalReason::RepeatedRead,
+        ) => (
+            InvestigationEventKind::ActionRefused,
+            "This exact read was already acquired; the attempt was charged without executing it again.",
         ),
         admission_journal::RefusalReason::Action(_) => (
             InvestigationEventKind::ActionRefused,

@@ -68,7 +68,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     {
                         use agents::investigation::query_refusal::QueryRefusalRecord;
                         let mut record = QueryRefusalRecord {
-                            schema_version: 1,
+                            schema_version: 2,
                             record_id: String::new(),
                             task_id: self.id.into(),
                             step_id: step_id.into(),

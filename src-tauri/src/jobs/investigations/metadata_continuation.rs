@@ -45,6 +45,7 @@ impl MetadataContinuationSnapshot {
                 &INVESTIGATION_V2_POLICY,
             )?;
             let expected = agents::investigation::AcquisitionAdmission {
+                finish_reason: None,
                 choices_hash: choices.stamp_hash()?,
                 action_feedback_hash: None,
             };

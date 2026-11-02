@@ -40,6 +40,11 @@ impl NextPromptSnapshot {
     pub(crate) fn mode(&self) -> CompletionCallMode {
         self.mode
     }
+    pub(crate) fn preparation_mode(&self) -> Result<CompletionCallMode, InvestigationStoreError> {
+        Ok(self
+            .metadata()
+            .next_call_mode_with_policy(&self.detail().usage, &INVESTIGATION_V2_POLICY)?)
+    }
     pub(crate) fn capacity_refusal_count(&self) -> u32 {
         self.capacity.count
     }
@@ -107,7 +112,13 @@ impl JobStore {
         let metadata = metadata_current_next_prompt(&tx, &task)?;
         let basis = super::super::turn::basis(&tx, &task)?;
         let capacity = admission_journal::derive_current(&tx, &task)?;
-        let derived_mode = metadata.next_call_mode_with_policy(&task.detail.usage, policy)?;
+        let derived_mode = if capacity.action_feedback.as_ref().is_some_and(|feedback| {
+            feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
+        }) {
+            CompletionCallMode::FinishOnly
+        } else {
+            metadata.next_call_mode_with_policy(&task.detail.usage, policy)?
+        };
         let pending = task.pending.clone();
         let mode = if task.phase == Phase::Consent {
             let call = task

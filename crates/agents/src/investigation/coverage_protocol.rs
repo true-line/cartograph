@@ -30,6 +30,30 @@ enum ReadAction {
 }
 
 impl QualifiedInvestigationAction {
+    /// Exact metadata-read identity in an authenticated frozen ledger. This is
+    /// not a tool result: callers must separately journal and charge a skipped
+    /// action, and must not append a query, inventory read, or citation for it.
+    /// A changed byte limit, cursor, context, or query remains a distinct read.
+    pub fn repeats_acquired_metadata(&self, ledger: &InvestigationInputLedger) -> bool {
+        let Some(coverage) = ledger.coverage.as_ref() else {
+            return false;
+        };
+        match self {
+            Self::QueryContext { context_id, query } => {
+                context_id == &coverage.context_id
+                    && ledger.queries.iter().any(|saved| &saved.query == query)
+            }
+            Self::ReadCoverageInventory(read) => {
+                read.context_id == coverage.context_id
+                    && ledger
+                        .coverage_reads
+                        .iter()
+                        .any(|saved| &saved.request == read)
+            }
+            Self::SourceOrFinish(_) => false,
+        }
+    }
+
     /// Admit one strict action against the already prepared qualified identity.
     /// The caller obtains that identity from its validated immutable ledger.
     pub fn decode(raw: &str, expected_context_id: &str) -> Result<Self, InvestigationError> {

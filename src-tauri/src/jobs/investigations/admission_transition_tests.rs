@@ -349,6 +349,7 @@ fn action_fixture() -> (completion::InternalFixture, Value) {
     disclosure.query_history.as_mut().unwrap().request_hash = intent.request_hash.clone();
     disclosure.query_history.as_mut().unwrap().registry_hash = registry.registry_hash;
     disclosure.admission.as_mut().unwrap().acquisition = Some(AcquisitionAdmission {
+        finish_reason: None,
         choices_hash: choices.stamp_hash().unwrap(),
         action_feedback_hash: None,
     });
@@ -587,4 +588,34 @@ fn action_refusal_journal_preserves_capacity_bytes_and_atomic_feedback() {
             .action_feedback
             .is_some()
     );
+}
+
+// AC-0260: a repetition notice cannot substitute for an actual acquired read.
+#[test]
+fn repeated_read_notice_rejects_unacquired_action_without_charging() {
+    let (mut f, offered) = action_fixture();
+    assert!(f.ledger.queries.is_empty() && f.ledger.coverage_reads.is_empty());
+    let before = saved_task_row(&f.store.conn, &f.basis.task_id);
+    let before_inputs = body_rows(&f.store.conn, "investigation_inputs", &f.basis.task_id);
+    let response = fixture::response(&f, &offered);
+    let revision = f.task.detail.summary.revision;
+    assert!(
+        f.store
+            .refuse_next_prompt(
+                &f._execution_guard,
+                revision,
+                &response,
+                &offered,
+                admission_journal::RefusalReason::Action(
+                    agents::investigation::ActionRefusalReason::RepeatedRead
+                ),
+            )
+            .is_err()
+    );
+    assert_eq!(saved_task_row(&f.store.conn, &f.basis.task_id), before);
+    assert_eq!(
+        body_rows(&f.store.conn, "investigation_inputs", &f.basis.task_id),
+        before_inputs
+    );
+    assert!(fixture::state(&f).action_feedback.is_none());
 }

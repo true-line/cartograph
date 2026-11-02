@@ -217,6 +217,10 @@ struct NextProvider {
     metadata_order: Option<[bool; 2]>,
     metadata_query: Option<Value>,
     repeat_metadata_query: bool,
+    duplicate_metadata_recovery: bool,
+    duplicate_inventory: bool,
+    replay_metadata_query: bool,
+    ignore_duplicate_finish: bool,
     query_refusal_recovery: bool,
     received_payloads: std::sync::Mutex<Vec<llm::CompletionPayload>>,
     inventory_max_bytes: usize,
@@ -238,6 +242,10 @@ impl NextProvider {
             metadata_order: None,
             metadata_query: None,
             repeat_metadata_query: false,
+            duplicate_metadata_recovery: false,
+            duplicate_inventory: false,
+            replay_metadata_query: false,
+            ignore_duplicate_finish: false,
             query_refusal_recovery: false,
             received_payloads: std::sync::Mutex::new(Vec::new()),
             inventory_max_bytes: 32768,
@@ -420,10 +428,51 @@ impl LlmProvider for NextProvider {
         } else if self.query_refusal_recovery && call == 2 {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
+            // Select the recovery scope from the actual admitted transport
+            // schema, rather than scripting knowledge unavailable to the model.
+            let schema: Value =
+                serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
+                    .unwrap();
+            let scopes = schema["$defs"]["query_scope"]["anyOf"].as_array().unwrap();
+            assert_eq!(scopes.len(), 1);
+            let scope_type = &scopes[0]["properties"]["type"]["const"];
+            assert_eq!(scope_type, "all");
+            assert_eq!(schema["$defs"]["query_cursor"], json!({"type":"null"}));
             json!({"type":"query_context","context_id":prompt["context_id"],"query":{
-                "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
+                "scope":{"type":scope_type},"kind":"node","labels":["BusinessRule"],
                 "max_facts":1,"max_bytes":32768,"cursor":null}})
             .to_string()
+        } else if self.replay_metadata_query && call == 2 {
+            let schema: Value =
+                serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
+                    .unwrap();
+            let offered = schema["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|branch| branch["properties"]["type"]["const"] == "replay_query")
+                .expect("the admitted schema must offer an authenticated replay");
+            let fields = &offered["properties"];
+            json!({"type":"replay_query","context_id":fields["context_id"]["const"],
+                "query_index":fields["query_index"]["const"],"query_id":fields["query_id"]["const"]}).to_string()
+        } else if self.duplicate_metadata_recovery
+            && (call == 2 || (call > 2 && self.ignore_duplicate_finish))
+        {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            if self.duplicate_inventory {
+                let inventory =
+                    &prompt["completion_contract"]["obligations"]["obligations"][0]["target"];
+                json!({"type":"read_coverage_inventory","context_id":inventory["context_id"],
+                    "repo":inventory["repo"],"inventory_hash":inventory["inventory_hash"],
+                    "max_bytes":self.inventory_max_bytes})
+                .to_string()
+            } else {
+                json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                    "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
+                    "max_facts":1,"max_bytes":32768,"cursor":null}})
+                .to_string()
+            }
         } else if self.repeat_metadata_query {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
@@ -2016,7 +2065,7 @@ fn desktop_v18_unknown_anchor_after_inventory_recovers() {
     let prompts = provider.observed.prompts.lock().unwrap();
     assert_eq!(
         prompts[2]["turn_progress"]["action_feedback"]["reason"],
-        "query_rejected"
+        "unknown_anchor"
     );
     assert!(
         !prompts[2]
@@ -2091,3 +2140,158 @@ fn desktop_v18_cancelled_query_does_not_publish_refusal_or_retry() {
 
 #[path = "next_prompt_timeout_witness.rs"]
 mod timeout_witness;
+
+// AC-0260: ordinary dispatch charges one duplicate notice, then finishes/reopens.
+#[test]
+fn desktop_v18_duplicate_read_enters_authenticated_finish_only() {
+    for (inventory, ignore_finish) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut scripted = NextProvider::new(false);
+        scripted.metadata_order = Some([false, true]);
+        scripted.duplicate_metadata_recovery = true;
+        scripted.duplicate_inventory = inventory;
+        scripted.ignore_duplicate_finish = ignore_finish;
+        let provider = Arc::new(scripted);
+        let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18);
+        f.run(provider.clone());
+        let state = f.base.base.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&f.id).unwrap();
+        assert_eq!(
+            detail.summary.status,
+            if ignore_finish {
+                InvestigationStatus::Failed
+            } else {
+                InvestigationStatus::Completed
+            },
+            "{:?}",
+            detail.error
+        );
+        assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(detail.usage.tool_actions, 3);
+        if ignore_finish {
+            assert!(jobs.investigation_result(&f.id).unwrap().is_none());
+            assert!(
+                detail.error.as_deref()
+                    == Some(
+                        "The provider proposed a tool when only a finishing response was permitted."
+                    ),
+                "{:?}",
+                detail.error
+            );
+        }
+        let ledger = jobs.investigation_ledger(&f.id).unwrap().unwrap();
+        assert_eq!(ledger.queries.len(), 1);
+        assert_eq!(ledger.coverage_reads.len(), 1);
+        let prompts = provider.observed.prompts.lock().unwrap();
+        assert_eq!(prompts[3]["turn_progress"]["admission_mode"], "finish_only");
+        assert_eq!(
+            prompts[3]["turn_progress"]["action_feedback"]["reason"],
+            "repeated_read"
+        );
+        let events = jobs.investigation_events(&f.id, 0).unwrap();
+        assert_eq!(
+            events
+                .items
+                .iter()
+                .filter(|e| e.kind == InvestigationEventKind::ToolCompleted)
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .items
+                .iter()
+                .filter(|e| e.kind == InvestigationEventKind::ActionRefused)
+                .count(),
+            1
+        );
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+        assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+
+        // Rehashing an invocation after removing the finish witness must not
+        // erase the journal's reason for restricting this exact saved call.
+        if !ignore_finish {
+            let conn = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
+            let rows = conn
+                .prepare("SELECT step_id,body FROM investigation_invocations WHERE task_id=?1")
+                .unwrap()
+                .query_map([&f.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let (step, original) = rows
+                .into_iter()
+                .find(|(_, bytes)| {
+                    let value: Value = serde_json::from_slice(bytes).unwrap();
+                    value["disclosure"]["admission"]["acquisition"]["finish_reason"]
+                        == "repeated_read"
+                })
+                .unwrap();
+            let mut forged: Value = serde_json::from_slice(&original).unwrap();
+            forged["disclosure"]["admission"]["acquisition"]
+                .as_object_mut()
+                .unwrap()
+                .remove("finish_reason");
+            let forged = serde_json::to_vec(&forged).unwrap();
+            let trigger: String = conn.query_row("SELECT sql FROM sqlite_schema WHERE name='investigation_invocations_no_update'", [], |row| row.get(0)).unwrap();
+            for (bytes, valid) in [(&forged, false), (&original, true)] {
+                let tx = conn.unchecked_transaction().unwrap();
+                tx.execute_batch("DROP TRIGGER investigation_invocations_no_update")
+                    .unwrap();
+                tx.execute("UPDATE investigation_invocations SET body=?1,body_hash=?2 WHERE task_id=?3 AND step_id=?4",
+                    rusqlite::params![bytes,content_hash(bytes),f.id,step]).unwrap();
+                tx.execute_batch(&trigger).unwrap();
+                tx.commit().unwrap();
+                assert_eq!(reopened.investigation(&f.id).is_ok(), valid);
+            }
+        }
+    }
+}
+
+// AC-0260: an offered authenticated replay is intentional, not a duplicate refusal.
+#[test]
+fn desktop_v18_authenticated_query_replay_executes_and_reopens() {
+    let mut scripted = NextProvider::new(false);
+    scripted.metadata_order = Some([false, true]);
+    scripted.replay_metadata_query = true;
+    let provider = Arc::new(scripted);
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18);
+    f.run(provider.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(
+        detail.summary.status,
+        InvestigationStatus::Completed,
+        "{:?}",
+        detail.error
+    );
+    assert_eq!(detail.usage.model_invocations, 4);
+    assert_eq!(detail.usage.tool_actions, 3);
+    let ledger = jobs.investigation_ledger(&f.id).unwrap().unwrap();
+    assert_eq!(ledger.queries.len(), 2);
+    assert_eq!(ledger.coverage_reads.len(), 1);
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    assert_eq!(
+        events
+            .items
+            .iter()
+            .filter(|e| e.kind == InvestigationEventKind::ToolCompleted)
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .items
+            .iter()
+            .filter(|e| e.kind == InvestigationEventKind::ActionRefused)
+            .count(),
+        0
+    );
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_ledger(&f.id).unwrap(), Some(ledger));
+}

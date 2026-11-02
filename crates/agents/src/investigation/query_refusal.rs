@@ -32,6 +32,23 @@ pub struct QueryRefusalRecord {
     pub reason: QueryRejection,
 }
 impl QueryRefusalRecord {
+    /// V1 preserves its historical feedback bytes. V2 discloses the closed
+    /// diagnostic already authenticated in the event, without model text or IDs.
+    pub fn feedback_reason(&self) -> ActionRefusalReason {
+        if self.schema_version == 1 {
+            return ActionRefusalReason::QueryRejected;
+        }
+        match self.reason {
+            QueryRejection::UnknownAnchor => ActionRefusalReason::UnknownAnchor,
+            QueryRejection::UnknownNode => ActionRefusalReason::UnknownNode,
+            QueryRejection::CursorSnapshotMismatch => ActionRefusalReason::CursorSnapshot,
+            QueryRejection::CursorSelectionMismatch => ActionRefusalReason::CursorSelection,
+            QueryRejection::CursorContextMismatch => ActionRefusalReason::CursorContext,
+            QueryRejection::InvalidCursorOffset => ActionRefusalReason::CursorOffset,
+            QueryRejection::InvalidLimit => ActionRefusalReason::QueryLimit,
+        }
+    }
+
     pub fn content_id(&self) -> Result<String, InvestigationError> {
         let mut record = self.clone();
         record.record_id.clear();
@@ -73,7 +90,7 @@ impl QueryRefusalRecord {
             .coverage
             .as_ref()
             .map(|proof| proof.context_id.as_str());
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
             || !records::opaque_id(task_id)
             || !records::opaque_id(step_id)
             || self.task_id != task_id
@@ -100,7 +117,7 @@ impl InvestigationEvent {
                 if self.investigation_id == record.task_id
                     && self.step_id.as_deref() == Some(record.step_id.as_str())
                     && self.tool == Some(InvestigationTool::QueryContext)
-                    && record.schema_version == 1
+                    && matches!(record.schema_version, 1 | 2)
                     && record.record_id == record.content_id()? =>
             {
                 Ok(())
@@ -171,6 +188,22 @@ mod tests {
             &INVESTIGATION_V1_POLICY,
         )
     }
+    #[test]
+    fn query_refusal_v2_reason_preserves_v1_projection_and_binds_version() {
+        let (mut record, ledger) = fixture();
+        let legacy_id = record.record_id.clone();
+        assert_eq!(record.feedback_reason(), ActionRefusalReason::QueryRejected);
+        record.schema_version = 2;
+        assert!(validate(&record, &ledger, &record.action_hash).is_err());
+        record.record_id = record.content_id().unwrap();
+        assert_ne!(record.record_id, legacy_id);
+        assert!(validate(&record, &ledger, &record.action_hash).is_ok());
+        assert_eq!(record.feedback_reason(), ActionRefusalReason::UnknownAnchor);
+        record.schema_version = 3;
+        record.record_id = record.content_id().unwrap();
+        assert!(validate(&record, &ledger, &record.action_hash).is_err());
+    }
+
     #[test]
     fn query_refusal_record_binds_action_step_and_unchanged_ledger() {
         let (record, ledger) = fixture();
@@ -272,6 +305,20 @@ mod feedback_budget_tests {
         };
         let maximum = serde_json::to_vec(&reserved).unwrap();
         let original_stamp = reserved.stamp_hash().unwrap();
+        for reason in [
+            ActionRefusalReason::RepeatedRead,
+            ActionRefusalReason::QueryRejected,
+            ActionRefusalReason::UnknownAnchor,
+            ActionRefusalReason::UnknownNode,
+            ActionRefusalReason::CursorSnapshot,
+            ActionRefusalReason::CursorSelection,
+            ActionRefusalReason::CursorContext,
+            ActionRefusalReason::CursorOffset,
+            ActionRefusalReason::QueryLimit,
+        ] {
+            reserved.reason = reason;
+            assert!(serde_json::to_vec(&reserved).unwrap().len() <= maximum.len());
+        }
         reserved.reason = ActionRefusalReason::QueryRejected;
         let actual = serde_json::to_vec(&reserved).unwrap();
         assert!(actual.len() < maximum.len());

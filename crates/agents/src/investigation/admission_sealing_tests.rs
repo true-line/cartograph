@@ -504,6 +504,7 @@ fn reserved_acquisition_stamp_preserves_legacy_bytes_and_rejects_present() {
             .is_ok()
         );
         let reserved = AcquisitionAdmission {
+            finish_reason: None,
             choices_hash: "b".repeat(64),
             action_feedback_hash: Some("c".repeat(64)),
         };
@@ -539,6 +540,7 @@ fn reserved_acquisition_stamp_checks_hash_shape() {
     ] {
         assert_eq!(
             AcquisitionAdmission {
+                finish_reason: None,
                 choices_hash,
                 action_feedback_hash
             }
@@ -733,4 +735,26 @@ fn acquisition_finish_consistency_binds_identity_policy_and_stamp() {
             );
         }
     }
+}
+
+// AC-0260: finish witnesses require a feedback binding; absence stays historical.
+#[test]
+fn repeated_read_finish_stamp_preserves_legacy_bytes_and_rejects_other_reasons() {
+    let mut stamp = AcquisitionAdmission {
+        finish_reason: None,
+        choices_hash: "a".repeat(64),
+        action_feedback_hash: None,
+    };
+    let legacy = serde_json::to_value(&stamp).unwrap();
+    assert!(legacy.get("finish_reason").is_none());
+    assert_eq!(
+        serde_json::from_value::<AcquisitionAdmission>(legacy).unwrap(),
+        stamp
+    );
+    stamp.finish_reason = Some(ActionRefusalReason::RepeatedRead);
+    assert!(stamp.validate().is_err());
+    stamp.action_feedback_hash = Some("b".repeat(64));
+    assert!(stamp.validate().is_ok());
+    stamp.finish_reason = Some(ActionRefusalReason::UnknownAnchor);
+    assert!(stamp.validate().is_err());
 }

@@ -674,3 +674,71 @@ fn completed_acquisitions_offer_only_resolvable_replay_pairs() {
         Some(super::super::response_schema::FINISH)
     );
 }
+
+// AC-0260: an unknown-ID refusal offers fresh discovery, not another guessed ID.
+#[test]
+fn unknown_id_recovery_schema_is_bounded_and_preserves_legacy_feedback() {
+    let f = Fixture::new();
+    let ledger = f.empty();
+    let mut complete = f.derive(&ledger, &[]).unwrap();
+    complete.entries.clear();
+    complete.blocked.clear();
+    complete.deferred = 0;
+    let mode = staged_refusal::CompletionCallMode::Choice;
+    let ordinary =
+        response_schema::select_acquisition(mode, &complete, &ledger, &f.contract.request_hash)
+            .unwrap();
+    let mut feedback = ActionRefusalFeedback {
+        reason: ActionRefusalReason::QueryRejected,
+        invocation_ordinal: 1,
+        action_hash: "a".repeat(64),
+        choices_hash: complete.stamp_hash().unwrap(),
+    };
+    let select = |feedback: &ActionRefusalFeedback| {
+        response_schema::select_acquisition_recovery(
+            mode,
+            &complete,
+            &ledger,
+            &f.contract.request_hash,
+            Some(feedback),
+        )
+        .unwrap()
+    };
+    assert_eq!(select(&feedback), ordinary);
+    for reason in [
+        ActionRefusalReason::UnknownAnchor,
+        ActionRefusalReason::UnknownNode,
+    ] {
+        feedback.reason = reason;
+        let recovered = select(&feedback).unwrap();
+        assert!(recovered.len() < ordinary.as_ref().unwrap().len());
+        let schema: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(
+            schema["$defs"]["query_scope"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            schema["$defs"]["query_scope"]["anyOf"][0]["properties"]["type"]["const"],
+            "all"
+        );
+        assert_eq!(
+            schema["$defs"]["query_cursor"],
+            serde_json::json!({"type":"null"})
+        );
+        assert_eq!(
+            response_schema::select_acquisition_recovery(
+                staged_refusal::CompletionCallMode::FinishOnly,
+                &complete,
+                &ledger,
+                &f.contract.request_hash,
+                Some(&feedback)
+            )
+            .unwrap()
+            .as_deref(),
+            Some(response_schema::FINISH)
+        );
+    }
+}

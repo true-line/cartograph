@@ -21,12 +21,18 @@ pub struct DisclosedAdmissionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionAdmission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<ActionRefusalReason>,
     pub choices_hash: String,
     pub action_feedback_hash: Option<String>,
 }
 impl AcquisitionAdmission {
     pub fn validate(&self) -> Result<(), InvestigationError> {
-        if !crate::source_basis::hash(&self.choices_hash)
+        if self
+            .finish_reason
+            .is_some_and(|reason| reason != ActionRefusalReason::RepeatedRead)
+            || (self.finish_reason.is_some() && self.action_feedback_hash.is_none())
+            || !crate::source_basis::hash(&self.choices_hash)
             || self
                 .action_feedback_hash
                 .as_deref()
@@ -42,7 +48,15 @@ impl AcquisitionAdmission {
 #[serde(rename_all = "snake_case")]
 pub enum ActionRefusalReason {
     ActionNotOffered,
+    RepeatedRead,
     QueryRejected,
+    UnknownAnchor,
+    UnknownNode,
+    CursorSnapshot,
+    CursorSelection,
+    CursorContext,
+    CursorOffset,
+    QueryLimit,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActionRefusalFeedback {
@@ -126,6 +140,28 @@ impl DisclosedAdmissionState {
         }
         if let Some(feedback) = &self.capacity_feedback {
             feedback.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Shape-only mode check. The host must authenticate finish_reason against
+    /// the exact saved refusal prefix; this stamp alone grants no authority.
+    pub fn validate_mode_with_metadata(
+        &self,
+        metadata: &ProtectedCompletionMetadata,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        let expected = if self
+            .acquisition
+            .as_ref()
+            .is_some_and(|stamp| stamp.finish_reason == Some(ActionRefusalReason::RepeatedRead))
+        {
+            CompletionCallMode::FinishOnly
+        } else {
+            metadata.next_call_mode_with_policy(&self.consumed_budgets, policy)?
+        };
+        if expected != self.mode {
+            return Err(InvestigationError::InvalidInput);
         }
         Ok(())
     }
