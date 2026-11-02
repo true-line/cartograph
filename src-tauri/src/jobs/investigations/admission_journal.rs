@@ -224,7 +224,8 @@ fn timeline(
 ) -> Result<Timeline, InvestigationStoreError> {
     require_transaction(connection)?;
     admission_contract::validate_pairing(task)?;
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let id = &task.detail.summary.investigation_id;
     let count: i64 = connection.query_row(
         "SELECT count(*) FROM investigation_events WHERE task_id=?1",
@@ -626,7 +627,7 @@ fn validate_publication_response(
                     &call.request_hash,
                     before,
                     index,
-                    &INVESTIGATION_V2_POLICY,
+                    &super::policy_for_detail(&task.detail)?,
                 )?;
                 let replay = serde_json::json!({"type":"replay_query","context_id":context_id,
                     "query_index":reference.query_index,"query_id":reference.query_id});
@@ -653,7 +654,8 @@ fn read_entries(
 ) -> Result<Vec<Entry>, InvestigationStoreError> {
     let present = preflight(connection)?;
     let id = &task.detail.summary.investigation_id;
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let mut entries: Vec<Entry> = vec![];
     if present {
         let rows=connection.prepare("SELECT sequence,step_id,invocation_ordinal FROM investigation_admission_refusals WHERE task_id=?1 ORDER BY sequence LIMIT ?2")?
@@ -846,6 +848,7 @@ fn validate_proposal(
     ledger: &InvestigationInputLedger,
     call: &SavedCallBasis,
     role: SpecialistId,
+    policy: &InvestigationPolicy,
 ) -> Result<CompletionInvestigationAction, InvestigationStoreError> {
     // Capacity refusals are read proposals only. Exclude the broader finish
     // decoder before it can acquire findings that this journal always rejects.
@@ -869,7 +872,7 @@ fn validate_proposal(
         context,
         &call.request_hash,
         ledger,
-        &INVESTIGATION_V2_POLICY,
+        policy,
         role,
     )?;
     if !matches!(action, CompletionInvestigationAction::Read(_))
@@ -896,6 +899,7 @@ fn validate_reason(
         ledger,
         call,
         task.detail.summary.specialist_id,
+        &super::policy_for_detail(&task.detail)?,
     )?;
     if let RefusalReason::Action(reason) = reason {
         let choices = history
@@ -973,6 +977,7 @@ pub(super) fn saved_core_and_capacity(
 /// Saved provenance for the pure agents witness. Only the same-transaction
 /// replay below can construct this owner; no caller role/stamp is authority.
 pub(super) struct AuthenticatedCompletionBasis {
+    policy: InvestigationPolicy,
     call: SavedCallBasis,
     core: SavedCallCore,
     contract: agents::investigation::InvestigationCompletionContract,
@@ -1017,13 +1022,14 @@ impl AuthenticatedCompletionBasis {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let result = Self::from_named(intent, &history, &mut line, &entries, ordinal)?;
+        let result = Self::from_named(task, intent, &history, &mut line, &entries, ordinal)?;
         drop((history, line, entries));
         result.binding()?;
         Ok(Some(result))
     }
     // Eligibility is enforced by the two distinct factories, never a flag.
     fn from_named(
+        task: &StoredTask,
         intent: &completion::CompletionIntent,
         history: &completion::SavedMetadataHistory<'_>,
         line: &mut Timeline,
@@ -1049,6 +1055,7 @@ impl AuthenticatedCompletionBasis {
             .remove(&ordinal)
             .ok_or(InvestigationStoreError::Missing)?;
         Ok(Self {
+            policy: super::policy_for_detail(&task.detail)?,
             call: witness.call,
             core: witness.core,
             contract: intent.contract(),
@@ -1072,7 +1079,7 @@ impl AuthenticatedCompletionBasis {
                 .as_ref()
                 .ok_or(InvestigationStoreError::Invalid)?,
             self.feedback.as_ref(),
-            &INVESTIGATION_V2_POLICY,
+            &self.policy,
         )?)
     }
     pub(super) fn check_step(
@@ -1180,7 +1187,7 @@ impl AuthenticatedRefusalBasis {
             return Err(InvestigationStoreError::Invalid);
         }
         let result = Self(AuthenticatedCompletionBasis::from_named(
-            intent, &history, &mut line, &entries, ordinal,
+            task, intent, &history, &mut line, &entries, ordinal,
         )?);
         drop((history, line, entries));
         result.binding()?;

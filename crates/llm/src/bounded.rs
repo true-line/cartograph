@@ -85,6 +85,9 @@ impl Default for CompletionLimitValues {
 #[serde(transparent)]
 pub struct CompletionLimits(CompletionLimitValues);
 
+/// Explicit configurable timeout ceiling; the default remains 180 seconds.
+pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
+
 impl CompletionLimits {
     pub fn new(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
         let ceiling = CompletionLimitValues::default();
@@ -97,7 +100,7 @@ impl CompletionLimits {
                 u64::from(values.max_output_tokens),
                 u64::from(ceiling.max_output_tokens),
             ),
-            (values.request_timeout_ms, ceiling.request_timeout_ms),
+            (values.request_timeout_ms, MAX_REQUEST_TIMEOUT_MS),
             (u64::from(values.max_spans), u64::from(MAX_COMPLETION_SPANS)),
         ];
         if pairs.iter().any(|(value, max)| *value == 0 || value > max) {

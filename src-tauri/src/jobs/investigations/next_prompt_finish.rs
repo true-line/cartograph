@@ -39,7 +39,8 @@ impl JobStore {
         // while the provider response was in flight. Refusals retain the normal
         // cancellation precedence and can never start a new acquisition.
         transitions::check_job(&tx, execution, true)?;
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
         let request = input.request.normalized_with_policy(policy)?;
         if request.intent_hash_with_policy(policy)? != task.intent_hash {
             return Err(InvestigationStoreError::Conflict);

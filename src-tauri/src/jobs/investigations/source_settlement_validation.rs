@@ -61,7 +61,8 @@ pub(super) fn validate_continuation(
     reason: Option<&UnavailableReason>,
     active: u64,
 ) -> Result<InvestigationInputLedger, InvestigationStoreError> {
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&before.detail)?;
+    let policy = &effective_policy;
     validate_next_ledger(before, saved, base, c.candidate.ledger(), kind, active)?;
     if c.current.ledger() != base {
         return Err(InvestigationStoreError::Invalid);
@@ -139,7 +140,7 @@ pub(super) fn validate_continuation(
         let choices = completion::SavedMetadataHistory::load(connection, before)?
             .prospective_choices(ledger, &next_metadata, &records)?
             .ok_or(InvestigationStoreError::Invalid)?;
-        source_snapshot::validate_acquisition(&choices, state)?;
+        source_snapshot::validate_acquisition(&choices, state, policy)?;
     }
     if state.consumed_budgets != usage_for(saved, kind, active)?
         || state.mode
@@ -190,7 +191,8 @@ pub(super) fn validate_next_ledger(
     kind: DispositionKind,
     active: u64,
 ) -> Result<(), InvestigationStoreError> {
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&before.detail)?;
+    let policy = &effective_policy;
     if !matches!(
         kind,
         DispositionKind::Acquired | DispositionKind::ReadUnavailable

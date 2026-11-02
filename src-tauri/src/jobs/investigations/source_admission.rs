@@ -105,7 +105,8 @@ impl JobStore {
             input.current_prepared,
             input.active_milliseconds,
         )?;
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
         let call = &authenticated.call;
         let core = &authenticated.core;
         if completion::metadata_current_next_prompt(&tx, &task)? != core.metadata {
@@ -343,7 +344,8 @@ fn count_headroom(
     envelope: &source_settlement::SettlementEnvelope,
     attempt_count: usize,
 ) -> Result<(), InvestigationStoreError> {
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let id = &task.detail.summary.investigation_id;
     if envelope.events > reservation.storage_claim.settlement_events
         || envelope.input_rows > 1

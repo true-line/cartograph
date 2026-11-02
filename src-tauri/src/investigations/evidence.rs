@@ -424,7 +424,7 @@ fn append_source_evidence(
         text_hash: Some(content_hash(text.as_bytes())),
         origin,
     });
-    ledger.validate_with_policy(context.policy)?;
+    ledger.validate_with_policy(&context.policy)?;
     Ok((ledger, AgentEvidence { id, source, text }))
 }
 

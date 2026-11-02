@@ -189,7 +189,15 @@ fn run_completion_with_clock<R: tauri::Runtime>(
     clock: RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 ) {
-    match FrozenContext::completion_acquisition_request(&request) {
+    let projected = (|| {
+        let state = app.state::<AppState>();
+        let detail = read_detail(&state, &id, &execution)?;
+        let policy = crate::jobs::investigations::policy_for_detail(&detail)?;
+        Ok::<_, Failure>(FrozenContext::completion_acquisition_request_with_policy(
+            &request, &policy,
+        )?)
+    })();
+    match projected {
         Ok(projected) => run_inner(
             app,
             id,
@@ -242,7 +250,12 @@ fn run_inner<R: tauri::Runtime>(
     };
     let outcome = (|| {
         let request = request?;
-        let detail = read_detail(&state, &id, &execution)?;
+        let (detail, request_timeout_ms) = state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .investigation_owned_runtime(&execution, &id)?;
+        clock.set_active_limit(detail.limits.active_seconds);
         let mut worker = Worker {
             app: &app,
             state: &state,
@@ -252,6 +265,7 @@ fn run_inner<R: tauri::Runtime>(
             detail,
             clock: &mut clock,
             task_limits,
+            request_timeout_ms,
         };
         worker
             .execute_inner(&request, completion_request.as_ref(), provider.as_ref())
@@ -299,20 +313,27 @@ struct Worker<'a, R: tauri::Runtime> {
     execution: &'a JobExecution,
     live: &'a LiveTask,
     detail: InvestigationDetail,
+    request_timeout_ms: u64,
     clock: &'a mut RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
+    fn completion_limits(&self, policy: &InvestigationPolicy) -> Result<CompletionLimits, Failure> {
+        let mut values = super::provider_workspace::completion_limit_values(policy)?;
+        values.request_timeout_ms = self.request_timeout_ms;
+        CompletionLimits::new(values).map_err(provider_failure)
+    }
+
     fn execute_inner(
         &mut self,
         request: &AcquisitionRequest,
         completion_request: Option<&obligations::StagedObligationRequest>,
         provider: &dyn LlmProvider,
     ) -> Result<(), Failure> {
-        let policy = InvestigationPolicy::for_limits(&self.detail.limits)
-            .ok_or(InvestigationStoreError::Invalid)?;
-        if request.policy.profile() != policy.profile()
+        let effective_policy = crate::jobs::investigations::policy_for_detail(&self.detail)?;
+        let policy = &effective_policy;
+        if request.policy.limits() != policy.limits()
             || request.specialist_id != self.detail.summary.specialist_id
         {
             return Err(Failure::Store(InvestigationStoreError::Invalid));
@@ -562,9 +583,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();
-            let limits =
-                CompletionLimits::new(super::provider_workspace::completion_limit_values(policy)?)
-                    .map_err(provider_failure)?;
+            let limits = self.completion_limits(policy)?;
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;
@@ -1501,6 +1520,7 @@ pub(super) fn handle_gated_response(
         detail,
         clock: &mut clock,
         task_limits: None,
+        request_timeout_ms: saved.prepared().limits().values().request_timeout_ms,
     };
     before_handle();
     let result = validate_completion(completion, saved.prepared())

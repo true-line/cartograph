@@ -13,7 +13,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         mode: staged_refusal::CompletionCallMode,
         step_id: &str,
     ) -> Result<bool, Failure> {
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = crate::jobs::investigations::policy_for_detail(&self.detail)?;
+        let policy = &effective_policy;
         let context = input
             .ledger()
             .coverage
@@ -156,7 +157,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         // The Ready prompt sampled RunClock before construction; Consent keeps
         // that exact sealed stamp throughout human waiting and approval.
         let active_milliseconds = input
-            .seal_disclosure_with_policy(prepared, &INVESTIGATION_V2_POLICY)?
+            .seal_disclosure_with_policy(prepared, &context.policy)?
             .and_then(|disclosure| disclosure.admission)
             .ok_or(HostError::InvalidInput)?
             .consumed_budgets
@@ -222,7 +223,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.detail.summary.revision,
                 request,
             )?;
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = crate::jobs::investigations::policy_for_detail(&self.detail)?;
+        let policy = &effective_policy;
         let mut usage = detail.usage.clone();
         usage.active_milliseconds = self.clock.active_milliseconds();
         let query_pages = context
@@ -273,10 +275,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             None => input,
         }; // construction-only contract is dropped before firewall/sealing
         let action = input.action(format!("{}:step-1", self.id))?;
-        let limits = CompletionLimits::new(
-            super::super::provider_workspace::completion_limit_values(policy)?,
-        )
-        .map_err(provider_failure)?;
+        let limits = self.completion_limits(policy)?;
         let prepared = firewall(self.state)?
             .prepare_bounded(provider, &action, &limits)
             .map_err(provider_failure)?;

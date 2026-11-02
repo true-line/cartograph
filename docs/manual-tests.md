@@ -1527,6 +1527,19 @@ It is run as step 8 of the release pilot ([readiness report](release/v1.0-readin
    when it finishes.
 3. Confirm that no API key or request header appears in the log.
 
+## MT-1633-01 — Configure → Run Limits on a release build
+
+**Status: Pending the next release pilot.** AC-0562; #1633.
+
+1. On the signed release build, choose **Configure → Run Limits…** in the
+   menubar. A separate window opens showing 10 minutes and 3 minutes.
+2. Enter 61 for the task limit. The window says it must be between 10 and 60
+   minutes and **Save** stays disabled.
+3. Enter 60 and 10, save, quit and relaunch, and reopen the window. It shows 60
+   and 10.
+4. Start an investigation and confirm its recorded limits show the new values.
+5. Choose **Restore defaults**; the window shows 10 and 3 again.
+
 ### Captured start timing authority (#1626)
 
 Fresh analyst/auditor staging prints `captured-analyst-start-sha256` or

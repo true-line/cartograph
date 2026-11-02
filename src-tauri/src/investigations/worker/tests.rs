@@ -726,7 +726,7 @@ fn investigation_query_pages_include_evidence_inventory_and_preserve_continuatio
         use crate::investigations::query_workspace::{self, QueryInputs};
         let base_wire = context_hub::logical::count(&context.ledger).unwrap();
         let bound = query_workspace::workspace(
-            context.policy,
+            &context.policy,
             QueryInputs {
                 graph: core_graph::SnapshotReadLimits::default(),
                 coverage: core_graph::coverage::CoverageReadLimits::default(),

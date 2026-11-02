@@ -123,6 +123,20 @@ pub(super) fn start_access<R: tauri::Runtime>(
     let descriptor = provider
         .as_ref()
         .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());
+    // Capture desktop settings only for new work, after nonce recovery and
+    // before taking the jobs lock. MCP retains its existing default contract.
+    let configured = if session.is_none() && specialist.uses_next_prompt_admission() {
+        Some(
+            state
+                .settings
+                .lock()
+                .map_err(|e| e.to_string())?
+                .run_limits()
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
     let committed = {
         let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
         match session {
@@ -133,7 +147,15 @@ pub(super) fn start_access<R: tauri::Runtime>(
                 Some(session),
             ),
             None if specialist.uses_next_prompt_admission() => {
-                jobs.start_next_prompt_investigation(&request, descriptor.as_ref())
+                let limits = configured
+                    .as_ref()
+                    .ok_or_else(|| "Missing desktop run limits.".to_owned())?;
+                jobs.start_configured_next_prompt_investigation(
+                    &request,
+                    descriptor.as_ref(),
+                    limits.active_seconds,
+                    limits.request_timeout_ms,
+                )
             }
             None => jobs.start_completion_investigation(&request, descriptor.as_ref()),
         }

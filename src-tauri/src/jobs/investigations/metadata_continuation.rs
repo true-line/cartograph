@@ -15,6 +15,7 @@ pub(crate) struct MetadataContinuationRead<'a> {
 }
 
 pub(crate) struct MetadataContinuationSnapshot {
+    policy: InvestigationPolicy,
     revision: u64,
     usage: InvestigationUsage,
     admitted_usage: InvestigationUsage,
@@ -40,10 +41,7 @@ impl MetadataContinuationSnapshot {
         stamp: &DisclosedAdmissionState,
     ) -> Result<(), InvestigationStoreError> {
         if let Some(choices) = &self.choices {
-            stamp.validate_saved_role_shape(
-                SpecialistId::DomainAnalystV18,
-                &INVESTIGATION_V2_POLICY,
-            )?;
+            stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, &self.policy)?;
             let expected = agents::investigation::AcquisitionAdmission {
                 finish_reason: None,
                 choices_hash: choices.stamp_hash()?,
@@ -53,7 +51,7 @@ impl MetadataContinuationSnapshot {
                 return Err(InvestigationStoreError::Invalid);
             }
         } else {
-            stamp.validate_with_metadata(&self.metadata, &INVESTIGATION_V2_POLICY)?;
+            stamp.validate_with_metadata(&self.metadata, &self.policy)?;
         }
         Ok(())
     }
@@ -99,7 +97,8 @@ impl JobStore {
         if task.detail.summary.cancel_requested {
             return Err(InvestigationStoreError::Cancelled);
         }
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
         let request = input.request.normalized_with_policy(policy)?;
         if request.intent_hash_with_policy(policy)? != task.intent_hash {
             return Err(InvestigationStoreError::Conflict);
@@ -147,7 +146,8 @@ pub(super) fn derive(
     kind: ContextPreviewKind,
     active_milliseconds: u64,
 ) -> Result<DerivedContinuation, InvestigationStoreError> {
-    let policy = &INVESTIGATION_V2_POLICY;
+    let effective_policy = super::policy_for_detail(&task.detail)?;
+    let policy = &effective_policy;
     let core = &authenticated.core;
     let call = &authenticated.call;
     let prior = &core.ledger;
@@ -284,6 +284,7 @@ pub(super) fn derive(
     };
     Ok(DerivedContinuation {
         snapshot: MetadataContinuationSnapshot {
+            policy: effective_policy.clone(),
             revision: task.detail.summary.revision,
             usage,
             admitted_usage: authenticated.admitted_usage.clone(),

@@ -40,7 +40,7 @@ pub(super) struct AcquisitionRequest {
     pub expected_context_id: Option<String>,
     pub conversation_id: Option<String>,
     pub parent_id: Option<String>,
-    pub policy: &'static InvestigationPolicy,
+    pub policy: Arc<InvestigationPolicy>,
 }
 impl TryFrom<&StartInvestigationRequest> for AcquisitionRequest {
     type Error = HostError;
@@ -56,8 +56,11 @@ impl TryFrom<&StartInvestigationRequest> for AcquisitionRequest {
             expected_context_id: request.expected_context_id.clone(),
             conversation_id: request.conversation_id.clone(),
             parent_id: request.parent_id.clone(),
-            policy: InvestigationPolicy::for_profile(&request.limit_profile)
-                .ok_or(HostError::InvalidInput)?,
+            policy: Arc::new(
+                InvestigationPolicy::for_profile(&request.limit_profile)
+                    .ok_or(HostError::InvalidInput)?
+                    .clone(),
+            ),
         })
     }
 }
@@ -79,7 +82,7 @@ pub(super) struct FrozenContext {
     pub(super) coverage_archive: Option<InvestigationCoverageArchive>,
     pub(super) inventory_details: Vec<String>,
     qualified: Option<CoverageContext>,
-    pub(super) policy: &'static InvestigationPolicy,
+    pub(super) policy: Arc<InvestigationPolicy>,
     specialist: SpecialistId,
     /// The complete-graph ceiling this context was prepared under; later
     /// evidence selection rereads under the same bound (#1602).
@@ -344,6 +347,7 @@ mod graph_limit_tests {
 }
 
 impl FrozenContext {
+    #[cfg(test)]
     pub(super) fn completion_acquisition_request(
         request: &obligations::StagedObligationRequest,
     ) -> Result<AcquisitionRequest, HostError> {
@@ -354,7 +358,7 @@ impl FrozenContext {
 
     pub(super) fn completion_acquisition_request_with_policy(
         request: &obligations::StagedObligationRequest,
-        policy: &'static InvestigationPolicy,
+        policy: &InvestigationPolicy,
     ) -> Result<AcquisitionRequest, HostError> {
         let request = request.normalized_with_policy(policy)?;
         let sources = request.obligations.sources_with_policy(policy)?;
@@ -375,7 +379,7 @@ impl FrozenContext {
             expected_context_id: Some(request.expected_context_id),
             conversation_id: request.conversation_id,
             parent_id: request.parent_id,
-            policy,
+            policy: Arc::new(policy.clone()),
         })
     }
 
@@ -440,7 +444,7 @@ impl FrozenContext {
         request: InvestigationCoverageRead,
         sink: &mut impl AcquisitionSink,
     ) -> Result<Option<staged_attempt::UnavailableReason>, HostError> {
-        self.ledger.validate_with_policy(self.policy)?;
+        self.ledger.validate_with_policy(&self.policy)?;
         let archive = self
             .coverage_archive
             .as_ref()
@@ -621,7 +625,7 @@ impl FrozenContext {
         let archive = InvestigationCoverageArchive::new(proof.clone(), originals)?;
         prepared.ledger.schema_version = 2;
         prepared.ledger.coverage = Some(proof);
-        prepared.ledger.validate_with_policy(prepared.policy)?;
+        prepared.ledger.validate_with_policy(&prepared.policy)?;
         prepared.coverage_archive = Some(archive);
         prepared.qualified = Some(qualified);
         Ok(prepared)
@@ -663,7 +667,7 @@ impl FrozenContext {
                 .then(|| content_hash(&history_bytes)),
             supplied_history_bytes: history_bytes.len(),
         };
-        ledger.validate_with_policy(request.policy)?;
+        ledger.validate_with_policy(&request.policy)?;
         Ok(Self {
             graph,
             snapshot,
@@ -673,7 +677,7 @@ impl FrozenContext {
             coverage_archive: None,
             inventory_details: vec![],
             qualified: None,
-            policy: request.policy,
+            policy: Arc::clone(&request.policy),
             specialist: request.specialist_id,
             graph_limits: SnapshotReadLimits::investigation(),
         })
@@ -746,7 +750,7 @@ impl FrozenContext {
         query: InvestigationQuery,
     ) -> Result<PreparedContextRead, ContextReadPreparationError> {
         query.validate_for_specialist(self.specialist)?;
-        self.ledger.validate_with_policy(self.policy)?;
+        self.ledger.validate_with_policy(&self.policy)?;
         match (
             &self.qualified,
             &self.ledger.coverage,
@@ -923,7 +927,7 @@ impl FrozenContext {
         drop(response);
         drop(authoritative);
         drop(returned_keys);
-        ledger.validate_with_policy(self.policy)?;
+        ledger.validate_with_policy(&self.policy)?;
         let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
         Ok(PreparedContextRead {
             base_ledger: self.ledger.clone(),
@@ -961,7 +965,7 @@ impl FrozenContext {
         &self,
         request: InvestigationCoverageRead,
     ) -> Result<PreparedContextRead, ContextReadPreparationError> {
-        self.ledger.validate_with_policy(self.policy)?;
+        self.ledger.validate_with_policy(&self.policy)?;
         let archive = self
             .coverage_archive
             .as_ref()
@@ -996,7 +1000,7 @@ impl FrozenContext {
                 response_hash: content_hash(&raw),
                 response_bytes: raw.len(),
             });
-        ledger.validate_with_policy(self.policy)?;
+        ledger.validate_with_policy(&self.policy)?;
         let raw = String::from_utf8(raw).map_err(|_| HostError::InvalidInput)?;
         Ok(PreparedContextRead {
             base_ledger: self.ledger.clone(),
@@ -1035,7 +1039,7 @@ impl FrozenContext {
         if !one_manifest || base.revision.checked_add(1) != Some(next.revision) {
             return Err(HostError::InvalidInput);
         }
-        prepared.ledger().validate_with_policy(self.policy)?;
+        prepared.ledger().validate_with_policy(&self.policy)?;
         let (response_bytes, response_hash) = match prepared.kind() {
             PreparedContextReadKind::Query => prepared
                 .ledger()

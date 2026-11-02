@@ -281,7 +281,7 @@ impl<'a> SavedMetadataHistory<'a> {
             &self.task.detail.summary.investigation_id,
             ledger,
             &evidence,
-            &INVESTIGATION_V2_POLICY,
+            &saved_policy(self.task)?,
         )?;
         Ok(choices)
     }

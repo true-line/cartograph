@@ -22,7 +22,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         context: &mut FrozenContext,
         history: &[String],
     ) -> Result<(), Failure> {
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective_policy = crate::jobs::investigations::policy_for_detail(&self.detail)?;
+        let policy = &effective_policy;
         let coverage = current
             .ledger()
             .coverage

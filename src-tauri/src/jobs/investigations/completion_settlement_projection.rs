@@ -77,7 +77,8 @@ fn observation_from_prefix(
     entries.extend_from_slice(suffix);
     let refusals = raw_refusals(connection, before)?;
     let detail = observation_from_entries(next, &entries, &refusals)?;
-    next.detail.summary.obligation_status = Some(detail.validate_with_policy(saved_policy(next)?)?);
+    next.detail.summary.obligation_status =
+        Some(detail.validate_with_policy(&saved_policy(next)?)?);
     next.detail.completion = Some(detail);
     Ok(())
 }

@@ -215,7 +215,8 @@ fn materialize(
     }
     if acquired {
         let ledger = ledger.as_ref().ok_or(InvestigationStoreError::Invalid)?;
-        task.ledger_hash = Some(ledger.fingerprint_with_policy(&INVESTIGATION_V2_POLICY)?);
+        task.ledger_hash =
+            Some(ledger.fingerprint_with_policy(&super::policy_for_detail(&task.detail)?)?);
         task.ledger_revision = Some(ledger.revision);
         task.detail.citations = ledger.citations.clone();
     }

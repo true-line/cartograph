@@ -7,7 +7,10 @@ use super::InvestigationLimits;
 /// migration; a registry entry may never promise more durable attempt slots.
 pub const MAX_STORED_COMPLETION_ATTEMPTS: usize = 112;
 
-#[derive(Debug)]
+/// Owner-approved desktop active-time maximum; defaults stay in the registry.
+pub const MAX_CONFIGURED_ACTIVE_SECONDS: u64 = 3_600;
+
+#[derive(Debug, Clone)]
 pub struct InvestigationPolicy {
     profile: &'static str,
     request_bytes: usize,
@@ -122,6 +125,25 @@ impl InvestigationPolicy {
         Self::for_profile(&limits.profile).filter(|policy| policy.limits() == *limits)
     }
 
+    /// Freeze an explicitly configured desktop active-time allowance (#1633).
+    /// Every other field remains the immutable registry value.
+    pub fn with_active_seconds(&self, active_seconds: u64) -> Option<Self> {
+        if !(self.active_seconds..=MAX_CONFIGURED_ACTIVE_SECONDS).contains(&active_seconds) {
+            return None;
+        }
+        let mut effective = self.clone();
+        effective.active_seconds = active_seconds;
+        Some(effective)
+    }
+
+    /// Recover a saved effective policy without consulting current settings.
+    /// Static lookup remains exact so existing callers cannot opt in silently.
+    pub fn for_effective_limits(limits: &InvestigationLimits) -> Option<Self> {
+        let effective =
+            Self::for_profile(&limits.profile)?.with_active_seconds(limits.active_seconds)?;
+        (effective.limits() == *limits).then_some(effective)
+    }
+
     /// Durable event capacity; includes the host reserved terminal slots.
     pub const fn journal_events(&self) -> u64 {
         self.journal_events
@@ -177,6 +199,88 @@ mod tests {
             "investigation-v1 ",
         ] {
             assert!(InvestigationPolicy::for_profile(profile).is_none());
+        }
+    }
+    #[test]
+    fn effective_time_policy_preserves_non_time_fields_and_static_lookup() {
+        // AC-0188: effective limits retain immutable non-time policy identity.
+        for base in [INVESTIGATION_V1_POLICY, INVESTIGATION_V2_POLICY] {
+            for seconds in [600, 601, 3_600] {
+                let effective = base.with_active_seconds(seconds).unwrap();
+                let saved = effective.limits();
+                assert_eq!(saved.active_seconds, seconds);
+                assert_eq!(saved.wall_seconds, 3_600);
+                assert_eq!(
+                    InvestigationPolicy::for_effective_limits(&saved)
+                        .unwrap()
+                        .limits(),
+                    saved
+                );
+                assert_eq!(
+                    InvestigationPolicy::for_limits(&saved).is_some(),
+                    seconds == 600
+                );
+                let canonical = serde_json::to_value(&saved).unwrap();
+                for (field, value) in canonical.as_object().unwrap() {
+                    if field == "active_seconds" {
+                        continue;
+                    }
+                    let mut forged = canonical.clone();
+                    forged[field] = if let Some(number) = value.as_u64() {
+                        serde_json::json!(number + 1)
+                    } else {
+                        serde_json::json!("unknown-profile")
+                    };
+                    let forged: InvestigationLimits = serde_json::from_value(forged).unwrap();
+                    assert!(
+                        InvestigationPolicy::for_effective_limits(&forged).is_none(),
+                        "accepted altered {field}"
+                    );
+                }
+            }
+            for seconds in [0, 599, 3_601, u64::MAX] {
+                assert!(base.with_active_seconds(seconds).is_none());
+            }
+        }
+    }
+    #[test]
+    fn configured_time_limits_preserve_workspace_reservations() {
+        use crate::investigation::InvestigationInput;
+        use llm::bounded::CompletionLimits;
+        // AC-0188: time overrides must not invalidate shared phase reservations.
+        for base in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+            let effective = base.with_active_seconds(3_600).unwrap();
+            let ordinary = CompletionLimits::default();
+            let mut values = ordinary.values();
+            values.request_timeout_ms = 600_000;
+            let configured = CompletionLimits::new(values).unwrap();
+            assert_eq!(
+                InvestigationInput::construction_workspace_bytes(base),
+                InvestigationInput::construction_workspace_bytes(&effective),
+            );
+            assert_eq!(
+                InvestigationInput::retained_workspace_bytes(base),
+                InvestigationInput::retained_workspace_bytes(&effective),
+            );
+            for (ordinary_size, configured_size) in [
+                (
+                    InvestigationInput::context_preview_workspace_bytes(base, &ordinary),
+                    InvestigationInput::context_preview_workspace_bytes(&effective, &configured),
+                ),
+                (
+                    InvestigationInput::source_preview_workspace_bytes(base, &ordinary),
+                    InvestigationInput::source_preview_workspace_bytes(&effective, &configured),
+                ),
+            ] {
+                assert!(ordinary_size.is_some());
+                assert_eq!(ordinary_size, configured_size);
+            }
+            let ordinary_seal = InvestigationInput::sealing_workspace_bytes(base, &ordinary);
+            assert!(ordinary_seal.is_some());
+            assert_eq!(
+                ordinary_seal,
+                InvestigationInput::sealing_workspace_bytes(&effective, &configured)
+            );
         }
     }
 }

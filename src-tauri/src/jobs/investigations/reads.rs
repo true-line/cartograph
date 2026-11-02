@@ -146,9 +146,7 @@ pub(super) fn specialist_activity_admission_bytes(
     summary.has_result = false;
     if task.detail.inspection_requirements.is_some() {
         summary.inspection_status = Some(InvestigationInspectionStatus::NotAssessed);
-        let max_requirements = InvestigationPolicy::for_limits(&task.detail.limits)
-            .ok_or(InvestigationStoreError::Invalid)?
-            .max_completion_obligations();
+        let max_requirements = super::policy_for_detail(&task.detail)?.max_completion_obligations();
         summary.inspection_requirement_count = Some(max_requirements);
     }
     if task.completion_intent.is_some() {
@@ -581,8 +579,7 @@ impl JobStore {
         for id in ids {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
             let task = load_execution_task(&tx, &id)?;
-            let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-                .ok_or(InvestigationStoreError::Invalid)?;
+            let policy = super::policy_for_detail(&task.detail)?;
             let revisions = usize::try_from(policy.limits().tool_actions)
                 .ok()
                 .and_then(|count| count.checked_add(1))
@@ -612,8 +609,7 @@ impl JobStore {
         let mut checked_inputs = 0i64;
         for task in loaded {
             let id = task.detail.summary.investigation_id.clone();
-            let policy = InvestigationPolicy::for_limits(&task.detail.limits)
-                .ok_or(InvestigationStoreError::Invalid)?;
+            let policy = super::policy_for_detail(&task.detail)?;
             if let Some(targets) = &task.detail.inspection_requirements {
                 for target in targets {
                     expected
@@ -627,7 +623,7 @@ impl JobStore {
                 }
             }
             if let Some(intent) = &task.completion_intent {
-                for target in intent.obligations.sources_with_policy(policy)? {
+                for target in intent.obligations.sources_with_policy(&policy)? {
                     // The actual factory inserts pinned source receipts at
                     // revision zero, even while the task has no initial ledger.
                     expected
@@ -662,7 +658,7 @@ impl JobStore {
                 let ledger: InvestigationInputLedger =
                     read_body(&tx, "investigation_inputs", "revision", &id, &revision)?
                         .ok_or(InvestigationStoreError::Invalid)?;
-                ledger.validate_for_specialist(task.detail.summary.specialist_id, policy)?;
+                ledger.validate_for_specialist(task.detail.summary.specialist_id, &policy)?;
                 encode(&ledger, MAX_MANIFEST_BYTES)?;
                 if signed(ledger.revision)? != revision
                     || Some(&ledger.graph_snapshot_id)

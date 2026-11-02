@@ -888,7 +888,7 @@ fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
             request_wire: context_hub::logical::count(&request).unwrap() + 128,
             app_path_bytes: crate::sources::MAX_PATH_BYTES,
         };
-        let bound = query_workspace::workspace(frozen.policy, input).unwrap();
+        let bound = query_workspace::workspace(&frozen.policy, input).unwrap();
         let prepared = frozen.prepare_query(&fixture.state, request).unwrap();
         let actual = context_hub::logical::count(&prepared.base_ledger).unwrap()
             + context_hub::logical::count(&prepared.ledger).unwrap()

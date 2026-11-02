@@ -93,8 +93,9 @@ impl SourceContinuationSnapshot {
 pub(super) fn validate_acquisition(
     choices: &agents::investigation::acquisition_choices::AcquisitionChoices,
     stamp: &DisclosedAdmissionState,
+    policy: &InvestigationPolicy,
 ) -> Result<(), InvestigationStoreError> {
-    stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, &INVESTIGATION_V2_POLICY)?;
+    stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
     if stamp.acquisition.as_ref()
         != Some(&agents::investigation::AcquisitionAdmission {
             finish_reason: None,
@@ -112,11 +113,12 @@ impl JobStore {
         &self,
         input: &SourceContinuationSnapshotInput<'_>,
     ) -> Result<SourceContinuationSnapshot, InvestigationStoreError> {
-        let policy = &INVESTIGATION_V2_POLICY;
-        let request = input.request.normalized_with_policy(policy)?;
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_next_prompt_task(&tx, input.investigation_id)?;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
+        let request = input.request.normalized_with_policy(policy)?;
         if task.phase != Phase::Reservation
             || task.detail.summary.revision != input.expected_revision
         {

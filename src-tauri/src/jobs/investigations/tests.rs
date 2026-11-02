@@ -1,3 +1,6 @@
+#[path = "effective_policy_tests.rs"]
+mod effective_policy_tests;
+
 #[path = "query_refusal_tests.rs"]
 mod query_refusal_tests;
 

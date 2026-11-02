@@ -153,9 +153,13 @@ impl LiveTask {
 
 const WALL_LIMIT: Duration = Duration::from_secs(3600);
 
+/// The default active allowance; saved task limits replace it at run start.
+const DEFAULT_ACTIVE_LIMIT: Duration = Duration::from_secs(600);
+
 pub(super) struct RunClock {
     started: Instant,
     consent_waiting: Duration,
+    active_limit: Duration,
     #[cfg(test)]
     active_elapsed_override: Option<Duration>,
 }
@@ -165,15 +169,21 @@ impl RunClock {
         Self {
             started,
             consent_waiting: Duration::ZERO,
+            active_limit: DEFAULT_ACTIVE_LIMIT,
             #[cfg(test)]
             active_elapsed_override: None,
         }
+    }
+    /// Apply the task's saved active-time allowance (AC-0562).
+    pub(super) fn set_active_limit(&mut self, active_seconds: u64) {
+        self.active_limit = Duration::from_secs(active_seconds);
     }
     #[cfg(test)]
     pub(super) fn frozen_active(started: Instant) -> Self {
         Self {
             started,
             consent_waiting: Duration::ZERO,
+            active_limit: DEFAULT_ACTIVE_LIMIT,
             active_elapsed_override: Some(Duration::ZERO),
         }
     }
@@ -210,7 +220,8 @@ impl RunClock {
     }
     fn remaining_deadline_at(&self, now: Instant) -> Result<Duration, HostError> {
         let active = Duration::from_millis(self.active_milliseconds_at(now));
-        let remaining = Duration::from_secs(600)
+        let remaining = self
+            .active_limit
             .saturating_sub(active)
             .min(self.remaining_wall_at(now));
         if remaining.is_zero() {
@@ -224,6 +235,22 @@ impl RunClock {
 #[cfg(test)]
 mod run_clock_tests {
     use super::*;
+    // AC-0562: a saved active allowance above the default extends the deadline.
+    #[test]
+    fn saved_active_limit_replaces_default_deadline() {
+        let started = Instant::now();
+        let mut clock = RunClock::new(started);
+        clock.active_elapsed_override = Some(Duration::from_secs(700));
+        assert!(matches!(
+            clock.remaining_deadline_at(started),
+            Err(HostError::LimitExceeded)
+        ));
+        clock.set_active_limit(3600);
+        assert_eq!(
+            clock.remaining_deadline_at(started).unwrap(),
+            Duration::from_secs(2900)
+        );
+    }
     // AC-0287: synthetic active time preserves the real wall deadline.
     #[test]
     fn frozen_active_time_keeps_real_wall_deadline() {

@@ -87,13 +87,13 @@ fn assert_acquired_publication(gated: bool) {
     assert!(
         published
             .input
-            .seal_disclosure_with_policy(&published.prepared, context.policy)
+            .seal_disclosure_with_policy(&published.prepared, &context.policy)
             .unwrap()
             .is_some()
     );
     let admission = published
         .input
-        .seal_disclosure_with_policy(&published.prepared, context.policy)
+        .seal_disclosure_with_policy(&published.prepared, &context.policy)
         .unwrap()
         .unwrap()
         .admission

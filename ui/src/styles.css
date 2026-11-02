@@ -4516,3 +4516,10 @@ details.investigation-section { display: block; }
 .agent-chat-message-body .investigation-chat-messages > li { width: fit-content; max-width: 92%; min-width: 0; margin-inline-end: auto; padding: .75rem; border-radius: var(--radius-card); background: var(--surface-raised); }
 .agent-chat-message-body .investigation-chat-messages > li[aria-label="User question"] { margin-inline-start: auto; margin-inline-end: 0; background: color-mix(in srgb, var(--accent) 12%, var(--control)); }
 .agent-chat-message-body article[aria-label="Specialist final message"] { padding: .75rem; background: var(--surface-raised); border-radius: var(--radius-card); }
+
+/* Configure → Run Limits window (#1633). */
+.configure-window { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+.configure-window h1 { font-size: 1.25rem; margin: 0 0 8px; }
+.configure-field { display: grid; gap: 4px; margin: 16px 0; }
+.configure-field input { max-width: 160px; }
+.configure-actions { display: flex; gap: 8px; margin-top: 8px; }

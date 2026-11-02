@@ -45,7 +45,7 @@ pub(in super::super) fn derive_attempt_records(
         return Ok(vec![]);
     }
     let ledger = ledger.ok_or(InvestigationStoreError::Invalid)?;
-    let input_ledger_hash = ledger.fingerprint_with_policy(policy)?;
+    let input_ledger_hash = ledger.fingerprint_with_policy(&policy)?;
     let id = &task.detail.summary.investigation_id;
     matching
         .into_iter()
@@ -69,7 +69,7 @@ pub(in super::super) fn derive_attempt_records(
                 &intent.obligations,
                 id,
                 ledger,
-                policy,
+                &policy,
             )?;
             Ok(record)
         })

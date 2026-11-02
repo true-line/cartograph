@@ -16,9 +16,14 @@ pub(crate) fn workspace_bytes(
     // Source requirements move existing obligation targets; normalization only
     // deduplicates them. Other owned fields project frame-bounded input.
     // Include its typed root in addition to conservative JSON/container owners.
+    // The request and frozen context share an immutable effective policy.
+    // Account for its owned value and Arc counters; counting it in both named
+    // owners is conservative when those owners coexist during preparation.
+    let policy_owner = sum(&[slots::<InvestigationPolicy>(1)?, slots::<usize>(2)?])?;
     let request_owner = sum(&[
         json_bytes(request_frame_bytes)?,
         slots::<AcquisitionRequest>(1)?,
+        policy_owner,
     ])?;
     let coverage_limits = coverage_preparation_limits(archive_capacity).ok()?;
     let graph_limits = SnapshotReadLimits::default();
@@ -47,6 +52,7 @@ pub(crate) fn workspace_bytes(
     let ledger = sum(&[proof, slots::<InvestigationInputLedger>(1)?, 2 * 128, 64])?;
     let retained = sum(&[
         slots::<FrozenContext>(1)?,
+        policy_owner,
         raw,
         snapshot.retained,
         coverage.retained,

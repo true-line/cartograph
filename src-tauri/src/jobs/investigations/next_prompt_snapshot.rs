@@ -41,9 +41,10 @@ impl NextPromptSnapshot {
         self.mode
     }
     pub(crate) fn preparation_mode(&self) -> Result<CompletionCallMode, InvestigationStoreError> {
+        let policy = super::policy_for_detail(self.detail())?;
         Ok(self
             .metadata()
-            .next_call_mode_with_policy(&self.detail().usage, &INVESTIGATION_V2_POLICY)?)
+            .next_call_mode_with_policy(&self.detail().usage, &policy)?)
     }
     pub(crate) fn capacity_refusal_count(&self) -> u32 {
         self.capacity.count
@@ -77,11 +78,12 @@ impl JobStore {
         id: &str,
         request: &StagedObligationRequest,
     ) -> Result<NextPromptSnapshot, InvestigationStoreError> {
-        let policy = &INVESTIGATION_V2_POLICY;
-        let request = request.normalized_with_policy(policy)?;
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let task = load_next_prompt_task(&tx, id)?;
+        let effective_policy = super::policy_for_detail(&task.detail)?;
+        let policy = &effective_policy;
+        let request = request.normalized_with_policy(policy)?;
         if !matches!(task.phase, Phase::Ready | Phase::Consent) {
             return Err(InvestigationStoreError::Stale);
         }

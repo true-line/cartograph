@@ -32,7 +32,16 @@ impl NextFixture {
         provider: &dyn LlmProvider,
         specialist: SpecialistId,
         base: CompletionFixture,
+        request: StagedObligationRequest,
+    ) -> Self {
+        Self::from_completion_base_with_limits(provider, specialist, base, request, None)
+    }
+    fn from_completion_base_with_limits(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        base: CompletionFixture,
         mut request: StagedObligationRequest,
+        configured: Option<(u64, u64)>,
     ) -> Self {
         let state = base.base.app.state::<AppState>();
         let mut jobs = state.jobs.lock().unwrap();
@@ -57,12 +66,18 @@ impl NextFixture {
             .as_str()
             .unwrap()
             .into();
-        let start = jobs
-            .start_next_prompt_investigation(
+        let provider_descriptor = descriptor(provider, InvestigationProviderMode::Local).unwrap();
+        let start = if let Some((active, timeout)) = configured {
+            jobs.start_configured_next_prompt_investigation(
                 &request,
-                Some(&descriptor(provider, InvestigationProviderMode::Local).unwrap()),
+                Some(&provider_descriptor),
+                active,
+                timeout,
             )
-            .unwrap();
+        } else {
+            jobs.start_next_prompt_investigation(&request, Some(&provider_descriptor))
+        }
+        .unwrap();
         let id = start.detail.summary.investigation_id;
         let plan = jobs
             .claim_plan(
@@ -160,6 +175,7 @@ impl NextFixture {
             detail,
             clock: &mut clock,
             task_limits: None,
+            request_timeout_ms: CompletionLimits::default().values().request_timeout_ms,
         };
         let outcome = worker
             .execute_inner(&request, Some(&self.request), provider)
@@ -210,6 +226,7 @@ enum GatedFlow {
     Cancel,
 }
 struct NextProvider {
+    expected_timeout_ms: u64,
     capacity_control: bool,
     observed: Scripted,
     malformed: bool,
@@ -235,6 +252,7 @@ struct NextProvider {
 impl NextProvider {
     fn new(malformed: bool) -> Self {
         Self {
+            expected_timeout_ms: 180_000,
             capacity_control: false,
             observed: Scripted::new(Mode::CompletionNoAttempt),
             malformed,
@@ -284,6 +302,10 @@ impl LlmProvider for NextProvider {
         control: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
         assert_eq!((control.check)(), CallDirective::Continue);
+        assert_eq!(
+            request.limits().values().request_timeout_ms,
+            self.expected_timeout_ms
+        );
         if self.metadata_query.is_some() || self.gated_flow.is_some() {
             self.received_payloads
                 .lock()
@@ -2144,18 +2166,54 @@ mod timeout_witness;
 // AC-0260: ordinary dispatch charges one duplicate notice, then finishes/reopens.
 #[test]
 fn desktop_v18_duplicate_read_enters_authenticated_finish_only() {
-    for (inventory, ignore_finish) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (inventory, ignore_finish, configured) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+    ] {
         let mut scripted = NextProvider::new(false);
+        if configured {
+            scripted.expected_timeout_ms = 600_000;
+        }
         scripted.metadata_order = Some([false, true]);
         scripted.duplicate_metadata_recovery = true;
         scripted.duplicate_inventory = inventory;
         scripted.ignore_duplicate_finish = ignore_finish;
         let provider = Arc::new(scripted);
-        let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18);
+        let f = if configured {
+            let base = CompletionFixture::new(
+                provider.as_ref(),
+                SpecialistId::DomainAnalystV9,
+                false,
+                true,
+                false,
+            );
+            let request = base.request.clone();
+            NextFixture::from_completion_base_with_limits(
+                provider.as_ref(),
+                SpecialistId::DomainAnalystV18,
+                base,
+                request,
+                Some((3600, 600_000)),
+            )
+        } else {
+            NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18)
+        };
         f.run(provider.clone());
         let state = f.base.base.app.state::<AppState>();
         let jobs = state.jobs.lock().unwrap();
         let detail = jobs.investigation(&f.id).unwrap();
+        if configured {
+            let (owned, timeout) = jobs
+                .investigation_owned_runtime(&f.execution, &f.id)
+                .unwrap();
+            assert_eq!(owned, detail);
+            assert_eq!(owned.limits.active_seconds, 3600);
+            assert_eq!(timeout, 600_000);
+        }
         assert_eq!(
             detail.summary.status,
             if ignore_finish {
@@ -2294,4 +2352,104 @@ fn desktop_v18_authenticated_query_replay_executes_and_reopens() {
     let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
     assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
     assert_eq!(reopened.investigation_ledger(&f.id).unwrap(), Some(ledger));
+}
+
+// AC-0188, AC-0562: genuine admission freezes both time limits across
+// query/inventory continuations, a settings change, finish and durable reopen.
+#[test]
+fn configured_desktop_worker_preserves_time_limits_across_calls_and_reopen() {
+    configured_desktop_worker_time_limits(false, 0);
+}
+
+// AC-0187, AC-0562: a valid late finish is retained without another tool action.
+#[test]
+fn configured_desktop_worker_late_cancel_retains_valid_finish_and_time_limits() {
+    configured_desktop_worker_time_limits(true, 0);
+}
+
+// AC-0188, AC-0562: the real worker clock must honor the saved active limit.
+#[test]
+fn configured_desktop_worker_continues_after_default_active_deadline() {
+    configured_desktop_worker_time_limits(false, 601);
+}
+
+fn configured_desktop_worker_time_limits(cancel_finish: bool, elapsed_seconds: u64) {
+    let mut scripted = NextProvider::new(false);
+    scripted.expected_timeout_ms = 600_000;
+    // The current family requires inventory before exploratory queries.
+    scripted.metadata_order = Some([false, true]);
+    scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+        "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+    let provider = Arc::new(scripted);
+    let base = CompletionFixture::new(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV9,
+        false,
+        true,
+        false,
+    );
+    let request = base.request.clone();
+    let f = NextFixture::from_completion_base_with_limits(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV18,
+        base,
+        request,
+        Some((3600, 600_000)),
+    );
+    f.base
+        .base
+        .app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .unwrap()
+        .set_run_limits(600, 180_000)
+        .unwrap();
+    if cancel_finish {
+        let app = f.base.base.app.handle().clone();
+        let id = f.id.clone();
+        *provider.observed.cancel.lock().unwrap() = Some(Box::new(move || {
+            app.state::<AppState>()
+                .jobs
+                .lock()
+                .unwrap()
+                .cancel_next_prompt_investigation(&id)
+                .unwrap();
+        }));
+    }
+    f.base.base.app.run_completion(
+        f.id.clone(),
+        f.request.clone(),
+        f.execution.clone(),
+        provider.clone(),
+        f.live.clone(),
+        Instant::now() - Duration::from_secs(elapsed_seconds),
+    );
+    let state = f.base.base.app.state::<AppState>();
+    let (detail, timeout) = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_owned_runtime(&f.execution, &f.id)
+        .unwrap();
+    assert_eq!(timeout, 600_000);
+    assert_eq!(detail.limits.active_seconds, 3600);
+    assert_eq!(
+        detail.summary.status,
+        InvestigationStatus::Completed,
+        "{:?}",
+        detail.error
+    );
+    assert!(detail.summary.has_result);
+    assert_eq!(detail.summary.cancel_requested, cancel_finish);
+    assert_eq!(detail.usage.model_invocations, 3);
+    assert_eq!(detail.usage.tool_actions, 2);
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 3);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation_owned_runtime(&f.execution, &f.id)
+            .unwrap(),
+        (detail, timeout)
+    );
 }

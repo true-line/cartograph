@@ -213,7 +213,7 @@ fn prepared_source_cleanup_rejects_same_descriptor_reservation_from_another_task
             &target,
             &context
                 .ledger
-                .fingerprint_with_policy(context.policy)
+                .fingerprint_with_policy(&context.policy)
                 .unwrap()
         )
     );
