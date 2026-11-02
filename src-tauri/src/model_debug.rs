@@ -117,8 +117,18 @@ pub(crate) fn text_viewer(os: &str, path: &Path) -> Option<(&'static str, Vec<St
     }
 }
 
+/// Most bytes of one formatted entry. The single writer thread formats one
+/// entry at a time, so its scratch is this cap plus one decoded string in
+/// flight (itself no longer than the entry's bounded body).
+pub(crate) const FORMAT_BYTES: usize = 4 * 1024 * 1024;
+
 pub(crate) fn format_entry(exchange: &ModelExchange) -> String {
-    let mut out = match exchange.phase {
+    format_entry_capped(exchange, FORMAT_BYTES)
+}
+
+pub(crate) fn format_entry_capped(exchange: &ModelExchange, cap: usize) -> String {
+    let mut out = Capped::new(cap);
+    out.push_str(&match exchange.phase {
         Phase::Sent => format!(
             "==== #{} SENT  {}  {}  {} ====\n",
             exchange.call,
@@ -137,7 +147,7 @@ pub(crate) fn format_entry(exchange: &ModelExchange) -> String {
                 "OK"
             }
         ),
-    };
+    });
     if exchange.dropped_before > 0 {
         out.push_str(&format!(
             "[{} earlier entries dropped: debug log queue full]\n",
@@ -158,10 +168,61 @@ pub(crate) fn format_entry(exchange: &ModelExchange) -> String {
         decode::model_output(response, &mut out);
     }
     out.push('\n');
-    out
+    out.finish()
 }
 
-fn push_line(out: &mut String, text: &str) {
+/// Output that stops growing at `cap` bytes (on a character boundary) and
+/// then states how many bytes were left out. Capacity grows by doubling
+/// but never past the cap.
+pub(crate) struct Capped {
+    text: String,
+    cap: usize,
+    omitted: usize,
+}
+
+impl Capped {
+    fn new(cap: usize) -> Self {
+        Self {
+            text: String::new(),
+            cap,
+            omitted: 0,
+        }
+    }
+
+    pub(crate) fn push_str(&mut self, text: &str) {
+        let room = self.cap - self.text.len();
+        let mut end = text.len().min(room);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end > self.text.capacity() - self.text.len() {
+            let grown = (self.text.capacity() * 2)
+                .max(self.text.len() + end)
+                .min(self.cap);
+            self.text.reserve_exact(grown - self.text.len());
+        }
+        self.text.push_str(&text[..end]);
+        self.omitted += text.len() - end;
+    }
+
+    pub(crate) fn push(&mut self, c: char) {
+        self.push_str(c.encode_utf8(&mut [0; 4]));
+    }
+
+    fn finish(mut self) -> String {
+        if self.omitted > 0 {
+            let note = format!(
+                "\n[debug log: entry clipped at {} bytes; {} more bytes not shown]\n\n",
+                self.cap, self.omitted
+            );
+            self.text.reserve_exact(note.len());
+            self.text.push_str(&note);
+        }
+        self.text
+    }
+}
+
+fn push_line(out: &mut Capped, text: &str) {
     out.push_str(text);
     if !text.ends_with('\n') {
         out.push('\n');
@@ -170,26 +231,25 @@ fn push_line(out: &mut String, text: &str) {
 
 /// Streaming decoders for the readable sections. They never build a JSON
 /// tree: each message or output string is unescaped once and written
-/// straight into the entry text, so formatting one entry holds at most the
-/// raw body, its decoded strings and one string in flight (#1624 review).
+/// straight into the capped entry text (#1624 review).
 mod decode {
     use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
     use std::fmt;
 
     /// `--- request message: role ---` sections for a chat request body.
-    pub(super) fn request_messages(body: &str, out: &mut String) {
+    pub(super) fn request_messages(body: &str, out: &mut super::Capped) {
         let mut de = serde_json::Deserializer::from_str(body);
         let _ = de::Deserializer::deserialize_map(&mut de, top(out, true));
     }
 
     /// `--- model output ---` for Ollama, OpenAI-compatible or Anthropic
     /// response bodies.
-    pub(super) fn model_output(body: &str, out: &mut String) {
+    pub(super) fn model_output(body: &str, out: &mut super::Capped) {
         let mut de = serde_json::Deserializer::from_str(body);
         let _ = de::Deserializer::deserialize_map(&mut de, top(out, false));
     }
 
-    fn section(out: &mut String, title: &str, text: &str) {
+    fn section(out: &mut super::Capped, title: &str, text: &str) {
         out.push_str("--- ");
         out.push_str(title);
         out.push_str(" ---\n");
@@ -255,11 +315,11 @@ mod decode {
     }
 
     struct Map<'o> {
-        out: &'o mut String,
+        out: &'o mut super::Capped,
         kind: Kind,
     }
 
-    fn top(out: &mut String, request: bool) -> Map<'_> {
+    fn top(out: &mut super::Capped, request: bool) -> Map<'_> {
         Map {
             out,
             kind: Kind::Top { request },
@@ -337,7 +397,7 @@ mod decode {
     }
 
     struct Seq<'o> {
-        out: &'o mut String,
+        out: &'o mut super::Capped,
         kind: SeqKind,
     }
 
@@ -526,8 +586,8 @@ mod tests {
     fn model_debug_decoding_streams_every_provider_shape_within_a_fixed_bound() {
         // AC-0560 (#1624 review): decoding never builds a JSON tree. OpenAI
         // uses only the first choice, Anthropic joins text blocks, non-string
-        // content is skipped, and malformed or hostile bodies only lose the
-        // decoded section, so an entry stays within header + 2 x its body.
+        // content is skipped, and malformed or deeply nested bodies only lose
+        // the decoded section. The hard bound is the format cap (next test).
         let openai = r#"{"choices":[{"message":{"role":"assistant","content":"first"}},{"message":{"content":"second"}}]}"#;
         let out = format_entry(&received(1, Some(openai), None));
         assert!(out.contains("--- model output ---\nfirst\n") && !out.contains("second\n---"));
@@ -548,5 +608,27 @@ mod tests {
             let out = format_entry(&sent(4, &hostile));
             assert!(out.len() <= 2 * hostile.len() + 256, "{}", out.len());
         }
+    }
+
+    #[test]
+    fn model_debug_entry_is_clipped_at_the_format_cap_with_a_note() {
+        // AC-0560 (#1624 review): many empty-content messages each add a
+        // section header, so output is capped explicitly, never past `cap`
+        // plus the note, on a character boundary.
+        let empty = format!(
+            r#"{{"messages":[{}]}}"#,
+            vec![r#"{"content":""}"#; 50_000].join(",")
+        );
+        let cap = 64 * 1024;
+        let out = format_entry_capped(&sent(5, &empty), cap);
+        let note = "\n[debug log: entry clipped at 65536 bytes; ";
+        let at = out.find(note).expect("clip note");
+        assert_eq!(at, cap);
+        assert!(out.len() < cap + 128 && out.capacity() <= cap + 128);
+        let wide = format_entry_capped(&sent(6, &"é".repeat(100)), 101);
+        assert!(wide.contains("[debug log: entry clipped at 101 bytes;"));
+        let full = format_entry(&sent(5, &empty));
+        assert!(full.contains("--- request message: ? ---") && full.len() > cap);
+        assert!(full.len() <= FORMAT_BYTES + 128);
     }
 }
