@@ -116,3 +116,94 @@ fn host_metadata_lost_commit_ack_does_not_install_prepared_state() {
         // The uncertain acknowledgement does not trigger preparation or retry.
     }
 }
+
+// #1617: classify only query-selection errors after host consistency checks.
+#[test]
+fn query_rejection_is_typed_without_weakening_host_validation() {
+    let mut f = Fixture::new();
+    let query = InvestigationQuery {
+        scope: InvestigationScope::Neighborhood {
+            anchor: "absent".into(),
+            hops: 1,
+        },
+        kind: None,
+        labels: vec![],
+        max_facts: 1,
+        max_bytes: 16384,
+        cursor: None,
+    };
+    let before = f.context.ledger.clone();
+    assert!(matches!(
+        f.context
+            .prepare_query_with_diagnostic(&f.state, query.clone()),
+        Err(ContextReadPreparationError::QueryRejected(
+            QueryRejection::UnknownAnchor
+        ))
+    ));
+    assert_eq!(f.context.ledger, before);
+    assert!(f.context.query_pages.is_empty());
+    // A broken host tuple must take precedence over the same bad model selector.
+    f.context.coverage_archive = None;
+    assert!(matches!(
+        f.context.prepare_query_with_diagnostic(&f.state, query),
+        Err(ContextReadPreparationError::Host(HostError::InvalidInput))
+    ));
+}
+
+#[test]
+fn query_rejection_keeps_host_corruption_and_budget_terminal() {
+    use context_hub::ContextError as E;
+    for error in [
+        E::InvalidCoverage("bad".into()),
+        E::DuplicateNode("bad".into()),
+        E::InventoryUnavailable("bad".into()),
+        E::InventoryChanged("bad".into()),
+    ] {
+        assert_eq!(
+            query_preparation_error(error),
+            ContextReadPreparationError::Host(HostError::InvalidInput)
+        );
+    }
+    assert_eq!(
+        query_preparation_error(E::ResponseBudgetExceeded {
+            max_bytes: 1,
+            required_bytes: 2
+        }),
+        ContextReadPreparationError::Host(HostError::LimitExceeded)
+    );
+    for (error, reason) in [
+        (E::UnknownNode("absent".into()), QueryRejection::UnknownNode),
+        (
+            E::CursorSnapshotMismatch,
+            QueryRejection::CursorSnapshotMismatch,
+        ),
+        (
+            E::CursorSelectionMismatch,
+            QueryRejection::CursorSelectionMismatch,
+        ),
+        (
+            E::CursorContextMismatch,
+            QueryRejection::CursorContextMismatch,
+        ),
+        (
+            E::InvalidCursorOffset {
+                offset: 2,
+                total_selected: 1,
+            },
+            QueryRejection::InvalidCursorOffset,
+        ),
+        (
+            E::InvalidLimit {
+                name: "hops",
+                requested: 0,
+                maximum: 2,
+            },
+            QueryRejection::InvalidLimit,
+        ),
+    ] {
+        assert_eq!(
+            query_preparation_error(error),
+            ContextReadPreparationError::QueryRejected(reason)
+        );
+    }
+}

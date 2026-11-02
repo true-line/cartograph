@@ -1443,6 +1443,7 @@ pub(super) fn prepare_event(
     }
     task.detail.summary.last_event_sequence = next;
     Ok(InvestigationEvent {
+        query_refusal: None,
         investigation_id: task.detail.summary.investigation_id.clone(),
         sequence: next,
         revision: task.detail.summary.revision,
@@ -1458,6 +1459,7 @@ pub(super) fn persist_event(
     connection: &Connection,
     event: &InvestigationEvent,
 ) -> Result<(), InvestigationStoreError> {
+    event.validate_query_refusal_envelope()?;
     let reserved =
         super::read_reservations::pending_event_claims(connection, &event.investigation_id)?;
     if reserved != 0 {

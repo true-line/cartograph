@@ -35,51 +35,6 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         )
         .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
         self.check_new_work()?;
-        let (read, kind) = match action {
-            CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {
-                query,
-                ..
-            }) => (
-                context
-                    .prepare_query_with_diagnostic(self.state, query)
-                    .map_err(|error| match error {
-                        ContextReadPreparationError::CumulativeQueryAndInventoryBytes => {
-                            Failure::Stop(InvestigationStopReason::HostLimitAt {
-                                phase: PreparationPhase::Query,
-                                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
-                            })
-                        }
-                        ContextReadPreparationError::Host(error) => {
-                            Failure::from(error).preparation_at(PreparationPhase::Query)
-                        }
-                    })?,
-                ContextPreviewKind::Query,
-            ),
-            CompletionInvestigationAction::Read(
-                QualifiedInvestigationAction::ReadCoverageInventory(read),
-            ) => (
-                context
-                    .prepare_inventory_with_diagnostic(read)
-                    .map_err(|error| match error {
-                        ContextReadPreparationError::CumulativeQueryAndInventoryBytes => {
-                            Failure::Stop(InvestigationStopReason::HostLimitAt {
-                                phase: PreparationPhase::Inventory,
-                                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
-                            })
-                        }
-                        ContextReadPreparationError::Host(error) => {
-                            Failure::from(error).preparation_at(PreparationPhase::Inventory)
-                        }
-                    })?,
-                ContextPreviewKind::Inventory,
-            ),
-            CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
-                _,
-            )) => return Ok(false),
-            CompletionInvestigationAction::Finish(_) => {
-                return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
-            }
-        };
         let original: serde_json::Value = serde_json::from_str(&completion.text)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
         let response = InvestigationResponseMeta {
@@ -100,6 +55,93 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .as_ref()
                 .and_then(|usage| usage.cache_read_input_tokens),
             active_milliseconds: self.clock.active_milliseconds(),
+        };
+        let (read, kind) = match action {
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {
+                query,
+                ..
+            }) => {
+                let read = match context.prepare_query_with_diagnostic(self.state, query.clone()) {
+                    Ok(read) => read,
+                    Err(ContextReadPreparationError::QueryRejected(reason))
+                        if self.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 =>
+                    {
+                        use agents::investigation::query_refusal::QueryRefusalRecord;
+                        let mut record = QueryRefusalRecord {
+                            schema_version: 1,
+                            record_id: String::new(),
+                            task_id: self.id.into(),
+                            step_id: step_id.into(),
+                            action_hash: response.action_hash.clone(),
+                            input_ledger_hash: current.ledger().fingerprint_with_policy(policy)?,
+                            input_revision: current.ledger().revision,
+                            context_id: Some(proof.context_id.clone()),
+                            query,
+                            reason,
+                        };
+                        record.record_id = record.content_id()?;
+                        self.check_new_work()?;
+                        self.detail = self
+                            .state
+                            .jobs
+                            .lock()
+                            .map_err(|_| HostError::Operational)?
+                            .refuse_next_query(
+                                self.execution,
+                                self.detail.summary.revision,
+                                crate::jobs::investigations::QueryRefusalAdmission {
+                                    response: &response,
+                                    original_action: &original,
+                                    current,
+                                    current_prepared,
+                                    record,
+                                    active_milliseconds: self.clock.active_milliseconds(),
+                                },
+                            )?;
+                        super::super::emit_changed(self.app, &self.detail);
+                        return Ok(true);
+                    }
+                    Err(ContextReadPreparationError::CumulativeQueryAndInventoryBytes) => {
+                        return Err(Failure::Stop(InvestigationStopReason::HostLimitAt {
+                            phase: PreparationPhase::Query,
+                            limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+                        }));
+                    }
+                    Err(error) => {
+                        return Err(Failure::from(error.into_host_error())
+                            .preparation_at(PreparationPhase::Query));
+                    }
+                };
+                (read, ContextPreviewKind::Query)
+            }
+            CompletionInvestigationAction::Read(
+                QualifiedInvestigationAction::ReadCoverageInventory(read),
+            ) => (
+                context
+                    .prepare_inventory_with_diagnostic(read)
+                    .map_err(|error| match error {
+                        ContextReadPreparationError::CumulativeQueryAndInventoryBytes => {
+                            Failure::Stop(InvestigationStopReason::HostLimitAt {
+                                phase: PreparationPhase::Inventory,
+                                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+                            })
+                        }
+                        ContextReadPreparationError::QueryRejected(_) => {
+                            Failure::from(HostError::InvalidInput)
+                                .preparation_at(PreparationPhase::Inventory)
+                        }
+                        ContextReadPreparationError::Host(error) => {
+                            Failure::from(error).preparation_at(PreparationPhase::Inventory)
+                        }
+                    })?,
+                ContextPreviewKind::Inventory,
+            ),
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
+                _,
+            )) => return Ok(false),
+            CompletionInvestigationAction::Finish(_) => {
+                return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
+            }
         };
         let active_milliseconds = self.clock.active_milliseconds();
         let snapshot = self

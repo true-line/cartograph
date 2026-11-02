@@ -463,6 +463,40 @@ impl InvestigationInput {
         Ok(self)
     }
 
+    /// Attach fixed feedback from a host-validated durable refusal before the
+    /// firewall and disclosure seal. This method does not attest persistence.
+    pub fn with_query_refusal_feedback(
+        mut self,
+        record: &query_refusal::QueryRefusalRecord,
+        specialist: SpecialistId,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        record.validate_binding(
+            &record.task_id,
+            &record.step_id,
+            &record.action_hash,
+            &self.ledger,
+            specialist,
+            policy,
+        )?;
+        let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let object = prompt
+            .as_object_mut()
+            .ok_or(InvestigationError::InvalidInput)?;
+        if object.contains_key("query_refusal") {
+            return Err(InvestigationError::InvalidInput);
+        }
+        object.insert("query_refusal".into(), serde_json::json!({
+            "record_id": record.record_id,
+            "step_id": record.step_id,
+            "reason": record.reason,
+            "instruction": "The prior query was refused and acquired no evidence. Choose a valid query using known context identifiers or finish using already acquired evidence. Existing obligations and remaining budgets still apply."
+        }));
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
+        Ok(self)
+    }
+
     /// Seals metadata against the exact firewall-prepared representation.
     pub fn seal_disclosure(
         &self,
@@ -1025,6 +1059,38 @@ mod source_replay_feedback_tests {
                 .len()
                 <= MAX_INPUT_BYTES
         );
+        let mut refusal = query_refusal::QueryRefusalRecord {
+            schema_version: 1,
+            record_id: String::new(),
+            task_id: "task-1".into(),
+            step_id: "step-1".into(),
+            action_hash: String::new(),
+            input_ledger_hash: near_limit.ledger.fingerprint().unwrap(),
+            input_revision: near_limit.ledger.revision,
+            context_id: None,
+            query: InvestigationQuery {
+                scope: InvestigationScope::Neighborhood {
+                    anchor: "absent".into(),
+                    hops: 1,
+                },
+                kind: None,
+                labels: vec![],
+                max_facts: 1,
+                max_bytes: 16384,
+                cursor: None,
+            },
+            reason: query_refusal::QueryRejection::UnknownAnchor,
+        };
+        refusal.action_hash = refusal.query_action_hash().unwrap();
+        refusal.record_id = refusal.content_id().unwrap();
+        assert!(matches!(
+            near_limit.clone().with_query_refusal_feedback(
+                &refusal,
+                SpecialistId::DomainAnalyst,
+                &INVESTIGATION_V1_POLICY
+            ),
+            Err(InvestigationError::LimitExceeded)
+        ));
         assert!(matches!(
             near_limit.with_source_replay_feedback(),
             Err(InvestigationError::LimitExceeded)

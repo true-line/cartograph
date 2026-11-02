@@ -210,6 +210,7 @@ struct Timeline {
     calls: BTreeMap<u32, CallWitness>,
     publications: Vec<Publication>,
     action_refusals: BTreeSet<u32>,
+    query_feedback: BTreeMap<u32, ActionFeedback>,
 }
 
 /// All ordering is through explicit within-task invocation ordinals from sealed
@@ -262,6 +263,7 @@ fn timeline(
         calls: BTreeMap::new(),
         publications: vec![],
         action_refusals: BTreeSet::new(),
+        query_feedback: BTreeMap::new(),
     };
     let mut current: Option<InvestigationInputLedger> = None;
     let mut active: Option<u32> = None;
@@ -285,6 +287,7 @@ fn timeline(
             return Err(InvestigationStoreError::Invalid);
         }
         last_revision = event.revision;
+        super::query_refusal::validate_event(connection, task, &event)?;
         match event.kind {
             InvestigationEventKind::ContextPrepared => {
                 if current.is_some() || event.tool.is_some() || !result.calls.is_empty() {
@@ -464,6 +467,43 @@ fn timeline(
                 .validate_with_policy(&ledger, policy)?;
                 current = Some(ledger);
                 result.publications.push(Publication { ordinal });
+            }
+            InvestigationEventKind::QueryRefused => {
+                let (ordinal, tool, started) =
+                    accepted.take().ok_or(InvestigationStoreError::Invalid)?;
+                let record = event
+                    .query_refusal
+                    .as_ref()
+                    .ok_or(InvestigationStoreError::Invalid)?;
+                let ledger = current.as_ref().ok_or(InvestigationStoreError::Invalid)?;
+                if !started
+                    || tool != InvestigationTool::QueryContext
+                    || active != Some(ordinal)
+                    || record.step_id != result.calls[&ordinal].call.step_id
+                    || record.input_revision != ledger.revision
+                    || record.input_ledger_hash != ledger.fingerprint_with_policy(policy)?
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+                    let call = &result.calls[&ordinal].call;
+                    let acquisition = call
+                        .admission
+                        .acquisition
+                        .as_ref()
+                        .ok_or(InvestigationStoreError::Invalid)?;
+                    result.query_feedback.insert(
+                        ordinal,
+                        ActionFeedback {
+                            reason: ActionRefusalReason::QueryRejected,
+                            invocation_ordinal: ordinal,
+                            action_hash: record.action_hash.clone(),
+                            choices_hash: acquisition.choices_hash.clone(),
+                        },
+                    );
+                }
+                // Consume only the charged attempt. No new input revision,
+                // successful publication, or obligation acquisition exists.
             }
             InvestigationEventKind::ReadUnavailable => {
                 let (ordinal, tool, started) =
@@ -738,11 +778,26 @@ fn project(entries: &[Entry], line: &Timeline, cutoff: Option<u32>) -> CapacityS
             .and_then(Entry::feedback),
         action_feedback: prior
             .iter()
-            .rev()
             .copied()
-            .find(|entry| matches!(entry.reason, RefusalReason::Action(_)))
             .filter(uncleared)
-            .and_then(Entry::action_feedback),
+            .filter_map(|entry| {
+                entry
+                    .action_feedback()
+                    .map(|feedback| (entry.call.invocation_ordinal, feedback))
+            })
+            .chain(
+                line.query_feedback
+                    .iter()
+                    .filter(|(ordinal, _)| {
+                        before(**ordinal)
+                            && !line.publications.iter().any(|publication| {
+                                publication.ordinal > **ordinal && before(publication.ordinal)
+                            })
+                    })
+                    .map(|(ordinal, feedback)| (*ordinal, feedback.clone())),
+            )
+            .max_by_key(|(ordinal, _)| *ordinal)
+            .map(|(_, feedback)| feedback),
     }
 }
 fn validate_response_shape(
@@ -821,7 +876,10 @@ fn validate_reason(
         call,
         task.detail.summary.specialist_id,
     )?;
-    if let RefusalReason::Action(_) = reason {
+    if let RefusalReason::Action(reason) = reason {
+        if reason != ActionRefusalReason::ActionNotOffered {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let choices = history
             .acquisition_choices_at(call, ledger)?
             .ok_or(InvestigationStoreError::Invalid)?;

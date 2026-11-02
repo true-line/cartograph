@@ -25,6 +25,7 @@ enum Mode {
     ResponseTooLarge,
     UnknownResponseTooLarge,
     CompletionHostLimit,
+    CompletionUnknownAnchor,
     ForeignCursor,
     RepeatQuery,
     RepeatRead,
@@ -324,6 +325,11 @@ impl LlmProvider for Scripted {
         }
         let text = if matches!(self.mode, Mode::Malformed) {
             "```json\n{}\n```".into()
+        } else if matches!(self.mode, Mode::CompletionUnknownAnchor) && call == 0 {
+            format!(
+                "  {{ \"type\" : \"query_context\", \"query\" : {}, \"context_id\" : {} }}  ",
+                action["query"], action["context_id"]
+            )
         } else {
             serde_json::to_string(&action).unwrap()
         };

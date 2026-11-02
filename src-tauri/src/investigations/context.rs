@@ -130,12 +130,33 @@ pub(super) enum PreparedContextReadKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContextReadPreparationError {
     Host(HostError),
+    QueryRejected(QueryRejection),
     CumulativeQueryAndInventoryBytes,
+}
+pub(super) use agents::investigation::query_refusal::QueryRejection;
+
+/// Only errors from querying a validated frozen context can become feedback.
+/// Construction, coverage and serialization errors must remain host failures.
+fn query_preparation_error(error: context_hub::ContextError) -> ContextReadPreparationError {
+    use context_hub::ContextError as E;
+    let reason = match error {
+        E::UnknownAnchor(_) => QueryRejection::UnknownAnchor,
+        E::UnknownNode(_) => QueryRejection::UnknownNode,
+        E::CursorSnapshotMismatch => QueryRejection::CursorSnapshotMismatch,
+        E::CursorSelectionMismatch => QueryRejection::CursorSelectionMismatch,
+        E::CursorContextMismatch => QueryRejection::CursorContextMismatch,
+        E::InvalidCursorOffset { .. } => QueryRejection::InvalidCursorOffset,
+        E::InvalidLimit { .. } => QueryRejection::InvalidLimit,
+        other => return ContextReadPreparationError::Host(context_error(other)),
+    };
+    ContextReadPreparationError::QueryRejected(reason)
 }
 impl ContextReadPreparationError {
     pub(super) fn into_host_error(self) -> HostError {
         match self {
             Self::Host(error) => error,
+            // Legacy callers remain terminal until a durable refusal is published.
+            Self::QueryRejected(_) => HostError::InvalidInput,
             Self::CumulativeQueryAndInventoryBytes => HostError::LimitExceeded,
         }
     }
@@ -695,6 +716,7 @@ impl FrozenContext {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn query(
         &mut self,
         state: &AppState,
@@ -707,6 +729,7 @@ impl FrozenContext {
 
     /// Build exact prospective bytes and metadata under retained source guards.
     /// This may touch lockfiles, but neither publishes input nor mutates self.
+    #[cfg(test)]
     pub(super) fn prepare_query(
         &self,
         state: &AppState,
@@ -765,7 +788,7 @@ impl FrozenContext {
                     .query(request)
                     .map(InvestigationPageContext::Legacy),
             }
-            .map_err(context_error)
+            .map_err(query_preparation_error)
         };
         let prior_keys = self
             .ledger

@@ -36,6 +36,7 @@ fn fixture(
     // with a synthetic complete event stream containing only existing event kinds.
     let mut events: Vec<_> = (1..=detail.summary.last_event_sequence)
         .map(|sequence| InvestigationEvent {
+            query_refusal: None,
             investigation_id: detail.summary.investigation_id.clone(),
             sequence,
             revision: 1,

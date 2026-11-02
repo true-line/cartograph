@@ -137,6 +137,7 @@ impl JobStore {
             request,
             choices,
             saved: CompletionPromptSnapshot {
+                query_refusal: super::super::query_refusal::latest(&tx, &task)?,
                 detail: task.detail,
                 ledger,
                 attempts: entries.into_iter().map(|entry| entry.record).collect(),

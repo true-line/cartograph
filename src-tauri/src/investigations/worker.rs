@@ -539,6 +539,20 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     &self.detail.usage,
                 )?
             };
+            if let Some(refusal) = completion_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.query_refusal())
+            {
+                input = input
+                    .with_query_refusal_feedback(refusal, request.specialist_id, policy)
+                    .map_err(|error| {
+                        if error == InvestigationError::LimitExceeded {
+                            Failure::Stop(InvestigationStopReason::HostLimit)
+                        } else {
+                            Failure::from(error)
+                        }
+                    })?;
+            }
             if source_replay_correction_for.is_some() {
                 input = input.with_source_replay_feedback()?;
             }
@@ -906,7 +920,39 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let mut sink = WorkerSink { worker: self };
             let unavailable = match (action, inventory_read) {
                 (Some(InvestigationAction::QueryContext { query }), None) => {
-                    context.query(state, query, &mut sink)?;
+                    match context.prepare_query_with_diagnostic(state, query.clone()) {
+                        Ok(prepared) => context.publish_context_read(prepared, &mut sink)?,
+                        Err(super::context::ContextReadPreparationError::QueryRejected(reason))
+                            if completion_request.is_some() =>
+                        {
+                            use agents::investigation::query_refusal::QueryRefusalRecord;
+                            let mut record = QueryRefusalRecord {
+                                schema_version: 1,
+                                record_id: String::new(),
+                                task_id: sink.worker.id.into(),
+                                step_id: step_id.clone(),
+                                action_hash: String::new(),
+                                input_ledger_hash: context
+                                    .ledger
+                                    .fingerprint_with_policy(policy)?,
+                                input_revision: context.ledger.revision,
+                                context_id: context
+                                    .ledger
+                                    .coverage
+                                    .as_ref()
+                                    .map(|proof| proof.context_id.clone()),
+                                query,
+                                reason,
+                            };
+                            record.action_hash = record.query_action_hash()?;
+                            record.record_id = record.content_id()?;
+                            sink.worker
+                                .transition(InvestigationTransition::QueryRefused {
+                                    record: Box::new(record),
+                                })?;
+                        }
+                        Err(error) => return Err(error.into_host_error().into()),
+                    }
                     None
                 }
                 (Some(InvestigationAction::ReadEvidence { fact, role, index }), None) => {

@@ -510,6 +510,7 @@ impl JobStore {
                 let event: InvestigationEvent =
                     read_body(&tx, "investigation_events", "sequence", id, &sequence)?
                         .ok_or(InvestigationStoreError::Invalid)?;
+                super::query_refusal::validate_event(&tx, &task, &event)?;
                 if event.investigation_id != id
                     || signed(event.sequence)? != sequence
                     || event.sequence != next_sequence + 1

@@ -195,6 +195,7 @@ pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompleti
 /// This carries no lease/authorization proof, latest-graph claim or transient
 /// source bytes. A later mutation still needs its normal transaction guards.
 pub(crate) struct CompletionPromptSnapshot {
+    query_refusal: Option<agents::investigation::query_refusal::QueryRefusalRecord>,
     detail: InvestigationDetail,
     ledger: InvestigationInputLedger,
     attempts: Vec<AttemptRecord>,
@@ -203,6 +204,11 @@ pub(crate) struct CompletionPromptSnapshot {
     basis: InvestigationTurnBasis,
 }
 impl CompletionPromptSnapshot {
+    pub(crate) fn query_refusal(
+        &self,
+    ) -> Option<&agents::investigation::query_refusal::QueryRefusalRecord> {
+        self.query_refusal.as_ref()
+    }
     pub(crate) fn detail(&self) -> &InvestigationDetail {
         &self.detail
     }
@@ -420,7 +426,9 @@ fn prompt_snapshot(
         .collect::<Result<Vec<_>, _>>()?;
     let metadata = metadata(connection, &task, None)?;
     let basis = super::turn::basis(connection, &task)?;
+    let query_refusal = super::query_refusal::latest(connection, &task)?;
     Ok(CompletionPromptSnapshot {
+        query_refusal,
         detail: task.detail,
         ledger,
         attempts: entries.into_iter().map(|entry| entry.record).collect(),
