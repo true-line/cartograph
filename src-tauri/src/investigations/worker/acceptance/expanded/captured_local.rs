@@ -144,11 +144,14 @@ fn captured_local_explicit_configuration_matches_only_frozen_descriptor() {
 fn vendure_captured_local_analyst() {
     let path = |name| std::path::PathBuf::from(super::super::required(name));
     let definition = path("CARTOGRAPH_VENDURE_ANALYST_DEFINITION");
-    let expected: Definition = agents::investigation::decode_record(
+    let mut expected: Definition = agents::investigation::decode_record(
         std::str::from_utf8(&vendure::read_preparation_artifact(&definition, 128 * 1024).unwrap())
             .unwrap(),
     )
     .unwrap();
+    expected.start_sha256 = Some(super::super::required(
+        "CARTOGRAPH_VENDURE_ANALYST_START_SHA256",
+    ));
     let execute = match super::super::required("CARTOGRAPH_VENDURE_ANALYST_ACTION").as_str() {
         "execute" => true,
         "reopen" => false,
@@ -228,21 +231,25 @@ fn run_captured_auditor(action: &str) {
     use super::captured_auditor::{self, Artifacts};
     let path = |name| std::path::PathBuf::from(super::super::required(name));
     let parent_definition_path = path("CARTOGRAPH_VENDURE_ANALYST_DEFINITION");
-    let parent_definition: Definition = decode_record(
+    let mut parent_definition: Definition = decode_record(
         std::str::from_utf8(
             &vendure::read_preparation_artifact(&parent_definition_path, 128 * 1024).unwrap(),
         )
         .unwrap(),
     )
     .unwrap();
+    parent_definition.start_sha256 = Some(super::super::required(
+        "CARTOGRAPH_VENDURE_ANALYST_START_SHA256",
+    ));
     let definition_path = path("CARTOGRAPH_VENDURE_AUDITOR_DEFINITION");
-    let expected: captured_auditor::Definition = decode_record(
+    let mut expected: captured_auditor::Definition = decode_record(
         std::str::from_utf8(
             &vendure::read_preparation_artifact(&definition_path, 128 * 1024).unwrap(),
         )
         .unwrap(),
     )
     .unwrap();
+    expected.start_sha256 = std::env::var("CARTOGRAPH_VENDURE_AUDITOR_START_SHA256").ok();
     let review =
         vendure::read_preparation_artifact(&path("CARTOGRAPH_VENDURE_AUDITOR_REVIEW"), 128 * 1024)
             .unwrap();

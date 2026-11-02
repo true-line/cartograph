@@ -1526,3 +1526,21 @@ It is run as step 8 of the release pilot ([readiness report](release/v1.0-readin
    call starts and a matching `RECEIVED` entry, with duration and OK or ERROR,
    when it finishes.
 3. Confirm that no API key or request header appears in the log.
+
+### Captured start timing authority (#1626)
+
+Fresh analyst/auditor staging prints `captured-analyst-start-sha256` or
+`captured-auditor-start-sha256` (use `--nocapture`). Retain that exact staging
+output in the independently reviewed acceptance packet, outside the artifact
+output directory, before execution. For every subsequent prepare, execute or
+reopen, supply the retained value as `CARTOGRAPH_VENDURE_ANALYST_START_SHA256`
+or `CARTOGRAPH_VENDURE_AUDITOR_START_SHA256`, respectively. Auditor staging also
+requires the retained parent analyst pin. These caller pins are deliberately
+excluded from serialized definition files. Never recompute a trusted pin from
+artifacts during reopen or accept one supplied by those artifacts.
+
+Reopen checks exact start bytes against this independent pin before validating
+the timing sidecar. A paired sidecar/start rewrite or removal fails closed.
+Historical unknown timing requires an independently retained historical start
+pin; missing timing alone never authorizes a downgrade. A lost staging pin is
+an explicit evidence recovery problem, not permission to restage or run again.
