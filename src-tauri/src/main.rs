@@ -3809,6 +3809,65 @@ fn reset_run_limits(state: State<'_, AppState>) -> Result<settings::RunLimits, S
     store.reset_run_limits().map_err(|e| e.to_string())
 }
 
+/// Installed Ollama models on this Mac, for Configure → Run Limits (#1643).
+fn installed_local_models() -> Result<Vec<llm::catalog::LocalModel>, String> {
+    llm::OllamaProvider::with_models(
+        llm::OllamaProvider::DEFAULT_URL,
+        llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+        llm::OllamaProvider::DEFAULT_COMPLETION_MODEL,
+        llm::bounded::CONNECT_TIMEOUT,
+    )
+    .and_then(|provider| provider.list_local_models())
+    .map_err(|_| {
+        "Ollama is not reachable on this Mac, so installed models cannot be listed.".to_owned()
+    })
+}
+
+#[tauri::command]
+async fn list_local_models() -> Result<Vec<llm::catalog::LocalModel>, String> {
+    tauri::async_runtime::spawn_blocking(installed_local_models)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The local completion model for new desktop investigations (#1643).
+#[tauri::command]
+fn get_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelChoice, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.local_model().map_err(|e| e.to_string())
+}
+
+/// Save the local completion model. Anything but the shipped default must be
+/// installed in Ollama now; Cartograph never pulls a model (#1643).
+#[tauri::command]
+async fn set_local_model(
+    model: String,
+    state: State<'_, AppState>,
+) -> Result<settings::LocalModelChoice, String> {
+    if !settings::local_model_name(&model) {
+        return Err(settings::SettingsError::InvalidLocalModel.to_string());
+    }
+    if model != llm::OllamaProvider::DEFAULT_COMPLETION_MODEL {
+        let installed = tauri::async_runtime::spawn_blocking(installed_local_models)
+            .await
+            .map_err(|e| e.to_string())??;
+        if !installed.iter().any(|entry| entry.name == model) {
+            return Err(format!(
+                "'{model}' is not installed in Ollama on this Mac. Install it with `ollama pull {model}`, then choose it here."
+            ));
+        }
+    }
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.set_local_model(&model).map_err(|e| e.to_string())
+}
+
+/// Return to the shipped local completion model (#1643).
+#[tauri::command]
+fn reset_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelChoice, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.reset_local_model().map_err(|e| e.to_string())
+}
+
 /// Live egress summary for the status bar (#103's seam, now real).
 #[tauri::command]
 fn egress_summary(state: State<'_, AppState>) -> Result<settings::EgressSummary, String> {
@@ -6574,6 +6633,10 @@ fn main() {
             get_run_limits,
             set_run_limits,
             reset_run_limits,
+            list_local_models,
+            get_local_model,
+            set_local_model,
+            reset_local_model,
             cloud_disclosure,
             ingest_history,
             extractor_coverage,
