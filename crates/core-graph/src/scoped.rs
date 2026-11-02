@@ -307,6 +307,17 @@ fn more(
     )?)
 }
 impl SqliteGraphStore {
+    /// Probe only edge existence at a frozen revision, without copying keys or
+    /// properties. This admits no graph row and grants no further read budget.
+    pub fn has_edges_at_revision(&self, expected: &StoreRevision) -> Result<bool, GraphError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        check_revision(&transaction, Some(expected))?;
+        preflight_schema(&transaction)?;
+        let exists = more(&transaction, Kind::Edge, "LIMIT 1", &[])?;
+        transaction.commit()?;
+        Ok(exists)
+    }
+
     /// Read a bounded node keyset window without counting/admitting the whole graph.
     pub fn read_node_window(
         &self,

@@ -263,3 +263,5 @@ host-only and output-only; historical complete snapshot and ledger formats are
 unchanged. Runtime activation requires the ledger, evidence and replay integration.
 
 All investigation traversal uses a host-owned, non-deserializable cursor with fixed narrowed page and aggregate limits. It binds every node and edge window to the same acquisition basis/revision. Successful pages charge actual decoded JSON values (including duplicate input property values) and both raw and canonical bytes. A failed acquisition terminates this cursor; outer task admission still accounts for attempted reads and validation. Nodes exhausted does not mean graph exhausted: the edge phase must also finish. Runtime and durable-ledger activation remain separate work.
+
+At an exactly exhausted aggregate allowance, All traversal may prove an empty final edge phase with a revision-checked existence probe that copies no graph payload. Any present edge still refuses; a revision change never turns the probe into completion.

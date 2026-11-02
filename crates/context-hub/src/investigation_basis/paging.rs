@@ -116,6 +116,19 @@ impl InvestigationAllTraversal {
             max_values: self.page.max_values.min(self.remaining.max_values),
             max_depth: self.page.max_depth.min(self.remaining.max_depth),
         };
+        // Exhausted allowances can still admit an empty terminal phase. Probe
+        // existence only, at the same revision, before any payload allocation.
+        if matches!(self.position, Position::Edges(None))
+            && (limits.max_rows == 0 || limits.max_bytes == 0 || limits.max_values == 0)
+            && !store.has_edges_at_revision(self.basis.revision())?
+        {
+            self.position = Position::Done;
+            return Ok(Some(InvestigationPage {
+                nodes: vec![],
+                edges: vec![],
+                traversal_complete: true,
+            }));
+        }
         let revision = Some(self.basis.revision().clone());
         let (nodes, edges, rows, raw, canonical, values, position) = match &self.position {
             Position::Nodes(after) => {
