@@ -42,6 +42,7 @@ impl AcquisitionAdmission {
 #[serde(rename_all = "snake_case")]
 pub enum ActionRefusalReason {
     ActionNotOffered,
+    QueryRejected,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActionRefusalFeedback {

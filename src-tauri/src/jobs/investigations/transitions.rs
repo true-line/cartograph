@@ -554,6 +554,9 @@ impl JobStore {
             InvestigationTransition::ReadUnavailable { read, reason } => {
                 completion::unavailable(&tx, &mut task, read, reason)?;
             }
+            InvestigationTransition::QueryRefused { record } => {
+                query_refusal::publish(&tx, &mut task, *record)?;
+            }
             InvestigationTransition::BeginTool { tool } => {
                 if task.phase != Phase::Action || task.action_tool != Some(tool) {
                     return Err(InvestigationStoreError::Stale);

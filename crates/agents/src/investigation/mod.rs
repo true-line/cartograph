@@ -25,6 +25,8 @@ mod policy;
 mod privacy;
 mod projection;
 mod protocol;
+#[doc(hidden)]
+pub mod query_refusal;
 mod record_workspace;
 mod records;
 mod response_schema;

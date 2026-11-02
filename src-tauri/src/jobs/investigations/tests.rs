@@ -1,3 +1,6 @@
+#[path = "query_refusal_tests.rs"]
+mod query_refusal_tests;
+
 use super::chat::StoredChatMessage;
 use super::*;
 use crate::job_execution::JobExecutionLocks;

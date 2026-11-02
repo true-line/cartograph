@@ -403,11 +403,14 @@ pub enum InvestigationEventKind {
     CapacityRefused,
     ActionRefused,
     ReadUnavailable,
+    QueryRefused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_refusal: Option<Box<super::query_refusal::QueryRefusalRecord>>,
     pub investigation_id: String,
     pub sequence: u64,
     pub revision: u64,

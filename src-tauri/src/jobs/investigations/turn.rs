@@ -134,6 +134,7 @@ fn completed_tool(
         {
             return Err(InvestigationStoreError::Invalid);
         }
+        super::query_refusal::validate_event(connection, task, &event)?;
         match event.kind {
             InvestigationEventKind::ContextPrepared if completed == 0 && event.tool.is_none() => {
                 completed = 1;

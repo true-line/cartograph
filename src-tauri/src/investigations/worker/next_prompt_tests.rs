@@ -217,6 +217,7 @@ struct NextProvider {
     metadata_order: Option<[bool; 2]>,
     metadata_query: Option<Value>,
     repeat_metadata_query: bool,
+    query_refusal_recovery: bool,
     received_payloads: std::sync::Mutex<Vec<llm::CompletionPayload>>,
     inventory_max_bytes: usize,
     lose_metadata_ack: bool,
@@ -237,6 +238,7 @@ impl NextProvider {
             metadata_order: None,
             metadata_query: None,
             repeat_metadata_query: false,
+            query_refusal_recovery: false,
             received_payloads: std::sync::Mutex::new(Vec::new()),
             inventory_max_bytes: 32768,
             lose_metadata_ack: false,
@@ -283,6 +285,9 @@ impl LlmProvider for NextProvider {
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         if let Some(schema) = &request.payload().response_schema
             && self.gated_flow.is_none()
+            // @18 selects its schema from current acquisition choices; the
+            // fixed historical action-count assertion does not apply.
+            && request.payload().system != SpecialistId::DomainAnalystV18.prompt()
         {
             let parsed: Value = serde_json::from_str(schema).unwrap();
             assert_eq!(
@@ -412,6 +417,13 @@ impl LlmProvider for NextProvider {
                     "type":"finish","findings":findings,
                     "knowledge_completeness":"partial","limitations":if audit { json!(["This review leaves broader behavior unresolved."]) } else { json!(["No complete business policy was established."]) }}}).to_string()
             }
+        } else if self.query_refusal_recovery && call == 2 {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
+                "max_facts":1,"max_bytes":32768,"cursor":null}})
+            .to_string()
         } else if self.repeat_metadata_query {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
@@ -446,7 +458,18 @@ impl LlmProvider for NextProvider {
                 "limitations":["No inventory acquisition has completed."]}})
             .to_string()
         };
-        if (call == 2 || (call == 0 && self.gated_flow == Some(GatedFlow::Cancel)))
+        let text = if self.query_refusal_recovery && call == 1 {
+            let action: Value = serde_json::from_str(&text).unwrap();
+            format!(
+                "  {{ \"type\" : \"query_context\", \"query\" : {}, \"context_id\" : {} }}  ",
+                action["query"], action["context_id"]
+            )
+        } else {
+            text
+        };
+        if (call == 2
+            || (call == 1 && self.query_refusal_recovery)
+            || (call == 0 && self.gated_flow == Some(GatedFlow::Cancel)))
             && let Some(cancel) = self.observed.cancel.lock().unwrap().as_ref()
         {
             // The final response has been computed while the invocation is in
@@ -1966,3 +1989,102 @@ fn explicit_acquisition_saved_task_runs_normal_worker() {
 
 #[path = "initial_acquisition_tests.rs"]
 mod initial_acquisition_tests;
+
+// AC-0266: after required acquisitions, @18 permits exploratory queries. A
+// missing selector must not be confused with a corrupt host snapshot.
+#[test]
+fn desktop_v18_unknown_anchor_after_inventory_recovers() {
+    let mut scripted = NextProvider::new(false);
+    scripted.metadata_order = Some([false, true]);
+    scripted.query_refusal_recovery = true;
+    scripted.metadata_query = Some(json!({
+        "scope":{"type":"neighborhood","anchor":"absent-query-refusal-anchor","hops":1},
+        "kind":null,"labels":[],"max_facts":1,"max_bytes":16384,"cursor":null
+    }));
+    let provider = Arc::new(scripted);
+    // Genuine current-family start, not the historical gated fixture rewrite.
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18);
+    f.run(provider.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(detail.usage.model_invocations, 4);
+    assert_eq!(detail.usage.tool_actions, 3);
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert!(detail.error.is_none());
+    let prompts = provider.observed.prompts.lock().unwrap();
+    assert_eq!(
+        prompts[2]["turn_progress"]["action_feedback"]["reason"],
+        "query_rejected"
+    );
+    assert!(
+        !prompts[2]
+            .to_string()
+            .contains("absent-query-refusal-anchor")
+    );
+    assert!(prompts[3]["turn_progress"]["action_feedback"].is_null());
+    drop(prompts);
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    assert!(
+        !events
+            .items
+            .iter()
+            .any(|event| event.kind == InvestigationEventKind::ActionRefused)
+    );
+    assert_eq!(
+        events
+            .items
+            .iter()
+            .filter(|event| event.kind == InvestigationEventKind::ToolCompleted)
+            .count(),
+        2
+    );
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+}
+
+// AC-0266, AC-0187: cancellation of the in-flight query cannot publish
+// refusal feedback or authorize the next invocation.
+#[test]
+fn desktop_v18_cancelled_query_does_not_publish_refusal_or_retry() {
+    let mut scripted = NextProvider::new(false);
+    scripted.metadata_order = Some([false, true]);
+    scripted.query_refusal_recovery = true;
+    scripted.metadata_query = Some(json!({
+        "scope":{"type":"neighborhood","anchor":"absent-query-refusal-anchor","hops":1},
+        "kind":null,"labels":[],"max_facts":1,"max_bytes":16384,"cursor":null
+    }));
+    let provider = Arc::new(scripted);
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18);
+    let app = f.base.base.app.handle().clone();
+    let id = f.id.clone();
+    *provider.observed.cancel.lock().unwrap() = Some(Box::new(move || {
+        let state = app.state::<AppState>();
+        let mut jobs = state.jobs.lock().unwrap();
+        let before = jobs.investigation(&id).unwrap();
+        assert_eq!(before.usage.model_invocations, 2);
+        assert_eq!(before.usage.tool_actions, 1);
+        jobs.cancel_next_prompt_investigation(&id).unwrap();
+    }));
+    f.run(provider.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(detail.usage.model_invocations, 2);
+    assert_eq!(detail.usage.tool_actions, 1);
+    assert_eq!(detail.summary.status, InvestigationStatus::Cancelled);
+    assert!(jobs.investigation_result(&f.id).unwrap().is_none());
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    assert!(
+        !events
+            .items
+            .iter()
+            .any(|event| event.kind == InvestigationEventKind::QueryRefused)
+    );
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+}

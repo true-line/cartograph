@@ -118,6 +118,9 @@ pub(crate) use result_replay_workspace::{
 };
 #[cfg(unix)]
 pub(crate) use staged::next_prompt_staged_workspace;
+#[path = "investigations/query_refusal.rs"]
+mod query_refusal;
+pub(crate) use query_refusal::QueryRefusalAdmission;
 #[cfg(test)]
 #[path = "investigations/tests.rs"]
 mod tests;
@@ -327,6 +330,9 @@ pub(crate) enum InvestigationTransition {
     ReadUnavailable {
         read: ReadIntent,
         reason: UnavailableReason,
+    },
+    QueryRefused {
+        record: Box<agents::investigation::query_refusal::QueryRefusalRecord>,
     },
     BeginTool {
         tool: InvestigationTool,

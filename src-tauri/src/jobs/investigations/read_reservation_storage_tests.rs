@@ -421,6 +421,7 @@ fn read_reservation_event_writer_preserves_claims_at_normal_and_cancel_boundarie
             let reserved = reservation.storage_claim.events(charged) as u64;
             let maximum = INVESTIGATION_V2_POLICY.journal_events() - if cancel { 2 } else { 3 };
             let mut event = InvestigationEvent {
+                query_refusal: None,
                 investigation_id: id.clone(),
                 sequence: maximum - reserved + 1,
                 revision: 1,

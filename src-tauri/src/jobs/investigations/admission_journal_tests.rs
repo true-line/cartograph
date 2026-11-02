@@ -893,3 +893,72 @@ fn admission_journal_capacity_only_preserves_legacy_bytes_hashes_and_counts() {
     assert_eq!(state(&f).count, 2);
     assert!(state(&f).action_feedback.is_none());
 }
+
+// AC-0266: a refused query consumes its admitted tool but creates no input.
+#[test]
+fn next_prompt_query_refusal_replay_consumes_attempt_without_publication() {
+    use agents::investigation::query_refusal::{QueryRefusalRecord, QueryRejection};
+    let mut f = internal_next_prompt_fixture();
+    let mut value = proposal(&f, 1);
+    value["query"]["scope"] = json!({"type":"neighborhood","anchor":"absent","hops":1});
+    let response = response(&f, &value);
+    let mut record = QueryRefusalRecord {
+        schema_version: 1,
+        record_id: String::new(),
+        task_id: f.basis.task_id.clone(),
+        step_id: f.basis.step_id.clone(),
+        action_hash: response.action_hash.clone(),
+        input_ledger_hash: f
+            .ledger
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap(),
+        input_revision: f.ledger.revision,
+        context_id: Some(f.request.expected_context_id.clone()),
+        query: serde_json::from_value(value["query"].clone()).unwrap(),
+        reason: QueryRejection::UnknownAnchor,
+    };
+    record.record_id = record.content_id().unwrap();
+    let tx = f.store.conn.transaction().unwrap();
+    let (_, mut usage) = transitions::validate_response(&tx, &f.task, &response).unwrap();
+    usage.tool_actions += 1;
+    f.task.detail.usage = usage;
+    insert_body(
+        &tx,
+        "investigation_responses",
+        &f.basis.task_id,
+        &f.basis.step_id,
+        &response,
+        4096,
+    )
+    .unwrap();
+    bump(&tx, &mut f.task).unwrap();
+    for kind in [
+        InvestigationEventKind::ModelCompleted,
+        InvestigationEventKind::ActionAdmitted,
+        InvestigationEventKind::ToolStarted,
+    ] {
+        event(
+            &tx,
+            &mut f.task,
+            kind,
+            Some(&f.basis.step_id),
+            Some(InvestigationTool::QueryContext),
+            "Refusal replay fixture.",
+        )
+        .unwrap();
+    }
+    f.task.phase = Phase::Tool;
+    f.task.action_tool = Some(InvestigationTool::QueryContext);
+    super::super::query_refusal::publish(&tx, &mut f.task, record).unwrap();
+    f.task.pending = None;
+    f.task.admission_state.as_mut().unwrap().current_call = None;
+    save_task(&tx, &f.task);
+    let history = completion::SavedMetadataHistory::load(&tx, &f.task).unwrap();
+    let line = timeline(&tx, &f.task, &history).unwrap();
+    assert_eq!(line.calls.len(), 1);
+    assert_eq!(line.publications.len(), 1); // Initial context only.
+    assert_eq!(line.publications[0].ordinal, 0);
+    assert_eq!(f.task.ledger_revision, Some(f.ledger.revision));
+    derive_current(&tx, &f.task).unwrap();
+    tx.commit().unwrap();
+}

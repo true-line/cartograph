@@ -14,6 +14,26 @@ fn export_wire(name: &str, detail: &InvestigationDetail, result: Option<&Investi
 }
 
 pub(super) fn scripted_action(mode: Mode, call: usize, prompt: &Value) -> Value {
+    if matches!(mode, Mode::CompletionUnknownAnchor) && call == 0 {
+        return json!({"type":"query_context","context_id":prompt["context_id"],
+            "query":{"scope":{"type":"neighborhood","anchor":"missing:pilot-anchor","hops":1},
+            "kind":null,"labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}});
+    }
+    let (mode, call) = if matches!(mode, Mode::CompletionUnknownAnchor) {
+        if call == 1 {
+            assert_eq!(prompt["query_refusal"]["reason"], "unknown_anchor");
+            assert!(
+                !prompt["query_refusal"]
+                    .to_string()
+                    .contains("missing:pilot-anchor")
+            );
+        } else {
+            assert!(prompt.get("query_refusal").is_none());
+        }
+        (Mode::CompletionSupported, call - 1)
+    } else {
+        (mode, call)
+    };
     if matches!(mode, Mode::CompletionHostLimit) {
         return json!({"type":"query_context","context_id":prompt["context_id"],
             "query":{"scope":{"type":"all"},"kind":null,"labels":[],
@@ -183,15 +203,47 @@ impl CompletionFixture {
         inventory: bool,
         original: &str,
     ) -> Self {
+        Self::with_padding(provider, specialist, source, inventory, original, 0)
+    }
+    fn with_padding(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        source: bool,
+        inventory: bool,
+        original: &str,
+        padding_nodes: usize,
+    ) -> Self {
         // Reuse real parser/receipt/context setup, then retire its unused legacy
         // task before creating the genuine request4 task under test.
-        let base = Fixture::with_contract(
+        let base = Fixture::with_prepared_contract(
             provider,
             tempfile::tempdir().unwrap(),
             "Inspect selected source and recorded analysis limits.",
             SpecialistId::DomainAnalystV6,
             source.then_some(agents::TaskRangeRole::DefinitionInitializer),
             original,
+            None,
+            |_, state, _| {
+                if padding_nodes > 0 {
+                    let mut graph = state.graph.lock().unwrap();
+                    let expected = graph.read_snapshot().unwrap();
+                    let patch = core_graph::GraphPatch {
+                        upsert_nodes: (0..padding_nodes)
+                            .map(|i| core_graph::Node {
+                                id: format!("padding:{i}"),
+                                label: "Module".into(),
+                                props: json!({"name":format!("padding{i}")}),
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    assert!(
+                        graph
+                            .apply_patch_if_snapshot_matches(&expected, &patch)
+                            .unwrap()
+                    );
+                }
+            },
         );
         let state = base.app.state::<AppState>();
         {
@@ -1454,6 +1506,44 @@ fn spec_writer_message_worker_reopens_and_accepts_a_valid_late_cancel() {
                 .summary
                 .investigation_id,
             fixture.id
+        );
+    }
+}
+
+// AC-0266: diagnostic reproduction on the released production worker; no real provider.
+#[test]
+fn desktop_v7_unknown_anchor_refusal_continues_and_reopens() {
+    for role in [SpecialistId::DomainAnalystV7, SpecialistId::DomainAnalystV8] {
+        let provider = Arc::new(Scripted::new(Mode::CompletionUnknownAnchor));
+        let fixture =
+            CompletionFixture::with_padding(provider.as_ref(), role, false, true, ORIGINAL, 50_001);
+        fixture.run(provider.clone());
+        let state = fixture.base.app.state::<AppState>();
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&fixture.id).unwrap();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(detail.usage.tool_actions, 3);
+        assert_eq!(
+            detail.summary.status,
+            InvestigationStatus::Completed,
+            "{:?}",
+            detail.error
+        );
+        let events = jobs.investigation_events(&fixture.id, 0).unwrap();
+        assert_eq!(
+            events
+                .items
+                .iter()
+                .filter(|event| event.kind == InvestigationEventKind::QueryRefused)
+                .count(),
+            1
+        );
+        drop(jobs);
+        let reopened = crate::jobs::JobStore::open(fixture.base.app_data.join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(&fixture.id).unwrap(), detail);
+        assert_eq!(
+            reopened.investigation_events(&fixture.id, 0).unwrap(),
+            events
         );
     }
 }
