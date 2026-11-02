@@ -171,7 +171,17 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
         assert_eq!(serde_json::to_vec(&restored).unwrap(), wire);
     }
     let manifest = run(&expected).unwrap();
+    // AC-0463 (#1626): actual staging seals its original start measurement.
+    let timing_bytes = std::fs::read(output.join("start-latency.json")).unwrap();
+    let timing: Value = serde_json::from_slice(&timing_bytes).unwrap();
+    assert_eq!(timing["role"], "analyst");
+    assert_eq!(
+        timing["boundary"],
+        "production_start_call_to_returned_task_id"
+    );
+    assert!(timing["elapsed_ns"].as_u64().is_some());
     let wire = std::fs::read(output.join("analyst-request.json")).unwrap();
+    assert_eq!(timing["request_sha256"], sha(&wire));
     let request: StagedObligationRequest = serde_json::from_slice(&wire).unwrap();
     assert_eq!(
         (
@@ -193,6 +203,10 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
     assert_eq!(manifest["source_id"], prepared.graph.source_id);
     assert_eq!(manifest["provider_calls"], 0);
     assert_eq!(run(&expected).unwrap(), manifest);
+    assert_eq!(
+        std::fs::read(output.join("start-latency.json")).unwrap(),
+        timing_bytes
+    );
     if execute {
         use super::super::expanded::{captured_local, vendure_prepare};
         use crate::investigations::worker::tests::completion_tests::expanded_scripted_provider;

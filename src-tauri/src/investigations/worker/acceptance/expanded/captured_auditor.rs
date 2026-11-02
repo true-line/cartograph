@@ -169,26 +169,33 @@ pub(super) fn stage(
     {
         return Err("Frozen auditor definition changed.".into());
     }
-    let detail = if fresh_output {
+    let (detail, elapsed) = if fresh_output {
+        let clock = std::time::Instant::now();
         let started = jobs
             .start_next_prompt_investigation(request, Some(&expected.provider))
             .map_err(|e| e.to_string())?;
+        let elapsed = clock.elapsed();
         if !started.created {
             return Err("Auditor nonce consumed.".into());
         }
-        started.detail
+        (started.detail, Some(elapsed))
     } else {
-        jobs.existing_investigation_completion(request)
-            .map_err(|e| e.to_string())?
-            .ok_or("Auditor start absent; explicit recovery required")?
+        (
+            jobs.existing_investigation_completion(request)
+                .map_err(|e| e.to_string())?
+                .ok_or("Auditor start absent; explicit recovery required")?,
+            None,
+        )
     };
     let id = detail.summary.investigation_id;
-    let start = wire(&json!({"definition_sha256":sha(&definition),"auditor_id":id}))?;
-    if fresh_output {
-        analyst::exclusive(&output.join("start.json"), &start)?;
-    } else if read(&output.join("start.json"))? != start {
-        return Err("Auditor start changed.".into());
-    }
+    let start = json!({"definition_sha256":sha(&definition),"auditor_id":id});
+    super::start_timing::seal_or_validate(
+        output,
+        &start,
+        "auditor",
+        &sha(&wire(request)?),
+        elapsed,
+    )?;
     if detail.provider != expected.provider
         || (preparing
             && (detail.summary.status != InvestigationStatus::Queued
@@ -453,7 +460,24 @@ mod tests {
         assert!(!output.exists());
         std::fs::write(&definition_path, wire(&expected).unwrap()).unwrap();
         let id = stage(&parent, &artifacts, &expected, true).unwrap();
+        // AC-0463 (#1626): real auditor staging and reopen preserve timing.
+        let timing_bytes = read(&output.join("start-latency.json")).unwrap();
+        let timing: Value = serde_json::from_slice(&timing_bytes).unwrap();
+        assert_eq!(timing["role"], "auditor");
+        assert_eq!(
+            timing["boundary"],
+            "production_start_call_to_returned_task_id"
+        );
+        assert_eq!(
+            timing["request_sha256"],
+            sha(&wire(&expected.request).unwrap())
+        );
+        assert!(timing["elapsed_ns"].as_u64().is_some());
         assert_eq!(stage(&parent, &artifacts, &expected, true).unwrap(), id);
+        assert_eq!(
+            read(&output.join("start-latency.json")).unwrap(),
+            timing_bytes
+        );
         let db = prepared.app_data.join("state.db");
         let read_task = || {
             crate::jobs::JobStore::open(&db)

@@ -388,27 +388,28 @@ fn bound_with_scope<T>(
             if read(definition_path)? != definition {
                 return Err("caller definition changed".into());
             }
-            let task = if fresh {
+            let (task, elapsed) = if fresh {
+                let clock = std::time::Instant::now();
                 let started = jobs
                     .start_next_prompt_investigation(&request, Some(&expected.provider))
                     .map_err(|e| e.to_string())?;
+                let elapsed = clock.elapsed();
                 if !started.created {
                     return Err("fresh capture nonce already consumed".into());
                 }
-                started.detail
+                (started.detail, Some(elapsed))
             } else {
-                jobs.existing_investigation_completion(&request)
-                    .map_err(|e| e.to_string())?
-                    .ok_or("frozen start absent; explicit recovery required")?
+                (
+                    jobs.existing_investigation_completion(&request)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("frozen start absent; explicit recovery required")?,
+                    None,
+                )
             };
             let start = serde_json::json!({"definition_sha256":sha(&definition), "request_sha256":sha(&wire),
                 "intent_hash":request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
                 "analyst_id":task.summary.investigation_id});
-            if fresh {
-                write(output, "start.json", &start)?;
-            } else if read(&output.join("start.json"))? != json(&start)? {
-                return Err("sealed start absent or changed; explicit recovery required".into());
-            }
+            super::start_timing::seal_or_validate(output, &start, "analyst", &sha(&wire), elapsed)?;
             if task.provider != expected.provider
                 || (preparing
                     && (task.summary.status != InvestigationStatus::Queued
