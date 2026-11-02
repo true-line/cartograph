@@ -206,3 +206,51 @@ pub(super) fn select_acquisition(
         .map(Some)
         .map_err(|_| InvestigationError::InvalidInput)
 }
+
+/// Recover from an authenticated unknown ID without inventing another anchor.
+/// This is a strict subset of the ordinary schema, so its existing reservation
+/// covers it. A fresh all-scope query can discover actual IDs in the admitted
+/// context. Historical generic feedback keeps its exact original schema.
+pub(super) fn select_acquisition_recovery(
+    mode: CompletionCallMode,
+    choices: &acquisition_choices::AcquisitionChoices,
+    ledger: &InvestigationInputLedger,
+    request_hash: &str,
+    feedback: Option<&ActionRefusalFeedback>,
+) -> Result<Option<String>, InvestigationError> {
+    let ordinary = select_acquisition(mode, choices, ledger, request_hash)?;
+    if mode == CompletionCallMode::FinishOnly
+        || !choices.attempts_complete()
+        || !feedback.is_some_and(|feedback| {
+            matches!(
+                feedback.reason,
+                ActionRefusalReason::UnknownAnchor | ActionRefusalReason::UnknownNode
+            )
+        })
+    {
+        return Ok(ordinary);
+    }
+    let mut schema: Value = serde_json::from_str(
+        ordinary
+            .as_deref()
+            .ok_or(InvestigationError::InvalidInput)?,
+    )
+    .map_err(|_| InvestigationError::InvalidInput)?;
+    schema["$defs"]["query_scope"]["anyOf"] = serde_json::json!([{
+        "type":"object", "properties":{"type":{"const":"all"}},
+        "required":["type"], "additionalProperties":false
+    }]);
+    schema["$defs"]["query_cursor"] = serde_json::json!({"type":"null"});
+    let narrowed = bounded_bytes(&schema, MAX_INPUT_BYTES)?;
+    if narrowed.len()
+        > ordinary
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?
+            .len()
+    {
+        return Err(InvestigationError::InvalidInput);
+    }
+    String::from_utf8(narrowed)
+        .map(Some)
+        .map_err(|_| InvestigationError::InvalidInput)
+}

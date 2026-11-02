@@ -676,9 +676,7 @@ impl InvestigationInput {
                 .map_err(|_| InvestigationError::InvalidInput)?;
         if self.acquisition_choices.is_some() {
             state.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
-            if metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)? != state.mode {
-                return Err(InvestigationError::InvalidInput);
-            }
+            state.validate_mode_with_metadata(&metadata, policy)?;
         } else {
             state.validate_with_metadata(&metadata, policy)?;
         }
@@ -777,7 +775,15 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let mode = metadata.next_call_mode_with_policy(&usage, policy)?;
+        let mode = if self
+            .action_feedback
+            .as_ref()
+            .is_some_and(|feedback| feedback.reason == ActionRefusalReason::RepeatedRead)
+        {
+            CompletionCallMode::FinishOnly
+        } else {
+            metadata.next_call_mode_with_policy(&usage, policy)?
+        };
         let count = prompt["turn_progress"]["capacity_refusal_count"]
             .as_u64()
             .filter(|value| {
@@ -977,15 +983,27 @@ impl InvestigationInput {
         prompt["turn_progress"]["action_feedback"] =
             serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
         self.action_feedback = feedback;
+        if self
+            .action_feedback
+            .as_ref()
+            .is_some_and(|value| value.reason == ActionRefusalReason::RepeatedRead)
+        {
+            prompt["turn_progress"]["admission_mode"] =
+                serde_json::to_value(CompletionCallMode::FinishOnly)
+                    .map_err(|_| InvestigationError::InvalidInput)?;
+            prompt["turn_progress"]["admission_instructions"] = FINISH_ONLY_INSTRUCTIONS.into();
+            prompt["turn_progress"]["phase"] = "finish_only".into();
+        }
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
-        self.payload.response_schema = response_schema::select_acquisition(
+        self.payload.response_schema = response_schema::select_acquisition_recovery(
             mode,
             &choices,
             &self.ledger,
             prompt["completion_contract"]["request_hash"]
                 .as_str()
                 .ok_or(InvestigationError::InvalidInput)?,
+            self.action_feedback.as_ref(),
         )?;
         self.acquisition_choices = Some(choices);
         self.acquisition_mode = Some(mode);
@@ -1013,6 +1031,11 @@ impl InvestigationInput {
         }
         self.validate_acquisition_projection()?;
         Ok(AcquisitionAdmission {
+            finish_reason: self
+                .action_feedback
+                .as_ref()
+                .filter(|value| value.reason == ActionRefusalReason::RepeatedRead)
+                .map(|value| value.reason),
             choices_hash: self
                 .acquisition_choices
                 .as_ref()
@@ -1059,11 +1082,12 @@ impl InvestigationInput {
                         .map_err(|_| InvestigationError::InvalidInput)?,
                 )
             || self.payload.response_schema
-                != response_schema::select_acquisition(
+                != response_schema::select_acquisition_recovery(
                     mode,
                     choices,
                     &self.ledger,
                     &contract.request_hash,
+                    self.action_feedback.as_ref(),
                 )?
         {
             return Err(InvestigationError::InvalidInput);

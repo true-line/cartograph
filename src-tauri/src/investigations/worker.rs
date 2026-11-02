@@ -451,7 +451,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     snapshot.request(),
                     snapshot.metadata(),
                     &inventory_details,
-                    snapshot.mode(),
+                    snapshot.preparation_mode()?,
                     snapshot.capacity_refusal_count(),
                     snapshot.capacity_feedback(),
                     policy,

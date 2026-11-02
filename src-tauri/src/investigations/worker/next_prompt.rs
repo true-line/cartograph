@@ -28,12 +28,23 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.detail.summary.specialist_id,
         )
         .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
-        let unoffered = if let CompletionInvestigationAction::Read(read) = &action
+        let original: serde_json::Value = serde_json::from_str(&completion.text)
+            .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
+        let refusal = if let CompletionInvestigationAction::Read(read) = &action
             && mode == staged_refusal::CompletionCallMode::Choice
         {
-            if input.permits_acquisition(read) {
+            let reason = if !input.permits_acquisition(read) {
+                ActionRefusalReason::ActionNotOffered
+            } else if self.detail.summary.specialist_id == SpecialistId::DomainAnalystV18
+                // Strict decoding above authenticated the saved replay selector.
+                // An explicitly requested replay is not an accidental raw repeat.
+                && original["type"] != "replay_query"
+                && read.repeats_acquired_metadata(input.ledger())
+            {
+                ActionRefusalReason::RepeatedRead
+            } else {
                 return Ok(false);
-            }
+            };
             // Cancellation/deadlines precede refusal. Unlike a late finish,
             // an acquisition response cannot rebase to a newer task revision.
             let revision = self.detail.summary.revision;
@@ -41,12 +52,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             if self.detail.summary.revision != revision {
                 return Err(InvestigationStoreError::Stale.into());
             }
-            true
+            Some(reason)
         } else {
-            false
+            None
         };
-        let original: serde_json::Value = serde_json::from_str(&completion.text)
-            .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
         let response = InvestigationResponseMeta {
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
@@ -66,7 +75,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .and_then(|usage| usage.cache_read_input_tokens),
             active_milliseconds: self.clock.active_milliseconds(),
         };
-        if unoffered {
+        if let Some(reason) = refusal {
             self.detail = self
                 .state
                 .jobs
@@ -77,9 +86,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     self.detail.summary.revision,
                     &response,
                     &original,
-                    crate::jobs::investigations::NextPromptRefusalReason::Action(
-                        ActionRefusalReason::ActionNotOffered,
-                    ),
+                    crate::jobs::investigations::NextPromptRefusalReason::Action(reason),
                 )?;
             super::super::emit_changed(self.app, &self.detail);
             return Ok(true);

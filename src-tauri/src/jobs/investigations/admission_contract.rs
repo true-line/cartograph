@@ -253,11 +253,8 @@ impl SavedCallBasis {
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
         disclosure.validate_saved_role_shape(ledger, policy, role)?;
-        if metadata.next_call_mode_with_policy(&self.admission.consumed_budgets, policy)?
-            != self.admission.mode
-        {
-            return Err(InvestigationStoreError::Invalid);
-        }
+        self.admission
+            .validate_mode_with_metadata(metadata, policy)?;
         if self.task_id != task.detail.summary.investigation_id
             || self.request_hash != task.intent_hash
             || self.step_id != step.step_id
@@ -286,7 +283,19 @@ impl SavedCallBasis {
         &self,
         capacity: &admission_journal::CapacityState,
     ) -> Result<(), InvestigationStoreError> {
-        if self.admission.capacity_refusal_count != capacity.count
+        if self
+            .admission
+            .acquisition
+            .as_ref()
+            .and_then(|stamp| stamp.finish_reason)
+            != capacity
+                .action_feedback
+                .as_ref()
+                .filter(|feedback| {
+                    feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
+                })
+                .map(|feedback| feedback.reason)
+            || self.admission.capacity_refusal_count != capacity.count
             || self.admission.capacity_feedback != capacity.feedback
             || self
                 .admission

@@ -7,7 +7,7 @@ use agents::investigation::staged_refusal::CompletionCallMode;
 use agents::investigation::{ActionRefusalFeedback as ActionFeedback, ActionRefusalReason};
 use rusqlite::Transaction;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 const TABLE: &str = "investigation_admission_refusals";
 const OWNED: &str = "name GLOB 'investigation_admission_*' OR (tbl_name GLOB 'investigation_admission_*' AND name NOT GLOB 'sqlite_*')";
@@ -209,7 +209,7 @@ struct Publication {
 struct Timeline {
     calls: BTreeMap<u32, CallWitness>,
     publications: Vec<Publication>,
-    action_refusals: BTreeSet<u32>,
+    action_refusals: BTreeMap<u32, ActionRefusalReason>,
     query_feedback: BTreeMap<u32, ActionFeedback>,
 }
 
@@ -262,7 +262,7 @@ fn timeline(
     let mut result = Timeline {
         calls: BTreeMap::new(),
         publications: vec![],
-        action_refusals: BTreeSet::new(),
+        action_refusals: BTreeMap::new(),
         query_feedback: BTreeMap::new(),
     };
     let mut current: Option<InvestigationInputLedger> = None;
@@ -386,6 +386,15 @@ fn timeline(
                 }
             }
             InvestigationEventKind::ActionRefused => {
+                let reason = match event.summary.as_str() {
+                    "The proposed acquisition was not offered in this saved call." => {
+                        ActionRefusalReason::ActionNotOffered
+                    }
+                    "This exact read was already acquired; the attempt was charged without executing it again." => {
+                        ActionRefusalReason::RepeatedRead
+                    }
+                    _ => return Err(InvestigationStoreError::Invalid),
+                };
                 let ordinal = active.ok_or(InvestigationStoreError::Invalid)?;
                 let witness = &result.calls[&ordinal];
                 if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18
@@ -394,9 +403,7 @@ fn timeline(
                     || completed != Some(ordinal)
                     || witness.action_admitted
                     || accepted.is_some()
-                    || event.summary
-                        != "The proposed acquisition was not offered in this saved call."
-                    || !result.action_refusals.insert(ordinal)
+                    || result.action_refusals.insert(ordinal, reason).is_some()
                 {
                     return Err(InvestigationStoreError::Invalid);
                 }
@@ -495,7 +502,7 @@ fn timeline(
                     result.query_feedback.insert(
                         ordinal,
                         ActionFeedback {
-                            reason: ActionRefusalReason::QueryRejected,
+                            reason: record.feedback_reason(),
                             invocation_ordinal: ordinal,
                             action_hash: record.action_hash.clone(),
                             choices_hash: acquisition.choices_hash.clone(),
@@ -700,9 +707,11 @@ fn read_entries(
                 entry.reason,
                 history,
             )?;
-            if matches!(entry.reason, RefusalReason::Action(_))
-                != line.action_refusals.contains(&ordinal)
-            {
+            let action_reason = match entry.reason {
+                RefusalReason::Action(reason) => Some(reason),
+                RefusalReason::Capacity(_) => None,
+            };
+            if action_reason != line.action_refusals.get(&ordinal).copied() {
                 return Err(InvestigationStoreError::Invalid);
             }
             let response: InvestigationResponseMeta = read_body(
@@ -733,7 +742,19 @@ fn read_entries(
     // rows: deleting a refusal cannot silently restore count/visible feedback.
     for (ordinal, witness) in &line.calls {
         let before = project(&entries, line, Some(*ordinal));
-        if witness.call.admission.capacity_refusal_count != before.count
+        let expected_finish = before
+            .action_feedback
+            .as_ref()
+            .filter(|feedback| feedback.reason == ActionRefusalReason::RepeatedRead)
+            .map(|feedback| feedback.reason);
+        if witness
+            .call
+            .admission
+            .acquisition
+            .as_ref()
+            .and_then(|stamp| stamp.finish_reason)
+            != expected_finish
+            || witness.call.admission.capacity_refusal_count != before.count
             || witness.call.admission.capacity_feedback != before.feedback
             || witness
                 .call
@@ -877,16 +898,23 @@ fn validate_reason(
         task.detail.summary.specialist_id,
     )?;
     if let RefusalReason::Action(reason) = reason {
-        if reason != ActionRefusalReason::ActionNotOffered {
-            return Err(InvestigationStoreError::Invalid);
-        }
         let choices = history
             .acquisition_choices_at(call, ledger)?
             .ok_or(InvestigationStoreError::Invalid)?;
         let CompletionInvestigationAction::Read(action) = action else {
             return Err(InvestigationStoreError::Invalid);
         };
-        if choices.permits_acquisition(&action) {
+        let valid = match reason {
+            ActionRefusalReason::ActionNotOffered => !choices.permits_acquisition(&action),
+            ActionRefusalReason::RepeatedRead => {
+                task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18
+                    && choices.permits_acquisition(&action)
+                    && proposal["type"] != "replay_query"
+                    && action.repeats_acquired_metadata(ledger)
+            }
+            _ => false,
+        };
+        if !valid {
             return Err(InvestigationStoreError::Invalid);
         }
     }

@@ -512,6 +512,9 @@ impl acquisition_choices::AcquisitionChoices {
         self.validate_basis(contract, metadata, ledger, policy)?;
         disclosure.validate_saved_role_shape(ledger, policy, SpecialistId::DomainAnalystV18)?;
         let expected = AcquisitionAdmission {
+            finish_reason: feedback
+                .filter(|value| value.reason == ActionRefusalReason::RepeatedRead)
+                .map(|value| value.reason),
             choices_hash: self.stamp_hash()?,
             action_feedback_hash: feedback
                 .map(ActionRefusalFeedback::stamp_hash)

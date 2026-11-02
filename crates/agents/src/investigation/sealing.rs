@@ -82,9 +82,7 @@ pub(super) fn seal_admission_inner(
             serde_json::from_value(before["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         if acquisition.is_some() {
-            if metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)? != state.mode {
-                return Err(InvestigationError::InvalidInput);
-            }
+            state.validate_mode_with_metadata(&metadata, policy)?;
         } else {
             state.validate_with_metadata(&metadata, policy)?;
         }
