@@ -1,5 +1,18 @@
 # cartograph
 
+## 0.61.0
+
+### Minor Changes
+
+- cdf2caa: Add Configure → Run Limits… to the menubar: a separate window where the investigation time limit (up to 60 minutes) and the per-model-call timeout (up to 10 minutes) can be raised without a rebuild (#1633).
+- 412523a: Investigations show live progress after you ask a question: the current step in plain words, how long it has taken (ticking), model calls and actions so far, and a pointer to Help → Debug Viewer. Each activity row now says whether the model's action was proposed, running, executed or not executed (#1631).
+
+### Patch Changes
+
+- ab10b6f: Help analyst investigations recover from invalid query identifiers and finish after repeated metadata reads without repeating the acquisition or inventing evidence.
+- 223539d: Opening a gap's Resolution Strategy no longer fails with "Prepared task exceeds its bounded evidence or metadata contract". Oversized working-tree spans are omitted like unreadable ones, and a gap whose relation the agents cannot propose shows its evidence with escalation marked unavailable (#1635).
+- c78b382: The Investigations composer now remembers your last explicit budget and specialist across app restarts (stored in the app profile); a fresh profile still starts with domain-analyst@18 under Expanded (#1636).
+
 ## 0.60.0
 
 ### Minor Changes
