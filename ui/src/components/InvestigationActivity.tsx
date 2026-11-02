@@ -8,6 +8,7 @@ const LABELS: Record<InvestigationEvent['kind'], string> = {
   tool_started: 'Tool started', tool_completed: 'Tool completed',
   evidence_validation_reserved: 'Source validation budget reserved',
   capacity_refused: 'Evidence request exceeds continuation capacity',
+  action_refused: 'Proposed action refused', query_refused: 'Query refused — scope not in the prepared context',
   finish_refused: 'Finish refused — evidence obligations remain', read_unavailable: 'Requested evidence unavailable',
   source_replay_refused: 'Finish discarded — source replay detected',
   consent_required: 'Cloud action awaiting consent', consent_approved: 'Cloud action approved',

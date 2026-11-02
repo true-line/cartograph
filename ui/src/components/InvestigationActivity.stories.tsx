@@ -50,11 +50,15 @@ export const ProposedVersusExecuted: Story = {
     { ...investigationEvents()[4], sequence: 7 },
     { ...investigationEvents()[6], sequence: 8 },
     { ...investigationEvents()[3], sequence: 9, kind: 'capacity_refused', summary: 'Refused.' },
+    { ...investigationEvents()[3], sequence: 10, kind: 'query_refused', summary: 'Query refused.' },
+    { ...investigationEvents()[3], sequence: 11, kind: 'action_refused', summary: 'Action refused.' },
   ] },
   // AC-0561: each step says whether the model's action was proposed, running, executed or not executed.
   play: async ({ canvasElement }) => {
     const rows = within(canvasElement).getAllByRole('listitem');
     await expect(rows.map((row) => row.querySelector('.investigation-stage')?.textContent?.trim())).toEqual([
-      'Waiting for model', 'Model replied', 'Proposed by model · accepted', 'Running', 'Executed', 'Not executed']);
+      'Waiting for model', 'Model replied', 'Proposed by model · accepted', 'Running', 'Executed', 'Not executed', 'Not executed', 'Not executed']);
+    await expect(within(canvasElement).getByText('Query refused — scope not in the prepared context')).toBeInTheDocument();
+    await expect(within(canvasElement).getByText('Proposed action refused')).toBeInTheDocument();
   },
 };

@@ -24,6 +24,14 @@ describe('investigationProgress (#1631)', () => {
     expect(eventStage('action_admitted')).toBe('proposed');
     expect(eventStage('tool_completed')).toBe('executed');
     expect(eventStage('finish_refused')).toBe('not_executed');
+    expect(eventStage('action_refused')).toBe('not_executed');
+    expect(eventStage('query_refused')).toBe('not_executed');
+  });
+  it('names refused queries and actions as not executed in the current step (#1632 review)', () => {
+    const at = (kind: 'action_refused' | 'query_refused') =>
+      investigationProgress('running', false, [...events.slice(0, 5), { ...events[4], sequence: 99, kind }], now)?.headline;
+    expect(at('query_refused')).toBe('The model’s query was refused (not executed) — asking it to try again');
+    expect(at('action_refused')).toBe('The model’s proposal was refused (not executed) — continuing');
     expect(eventStage('created')).toBeNull();
   });
   it('formats durations', () => {

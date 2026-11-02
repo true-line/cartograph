@@ -43,6 +43,16 @@ export const RefusedProposal: Story = {
   },
 };
 
+export const RefusedQuery: Story = {
+  args: { events: [...running, { ...running[3], sequence: 5, kind: 'query_refused', summary: 'Query refused.' }] },
+  // AC-0561 (#1632 review): a refused graph query — the v0.60.0 pilot failure — is shown as not executed.
+  play: async ({ canvasElement }) => {
+    const status = within(canvasElement).getByRole('status');
+    await expect(status).toHaveTextContent('query was refused (not executed)');
+    await expect(status).toHaveTextContent('(executed: 0)');
+  },
+};
+
 export const HiddenWhenFinished: Story = {
   args: { status: 'completed', events: investigationEvents() },
   // AC-0561: a finished task shows no live progress.

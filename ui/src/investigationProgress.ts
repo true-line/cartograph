@@ -15,7 +15,8 @@ export function eventStage(kind: InvestigationEvent['kind']): InvestigationEvent
     case 'action_admitted': return 'proposed';
     case 'tool_started': return 'running';
     case 'tool_completed': return 'executed';
-    case 'capacity_refused': case 'finish_refused': case 'source_replay_refused': case 'consent_declined': return 'not_executed';
+    case 'capacity_refused': case 'finish_refused': case 'source_replay_refused': case 'action_refused': case 'query_refused':
+    case 'consent_declined': return 'not_executed';
     default: return null;
   }
 }
@@ -62,7 +63,8 @@ function headline(last: InvestigationEvent | undefined): string {
     case 'evidence_validation_reserved': return 'Checking captured source files';
     case 'tool_completed': return 'Action finished — sending the result to the model';
     case 'read_unavailable': return 'Requested evidence was unavailable — continuing';
-    case 'capacity_refused': case 'finish_refused': case 'source_replay_refused':
+    case 'query_refused': return 'The model’s query was refused (not executed) — asking it to try again';
+    case 'capacity_refused': case 'finish_refused': case 'source_replay_refused': case 'action_refused':
       return 'The model’s proposal was refused (not executed) — continuing';
     case 'consent_required': return 'Waiting for your approval of the next cloud action';
     case 'consent_approved': return 'Cloud action approved — continuing';
