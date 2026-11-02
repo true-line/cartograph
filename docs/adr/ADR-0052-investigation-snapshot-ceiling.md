@@ -24,10 +24,12 @@ Split the hard ceilings from the default:
 - `SnapshotReadLimits::default()` stays at 32 MiB / 50,000 / 32 / 1,000,000.
 - `SnapshotReadLimits::investigation()` returns the ceilings and is used only by
   desktop-started investigations (preparation, coverage and inspection reads).
-- MCP-started tasks keep `default()` (or their operator/scope limits) for both
-  acquisition and reservation, so the MCP worker reservation is unchanged.
-  Operators may now configure MCP graph limits up to the new ceilings; their
-  reservation grows with what they choose.
+- MCP-started investigation tasks keep the fixed `default()` for acquisition
+  and the corresponding worker reservation. `task_graph_limits(true)` does not
+  read operator-configured graph limits.
+- Separate MCP read sessions may configure graph limits up to the new ceilings;
+  their read-session reservation grows with those limits. This does not change
+  MCP-started investigation task acquisition.
 
 Desktop investigations already have no host memory admission; the dedicated
 analysis machine is expected to supply the memory a large estate needs.
@@ -38,5 +40,6 @@ analysis machine is expected to supply the memory a large estate needs.
 - Local work packets reuse the hard ceilings, so they also admit larger graphs.
 - Peak memory for a desktop investigation scales with the graph; a 330k-node
   estate fits well within 4 GiB of serialized graph.
-- MCP admission and reservation numbers do not change unless an operator raises
-  their configured limits.
+- MCP-started investigation task acquisition and reservation remain unchanged.
+  Separate MCP read-session admission and reservation change only when an
+  operator changes the read-session graph limits.
