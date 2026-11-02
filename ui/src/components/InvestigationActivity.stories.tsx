@@ -58,7 +58,7 @@ export const ProposedVersusExecuted: Story = {
     const rows = within(canvasElement).getAllByRole('listitem');
     await expect(rows.map((row) => row.querySelector('.investigation-stage')?.textContent?.trim())).toEqual([
       'Waiting for model', 'Model replied', 'Proposed by model · accepted', 'Running', 'Executed', 'Not executed', 'Not executed', 'Not executed']);
-    await expect(within(canvasElement).getByText('Query refused — scope not in the prepared context')).toBeInTheDocument();
+    await expect(within(canvasElement).getByText('Query refused')).toBeInTheDocument();
     await expect(within(canvasElement).getByText('Proposed action refused')).toBeInTheDocument();
   },
 };
