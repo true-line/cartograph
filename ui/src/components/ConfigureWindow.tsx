@@ -51,6 +51,9 @@ function LocalModelSection({ api }: { api: LocalModelApi }) {
           onClick={() => void run(() => api.reset(), `Restored the default model, ${choice.default_model}.`)}>Use default model</button>
       </div>
     </form>}
+    {!choice && !error && <p className="muted">Loading…</p>}
+    {!choice && error && <button type="button" disabled={busy}
+      onClick={() => void run(() => api.reset(), 'Restored the default model.')}>Use default model</button>}
     {saved && <p className="muted" role="status">{saved}</p>}
     {error && <p className="error-text" role="alert">{error}</p>}
   </section>;

@@ -15,13 +15,14 @@ let stored = shipped;
 let loadFailure: string | null = null;
 const defaultModel: LocalModelChoice = { model: 'qwen3:8b', default_model: 'qwen3:8b', customized: false };
 let model = defaultModel;
+let modelFailure: string | null = null;
 let installed: Array<{ name: string; digest: string }> | string = [
   { name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
 
 const meta = {
   title: 'Surfaces/ConfigureWindow', component: ConfigureWindow, args: { api: tauriRunLimitsApi },
   beforeEach: () => {
-    calls = []; stored = shipped; loadFailure = null; model = defaultModel;
+    calls = []; stored = shipped; loadFailure = null; model = defaultModel; modelFailure = null;
     installed = [{ name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
     mockIPC((command, args) => {
       calls.push([command, args]);
@@ -32,7 +33,7 @@ const meta = {
         return stored;
       }
       if (command === 'reset_run_limits') { stored = shipped; return stored; }
-      if (command === 'get_local_model') return model;
+      if (command === 'get_local_model') { if (modelFailure) throw new Error(modelFailure); return model; }
       if (command === 'list_local_models') { if (typeof installed === 'string') throw new Error(installed); return installed; }
       if (command === 'set_local_model') {
         const name = (args as { model: string }).model;
@@ -40,7 +41,7 @@ const meta = {
         model = { ...model, model: name, customized: name !== model.default_model };
         return model;
       }
-      if (command === 'reset_local_model') { model = defaultModel; return model; }
+      if (command === 'reset_local_model') { model = defaultModel; modelFailure = null; return model; }
       throw new Error(`unexpected command ${command}`);
     });
     return () => clearMocks();
@@ -165,5 +166,17 @@ export const OllamaUnreachable: Story = {
     const c = within(canvasElement);
     await expect(await c.findByLabelText(/Completion model/)).toHaveValue('qwen3:8b');
     await waitFor(() => expect(c.getByText(/Ollama is not reachable on this Mac/)).toBeInTheDocument());
+  },
+};
+
+// AC-0564: a stored model name the host refuses on read stays repairable through the reset.
+export const InvalidStoredModelCanBeReset: Story = {
+  beforeEach: () => { modelFailure = 'local model must be an Ollama model name'; },
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    await expect(await c.findByText('local model must be an Ollama model name', { exact: false })).toBeInTheDocument();
+    await userEvent.click(c.getByRole('button', { name: 'Use default model' }));
+    await waitFor(() => expect(c.getByLabelText(/Completion model/)).toHaveValue('qwen3:8b'));
+    await expect(calls.some(([command]) => command === 'reset_local_model')).toBe(true);
   },
 };

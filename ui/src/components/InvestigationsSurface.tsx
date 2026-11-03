@@ -1,6 +1,6 @@
 import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFamilies';
-import { useEffect, useRef, useState } from 'react';
-import { tauriRunLimitsApi, usesConfiguredLimits, type RunLimits } from '../runLimits';
+import { useRef, useState } from 'react';
+import { RunLimitFooter } from './RunLimitFooter';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
 import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistActivityItem, SpecialistId } from '../investigationTypes';
@@ -90,10 +90,6 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const policy = investigationPolicy(state.catalog, profile, specialistId);
   const selectedSpecialistAvailable = Boolean(policy && state.catalog?.specialists.some((item) => item.id === specialistId));
   const limits = policy?.limits ?? (profile === 'investigation-v1' ? state.catalog?.limits : undefined);
-  // Desktop runs by these specialists use Configure → Run Limits (#1643); others keep the policy value.
-  const [runLimits, setRunLimits] = useState<RunLimits | null>(null);
-  useEffect(() => { tauriRunLimitsApi.load().then(setRunLimits, () => setRunLimits(null)); }, [specialistId]);
-  const activeSeconds = runLimits && usesConfiguredLimits(specialistId) ? runLimits.active_seconds : limits?.active_seconds;
   const requestLimit = policy?.request_bytes ?? 8192;
   const choices = state.obligationChoices;
   const obligations = obligationEnvelope(state.draftObligations, policy);
@@ -259,8 +255,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       {requestBytes > requestLimit && <p role="alert" className="error-text">This request exceeds the {requestLimit.toLocaleString()}-byte limit. Shorten the question or remove required sources.</p>}
       {parent && <p className="muted">New task following <code>{parent.parent_id}</code>; earlier findings remain T3 history.
         <button type="button" className="secondary-button" disabled={locked} onClick={() => setParent(null)}>Start a separate conversation</button></p>}
-      {limits && <p className="muted">Up to {limits?.model_invocations} model invocations and {limits?.tool_actions} tool actions;
-        {' '}{activeSeconds}s active execution. Source and byte limits apply. Missing evidence is not proof of absence.</p>}
+      {limits && <RunLimitFooter specialistId={specialistId} limits={limits} />}
       <button type="submit" disabled={!startEnabled}>{state.starting ? 'Saving investigation…' : parent ? 'Start follow-up' : 'Start investigation'}</button>
       {state.startError && <div role="alert" className="error-text"><p>{state.startError}</p>
         {state.pendingStart && <button type="button" className="secondary-button" disabled={state.starting} onClick={() => void state.retryStart()}>Retry same start request</button>}</div>}
