@@ -1103,3 +1103,6 @@ fn citation_correction_shared_receipt_maps_all_targets_and_rejects_attempted_mem
         None
     );
 }
+
+#[path = "acquisition_eligibility_tests.rs"]
+mod eligibility;

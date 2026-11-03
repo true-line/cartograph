@@ -187,6 +187,18 @@ impl RefusalFeedback {
         ))
     }
 
+    /// The fixed contract bounds every possible query/read correction; the
+    /// unchanged total admission ceiling is still the fallback upper bound.
+    pub(super) fn sizing_typed_contract_envelope(
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<TypedFeedbackSizeEnvelope, InvestigationError> {
+        Ok(TypedFeedbackSizeEnvelope("\\".repeat(
+            acquisition_choices::feedback_encoded_bound(contract, ledger, policy)?,
+        )))
+    }
+
     /// Derive a maximal feedback representation for this exact normalized
     /// obligation set and the immutable policy resolved from saved task limits.
     ///

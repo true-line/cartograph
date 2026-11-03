@@ -738,3 +738,7 @@ impl AcquisitionChoices {
 #[cfg(test)]
 #[path = "acquisition_choices_tests.rs"]
 mod tests;
+
+#[path = "acquisition_feedback_bound.rs"]
+mod feedback_bound;
+pub(super) use feedback_bound::feedback_encoded_bound;

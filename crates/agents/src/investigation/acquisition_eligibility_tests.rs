@@ -1,0 +1,429 @@
+use super::*;
+use crate::investigation::response_schema;
+use staged_refusal::CompletionCallMode::{Choice, FinishOnly};
+
+fn selected(
+    f: &Fixture,
+    choices: &AcquisitionChoices,
+    ledger: &InvestigationInputLedger,
+) -> serde_json::Value {
+    let ordinary =
+        response_schema::select_acquisition(Choice, choices, ledger, &f.contract.request_hash)
+            .unwrap();
+    serde_json::from_str(
+        &response_schema::select_eligible_acquisition(ordinary, Choice, choices, ledger)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+}
+// AC-0566: transport choices cannot offer a guaranteed premature finish.
+#[test]
+fn analyst20_schema_pending_and_partial_attempts_offer_acquisition_only() {
+    let f = Fixture::new();
+    let pending = f.derive(&f.ledger, &[]).unwrap();
+    let partial = f
+        .derive(
+            &f.ledger,
+            &[f.source_attempt(AttemptOutcome::Unavailable {
+                reason: UnavailableReason::PinnedTargetAbsent,
+            })],
+        )
+        .unwrap();
+    for choices in [&pending, &partial] {
+        let schema = selected(&f, choices, &f.ledger);
+        assert_eq!(schema["anyOf"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            schema["anyOf"][0]["enum"].as_array().unwrap().len(),
+            choices.entries().len()
+        );
+        let old = response_schema::select_acquisition(
+            Choice,
+            choices,
+            &f.ledger,
+            &f.contract.request_hash,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(old.contains("\"$ref\":\"#/$defs/supported_wrapper\""));
+    }
+}
+// AC-0566: an authenticated completed attempt enables honest insufficiency;
+// acquired citations constrain supported output without replacing host guards.
+#[test]
+fn analyst20_schema_completed_attempts_constrain_citations() {
+    let mut f = Fixture::new();
+    f.contract
+        .obligations
+        .obligations
+        .retain(|o| matches!(o, Obligation::Source { .. }));
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+        reason: UnavailableReason::PinnedTargetAbsent,
+    });
+    let mut ledger = f.ledger.clone();
+    let complete = f.derive(&ledger, std::slice::from_ref(&attempt)).unwrap();
+    assert!(complete.attempts_complete());
+    let finish_schema = |ledger: &InvestigationInputLedger| -> serde_json::Value {
+        serde_json::from_str(
+            &response_schema::select_eligible_acquisition(
+                Some(response_schema::FINISH.into()),
+                Choice,
+                &complete,
+                ledger,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let schema = finish_schema(&ledger);
+    let expected: Vec<_> = ledger
+        .citations
+        .iter()
+        .map(|c| c.citation_id.clone())
+        .collect();
+    assert!(!expected.is_empty());
+    assert_eq!(
+        schema["$defs"]["finding"]["properties"]["citation_ids"]["items"]["enum"],
+        serde_json::json!(expected)
+    );
+    ledger.citations.clear();
+    let schema = finish_schema(&ledger);
+    assert!(
+        !schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["$ref"] == "#/$defs/supported_wrapper")
+    );
+    assert!(
+        schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["$ref"] == "#/$defs/insufficient_wrapper")
+    );
+}
+// AC-0566: blocked/deferred no-action states and FinishOnly retain fallback,
+// never an empty grammar or invented completed attempt.
+#[test]
+fn analyst20_schema_preserves_no_action_and_finish_only_fallbacks() {
+    let f = Fixture::new();
+    let mut choices = f.derive(&f.ledger, &[]).unwrap();
+    let old = response_schema::select_acquisition(
+        FinishOnly,
+        &choices,
+        &f.ledger,
+        &f.contract.request_hash,
+    )
+    .unwrap();
+    assert_eq!(
+        response_schema::select_eligible_acquisition(old.clone(), FinishOnly, &choices, &f.ledger)
+            .unwrap(),
+        old
+    );
+    choices.entries.clear();
+    for deferred in [false, true] {
+        choices.blocked.clear();
+        choices.deferred = usize::from(deferred);
+        if !deferred {
+            choices.blocked.push("blocked".into());
+        }
+        assert!(!choices.attempts_complete());
+        let old = response_schema::select_acquisition(
+            Choice,
+            &choices,
+            &f.ledger,
+            &f.contract.request_hash,
+        )
+        .unwrap();
+        assert_eq!(
+            response_schema::select_eligible_acquisition(old.clone(), Choice, &choices, &f.ledger)
+                .unwrap(),
+            old
+        );
+    }
+}
+
+// AC-0566: prospective source citation bytes must be reserved, including the
+// schema's outer JSON string escaping. Sizing data is not acquired evidence.
+#[test]
+fn analyst20_schema_reserve_includes_prospective_citation_enum() {
+    let f = Fixture::new();
+    let mut choices = f.derive(&f.ledger, &[]).unwrap();
+    choices.entries.clear();
+    choices.blocked.clear();
+    choices.deferred = 0;
+    let mut ledger = f.ledger.clone();
+    let mut future = ledger.citations[0].clone();
+    future.citation_id = "evidence-999".into();
+    ledger.citations.push(future);
+    let prompt = serde_json::json!({"citations":ledger.citations});
+    let reserve = response_schema::reserve_eligible_acquisition(
+        Some(
+            serde_json::to_string(
+                &serde_json::from_str::<serde_json::Value>(response_schema::FINISH).unwrap(),
+            )
+            .unwrap(),
+        ),
+        Choice,
+        &prompt,
+    )
+    .unwrap()
+    .unwrap();
+    let actual = response_schema::select_eligible_acquisition(
+        Some(
+            serde_json::to_string(
+                &serde_json::from_str::<serde_json::Value>(response_schema::FINISH).unwrap(),
+            )
+            .unwrap(),
+        ),
+        Choice,
+        &choices,
+        &ledger,
+    )
+    .unwrap()
+    .unwrap();
+    let decoded: serde_json::Value = serde_json::from_str(&reserve).unwrap();
+    assert!(
+        decoded["$defs"]["finding"]["properties"]["citation_ids"]["items"]["anyOf"][1]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("evidence-999"))
+    );
+    let mut actual = actual;
+    let mut reserve = reserve;
+    for _ in 0..4 {
+        assert!(reserve.len() >= actual.len());
+        actual = serde_json::to_string(&actual).unwrap();
+        reserve = serde_json::to_string(&reserve).unwrap();
+    }
+}
+
+// AC-0566: a short exact enum must not under-reserve the unchanged fallback.
+#[test]
+fn analyst20_schema_reserve_dominates_short_id_fallback() {
+    let prompt = serde_json::json!({"citations":[{"citation_id":"x"}]});
+    let mut reserve = response_schema::reserve_eligible_acquisition(
+        Some(response_schema::FINISH.into()),
+        Choice,
+        &prompt,
+    )
+    .unwrap()
+    .unwrap();
+    let mut fallback = response_schema::FINISH.to_owned();
+    for _ in 0..4 {
+        assert!(reserve.len() >= fallback.len());
+        reserve = serde_json::to_string(&reserve).unwrap();
+        fallback = serde_json::to_string(&fallback).unwrap();
+    }
+}
+
+// AC-0566: exact contract action bounds dominate both query and read mappings,
+// including complete feedback and current correction at repeated escape layers.
+#[test]
+fn analyst20_contract_feedback_bound_covers_query_and_read_corrections() {
+    let f = Fixture::new();
+    for ledger in [f.empty(), f.ledger.clone()] {
+        let choices = f.derive(&ledger, &[]).unwrap();
+        let correction = choices
+            .citation_correction(
+                std::slice::from_ref(&f.target.target_id),
+                &f.contract,
+                &f.metadata,
+                &ledger,
+                POLICY,
+            )
+            .unwrap()
+            .unwrap();
+        let feedback = staged_finish::RefusalFeedback {
+            schema_version: 2,
+            citation_correction: Some(correction.clone()),
+            unmet: f
+                .contract
+                .obligations
+                .obligations
+                .iter()
+                .map(|o| {
+                    let (kind, id) = o.key();
+                    staged_finish::FeedbackEntry {
+                        obligation_id: id.into(),
+                        kind: kind.into(),
+                        reason: staged_finish::RefusalReason::NotAttempted,
+                    }
+                })
+                .collect(),
+        };
+        let bound = feedback_encoded_bound(&f.contract, &ledger, POLICY).unwrap();
+        assert!(bound < staged_finish::RefusalFeedback::max_bytes_with_policy(POLICY).unwrap());
+        assert!(feedback.bytes_with_policy(POLICY).unwrap().len() <= bound);
+        let upper = staged_finish::RefusalFeedback::sizing_typed_contract_envelope(
+            &f.contract,
+            &ledger,
+            POLICY,
+        )
+        .unwrap();
+        for value in [
+            serde_json::to_value(feedback).unwrap(),
+            serde_json::to_value(correction).unwrap(),
+        ] {
+            let mut actual = serde_json::to_string(&value).unwrap();
+            let mut maximum = serde_json::to_string(&upper).unwrap();
+            for _ in 0..4 {
+                assert!(actual.len() <= maximum.len());
+                actual = serde_json::to_string(&actual).unwrap();
+                maximum = serde_json::to_string(&maximum).unwrap();
+            }
+        }
+    }
+}
+
+// AC-0566: all targets choose their largest finite action, including escaped
+// identities; subsets and policy-ceiling fallback cannot enlarge the bound.
+#[test]
+fn analyst20_contract_bound_covers_largest_actions_for_all_targets() {
+    for count in [3, 7, 20] {
+        let mut f = Fixture::new();
+        f.contract
+            .obligations
+            .obligations
+            .retain(|o| matches!(o, Obligation::Inventory { .. }));
+        for index in 0..count {
+            let mut target = f.target.clone();
+            target.fact = TaskFactKey::Node {
+                id: format!(
+                    "node-{index}-{}",
+                    "quoted-\"-\\-é".repeat(if count == 20 { 15 } else { 1 })
+                ),
+            };
+            target.target_id = target.content_id().unwrap();
+            f.contract
+                .obligations
+                .obligations
+                .push(identified(Obligation::Source {
+                    obligation_id: String::new(),
+                    target: Box::new(target),
+                }));
+        }
+        f.contract.obligations = f
+            .contract
+            .obligations
+            .normalized_with_policy(POLICY)
+            .unwrap();
+        f.contract.obligations_hash = f
+            .contract
+            .obligations
+            .fingerprint_with_policy(POLICY)
+            .unwrap();
+        f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+        let ledger = f.empty();
+        let choices = f.derive(&ledger, &[]).unwrap();
+        let bound = feedback_encoded_bound(&f.contract, &ledger, POLICY).unwrap();
+        let ids = f
+            .contract
+            .obligations
+            .obligations
+            .iter()
+            .filter_map(|o| match o {
+                Obligation::Source { target, .. } => Some(target.target_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if count < 20 {
+            assert!(bound < staged_finish::RefusalFeedback::max_bytes_with_policy(POLICY).unwrap());
+        }
+        for size in [1, ids.len()] {
+            let correction = choices.citation_correction(
+                &ids[..size],
+                &f.contract,
+                &f.metadata,
+                &ledger,
+                POLICY,
+            );
+            if let Ok(Some(correction)) = correction {
+                assert_eq!(correction.entries.len(), size);
+                for entry in &correction.entries {
+                    let target = f
+                        .contract
+                        .obligations
+                        .obligations
+                        .iter()
+                        .find_map(|o| match o {
+                            Obligation::Source { target, .. }
+                                if target.target_id == entry.target_id =>
+                            {
+                                Some(target)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let read = AcquisitionAction::ReadEvidence {
+                        fact: target.fact.clone(),
+                        role: target.role,
+                        index: target.index,
+                    };
+                    assert!(
+                        serde_json::to_vec(&entry.action).unwrap().len()
+                            >= serde_json::to_vec(&read).unwrap().len()
+                    );
+                }
+                let feedback = staged_finish::RefusalFeedback {
+                    schema_version: 2,
+                    citation_correction: Some(correction),
+                    unmet: f
+                        .contract
+                        .obligations
+                        .obligations
+                        .iter()
+                        .map(|o| {
+                            let (kind, id) = o.key();
+                            staged_finish::FeedbackEntry {
+                                kind: kind.into(),
+                                obligation_id: id.into(),
+                                reason: staged_finish::RefusalReason::NotAttempted,
+                            }
+                        })
+                        .collect(),
+                };
+                if let Ok(bytes) = feedback.bytes_with_policy(POLICY) {
+                    assert!(bytes.len() <= bound);
+                    let upper = staged_finish::RefusalFeedback::sizing_typed_contract_envelope(
+                        &f.contract,
+                        &ledger,
+                        POLICY,
+                    )
+                    .unwrap();
+                    let mut actual = String::from_utf8(bytes).unwrap();
+                    let mut maximum = serde_json::to_string(&upper).unwrap();
+                    for _ in 0..4 {
+                        assert!(actual.len() <= maximum.len());
+                        actual = serde_json::to_string(&actual).unwrap();
+                        maximum = serde_json::to_string(&maximum).unwrap();
+                    }
+                } else {
+                    assert_eq!(
+                        bound,
+                        staged_finish::RefusalFeedback::max_bytes_with_policy(POLICY).unwrap()
+                    );
+                }
+            } else {
+                assert_eq!(
+                    bound,
+                    staged_finish::RefusalFeedback::max_bytes_with_policy(POLICY).unwrap()
+                );
+            }
+        }
+        if count == 20 {
+            assert_eq!(
+                bound,
+                staged_finish::RefusalFeedback::max_bytes_with_policy(POLICY).unwrap()
+            );
+        }
+    }
+}

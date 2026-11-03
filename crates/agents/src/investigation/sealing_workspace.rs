@@ -57,6 +57,9 @@ impl InvestigationInput {
         let reserved = super::admission_input::reserve_projection_bytes(policy)?;
         let measurement = sum(&[
             response_schema::workspace_bytes(policy)?,
+            acquisition_choices::AuthenticatedCitationCorrection::projection_workspace_bytes(
+                policy,
+            )?, // finite typed-feedback sizing candidates
             json_bytes(reserved)?.checked_mul(2)?, // reserve and per-mode clone
             tree.checked_mul(3)?,                  // candidate/current/reserve action payloads
             slots::<CompletionAction>(3)?,
@@ -93,6 +96,9 @@ impl InvestigationInput {
         // phases conservatively rather than relying on temporary drop timing.
         let admission = sum(&[
             response_schema::workspace_bytes(policy)?,
+            acquisition_choices::AuthenticatedCitationCorrection::projection_workspace_bytes(
+                policy,
+            )?, // finite typed-feedback sizing candidates
             tree.checked_mul(2)?,
             tree.checked_mul(2)?, // contract clone / decoded contract
             tree.checked_mul(2)?, // metadata clone / decoded metadata

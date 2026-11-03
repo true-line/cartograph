@@ -69,7 +69,14 @@ fn finish_action(prompt: &Value) -> Value {
 // AC-0489: choose the exact supplied finite object; never reconstruct query,
 // range, receipt or inventory authority from descriptive obligation fields.
 pub(super) fn next_offered_action(prompt: &Value, schema: &Value) -> Value {
-    assert!(prompt["turn_progress"]["capacity_feedback"].is_null());
+    assert!(
+        prompt["turn_progress"]["capacity_feedback"].is_null(),
+        "capacity_feedback={} mode={} usage={} choices={}",
+        prompt["turn_progress"]["capacity_feedback"],
+        prompt["turn_progress"]["admission_mode"],
+        prompt["consumed_budgets"],
+        prompt["turn_progress"]["acquisition_choices"],
+    );
     assert!(prompt["turn_progress"]["action_feedback"].is_null());
     let choices = &prompt["turn_progress"]["acquisition_choices"];
     if let Some(entry) = choices["entries"].as_array().unwrap().first() {
@@ -369,4 +376,65 @@ fn gated_exact_node_worker_selects_seven_offered_targets_and_reopens() {
         usize::try_from(invocations).unwrap(),
         provider.observed.calls.load(Ordering::SeqCst)
     );
+}
+
+// AC-0566: production @20 with seven source obligations plus inventory must
+// acquire before finishing, including the exact first provider request.
+#[test]
+fn analyst20_worker_eight_obligations_offer_acquisition_then_finish() {
+    let mut scripted = NextProvider::new(false);
+    scripted.gated_flow = Some(GatedFlow::OfferedTargets);
+    let provider = Arc::new(scripted);
+    let (base, request) = seven_target_base(provider.as_ref());
+    let fixture = NextFixture::from_completion_base(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV20,
+        base,
+        request,
+    );
+    fixture.run(provider.clone());
+    assert_seven_completed(&fixture, provider.as_ref());
+    let prompts = provider.observed.prompts.lock().unwrap();
+    let payloads = provider.received_payloads.lock().unwrap();
+    assert_eq!(
+        prompts[0]["turn_progress"]["acquisition_choices"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    assert_eq!(payloads.len(), 16);
+    for (ordinal, payload) in payloads.iter().enumerate() {
+        assert_eq!(payload.system, SpecialistId::DomainAnalystV20.prompt());
+        let schema: Value =
+            serde_json::from_str(payload.response_schema.as_deref().unwrap()).unwrap();
+        let branches = schema["anyOf"].as_array().unwrap();
+        if ordinal < 15 {
+            assert_eq!(branches.len(), 1);
+            assert!(branches[0].get("$ref").is_none());
+            let offered = branches[0]["enum"].as_array().unwrap();
+            assert!(!offered.is_empty());
+            assert!(offered.contains(&next_offered_action(&prompts[ordinal], &schema)));
+        } else {
+            assert!(
+                branches
+                    .iter()
+                    .any(|b| b["$ref"] == "#/$defs/supported_wrapper")
+            );
+            let ids = schema["$defs"]["finding"]["properties"]["citation_ids"]["items"]["enum"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                ids.len(),
+                prompts[ordinal]["citations"].as_array().unwrap().len()
+            );
+            assert!(ids.iter().all(|id| {
+                prompts[ordinal]["citations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c["citation_id"] == *id)
+            }));
+        }
+    }
 }

@@ -237,7 +237,11 @@ impl InvestigationInput {
         );
         if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
             let upper = serde_json::to_value(
-                staged_finish::RefusalFeedback::sizing_typed_upper_envelope_with_policy(policy)?,
+                staged_finish::RefusalFeedback::sizing_typed_contract_envelope(
+                    &contract,
+                    &self.ledger,
+                    policy,
+                )?,
             )
             .map_err(|_| InvestigationError::InvalidInput)?;
             // Both the immutable historical mapping and the current-action
@@ -328,6 +332,13 @@ impl InvestigationInput {
             } else {
                 None
             };
+            if action.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+                action.payload.response_schema = response_schema::reserve_eligible_acquisition(
+                    action.payload.response_schema.take(),
+                    mode,
+                    &prompt,
+                )?;
+            }
             #[cfg(test)]
             assert!(
                 context_hub::logical::count(&prompt).unwrap()
@@ -1079,6 +1090,14 @@ impl InvestigationInput {
                 .ok_or(InvestigationError::InvalidInput)?,
             self.action_feedback.as_ref(),
         )?;
+        if typed_role {
+            self.payload.response_schema = response_schema::select_eligible_acquisition(
+                self.payload.response_schema.take(),
+                mode,
+                &choices,
+                &self.ledger,
+            )?;
+        }
         self.acquisition_choices = Some(choices);
         self.acquisition_mode = Some(mode);
         wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
@@ -1164,6 +1183,23 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        let ordinary_schema = response_schema::select_acquisition_recovery(
+            mode,
+            choices,
+            &self.ledger,
+            &contract.request_hash,
+            self.action_feedback.as_ref(),
+        )?;
+        let expected_schema = if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+            response_schema::select_eligible_acquisition(
+                ordinary_schema,
+                mode,
+                choices,
+                &self.ledger,
+            )?
+        } else {
+            ordinary_schema
+        };
         if self.acquisition_mode != Some(mode)
             || prompt["turn_progress"]["acquisition_choices"]
                 != serde_json::to_value(&**choices).map_err(|_| InvestigationError::InvalidInput)?
@@ -1172,14 +1208,7 @@ impl InvestigationInput {
                     &serde_json::to_value(&self.action_feedback)
                         .map_err(|_| InvestigationError::InvalidInput)?,
                 )
-            || self.payload.response_schema
-                != response_schema::select_acquisition_recovery(
-                    mode,
-                    choices,
-                    &self.ledger,
-                    &contract.request_hash,
-                    self.action_feedback.as_ref(),
-                )?
+            || self.payload.response_schema != expected_schema
         {
             return Err(InvestigationError::InvalidInput);
         }

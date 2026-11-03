@@ -363,6 +363,21 @@ impl LlmProvider for NextProvider {
                 flow,
                 GatedFlow::TypedCorrection | GatedFlow::ReceiptCorrection
             ) {
+                if call == 0 {
+                    // AC-0566: the real prepared worker request offers only
+                    // acquisition. This scripted provider deliberately ignores
+                    // grammar to keep testing host correction defense in depth.
+                    let schema: Value =
+                        serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
+                            .unwrap();
+                    let branches = schema["anyOf"].as_array().unwrap();
+                    assert_eq!(branches.len(), 1);
+                    assert!(
+                        branches[0]["enum"]
+                            .as_array()
+                            .is_some_and(|a| !a.is_empty())
+                    );
+                }
                 typed_correction_tests::next_action(
                     prompt,
                     call,
