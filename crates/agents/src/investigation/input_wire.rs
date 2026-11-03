@@ -98,6 +98,20 @@ pub(super) fn measure_replacement(
 
 pub(super) fn replace_prompt(
     payload: &mut CompletionPayload,
+    prompt: &Value,
+    limit: usize,
+) -> Result<(), InvestigationError> {
+    if payload.system == SpecialistId::DomainAnalystV20.prompt() {
+        let ordered = super::prompt_layout::OrderedPrompt(prompt);
+        measure_replacement(payload, &ordered, limit)?;
+        payload.prompt = encode_prompt(&ordered, limit)?;
+        return validate_payload(payload, limit);
+    }
+    replace_serialized_prompt(payload, prompt, limit)
+}
+
+fn replace_serialized_prompt(
+    payload: &mut CompletionPayload,
     prompt: &impl Serialize,
     limit: usize,
 ) -> Result<(), InvestigationError> {
@@ -127,6 +141,66 @@ mod tests {
                 commit_sha: "workdir".into(),
                 text: "source\n\t\\\"\u{0}".into(),
             }],
+        }
+    }
+
+    #[test]
+    fn analyst20_ordered_wire_keeps_historical_roles_and_exact_bounds() {
+        // AC-0566: role gating and exact escaped transport size, including source text.
+        let value = json!({"citations":[], "completion_contract":{"text":"é\n\""},
+            "compact_context":{"query_history":{"latest_query":null,"prior_queries":[]},
+            "facts":[],"evidence_options":[]},"turn_progress":{"revision":1}});
+        for version in (1..=15).chain(17..=20) {
+            let role: SpecialistId =
+                serde_json::from_value(json!(format!("domain-analyst@{version}"))).unwrap();
+            let mut actual = payload();
+            actual.system = role.prompt();
+            let original = actual.clone();
+            let encoded = if version == 20 {
+                encode_prompt(
+                    &super::super::prompt_layout::OrderedPrompt(&value),
+                    usize::MAX,
+                )
+                .unwrap()
+            } else {
+                serde_json::to_string(&value).unwrap()
+            };
+            let mut expected = original.clone();
+            expected.prompt = encoded;
+            let size = serde_json::to_vec(&expected).unwrap().len();
+            replace_prompt(&mut actual, &value, size).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                serde_json::from_str::<Value>(&actual.prompt).unwrap(),
+                value
+            );
+            assert!(replace_prompt(&mut original.clone(), &value, size - 1).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "manual retained DEVELOPMENT payloads, no provider execution"]
+    fn analyst20_retained_payloads_preserve_every_value() {
+        // AC-0566: exercise the production writer against all retained cohort requests.
+        let path = std::env::var("CARTOGRAPH_LAYOUT_PAYLOADS").expect("reviewed payload fixture");
+        let inputs: Vec<CompletionPayload> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(!inputs.is_empty());
+        for mut input in inputs {
+            let before: Value = serde_json::from_str(&input.prompt).unwrap();
+            let spans = input.spans.clone();
+            input.system = SpecialistId::DomainAnalystV20.prompt();
+            replace_prompt(&mut input, &before, MAX_INPUT_BYTES).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&input.prompt).unwrap(),
+                before
+            );
+            assert_eq!(input.spans, spans);
+            let expected = super::super::prompt_layout::OrderedPrompt(&before);
+            assert_eq!(
+                input.prompt,
+                encode_prompt(&expected, MAX_INPUT_BYTES).unwrap()
+            );
         }
     }
 
@@ -195,7 +269,7 @@ mod tests {
             Err(InvestigationError::LimitExceeded)
         );
         assert_eq!(
-            replace_prompt(&mut actual, &Unavailable, MAX_INPUT_BYTES),
+            replace_serialized_prompt(&mut actual, &Unavailable, MAX_INPUT_BYTES),
             Err(InvestigationError::LimitExceeded)
         );
         assert_eq!(actual, original);

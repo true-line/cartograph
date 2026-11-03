@@ -1130,6 +1130,8 @@ mod coverage_details;
 #[path = "input_query_history.rs"]
 mod query_history_input;
 
+#[path = "input_prompt_layout.rs"]
+mod prompt_layout;
 #[path = "input_wire.rs"]
 mod wire;
 

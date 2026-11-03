@@ -1024,7 +1024,7 @@ fn citation_correction_analyst20_prompt_qualifies_finish_without_rewriting_19() 
     assert!(!SpecialistId::DomainAnalystV18.prompt().contains(paraphrase));
     assert_eq!(
         new.definition().unwrap().prompt_fingerprint,
-        "d6954cd6c8af3e22e98afafeee107d71390ef6c38be03bd7a8dfa4234c471453"
+        "6e6a1f561d2a326df19c33e62a27313085d869705ead7210514e584379ec74b1"
     );
     assert_eq!(new.definition().unwrap().version, 20);
     assert_ne!(
