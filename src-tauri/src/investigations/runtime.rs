@@ -89,8 +89,14 @@ impl InvestigationRuntime {
         Ok(provider)
     }
 
-    pub(super) fn descriptor(&self, mode: InvestigationProviderMode) -> InvestigationProvider {
-        self.provider(mode)
+    /// The provider a new desktop start would use, as the catalog shows it:
+    /// the configured local model (#1643) when one is saved.
+    pub(super) fn descriptor_for_start(
+        &self,
+        mode: InvestigationProviderMode,
+        local_model: Option<&str>,
+    ) -> InvestigationProvider {
+        self.provider_for_start(mode, local_model)
             .and_then(|p| descriptor(p.as_ref(), mode))
             .unwrap_or_else(|_| InvestigationProvider {
                 mode,
@@ -306,6 +312,17 @@ mod run_clock_tests {
             &runtime.provider_for_start(local, None).unwrap(),
             &default
         ));
+        // The catalog shows what a desktop start would use.
+        assert_eq!(
+            runtime
+                .descriptor_for_start(local, Some("qwen3:30b-a3b"))
+                .model,
+            "qwen3:30b-a3b"
+        );
+        assert_eq!(
+            runtime.descriptor_for_start(local, None).model,
+            llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
+        );
     }
     // AC-0562: a saved active allowance above the default extends the deadline.
     #[test]

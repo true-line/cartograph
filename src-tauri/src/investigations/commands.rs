@@ -91,6 +91,14 @@ pub(crate) async fn investigation_specialists(
 ) -> Result<InvestigationCatalog, String> {
     crate::off_ui_thread(move || {
         let state = app.state::<AppState>();
+        // The desktop catalog names the saved local model (#1643); an
+        // unreadable setting shows the default, and a start reports the error.
+        let local_model = state
+            .settings
+            .lock()
+            .ok()
+            .and_then(|store| store.local_model().ok())
+            .map(|choice| choice.model);
         Ok(InvestigationCatalog {
             schema_version: 1,
             specialists: available_specialists()
@@ -103,7 +111,11 @@ pub(crate) async fn investigation_specialists(
                 InvestigationProviderMode::Cloud,
             ]
             .into_iter()
-            .map(|mode| state.investigations.descriptor(mode))
+            .map(|mode| {
+                state
+                    .investigations
+                    .descriptor_for_start(mode, local_model.as_deref())
+            })
             .collect(),
             limits: InvestigationLimits::default(),
             policies: policy_catalog(),
