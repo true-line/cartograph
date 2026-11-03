@@ -15,10 +15,19 @@ pub(in crate::jobs::investigations) fn initial_fixture(
     mode: InvestigationProviderMode,
     provider: InvestigationProvider,
 ) -> InitialFixture {
+    initial_fixture_with_request(mode, provider, |_, _| {})
+}
+
+pub(in crate::jobs::investigations) fn initial_fixture_with_request(
+    mode: InvestigationProviderMode,
+    provider: InvestigationProvider,
+    customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
+) -> InitialFixture {
     let fixture = Fixture::with_family_preparation(mode, &INVESTIGATION_V2_POLICY, true, false);
     let mut request = fixture.request;
     request.schema_version = 7;
     request.specialist_id = "domain-analyst@10".into();
+    customize(&mut request, &fixture.archive);
     let request = request
         .normalized_with_policy(&INVESTIGATION_V2_POLICY)
         .unwrap();

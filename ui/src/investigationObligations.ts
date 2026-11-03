@@ -40,7 +40,7 @@ export function validObligationEnvelope(value: InvestigationObligationEnvelope, 
 export function investigationPolicy(catalog: InvestigationCatalog | null, profile: string, specialist: SpecialistId): (Omit<InvestigationPolicy, 'limits'> & { limits?: InvestigationPolicy['limits'] }) | undefined {
   const advertised = catalog?.policies?.find((policy) => policy.limits.profile === profile && policy.specialist_ids.includes(specialist));
   if (advertised) {
-    const admission = specialist.endsWith('@10') || specialist.endsWith('@11') || specialist === 'domain-analyst@12' || specialist === 'domain-analyst@18';
+    const admission = specialist.endsWith('@10') || specialist.endsWith('@11') || specialist === 'domain-analyst@12' || specialist === 'domain-analyst@18' || specialist === 'domain-analyst@19';
     const progressive = specialist.endsWith('@9');
     const modern = specialist.endsWith('@8') || progressive || admission;
     if (advertised.request_schema_version !== (admission ? 7 : progressive ? 6 : modern ? 5 : 4) || advertised.envelope_schema_version !== (modern ? 2 : 1) ||
@@ -49,7 +49,7 @@ export function investigationPolicy(catalog: InvestigationCatalog | null, profil
         ![advertised.max_completion_obligations, advertised.request_bytes, advertised.envelope_bytes].every((value) => Number.isSafeInteger(value) && value > 0)) return undefined;
     return advertised;
   }
-  if (specialist.endsWith('@8') || specialist.endsWith('@9') || specialist.endsWith('@10') || specialist.endsWith('@11') || specialist === 'domain-analyst@12' || specialist === 'domain-analyst@18' || profile !== 'investigation-v1') return undefined;
+  if (specialist.endsWith('@8') || specialist.endsWith('@9') || specialist.endsWith('@10') || specialist.endsWith('@11') || specialist === 'domain-analyst@12' || specialist === 'domain-analyst@18' || specialist === 'domain-analyst@19' || profile !== 'investigation-v1') return undefined;
   return { limits: catalog?.limits, request_schema_version: 4, envelope_schema_version: 1,
     envelope_contract: 'investigation-completion-obligations@1', max_completion_obligations: 12,
     request_bytes: 8192, envelope_bytes: 8192, specialist_ids: [specialist] };

@@ -61,6 +61,8 @@ pub enum SpecialistId {
     DomainAnalystV17,
     #[serde(rename = "domain-analyst@18")]
     DomainAnalystV18,
+    #[serde(rename = "domain-analyst@19")]
+    DomainAnalystV19,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -228,6 +230,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -260,6 +263,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -293,6 +297,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -319,6 +324,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -339,6 +345,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -359,6 +366,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -376,6 +384,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
                 | Self::EvidenceAuditorV11
         )
     }
@@ -410,6 +419,7 @@ impl SpecialistId {
             Self::DomainAnalystV15 => 15,
             Self::DomainAnalystV17 => 17,
             Self::DomainAnalystV18 => 18,
+            Self::DomainAnalystV19 => 19,
         }
     }
 
@@ -426,6 +436,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
         ) {
             return 10;
         }
@@ -439,11 +450,24 @@ impl SpecialistId {
         }
     }
 
+    pub fn uses_acquisition_choices(self) -> bool {
+        matches!(self, Self::DomainAnalystV18 | Self::DomainAnalystV19)
+    }
+
     pub fn uses_exact_node_queries(self) -> bool {
-        matches!(self, Self::DomainAnalystV17 | Self::DomainAnalystV18)
+        matches!(
+            self,
+            Self::DomainAnalystV17 | Self::DomainAnalystV18 | Self::DomainAnalystV19
+        )
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV19 {
+            return format!(
+                "{}\nUnacquired citation correction@1: Source target IDs identify passages to acquire; they are not citation IDs. If the host refuses a finish with acquisition feedback, use the currently offered acquisition choices to read the missing passages. Cite only acquired citation handles in a subsequent finish. Feedback does not grant evidence, perform a read, reset budgets or grant repeated corrections. If acquisition is unavailable within the remaining budget, report insufficient evidence honestly.",
+                Self::DomainAnalystV18.prompt()
+            );
+        }
         if self == Self::DomainAnalystV18 {
             return format!(
                 "{}\nObligation acquisition choices@1: While turn_progress.acquisition_choices is incomplete, choose an acquisition exactly from its entries. Exact discovery admits metadata only; its next source read still crosses retained receipt/range guards. Inventory is directly selectable. Blocked and deferred obligations remain unattempted, not satisfied. action_not_offered feedback rejects only that proposal, grants no evidence and no extra retry budget. Reconsider the currently offered choices; an honest finish retains the existing completion requirements. Ordinary exploration resumes only after every required read has an applicable attempt.",
@@ -505,7 +529,8 @@ impl SpecialistId {
             | Self::DomainAnalystV14
             | Self::DomainAnalystV15
             | Self::DomainAnalystV17
-            | Self::DomainAnalystV18 => {
+            | Self::DomainAnalystV18
+            | Self::DomainAnalystV19 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -619,6 +644,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV15
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -666,7 +692,8 @@ impl SpecialistId {
             | Self::DomainAnalystV14
             | Self::DomainAnalystV15
             | Self::DomainAnalystV17
-            | Self::DomainAnalystV18 => (
+            | Self::DomainAnalystV18
+            | Self::DomainAnalystV19 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),

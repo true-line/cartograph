@@ -65,6 +65,94 @@ impl InvestigationInput {
         }
         Ok(())
     }
+    /// Check withheld finish prose before considering recoverable citation feedback.
+    /// This grants neither citation admission nor permission to continue: callers
+    /// must separately authenticate the response, classify every invalid citation,
+    /// validate narrative references, and enforce the durable correction allowance.
+    pub fn validate_correction_prose(
+        &self,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+    ) -> Result<(), InvestigationError> {
+        finish.fingerprint()?;
+        self.validate_response_metadata(model)?;
+        let InvestigationAction::Finish {
+            findings,
+            limitations,
+            ..
+        } = &finish.action
+        else {
+            return Err(InvestigationError::InvalidAction);
+        };
+        let prose = findings
+            .iter()
+            .flat_map(|finding| {
+                std::iter::once(finding.title.as_str())
+                    .chain(std::iter::once(finding.statement.as_str()))
+                    .chain(finding.limitations.iter().map(String::as_str))
+            })
+            .chain(limitations.iter().map(String::as_str))
+            .chain(model)
+            .chain(finish.narrative.as_ref().map(|value| value.text.as_str()))
+            .collect::<Vec<_>>();
+        reject_prose_replay(
+            prose.iter().copied(),
+            self.supplied_strings.iter().map(String::as_str),
+        )?;
+        super::privacy::reject_metadata_replay(prose, self.graph_strings.iter().map(String::as_str))
+    }
+
+    /// Only the new analyst may turn known missing source citations into feedback.
+    /// The caller has already authenticated the completion binding and attempts.
+    pub(super) fn eligible_citation_correction(
+        &self,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<bool, InvestigationError> {
+        if self.payload.system != SpecialistId::DomainAnalystV19.prompt() {
+            return Ok(false);
+        }
+        // Analyst finishes never carry a narrative. Do not extend this recovery
+        // path to other roles without their separate narrative-reference checks.
+        if finish.schema_version != 1 || finish.narrative.is_some() {
+            return Err(InvestigationError::InvalidAction);
+        }
+        self.validate_correction_prose(finish, model)?;
+        self.validate_acquisition_projection()?;
+        // A finish-only offer cannot become permission to acquire missing source.
+        // Choice already reserves the continuation and final finish under the
+        // shared refusal allowance; no budget or admission mode is upgraded here.
+        if self.acquisition_mode != Some(staged_refusal::CompletionCallMode::Choice) {
+            return Ok(false);
+        }
+        let InvestigationAction::Finish { findings, .. } = &finish.action else {
+            return Err(InvestigationError::InvalidAction);
+        };
+        let citations =
+            disclosure.eligible_citations_consistent(&self.ledger, policy, consistency)?;
+        let invalid = findings
+            .iter()
+            .flat_map(|finding| &finding.citation_ids)
+            .filter(|id| !citations.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let contract = serde_json::from_value(prompt["completion_contract"].clone())
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        Ok(self
+            .acquisition_choices
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?
+            .unacquired_citation_targets(&invalid, &contract, &metadata, &self.ledger, policy)?
+            .is_some())
+    }
+
     /// The host supplies canonical query-response JSON in original response order
     /// and exact source spans. This pure method verifies their hashes and bound
     /// membership; it cannot verify that the host read a database or source file.

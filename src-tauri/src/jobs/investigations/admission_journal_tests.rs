@@ -128,7 +128,13 @@ pub(in crate::jobs::investigations) fn start_call(
         policy,
     )
     .unwrap();
-    let input = if f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+    let input = if f
+        .task
+        .detail
+        .summary
+        .specialist_id
+        .uses_acquisition_choices()
+    {
         let tx = f.store.conn.unchecked_transaction().unwrap();
         let choices = completion::SavedMetadataHistory::load(&tx, &f.task)
             .unwrap()

@@ -442,13 +442,28 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         step,
         Some(disclosure),
         &finish.action,
-        model,
+        model.clone(),
         timestamp,
         completion,
         policy,
         consistency,
-    )?;
-    let admitted = input.admit_narrative(admitted, finish)?;
+    );
+    let admitted = match admitted {
+        Ok(result) => Some(input.admit_narrative(result, finish)?),
+        Err(InvestigationError::InvalidCitation)
+            if request.specialist_id == "domain-analyst@19"
+                && input.eligible_citation_correction(
+                    disclosure,
+                    finish,
+                    model.as_deref(),
+                    policy,
+                    consistency,
+                )? =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let unmet = assessment
         .iter()
         .filter_map(|observation| {
@@ -460,6 +475,8 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         })
         .collect::<Vec<_>>();
     if unmet.is_empty() {
+        // A correction never constructs a result or discharges an obligation.
+        let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
         Ok(FinishDecision::Accepted(AcceptedCandidate {
             outcome: finish.outcome,
             findings: admitted.findings,

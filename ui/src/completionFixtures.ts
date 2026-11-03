@@ -135,6 +135,14 @@ export const acquisitionCatalog: InvestigationCatalog = {
   policies: admissionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@18'] })),
 };
 
+/** Correction version retains the historical acquisition catalog. */
+export const correctionCatalog: InvestigationCatalog = {
+  ...acquisitionCatalog,
+  specialists: [...acquisitionCatalog.specialists, { ...acquisitionCatalog.specialists.find((item) => item.id === 'domain-analyst@18')!,
+    id: 'domain-analyst@19', version: 19, prompt_fingerprint: 'fixture-domain-analyst@19' }],
+  policies: acquisitionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@19'] })),
+};
+
 export function admissionDetail(id = 'inv-admission'): InvestigationDetail {
   const detail = queryHistoryDetail(id);
   detail.schema_version = 7; detail.specialist_id = 'domain-analyst@10';

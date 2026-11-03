@@ -44,7 +44,7 @@ impl JobStore {
             return Err(InvestigationStoreError::Invalid);
         }
         let metadata = completion::derive_protected_metadata(&task, vec![], &[])?;
-        let contract = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let contract = if task.detail.summary.specialist_id.uses_acquisition_choices() {
             Some(
                 task.completion_intent
                     .as_ref()

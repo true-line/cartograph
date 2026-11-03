@@ -136,7 +136,12 @@ pub(super) fn validate_continuation(
         .admission
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
-    if before.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+    if before
+        .detail
+        .summary
+        .specialist_id
+        .uses_acquisition_choices()
+    {
         let choices = completion::SavedMetadataHistory::load(connection, before)?
             .prospective_choices(ledger, &next_metadata, &records)?
             .ok_or(InvestigationStoreError::Invalid)?;

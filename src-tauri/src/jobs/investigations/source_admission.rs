@@ -246,7 +246,7 @@ impl JobStore {
         ];
         task = projected;
         let validation = source_validation::validation_storage_bound(&tx, &task, &reservation)?;
-        let envelope = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let envelope = if task.detail.summary.specialist_id.uses_acquisition_choices() {
             source_settlement::envelope_with_authenticated_core(
                 &tx,
                 &task,
@@ -273,7 +273,7 @@ impl JobStore {
             .as_mut()
             .ok_or(InvestigationStoreError::Invalid)?
             .reservation_hash = reservation.fingerprint()?;
-        let repeated = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let repeated = if task.detail.summary.specialist_id.uses_acquisition_choices() {
             source_settlement::envelope_with_authenticated_core(
                 &tx,
                 &task,

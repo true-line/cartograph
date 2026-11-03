@@ -484,9 +484,7 @@ pub(super) use tests::fixture_data::gated_source_obligation_fixture;
 pub(super) use tests::fixture_data::source_invocation_fixture as internal_source_invocation_fixture;
 
 #[cfg(test)]
-pub(super) use tests::fixture_data::captured_source_invocation;
-#[cfg(test)]
-pub(super) use tests::fixture_data::captured_source_invocation_for;
+pub(super) use tests::fixture_data::captured_source_invocation_for_role;
 
 #[cfg(test)]
 pub(super) fn lose_next_charge_ack() {

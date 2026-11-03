@@ -641,3 +641,80 @@ fn history_answer_search_markers_keep_legacy_empty_page_bytes() {
         json!(["saved-task"])
     );
 }
+
+#[test]
+fn correction_prose_is_checked_even_with_unadmitted_citations() {
+    // AC-0565: a recoverable citation error must not hide replay or secrets.
+    let private = "Never copy this complete private implementation string into durable findings.";
+    let page = json!({"facts":[{"properties":{"implementation":private}}]}).to_string();
+    let mut basis = ledger();
+    basis.queries[0].response_hash = content_hash(page.as_bytes());
+    basis.queries[0].response_bytes = page.len();
+    let input = InvestigationInput::prepare(
+        "Explain the bounded evidence",
+        SpecialistId::DomainAnalyst,
+        basis,
+        &[page],
+        &[],
+        &[],
+        &InvestigationUsage::default(),
+    )
+    .unwrap();
+    let mut finish = staged_finish::StagedFinish {
+        schema_version: 1,
+        outcome: staged_finish::CompletionOutcome::Supported,
+        narrative: None,
+        action: action(),
+    };
+    if let InvestigationAction::Finish { findings, .. } = &mut finish.action {
+        findings[0].citation_ids = vec!["unacquired-target".into()];
+    }
+    assert_eq!(input.validate_correction_prose(&finish, None), Ok(()));
+    // Passing prose validation does not admit the target as a citation.
+    assert_eq!(
+        input.admit_result(
+            "inv-one",
+            &finish.action,
+            None,
+            "2026-09-11T00:00:00Z".into()
+        ),
+        Err(InvestigationError::InvalidCitation)
+    );
+    if let InvestigationAction::Finish { findings, .. } = &mut finish.action {
+        findings[0].statement = private.into();
+    }
+    assert_eq!(
+        input.validate_correction_prose(&finish, None),
+        Err(InvestigationError::SourceReplay)
+    );
+    if let InvestigationAction::Finish { findings, .. } = &mut finish.action {
+        findings[0].statement = "password=synthetic-secret".into();
+    }
+    assert_eq!(
+        input.validate_correction_prose(&finish, None),
+        Err(InvestigationError::SensitiveOutput)
+    );
+}
+
+#[test]
+fn correction_specialist_has_separate_identity_and_retains_acquisition_guards() {
+    // AC-0565: @19 evolves the prompt without rewriting saved @18 receipts.
+    let old = SpecialistId::DomainAnalystV18;
+    let current = SpecialistId::DomainAnalystV19;
+    assert_eq!(old.definition().unwrap().version, 18);
+    assert_eq!(current.definition().unwrap().version, 19);
+    assert_eq!(serde_json::to_value(current).unwrap(), "domain-analyst@19");
+    assert_ne!(
+        old.definition().unwrap().prompt_fingerprint,
+        current.definition().unwrap().prompt_fingerprint
+    );
+    assert!(current.prompt().starts_with(&old.prompt()));
+    assert!(!old.prompt().contains("Unacquired citation correction@1"));
+    assert!(current.uses_acquisition_choices());
+    assert!(old.uses_acquisition_choices());
+    assert!(!SpecialistId::DomainAnalystV17.uses_acquisition_choices());
+    assert_eq!(
+        old.definition().unwrap().operations,
+        current.definition().unwrap().operations
+    );
+}

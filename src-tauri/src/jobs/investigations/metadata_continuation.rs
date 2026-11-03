@@ -276,7 +276,7 @@ pub(super) fn derive(
     };
     basis.validate_with_policy(ledger, policy)?;
     let mode = metadata.next_call_mode_with_policy(&usage, policy)?;
-    let choices = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+    let choices = if task.detail.summary.specialist_id.uses_acquisition_choices() {
         completion::SavedMetadataHistory::load(tx, task)?
             .prospective_choices(ledger, &metadata, &records)?
     } else {

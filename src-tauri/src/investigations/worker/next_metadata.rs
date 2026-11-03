@@ -65,7 +65,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 let read = match context.prepare_query_with_diagnostic(self.state, query.clone()) {
                     Ok(read) => read,
                     Err(ContextReadPreparationError::QueryRejected(reason))
-                        if self.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 =>
+                        if self.detail.summary.specialist_id.uses_acquisition_choices() =>
                     {
                         use agents::investigation::query_refusal::QueryRefusalRecord;
                         let mut record = QueryRefusalRecord {

@@ -36,7 +36,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         {
             let reason = if !input.permits_acquisition(read) {
                 ActionRefusalReason::ActionNotOffered
-            } else if self.detail.summary.specialist_id == SpecialistId::DomainAnalystV18
+            } else if self.detail.summary.specialist_id.uses_acquisition_choices()
                 // Strict decoding above authenticated the saved replay selector.
                 // An explicitly requested replay is not an accidental raw repeat.
                 && original["type"] != "replay_query"

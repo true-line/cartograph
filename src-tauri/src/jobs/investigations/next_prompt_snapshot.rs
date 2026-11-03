@@ -140,7 +140,7 @@ impl JobStore {
         } else {
             derived_mode
         };
-        let choices = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let choices = if task.detail.summary.specialist_id.uses_acquisition_choices() {
             completion::SavedMetadataHistory::load(&tx, &task)?
                 .current_choices(&ledger, &metadata)?
         } else {

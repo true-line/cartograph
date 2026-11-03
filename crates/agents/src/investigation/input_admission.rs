@@ -700,6 +700,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV15,
             SpecialistId::DomainAnalystV17,
             SpecialistId::DomainAnalystV18,
+            SpecialistId::DomainAnalystV19,
             SpecialistId::EvidenceAuditorV11,
         ]
         .into_iter()
@@ -708,7 +709,7 @@ impl InvestigationInput {
         self.ledger.validate_for_specialist(role, policy)?;
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if role == SpecialistId::DomainAnalystV18 {
+        if role.uses_acquisition_choices() {
             self.validate_acquisition_projection()?;
         } else {
             response_schema::validate(&self.ledger, &self.payload, &prompt)?;
@@ -742,7 +743,7 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
-            if role == SpecialistId::DomainAnalystV18 {
+            if role.uses_acquisition_choices() {
                 &["acquisition_choices", "action_feedback"]
             } else {
                 &[]
@@ -960,7 +961,16 @@ impl InvestigationInput {
 }
 
 impl InvestigationInput {
-    /// Current @18 input assembly; dispatch remains gated until worker activation.
+    fn uses_acquisition_prompt(&self) -> bool {
+        [
+            SpecialistId::DomainAnalystV18,
+            SpecialistId::DomainAnalystV19,
+        ]
+        .iter()
+        .any(|role| self.payload.system == role.prompt())
+    }
+
+    /// Acquisition input assembly; task activation is a separate host gate.
     /// The caller must authenticate the host journal before deriving choices.
     pub fn with_acquisition_choices(
         self,
@@ -973,7 +983,7 @@ impl InvestigationInput {
         choices: std::sync::Arc<acquisition_choices::AcquisitionChoices>,
         feedback: Option<ActionRefusalFeedback>,
     ) -> Result<Self, InvestigationError> {
-        if self.payload.system != SpecialistId::DomainAnalystV18.prompt() {
+        if !self.uses_acquisition_prompt() {
             return Err(InvestigationError::InvalidInput);
         }
         let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
@@ -1012,7 +1022,7 @@ impl InvestigationInput {
         Ok(self)
     }
     pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {
-        self.payload.system != SpecialistId::DomainAnalystV18.prompt()
+        !self.uses_acquisition_prompt()
             || (self.acquisition_mode == Some(staged_refusal::CompletionCallMode::Choice)
                 && self.validate_acquisition_projection().is_ok()
                 && self
@@ -1024,9 +1034,7 @@ impl InvestigationInput {
         &self,
         original: &llm::CompletionPayload,
     ) -> Result<AcquisitionAdmission, InvestigationError> {
-        if self.payload != *original
-            || self.payload.system != SpecialistId::DomainAnalystV18.prompt()
-        {
+        if self.payload != *original || !self.uses_acquisition_prompt() {
             return Err(InvestigationError::InvalidInput);
         }
         self.validate_acquisition_projection()?;
@@ -1049,7 +1057,7 @@ impl InvestigationInput {
         })
     }
     pub(super) fn validate_acquisition_projection(&self) -> Result<(), InvestigationError> {
-        if self.payload.system != SpecialistId::DomainAnalystV18.prompt() {
+        if !self.uses_acquisition_prompt() {
             return if self.acquisition_choices.is_none()
                 && self.action_feedback.is_none()
                 && self.acquisition_mode.is_none()

@@ -57,8 +57,17 @@ fn prepared_source_publication_acquired_installs_actual_read_only_after_ack() {
 fn prepared_source_publication_gated_source_uses_attached_candidate() {
     assert_acquired_publication(true);
 }
+// AC-0565: native captured-source read/publication for the new role, no model.
+#[test]
+fn prepared_source_publication_analyst19_source_uses_attached_candidate() {
+    assert_acquired_publication_role(Some(SpecialistId::DomainAnalystV19));
+}
 fn assert_acquired_publication(gated: bool) {
-    let (saved, state, mut context, target, _) = fixture_for(gated);
+    assert_acquired_publication_role(gated.then_some(SpecialistId::DomainAnalystV18));
+}
+fn assert_acquired_publication_role(role: Option<SpecialistId>) {
+    let gated = role.is_some();
+    let (saved, state, mut context, target, _) = fixture_for_role(role);
     reset_reads();
     let candidate = match read(&saved, &state, &context, &target) {
         Ok(candidate) => candidate,

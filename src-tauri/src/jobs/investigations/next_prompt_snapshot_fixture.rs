@@ -1,7 +1,7 @@
 //! AC-0287: real internal factory/claim/initial publication and sealed calls;
 //! no SQL family conversion, provider dispatch or public-route activation.
 use super::*;
-use completion::{InitialFixture, initial_fixture};
+use completion::{InitialFixture, initial_fixture_with_request};
 use llm::bounded::PreparedBoundedCompletion;
 use next_prompt_invocation::tests::{firewall, limits, provider};
 use serde_json::json;
@@ -20,13 +20,26 @@ impl Fixture {
         cloud: bool,
         setup: impl FnOnce(&mut InitialFixture),
     ) -> Self {
+        Self::customized_request(cloud, |_, _| {}, setup)
+    }
+    pub(in crate::jobs::investigations) fn with_request(
+        cloud: bool,
+        customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
+    ) -> Self {
+        Self::customized_request(cloud, customize, |_| {})
+    }
+    fn customized_request(
+        cloud: bool,
+        customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
+        setup: impl FnOnce(&mut InitialFixture),
+    ) -> Self {
         let profile = provider(cloud).0;
         let mode = if cloud {
             InvestigationProviderMode::Cloud
         } else {
             InvestigationProviderMode::Local
         };
-        let mut f = initial_fixture(
+        let mut f = initial_fixture_with_request(
             mode,
             InvestigationProvider {
                 mode,
@@ -38,6 +51,7 @@ impl Fixture {
                 available: true,
                 unavailable_reason: None,
             },
+            customize,
         );
         setup(&mut f);
         let policy = &INVESTIGATION_V2_POLICY;
@@ -66,7 +80,13 @@ impl Fixture {
             policy,
         )
         .unwrap();
-        let input = if f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let input = if f
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
+        {
             let choices = agents::investigation::acquisition_choices::AcquisitionChoices::derive(
                 &f.task.completion_intent.as_ref().unwrap().contract(),
                 &f.metadata,
@@ -128,7 +148,14 @@ impl Fixture {
         let authorized = firewall()
             .authorize_bounded(&provider(false), &self.prepared, None)
             .unwrap();
-        let active = if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let active = if self
+            .f
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
+        {
             self.input
                 .seal_disclosure_with_policy(&self.prepared, &INVESTIGATION_V2_POLICY)
                 .unwrap()
@@ -158,7 +185,14 @@ impl Fixture {
     }
     fn response(&self, original: &serde_json::Value) -> InvestigationResponseMeta {
         InvestigationResponseMeta {
-            step_id: if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+            step_id: if self
+                .f
+                .task
+                .detail
+                .summary
+                .specialist_id
+                .uses_acquisition_choices()
+            {
                 format!("step-{}", self.f.task.detail.usage.model_invocations)
             } else {
                 "step-1".into()
@@ -267,7 +301,13 @@ impl Fixture {
             previous_ledger: Some(self.f.ledger.clone()),
             completed_tool: Some(InvestigationTool::ReadCoverageInventory),
         };
-        let snapshot = if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18
+        let snapshot = if self
+            .f
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
         {
             Some(
                 self.f
@@ -316,12 +356,18 @@ impl Fixture {
             Some(snapshot) => snapshot.attach_acquisition(candidate).unwrap(),
             None => candidate,
         };
-        let action_id =
-            if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
-                format!("{}:step-{}", self.id(), usage.model_invocations + 1)
-            } else {
-                format!("{}:step-2", self.id())
-            };
+        let action_id = if self
+            .f
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
+        {
+            format!("{}:step-{}", self.id(), usage.model_invocations + 1)
+        } else {
+            format!("{}:step-2", self.id())
+        };
         let prepared = firewall()
             .prepare_bounded(
                 &provider(false),

@@ -23,11 +23,15 @@ impl CapturedSourceInvocationFixture {
         gated: bool,
         initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
     ) -> Self {
-        let (f, target, raw) = if gated {
-            source_validation::captured_source_invocation_for(true, initialize)
-        } else {
-            source_validation::captured_source_invocation(initialize)
-        };
+        Self::with_role(gated.then_some(SpecialistId::DomainAnalystV18), initialize)
+    }
+    pub(crate) fn with_role(
+        role: Option<SpecialistId>,
+        initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
+    ) -> Self {
+        let gated = role.is_some();
+        let (f, target, raw) =
+            source_validation::captured_source_invocation_for_role(role, initialize);
         let tx = f.store.conn.unchecked_transaction().unwrap();
         let basis = turn::basis(&tx, &f.task).unwrap();
         tx.commit().unwrap();

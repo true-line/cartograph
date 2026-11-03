@@ -62,7 +62,7 @@ fn prepare_with_pages(
         policy,
     )
     .unwrap();
-    let input = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+    let input = if task.detail.summary.specialist_id.uses_acquisition_choices() {
         let choices = agents::investigation::acquisition_choices::AcquisitionChoices::derive(
             &agents::investigation::InvestigationCompletionContract {
                 schema_version: 1,
