@@ -1,15 +1,69 @@
 import { useEffect, useState } from 'react';
-import { formatMinutes, parseMinutes, toMinutes, type RunLimits, type RunLimitsApi } from '../runLimits';
+import { formatMinutes, parseMinutes, tauriLocalModelApi, toMinutes, type InstalledModel, type LocalModelApi,
+  type LocalModelChoice, type RunLimits, type RunLimitsApi } from '../runLimits';
 
 export interface ConfigureWindowProps {
   api: RunLimitsApi;
+  modelApi?: LocalModelApi;
+}
+
+/** Configure → Local model (#1643): which installed Ollama model new desktop investigations use. */
+function LocalModelSection({ api }: { api: LocalModelApi }) {
+  const [choice, setChoice] = useState<LocalModelChoice | null>(null);
+  const [installed, setInstalled] = useState<InstalledModel[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [selected, setSelected] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const show = (next: LocalModelChoice) => { setChoice(next); setSelected(next.model); };
+  useEffect(() => {
+    api.load().then(show, (e: unknown) => setError(String(e)));
+    api.installed().then(setInstalled, (e: unknown) => setListError(String(e)));
+  }, [api]);
+
+  const run = async (action: () => Promise<LocalModelChoice>, message: string) => {
+    setBusy(true); setError(null); setSaved(null);
+    try { show(await action()); setSaved(message); } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+
+  const names = installed?.map((entry) => entry.name) ?? [];
+  const options = choice && !names.includes(choice.model) ? [choice.model, ...names] : names;
+  const digest = installed?.find((entry) => entry.name === selected)?.digest;
+
+  return <section className="configure-section" aria-label="Local model">
+    <h2>Local model</h2>
+    <p className="muted">The Ollama model new desktop investigations on the local provider use. Cartograph never downloads a model;
+      install one with <code>ollama pull</code> first. Running investigations keep their model.</p>
+    {choice && <form onSubmit={(event) => { event.preventDefault(); void run(() => api.save(selected), `Saved. New investigations use ${selected}.`); }}>
+      <label className="configure-field">
+        <span>Completion model</span>
+        <select value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}>
+          {options.map((name) => <option key={name} value={name}>
+            {name}{name === choice.default_model ? ' (default)' : ''}{installed && !names.includes(name) ? ' (not installed)' : ''}</option>)}
+        </select>
+        <small className="muted">{listError ?? (digest ? `Installed digest ${digest.slice(0, 12)}.` : installed ? 'Not installed in Ollama on this Mac.' : 'Checking installed models…')}</small>
+      </label>
+      <div className="configure-actions">
+        <button type="submit" disabled={busy || selected === choice.model}>Use this model</button>
+        <button type="button" className="secondary-button" disabled={busy || !choice.customized}
+          onClick={() => void run(() => api.reset(), `Restored the default model, ${choice.default_model}.`)}>Use default model</button>
+      </div>
+    </form>}
+    {!choice && !error && <p className="muted">Loading…</p>}
+    {!choice && error && <button type="button" disabled={busy}
+      onClick={() => void run(() => api.reset(), 'Restored the default model.')}>Use default model</button>}
+    {saved && <p className="muted" role="status">{saved}</p>}
+    {error && <p className="error-text" role="alert">{error}</p>}
+  </section>;
 }
 
 /**
  * Configure → Run Limits (#1633): the two investigation time limits, kept
  * apart from the app Settings page. Every other cap stays fixed.
  */
-export function ConfigureWindow({ api }: ConfigureWindowProps) {
+export function ConfigureWindow({ api, modelApi = tauriLocalModelApi }: ConfigureWindowProps) {
   const [limits, setLimits] = useState<RunLimits | null>(null);
   const [task, setTask] = useState('');
   const [call, setCall] = useState('');
@@ -84,5 +138,6 @@ export function ConfigureWindow({ api }: ConfigureWindowProps) {
     </form>
     {saved && <p className="muted" role="status">{saved}</p>}
     {error && <p className="error-text" role="alert">{error}</p>}
+    <LocalModelSection api={modelApi} />
   </main>;
 }

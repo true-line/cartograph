@@ -4523,3 +4523,5 @@ details.investigation-section { display: block; }
 .configure-field { display: grid; gap: 4px; margin: 16px 0; }
 .configure-field input { max-width: 160px; }
 .configure-actions { display: flex; gap: 8px; margin-top: 8px; }
+.configure-section { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 8px; }
+.configure-field select { max-width: 280px; }

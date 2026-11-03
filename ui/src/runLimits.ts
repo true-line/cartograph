@@ -24,6 +24,45 @@ export const tauriRunLimitsApi: RunLimitsApi = {
   reset: () => invoke<RunLimits>('reset_run_limits'),
 };
 
+/** The local completion model for new desktop investigations (#1643). */
+export interface LocalModelChoice {
+  model: string;
+  default_model: string;
+  customized: boolean;
+}
+
+/** One model installed in Ollama on this Mac. */
+export interface InstalledModel {
+  name: string;
+  digest: string;
+}
+
+export interface LocalModelApi {
+  load(): Promise<LocalModelChoice>;
+  installed(): Promise<InstalledModel[]>;
+  save(model: string): Promise<LocalModelChoice>;
+  reset(): Promise<LocalModelChoice>;
+}
+
+export const tauriLocalModelApi: LocalModelApi = {
+  load: () => invoke<LocalModelChoice>('get_local_model'),
+  installed: () => invoke<InstalledModel[]>('list_local_models'),
+  save: (model) => invoke<LocalModelChoice>('set_local_model', { model }),
+  reset: () => invoke<LocalModelChoice>('reset_local_model'),
+};
+
+/**
+ * Specialist versions whose desktop runs use the saved run limits; mirrors
+ * `SpecialistId::uses_next_prompt_admission` in crates/agents.
+ */
+export function usesConfiguredLimits(specialistId: string): boolean {
+  const match = /^(domain-analyst|evidence-auditor)@(\d+)$/.exec(specialistId);
+  if (!match) return false;
+  const version = Number(match[2]);
+  return match[1] === 'domain-analyst' ? (version >= 10 && version <= 15) || version === 17 || version === 18
+    : version === 10 || version === 11;
+}
+
 /** Whole minutes in the window; seconds/milliseconds on the wire. */
 export const toMinutes = (seconds: number) => seconds / 60;
 

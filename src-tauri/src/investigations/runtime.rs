@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub(crate) struct InvestigationRuntime {
     providers: Mutex<BTreeMap<InvestigationProviderMode, Arc<dyn LlmProvider>>>,
+    /// Local providers for a configured completion model (#1643), by model.
+    local_models: Mutex<BTreeMap<String, Arc<dyn LlmProvider>>>,
     live: Mutex<BTreeMap<String, Arc<LiveTask>>>,
 }
 
@@ -47,8 +49,54 @@ impl InvestigationRuntime {
         Ok(provider)
     }
 
-    pub(super) fn descriptor(&self, mode: InvestigationProviderMode) -> InvestigationProvider {
-        self.provider(mode)
+    /// The provider a new desktop start uses: the configured local completion
+    /// model (#1643) when it differs from the shipped default, otherwise the
+    /// mode's default provider. Construction makes no network call; a model
+    /// that is not installed fails at its first request and is reported.
+    pub(super) fn provider_for_start(
+        &self,
+        mode: InvestigationProviderMode,
+        local_model: Option<&str>,
+    ) -> Result<Arc<dyn LlmProvider>, HostError> {
+        let model = match (mode, local_model) {
+            (InvestigationProviderMode::Local, Some(model))
+                if model != llm::OllamaProvider::DEFAULT_COMPLETION_MODEL =>
+            {
+                model
+            }
+            _ => return self.provider(mode),
+        };
+        let mut providers = self
+            .local_models
+            .lock()
+            .map_err(|_| HostError::Operational)?;
+        if let Some(provider) = providers.get(model) {
+            return Ok(provider.clone());
+        }
+        let provider: Arc<dyn LlmProvider> = Arc::new(
+            llm::OllamaProvider::with_models(
+                llm::OllamaProvider::DEFAULT_URL,
+                llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+                model,
+                Duration::from_secs(120),
+            )
+            .map_err(|_| HostError::Operational)?,
+        );
+        provider
+            .bounded_profile()
+            .map_err(|_| HostError::InvalidInput)?;
+        providers.insert(model.to_owned(), provider.clone());
+        Ok(provider)
+    }
+
+    /// The provider a new desktop start would use, as the catalog shows it:
+    /// the configured local model (#1643) when one is saved.
+    pub(super) fn descriptor_for_start(
+        &self,
+        mode: InvestigationProviderMode,
+        local_model: Option<&str>,
+    ) -> InvestigationProvider {
+        self.provider_for_start(mode, local_model)
             .and_then(|p| descriptor(p.as_ref(), mode))
             .unwrap_or_else(|_| InvestigationProvider {
                 mode,
@@ -235,6 +283,47 @@ impl RunClock {
 #[cfg(test)]
 mod run_clock_tests {
     use super::*;
+    // AC-0564: a desktop start with a configured local model gets a provider
+    // for that model; the default model and cloud keep the mode provider.
+    #[test]
+    fn configured_local_model_selects_its_own_provider() {
+        let runtime = InvestigationRuntime::default();
+        let local = InvestigationProviderMode::Local;
+        let chosen = runtime
+            .provider_for_start(local, Some("qwen3:30b-a3b"))
+            .unwrap();
+        assert_eq!(
+            descriptor(chosen.as_ref(), local).unwrap().model,
+            "qwen3:30b-a3b"
+        );
+        let again = runtime
+            .provider_for_start(local, Some("qwen3:30b-a3b"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&chosen, &again));
+        let default = runtime
+            .provider_for_start(local, Some(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL))
+            .unwrap();
+        assert!(Arc::ptr_eq(&default, &runtime.provider(local).unwrap()));
+        assert_eq!(
+            descriptor(default.as_ref(), local).unwrap().model,
+            llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
+        );
+        assert!(Arc::ptr_eq(
+            &runtime.provider_for_start(local, None).unwrap(),
+            &default
+        ));
+        // The catalog shows what a desktop start would use.
+        assert_eq!(
+            runtime
+                .descriptor_for_start(local, Some("qwen3:30b-a3b"))
+                .model,
+            "qwen3:30b-a3b"
+        );
+        assert_eq!(
+            runtime.descriptor_for_start(local, None).model,
+            llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
+        );
+    }
     // AC-0562: a saved active allowance above the default extends the deadline.
     #[test]
     fn saved_active_limit_replaces_default_deadline() {

@@ -111,6 +111,7 @@ pub enum SettingsError {
     InvalidProvider(String),
     InvalidParallelism(u32),
     InvalidInvestigationChoice,
+    InvalidLocalModel,
     InvalidRunLimit {
         field: &'static str,
         value: u64,
@@ -143,6 +144,10 @@ impl std::fmt::Display for SettingsError {
             Self::InvalidInvestigationChoice => write!(
                 f,
                 "investigation choice must name a specialist and a budget profile (1..=128 of a-z, 0-9, @ . _ -)"
+            ),
+            Self::InvalidLocalModel => write!(
+                f,
+                "local model must be an Ollama model name (1..=128 of A-Z, a-z, 0-9, : . _ / + -)"
             ),
             Self::InvalidRunLimit {
                 field,
@@ -253,6 +258,40 @@ fn check_run_limit(
     }
 }
 
+/// The local completion model desktop investigations use (#1643). A stored
+/// `NULL` means the shipped default, so a later default change still reaches
+/// profiles that never chose a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalModelChoice {
+    /// The Ollama model new desktop investigations request.
+    pub model: String,
+    /// The shipped default model.
+    pub default_model: String,
+    /// Whether the model differs from the shipped default.
+    pub customized: bool,
+}
+
+impl LocalModelChoice {
+    fn describe(stored: Option<String>) -> Self {
+        let default_model = llm::OllamaProvider::DEFAULT_COMPLETION_MODEL.to_owned();
+        let model = stored.unwrap_or_else(|| default_model.clone());
+        Self {
+            customized: model != default_model,
+            model,
+            default_model,
+        }
+    }
+}
+
+/// An Ollama model name: `name[:tag]`, optionally namespaced. Syntax only;
+/// whether it is installed is checked against Ollama when it is saved.
+pub fn local_model_name(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b":._/+-".contains(&b))
+}
+
 /// Store for tier settings and the egress log, on the state spine.
 pub struct SettingsStore {
     conn: Connection,
@@ -308,6 +347,11 @@ impl SettingsStore {
                  request_timeout_ms INTEGER CHECK (request_timeout_ms > 0)
              ) STRICT;
              INSERT OR IGNORE INTO run_limit_settings (id) VALUES (1);
+             CREATE TABLE IF NOT EXISTS settings_local_model (
+                 id               INTEGER PRIMARY KEY CHECK (id = 1),
+                 completion_model TEXT CHECK (length(completion_model) BETWEEN 1 AND 128)
+             ) STRICT;
+             INSERT OR IGNORE INTO settings_local_model (id) VALUES (1);
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -709,6 +753,43 @@ impl SettingsStore {
         self.run_limits()
     }
 
+    /// The local completion model for new desktop investigations (#1643).
+    /// A stored value that is not a model name is reported as an error.
+    pub fn local_model(&self) -> Result<LocalModelChoice, SettingsError> {
+        let stored: Option<String> = self.conn.query_row(
+            "SELECT completion_model FROM settings_local_model WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        match stored {
+            Some(model) if !local_model_name(&model) => Err(SettingsError::InvalidLocalModel),
+            stored => Ok(LocalModelChoice::describe(stored)),
+        }
+    }
+
+    /// Persist the local completion model; the shipped default is stored as
+    /// `NULL`. The caller confirms the model is installed before saving.
+    pub fn set_local_model(&mut self, model: &str) -> Result<LocalModelChoice, SettingsError> {
+        if !local_model_name(model) {
+            return Err(SettingsError::InvalidLocalModel);
+        }
+        let stored = (model != llm::OllamaProvider::DEFAULT_COMPLETION_MODEL).then_some(model);
+        self.conn.execute(
+            "UPDATE settings_local_model SET completion_model = ?1 WHERE id = 1",
+            params![stored],
+        )?;
+        self.local_model()
+    }
+
+    /// Return to the shipped default model; also clears an invalid stored value.
+    pub fn reset_local_model(&mut self) -> Result<LocalModelChoice, SettingsError> {
+        self.conn.execute(
+            "UPDATE settings_local_model SET completion_model = NULL WHERE id = 1",
+            [],
+        )?;
+        self.local_model()
+    }
+
     /// Derive the egress firewall policy from persisted settings: cloud is
     /// allowed only for enabled LLM tiers whose provider is `cloud` **and**
     /// which hold standing consent. Everything else stays local-only.
@@ -766,6 +847,47 @@ mod tests {
             ));
         }
         assert_eq!(store.investigation_choice().unwrap(), chosen);
+    }
+
+    // AC-0564: the local model defaults to the shipped one, persists across
+    // reopen, refuses non-model names without writing, and resets.
+    #[test]
+    fn local_model_default_persist_validate_and_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        let shipped = store.local_model().unwrap();
+        assert_eq!(shipped.model, llm::OllamaProvider::DEFAULT_COMPLETION_MODEL);
+        assert!(!shipped.customized);
+        let chosen = store.set_local_model("qwen3:30b-a3b").unwrap();
+        assert_eq!(chosen.model, "qwen3:30b-a3b");
+        assert!(chosen.customized);
+        for bad in ["", "qwen3 30b", "a;b", &"x".repeat(129)] {
+            assert!(matches!(
+                store.set_local_model(bad),
+                Err(SettingsError::InvalidLocalModel)
+            ));
+        }
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.local_model().unwrap(), chosen);
+        let default = store
+            .set_local_model(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL)
+            .unwrap();
+        assert!(!default.customized);
+        store.set_local_model("library/qwen3:30b-a3b").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE settings_local_model SET completion_model = 'bad model' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.local_model(),
+            Err(SettingsError::InvalidLocalModel)
+        ));
+        assert_eq!(store.reset_local_model().unwrap(), shipped);
     }
 
     #[test]

@@ -91,6 +91,14 @@ pub(crate) async fn investigation_specialists(
 ) -> Result<InvestigationCatalog, String> {
     crate::off_ui_thread(move || {
         let state = app.state::<AppState>();
+        // The desktop catalog names the saved local model (#1643); an
+        // unreadable setting shows the default, and a start reports the error.
+        let local_model = state
+            .settings
+            .lock()
+            .ok()
+            .and_then(|store| store.local_model().ok())
+            .map(|choice| choice.model);
         Ok(InvestigationCatalog {
             schema_version: 1,
             specialists: available_specialists()
@@ -103,7 +111,11 @@ pub(crate) async fn investigation_specialists(
                 InvestigationProviderMode::Cloud,
             ]
             .into_iter()
-            .map(|mode| state.investigations.descriptor(mode))
+            .map(|mode| {
+                state
+                    .investigations
+                    .descriptor_for_start(mode, local_model.as_deref())
+            })
             .collect(),
             limits: InvestigationLimits::default(),
             policies: policy_catalog(),
@@ -226,7 +238,26 @@ pub(super) fn start_access<R: tauri::Runtime>(
     // This resolves app-lifetime configuration only, without network activity.
     // An unavailable provider is passed through: durable deduplication must win
     // over a later configuration change for an already committed request.
-    let provider = state.investigations.provider(request.provider_mode).ok();
+    // Desktop starts use the configured local completion model (#1643);
+    // MCP keeps the shipped default.
+    let local_model =
+        if session.is_none() && request.provider_mode == InvestigationProviderMode::Local {
+            Some(
+                state
+                    .settings
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .local_model()
+                    .map_err(|e| e.to_string())?
+                    .model,
+            )
+        } else {
+            None
+        };
+    let provider = state
+        .investigations
+        .provider_for_start(request.provider_mode, local_model.as_deref())
+        .ok();
     let descriptor = provider
         .as_ref()
         .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());

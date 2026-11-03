@@ -1,5 +1,6 @@
 import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFamilies';
 import { useRef, useState } from 'react';
+import { RunLimitFooter } from './RunLimitFooter';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
 import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistActivityItem, SpecialistId } from '../investigationTypes';
@@ -254,8 +255,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       {requestBytes > requestLimit && <p role="alert" className="error-text">This request exceeds the {requestLimit.toLocaleString()}-byte limit. Shorten the question or remove required sources.</p>}
       {parent && <p className="muted">New task following <code>{parent.parent_id}</code>; earlier findings remain T3 history.
         <button type="button" className="secondary-button" disabled={locked} onClick={() => setParent(null)}>Start a separate conversation</button></p>}
-      {limits && <p className="muted">Up to {limits?.model_invocations} model invocations and {limits?.tool_actions} tool actions;
-        {' '}{limits?.active_seconds}s active execution. Source and byte limits apply. Missing evidence is not proof of absence.</p>}
+      {limits && <RunLimitFooter specialistId={specialistId} limits={limits} />}
       <button type="submit" disabled={!startEnabled}>{state.starting ? 'Saving investigation…' : parent ? 'Start follow-up' : 'Start investigation'}</button>
       {state.startError && <div role="alert" className="error-text"><p>{state.startError}</p>
         {state.pendingStart && <button type="button" className="secondary-button" disabled={state.starting} onClick={() => void state.retryStart()}>Retry same start request</button>}</div>}
