@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.62.0
+
+### Minor Changes
+
+- 04f451f: Choose which installed Ollama model local investigations use in Configure → Run Limits… (default qwen3:8b). The window lists installed models with their digests, refuses a model that is not installed, and shows a saved model that has since been removed. The Investigations footer now shows the saved task time limit (#1643).
+
+### Patch Changes
+
+- 601f142: Correct premature investigation failure when an analyst cites a known source passage before reading it. The new analyst version offers one bounded correction through the existing refusal history, requires explicit source acquisition, and preserves historical analyst receipts and resource limits.
+- 6aefdf2: Explain when an investigation answer cites evidence it did not acquire, preserving a durable refusal and measured model usage without saving rejected findings.
+
 ## 0.61.0
 
 ### Minor Changes
