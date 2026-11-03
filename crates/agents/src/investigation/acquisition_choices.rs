@@ -310,6 +310,28 @@ impl AcquisitionChoices {
         ledger: &InvestigationInputLedger,
         policy: &InvestigationPolicy,
     ) -> Result<Option<Vec<String>>, InvestigationError> {
+        self.classify_unacquired_citations::<false>(invalid_ids, contract, metadata, ledger, policy)
+    }
+
+    pub fn unacquired_citation_handles(
+        &self,
+        invalid_ids: &[String],
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<Vec<String>>, InvestigationError> {
+        self.classify_unacquired_citations::<true>(invalid_ids, contract, metadata, ledger, policy)
+    }
+
+    fn classify_unacquired_citations<const RECEIPTS: bool>(
+        &self,
+        invalid_ids: &[String],
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<Vec<String>>, InvestigationError> {
         self.validate_basis(contract, metadata, ledger, policy)?;
         bounded_bytes(&invalid_ids, MAX_ACTION_BYTES)?;
         if invalid_ids.is_empty() {
@@ -317,26 +339,31 @@ impl AcquisitionChoices {
         }
         let mut targets = BTreeSet::new();
         for id in invalid_ids {
-            let eligible = contract
-                .obligations
-                .obligations
-                .iter()
-                .zip(&self.pending)
-                .any(|(obligation, pending)| {
-                    *pending
-                        && matches!(obligation, Obligation::Source { target, .. }
-                            if target.target_id == *id)
-                        && self
-                            .entries
-                            .iter()
-                            .any(|entry| entry.obligation_id == obligation.key().1)
-                });
-            // Unknown/foreign IDs, acquired targets, and unavailable or
-            // deferred targets must not become a new acquisition capability.
-            if !eligible {
+            let mut matched = false;
+            for (obligation, pending) in contract.obligations.obligations.iter().zip(&self.pending)
+            {
+                let Obligation::Source { target, .. } = obligation else {
+                    continue;
+                };
+                if target.target_id != *id && !(RECEIPTS && target.receipt_id == *id) {
+                    continue;
+                }
+                matched = true;
+                // Every matching target must be pending and currently offered.
+                // A shared receipt cannot revive an acquired or blocked target.
+                if !*pending
+                    || !self
+                        .entries
+                        .iter()
+                        .any(|entry| entry.obligation_id == obligation.key().1)
+                {
+                    return Ok(None);
+                }
+                targets.insert(target.target_id.clone());
+            }
+            if !matched {
                 return Ok(None);
             }
-            targets.insert(id.clone());
         }
         Ok(Some(targets.into_iter().collect()))
     }

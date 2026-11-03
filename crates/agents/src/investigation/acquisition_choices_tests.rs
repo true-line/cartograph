@@ -1023,3 +1023,83 @@ fn citation_correction_analyst20_prompt_qualifies_finish_without_rewriting_19() 
         old.definition().unwrap().prompt_fingerprint
     );
 }
+
+// AC-0566: receipt handles map to offered targets, never to citations.
+#[test]
+fn citation_correction_receipt_handles_preserve_historical_and_foreign_boundaries() {
+    let f = Fixture::new();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    let receipt = f.target.receipt_id.clone();
+    let classify = |ids: &[String]| {
+        choices.unacquired_citation_handles(ids, &f.contract, &f.metadata, &ledger, POLICY)
+    };
+    assert_eq!(
+        classify(std::slice::from_ref(&receipt)).unwrap(),
+        Some(vec![f.target.target_id.clone()])
+    );
+    assert_eq!(
+        classify(&[receipt.clone(), "foreign".into()]).unwrap(),
+        None
+    );
+    assert_eq!(
+        choices
+            .unacquired_citation_targets(&[receipt], &f.contract, &f.metadata, &ledger, POLICY)
+            .unwrap(),
+        None
+    );
+}
+
+// AC-0566: every target sharing a receipt must remain pending and offered.
+#[test]
+fn citation_correction_shared_receipt_maps_all_targets_and_rejects_attempted_member() {
+    let mut f = Fixture::new();
+    let mut second = f.target.clone();
+    second.fact = TaskFactKey::Node {
+        id: "second-source-fact".into(),
+    };
+    second.target_id = second.content_id().unwrap();
+    f.contract
+        .obligations
+        .obligations
+        .push(identified(Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(second.clone()),
+        }));
+    f.contract.obligations = f
+        .contract
+        .obligations
+        .normalized_with_policy(POLICY)
+        .unwrap();
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    let mut expected = vec![f.target.target_id.clone(), second.target_id];
+    expected.sort();
+    let ids = vec![f.target.receipt_id.clone()];
+    assert_eq!(
+        choices
+            .unacquired_citation_handles(&ids, &f.contract, &f.metadata, &ledger, POLICY)
+            .unwrap(),
+        Some(expected)
+    );
+    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+        reason: UnavailableReason::PinnedTargetAbsent,
+    });
+    let mut metadata = f.metadata.clone();
+    metadata
+        .completed_attempt_ids
+        .push(attempt.attempt_id.clone());
+    let attempted = f.derive(&f.ledger, &[attempt]).unwrap();
+    assert_eq!(
+        attempted
+            .unacquired_citation_handles(&ids, &f.contract, &metadata, &f.ledger, POLICY)
+            .unwrap(),
+        None
+    );
+}

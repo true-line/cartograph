@@ -148,10 +148,27 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
-        self.acquisition_choices
+        let choices = self
+            .acquisition_choices
             .as_ref()
-            .ok_or(InvestigationError::InvalidInput)?
-            .unacquired_citation_targets(&invalid, &contract, &metadata, &self.ledger, policy)
+            .ok_or(InvestigationError::InvalidInput)?;
+        if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+            choices.unacquired_citation_handles(
+                &invalid,
+                &contract,
+                &metadata,
+                &self.ledger,
+                policy,
+            )
+        } else {
+            choices.unacquired_citation_targets(
+                &invalid,
+                &contract,
+                &metadata,
+                &self.ledger,
+                policy,
+            )
+        }
     }
 
     pub(super) fn eligible_citation_correction(

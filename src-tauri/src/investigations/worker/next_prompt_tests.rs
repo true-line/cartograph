@@ -221,6 +221,7 @@ enum SourceScenario {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatedFlow {
     TypedCorrection,
+    ReceiptCorrection,
     OfferedTargets,
     Repair,
     Repeat,
@@ -358,8 +359,16 @@ impl LlmProvider for NextProvider {
         let text = if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            if flow == GatedFlow::TypedCorrection {
-                typed_correction_tests::next_action(prompt, call).to_string()
+            if matches!(
+                flow,
+                GatedFlow::TypedCorrection | GatedFlow::ReceiptCorrection
+            ) {
+                typed_correction_tests::next_action(
+                    prompt,
+                    call,
+                    flow == GatedFlow::ReceiptCorrection,
+                )
+                .to_string()
             } else if flow == GatedFlow::OfferedTargets {
                 let schema: Value =
                     serde_json::from_str(request.payload().response_schema.as_deref().unwrap())

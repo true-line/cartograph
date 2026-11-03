@@ -1266,3 +1266,71 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
         }
     }
 }
+
+// AC-0566: only @20 accepts receipt handles through real input/sealing.
+#[test]
+fn analyst20_receipt_correction_is_role_bound_and_authenticated() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in [
+        SpecialistId::DomainAnalystV19,
+        SpecialistId::DomainAnalystV20,
+    ] {
+        let (f, raw, target, _) = source_fixture(role, "bounded source");
+        let input = source_choices(
+            &f,
+            build_source(&f, &raw, &[], role, CompletionCallMode::Choice),
+            &[],
+            &f.ledger,
+        );
+        let disclosure = input
+            .seal_disclosure_with_policy(&prepare(&input), policy)
+            .unwrap()
+            .unwrap();
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let bound = input
+            .acquisition_choices
+            .as_ref()
+            .unwrap()
+            .bind_completion_disclosure(
+                "source-preview-task",
+                "current:1",
+                &contract,
+                &f.metadata,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .unwrap();
+        let finish = staged_finish::StagedFinish {
+            schema_version: 1,
+            outcome: staged_finish::CompletionOutcome::Supported,
+            narrative: None,
+            action: InvestigationAction::Finish {
+                findings: vec![ProposedInvestigationFinding {
+                    claim_kind: InvestigationClaimKind::InferredInterpretation,
+                    title: "Candidate interpretation".into(),
+                    statement: "A candidate interpretation requires a source check.".into(),
+                    citation_ids: vec![target.receipt_id.clone()],
+                    limitations: vec!["Only selected material was considered.".into()],
+                }],
+                knowledge_completeness: KnowledgeCompleteness::Partial,
+                limitations: vec!["Only selected material was considered.".into()],
+            },
+        };
+        let correction = input
+            .typed_citation_correction(&disclosure, &finish, None, policy, Some(&bound))
+            .unwrap();
+        assert_eq!(correction.is_some(), role == SpecialistId::DomainAnalystV20);
+        if let Some(correction) = correction {
+            bound
+                .authenticate_citation_correction(&correction, &[target.target_id])
+                .unwrap();
+        }
+    }
+}

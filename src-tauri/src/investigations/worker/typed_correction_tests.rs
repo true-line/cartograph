@@ -1,7 +1,7 @@
 //! AC-0566: real worker, retained synthetic source, typed correction and result reopen.
 use super::*;
 
-pub(super) fn next_action(prompt: &Value, call: usize) -> Value {
+pub(super) fn next_action(prompt: &Value, call: usize, receipt: bool) -> Value {
     let target = &prompt["completion_contract"]["obligations"]["obligations"]
         .as_array()
         .unwrap()
@@ -9,7 +9,7 @@ pub(super) fn next_action(prompt: &Value, call: usize) -> Value {
         .find(|o| o["kind"] == "source")
         .unwrap()["target"];
     if call == 0 {
-        return finish(target["target_id"].clone());
+        return finish(target[if receipt { "receipt_id" } else { "target_id" }].clone());
     }
     if let Some(entry) = prompt["turn_progress"]["citation_correction"]["entries"]
         .as_array()
@@ -42,8 +42,17 @@ fn finish(id: Value) -> Value {
 
 #[test]
 fn analyst20_worker_correction_queries_reads_and_reopens_supported_result() {
+    correction_round_trip(GatedFlow::TypedCorrection);
+}
+
+#[test]
+fn analyst20_worker_receipt_correction_queries_reads_and_reopens_supported_result() {
+    correction_round_trip(GatedFlow::ReceiptCorrection);
+}
+
+fn correction_round_trip(flow: GatedFlow) {
     let mut scripted = NextProvider::new(false);
-    scripted.gated_flow = Some(GatedFlow::TypedCorrection);
+    scripted.gated_flow = Some(flow);
     let provider = Arc::new(scripted);
     let f = NextFixture::with_source_obligation(
         provider.as_ref(),
