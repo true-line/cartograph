@@ -8,6 +8,9 @@ use fixture::Fixture;
 #[path = "next_prompt_finish_only_tests.rs"]
 mod finish_only;
 
+#[path = "next_prompt_invalid_finish_tests.rs"]
+mod invalid_finish;
+
 #[test]
 fn next_prompt_finish_boundary_accepted_result7_reopens_and_rejects_family_downgrade() {
     let mut f = Fixture::new(true);

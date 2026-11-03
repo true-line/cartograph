@@ -141,7 +141,7 @@ impl JobStore {
                         &evidence,
                         input.response.observed_model.clone(),
                         timestamp(&tx)?,
-                    )?
+                    )
                 } else {
                     input.current.admit_completion_finish_with_policy(
                         &request,
@@ -153,10 +153,10 @@ impl JobStore {
                         input.response.observed_model.clone(),
                         timestamp(&tx)?,
                         policy,
-                    )?
+                    )
                 };
                 match decision {
-                    Ok(result) => {
+                    Ok(Ok(result)) => {
                         validate_result_basis(
                             &result,
                             &authenticated.core.ledger,
@@ -205,7 +205,7 @@ impl JobStore {
                         )?;
                         transitions::sync_terminal_job(&tx, &task)?;
                     }
-                    Err(FinishDecision::Refused { .. }) => {
+                    Ok(Err(FinishDecision::Refused { .. })) => {
                         refused(
                             &tx,
                             &self.namespace,
@@ -218,9 +218,21 @@ impl JobStore {
                             basis.as_ref(),
                         )?;
                     }
-                    Err(FinishDecision::Accepted(_)) => {
+                    Ok(Err(FinishDecision::Accepted(_))) => {
                         return Err(InvestigationStoreError::Invalid);
                     }
+                    Err(InvestigationError::InvalidCitation) => {
+                        // The saved call and full response were authenticated above.
+                        // Retain the measured response, never the rejected finding.
+                        persist_response(
+                            &tx,
+                            &mut task,
+                            input.response,
+                            authenticated.admitted_usage,
+                        )?;
+                        invalid_citation(&tx, &mut task, &input.response.step_id)?;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
@@ -267,6 +279,39 @@ fn persist_response(
         None,
         "A complete provider response was admitted and its identity persisted.",
     )
+}
+
+fn invalid_citation(
+    tx: &Transaction<'_>,
+    task: &mut StoredTask,
+    step_id: &str,
+) -> Result<(), InvestigationStoreError> {
+    const MESSAGE: &str =
+        "The model's answer cited evidence it had not acquired. No findings were saved.";
+    task.phase = Phase::Terminal;
+    task.detail.summary.status = if task.detail.summary.cancel_requested {
+        InvestigationStatus::Cancelled
+    } else {
+        InvestigationStatus::Failed
+    };
+    task.detail.error = Some(MESSAGE.into());
+    bump(tx, task)?;
+    event(
+        tx,
+        task,
+        InvestigationEventKind::FinishRefused,
+        Some(step_id),
+        None,
+        MESSAGE,
+    )?;
+    let kind = if task.detail.summary.cancel_requested {
+        InvestigationEventKind::Cancelled
+    } else {
+        InvestigationEventKind::Failed
+    };
+    event(tx, task, kind, Some(step_id), None, MESSAGE)?;
+    refresh_observation(tx, task)?;
+    transitions::sync_terminal_job(tx, task)
 }
 
 #[cfg(test)]
