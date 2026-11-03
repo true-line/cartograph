@@ -133,6 +133,10 @@ pub struct FeedbackEntry {
 #[serde(deny_unknown_fields)]
 pub struct RefusalFeedback {
     pub schema_version: u32,
+    /// Version two stores exact citation guidance. Absent for every historical
+    /// version-one record, preserving its canonical bytes and fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_correction: Option<acquisition_choices::CitationCorrection>,
     pub unmet: Vec<FeedbackEntry>,
 }
 
@@ -147,6 +151,12 @@ pub struct RefusalFeedback {
 pub struct RefusalFeedbackSizeEnvelope {
     feedback: RefusalFeedback,
 }
+/// Conservative serializer-only envelope for version-two feedback and its
+/// projected correction. Never decodable as authoritative feedback.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct TypedFeedbackSizeEnvelope(String);
+
 /// Feedback entries are at most 137 encoded bytes (a 64-hex id, `inventory`,
 /// `acquired_not_supplied`); the frame is 31. These allowances keep v1's
 /// literal 2 KiB bound for its 12 obligations and scale with the saved policy.
@@ -162,6 +172,21 @@ fn feedback_bytes(policy: &InvestigationPolicy) -> Result<usize, InvestigationEr
 }
 
 impl RefusalFeedback {
+    /// Any admitted complete feedback has at most B encoded UTF-8 bytes.
+    /// B literal backslashes serialize to 2B+2 bytes; every further JSON-string
+    /// embedding at most doubles each already encoded byte. Thus this string
+    /// dominates every feedback at every enclosing escape layer, with other
+    /// fields unchanged, including escaped actions and multibyte identities.
+    /// It contains no source/secret recognizer text. This is deliberately a
+    /// sizing value, not a new feedback protocol or a larger admission limit.
+    pub fn sizing_typed_upper_envelope_with_policy(
+        policy: &InvestigationPolicy,
+    ) -> Result<TypedFeedbackSizeEnvelope, InvestigationError> {
+        Ok(TypedFeedbackSizeEnvelope(
+            "\\".repeat(feedback_bytes(policy)?),
+        ))
+    }
+
     /// Derive a maximal feedback representation for this exact normalized
     /// obligation set and the immutable policy resolved from saved task limits.
     ///
@@ -183,6 +208,7 @@ impl RefusalFeedback {
         }
         let feedback = Self {
             schema_version: 1,
+            citation_correction: None,
             unmet: obligations
                 .obligations
                 .iter()
@@ -215,7 +241,12 @@ impl RefusalFeedback {
         &self,
         policy: &InvestigationPolicy,
     ) -> Result<Vec<u8>, InvestigationError> {
-        if self.schema_version != 1
+        if self.schema_version
+            != if self.citation_correction.is_some() {
+                2
+            } else {
+                1
+            }
             || self.unmet.is_empty()
             || self.unmet.len() > policy.max_completion_obligations()
             || self.unmet.iter().any(|entry| {
@@ -229,6 +260,11 @@ impl RefusalFeedback {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        if let Some(correction) = &self.citation_correction {
+            correction.validate_feedback(&self.unmet, policy)?;
+        }
+        // The correction shares the old total ceiling with generic feedback.
+        // Component validity never implies that their combination fits.
         bounded_bytes(self, feedback_bytes(policy)?)
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
@@ -448,6 +484,7 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         policy,
         consistency,
     );
+    let mut citation_correction = None;
     let admitted = match admitted {
         Ok(result) => Some(input.admit_narrative(result, finish)?),
         Err(InvestigationError::InvalidCitation)
@@ -460,6 +497,21 @@ pub(super) fn admit_finish_with_policy_using_consistency(
                     consistency,
                 )? =>
         {
+            None
+        }
+        Err(InvestigationError::InvalidCitation)
+            if request.specialist_id == "domain-analyst@20" =>
+        {
+            citation_correction = input.typed_citation_correction(
+                disclosure,
+                finish,
+                model.as_deref(),
+                policy,
+                consistency,
+            )?;
+            if citation_correction.is_none() {
+                return Err(InvestigationError::InvalidCitation);
+            }
             None
         }
         Err(error) => return Err(error),
@@ -486,7 +538,8 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         }))
     } else {
         let feedback = RefusalFeedback {
-            schema_version: 1,
+            schema_version: if citation_correction.is_some() { 2 } else { 1 },
+            citation_correction,
             unmet,
         };
         feedback.bytes_with_policy(policy)?;

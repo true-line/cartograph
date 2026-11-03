@@ -220,6 +220,7 @@ enum SourceScenario {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatedFlow {
+    TypedCorrection,
     OfferedTargets,
     Repair,
     Repeat,
@@ -357,7 +358,9 @@ impl LlmProvider for NextProvider {
         let text = if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            if flow == GatedFlow::OfferedTargets {
+            if flow == GatedFlow::TypedCorrection {
+                typed_correction_tests::next_action(prompt, call).to_string()
+            } else if flow == GatedFlow::OfferedTargets {
                 let schema: Value =
                     serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
                         .unwrap();
@@ -2453,3 +2456,6 @@ fn configured_desktop_worker_time_limits(cancel_finish: bool, elapsed_seconds: u
         (detail, timeout)
     );
 }
+
+#[path = "typed_correction_tests.rs"]
+mod typed_correction_tests;

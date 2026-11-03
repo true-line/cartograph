@@ -169,3 +169,11 @@ export function gapTriagerResult(id = 'inv-gap-triager'): InvestigationResult {
     statement: 'Inspect the admitted source behind this recorded gap and add a test for both outcomes before deciding whether the boundary is closed. The gap remains unresolved here.' }));
   return result;
 }
+
+/** Typed correction preserves both historical correction and acquisition roles. */
+export const typedCorrectionCatalog: InvestigationCatalog = {
+  ...correctionCatalog,
+  specialists: [...correctionCatalog.specialists, { ...correctionCatalog.specialists.find((item) => item.id === 'domain-analyst@19')!,
+    id: 'domain-analyst@20', version: 20, prompt_fingerprint: 'fixture-domain-analyst@20' }],
+  policies: correctionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@20'] })),
+};

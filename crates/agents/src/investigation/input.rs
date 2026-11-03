@@ -21,6 +21,7 @@ pub struct InvestigationInput {
     acquisition_choices: Option<std::sync::Arc<acquisition_choices::AcquisitionChoices>>,
     acquisition_mode: Option<staged_refusal::CompletionCallMode>,
     action_feedback: Option<ActionRefusalFeedback>,
+    citation_correction: Option<acquisition_choices::CitationCorrection>,
     inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
 }
 
@@ -104,16 +105,18 @@ impl InvestigationInput {
 
     /// Only the new analyst may turn known missing source citations into feedback.
     /// The caller has already authenticated the completion binding and attempts.
-    pub(super) fn eligible_citation_correction(
+    fn citation_correction_targets(
         &self,
         disclosure: &InvestigationDisclosure,
         finish: &staged_finish::StagedFinish,
         model: Option<&str>,
         policy: &InvestigationPolicy,
         consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
-    ) -> Result<bool, InvestigationError> {
-        if self.payload.system != SpecialistId::DomainAnalystV19.prompt() {
-            return Ok(false);
+    ) -> Result<Option<Vec<String>>, InvestigationError> {
+        if self.payload.system != SpecialistId::DomainAnalystV19.prompt()
+            && self.payload.system != SpecialistId::DomainAnalystV20.prompt()
+        {
+            return Ok(None);
         }
         // Analyst finishes never carry a narrative. Do not extend this recovery
         // path to other roles without their separate narrative-reference checks.
@@ -126,7 +129,7 @@ impl InvestigationInput {
         // Choice already reserves the continuation and final finish under the
         // shared refusal allowance; no budget or admission mode is upgraded here.
         if self.acquisition_mode != Some(staged_refusal::CompletionCallMode::Choice) {
-            return Ok(false);
+            return Ok(None);
         }
         let InvestigationAction::Finish { findings, .. } = &finish.action else {
             return Err(InvestigationError::InvalidAction);
@@ -145,12 +148,57 @@ impl InvestigationInput {
             .map_err(|_| InvestigationError::InvalidInput)?;
         let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
+        self.acquisition_choices
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?
+            .unacquired_citation_targets(&invalid, &contract, &metadata, &self.ledger, policy)
+    }
+
+    pub(super) fn eligible_citation_correction(
+        &self,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<bool, InvestigationError> {
         Ok(self
+            .citation_correction_targets(disclosure, finish, model, policy, consistency)?
+            .is_some())
+    }
+
+    pub(super) fn typed_citation_correction(
+        &self,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<Option<acquisition_choices::CitationCorrection>, InvestigationError> {
+        if self.payload.system != SpecialistId::DomainAnalystV20.prompt() {
+            return Ok(None);
+        }
+        let Some(ids) =
+            self.citation_correction_targets(disclosure, finish, model, policy, consistency)?
+        else {
+            return Ok(None);
+        };
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let contract = serde_json::from_value(prompt["completion_contract"].clone())
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata = serde_json::from_value(prompt["completion_metadata"].clone())
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let correction = self
             .acquisition_choices
             .as_ref()
             .ok_or(InvestigationError::InvalidInput)?
-            .unacquired_citation_targets(&invalid, &contract, &metadata, &self.ledger, policy)?
-            .is_some())
+            .citation_correction(&ids, &contract, &metadata, &self.ledger, policy)?
+            .ok_or(InvestigationError::InvalidInput)?;
+        consistency
+            .ok_or(InvestigationError::InvalidInput)?
+            .authenticate_citation_correction(&correction, &ids)?;
+        Ok(Some(correction))
     }
 
     /// The host supplies canonical query-response JSON in original response order
@@ -460,6 +508,7 @@ impl InvestigationInput {
             acquisition_choices: None,
             acquisition_mode: None,
             action_feedback: None,
+            citation_correction: None,
             inspection_requirements: None,
         })
     }

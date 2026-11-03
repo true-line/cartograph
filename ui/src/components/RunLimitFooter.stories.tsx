@@ -54,3 +54,9 @@ export const Analyst19ReloadsSavedLimitOnFocus: Story = {
   ...ReloadsSavedLimitOnFocus,
   args: { specialistId: 'domain-analyst@19' },
 };
+
+// AC-0566: analyst20 retains configured limits after focus refresh.
+export const Analyst20ReloadsSavedLimitOnFocus: Story = {
+  ...ReloadsSavedLimitOnFocus,
+  args: { specialistId: 'domain-analyst@20' },
+};

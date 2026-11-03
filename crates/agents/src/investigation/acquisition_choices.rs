@@ -3,12 +3,12 @@
 //! No specialist uses this foundation until projection/admission wiring lands.
 use super::{staged_attempt::*, staged_refusal::ProtectedCompletionMetadata, *};
 use crate::{TaskFactKey, TaskRangeRole};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// Concrete acquisition wire objects; source reads still require host guards.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AcquisitionAction {
     QueryContext {
         context_id: String,
@@ -31,6 +31,219 @@ pub enum AcquisitionAction {
 pub struct AcquisitionChoice {
     pub obligation_id: String,
     pub action: AcquisitionAction,
+}
+
+/// Exact correction mappings; construction requires authenticated choices.
+/// Decoding is shape-only; authenticate against the saved invocation before use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CitationCorrection {
+    schema_version: u32,
+    choices_hash: String,
+    entries: Vec<CitationCorrectionEntry>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CitationCorrectionEntry {
+    target_id: String,
+    obligation_id: String,
+    action: AcquisitionAction,
+}
+
+/// Invocation-bound witness. It cannot be decoded from stored JSON; reopen
+/// must authenticate the saved correction before deriving fresh guidance.
+#[derive(Clone)]
+pub struct AuthenticatedCitationCorrection {
+    correction: CitationCorrection,
+    contract_hash: String,
+}
+impl AuthenticatedCitationCorrection {
+    /// Owned validated mapping and contract fingerprint, excluding projection
+    /// scratch and caller-owned history. Uses the existing feedback wire cap.
+    pub fn retained_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+        let bytes = staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?;
+        std::mem::size_of::<Self>()
+            .checked_add(context_hub::logical::json_bytes(bytes)?)?
+            .checked_add(64)
+    }
+
+    /// Reprojection/authentication scratch, including rejected candidate growth.
+    /// Borrowed choices, contract, metadata and ledger are caller-owned.
+    pub fn projection_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+        let n = policy.max_completion_obligations();
+        context_hub::logical::sum(&[
+            // Original IDs, deduplication tree, returned target vector and
+            // projected entries coexist. Each offered action is bounded by
+            // MAX_ACTION_BYTES, even before the smaller feedback check.
+            context_hub::logical::slots::<String>(n)?.checked_mul(2)?,
+            context_hub::logical::set::<String>(n)?,
+            context_hub::logical::slots::<CitationCorrectionEntry>(n)?,
+            n.checked_mul(128)?,
+            context_hub::logical::json_bytes(MAX_ACTION_BYTES)?.checked_mul(3)?,
+            super::task_validation_workspace::envelope_workspace(policy)?,
+            ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
+            context_hub::logical::json_bytes(MAX_MANIFEST_BYTES)?,
+        ])
+    }
+
+    pub(super) fn original(&self) -> &CitationCorrection {
+        &self.correction
+    }
+
+    /// Replace historical actions with the exact currently offered actions.
+    /// Completed, blocked and deferred targets disappear from guidance; none
+    /// become a capability merely because they occurred in a refused finish.
+    pub fn project(
+        &self,
+        choices: &AcquisitionChoices,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<CitationCorrection>, InvestigationError> {
+        choices.validate_basis(contract, metadata, ledger, policy)?;
+        if self.contract_hash != contract.fingerprint_with_policy(policy)? {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut targets = Vec::new();
+        for entry in &self.correction.entries {
+            if choices
+                .unacquired_citation_targets(
+                    std::slice::from_ref(&entry.target_id),
+                    contract,
+                    metadata,
+                    ledger,
+                    policy,
+                )?
+                .is_some()
+            {
+                targets.push(entry.target_id.clone());
+            }
+        }
+        choices.citation_correction(&targets, contract, metadata, ledger, policy)
+    }
+}
+
+impl CitationCorrection {
+    /// Only for an already authenticated refusal journal. This verifies the
+    /// saved mapping at its invocation cutoff; the host's immutable response
+    /// binding proves that this is the complete originally published ID set.
+    pub(super) fn validate_stored_mapping(
+        &self,
+        choices: &AcquisitionChoices,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        // Reject oversized/malformed saved mappings before cloning their IDs.
+        self.bytes_with_policy(policy)?;
+        let ids = self
+            .entries
+            .iter()
+            .map(|entry| entry.target_id.clone())
+            .collect::<Vec<_>>();
+        self.validate(&ids, choices, contract, metadata, ledger, policy)
+    }
+
+    pub(super) fn authenticate_stored(
+        &self,
+        choices: &AcquisitionChoices,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<AuthenticatedCitationCorrection, InvestigationError> {
+        self.validate_stored_mapping(choices, contract, metadata, ledger, policy)?;
+        Ok(AuthenticatedCitationCorrection {
+            correction: self.clone(),
+            contract_hash: contract.fingerprint_with_policy(policy)?,
+        })
+    }
+
+    pub(super) fn validate_feedback(
+        &self,
+        unmet: &[staged_finish::FeedbackEntry],
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        self.bytes_with_policy(policy)?;
+        if self.entries.iter().any(|entry| {
+            !unmet.iter().any(|feedback| {
+                feedback.obligation_id == entry.obligation_id
+                    && feedback.kind == "source"
+                    && feedback.reason == staged_finish::RefusalReason::NotAttempted
+            })
+        }) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Authenticate the complete mapping against a trusted refused response's
+    /// invalid IDs and the choices at its saved invocation cutoff. Neither this
+    /// decoded object nor its hash supplies those authorities.
+    pub fn validate(
+        &self,
+        invalid_ids: &[String],
+        choices: &AcquisitionChoices,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<(), InvestigationError> {
+        self.bytes_with_policy(policy)?;
+        let expected = choices
+            .citation_correction(invalid_ids, contract, metadata, ledger, policy)?
+            .ok_or(InvestigationError::InvalidInput)?;
+        if self != &expected {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    pub fn authenticate(
+        &self,
+        invalid_ids: &[String],
+        choices: &AcquisitionChoices,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<AuthenticatedCitationCorrection, InvestigationError> {
+        self.validate(invalid_ids, choices, contract, metadata, ledger, policy)?;
+        Ok(AuthenticatedCitationCorrection {
+            correction: self.clone(),
+            contract_hash: contract.fingerprint_with_policy(policy)?,
+        })
+    }
+
+    /// Reuse the existing feedback ceiling, not a new numeric policy limit.
+    /// This caps this component; the enclosing feedback and final escaped
+    /// provider payload still require their own complete admission checks.
+    pub fn bytes_with_policy(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<Vec<u8>, InvestigationError> {
+        if self.schema_version != 1
+            || self.entries.is_empty()
+            || self.entries.len() > policy.max_completion_obligations()
+            || !crate::source_basis::hash(&self.choices_hash)
+            || self.entries.iter().any(|entry| {
+                !crate::source_basis::hash(&entry.target_id)
+                    || !crate::source_basis::hash(&entry.obligation_id)
+            })
+            || self
+                .entries
+                .windows(2)
+                .any(|pair| pair[0].target_id >= pair[1].target_id)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        bounded_bytes(
+            self,
+            staged_finish::RefusalFeedback::max_bytes_with_policy(policy)?,
+        )
+    }
 }
 
 /// Immutable derivation with stable envelope order. Deferred entries are a
@@ -126,6 +339,52 @@ impl AcquisitionChoices {
             targets.insert(id.clone());
         }
         Ok(Some(targets.into_iter().collect()))
+    }
+
+    /// Derive model-visible correction from authenticated eligible target IDs.
+    /// This is guidance only: neither a read nor new acquisition authority.
+    pub fn citation_correction(
+        &self,
+        invalid_ids: &[String],
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<CitationCorrection>, InvestigationError> {
+        let Some(targets) =
+            self.unacquired_citation_targets(invalid_ids, contract, metadata, ledger, policy)?
+        else {
+            return Ok(None);
+        };
+        let mut entries = Vec::with_capacity(targets.len());
+        for target_id in targets {
+            let obligation = contract
+                .obligations
+                .obligations
+                .iter()
+                .find(|obligation| {
+                    matches!(obligation, Obligation::Source { target, .. }
+                    if target.target_id == target_id)
+                })
+                .ok_or(InvestigationError::InvalidInput)?;
+            let choice = self
+                .entries
+                .iter()
+                .find(|entry| entry.obligation_id == obligation.key().1)
+                .ok_or(InvestigationError::InvalidInput)?;
+            entries.push(CitationCorrectionEntry {
+                target_id,
+                obligation_id: choice.obligation_id.clone(),
+                action: choice.action.clone(),
+            });
+        }
+        let correction = CitationCorrection {
+            schema_version: 1,
+            choices_hash: self.stamp_hash()?,
+            entries,
+        };
+        correction.bytes_with_policy(policy)?;
+        Ok(Some(correction))
     }
 
     pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {

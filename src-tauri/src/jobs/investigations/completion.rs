@@ -2156,7 +2156,7 @@ pub(super) use settlement_projection::{
 pub(super) use next_prompt_snapshot::tests::rewrite as rewrite_test_body;
 #[cfg(test)]
 pub(super) use tests::next_prompt_initial_fixture::{
-    InitialFixture, initial_fixture, initial_fixture_with_request,
+    InitialFixture, initial_fixture, initial_fixture_with_configured_request,
 };
 
 #[cfg(test)]

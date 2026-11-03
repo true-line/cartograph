@@ -46,7 +46,8 @@ impl Fixture {
     }
     fn prepare(base: &acquisition::Fixture) -> (InvestigationInput, PreparedBoundedCompletion) {
         let saved = base.snapshot();
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective = crate::jobs::investigations::policy_for_detail(saved.detail()).unwrap();
+        let policy = &effective;
         let details = base
             .f
             .ledger

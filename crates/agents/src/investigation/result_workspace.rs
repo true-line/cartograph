@@ -23,7 +23,9 @@ pub fn stored_refusal_validation_workspace(
     // content_id clones before assessment-count validation. The previous
     // record's clone can overlap reconstructed feedback. Strict preflight
     // bounds the combined dynamic element count even for malformed records.
-    let element = size_of::<ObligationObservation>().max(size_of::<staged_finish::FeedbackEntry>());
+    let element = size_of::<ObligationObservation>()
+        .max(size_of::<staged_finish::FeedbackEntry>())
+        .max(size_of::<acquisition_choices::CitationCorrectionEntry>());
     let cloned = sum(&[
         size_of::<staged_refusal::RefusalRecord>(),
         record_bytes,
@@ -48,6 +50,7 @@ pub fn stored_refusal_validation_workspace(
     sum(&[
         envelope,
         feedback,
+        acquisition_choices::AuthenticatedCitationCorrection::projection_workspace_bytes(policy)?,
         content_id
             .max(super::task_validation_workspace::envelope_workspace(
                 policy,

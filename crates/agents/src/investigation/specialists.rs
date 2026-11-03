@@ -63,6 +63,8 @@ pub enum SpecialistId {
     DomainAnalystV18,
     #[serde(rename = "domain-analyst@19")]
     DomainAnalystV19,
+    #[serde(rename = "domain-analyst@20")]
+    DomainAnalystV20,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -231,6 +233,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -264,6 +267,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -298,6 +302,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -325,6 +330,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -346,6 +352,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -367,6 +374,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -385,6 +393,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -420,6 +429,7 @@ impl SpecialistId {
             Self::DomainAnalystV17 => 17,
             Self::DomainAnalystV18 => 18,
             Self::DomainAnalystV19 => 19,
+            Self::DomainAnalystV20 => 20,
         }
     }
 
@@ -437,6 +447,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
         ) {
             return 10;
         }
@@ -451,17 +462,33 @@ impl SpecialistId {
     }
 
     pub fn uses_acquisition_choices(self) -> bool {
-        matches!(self, Self::DomainAnalystV18 | Self::DomainAnalystV19)
+        matches!(
+            self,
+            Self::DomainAnalystV18 | Self::DomainAnalystV19 | Self::DomainAnalystV20
+        )
     }
 
     pub fn uses_exact_node_queries(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV17 | Self::DomainAnalystV18 | Self::DomainAnalystV19
+            Self::DomainAnalystV17
+                | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
         )
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV20 {
+            let previous = Self::DomainAnalystV19.prompt();
+            let qualified = previous.replace(
+                "Completion obligations are mandatory. Return only the versioned finish wrapper",
+                "Completion obligations are mandatory. When finishing, return only the versioned finish wrapper",
+            );
+            return format!(
+                "{qualified}\nTyped citation correction@2: Citation correction entries map source target IDs to obligation IDs and exact currently offered acquisition actions. These IDs are source targets, not citations; acquire their source using the offered actions before citing. A query acquires metadata, not source text; after a query use the current offered source-read action. Historical correction actions in completion_metadata record the refused invocation; use only current correction entries and acquisition_choices for the next action. Correction feedback does not satisfy inventory obligations, grant evidence, expand permissions or change the single shared repair allowance."
+            );
+        }
         if self == Self::DomainAnalystV19 {
             return format!(
                 "{}\nUnacquired citation correction@1: Source target IDs identify passages to acquire; they are not citation IDs. If the host refuses a finish with acquisition feedback, use the currently offered acquisition choices to read the missing passages. Cite only acquired citation handles in a subsequent finish. Feedback does not grant evidence, perform a read, reset budgets or grant repeated corrections. If acquisition is unavailable within the remaining budget, report insufficient evidence honestly.",
@@ -530,7 +557,8 @@ impl SpecialistId {
             | Self::DomainAnalystV15
             | Self::DomainAnalystV17
             | Self::DomainAnalystV18
-            | Self::DomainAnalystV19 => {
+            | Self::DomainAnalystV19
+            | Self::DomainAnalystV20 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -645,6 +673,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -693,7 +722,8 @@ impl SpecialistId {
             | Self::DomainAnalystV15
             | Self::DomainAnalystV17
             | Self::DomainAnalystV18
-            | Self::DomainAnalystV19 => (
+            | Self::DomainAnalystV19
+            | Self::DomainAnalystV20 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),

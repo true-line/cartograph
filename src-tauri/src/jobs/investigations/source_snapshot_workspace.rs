@@ -78,6 +78,9 @@ pub(crate) fn workspace() -> Option<(usize, usize)> {
             policy,
         )?,
         64,
+        agents::investigation::acquisition_choices::AuthenticatedCitationCorrection::retained_workspace_bytes(
+            policy,
+        )?,
         128 + 6 + 20,
     ])?;
     // derive_attempt_records creates a record from admitted task, source and
@@ -156,6 +159,7 @@ pub(crate) fn workspace() -> Option<(usize, usize)> {
             .max(next_prompt_pending_source_workspace()?)
             .max(core_load)
             .max(metadata_load)
+            .max(correction_workspace()?)
             .max(attempt_validation)
             .max(observation)
             .max(reads)
@@ -168,4 +172,24 @@ pub(crate) fn workspace() -> Option<(usize, usize)> {
             ])?),
     )?;
     Some((retained, peak))
+}
+
+/// The typed-correction loader keeps the authenticated journal while loading
+/// the selected refusal basis a second time. Compose here, outside the base
+/// journal/history calculators, so this cannot recurse into its own estimate.
+pub(crate) fn correction_workspace() -> Option<usize> {
+    let (journal, journal_peak) = next_prompt_staged_workspace()?;
+    let (basis, basis_peak) = result_replay_workspace::completion_basis_workspace()?;
+    let policy = &INVESTIGATION_V2_POLICY;
+    let authentication = sum(&[
+        journal,
+        basis,
+        agents::investigation::acquisition_choices::AuthenticatedCitationCorrection::retained_workspace_bytes(policy)?,
+        agents::investigation::acquisition_choices::AuthenticatedCitationCorrection::projection_workspace_bytes(policy)?,
+    ])?;
+    Some(
+        journal_peak
+            .max(journal.checked_add(basis_peak)?)
+            .max(authentication),
+    )
 }

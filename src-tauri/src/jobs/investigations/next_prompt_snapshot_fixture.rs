@@ -1,7 +1,7 @@
 //! AC-0287: real internal factory/claim/initial publication and sealed calls;
 //! no SQL family conversion, provider dispatch or public-route activation.
 use super::*;
-use completion::{InitialFixture, initial_fixture_with_request};
+use completion::{InitialFixture, initial_fixture_with_configured_request};
 use llm::bounded::PreparedBoundedCompletion;
 use next_prompt_invocation::tests::{firewall, limits, provider};
 use serde_json::json;
@@ -22,16 +22,18 @@ impl Fixture {
     ) -> Self {
         Self::customized_request(cloud, |_, _| {}, setup)
     }
-    pub(in crate::jobs::investigations) fn with_request(
-        cloud: bool,
-        customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
-    ) -> Self {
-        Self::customized_request(cloud, customize, |_| {})
-    }
     fn customized_request(
         cloud: bool,
         customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
         setup: impl FnOnce(&mut InitialFixture),
+    ) -> Self {
+        Self::configured_request(cloud, customize, setup, None)
+    }
+    pub(in crate::jobs::investigations) fn configured_request(
+        cloud: bool,
+        customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
+        setup: impl FnOnce(&mut InitialFixture),
+        active_seconds: Option<u64>,
     ) -> Self {
         let profile = provider(cloud).0;
         let mode = if cloud {
@@ -39,7 +41,7 @@ impl Fixture {
         } else {
             InvestigationProviderMode::Local
         };
-        let mut f = initial_fixture_with_request(
+        let mut f = initial_fixture_with_configured_request(
             mode,
             InvestigationProvider {
                 mode,
@@ -52,9 +54,11 @@ impl Fixture {
                 unavailable_reason: None,
             },
             customize,
+            active_seconds,
         );
         setup(&mut f);
-        let policy = &INVESTIGATION_V2_POLICY;
+        let effective = crate::jobs::investigations::policy_for_detail(&f.task.detail).unwrap();
+        let policy = &effective;
         let mut usage = f.task.detail.usage.clone();
         usage.active_milliseconds += 5;
         let basis = InvestigationTurnBasis {

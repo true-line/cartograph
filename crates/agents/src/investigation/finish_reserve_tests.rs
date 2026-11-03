@@ -10,6 +10,7 @@ fn metadata(refusal_count: u32) -> ProtectedCompletionMetadata {
         last_refusal_id: (refusal_count > 0).then(|| "c".repeat(64)),
         feedback: (refusal_count > 0).then(|| RefusalFeedback {
             schema_version: 1,
+            citation_correction: None,
             unmet: vec![FeedbackEntry {
                 obligation_id: "d".repeat(64),
                 kind: "source".into(),

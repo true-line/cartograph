@@ -243,3 +243,9 @@ fn prepared_source_publication_rollback_and_unknown_ack_never_install_or_repeat_
 
 #[path = "prepared_source_cleanup_tests.rs"]
 mod cleanup_tests;
+
+// AC-0566: the activated role retains the real source-publication path.
+#[test]
+fn prepared_source_publication_analyst20_source_uses_attached_candidate() {
+    assert_acquired_publication_role(Some(SpecialistId::DomainAnalystV20));
+}

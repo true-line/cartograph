@@ -25,6 +25,7 @@ pub(crate) struct MetadataContinuationSnapshot {
     count: u32,
     next_action_id: String,
     choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
+    correction: Option<agents::investigation::acquisition_choices::AuthenticatedCitationCorrection>,
 }
 impl MetadataContinuationSnapshot {
     pub(crate) fn attach_acquisition(
@@ -32,7 +33,9 @@ impl MetadataContinuationSnapshot {
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationError> {
         match &self.choices {
-            Some(choices) => input.with_acquisition_admission(choices.clone(), None),
+            Some(choices) => {
+                input.with_acquisition_correction(choices.clone(), None, self.correction.as_ref())
+            }
             None => Ok(input),
         }
     }
@@ -284,6 +287,9 @@ pub(super) fn derive(
     };
     Ok(DerivedContinuation {
         snapshot: MetadataContinuationSnapshot {
+            correction: completion::next_prompt_snapshot::authenticated_citation_correction(
+                tx, task, &metadata,
+            )?,
             policy: effective_policy.clone(),
             revision: task.detail.summary.revision,
             usage,

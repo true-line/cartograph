@@ -394,6 +394,7 @@ fn admission_prompt_reserve_dominates_actual_simultaneous_feedback_in_both_modes
         fixture.metadata.last_refusal_id = Some("e".repeat(64));
         fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
             schema_version: 1,
+            citation_correction: None,
             unmet: fixture
                 .request
                 .obligations
@@ -983,6 +984,7 @@ fn admission_reserve_redaction_boundary_witnesses_preserve_the_wire_bound() {
             let (kind, id) = item.key();
             fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
                 schema_version: 1,
+                citation_correction: None,
                 unmet: vec![staged_finish::FeedbackEntry {
                     obligation_id: id.into(),
                     kind: kind.into(),

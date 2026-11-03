@@ -95,7 +95,10 @@ impl RefusalRecord {
         previous: Option<&RefusalRecord>,
         policy: &InvestigationPolicy,
     ) -> Result<RefusalDisposition, InvestigationError> {
-        if request.limit_profile != policy.profile() {
+        if request.limit_profile != policy.profile()
+            || (self.feedback.citation_correction.is_some()
+                && request.specialist_id != "domain-analyst@20")
+        {
             return Err(InvestigationError::InvalidInput);
         }
         self.validate_stored_basis_with_policy(
@@ -160,6 +163,13 @@ impl RefusalRecord {
         }
         bounded_bytes(self, MAX_MANIFEST_BYTES)?;
         self.feedback.bytes_with_policy(policy)?;
+        // Generic replay cannot authenticate acquisition choices. The host
+        // must supply the original invocation witness and enforce role @20.
+        if let Some(correction) = &self.feedback.citation_correction {
+            consistency
+                .ok_or(InvestigationError::InvalidInput)?
+                .validate_stored_citation_correction(correction)?;
+        }
         let obligations = envelope.normalized_with_policy(policy)?;
         if self.schema_version != 1
             || !super::records::opaque_id(&self.task_id)

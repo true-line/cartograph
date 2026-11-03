@@ -625,6 +625,7 @@ fn task_phase_workspaces(
         .max(crate::jobs::investigations::next_prompt_source_capacity_workspace()?.1)
         .max(finish)
         .max(crate::jobs::investigations::next_prompt_staged_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_correction_workspace()?)
         .max(crate::jobs::investigations::next_prompt_task_load_workspace()?.1)
         .max(
             crate::jobs::investigations::next_prompt_attempt_replay_workspace()?.checked_add(

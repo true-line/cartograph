@@ -55,7 +55,10 @@ mod source_settlement;
 pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
 pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
 #[cfg(unix)]
-pub(crate) use source_settlement::snapshot_workspace::workspace as source_snapshot_workspace;
+pub(crate) use source_settlement::snapshot_workspace::{
+    correction_workspace as next_prompt_correction_workspace,
+    workspace as source_snapshot_workspace,
+};
 #[cfg(unix)]
 pub(crate) use source_settlement::writer_workspace::workspace as source_settlement_workspace;
 #[path = "investigations/source_validation.rs"]
