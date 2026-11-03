@@ -194,7 +194,7 @@ impl JobStore {
         if task.detail.summary.cancel_requested {
             return Err(InvestigationStoreError::Cancelled);
         }
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18
+        if !task.detail.summary.specialist_id.uses_acquisition_choices()
             || input
                 .original_action
                 .get("type")

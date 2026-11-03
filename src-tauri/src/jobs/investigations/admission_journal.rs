@@ -398,7 +398,7 @@ fn timeline(
                 };
                 let ordinal = active.ok_or(InvestigationStoreError::Invalid)?;
                 let witness = &result.calls[&ordinal];
-                if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18
+                if !task.detail.summary.specialist_id.uses_acquisition_choices()
                     || event.step_id.as_deref() != Some(witness.call.step_id.as_str())
                     || event.tool.is_some()
                     || completed != Some(ordinal)
@@ -493,7 +493,7 @@ fn timeline(
                 {
                     return Err(InvestigationStoreError::Invalid);
                 }
-                if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+                if task.detail.summary.specialist_id.uses_acquisition_choices() {
                     let call = &result.calls[&ordinal].call;
                     let acquisition = call
                         .admission
@@ -911,7 +911,7 @@ fn validate_reason(
         let valid = match reason {
             ActionRefusalReason::ActionNotOffered => !choices.permits_acquisition(&action),
             ActionRefusalReason::RepeatedRead => {
-                task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18
+                task.detail.summary.specialist_id.uses_acquisition_choices()
                     && choices.permits_acquisition(&action)
                     && proposal["type"] != "replay_query"
                     && action.repeats_acquired_metadata(ledger)
@@ -990,7 +990,7 @@ impl AuthenticatedCompletionBasis {
         task: &StoredTask,
         step: &str,
     ) -> Result<Option<Self>, InvestigationStoreError> {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+        if !task.detail.summary.specialist_id.uses_acquisition_choices() {
             return Ok(None);
         }
         require_transaction(connection)?;
@@ -1130,7 +1130,7 @@ impl AuthenticatedRefusalBasis {
         sequence: u32,
         expected: &staged::JournalEntry,
     ) -> Result<Option<Self>, InvestigationStoreError> {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+        if !task.detail.summary.specialist_id.uses_acquisition_choices() {
             return Ok(None);
         }
         require_transaction(connection)?;

@@ -181,7 +181,7 @@ impl JobStore {
             .map(|entry| entry.record.clone())
             .collect::<Vec<_>>();
         let metadata = continuation_metadata(&core.metadata, &suffix)?;
-        let choices = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        let choices = if task.detail.summary.specialist_id.uses_acquisition_choices() {
             completion::SavedMetadataHistory::load(&tx, &task)?.prospective_choices(
                 input.candidate_ledger,
                 &metadata,

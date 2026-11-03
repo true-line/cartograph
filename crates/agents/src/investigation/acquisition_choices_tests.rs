@@ -742,3 +742,52 @@ fn unknown_id_recovery_schema_is_bounded_and_preserves_legacy_feedback() {
         );
     }
 }
+
+// AC-0565: classification cannot turn unknown or already-attempted targets into reads.
+#[test]
+fn unacquired_citation_feedback_rejects_foreign_mixed_and_attempted_targets() {
+    let f = Fixture::new();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    let classify = |ids: &[String]| {
+        choices.unacquired_citation_targets(ids, &f.contract, &f.metadata, &ledger, POLICY)
+    };
+    let id = f.target.target_id.clone();
+    assert_eq!(
+        classify(&[id.clone(), id.clone()]).unwrap(),
+        Some(vec![id.clone()])
+    );
+    assert_eq!(classify(&[]).unwrap(), None);
+    assert_eq!(classify(&["foreign-target".into()]).unwrap(), None);
+    assert_eq!(
+        classify(&[id.clone(), "foreign-target".into()]).unwrap(),
+        None
+    );
+    let mut foreign = f.metadata.clone();
+    foreign.request_hash = "b".repeat(64);
+    assert!(
+        choices
+            .unacquired_citation_targets(
+                std::slice::from_ref(&id),
+                &f.contract,
+                &foreign,
+                &ledger,
+                POLICY
+            )
+            .is_err()
+    );
+    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+        reason: UnavailableReason::PinnedTargetAbsent,
+    });
+    let mut metadata = f.metadata.clone();
+    metadata
+        .completed_attempt_ids
+        .push(attempt.attempt_id.clone());
+    let attempted = f.derive(&f.ledger, &[attempt]).unwrap();
+    assert_eq!(
+        attempted
+            .unacquired_citation_targets(&[id], &f.contract, &metadata, &f.ledger, POLICY)
+            .unwrap(),
+        None
+    );
+}

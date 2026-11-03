@@ -48,3 +48,9 @@ export const OlderSpecialistKeepsPolicyLimit: Story = {
     await expect(c.queryByText(/3600s/)).toBeNull();
   },
 };
+
+// AC-0565: the new desktop default retains configured limits after focus refresh.
+export const Analyst19ReloadsSavedLimitOnFocus: Story = {
+  ...ReloadsSavedLimitOnFocus,
+  args: { specialistId: 'domain-analyst@19' },
+};

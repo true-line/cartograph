@@ -928,3 +928,209 @@ fn source_preview_projects_deferred_choices_without_authority() {
     );
     assert!(bounded_bytes(&projected, MAX_ACTION_BYTES).is_ok());
 }
+
+#[test]
+fn analyst19_only_recovers_known_unacquired_citations_without_result() {
+    // AC-0565: exercise real input assembly, sealing and staged admission. The
+    // descriptor panics on dispatch; this test neither reads nor invokes a model.
+    let policy = &INVESTIGATION_V2_POLICY;
+    for (role, mode) in [
+        (SpecialistId::DomainAnalystV18, CompletionCallMode::Choice),
+        (SpecialistId::DomainAnalystV19, CompletionCallMode::Choice),
+        (
+            SpecialistId::DomainAnalystV18,
+            CompletionCallMode::FinishOnly,
+        ),
+        (
+            SpecialistId::DomainAnalystV19,
+            CompletionCallMode::FinishOnly,
+        ),
+    ] {
+        let (mut f, raw, target, prototype) = source_fixture(role, "bounded source");
+        let input = source_choices(&f, build_source(&f, &raw, &[], role, mode), &[], &f.ledger);
+        let disclosure = input
+            .seal_disclosure_with_policy(&prepare(&input), policy)
+            .unwrap()
+            .unwrap();
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let bound = input
+            .acquisition_choices
+            .as_ref()
+            .unwrap()
+            .bind_completion_disclosure(
+                "source-preview-task",
+                "current:1",
+                &contract,
+                &f.metadata,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .unwrap();
+        for foreign in [false, true] {
+            let mut ids = vec![target.target_id.clone()];
+            if foreign {
+                ids.push("foreign-target".into());
+            }
+            let finish = staged_finish::StagedFinish {
+                schema_version: 1,
+                outcome: staged_finish::CompletionOutcome::Supported,
+                narrative: None,
+                action: InvestigationAction::Finish {
+                    findings: vec![ProposedInvestigationFinding {
+                        claim_kind: InvestigationClaimKind::InferredInterpretation,
+                        title: "Candidate interpretation".into(),
+                        statement: "A candidate interpretation requires a source check.".into(),
+                        citation_ids: ids,
+                        limitations: vec!["Only selected material was considered.".into()],
+                    }],
+                    knowledge_completeness: KnowledgeCompleteness::Partial,
+                    limitations: vec!["Only selected material was considered.".into()],
+                },
+            };
+            let result = staged_finish::admit_finish_with_policy_using_consistency(
+                &f.request,
+                "source-preview-task",
+                "current:1",
+                &input,
+                &disclosure,
+                &finish,
+                &[],
+                None,
+                "2026-11-03T00:00:00Z".into(),
+                policy,
+                Some(&bound),
+            );
+            if role == SpecialistId::DomainAnalystV19
+                && !foreign
+                && mode == CompletionCallMode::Choice
+            {
+                let staged_finish::FinishDecision::Refused {
+                    assessment,
+                    feedback,
+                } = result.unwrap()
+                else {
+                    panic!("unacquired target must produce feedback, never a result");
+                };
+                assert!(
+                    !feedback.unmet.is_empty(),
+                    "eligible pending source must remain unmet"
+                );
+                let mut refusal = staged_refusal::RefusalRecord {
+                    schema_version: 1,
+                    refusal_id: String::new(),
+                    task_id: "source-preview-task".into(),
+                    request_hash: f.metadata.request_hash.clone(),
+                    obligations_hash: f.metadata.obligations_hash.clone(),
+                    step_id: "current:1".into(),
+                    input_ledger_hash: f.ledger.fingerprint_with_policy(policy).unwrap(),
+                    disclosure_hash: bound.fingerprint().unwrap(),
+                    finish_hash: finish.fingerprint().unwrap(),
+                    outcome: finish.outcome,
+                    response_hash: core_prov::content_hash(b"synthetic correction response"),
+                    previous_refusal: None,
+                    refusal_count: 1,
+                    assessment,
+                    feedback,
+                };
+                refusal.refusal_id = refusal.content_id().unwrap();
+                assert_eq!(
+                    bound
+                        .validate_refusal(
+                            &refusal,
+                            &f.metadata.request_hash,
+                            &f.request.obligations,
+                            &[],
+                            None
+                        )
+                        .unwrap(),
+                    staged_refusal::RefusalDisposition::Continue
+                );
+                f.metadata.refusal_count = 1;
+                f.metadata.last_refusal_id = Some(refusal.refusal_id);
+                f.metadata.feedback = Some(refusal.feedback);
+                // This is a synthetic acquisition observation, not native I/O.
+                // No citation exists until the explicit source acquisition below.
+                let prior = f.ledger.clone();
+                let mut evidence = vec![];
+                acquire_source(&mut f, &target, &prototype, &mut evidence, "bounded source");
+                let record = source_record(
+                    &f,
+                    &target,
+                    "source:2",
+                    staged_attempt::AttemptOutcome::SourceAcquired {
+                        citation_id: "evidence-1".into(),
+                    },
+                );
+                f.metadata.completed_attempt_ids = vec![record.attempt_id.clone()];
+                let records = [record];
+                let acquired = source_choices(
+                    &f,
+                    build_source(&f, &raw, &evidence, role, CompletionCallMode::Choice),
+                    &records,
+                    &prior,
+                );
+                let disclosed = acquired
+                    .seal_disclosure_with_policy(&prepare(&acquired), policy)
+                    .unwrap()
+                    .unwrap();
+                let accepted_bound = acquired
+                    .acquisition_choices
+                    .as_ref()
+                    .unwrap()
+                    .bind_completion_disclosure(
+                        "source-preview-task",
+                        "current:1",
+                        &contract,
+                        &f.metadata,
+                        acquired.ledger(),
+                        &disclosed,
+                        None,
+                        policy,
+                    )
+                    .unwrap();
+                let mut corrected = finish.clone();
+                if let InvestigationAction::Finish { findings, .. } = &mut corrected.action {
+                    findings[0].citation_ids = vec!["evidence-1".into()];
+                }
+                let attempts = [staged_attempt::AttemptEvidence {
+                    record: &records[0],
+                    ledger: &f.ledger,
+                }];
+                let admitted = accepted_bound
+                    .admit_finish(
+                        &acquired,
+                        &f.request,
+                        &corrected,
+                        &attempts,
+                        None,
+                        "2026-11-03T00:00:01Z".into(),
+                    )
+                    .unwrap();
+                assert!(
+                    admitted.is_ok(),
+                    "acquired and supplied source must allow a valid finish"
+                );
+            } else {
+                assert_eq!(
+                    result.err(),
+                    Some(InvestigationError::InvalidCitation),
+                    "role={role:?}, mode={mode:?}, foreign={foreign}"
+                );
+            }
+            assert!(
+                input
+                    .ledger()
+                    .citations
+                    .iter()
+                    .all(|citation| citation.citation_id != target.target_id)
+            );
+        }
+    }
+}

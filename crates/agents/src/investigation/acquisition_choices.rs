@@ -85,6 +85,49 @@ impl AcquisitionChoices {
         }
         Ok(())
     }
+    /// Classify the invalid citation IDs from an authenticated finish. This is
+    /// feedback eligibility only, never citation admission or source authority.
+    /// The host must derive the complete invalid-ID set from the saved finish
+    /// and its exact admitted citations, and enforce the once-only transition.
+    pub fn unacquired_citation_targets(
+        &self,
+        invalid_ids: &[String],
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<Option<Vec<String>>, InvestigationError> {
+        self.validate_basis(contract, metadata, ledger, policy)?;
+        bounded_bytes(&invalid_ids, MAX_ACTION_BYTES)?;
+        if invalid_ids.is_empty() {
+            return Ok(None);
+        }
+        let mut targets = BTreeSet::new();
+        for id in invalid_ids {
+            let eligible = contract
+                .obligations
+                .obligations
+                .iter()
+                .zip(&self.pending)
+                .any(|(obligation, pending)| {
+                    *pending
+                        && matches!(obligation, Obligation::Source { target, .. }
+                            if target.target_id == *id)
+                        && self
+                            .entries
+                            .iter()
+                            .any(|entry| entry.obligation_id == obligation.key().1)
+                });
+            // Unknown/foreign IDs, acquired targets, and unavailable or
+            // deferred targets must not become a new acquisition capability.
+            if !eligible {
+                return Ok(None);
+            }
+            targets.insert(id.clone());
+        }
+        Ok(Some(targets.into_iter().collect()))
+    }
+
     pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {
         self.attempts_complete()
             || self

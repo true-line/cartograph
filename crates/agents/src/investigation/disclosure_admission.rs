@@ -107,7 +107,7 @@ impl DisclosedAdmissionState {
         role: SpecialistId,
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
-        if (role == SpecialistId::DomainAnalystV18) != self.acquisition.is_some() {
+        if role.uses_acquisition_choices() != self.acquisition.is_some() {
             return Err(InvestigationError::InvalidInput);
         }
         if let Some(acquisition) = &self.acquisition {

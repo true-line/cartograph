@@ -23,8 +23,19 @@ fn fixture_for(
     InvestigationInspectionTarget,
     std::path::PathBuf,
 ) {
+    fixture_for_role(gated.then_some(SpecialistId::DomainAnalystV18))
+}
+fn fixture_for_role(
+    role: Option<SpecialistId>,
+) -> (
+    CapturedSourceInvocationFixture,
+    AppState,
+    FrozenContext,
+    InvestigationInspectionTarget,
+    std::path::PathBuf,
+) {
     let mut actual = None;
-    let saved = CapturedSourceInvocationFixture::with_gated(gated, |private| {
+    let saved = CapturedSourceInvocationFixture::with_role(role, |private| {
         let state = Fixture::state_at(private);
         let (mut context, target) = Fixture::context_for(&state);
         let qualification = CoverageQualification::new(

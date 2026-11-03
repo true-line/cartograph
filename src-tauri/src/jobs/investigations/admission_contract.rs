@@ -212,7 +212,7 @@ impl SavedCallBasis {
         drop(actual_metadata);
         let capacity = admission_journal::derive_current(connection, task)?;
         let value = Self::from_pre_call(task, step, ledger, metadata, &capacity)?;
-        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        if task.detail.summary.specialist_id.uses_acquisition_choices() {
             let choices = completion::SavedMetadataHistory::load(connection, task)?
                 .current_choices(ledger, metadata)?;
             if choices
@@ -390,7 +390,7 @@ impl SavedCallBasis {
         if state.current_call.as_ref() != Some(self) {
             return Err(InvestigationStoreError::Invalid);
         }
-        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+        if task.detail.summary.specialist_id.uses_acquisition_choices() {
             let (
                 SavedCallCore {
                     step,
@@ -431,9 +431,7 @@ pub(super) fn load_saved_call_basis_core_and_capacity(
     task: &StoredTask,
     basis: &SavedCallBasis,
 ) -> Result<(SavedCallCore, admission_journal::CapacityState), InvestigationStoreError> {
-    if connection.is_autocommit()
-        || task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18
-    {
+    if connection.is_autocommit() || !task.detail.summary.specialist_id.uses_acquisition_choices() {
         return Err(InvestigationStoreError::Invalid);
     }
     validate_pairing(task)?;
@@ -451,7 +449,7 @@ pub(super) fn load_saved_call_basis_core(
         return Err(InvestigationStoreError::Invalid);
     }
     validate_pairing(task)?;
-    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+    if task.detail.summary.specialist_id.uses_acquisition_choices() {
         return admission_journal::saved_core(connection, task, basis);
     }
     let id = &task.detail.summary.investigation_id;

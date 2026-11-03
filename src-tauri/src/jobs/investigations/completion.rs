@@ -1331,7 +1331,7 @@ pub(super) fn next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
-    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
+    if task.detail.summary.specialist_id.uses_acquisition_choices() {
         admission_journal::derive_current(connection, task)?;
         return raw_next_prompt_invocations(connection, task);
     }
@@ -2155,7 +2155,9 @@ pub(super) use settlement_projection::{
 #[cfg(test)]
 pub(super) use next_prompt_snapshot::tests::rewrite as rewrite_test_body;
 #[cfg(test)]
-pub(super) use tests::next_prompt_initial_fixture::{InitialFixture, initial_fixture};
+pub(super) use tests::next_prompt_initial_fixture::{
+    InitialFixture, initial_fixture, initial_fixture_with_request,
+};
 
 #[cfg(test)]
 #[path = "next_prompt_recovery_tests.rs"]

@@ -120,7 +120,13 @@ impl<'a> SavedMetadataHistory<'a> {
         InvestigationStoreError,
     > {
         self.check_epoch()?;
-        if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+        if !self
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
+        {
             return Ok(None);
         }
         let cutoff = self.ordinal(&basis.step_id)?;
@@ -152,7 +158,13 @@ impl<'a> SavedMetadataHistory<'a> {
         InvestigationStoreError,
     > {
         self.check_epoch()?;
-        if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+        if !self
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
+        {
             return Ok(None);
         }
         let cutoff = self
@@ -184,7 +196,13 @@ impl<'a> SavedMetadataHistory<'a> {
         InvestigationStoreError,
     > {
         self.check_epoch()?;
-        if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV18 {
+        if !self
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_acquisition_choices()
+        {
             return Ok(None);
         }
         let cutoff = self

@@ -378,12 +378,23 @@ pub(in crate::jobs::investigations) fn captured_source_invocation_for(
     InvestigationInspectionTarget,
     String,
 ) {
+    captured_source_invocation_for_role(gated.then_some(SpecialistId::DomainAnalystV18), initialize)
+}
+pub(in crate::jobs::investigations) fn captured_source_invocation_for_role(
+    role: Option<SpecialistId>,
+    initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
+) -> (
+    completion::InternalFixture,
+    InvestigationInspectionTarget,
+    String,
+) {
     let mut target = None;
     let mut f = completion::internal_fixture_with_initial_ledger(|store, task, ledger, request| {
-        if gated {
-            request.specialist_id = "domain-analyst@18".into();
-            task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
-            task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+        if let Some(role) = role {
+            assert!(role.uses_acquisition_choices());
+            request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
+            task.detail.summary.specialist_id = role;
+            task.detail.specialist = role.definition().unwrap();
         }
         let provider = llm::OllamaProvider::new(
             "http://127.0.0.1:11434",
