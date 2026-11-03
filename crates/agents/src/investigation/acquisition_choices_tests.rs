@@ -1017,6 +1017,15 @@ fn citation_correction_analyst20_prompt_qualifies_finish_without_rewriting_19() 
         new.prompt()
             .contains("These IDs are source targets, not citations")
     );
+    let paraphrase =
+        "Describe cited source in your own words; never copy a complete source excerpt";
+    assert!(new.prompt().contains(paraphrase));
+    assert!(!old.prompt().contains(paraphrase));
+    assert!(!SpecialistId::DomainAnalystV18.prompt().contains(paraphrase));
+    assert_eq!(
+        new.definition().unwrap().prompt_fingerprint,
+        "d6954cd6c8af3e22e98afafeee107d71390ef6c38be03bd7a8dfa4234c471453"
+    );
     assert_eq!(new.definition().unwrap().version, 20);
     assert_ne!(
         new.definition().unwrap().prompt_fingerprint,

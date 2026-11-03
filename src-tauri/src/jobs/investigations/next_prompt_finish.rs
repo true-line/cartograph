@@ -232,6 +232,25 @@ impl JobStore {
                         )?;
                         invalid_citation(&tx, &mut task, &input.response.step_id)?;
                     }
+                    Err(InvestigationError::SourceReplay)
+                        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV20 =>
+                    {
+                        persist_response(
+                            &tx,
+                            &mut task,
+                            input.response,
+                            authenticated.admitted_usage,
+                        )?;
+                        finish_refused(
+                            &tx,
+                            &mut task,
+                            &input.response.step_id,
+                            InvestigationStopReason::InvalidFinish(
+                                InvestigationError::SourceReplay,
+                            )
+                            .message(),
+                        )?;
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -288,13 +307,22 @@ fn invalid_citation(
 ) -> Result<(), InvestigationStoreError> {
     const MESSAGE: &str =
         "The model's answer cited evidence it had not acquired. No findings were saved.";
+    finish_refused(tx, task, step_id, MESSAGE)
+}
+
+fn finish_refused(
+    tx: &Transaction<'_>,
+    task: &mut StoredTask,
+    step_id: &str,
+    message: &'static str,
+) -> Result<(), InvestigationStoreError> {
     task.phase = Phase::Terminal;
     task.detail.summary.status = if task.detail.summary.cancel_requested {
         InvestigationStatus::Cancelled
     } else {
         InvestigationStatus::Failed
     };
-    task.detail.error = Some(MESSAGE.into());
+    task.detail.error = Some(message.into());
     bump(tx, task)?;
     event(
         tx,
@@ -302,14 +330,14 @@ fn invalid_citation(
         InvestigationEventKind::FinishRefused,
         Some(step_id),
         None,
-        MESSAGE,
+        message,
     )?;
     let kind = if task.detail.summary.cancel_requested {
         InvestigationEventKind::Cancelled
     } else {
         InvestigationEventKind::Failed
     };
-    event(tx, task, kind, Some(step_id), None, MESSAGE)?;
+    event(tx, task, kind, Some(step_id), None, message)?;
     refresh_observation(tx, task)?;
     transitions::sync_terminal_job(tx, task)
 }

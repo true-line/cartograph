@@ -223,6 +223,8 @@ enum GatedFlow {
     TypedCorrection,
     ReceiptCorrection,
     OfferedTargets,
+    RetainedSourceFinish,
+    ParaphrasedSourceFinish,
     Repair,
     Repeat,
     Cancel,
@@ -382,6 +384,16 @@ impl LlmProvider for NextProvider {
                     prompt,
                     call,
                     flow == GatedFlow::ReceiptCorrection,
+                )
+                .to_string()
+            } else if matches!(
+                flow,
+                GatedFlow::RetainedSourceFinish | GatedFlow::ParaphrasedSourceFinish
+            ) {
+                typed_correction_tests::source_finish_action(
+                    &prompts,
+                    call,
+                    flow == GatedFlow::ParaphrasedSourceFinish,
                 )
                 .to_string()
             } else if flow == GatedFlow::OfferedTargets {
