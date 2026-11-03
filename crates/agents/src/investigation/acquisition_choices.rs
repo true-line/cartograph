@@ -259,6 +259,8 @@ pub struct AcquisitionChoices {
     // Private derivation state, never part of the canonical choices wire/hash.
     #[serde(skip)]
     pending: Vec<bool>,
+    #[serde(skip)]
+    all_acquired: bool,
 }
 impl AcquisitionChoices {
     /// Canonical typed JSON under the existing action cap; not a publication
@@ -278,6 +280,10 @@ impl AcquisitionChoices {
     /// Unattempted without a supported next action; never satisfied.
     pub fn blocked(&self) -> &[String] {
         &self.blocked
+    }
+
+    pub fn all_acquired(&self) -> bool {
+        self.all_acquired
     }
 
     pub fn attempts_complete(&self) -> bool {
@@ -525,25 +531,56 @@ impl AcquisitionChoices {
             .iter()
             .map(|item| !attempted.contains(item.key().1))
             .collect();
-        Self::from_pending(
+        let mut choices = Self::from_pending(
             contract,
             ledger,
             metadata.fingerprint_with_policy(policy)?,
             pending,
             policy,
-        )
+        )?;
+        // Completion records are authenticated above; require their exact
+        // acquisition to remain in the current ledger as well.
+        choices.all_acquired = contract.obligations.obligations.iter().all(|obligation| {
+            attempts.iter().any(|evidence| {
+                evidence.record.obligation_id == obligation.key().1
+                    && match (&evidence.record.outcome, obligation) {
+                        (
+                            AttemptOutcome::SourceAcquired { citation_id },
+                            Obligation::Source { target, .. },
+                        ) => ledger.citations.iter().any(|citation| {
+                            citation.citation_id == *citation_id && target.matches(citation)
+                        }),
+                        (
+                            AttemptOutcome::InventoryAcquired { read_index },
+                            Obligation::Inventory { target, .. },
+                        ) => ledger.coverage.as_ref().is_some_and(|proof| {
+                            ledger.coverage_reads.get(*read_index).is_some_and(|read| {
+                                read.validate(proof).is_ok()
+                                    && read.request.context_id == target.context_id
+                                    && read.request.repo == target.repo
+                                    && read.request.inventory_hash == target.inventory_hash
+                            })
+                        }),
+                        _ => false,
+                    }
+            })
+        });
+        Ok(choices)
     }
 
     /// Additional unencoded cache owner. Encoded choices are charged separately.
     pub fn private_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
         context_hub::logical::sum(&[
             std::mem::size_of::<Vec<bool>>(),
+            std::mem::size_of::<bool>(),
             context_hub::logical::slots::<bool>(policy.max_completion_obligations())?,
         ])
     }
     #[cfg(test)]
     pub(super) fn private_bytes(&self) -> usize {
-        std::mem::size_of::<Vec<bool>>() + std::mem::size_of_val(self.pending.as_slice())
+        std::mem::size_of::<Vec<bool>>()
+            + std::mem::size_of::<bool>()
+            + std::mem::size_of_val(self.pending.as_slice())
     }
     /// Candidate construction before prefix truncation. Borrowed contract,
     /// ledgers, attempt witnesses and their validation remain caller-owned.
@@ -625,6 +662,7 @@ impl AcquisitionChoices {
             blocked: Vec::new(),
             deferred: 0,
             pending,
+            all_acquired: false,
         };
         // Validate every obligation, including the eventual deferred suffix.
         let byte_limit = MAX_ACTION_BYTES.min(policy.envelope_bytes());

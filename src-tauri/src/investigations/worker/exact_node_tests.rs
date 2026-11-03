@@ -416,6 +416,14 @@ fn analyst20_worker_eight_obligations_offer_acquisition_then_finish() {
             assert!(!offered.is_empty());
             assert!(offered.contains(&next_offered_action(&prompts[ordinal], &schema)));
         } else {
+            assert_eq!(branches.len(), 2);
+            assert!(
+                branches.iter().all(|branch| matches!(
+                    branch["$ref"].as_str(),
+                    Some("#/$defs/supported_wrapper" | "#/$defs/insufficient_wrapper")
+                )),
+                "all eight acquisitions must close exploration without an extra query"
+            );
             assert!(
                 branches
                     .iter()

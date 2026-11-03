@@ -24,7 +24,7 @@ pub(in crate::investigation) fn select_eligible_acquisition(
         .retain(|branch| match branch["$ref"].as_str() {
             Some("#/$defs/insufficient_wrapper") => ready,
             Some("#/$defs/supported_wrapper") => ready && !ledger.citations.is_empty(),
-            _ => true,
+            _ => !(ready && choices.all_acquired()),
         });
     if ready && !ledger.citations.is_empty() {
         set_citations(

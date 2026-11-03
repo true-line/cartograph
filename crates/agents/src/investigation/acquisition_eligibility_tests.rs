@@ -69,10 +69,13 @@ fn analyst20_schema_completed_attempts_constrain_citations() {
     let mut ledger = f.ledger.clone();
     let complete = f.derive(&ledger, std::slice::from_ref(&attempt)).unwrap();
     assert!(complete.attempts_complete());
+    let ordinary =
+        response_schema::select_acquisition(Choice, &complete, &ledger, &f.contract.request_hash)
+            .unwrap();
     let finish_schema = |ledger: &InvestigationInputLedger| -> serde_json::Value {
         serde_json::from_str(
             &response_schema::select_eligible_acquisition(
-                Some(response_schema::FINISH.into()),
+                ordinary.clone(),
                 Choice,
                 &complete,
                 ledger,
@@ -83,6 +86,87 @@ fn analyst20_schema_completed_attempts_constrain_citations() {
         .unwrap()
     };
     let schema = finish_schema(&ledger);
+    assert!(
+        schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| { branch["properties"]["type"]["const"] == "query_context" }),
+        "attempted but unavailable must retain exploration"
+    );
+    let expected: Vec<_> = ledger
+        .citations
+        .iter()
+        .map(|c| c.citation_id.clone())
+        .collect();
+    assert!(!expected.is_empty());
+    assert_eq!(
+        schema["$defs"]["finding"]["properties"]["citation_ids"]["items"]["enum"],
+        serde_json::json!(expected)
+    );
+    ledger.citations.clear();
+    let schema = finish_schema(&ledger);
+    assert!(
+        !schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["$ref"] == "#/$defs/supported_wrapper")
+    );
+    assert!(
+        schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["$ref"] == "#/$defs/insufficient_wrapper")
+    );
+}
+// AC-0566: only fully acquired obligations close exploration.
+#[test]
+fn analyst20_schema_all_acquired_removes_exploration() {
+    let mut f = Fixture::new();
+    f.contract
+        .obligations
+        .obligations
+        .retain(|o| matches!(o, Obligation::Source { .. }));
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    let attempt = f.source_attempt(AttemptOutcome::SourceAcquired {
+        citation_id: "evidence-1".into(),
+    });
+    let mut ledger = f.ledger.clone();
+    let complete = f.derive(&ledger, std::slice::from_ref(&attempt)).unwrap();
+    assert!(complete.attempts_complete());
+    let ordinary =
+        response_schema::select_acquisition(Choice, &complete, &ledger, &f.contract.request_hash)
+            .unwrap();
+    let finish_schema = |ledger: &InvestigationInputLedger| -> serde_json::Value {
+        serde_json::from_str(
+            &response_schema::select_eligible_acquisition(
+                ordinary.clone(),
+                Choice,
+                &complete,
+                ledger,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let schema = finish_schema(&ledger);
+    assert!(
+        schema["anyOf"].as_array().unwrap().iter().all(|branch| {
+            matches!(
+                branch["$ref"].as_str(),
+                Some("#/$defs/supported_wrapper" | "#/$defs/insufficient_wrapper")
+            )
+        }),
+        "completed attempts must not reopen exploration"
+    );
     let expected: Vec<_> = ledger
         .citations
         .iter()
@@ -426,4 +510,166 @@ fn analyst20_contract_bound_covers_largest_actions_for_all_targets() {
             );
         }
     }
+}
+
+// AC-0566: acquired source plus unavailable inventory is not all-acquired.
+#[test]
+fn analyst20_schema_mixed_acquisition_retains_exploration() {
+    let f = Fixture::new();
+    let source = f.source_attempt(AttemptOutcome::SourceAcquired {
+        citation_id: "evidence-1".into(),
+    });
+    let (obligation_id, target) = f
+        .contract
+        .obligations
+        .obligations
+        .iter()
+        .find_map(|o| match o {
+            Obligation::Inventory {
+                obligation_id,
+                target,
+            } => Some((obligation_id, target)),
+            _ => None,
+        })
+        .unwrap();
+    let mut inventory = source.clone();
+    inventory.obligation_id = obligation_id.clone();
+    inventory.step_id = "inventory-step".into();
+    inventory.read = ReadIntent::Inventory {
+        context_id: target.context_id.clone(),
+        repo: target.repo.clone(),
+        inventory_hash: target.inventory_hash.clone(),
+        max_bytes: MAX_QUERY_BYTES,
+    };
+    inventory.outcome = AttemptOutcome::Unavailable {
+        reason: UnavailableReason::InventoryExceedsMaxBytes,
+    };
+    inventory.attempt_id = inventory.content_id().unwrap();
+    let choices = f.derive(&f.ledger, &[source, inventory]).unwrap();
+    assert!(choices.attempts_complete());
+    assert!(!choices.all_acquired());
+    let schema = selected(&f, &choices, &f.ledger);
+    assert!(
+        schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| { branch["properties"]["type"]["const"] == "query_context" })
+    );
+}
+
+// AC-0566: retained acquisition survives revision growth and a disclosure
+// refusal, but not loss of its exact citation. The witness is never wire data.
+#[test]
+fn analyst20_schema_acquired_witness_tracks_current_ledger() {
+    let mut f = Fixture::new();
+    f.contract
+        .obligations
+        .obligations
+        .retain(|o| matches!(o, Obligation::Source { .. }));
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    let source = f.source_attempt(AttemptOutcome::SourceAcquired {
+        citation_id: "evidence-1".into(),
+    });
+    let refused = f.source_attempt(AttemptOutcome::FirewallRefused {
+        acquired_attempt_id: source.attempt_id.clone(),
+        observation_hash: "c".repeat(64),
+    });
+    let mut current = f.ledger.clone();
+    current.revision += 1;
+    let records = [source, refused];
+    let choices = f.derive(&current, &records).unwrap();
+    assert!(choices.all_acquired());
+    let wire = serde_json::to_value(&choices).unwrap();
+    assert!(wire.get("all_acquired").is_none());
+    let mut conservative = choices.clone();
+    conservative.all_acquired = false;
+    assert_eq!(serde_json::to_value(&conservative).unwrap(), wire);
+    let ordinary =
+        response_schema::select_acquisition(Choice, &choices, &current, &f.contract.request_hash)
+            .unwrap();
+    let reserve = response_schema::reserve_eligible_acquisition(
+        ordinary,
+        Choice,
+        &serde_json::json!({"citations":current.citations}),
+    )
+    .unwrap()
+    .unwrap();
+    let actual = serde_json::to_string(&selected(&f, &choices, &current)).unwrap();
+    assert!(
+        serde_json::to_string(&reserve).unwrap().len()
+            >= serde_json::to_string(&actual).unwrap().len()
+    );
+    current.citations.retain(|c| c.citation_id != "evidence-1");
+    let missing = f.derive(&current, &records).unwrap();
+    assert!(missing.attempts_complete());
+    assert!(!missing.all_acquired());
+}
+
+// AC-0566: inconsistent readiness must not erase acquisition branches;
+// inventory-only completion without citations still permits insufficiency.
+#[test]
+fn analyst20_schema_never_empties_on_inconsistent_or_inventory_only_state() {
+    let mut f = Fixture::new();
+    let mut inconsistent = f.derive(&f.ledger, &[]).unwrap();
+    inconsistent.all_acquired = true;
+    assert!(!inconsistent.attempts_complete());
+    let schema = selected(&f, &inconsistent, &f.ledger);
+    assert!(!schema["anyOf"].as_array().unwrap().is_empty());
+    assert!(schema["anyOf"][0].get("enum").is_some());
+
+    let mut record = f.source_attempt(AttemptOutcome::InventoryAcquired { read_index: 0 });
+    f.contract
+        .obligations
+        .obligations
+        .retain(|o| matches!(o, Obligation::Inventory { .. }));
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    f.ledger = f.empty();
+    let Obligation::Inventory {
+        obligation_id,
+        target,
+    } = &f.contract.obligations.obligations[0]
+    else {
+        unreachable!()
+    };
+    f.ledger
+        .coverage_reads
+        .push(InvestigationCoverageReadManifest {
+            request: InvestigationCoverageRead {
+                context_id: target.context_id.clone(),
+                repo: target.repo.clone(),
+                inventory_hash: target.inventory_hash.clone(),
+                max_bytes: MAX_QUERY_BYTES,
+            },
+            response_hash: "a".repeat(64),
+            response_bytes: 1,
+        });
+    record.obligation_id = obligation_id.clone();
+    record.obligations_hash = f.contract.obligations_hash.clone();
+    record.read = ReadIntent::Inventory {
+        context_id: target.context_id.clone(),
+        repo: target.repo.clone(),
+        inventory_hash: target.inventory_hash.clone(),
+        max_bytes: MAX_QUERY_BYTES,
+    };
+    record.input_ledger_hash = f.ledger.fingerprint_with_policy(POLICY).unwrap();
+    record.attempt_id = record.content_id().unwrap();
+    let choices = f.derive(&f.ledger, &[record]).unwrap();
+    assert!(choices.attempts_complete() && choices.all_acquired());
+    assert!(f.ledger.citations.is_empty());
+    let schema = selected(&f, &choices, &f.ledger);
+    assert_eq!(
+        schema["anyOf"],
+        serde_json::json!([{ "$ref": "#/$defs/insufficient_wrapper" }])
+    );
 }
