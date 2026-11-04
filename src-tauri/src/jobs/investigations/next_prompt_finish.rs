@@ -165,45 +165,67 @@ impl JobStore {
                             basis.as_ref(),
                         )?;
                         validate_inspection_result(&task, &result)?;
-                        accepted(
-                            &tx,
-                            &mut task,
-                            &result,
-                            &authenticated.core.ledger,
-                            &authenticated.core.step,
-                            basis.as_ref(),
-                        )?;
-                        let body = encode(&result, MAX_RESULT_BYTES)?;
-                        let result_hash = core_prov::content_hash(&body);
-                        one(tx.execute(
-                            "INSERT INTO investigation_results VALUES (?1,?2,?3)",
-                            params![id, body, result_hash],
-                        )?)?;
-                        super::chat::insert_result_reference(
-                            &tx,
-                            &id,
-                            &result.result_id,
-                            &result_hash,
-                        )?;
-                        persist_response(
-                            &tx,
-                            &mut task,
-                            input.response,
-                            authenticated.admitted_usage,
-                        )?;
-                        task.phase = Phase::Terminal;
-                        task.detail.summary.status = InvestigationStatus::Completed;
-                        task.detail.summary.has_result = true;
-                        bump(&tx, &mut task)?;
-                        event(
-                            &tx,
-                            &mut task,
-                            InvestigationEventKind::ResultPersisted,
-                            Some(&input.response.step_id),
-                            None,
-                            "Cited findings were persisted against the original input ledger.",
-                        )?;
-                        transitions::sync_terminal_job(&tx, &task)?;
+                        if task.semantic_audit.is_some()
+                            && result.completion.as_ref().is_some_and(|completion| {
+                                completion.outcome == CompletionOutcome::Supported
+                            })
+                        {
+                            // Structural admission is not semantic acceptance.
+                            // Save usage and candidate atomically without a result
+                            // row, chat reference, or Completed publication.
+                            persist_response(
+                                &tx,
+                                &mut task,
+                                input.response,
+                                authenticated.admitted_usage.clone(),
+                            )?;
+                            super::super::semantic_audit_state::hold_candidate(
+                                &mut task,
+                                result,
+                                &authenticated.admitted_usage,
+                            )?;
+                            bump(&tx, &mut task)?;
+                        } else {
+                            accepted(
+                                &tx,
+                                &mut task,
+                                &result,
+                                &authenticated.core.ledger,
+                                &authenticated.core.step,
+                                basis.as_ref(),
+                            )?;
+                            let body = encode(&result, MAX_RESULT_BYTES)?;
+                            let result_hash = core_prov::content_hash(&body);
+                            one(tx.execute(
+                                "INSERT INTO investigation_results VALUES (?1,?2,?3)",
+                                params![id, body, result_hash],
+                            )?)?;
+                            super::chat::insert_result_reference(
+                                &tx,
+                                &id,
+                                &result.result_id,
+                                &result_hash,
+                            )?;
+                            persist_response(
+                                &tx,
+                                &mut task,
+                                input.response,
+                                authenticated.admitted_usage,
+                            )?;
+                            task.phase = Phase::Terminal;
+                            task.detail.summary.status = InvestigationStatus::Completed;
+                            task.detail.summary.has_result = true;
+                            bump(&tx, &mut task)?;
+                            event(
+                                &tx,
+                                &mut task,
+                                InvestigationEventKind::ResultPersisted,
+                                Some(&input.response.step_id),
+                                None,
+                                "Cited findings were persisted against the original input ledger.",
+                            )?;
+                            transitions::sync_terminal_job(&tx, &task)?;
+                        }
                     }
                     Ok(Err(FinishDecision::Refused { .. })) => {
                         refused(

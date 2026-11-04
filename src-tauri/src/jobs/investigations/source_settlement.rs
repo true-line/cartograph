@@ -294,6 +294,7 @@ fn materialize(
             )
         },
     )?;
+    super::semantic_audit_state::account_analyst_save(&mut task)?;
     let mut plan = SettlementProjection {
         task,
         disposition,

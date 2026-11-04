@@ -546,7 +546,8 @@ fn validate_task_contract(
         || summary.actions.can_cancel
             != (task.phase != Phase::Terminal && !summary.cancel_requested)
         || !summary.actions.can_follow_up
-        || summary.invocation_pending != (task.phase == Phase::Invocation)
+        || summary.invocation_pending
+            != matches!(task.phase, Phase::Invocation | Phase::AuditInvocation)
         || task.ledger_hash.is_some() != task.ledger_revision.is_some()
         || detail.coverage_context.is_some()
             != (summary.specialist_id.uses_coverage_qualification()
@@ -565,6 +566,11 @@ fn validate_task_contract(
     }
     if let Some(admission) = &task.admission_state {
         admission.validate_task_binding(task)?;
+    }
+    if let Some(audit) = &task.semantic_audit {
+        audit.validate(task)?;
+    } else if matches!(task.phase, Phase::AuditPending | Phase::AuditInvocation) {
+        return Err(InvestigationStoreError::Invalid);
     }
     if let Some(pending) = &task.pending_source_read {
         pending.validate()?;
@@ -651,9 +657,13 @@ fn validate_task_contract(
         Phase::Consent => {
             summary.status == InvestigationStatus::AwaitingConsent && task.pending.is_some()
         }
-        Phase::Ready | Phase::Invocation | Phase::Action | Phase::Tool | Phase::Reservation => {
-            summary.status == InvestigationStatus::Running
-        }
+        Phase::Ready
+        | Phase::Invocation
+        | Phase::Action
+        | Phase::Tool
+        | Phase::Reservation
+        | Phase::AuditPending
+        | Phase::AuditInvocation => summary.status == InvestigationStatus::Running,
         Phase::Terminal => matches!(
             summary.status,
             InvestigationStatus::Completed
@@ -1019,6 +1029,9 @@ pub(super) fn load_next_prompt_task(
         }
     }
     completion::validate_saved(connection, &task)?;
+    if let Some(audit) = &task.semantic_audit {
+        audit.validate_saved(connection, &task)?;
+    }
     Ok(task)
 }
 
@@ -1189,8 +1202,29 @@ pub(super) fn save_next_prompt_task(
     if connection.is_autocommit() {
         return Err(InvestigationStoreError::Invalid);
     }
+    if task.semantic_audit.is_some() {
+        let mut accounted = task.clone();
+        super::semantic_audit_state::account_analyst_save(&mut accounted)?;
+        validate_next_prompt_task(&accounted)?;
+        return save_validated_task(connection, &accounted, expected_revision, terminal);
+    }
     validate_next_prompt_task(task)?;
     save_validated_task(connection, task, expected_revision, terminal)
+}
+
+/// Audited writer never feeds aggregate usage back into the analyst account.
+/// The owning caller authenticates execution and commits the journal and debit.
+pub(super) fn save_started_audit_task(
+    connection: &Connection,
+    task: &StoredTask,
+    expected_revision: u64,
+) -> Result<(), InvestigationStoreError> {
+    if connection.is_autocommit() || task.phase != Phase::AuditInvocation {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    validate_next_prompt_task(task)?;
+    super::semantic_audit_state::validate_invocation_journal(connection, task)?;
+    save_validated_task(connection, task, expected_revision, false)
 }
 
 fn save_validated_task(
@@ -1380,6 +1414,7 @@ pub(super) fn stored_bytes_with_reads(
     // The optional journal is lazily created; legacy stores keep identical
     // accounting without creating or migrating its private schema.
     let journal_bytes = super::staged::journal_bytes(connection, id)?;
+    let audit_bytes = super::semantic_audit_journal::stored_bytes(connection, id)?;
     let completion_bytes = super::completion::stored_bytes(connection, id)?;
     let admission_bytes = super::admission_journal::stored_bytes(connection, id)?;
     let review_bytes = super::finding_reviews::stored_bytes(connection, id)?;
@@ -1391,6 +1426,7 @@ pub(super) fn stored_bytes_with_reads(
     bytes
         .checked_add(usize::try_from(refs).map_err(|_| InvestigationStoreError::Invalid)?)
         .and_then(|bytes| bytes.checked_add(journal_bytes))
+        .and_then(|bytes| bytes.checked_add(audit_bytes))
         .and_then(|bytes| bytes.checked_add(completion_bytes))
         .and_then(|bytes| bytes.checked_add(admission_bytes))
         .and_then(|bytes| bytes.checked_add(review_bytes))
@@ -1509,7 +1545,8 @@ pub(super) fn bump(
     task.detail.summary.updated_at = timestamp(connection)?;
     task.detail.summary.actions.can_cancel =
         task.phase != Phase::Terminal && !task.detail.summary.cancel_requested;
-    task.detail.summary.invocation_pending = task.phase == Phase::Invocation;
+    task.detail.summary.invocation_pending =
+        matches!(task.phase, Phase::Invocation | Phase::AuditInvocation);
     Ok(())
 }
 

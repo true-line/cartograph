@@ -1365,7 +1365,8 @@ fn raw_next_prompt_invocations(
         [id], |row| Ok((row.get(0)?,row.get(1)?)))?;
     if !bounded
         || u32::try_from(count).ok().is_none_or(|n| n > limit)
-        || u32::try_from(count).ok() != Some(task.detail.usage.model_invocations)
+        || u32::try_from(count).ok()
+            != Some(super::semantic_audit_state::analyst_counters(task).model_invocations)
     {
         return Err(InvestigationStoreError::Invalid);
     }

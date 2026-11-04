@@ -19,6 +19,7 @@ pub(crate) fn next_prompt_record_workspace(bytes: usize) -> Option<(usize, usize
     let element = [
         size_of::<String>(),
         size_of::<InvestigationCitation>(),
+        size_of::<InvestigationFinding>(),
         size_of::<context_hub::coverage::RepoQualification>(),
         size_of::<InvestigationInspectionTarget>(),
         size_of::<InvestigationInspectionObservation>(),
@@ -124,5 +125,33 @@ pub(crate) fn next_prompt_task_load_workspace() -> Option<(usize, usize)> {
             .max(acquisition) // raw_refusals before staged semantic validation
             .max(projection),
     ])?;
-    Some((task, base.max(completion)))
+    // A pending audit retains its candidate in the task while validating the
+    // saved finishing disclosure, then reconstructs model-authored fields as a
+    // canonical JSON action. Count both typed and JSON representations and
+    // the bounded hashing/encoding buffers; no raw source payload is retained.
+    let audit = sum(&[
+        task,
+        projection,
+        super::semantic_audit_workspace::receipt_replay_workspace()?,
+        json_bytes(MAX_RESULT_BYTES)?.checked_mul(2)?,
+        json_bytes(MAX_ACTION_BYTES)?.checked_mul(2)?,
+        MAX_RESULT_BYTES,
+        MAX_ACTION_BYTES,
+    ])?;
+    Some((task, base.max(completion).max(audit)))
+}
+
+/// Logical owners of the task3 writer, including its borrowed caller task.
+/// Audit accounting keeps a complete replacement alive through validation and
+/// encoding. Historical writes use less memory; reserve the audited path before
+/// enabling it. Transaction/native SQLite storage is admitted separately.
+#[cfg(unix)]
+pub(crate) fn next_prompt_task_write_workspace() -> Option<usize> {
+    let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
+    sum(&[
+        task.checked_mul(2)?,
+        next_prompt_contract_workspace()?,
+        MAX_RECORD_BYTES,
+        slots::<Vec<u8>>(1)?,
+    ])
 }
