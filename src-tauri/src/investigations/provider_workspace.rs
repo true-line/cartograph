@@ -91,6 +91,73 @@ pub(crate) fn source_settlement_retained(policy: &InvestigationPolicy) -> Option
         )
 }
 
+/// Audit projection/firewall/transport owners in addition to the original
+/// invocation retained by continuation_retained. This does not include the
+/// durable start/settlement transactions or their saved-task reconstruction.
+#[cfg(unix)]
+pub(crate) fn audit_payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
+    use agents::investigation::{MAX_RECORD_BYTES, semantic_audit};
+    use context_hub::logical::{set, slots, sum};
+    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let firewall = limits.firewall_workspace_bytes()?;
+    let transport = limits.transport_workspace_bytes()?;
+    let (projection, construction) = semantic_audit::projection_workspace_bytes()?;
+    // semantic_audit_payload fingerprints the borrowed ledger, then keeps a
+    // separately cloned acquired-ID set during projection construction.
+    let ids = sum(&[
+        MAX_RECORD_BYTES,
+        set::<String>(policy.limits().evidence_items)?,
+        slots::<std::collections::BTreeSet<String>>(1)?,
+        64, // returned ledger fingerprint
+    ])?;
+    let construct =
+        construction
+            .checked_add(ids)?
+            .max(agents::investigation::ledger_validation_workspace(
+                policy,
+                MAX_RECORD_BYTES,
+            )?);
+    // action() clones the projection payload. Keep both through preparation,
+    // authorization and transport conservatively; action IDs use opaque_id's
+    // existing 128-byte ceiling. No original invocation owner is absorbed here.
+    let action = sum(&[
+        projection,
+        std::mem::size_of::<llm::CompletionAction>(),
+        128,
+    ])?;
+    let caller = projection.checked_add(action)?;
+    let authorize = firewall
+        .prepared_bytes
+        .checked_add(firewall.authorize_peak_bytes)?;
+    let invoke = sum(&[
+        firewall.prepared_bytes,
+        firewall.authorized_bytes,
+        transport
+            .request_peak_bytes
+            .max(transport.response_peak_bytes),
+    ])?;
+    Some(construct.max(caller.checked_add(firewall.prepare_peak_bytes.max(authorize).max(invoke))?))
+}
+
+/// Live audit objects retained across durable begin/settlement. These are in
+/// addition to continuation_retained's original analyst invocation. Keep the
+/// projection/action conservatively even if a future worker drops them earlier.
+#[cfg(unix)]
+pub(crate) fn audit_retained(policy: &InvestigationPolicy) -> Option<usize> {
+    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let firewall = limits.firewall_workspace_bytes()?;
+    context_hub::logical::sum(&[
+        agents::investigation::semantic_audit::projection_workspace_bytes()?
+            .0
+            .checked_mul(2)?,
+        std::mem::size_of::<llm::CompletionAction>(),
+        128,
+        firewall.prepared_bytes,
+        firewall.authorized_bytes,
+        limits.transport_workspace_bytes()?.completion_bytes,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

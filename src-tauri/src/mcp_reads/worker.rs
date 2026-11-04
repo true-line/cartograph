@@ -587,7 +587,32 @@ fn task_phase_workspaces(
         .checked_add(context_hub::logical::json_bytes(
             agents::investigation::MAX_ACTION_BYTES.checked_mul(2)?,
         )?)?; // saved call DTO plus separately encoded original action
+    let audit_limits = llm::bounded::CompletionLimits::new(
+        crate::investigations::provider_workspace::completion_limit_values(
+            &agents::investigation::INVESTIGATION_V2_POLICY,
+        )
+        .ok()?,
+    )
+    .ok()?;
+    let audit = crate::investigations::provider_workspace::audit_retained(
+        &agents::investigation::INVESTIGATION_V2_POLICY,
+    )?
+    .checked_add(
+        crate::jobs::investigations::next_prompt_audit_transaction_workspace(
+            crate::investigations::source_preparation_workspace::peak_bytes(
+                limits.evidence,
+                app_path_bytes,
+            )?,
+            &audit_limits,
+        )?,
+    )?;
     let execution = provider
+        .max(audit)
+        .max(
+            crate::investigations::provider_workspace::audit_payload_peak(
+                &agents::investigation::INVESTIGATION_V2_POLICY,
+            )?,
+        )
         .max(settlement)
         .max(initial_choices)
         .max(
@@ -627,6 +652,7 @@ fn task_phase_workspaces(
         .max(crate::jobs::investigations::next_prompt_staged_workspace()?.1)
         .max(crate::jobs::investigations::next_prompt_correction_workspace()?)
         .max(crate::jobs::investigations::next_prompt_task_load_workspace()?.1)
+        .max(crate::jobs::investigations::next_prompt_task_write_workspace()?)
         .max(
             crate::jobs::investigations::next_prompt_attempt_replay_workspace()?.checked_add(
                 agents::investigation::disclosure_validation_workspace(
