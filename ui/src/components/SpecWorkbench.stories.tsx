@@ -435,7 +435,7 @@ export const VerifiedOnlyExport: Story = {
       'aria-pressed',
       'true',
     );
-    await expect(canvas.getByText('1 gaps')).toBeInTheDocument();
+    await expect(canvas.getByText('Unresolved findings: 1')).toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'best-effort' }));
     await expect(args.onModeChange).toHaveBeenCalledWith('best-effort');
     await userEvent.click(canvas.getByRole('button', { name: 'Export bundle' }));
@@ -529,7 +529,7 @@ export const TruncatedArtifactShowsCountedNote: Story = {
     // The chip counts the true total (#488), not the one assertion the IPC
     // preview actually carried.
     const gapChip = within(nav).getByRole('button', { name: /Gap register/ });
-    await expect(within(gapChip).getByText('4200')).toBeInTheDocument();
+    await expect(within(gapChip).getByText('4200 assertion rows')).toBeInTheDocument();
 
     await userEvent.click(within(nav).getByRole('button', { name: /Gap register/ }));
     await userEvent.click(canvas.getByRole('button', { name: 'Source' }));
@@ -828,3 +828,35 @@ export const MarkdownArtifactsRenderByDefault: Story = {
   },
 };
 
+
+// AC-0067, AC-0218: one unresolved fact can have many supporting rows.
+export const FindingAndAssertionRowCountsAreDistinct: Story = {
+  args: {
+    bundle: {
+      ...BUNDLE,
+      artifacts: [{
+        ...artifact('gap-register', 'gap_register.md', 'Gap register', [GAP]),
+        assertions_total: 13,
+        assertions_truncated: true,
+      }],
+      assertion_count: 13,
+      gap_count: 1,
+      drift_count: 0,
+      security_count: 0,
+    },
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Unresolved findings: 1')).toBeInTheDocument();
+    const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
+    await expect(within(nav).getByText('13 assertion rows')).toBeInTheDocument();
+    await expect(canvas.getByText(/Assertion rows include supporting/)).toHaveTextContent(
+      'can refer to the same finding',
+    );
+    await expect(canvas.getByTestId('spec-assertions-truncated-note')).toHaveTextContent(
+      'Showing the first 1 of 13 assertions',
+    );
+    await userEvent.click(canvas.getByRole('button', { name: 'Export bundle' }));
+    await expect(args.onExportBundle).toHaveBeenCalledWith(args.bundle);
+  },
+};
