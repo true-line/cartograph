@@ -385,6 +385,7 @@ fn source_preview_bound_covers_all_feedback_values_after_actual_append() {
         RefusalReason::Unavailable,
     ] {
         fixture.metadata.feedback = Some(RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
             citation_correction: None,
             unmet: fixture

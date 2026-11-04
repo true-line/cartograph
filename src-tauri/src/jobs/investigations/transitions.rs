@@ -1203,6 +1203,11 @@ pub(super) fn stop(
         super::semantic_audit_state::stop_started_audit(task)?;
     } else if task.phase == Phase::Invocation {
         clear_unmeasured_usage(task);
+        if let Some(audit) = task.semantic_audit.as_mut() {
+            audit.account = audit
+                .account
+                .stop_unmeasured_analyst(&task.detail.usage, &task.detail.limits)?;
+        }
     }
     let cancelled = task.detail.summary.cancel_requested
         || matches!(

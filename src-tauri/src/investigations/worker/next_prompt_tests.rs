@@ -208,6 +208,8 @@ enum SourceScenario {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatedFlow {
     TypedCorrection,
+    ProseCorrection,
+    ExhaustedProseCorrection,
     ReceiptCorrection,
     OfferedTargets,
     RetainedSourceFinish,
@@ -314,9 +316,13 @@ impl LlmProvider for NextProvider {
         if prompt["role"] == "candidate-evidence-auditor@1" {
             let verdict = self.audit_verdict.expect("unexpected audit dispatch");
             assert_eq!(self.observed.calls.fetch_add(1, Ordering::SeqCst), 4);
-            if verdict == "provider_failure" {
+            if matches!(verdict, "provider_failure" | "audit_timeout") {
                 return Err(BoundedCallError {
-                    code: llm::bounded::FailureCode::Transport,
+                    code: if verdict == "audit_timeout" {
+                        llm::bounded::FailureCode::DeadlineExceeded
+                    } else {
+                        llm::bounded::FailureCode::Transport
+                    },
                     outcome: llm::bounded::InvocationOutcome::Unknown,
                 });
             }
@@ -416,6 +422,16 @@ impl LlmProvider for NextProvider {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
             if matches!(
+                flow,
+                GatedFlow::ProseCorrection | GatedFlow::ExhaustedProseCorrection
+            ) {
+                typed_correction_tests::prose_action(
+                    prompt,
+                    call,
+                    flow == GatedFlow::ExhaustedProseCorrection,
+                )
+                .to_string()
+            } else if matches!(
                 flow,
                 GatedFlow::TypedCorrection | GatedFlow::ReceiptCorrection
             ) {

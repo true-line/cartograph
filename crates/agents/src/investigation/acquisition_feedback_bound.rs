@@ -71,7 +71,8 @@ pub(in crate::investigation) fn feedback_encoded_bound(
         }
         entries.push(chosen);
     }
-    let feedback = staged_finish::RefusalFeedback {
+    let mut feedback = staged_finish::RefusalFeedback {
+        prose_correction: None,
         schema_version: 2,
         citation_correction: Some(CitationCorrection {
             schema_version: 1,
@@ -96,5 +97,11 @@ pub(in crate::investigation) fn feedback_encoded_bound(
     // possible source actions use frozen contract identities and context;
     // acquisition cannot create another correction action shape. Never expose
     // this synthetic combination as feedback or use it to authorize anything.
-    Ok(bounded_bytes(&feedback, cap).map_or(cap, |bytes| bytes.len()))
+    let citation_bytes = bounded_bytes(&feedback, cap).map_or(cap, |bytes| bytes.len());
+    feedback.schema_version = 3;
+    feedback.citation_correction = None;
+    feedback.prose_correction =
+        Some(staged_finish::ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+    let prose_bytes = bounded_bytes(&feedback, cap).map_or(cap, |bytes| bytes.len());
+    Ok(citation_bytes.max(prose_bytes))
 }

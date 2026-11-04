@@ -129,9 +129,18 @@ pub struct FeedbackEntry {
     pub kind: String,
     pub reason: RefusalReason,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProseCorrection {
+    RewriteSchemaPlaceholdersAsPlainProse,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefusalFeedback {
+    /// Fixed correction instruction; rejected authored text is never echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose_correction: Option<ProseCorrection>,
     pub schema_version: u32,
     /// Version two stores exact citation guidance. Absent for every historical
     /// version-one record, preserving its canonical bytes and fingerprint.
@@ -219,6 +228,7 @@ impl RefusalFeedback {
             return Err(InvestigationError::InvalidInput);
         }
         let feedback = Self {
+            prose_correction: None,
             schema_version: 1,
             citation_correction: None,
             unmet: obligations
@@ -254,12 +264,15 @@ impl RefusalFeedback {
         policy: &InvestigationPolicy,
     ) -> Result<Vec<u8>, InvestigationError> {
         if self.schema_version
-            != if self.citation_correction.is_some() {
+            != if self.prose_correction.is_some() {
+                3
+            } else if self.citation_correction.is_some() {
                 2
             } else {
                 1
             }
-            || self.unmet.is_empty()
+            || (self.unmet.is_empty() && self.prose_correction.is_none())
+            || (self.prose_correction.is_some() && self.citation_correction.is_some())
             || self.unmet.len() > policy.max_completion_obligations()
             || self.unmet.iter().any(|entry| {
                 !crate::source_basis::hash(&entry.obligation_id)
@@ -538,7 +551,11 @@ pub(super) fn admit_finish_with_policy_using_consistency(
             })
         })
         .collect::<Vec<_>>();
-    if unmet.is_empty() {
+    let prose_correction = (request.specialist_id == "domain-analyst@20"
+        && admitted.is_some()
+        && prose::has_placeholder(finish))
+    .then_some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+    if unmet.is_empty() && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
         Ok(FinishDecision::Accepted(AcceptedCandidate {
@@ -550,7 +567,14 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         }))
     } else {
         let feedback = RefusalFeedback {
-            schema_version: if citation_correction.is_some() { 2 } else { 1 },
+            prose_correction,
+            schema_version: if prose_correction.is_some() {
+                3
+            } else if citation_correction.is_some() {
+                2
+            } else {
+                1
+            },
             citation_correction,
             unmet,
         };
@@ -840,3 +864,6 @@ fn nested_finish_failure_mapping_preserves_errors_without_claiming_reachability(
         assert_eq!(nested_finish_failure(semantic), semantic);
     }
 }
+
+#[path = "finish_prose.rs"]
+mod prose;

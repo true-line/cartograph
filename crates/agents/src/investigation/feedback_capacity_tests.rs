@@ -139,6 +139,7 @@ fn feedback_capacity_mixed_envelope_preserves_exact_sorted_kind_and_id_output() 
         inventory_ids.sort();
         assert_eq!(inventory_ids.len(), 2);
         let expected = RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
             citation_correction: None,
             unmet: vec![
@@ -217,6 +218,7 @@ fn feedback_capacity_upper_envelope_covers_every_reason_and_mixed_subset() {
             dominates(
                 serialized_sizes(
                     &RefusalFeedback {
+                        prose_correction: None,
                         schema_version: 1,
                         citation_correction: None,
                         unmet,
@@ -247,6 +249,7 @@ fn feedback_capacity_upper_envelope_covers_maximum_saved_policy_sets() {
         for count in 1..=upper.feedback.unmet.len() {
             for reason in reasons() {
                 let actual = RefusalFeedback {
+                    prose_correction: None,
                     schema_version: 1,
                     citation_correction: None,
                     unmet: upper.feedback.unmet[..count]
@@ -262,6 +265,7 @@ fn feedback_capacity_upper_envelope_covers_maximum_saved_policy_sets() {
             }
         }
         let mixed = RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
             citation_correction: None,
             unmet: upper

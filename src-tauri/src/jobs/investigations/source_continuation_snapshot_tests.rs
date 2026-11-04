@@ -281,6 +281,7 @@ fn source_continuation_snapshot_rejects_checksummed_unbacked_prior_refusal() {
         refusal_count: 1,
         assessment: vec![],
         feedback: RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
             citation_correction: None,
             unmet: vec![],

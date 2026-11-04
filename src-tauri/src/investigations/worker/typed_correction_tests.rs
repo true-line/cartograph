@@ -202,3 +202,85 @@ fn analyst20_retained_finish_after_duplicate_source_read() {
         }
     }
 }
+
+// AC-0566: malformed authored prose uses the same once-only refusal allowance.
+pub(super) fn prose_action(prompt: &Value, call: usize, exhausted: bool) -> Value {
+    if exhausted && call < 3 {
+        return next_action(prompt, call, false);
+    }
+    if !exhausted && call < 2 {
+        return prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"].clone();
+    }
+    let mut response = next_action(prompt, call + 1, false);
+    if exhausted || call == 2 {
+        response["action"]["limitations"] =
+            json!(["action_placeholder_must_not_be_used_here_but_action_must_be_finish}],"]);
+    } else {
+        assert_eq!(call, 3);
+        assert_eq!(
+            prompt["completion_metadata"]["feedback"]["prose_correction"],
+            "rewrite_schema_placeholders_as_plain_prose"
+        );
+        assert_eq!(
+            prompt["completion_metadata"]["feedback"]["schema_version"],
+            3
+        );
+    }
+    response
+}
+
+#[test]
+fn analyst20_prose_refusal_precedes_audit_and_shares_correction_allowance() {
+    for exhausted in [false, true] {
+        let mut scripted = NextProvider::new(false);
+        scripted.gated_flow = Some(if exhausted {
+            GatedFlow::ExhaustedProseCorrection
+        } else {
+            GatedFlow::ProseCorrection
+        });
+        scripted.audit_verdict = Some("pass");
+        let provider = Arc::new(scripted);
+        let f = NextFixture::with_source_obligation(
+            provider.as_ref(),
+            SpecialistId::DomainAnalystV20,
+            true,
+        );
+        f.run_with_audit_options(provider.as_ref(), RunClock::new(Instant::now()), None, true);
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        let detail = reopened.investigation(&f.id).unwrap();
+        assert!(!detail.summary.invocation_pending);
+        assert_eq!(detail.summary.has_result, !exhausted, "{:?}", detail.error);
+        assert_eq!(
+            provider.observed.calls.load(Ordering::SeqCst),
+            if exhausted { 4 } else { 5 }
+        );
+        assert_eq!(
+            detail.usage.model_invocations,
+            if exhausted { 4 } else { 5 }
+        );
+        assert_eq!(
+            detail.summary.status,
+            if exhausted {
+                InvestigationStatus::Failed
+            } else {
+                InvestigationStatus::Completed
+            },
+            "{:?}",
+            detail.error
+        );
+        let events = reopened.investigation_events(&f.id, 0).unwrap();
+        assert_eq!(
+            events
+                .items
+                .iter()
+                .filter(|e| e.kind == InvestigationEventKind::FinishRefused)
+                .count(),
+            if exhausted { 2 } else { 1 }
+        );
+        let state = f.base.base.app.state::<AppState>();
+        assert_eq!(
+            state.jobs.lock().unwrap().investigation(&f.id).unwrap(),
+            detail
+        );
+    }
+}

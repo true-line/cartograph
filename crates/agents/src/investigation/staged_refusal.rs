@@ -96,7 +96,8 @@ impl RefusalRecord {
         policy: &InvestigationPolicy,
     ) -> Result<RefusalDisposition, InvestigationError> {
         if request.limit_profile != policy.profile()
-            || (self.feedback.citation_correction.is_some()
+            || ((self.feedback.citation_correction.is_some()
+                || self.feedback.prose_correction.is_some())
                 && request.specialist_id != "domain-analyst@20")
         {
             return Err(InvestigationError::InvalidInput);
@@ -169,6 +170,9 @@ impl RefusalRecord {
             consistency
                 .ok_or(InvestigationError::InvalidInput)?
                 .validate_stored_citation_correction(correction)?;
+        }
+        if self.feedback.prose_correction.is_some() && consistency.is_none() {
+            return Err(InvestigationError::InvalidInput);
         }
         let obligations = envelope.normalized_with_policy(policy)?;
         if self.schema_version != 1

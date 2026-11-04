@@ -1041,6 +1041,15 @@ impl InvestigationInput {
             .as_ref()
             .and_then(|feedback| feedback.citation_correction.as_ref());
         let typed_role = self.payload.system == SpecialistId::DomainAnalystV20.prompt();
+        if !typed_role
+            && metadata
+                .feedback
+                .as_ref()
+                .is_some_and(|f| f.prose_correction.is_some())
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+
         self.citation_correction = match (saved, correction) {
             (Some(saved), Some(authenticated))
                 if typed_role && saved == authenticated.original() =>

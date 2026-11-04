@@ -443,7 +443,7 @@ fn semantic_audit_worker_dispatches_once_with_original_deadline_and_reopens() {
 
 #[test]
 fn semantic_audit_worker_failure_and_inflight_cancellation_keep_charge() {
-    for verdict in ["provider_failure", "cancelled_pass"] {
+    for verdict in ["provider_failure", "audit_timeout", "cancelled_pass"] {
         run_audit_dispatch(verdict);
     }
 }
@@ -490,7 +490,10 @@ fn run_audit_dispatch(verdict: &'static str) {
         jobs.investigation_result(&f.id).unwrap().is_some(),
         verdict == "pass"
     );
-    if matches!(verdict, "provider_failure" | "cancelled_pass") {
+    if matches!(
+        verdict,
+        "provider_failure" | "audit_timeout" | "cancelled_pass"
+    ) {
         assert_eq!(
             detail.summary.status,
             if verdict == "cancelled_pass" {
@@ -577,4 +580,41 @@ fn semantic_audit_development_switch_uses_real_completion_entry() {
     assert_eq!(detail.summary.status, InvestigationStatus::Completed);
     assert!(detail.summary.has_result);
     assert_eq!(detail.usage.model_invocations, 5);
+}
+
+// AC-0566: expiration after the durable boundary must not roll terminal state back.
+#[test]
+fn semantic_audit_analyst_boundary_timeout_keeps_charge_and_reopens() {
+    let mut provider = NextProvider::new(false);
+    provider.gated_flow = Some(GatedFlow::TypedCorrection);
+    provider.audit_verdict = Some("pass");
+    let f = NextFixture::with_source_obligation(&provider, SpecialistId::DomainAnalystV20, true);
+    f.run_with_audit_options(&provider, RunClock::expiring_at_invocation(2), None, true);
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(detail.usage.model_invocations, 2);
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert!(
+        detail
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("deadline_exceeded")
+    );
+    assert!(!detail.summary.has_result);
+    assert!(!detail.summary.invocation_pending);
+    assert_eq!(
+        detail.usage.generated_token_reservations,
+        2 * detail.limits.generated_tokens_per_invocation
+    );
+    assert_eq!(detail.usage.reported_input_tokens, None);
+    assert_eq!(detail.usage.reported_output_tokens, None);
+    assert!(detail.usage.active_milliseconds > detail.limits.active_seconds * 1000);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(
+        serde_json::to_value(&detail).unwrap(),
+        serde_json::to_value(reopened.investigation(&f.id).unwrap()).unwrap()
+    );
 }

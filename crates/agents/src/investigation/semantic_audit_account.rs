@@ -119,6 +119,28 @@ impl SemanticAuditAccount {
         Ok(next)
     }
 
+    /// Terminate an analyst invocation with no admitted response. Earlier
+    /// measured totals cannot establish the cumulative total of this call.
+    /// Only reported totals become unknown; all debits remain monotonic.
+    pub fn stop_unmeasured_analyst(
+        &self,
+        usage: &InvestigationUsage,
+        limits: &InvestigationLimits,
+    ) -> Result<Self, InvestigationError> {
+        self.validate(limits)?;
+        if usage.reported_input_tokens.is_some()
+            || usage.reported_output_tokens.is_some()
+            || usage.reported_cache_read_tokens.is_some()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut unknown = self.clone();
+        unknown.analyst.reported_input_tokens = None;
+        unknown.analyst.reported_output_tokens = None;
+        unknown.analyst.reported_cache_read_tokens = None;
+        unknown.stop_analyst(usage, limits)
+    }
+
     /// Settle the single dispatched audit, including a terminal timeout sample.
     /// This records consumed resources but cannot authorize publication or retry.
     pub fn stop_auditor(
@@ -283,6 +305,37 @@ fn sum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-0566: unknown terminal totals never refund a debit or weaken live accounting.
+    #[test]
+    fn audit_account_unmeasured_analyst_stop_preserves_debits() {
+        let limits = INVESTIGATION_V2_POLICY.limits();
+        let measured = InvestigationUsage {
+            model_invocations: 2,
+            generated_token_reservations: 2 * limits.generated_tokens_per_invocation,
+            reported_input_tokens: Some(17),
+            reported_output_tokens: Some(3),
+            reported_cache_read_tokens: Some(1),
+            ..InvestigationUsage::default()
+        };
+        let account = SemanticAuditAccount::new(&limits)
+            .unwrap()
+            .analyst_usage(&measured, &limits)
+            .unwrap();
+        let mut unknown = measured.clone();
+        unknown.reported_input_tokens = None;
+        unknown.reported_output_tokens = None;
+        unknown.reported_cache_read_tokens = None;
+        assert!(account.analyst_usage(&unknown, &limits).is_err());
+        assert!(account.stop_analyst(&unknown, &limits).is_err());
+        assert!(account.stop_unmeasured_analyst(&measured, &limits).is_err());
+        let stopped = account.stop_unmeasured_analyst(&unknown, &limits).unwrap();
+        assert_eq!(stopped.usage().unwrap(), unknown);
+        assert!(stopped.begin_audit(&limits).is_err());
+        assert!(stopped.analyst_usage(&unknown, &limits).is_err());
+        unknown.model_invocations -= 1;
+        assert!(account.stop_unmeasured_analyst(&unknown, &limits).is_err());
+    }
 
     #[test]
     fn audit_account_terminal_timeout_keeps_measurement_without_restart() {

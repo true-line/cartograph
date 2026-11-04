@@ -210,6 +210,8 @@ pub(super) struct RunClock {
     active_limit: Duration,
     #[cfg(test)]
     active_elapsed_override: Option<Duration>,
+    #[cfg(test)]
+    expire_at_invocation: Option<u32>,
 }
 
 impl RunClock {
@@ -220,6 +222,8 @@ impl RunClock {
             active_limit: DEFAULT_ACTIVE_LIMIT,
             #[cfg(test)]
             active_elapsed_override: None,
+            #[cfg(test)]
+            expire_at_invocation: None,
         }
     }
     /// Apply the task's saved active-time allowance (AC-0562).
@@ -233,6 +237,19 @@ impl RunClock {
             consent_waiting: Duration::ZERO,
             active_limit: DEFAULT_ACTIVE_LIMIT,
             active_elapsed_override: Some(Duration::ZERO),
+            expire_at_invocation: None,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn expiring_at_invocation(invocation: u32) -> Self {
+        let mut clock = Self::frozen_active(Instant::now());
+        clock.expire_at_invocation = Some(invocation);
+        clock
+    }
+    #[cfg(test)]
+    pub(super) fn invocation_committed(&mut self, invocation: u32) {
+        if self.expire_at_invocation == Some(invocation) {
+            self.active_elapsed_override = Some(self.active_limit + Duration::from_millis(1));
         }
     }
     fn active_milliseconds_at(&self, now: Instant) -> u64 {

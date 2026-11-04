@@ -656,7 +656,15 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.transition(InvestigationTransition::BeginInvocation { step })?;
             }
             self.clear_pending()?;
-            let deadline = self.clock.deadline()?;
+            #[cfg(test)]
+            self.clock
+                .invocation_committed(self.detail.usage.model_invocations);
+            let deadline = self.clock.deadline().map_err(|_| {
+                Failure::Stop(InvestigationStopReason::BoundedProvider(BoundedCallError {
+                    code: llm::bounded::FailureCode::DeadlineExceeded,
+                    outcome: llm::bounded::InvocationOutcome::NotDispatched,
+                }))
+            })?;
             let directive = || execution_directive(self.state, self.execution, self.id);
             let completion = provider
                 .complete_bounded(
