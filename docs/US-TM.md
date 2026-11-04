@@ -45,7 +45,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0033 | AC-0237..0239, AC-0264..0266, AC-0268 | ingest, context-hub, agents, app (durable query refusal and bounded continuation, #1617), ui, adapters-lang-ts | P1 (ROADMAP) | — | ADR-0036 | T-0237..0239, T-0264..0266, T-0268 |
 | US-0034 | AC-0240..0241, AC-0315 | events, ingest, app, adapters-lang-ts, adapters-lang-kotlin, adapters-lang-java | P1 (ROADMAP) | F-* | ADR-0002, ADR-0036 | T-0240..0241, T-0315 |
 | US-0035 | AC-0242..0245 | spec, core-prov, core-graph, app, ui | P1 (ROADMAP) | — | ADR-0036 | T-0242..0245 |
-| US-0036 | AC-0246..0247 | spec, app, ui | P2 (ROADMAP) | F-* | ADR-0036 | T-0246..0247 |
+| US-0036 | AC-0246..0247 | spec, app, ui | P2 (ROADMAP; #1669 selected flow) | F-* | ADR-0036 | T-0246..0247 |
 | US-0037 | AC-0248..0252 | agents, spec, app, ui | P3 (ROADMAP) | — | ADR-0019, ADR-0036 | T-0248..0252 |
 | US-0038 | AC-0253..0255, AC-0263, AC-0361, AC-0362, AC-0369, AC-0371, AC-0426, AC-0427 | ingest, adapters-fw, adapters-lang-go, dynamic, adapters-plugin-host, app, ui | P1 (ROADMAP) | — | ADR-0017, ADR-0036 | T-0253..0255, T-0263, T-0361, T-0362, T-0369, T-0371, T-0426, T-0427 |
 | US-0039 | AC-0270 | semantic, app | P1 (#257) | — | ADR-0036 | T-0270 |

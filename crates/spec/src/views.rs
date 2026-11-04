@@ -226,6 +226,148 @@ fn bounded_diagram_view(
     }
 }
 
+// Shared projection keeps overview and selected-flow provenance semantics identical.
+fn flow_diagram_view(
+    artifact: &SpecArtifact,
+    mode: ExportMode,
+    by_id: &BTreeMap<&str, &Node>,
+    filtered_edges: &[&Edge],
+    flows: &[Flow],
+) -> SpecDiagramView {
+    // 2. Flow + infrastructure roles view: all projected flows, their hop
+    // participants, and any infrastructure Resource nodes + BACKS/TRIGGERS/ROUTES
+    // edges that back or route participants in those flows.
+    // Participants come only from the flows the view keeps, in flow order, so
+    // a later node/edge cap drops whole trailing flows' context rather than
+    // arbitrary participants of retained flows.
+    let retained_flows = &flows[..flows.len().min(SPEC_VIEW_MAX_FLOWS)];
+    let mut flow_nodes: Vec<Node> = Vec::new();
+    let mut flow_node_ids: BTreeSet<String> = BTreeSet::new();
+    let mut flow_edges: Vec<Edge> = Vec::new();
+    let mut flow_edge_keys: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for flow in retained_flows {
+        if let Some(trigger_node) = by_id.get(flow.trigger.as_str())
+            && flow_node_ids.insert(flow.trigger.clone())
+        {
+            flow_nodes.push((*trigger_node).clone());
+        }
+        for hop in &flow.hops {
+            if flow_node_ids.insert(hop.src.clone()) {
+                flow_nodes.push(
+                    by_id
+                        .get(hop.src.as_str())
+                        .map(|node| (*node).clone())
+                        .unwrap_or_else(|| Node {
+                            id: hop.src.clone(),
+                            label: participant_label(&hop.src, None),
+                            props: serde_json::json!({
+                                "name": hop.src_name,
+                                "prov": hop.provenance,
+                            }),
+                        }),
+                );
+            }
+            if flow_node_ids.insert(hop.dst.clone()) {
+                flow_nodes.push(
+                    by_id
+                        .get(hop.dst.as_str())
+                        .map(|node| (*node).clone())
+                        .unwrap_or_else(|| {
+                            synthetic_participant_node(&hop.dst, &hop.dst_name, hop)
+                        }),
+                );
+            }
+            if flow_edge_keys.insert((hop.src.clone(), hop.dst.clone(), hop.label.clone())) {
+                flow_edges.push(Edge {
+                    src: hop.src.clone(),
+                    dst: hop.dst.clone(),
+                    label: hop.label.clone(),
+                    props: serde_json::json!({
+                        "prov": hop.provenance,
+                        "gap_reason": hop.gap_reason,
+                        "attempted_tiers": hop.attempted_tiers,
+                    }),
+                });
+            }
+        }
+    }
+    let participant_ids = flow_node_ids.clone();
+    for edge in filtered_edges {
+        if !TOPOLOGY_EDGE_LABELS.contains(&edge.label.as_str()) {
+            continue;
+        }
+        let src_is_res = by_id
+            .get(edge.src.as_str())
+            .is_some_and(|node| node.label == "Resource");
+        let dst_is_res = by_id
+            .get(edge.dst.as_str())
+            .is_some_and(|node| node.label == "Resource");
+        let touches_flow =
+            participant_ids.contains(&edge.src) || participant_ids.contains(&edge.dst);
+        if touches_flow && (src_is_res || dst_is_res) {
+            for id in [&edge.src, &edge.dst] {
+                if let Some(node) = by_id.get(id.as_str())
+                    && flow_node_ids.insert(id.clone())
+                {
+                    flow_nodes.push((*node).clone());
+                }
+            }
+            if flow_node_ids.contains(&edge.src)
+                && flow_node_ids.contains(&edge.dst)
+                && flow_edge_keys.insert((edge.src.clone(), edge.dst.clone(), edge.label.clone()))
+            {
+                flow_edges.push((*edge).clone());
+            }
+        }
+    }
+
+    bounded_diagram_view(artifact, mode, flow_nodes, flow_edges, flows.to_vec(), true)
+}
+
+/// Compile one selected flow within existing diagram bounds, bound to the
+/// complete official dossier identity. Selection precedes participant limits.
+pub fn compile_selected_flow_view(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    trigger: &str,
+    expected_content_id: &str,
+) -> Result<SpecDiagramView, String> {
+    let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
+        .map_err(|error| format!("flow projection failed: {error:?}"))?;
+    let selected_flow = projection
+        .flows
+        .iter()
+        .find(|flow| flow.trigger == trigger)
+        .ok_or_else(|| "selected flow is no longer available; refresh the flow view".to_string())?;
+    let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
+    let filtered_edges = filter_edges(&projection.edges, mode, rejected_hashes);
+    let artifact = selected::flow_artifact_from_filtered(
+        &filtered_nodes,
+        &filtered_edges,
+        &projection.flows,
+        mode,
+        rejected_hashes,
+    );
+    if artifact.content_id != expected_content_id {
+        return Err("flow dossier changed since this preview; refresh the flow view".into());
+    }
+    let by_id = filtered_nodes
+        .iter()
+        .copied()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    Ok(flow_diagram_view(
+        &artifact,
+        mode,
+        &by_id,
+        &filtered_edges,
+        std::slice::from_ref(selected_flow),
+    ))
+}
+
 /// Compile both the official [`SpecBundle`] and its [`SpecViewBundle`] from a
 /// single R-INT-5 and curation projection and a single production of each
 /// artifact, binding view `content_id`s to the bundle artifacts by
@@ -313,93 +455,6 @@ pub fn compile_spec_with_views(
         .filter_map(|id| by_id.get(id.as_str()).copied().cloned())
         .collect();
 
-    // 2. Flow + infrastructure roles view: all projected flows, their hop
-    // participants, and any infrastructure Resource nodes + BACKS/TRIGGERS/ROUTES
-    // edges that back or route participants in those flows.
-    // Participants come only from the flows the view keeps, in flow order, so
-    // a later node/edge cap drops whole trailing flows' context rather than
-    // arbitrary participants of retained flows.
-    let retained_flows = &projection.flows[..projection.flows.len().min(SPEC_VIEW_MAX_FLOWS)];
-    let mut flow_nodes: Vec<Node> = Vec::new();
-    let mut flow_node_ids: BTreeSet<String> = BTreeSet::new();
-    let mut flow_edges: Vec<Edge> = Vec::new();
-    let mut flow_edge_keys: BTreeSet<(String, String, String)> = BTreeSet::new();
-    for flow in retained_flows {
-        if let Some(trigger_node) = by_id.get(flow.trigger.as_str())
-            && flow_node_ids.insert(flow.trigger.clone())
-        {
-            flow_nodes.push((*trigger_node).clone());
-        }
-        for hop in &flow.hops {
-            if flow_node_ids.insert(hop.src.clone()) {
-                flow_nodes.push(
-                    by_id
-                        .get(hop.src.as_str())
-                        .map(|node| (*node).clone())
-                        .unwrap_or_else(|| Node {
-                            id: hop.src.clone(),
-                            label: participant_label(&hop.src, None),
-                            props: serde_json::json!({
-                                "name": hop.src_name,
-                                "prov": hop.provenance,
-                            }),
-                        }),
-                );
-            }
-            if flow_node_ids.insert(hop.dst.clone()) {
-                flow_nodes.push(
-                    by_id
-                        .get(hop.dst.as_str())
-                        .map(|node| (*node).clone())
-                        .unwrap_or_else(|| {
-                            synthetic_participant_node(&hop.dst, &hop.dst_name, hop)
-                        }),
-                );
-            }
-            if flow_edge_keys.insert((hop.src.clone(), hop.dst.clone(), hop.label.clone())) {
-                flow_edges.push(Edge {
-                    src: hop.src.clone(),
-                    dst: hop.dst.clone(),
-                    label: hop.label.clone(),
-                    props: serde_json::json!({
-                        "prov": hop.provenance,
-                        "gap_reason": hop.gap_reason,
-                        "attempted_tiers": hop.attempted_tiers,
-                    }),
-                });
-            }
-        }
-    }
-    let participant_ids = flow_node_ids.clone();
-    for edge in &filtered_edges {
-        if !TOPOLOGY_EDGE_LABELS.contains(&edge.label.as_str()) {
-            continue;
-        }
-        let src_is_res = by_id
-            .get(edge.src.as_str())
-            .is_some_and(|node| node.label == "Resource");
-        let dst_is_res = by_id
-            .get(edge.dst.as_str())
-            .is_some_and(|node| node.label == "Resource");
-        let touches_flow =
-            participant_ids.contains(&edge.src) || participant_ids.contains(&edge.dst);
-        if touches_flow && (src_is_res || dst_is_res) {
-            for id in [&edge.src, &edge.dst] {
-                if let Some(node) = by_id.get(id.as_str())
-                    && flow_node_ids.insert(id.clone())
-                {
-                    flow_nodes.push((*node).clone());
-                }
-            }
-            if flow_node_ids.contains(&edge.src)
-                && flow_node_ids.contains(&edge.dst)
-                && flow_edge_keys.insert((edge.src.clone(), edge.dst.clone(), edge.label.clone()))
-            {
-                flow_edges.push((*edge).clone());
-            }
-        }
-    }
-
     // 3. Data-model view: DataEntity nodes and READS/WRITES/MAPS_TO relations.
     let entity_ids: BTreeSet<&str> = filtered_nodes
         .iter()
@@ -443,13 +498,12 @@ pub fn compile_spec_with_views(
             Vec::new(),
             true,
         ),
-        flows: bounded_diagram_view(
+        flows: flow_diagram_view(
             flow_artifact,
             mode,
-            flow_nodes,
-            flow_edges,
-            projection.flows,
-            true,
+            &by_id,
+            &filtered_edges,
+            &projection.flows,
         ),
         data_model: bounded_diagram_view(
             data_artifact,
@@ -646,6 +700,84 @@ mod tests {
             depth_limited: false,
         }];
         (nodes, edges, flows)
+    }
+
+    // AC-0246 / #1669: selection precedes limits without changing dossier identity.
+    #[test]
+    fn selected_late_flow_preserves_identity_mode_and_infrastructure() {
+        let (nodes, edges, original) = fixture();
+        let mut flows: Vec<_> = (0..SPEC_VIEW_MAX_FLOWS)
+            .map(|index| {
+                let mut flow = original[0].clone();
+                flow.trigger = format!("ep:AAA-padding:{index:04}");
+                flow.trigger_name = format!("Padding {index}");
+                flow.hops.clear();
+                flow
+            })
+            .collect();
+        flows.extend(original.clone());
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            let rejected = BTreeSet::new();
+            let (bundle, overview) =
+                compile_spec_with_views(&nodes, &edges, &flows, mode, &rejected);
+            let artifact = bundle
+                .artifacts
+                .iter()
+                .find(|a| a.id == "flow-dossiers")
+                .unwrap();
+            assert!(
+                !overview
+                    .flows
+                    .flows
+                    .iter()
+                    .any(|f| f.trigger == original[0].trigger)
+            );
+            let selected = compile_selected_flow_view(
+                &nodes,
+                &edges,
+                &flows,
+                mode,
+                &rejected,
+                &original[0].trigger,
+                &artifact.content_id,
+            )
+            .unwrap();
+            assert!(selected.matches_artifact(artifact));
+            assert_eq!(selected.flows_total, 1);
+            assert_eq!(selected.flows.len(), 1);
+            let baseline = compile_spec_views(&nodes, &edges, &original, mode, &rejected).flows;
+            assert_eq!(selected.nodes, baseline.nodes);
+            assert_eq!(selected.edges, baseline.edges);
+            assert_eq!(
+                serde_json::to_value(&selected.flows).unwrap(),
+                serde_json::to_value(&baseline.flows).unwrap()
+            );
+            assert_eq!(selected.deployments, baseline.deployments);
+            assert!(
+                compile_selected_flow_view(
+                    &nodes,
+                    &edges,
+                    &flows,
+                    mode,
+                    &rejected,
+                    &original[0].trigger,
+                    "stale"
+                )
+                .is_err()
+            );
+            assert!(
+                compile_selected_flow_view(
+                    &nodes,
+                    &edges,
+                    &flows,
+                    mode,
+                    &rejected,
+                    "missing-trigger",
+                    &artifact.content_id
+                )
+                .is_err()
+            );
+        }
     }
 
     // AC-0246 (T-0246): compiled topology, flow, deployment, and data-model

@@ -165,6 +165,7 @@ export default function App() {
     clearGraph,
     setSpecMode,
     readSpecArtifact,
+    readSelectedFlowView,
     curateAssertion,
     select,
     clearSelection,
@@ -684,6 +685,7 @@ export default function App() {
           >
             <FlowsCard
               flows={flowList}
+              readSelectedFlowView={readSelectedFlowView}
               anchors={flowAnchors}
               mode={specMode}
               onModeChange={(mode) => void setSpecMode(mode)}
