@@ -2114,6 +2114,8 @@ pub(super) fn refused(
         task.detail.error = Some(
             if task.detail.summary.cancel_requested {
                 "Cancellation won over a late unmet finish."
+            } else if entry.record.feedback.prose_correction.is_some() {
+                "The answer still contained incomplete or placeholder text after one correction. No findings were saved."
             } else {
                 "Two well-formed finishes left completion obligations unmet."
             }

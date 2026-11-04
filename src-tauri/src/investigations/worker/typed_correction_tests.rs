@@ -250,6 +250,16 @@ fn analyst20_prose_refusal_precedes_audit_and_shares_correction_allowance() {
         let detail = reopened.investigation(&f.id).unwrap();
         assert!(!detail.summary.invocation_pending);
         assert_eq!(detail.summary.has_result, !exhausted, "{:?}", detail.error);
+        if exhausted {
+            assert_eq!(
+                detail.error.as_deref(),
+                Some(
+                    "The answer still contained incomplete or placeholder text after one correction. No findings were saved."
+                )
+            );
+        } else {
+            assert!(detail.error.is_none());
+        }
         assert_eq!(
             provider.observed.calls.load(Ordering::SeqCst),
             if exhausted { 4 } else { 5 }
