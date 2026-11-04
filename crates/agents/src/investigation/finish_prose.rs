@@ -20,6 +20,18 @@ pub(super) fn has_placeholder(finish: &StagedFinish) -> bool {
 
 fn placeholder(value: &str) -> bool {
     let value = value.trim();
+    // Empty labels and punctuation-only fields cannot express a limitation.
+    // A colon inside a sentence remains ordinary prose.
+    if !value.chars().any(char::is_alphanumeric)
+        || value.strip_suffix(':').is_some_and(|label| {
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+        })
+    {
+        return true;
+    }
     let identifier = |s: &str| {
         let mut parts = s.split('_');
         let part = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric());
@@ -101,6 +113,31 @@ mod tests {
             "The field foo_bar is an identifier.",
         ] {
             assert!(!placeholder(text), "false positive {text}");
+        }
+    }
+    // AC-0566: Flint run 2 emitted a bare label; no semantic auditor needed.
+    #[test]
+    fn analyst20_prose_refuses_bare_labels_but_preserves_colon_sentences() {
+        for text in [
+            "statement:",
+            "  statement:  ",
+            "Note:",
+            "source_limit:",
+            ":",
+            "...",
+            "{}",
+            "—",
+        ] {
+            assert!(placeholder(text), "accepted empty authored field {text}");
+        }
+        for text in [
+            "Note: only the client was inspected.",
+            "HTTP status: 201",
+            "The route is API_ROUTE.NEW_ALIAS.",
+            "The response is {}.",
+            "Limitations",
+        ] {
+            assert!(!placeholder(text), "rejected ordinary prose {text}");
         }
     }
     #[test]
