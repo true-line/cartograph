@@ -478,6 +478,7 @@ impl Fixture {
             specialist_id,
             required_role,
             original,
+            0,
             None,
             None::<
                 fn(
@@ -511,10 +512,40 @@ impl Fixture {
             specialist_id,
             required_role,
             original,
+            0,
             inventory_json,
             Some(before_start),
         )
     }
+    #[allow(clippy::too_many_arguments)]
+    fn with_padded_contract(
+        provider: &dyn LlmProvider,
+        directory: tempfile::TempDir,
+        question: &str,
+        specialist_id: SpecialistId,
+        required_role: Option<agents::TaskRangeRole>,
+        original: &str,
+        padding_nodes: usize,
+    ) -> Self {
+        Self::with_optional_contract(
+            provider,
+            directory,
+            question,
+            specialist_id,
+            required_role,
+            original,
+            padding_nodes,
+            None,
+            None::<
+                fn(
+                    &tauri::AppHandle<tauri::test::MockRuntime>,
+                    &AppState,
+                    &mut StartInvestigationRequest,
+                ),
+            >,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn with_optional_contract(
         provider: &dyn LlmProvider,
@@ -523,6 +554,7 @@ impl Fixture {
         specialist_id: SpecialistId,
         required_role: Option<agents::TaskRangeRole>,
         original: &str,
+        padding_nodes: usize,
         inventory_json: Option<fn(&str) -> String>,
         before_start: Option<
             impl FnOnce(
@@ -591,6 +623,26 @@ impl Fixture {
             conversation_id: None,
             parent_id: None,
         };
+        // Closed setup: no AppHandle exists or escapes during graph padding.
+        if padding_nodes > 0 {
+            let mut graph = state.graph.lock().unwrap();
+            let expected = graph.read_snapshot().unwrap();
+            let patch = core_graph::GraphPatch {
+                upsert_nodes: (0..padding_nodes)
+                    .map(|i| core_graph::Node {
+                        id: format!("padding:{i}"),
+                        label: "Module".into(),
+                        props: json!({"name":format!("padding{i}")}),
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            assert!(
+                graph
+                    .apply_patch_if_snapshot_matches(&expected, &patch)
+                    .unwrap()
+            );
+        }
         let app = FixtureApp::new(state);
         let state = app.state::<AppState>();
         if let Some(before_start) = before_start {

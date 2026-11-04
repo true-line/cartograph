@@ -170,55 +170,20 @@ impl NextFixture {
     fn run_with_audit_options(
         &self,
         provider: &dyn LlmProvider,
-        mut clock: RunClock,
+        clock: RunClock,
         audit_probe: Option<&AuditProbe<'_>>,
         dispatch_audit: bool,
     ) {
-        let app = self.base.base.app.handle();
-        let state = app.state::<AppState>();
-        let _cleanup = Cleanup {
-            state: &state,
-            id: &self.id,
-            live: &self.live,
-        };
-        let detail = read_detail(&state, &self.id, &self.execution).unwrap();
-        let request = FrozenContext::completion_acquisition_request(&self.request).unwrap();
-        let mut worker = Worker {
-            app,
-            state: &state,
-            id: &self.id,
-            execution: &self.execution,
-            live: &self.live,
-            detail,
-            clock: &mut clock,
-            task_limits: None,
-            request_timeout_ms: CompletionLimits::default().values().request_timeout_ms,
+        self.base.base.app.run_gated_completion_inner(
+            &self.id,
+            &self.request,
+            &self.execution,
+            &self.live,
+            provider,
+            clock,
             audit_probe,
             dispatch_audit,
-        };
-        let outcome = worker
-            .execute_inner(&request, Some(&self.request), provider)
-            .map_err(|failure| {
-                failure.preparation_after_call(
-                    request.specialist_id,
-                    worker.detail.usage.model_invocations,
-                )
-            });
-        if audit_probe.is_some() {
-            assert!(outcome.is_ok(), "audit probe worker failed: {outcome:?}");
-        }
-        if let Err(failure) = outcome
-            && let Some(reason) = failure.reason()
-        {
-            stop(
-                app,
-                &state,
-                &self.id,
-                &self.execution,
-                reason,
-                clock.active_milliseconds(),
-            );
-        }
+        );
     }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
         self.base.base.app.run_completion(
@@ -2587,3 +2552,36 @@ mod typed_correction_tests;
 
 #[path = "semantic_audit_start_tests.rs"]
 mod semantic_audit_start_tests;
+
+#[test]
+fn inline_completion_fixture_releases_stores_and_preserves_handle_escape() {
+    // AC-0287: lifecycle follows the real worker, including ordinary failure.
+    for escape in [false, true] {
+        let provider = NextProvider::new(false);
+        let fixture = NextFixture::new(&provider, SpecialistId::DomainAnalystV10);
+        let weak = Arc::downgrade(&fixture.base.base.app.state::<AppState>().sources);
+        let escaped = escape.then(|| fixture.base.base.app.handle().clone());
+        fixture.run_gated_inner(&provider);
+        assert_eq!(
+            fixture
+                .base
+                .base
+                .app
+                .state::<AppState>()
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation(&fixture.id)
+                .unwrap()
+                .summary
+                .status,
+            InvestigationStatus::Failed
+        );
+        assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 2);
+        drop(fixture);
+        assert_eq!(weak.upgrade().is_some(), escape);
+        if let Some(handle) = escaped {
+            assert!(handle.try_state::<AppState>().is_some());
+        }
+    }
+}
