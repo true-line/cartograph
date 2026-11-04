@@ -221,7 +221,11 @@ pub fn flush(timeout: Duration) -> bool {
 
 /// Whether a sink is installed, so callers can skip recording entirely.
 pub(crate) fn enabled() -> bool {
-    RECORDER.enabled()
+    #[cfg(test)]
+    let recorder = test_support::recorder();
+    #[cfg(not(test))]
+    let recorder = &RECORDER;
+    recorder.enabled()
 }
 
 /// Worst-case pool charge of one entry.
@@ -273,6 +277,8 @@ pub(crate) fn excerpt(parts: &[&[u8]]) -> String {
 
 /// An in-flight call whose `Sent` entry has been queued.
 pub(crate) struct Call {
+    #[cfg(test)]
+    recorder: Arc<Recorder>,
     call: u64,
     path: &'static str,
     target: String,
@@ -285,8 +291,12 @@ pub(crate) fn begin(path: &'static str, target: &str, parts: &[&[u8]]) -> Call {
     let call = NEXT_CALL.fetch_add(1, Ordering::Relaxed);
     #[cfg(test)]
     test_support::BEGUN_ON_THREAD.with(|begun| begun.set(begun.get() + 1));
-    if let Some(reservation) = RECORDER.reserve(charge(target, 1)) {
-        RECORDER.push(
+    #[cfg(test)]
+    let recorder = test_support::recorder();
+    #[cfg(not(test))]
+    let recorder = &RECORDER;
+    if let Some(reservation) = recorder.reserve(charge(target, 1)) {
+        recorder.push(
             reservation,
             ModelExchange {
                 call,
@@ -303,6 +313,8 @@ pub(crate) fn begin(path: &'static str, target: &str, parts: &[&[u8]]) -> Call {
         );
     }
     Call {
+        #[cfg(test)]
+        recorder,
         call,
         path,
         target: target.to_owned(),
@@ -313,10 +325,14 @@ pub(crate) fn begin(path: &'static str, target: &str, parts: &[&[u8]]) -> Call {
 impl Call {
     /// Queue the matching `Received` entry, under the same pool rule.
     pub(crate) fn finish(self, response: Option<&[u8]>, error: Option<String>) {
-        let Some(reservation) = RECORDER.reserve(charge(&self.target, 1)) else {
+        #[cfg(test)]
+        let recorder = &self.recorder;
+        #[cfg(not(test))]
+        let recorder = &RECORDER;
+        let Some(reservation) = recorder.reserve(charge(&self.target, 1)) else {
             return;
         };
-        RECORDER.push(
+        recorder.push(
             reservation,
             ModelExchange {
                 call: self.call,
@@ -338,38 +354,45 @@ impl Call {
 pub(crate) mod test_support {
     use super::*;
 
-    static RECORDED: Mutex<Vec<ModelExchange>> = Mutex::new(Vec::new());
-    static INSTALL: std::sync::Once = std::sync::Once::new();
     thread_local! {
+        static RECORDER: Arc<Recorder> = Recorder::new(QUEUE_BYTES);
+        static RECORDED: Arc<Mutex<Vec<ModelExchange>>> = Arc::default();
         /// `Sent` entries begun by this thread, so a test's control check
         /// can act at the instant after the request was logged.
         pub(crate) static BEGUN_ON_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Only this capture's writer is held by the slow-sink test.
+        pub(crate) static HOLD_SLOW_SINK: Arc<AtomicBool> = Arc::default();
     }
-    /// While set, the capturing sink blocks on entries containing
-    /// `debug-1624-slow-sink`, standing in for a slow disk.
-    pub(crate) static HOLD_SLOW_SINK: AtomicBool = AtomicBool::new(false);
 
-    /// Install one capturing sink for the whole test binary.
+    pub(super) fn recorder() -> Arc<Recorder> {
+        RECORDER.with(Arc::clone)
+    }
+
+    /// Install a capturing sink owned by this test thread. Unrelated
+    /// completion tests cannot reserve from its pool or append its entries.
     pub(crate) fn capture() {
-        INSTALL.call_once(|| {
-            set_sink(Some(Arc::new(|exchange: &ModelExchange| {
-                let slow = exchange
-                    .request
-                    .as_deref()
-                    .is_some_and(|r| r.contains("debug-1624-slow-sink"));
-                while slow && HOLD_SLOW_SINK.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                RECORDED.lock().unwrap().push(exchange.clone());
-            })));
-        });
+        let recorded = RECORDED.with(Arc::clone);
+        let hold = HOLD_SLOW_SINK.with(Arc::clone);
+        recorder().set_sink(Some(Arc::new(move |exchange: &ModelExchange| {
+            let slow = exchange
+                .request
+                .as_deref()
+                .is_some_and(|r| r.contains("debug-1624-slow-sink"));
+            while slow && hold.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            recorded.lock().unwrap().push(exchange.clone());
+        })));
     }
 
     /// Both entries of every call whose `Sent` request contains `marker`,
     /// after the writer has delivered everything queued so far.
     pub(crate) fn calls_with(marker: &str) -> Vec<(ModelExchange, Option<ModelExchange>)> {
-        assert!(flush(Duration::from_secs(10)), "debug log did not drain");
-        let recorded = RECORDED.lock().unwrap().clone();
+        assert!(
+            recorder().flush(Duration::from_secs(10)),
+            "debug log did not drain"
+        );
+        let recorded = RECORDED.with(|entries| entries.lock().unwrap().clone());
         recorded
             .iter()
             .filter(|entry| {
@@ -404,6 +427,48 @@ mod tests {
             error: None,
             dropped_before: 0,
         }
+    }
+
+    // AC-0560 (#1674): capture pools remain independent under parallel
+    // pressure, and a call moved to another thread keeps its original sink.
+    #[test]
+    fn debug_capture_isolates_parallel_pressure_and_cross_thread_finish() {
+        use std::sync::mpsc;
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let pressure = std::thread::spawn(move || {
+            test_support::capture();
+            test_support::HOLD_SLOW_SINK.with(|hold| hold.store(true, Ordering::Release));
+            for _ in 0..QUEUE_BYTES / MAX_BODY_BYTES {
+                let _call = begin("test", "synthetic", &[b"debug-1624-slow-sink"]);
+            }
+            assert!(
+                test_support::recorder()
+                    .reserve(charge("synthetic", 1))
+                    .is_none()
+            );
+            ready_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            test_support::HOLD_SLOW_SINK.with(|hold| hold.store(false, Ordering::Release));
+            assert!(test_support::calls_with("isolated-target").is_empty());
+        });
+        ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        test_support::capture();
+        let call = begin("test", "synthetic", &[b"isolated-target"]);
+        std::thread::spawn(move || call.finish(None, Some("Cancelled".into())))
+            .join()
+            .unwrap();
+        // Release pressure before assertions so a failed assertion cannot
+        // leave the other capture's writer held indefinitely.
+        release_tx.send(()).unwrap();
+        pressure.join().unwrap();
+        let calls = test_support::calls_with("isolated-target");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1.as_ref().unwrap().error.as_deref(),
+            Some("Cancelled")
+        );
+        assert!(test_support::calls_with("debug-1624-slow-sink").is_empty());
     }
 
     // AC-0560 (#1624): a slow sink never blocks the caller. Every entry,

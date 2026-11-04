@@ -1797,7 +1797,7 @@ fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
     let (endpoint, server) = http(framed(&ollama_body(r#"{"action":"finish"}"#)));
     let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
     let request = authorized(&local, "debug-1624-slow-sink");
-    HOLD_SLOW_SINK.store(true, Ordering::Release);
+    HOLD_SLOW_SINK.with(|hold| hold.store(true, Ordering::Release));
     let started = Instant::now();
     let result = local.complete_bounded(
         &request,
@@ -1807,7 +1807,7 @@ fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
         },
     );
     let elapsed = started.elapsed();
-    HOLD_SLOW_SINK.store(false, Ordering::Release);
+    HOLD_SLOW_SINK.with(|hold| hold.store(false, Ordering::Release));
     server.join().unwrap();
     assert_eq!(result.unwrap().text, r#"{"action":"finish"}"#);
     assert!(elapsed < Duration::from_secs(2));
