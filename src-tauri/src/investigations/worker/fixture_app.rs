@@ -78,7 +78,9 @@ impl FixtureApp {
         live: Arc<LiveTask>,
         started: Instant,
     ) {
-        self.run_completion_with_audit(id, request, execution, provider, live, started, false);
+        self.run_completion_with_audit(
+            id, request, execution, provider, live, started, false, None,
+        );
     }
     // Test/development only: exercise the real entry and dispatch, never audit_probe.
     #[allow(clippy::too_many_arguments)]
@@ -91,6 +93,7 @@ impl FixtureApp {
         live: Arc<LiveTask>,
         started: Instant,
         dispatch_audit: bool,
+        auditor: Option<ConfiguredAuditor>,
     ) {
         self.begin();
         super::run_completion_with_clock(
@@ -103,6 +106,7 @@ impl FixtureApp {
             RunClock::new(started),
             None,
             dispatch_audit,
+            auditor,
         );
         self.end();
     }
@@ -143,6 +147,7 @@ impl FixtureApp {
                 request_timeout_ms: CompletionLimits::default().values().request_timeout_ms,
                 audit_probe,
                 dispatch_audit,
+                auditor: None,
             };
             let outcome = worker
                 .execute_inner(&request, Some(staged), provider)

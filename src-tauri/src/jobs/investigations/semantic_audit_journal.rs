@@ -7,6 +7,50 @@ use rusqlite::Transaction;
 const TABLE: &str = "candidate_audit_invocations";
 const OWNED: &str = "name GLOB 'candidate_audit_*' OR (tbl_name GLOB 'candidate_audit_*' AND name NOT GLOB 'sqlite_*')";
 
+/// Configured identity reported by the caller, not an attestation of executed weights.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SeparateAuditor {
+    pub profile: ProviderProfile,
+    pub reported_model_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyst_reported_model_digest: Option<String>,
+}
+impl SeparateAuditor {
+    pub(crate) fn validate(&self) -> Result<(), InvestigationStoreError> {
+        if self.profile.locality != llm::Locality::Local
+            || [
+                &self.reported_model_digest,
+                &self.analyst_reported_model_digest,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if let (Some(auditor), Some(analyst)) = (
+            &self.reported_model_digest,
+            &self.analyst_reported_model_digest,
+        ) && auditor.eq_ignore_ascii_case(analyst)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        encode(self, MAX_MANIFEST_BYTES)?;
+        Ok(())
+    }
+    pub(crate) fn validate_against_model(
+        &self,
+        analyst_model: &str,
+    ) -> Result<(), InvestigationStoreError> {
+        self.validate()?;
+        if self.profile.requested_model == analyst_model {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AuditInvocation {
@@ -19,6 +63,8 @@ pub(super) struct AuditInvocation {
     pub action_id: String,
     pub payload_hash: String,
     pub provider: ProviderProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separate_auditor: Option<SeparateAuditor>,
     pub limits: CompletionLimitValues,
     /// Original aggregate usage before charging the single reserved audit call.
     pub pre_usage: InvestigationUsage,
@@ -26,6 +72,12 @@ pub(super) struct AuditInvocation {
 
 impl AuditInvocation {
     fn validate(&self) -> Result<(), InvestigationStoreError> {
+        if let Some(selected) = &self.separate_auditor {
+            selected.validate()?;
+            if selected.profile != self.provider {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
         if self.schema_version != 1
             || !valid_id(&self.task_id)
             || !valid_id(&self.finishing_step_id)
@@ -155,6 +207,7 @@ mod tests {
     use super::*;
     fn invocation() -> AuditInvocation {
         AuditInvocation {
+            separate_auditor: None,
             schema_version: 1,
             task_id: "task:fixture".into(),
             finishing_step_id: "step-4".into(),
@@ -226,5 +279,48 @@ mod tests {
             .unwrap();
         assert!(load(&connection, "task:fixture").is_err());
         assert!(stored_bytes(&connection, None).is_err());
+    }
+    // AC-0566: optional identity preserves historical bytes and rejects mismatches.
+    #[test]
+    fn audit_separate_identity_preserves_legacy_and_rejects_mismatched_profile() {
+        let mut record = invocation();
+        let historical = encode(&record, MAX_MANIFEST_BYTES).unwrap();
+        assert!(
+            !String::from_utf8(historical.clone())
+                .unwrap()
+                .contains("separate_auditor")
+        );
+        let reopened: AuditInvocation = serde_json::from_slice(&historical).unwrap();
+        assert_eq!(encode(&reopened, MAX_MANIFEST_BYTES).unwrap(), historical);
+        record.separate_auditor = Some(SeparateAuditor {
+            profile: record.provider.clone(),
+            reported_model_digest: Some("a".repeat(64)),
+            analyst_reported_model_digest: Some("b".repeat(64)),
+        });
+        record.validate().unwrap();
+        let selected = record.separate_auditor.as_mut().unwrap();
+        assert!(
+            selected
+                .validate_against_model(&selected.profile.requested_model)
+                .is_err()
+        );
+        selected.validate_against_model("different-model").unwrap();
+        selected.analyst_reported_model_digest = Some("A".repeat(64));
+        assert!(selected.validate_against_model("different-model").is_err());
+        selected.analyst_reported_model_digest = Some("b".repeat(64));
+        record
+            .separate_auditor
+            .as_mut()
+            .unwrap()
+            .profile
+            .requested_model = "other".into();
+        assert!(record.validate().is_err());
+        record.separate_auditor.as_mut().unwrap().profile = record.provider.clone();
+        record
+            .separate_auditor
+            .as_mut()
+            .unwrap()
+            .reported_model_digest = Some("not-a-digest".into());
+        assert!(record.validate().is_err());
     }
 }

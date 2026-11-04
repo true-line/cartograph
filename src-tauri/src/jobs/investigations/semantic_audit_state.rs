@@ -13,6 +13,7 @@ pub(super) struct StoredSemanticAudit {
 }
 
 pub(crate) struct SemanticAuditStart<'a> {
+    pub separate_auditor: Option<&'a super::semantic_audit_journal::SeparateAuditor>,
     pub input: &'a InvestigationInput,
     pub original_prepared: &'a llm::bounded::PreparedBoundedCompletion,
     pub prepared: &'a llm::bounded::PreparedBoundedCompletion,
@@ -84,6 +85,12 @@ impl JobStore {
             return Err(InvestigationStoreError::Cancelled);
         }
         let expected = prepare_payload_for_task(&tx, &task, start.input, start.original_prepared)?;
+        if let Some(selected) = start.separate_auditor {
+            selected.validate_against_model(&start.original_prepared.profile().requested_model)?;
+            if &selected.profile != start.prepared.profile() {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
         let preview = start.prepared.preview();
         let authorized = start.authorized;
         if preview.egress.payload != *expected.payload()
@@ -134,6 +141,7 @@ impl JobStore {
             action_id: authorized.action_id().into(),
             payload_hash: authorized.payload_hash().into(),
             provider: authorized.profile().clone(),
+            separate_auditor: start.separate_auditor.cloned(),
             limits: authorized.limits().values(),
             pre_usage,
         };
@@ -436,11 +444,19 @@ pub(super) fn validate_invocation_journal(
             || record.acquired_ledger_hash != candidate.input_ledger_hash
             || Some(&record.finishing_step_id) != candidate.invocation_step_id.as_ref()
             || &record.pre_usage != audit.account.analyst_counters()
-            || record.provider.provider_id != provider.provider_id
-            || record.provider.requested_model != provider.model
-            || record.provider.endpoint_id != provider.endpoint
-            || Some(record.provider.protocol_version.as_str())
-                != provider.protocol_version.as_deref()
+            || match &record.separate_auditor {
+                Some(selected) => {
+                    selected.profile != record.provider
+                        || selected.validate_against_model(&provider.model).is_err()
+                }
+                None => {
+                    record.provider.provider_id != provider.provider_id
+                        || record.provider.requested_model != provider.model
+                        || record.provider.endpoint_id != provider.endpoint
+                        || Some(record.provider.protocol_version.as_str())
+                            != provider.protocol_version.as_deref()
+                }
+            }
             || record.limits != limits
         {
             return Err(InvestigationStoreError::Invalid);
@@ -686,6 +702,7 @@ mod tests {
                 &f.base.f.execution,
                 detail.summary.revision,
                 &crate::jobs::investigations::SemanticAuditStart {
+                    separate_auditor: None,
                     input: &f.input,
                     original_prepared: &f.prepared,
                     prepared: &f.prepared,
@@ -734,6 +751,7 @@ mod tests {
         assert_eq!(analyst_counters(&forged).model_invocations, 0);
         assert!(validate_invocation_journal(&f.base.f.store.conn, &forged).is_err());
         let record = super::super::semantic_audit_journal::AuditInvocation {
+            separate_auditor: None,
             schema_version: 1,
             task_id: f.base.id().into(),
             finishing_step_id: "step-1".into(),

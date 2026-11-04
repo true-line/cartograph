@@ -27,8 +27,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             Err(InvestigationStoreError::Stale) => return Ok(false), // earlier analyst refusal
             Err(error) => return Err(error.into()),
         };
+        let configured = self.auditor;
+        let provider = configured.map_or(provider, |auditor| auditor.provider.as_ref());
+        let auditor_descriptor = descriptor(provider, InvestigationProviderMode::Local)?;
         if provider.locality() != Locality::Local
-            || descriptor(provider, InvestigationProviderMode::Local)? != self.detail.provider
+            || (configured.is_some() && auditor_descriptor.model == self.detail.provider.model)
+            || (configured.is_none() && auditor_descriptor != self.detail.provider)
             || input.ledger() != &context.ledger
         {
             return Err(HostError::InputChanged.into());
@@ -38,6 +42,15 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .prepare_bounded(provider, &action, original.limits())
             .map_err(provider_failure)?;
         drop(action);
+        let auditor_selection =
+            configured.map(|auditor| crate::jobs::investigations::SeparateAuditor {
+                profile: prepared.profile().clone(),
+                reported_model_digest: auditor.reported_model_digest.clone(),
+                analyst_reported_model_digest: auditor.analyst_reported_model_digest.clone(),
+            });
+        if let Some(selected) = &auditor_selection {
+            selected.validate_against_model(&self.detail.provider.model)?;
+        }
         let authorized = firewall(self.state)?
             .authorize_bounded(provider, &prepared, None)
             .map_err(provider_failure)?;
@@ -60,6 +73,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.execution,
                 self.detail.summary.revision,
                 &SemanticAuditStart {
+                    separate_auditor: auditor_selection.as_ref(),
                     input,
                     original_prepared: original,
                     prepared: &prepared,

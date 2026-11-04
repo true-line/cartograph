@@ -100,6 +100,7 @@ mod tests {
         }))
         .unwrap();
         let invocation = AuditInvocation {
+            separate_auditor: None,
             schema_version: 1,
             task_id: candidate.investigation_id.clone(),
             finishing_step_id: "step-4".into(),
@@ -156,6 +157,52 @@ mod tests {
                 .validate(&invocation, &candidate, &std::collections::BTreeSet::new())
                 .unwrap(),
             AuditDisposition::Indeterminate
+        );
+        // AC-0566: the receipt authenticates the separately reported auditor
+        // identity through the complete immutable invocation hash.
+        let mut separate = invocation.clone();
+        separate.separate_auditor = Some(journal::SeparateAuditor {
+            profile: invocation.provider.clone(),
+            reported_model_digest: Some("a".repeat(64)),
+            analyst_reported_model_digest: Some("b".repeat(64)),
+        });
+        let mut bound = receipt.clone();
+        bound.invocation_hash =
+            core_prov::content_hash(&encode(&separate, MAX_MANIFEST_BYTES).unwrap());
+        assert!(
+            bound
+                .validate(&separate, &candidate, &std::collections::BTreeSet::new())
+                .is_ok()
+        );
+        let mut changed_analyst = separate.clone();
+        changed_analyst
+            .separate_auditor
+            .as_mut()
+            .unwrap()
+            .analyst_reported_model_digest = Some("c".repeat(64));
+        assert!(
+            bound
+                .validate(
+                    &changed_analyst,
+                    &candidate,
+                    &std::collections::BTreeSet::new()
+                )
+                .is_err()
+        );
+        separate
+            .separate_auditor
+            .as_mut()
+            .unwrap()
+            .reported_model_digest = Some("c".repeat(64));
+        assert!(
+            bound
+                .validate(&separate, &candidate, &std::collections::BTreeSet::new())
+                .is_err()
+        );
+        assert!(
+            receipt
+                .validate(&separate, &candidate, &std::collections::BTreeSet::new())
+                .is_err()
         );
         let ids = std::collections::BTreeSet::new();
         let directory = tempfile::tempdir().unwrap();

@@ -118,6 +118,7 @@ pub(super) fn run<R: tauri::Runtime>(
         RunClock::new(started),
         None,
         false,
+        None,
     )
 }
 
@@ -157,6 +158,7 @@ pub(super) fn run_completion_with_limits<R: tauri::Runtime>(
         RunClock::new(started),
         task_limits,
         false,
+        None,
     );
 }
 
@@ -180,6 +182,7 @@ pub(super) fn run_completion_with_frozen_active_clock<R: tauri::Runtime>(
         RunClock::frozen_active(started),
         None,
         false,
+        None,
     );
 }
 
@@ -194,6 +197,7 @@ fn run_completion_with_clock<R: tauri::Runtime>(
     clock: RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
     dispatch_audit: bool,
+    auditor: Option<ConfiguredAuditor>,
 ) {
     let projected = (|| {
         let state = app.state::<AppState>();
@@ -215,6 +219,7 @@ fn run_completion_with_clock<R: tauri::Runtime>(
             clock,
             task_limits,
             dispatch_audit,
+            auditor,
         ),
         Err(_) => {
             let state = app.state::<AppState>();
@@ -249,6 +254,7 @@ fn run_inner<R: tauri::Runtime>(
     mut clock: RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
     dispatch_audit: bool,
+    auditor: Option<ConfiguredAuditor>,
 ) {
     let state = app.state::<AppState>();
     let _cleanup = Cleanup {
@@ -274,6 +280,7 @@ fn run_inner<R: tauri::Runtime>(
             clock: &mut clock,
             task_limits,
             request_timeout_ms,
+            auditor: auditor.as_ref(),
             dispatch_audit, // public production entry points always pass false
             #[cfg(test)]
             audit_probe: None,
@@ -328,6 +335,12 @@ type AuditProbe<'a> = dyn Fn(
     ) -> Result<bool, Failure>
     + 'a;
 
+pub(super) struct ConfiguredAuditor {
+    pub provider: Arc<dyn LlmProvider>,
+    pub reported_model_digest: Option<String>,
+    pub analyst_reported_model_digest: Option<String>,
+}
+
 struct Worker<'a, R: tauri::Runtime> {
     app: &'a tauri::AppHandle<R>,
     state: &'a AppState,
@@ -337,6 +350,7 @@ struct Worker<'a, R: tauri::Runtime> {
     detail: InvestigationDetail,
     request_timeout_ms: u64,
     dispatch_audit: bool,
+    auditor: Option<&'a ConfiguredAuditor>,
     #[cfg(test)]
     audit_probe: Option<&'a AuditProbe<'a>>,
     clock: &'a mut RunClock,
@@ -1578,6 +1592,7 @@ pub(super) fn handle_gated_response(
         task_limits: None,
         request_timeout_ms: saved.prepared().limits().values().request_timeout_ms,
         dispatch_audit: false,
+        auditor: None,
         audit_probe: None,
     };
     before_handle();

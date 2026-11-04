@@ -97,6 +97,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
                 execution,
                 detail.summary.revision,
                 &SemanticAuditStart {
+                    separate_auditor: None,
                     input,
                     original_prepared: original,
                     prepared: &wrong,
@@ -124,6 +125,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
                 execution,
                 detail.summary.revision,
                 &SemanticAuditStart {
+                    separate_auditor: None,
                     input,
                     original_prepared: original,
                     prepared: &prepared,
@@ -150,6 +152,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
                     execution,
                     revision,
                     &SemanticAuditStart {
+                        separate_auditor: None,
                         input,
                         original_prepared: original,
                         prepared: &prepared,
@@ -573,6 +576,7 @@ fn semantic_audit_development_switch_uses_real_completion_entry() {
         f.live.clone(),
         Instant::now(),
         true,
+        None,
     );
     assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 5);
     let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
@@ -617,4 +621,199 @@ fn semantic_audit_analyst_boundary_timeout_keeps_charge_and_reopens() {
         serde_json::to_value(&detail).unwrap(),
         serde_json::to_value(reopened.investigation(&f.id).unwrap()).unwrap()
     );
+}
+
+// AC-0566: distinct configured provider is used only for the audit call.
+struct SeparateTestAuditor {
+    same_model: bool,
+    inner: Arc<NextProvider>,
+    calls: AtomicUsize,
+}
+impl LlmProvider for SeparateTestAuditor {
+    fn id(&self) -> &str {
+        "local:separate-auditor"
+    }
+    fn locality(&self) -> Locality {
+        Locality::Local
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        self.inner.capabilities()
+    }
+    fn embed(&self, text: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        self.inner.embed(text)
+    }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
+    fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
+        let mut profile = self.inner.bounded_profile()?;
+        profile.provider_id = self.id().into();
+        if !self.same_model {
+            profile.requested_model = "separate-audit-model".into();
+        }
+        profile.endpoint_id = "http://127.0.0.1:9999".into();
+        Ok(profile)
+    }
+    fn complete_bounded(
+        &self,
+        request: &AuthorizedBoundedCompletion,
+        control: &CompletionControl<'_>,
+    ) -> Result<BoundedCompletion, BoundedCallError> {
+        let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        assert_eq!(prompt["role"], "candidate-evidence-auditor@1");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut reply = self.inner.complete_bounded(request, control)?;
+        reply.requested_model = "separate-audit-model".into();
+        reply.response_model = Some("separate-audit-model-observed".into());
+        Ok(reply)
+    }
+}
+
+#[test]
+fn semantic_audit_separate_provider_identity_and_failures_reopen() {
+    for verdict in ["pass", "provider_failure", "audit_timeout"] {
+        let mut scripted = NextProvider::new(false);
+        scripted.gated_flow = Some(GatedFlow::TypedCorrection);
+        scripted.audit_verdict = Some(verdict);
+        let analyst = Arc::new(scripted);
+        let auditor = Arc::new(SeparateTestAuditor {
+            inner: analyst.clone(),
+            same_model: false,
+            calls: AtomicUsize::new(0),
+        });
+        let f = NextFixture::with_source_obligation(
+            analyst.as_ref(),
+            SpecialistId::DomainAnalystV20,
+            true,
+        );
+        f.base.base.app.run_completion_with_audit(
+            f.id.clone(),
+            f.request.clone(),
+            f.execution.clone(),
+            analyst.clone(),
+            f.live.clone(),
+            Instant::now(),
+            true,
+            Some(ConfiguredAuditor {
+                provider: auditor.clone(),
+                reported_model_digest: Some("a".repeat(64)),
+                analyst_reported_model_digest: Some("b".repeat(64)),
+            }),
+        );
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        let detail = reopened.investigation(&f.id).unwrap();
+        assert_eq!(auditor.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(detail.usage.model_invocations, 5);
+        assert_eq!(
+            detail.summary.has_result,
+            verdict == "pass",
+            "{:?}",
+            detail.error
+        );
+        assert!(!detail.summary.invocation_pending);
+        assert!(terminal(detail.summary.status));
+        let connection = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
+        let body: Vec<u8> = connection
+            .query_row(
+                "SELECT body FROM candidate_audit_invocations WHERE task_id=?1",
+                [&f.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let invocation: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            invocation["provider"]["requested_model"],
+            "separate-audit-model"
+        );
+        assert_eq!(
+            invocation["separate_auditor"]["reported_model_digest"],
+            "a".repeat(64)
+        );
+        let state = f.base.base.app.state::<AppState>();
+        assert_eq!(
+            state.jobs.lock().unwrap().investigation(&f.id).unwrap(),
+            detail
+        );
+    }
+}
+
+#[test]
+fn semantic_audit_separate_provider_refuses_identical_descriptor_without_debit() {
+    let mut scripted = NextProvider::new(false);
+    scripted.gated_flow = Some(GatedFlow::TypedCorrection);
+    scripted.audit_verdict = Some("pass");
+    let analyst = Arc::new(scripted);
+    let f =
+        NextFixture::with_source_obligation(analyst.as_ref(), SpecialistId::DomainAnalystV20, true);
+    f.base.base.app.run_completion_with_audit(
+        f.id.clone(),
+        f.request.clone(),
+        f.execution.clone(),
+        analyst.clone(),
+        f.live.clone(),
+        Instant::now(),
+        true,
+        Some(ConfiguredAuditor {
+            provider: analyst.clone(),
+            reported_model_digest: None,
+            analyst_reported_model_digest: None,
+        }),
+    );
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    let detail = reopened.investigation(&f.id).unwrap();
+    assert_eq!(analyst.observed.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(detail.usage.model_invocations, 4);
+    assert!(!detail.summary.has_result);
+    assert!(!detail.summary.invocation_pending);
+    assert!(terminal(detail.summary.status));
+}
+
+#[test]
+fn semantic_audit_separate_provider_refuses_same_model_other_endpoint_or_equal_digest_without_debit()
+ {
+    for same_model in [true, false] {
+        let mut scripted = NextProvider::new(false);
+        scripted.gated_flow = Some(GatedFlow::TypedCorrection);
+        scripted.audit_verdict = Some("pass");
+        let analyst = Arc::new(scripted);
+        let auditor = Arc::new(SeparateTestAuditor {
+            inner: analyst.clone(),
+            calls: AtomicUsize::new(0),
+            same_model,
+        });
+        let analyst_profile = analyst.bounded_profile().unwrap();
+        let auditor_profile = auditor.bounded_profile().unwrap();
+        assert_ne!(analyst_profile.endpoint_id, auditor_profile.endpoint_id);
+        assert_eq!(
+            analyst_profile.requested_model == auditor_profile.requested_model,
+            same_model
+        );
+        let f = NextFixture::with_source_obligation(
+            analyst.as_ref(),
+            SpecialistId::DomainAnalystV20,
+            true,
+        );
+        f.base.base.app.run_completion_with_audit(
+            f.id.clone(),
+            f.request.clone(),
+            f.execution.clone(),
+            analyst.clone(),
+            f.live.clone(),
+            Instant::now(),
+            true,
+            Some(ConfiguredAuditor {
+                provider: auditor.clone(),
+                reported_model_digest: Some("a".repeat(64)),
+                analyst_reported_model_digest: Some(if same_model { "b" } else { "a" }.repeat(64)),
+            }),
+        );
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        let detail = reopened.investigation(&f.id).unwrap();
+        assert_eq!(analyst.observed.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(detail.usage.model_invocations, 4);
+        assert!(!detail.summary.has_result);
+        assert!(!detail.summary.invocation_pending);
+        assert!(terminal(detail.summary.status));
+        assert_eq!(auditor.calls.load(Ordering::SeqCst), 0);
+    }
 }

@@ -82,6 +82,7 @@ pub(crate) use semantic_audit_settlement::SemanticAuditResponse;
 mod semantic_audit_state;
 #[path = "investigations/semantic_audit_workspace.rs"]
 mod semantic_audit_workspace;
+pub(crate) use semantic_audit_journal::SeparateAuditor;
 pub(crate) use semantic_audit_state::SemanticAuditStart;
 #[cfg(unix)]
 pub(crate) use semantic_audit_workspace::next_prompt_audit_transaction_workspace;
