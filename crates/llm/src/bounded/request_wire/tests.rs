@@ -57,7 +57,7 @@ fn borrowed_openai_compatible_request_preserves_wire_and_exact_cap() {
     for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
         for tokens in [0, 1, u32::MAX] {
             matches_wire_and_cap(
-                &openai_compatible(&text, &text, &text, tokens),
+                &openai_compatible(&text, &text, &text, tokens, None, false),
                 json!({
                     "model":text,"max_tokens":tokens,"stream":false,
                     "response_format":{"type":"json_object"},
@@ -66,4 +66,22 @@ fn borrowed_openai_compatible_request_preserves_wire_and_exact_cap() {
             );
         }
     }
+}
+
+#[test]
+fn openai_schema_and_template_fields_count_toward_exact_request_cap() {
+    let schema = serde_json::value::RawValue::from_string(
+        r#"{"type":"object","additionalProperties":false}"#.into(),
+    )
+    .unwrap();
+    let wire = openai_compatible("model", "system", "user", 37, Some(&schema), true);
+    let bytes = serde_json::to_vec(&wire).unwrap();
+    assert!(std::str::from_utf8(&bytes).unwrap().contains(schema.get()));
+    assert_eq!(
+        encode(&wire, bytes.len() as u64, FailureCode::RequestTooLarge).unwrap(),
+        bytes
+    );
+    let error = encode(&wire, bytes.len() as u64 - 1, FailureCode::RequestTooLarge).unwrap_err();
+    assert_eq!(error.code, FailureCode::RequestTooLarge);
+    assert_eq!(error.outcome, InvocationOutcome::NotDispatched);
 }

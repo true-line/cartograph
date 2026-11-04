@@ -1182,7 +1182,9 @@ pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, Bound
     let usage = response.usage.map(|usage| ReportedUsage {
         input_tokens: usage.prompt_tokens,
         output_tokens: usage.completion_tokens,
-        cache_read_input_tokens: None,
+        cache_read_input_tokens: usage
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens),
         cache_creation_input_tokens: None,
     });
     Ok((
@@ -1196,13 +1198,11 @@ pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, Bound
 pub(super) fn complete_openai_compatible(
     client: &Client,
     profile: &ProviderProfile,
+    disable_thinking: bool,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
     check_request(profile, request, control)?;
-    if request.payload().response_schema.is_some() {
-        return Err(BoundedCallError::unsupported());
-    }
     let user = user_message(request)?;
     let body = encode(
         &request_wire::openai_compatible(
@@ -1210,6 +1210,8 @@ pub(super) fn complete_openai_compatible(
             &request.payload().system,
             &user,
             request.limits().0.max_output_tokens,
+            response_schema(request.payload())?,
+            disable_thinking,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,

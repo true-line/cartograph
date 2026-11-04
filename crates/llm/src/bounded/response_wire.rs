@@ -66,6 +66,7 @@ pub(super) struct OpenAiChoice {
 }
 #[derive(Deserialize)]
 pub(super) struct OpenAiUsage {
+    pub(super) prompt_tokens_details: Option<OpenAiPromptDetails>,
     pub(super) prompt_tokens: Option<u64>,
     pub(super) completion_tokens: Option<u64>,
 }
@@ -76,4 +77,9 @@ pub(super) struct OpenAiResponse {
     pub(super) model: Option<String>,
     pub(super) id: Option<String>,
     pub(super) usage: Option<OpenAiUsage>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct OpenAiPromptDetails {
+    pub(super) cached_tokens: Option<u64>,
 }

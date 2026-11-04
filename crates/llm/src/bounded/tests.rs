@@ -1643,12 +1643,7 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         Duration::from_secs(1),
     )
     .unwrap();
-    assert_eq!(
-        firewall
-            .prepare_bounded(&other, &original, &limits)
-            .unwrap_err(),
-        BoundedCallError::unsupported()
-    );
+    assert!(firewall.prepare_bounded(&other, &original, &limits).is_ok());
     assert!(matches!(
         firewall.complete(&provider, &original, None),
         Err(ProviderError::Unsupported("legacy response schema"))
@@ -1889,4 +1884,89 @@ fn configured_timeout_changes_consent_identity_without_provider_execution() {
     firewall
         .authorize_bounded(&cloud, &changed, Some(&fresh))
         .unwrap();
+}
+
+// AC-0342 / #1654: actual synthetic HTTP bytes retain schema and bounded metrics.
+#[test]
+fn openai_compatible_strict_schema_and_thinking_are_bounded() {
+    for disable in [false, true] {
+        let mut body: Value = serde_json::from_slice(&openai_body("{}")).unwrap();
+        body["choices"][0]["message"]["reasoning_content"] = json!("PRIVATE REASONING");
+        body["usage"]["prompt_tokens_details"] = json!({"cached_tokens": 11});
+        let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
+        let base = openai(&endpoint);
+        let base_profile = base.bounded_profile().unwrap();
+        let provider = if disable {
+            base.with_thinking_disabled()
+        } else {
+            base
+        };
+        assert_eq!(
+            provider.bounded_profile().unwrap() == base_profile,
+            !disable
+        );
+        assert!(provider.supports_bounded_response_schema());
+        let firewall = EgressFirewall::new(EgressPolicy::default());
+        let mut selected = action();
+        selected.payload.response_schema = Some(RESPONSE_SCHEMA.into());
+        let prepared = firewall
+            .prepare_bounded(&provider, &selected, &CompletionLimits::default())
+            .unwrap();
+        let authorized = firewall
+            .authorize_bounded(&provider, &prepared, None)
+            .unwrap();
+        let output = provider.complete_bounded(&authorized, &control()).unwrap();
+        let request = server.join().unwrap();
+        let wire: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            wire["response_format"],
+            json!({"type":"json_schema", "json_schema":{
+            "name":"cartograph_bounded_response", "strict":true,
+            "schema":serde_json::from_str::<Value>(RESPONSE_SCHEMA).unwrap()}})
+        );
+        if disable {
+            assert_eq!(
+                wire["chat_template_kwargs"],
+                json!({"enable_thinking":false})
+            );
+        } else {
+            assert!(wire.get("chat_template_kwargs").is_none());
+        }
+        assert_eq!(output.text, "{}");
+        assert_eq!(output.usage.unwrap().cache_read_input_tokens, Some(11));
+        assert_eq!(output.request_bytes, request.body.len() as u64);
+    }
+}
+
+#[test]
+fn openai_compatible_oversize_schema_never_connects() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let provider =
+        openai(&format!("http://{}/", listener.local_addr().unwrap())).with_thinking_disabled();
+    let limits = CompletionLimits::new(CompletionLimitValues {
+        request_bytes: 512,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut selected = action();
+    selected.payload.response_schema =
+        Some(json!({"type":"object","description":"x".repeat(1024)}).to_string());
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let prepared = firewall
+        .prepare_bounded(&provider, &selected, &limits)
+        .unwrap();
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    assert_eq!(
+        provider
+            .complete_bounded(&authorized, &control())
+            .unwrap_err(),
+        not_sent(FailureCode::RequestTooLarge)
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
 }
