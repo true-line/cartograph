@@ -619,3 +619,13 @@ export const TenThousandNodeScale: Story = {
     },
   },
 };
+
+export const RecordedScreenRouteSelection: Story = {
+  // AC-0028: the label changes, the exact selected node does not.
+  args: { snapshot: { nodes: [{ id: 'screen:local/shop@/main', label: 'Screen', props: { route: '/main', prov: prov('Confirmed', 'router.ts') } }], edges: [] } },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: '/main' }));
+    await expect(args.onSelect).toHaveBeenCalledWith(args.snapshot.nodes[0]);
+  },
+};

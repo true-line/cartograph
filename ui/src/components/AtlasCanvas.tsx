@@ -176,6 +176,7 @@ export function displayName(node: GraphNode): string {
     const value = node.props[key];
     if (typeof value === 'string' && value.length > 0) return value;
   }
+  if (node.label === 'Screen' && typeof node.props.route === 'string' && node.props.route.trim()) return node.props.route;
   return node.id;
 }
 

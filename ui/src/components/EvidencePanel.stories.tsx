@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, fn, userEvent, within } from 'storybook/test';
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { EvidencePanel } from './EvidencePanel';
 import { endpointFixture } from './EndpointsCard.stories';
 
@@ -244,5 +244,16 @@ export const NoEvidence: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText(/no evidence span/i)).toBeInTheDocument();
+  },
+};
+
+export const RecordedScreenRoute: Story = {
+  // AC-0028: show the recorded route while keeping original source/provenance.
+  args: { node: { ...nodeWithSpan(), id: 'screen:local/shop@/main', label: 'Screen', props: { route: '/main', prov: nodeWithSpan().props.prov } }, source: { text: SOURCE, window_start: 0, truncated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByRole('heading', { name: '/main' })).toBeVisible());
+    await expect(canvas.getAllByText('Confirmed').length).toBeGreaterThan(0);
+    await expect(canvasElement.querySelector('mark')?.textContent).toBe(SPAN_TEXT);
   },
 };
