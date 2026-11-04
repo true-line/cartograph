@@ -78,15 +78,31 @@ impl FixtureApp {
         live: Arc<LiveTask>,
         started: Instant,
     ) {
+        self.run_completion_with_audit(id, request, execution, provider, live, started, false);
+    }
+    // Test/development only: exercise the real entry and dispatch, never audit_probe.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_completion_with_audit(
+        &self,
+        id: String,
+        request: StagedObligationRequest,
+        execution: JobExecution,
+        provider: Arc<dyn LlmProvider>,
+        live: Arc<LiveTask>,
+        started: Instant,
+        dispatch_audit: bool,
+    ) {
         self.begin();
-        super::run_completion(
+        super::run_completion_with_clock(
             self.app.handle().clone(),
             id,
             request,
             execution,
             provider,
             live,
-            started,
+            RunClock::new(started),
+            None,
+            dispatch_audit,
         );
         self.end();
     }

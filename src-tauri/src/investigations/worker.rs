@@ -28,6 +28,8 @@ mod next_metadata;
 mod next_prompt;
 #[path = "worker/next_source.rs"]
 mod next_source;
+#[path = "worker/semantic_audit.rs"]
+mod semantic_audit;
 
 #[derive(Debug)]
 enum Failure {
@@ -115,6 +117,7 @@ pub(super) fn run<R: tauri::Runtime>(
         live,
         RunClock::new(started),
         None,
+        false,
     )
 }
 
@@ -153,6 +156,7 @@ pub(super) fn run_completion_with_limits<R: tauri::Runtime>(
         live,
         RunClock::new(started),
         task_limits,
+        false,
     );
 }
 
@@ -175,6 +179,7 @@ pub(super) fn run_completion_with_frozen_active_clock<R: tauri::Runtime>(
         live,
         RunClock::frozen_active(started),
         None,
+        false,
     );
 }
 
@@ -188,6 +193,7 @@ fn run_completion_with_clock<R: tauri::Runtime>(
     live: Arc<LiveTask>,
     clock: RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
+    dispatch_audit: bool,
 ) {
     let projected = (|| {
         let state = app.state::<AppState>();
@@ -208,6 +214,7 @@ fn run_completion_with_clock<R: tauri::Runtime>(
             live,
             clock,
             task_limits,
+            dispatch_audit,
         ),
         Err(_) => {
             let state = app.state::<AppState>();
@@ -241,6 +248,7 @@ fn run_inner<R: tauri::Runtime>(
     live: Arc<LiveTask>,
     mut clock: RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
+    dispatch_audit: bool,
 ) {
     let state = app.state::<AppState>();
     let _cleanup = Cleanup {
@@ -266,6 +274,9 @@ fn run_inner<R: tauri::Runtime>(
             clock: &mut clock,
             task_limits,
             request_timeout_ms,
+            dispatch_audit, // public production entry points always pass false
+            #[cfg(test)]
+            audit_probe: None,
         };
         worker
             .execute_inner(&request, completion_request.as_ref(), provider.as_ref())
@@ -306,6 +317,17 @@ impl Drop for Cleanup<'_> {
     }
 }
 
+// Test-only checkpoint after genuine finish admission; no replacement DTOs or
+// database rewrites. Production dispatch never installs this callback.
+#[cfg(test)]
+type AuditProbe<'a> = dyn Fn(
+        &JobExecution,
+        &InvestigationDetail,
+        &InvestigationInput,
+        &PreparedBoundedCompletion,
+    ) -> Result<bool, Failure>
+    + 'a;
+
 struct Worker<'a, R: tauri::Runtime> {
     app: &'a tauri::AppHandle<R>,
     state: &'a AppState,
@@ -314,6 +336,9 @@ struct Worker<'a, R: tauri::Runtime> {
     live: &'a LiveTask,
     detail: InvestigationDetail,
     request_timeout_ms: u64,
+    dispatch_audit: bool,
+    #[cfg(test)]
+    audit_probe: Option<&'a AuditProbe<'a>>,
     clock: &'a mut RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
 }
@@ -403,6 +428,18 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 ledger: Box::new(context.ledger.clone()),
                 usage,
             })?;
+        }
+
+        let enable_audit = self.dispatch_audit;
+        #[cfg(test)]
+        let enable_audit = enable_audit || self.audit_probe.is_some();
+        if enable_audit {
+            self.detail = self
+                .state
+                .jobs
+                .lock()
+                .map_err(|_| HostError::Operational)?
+                .enable_next_prompt_semantic_audit(self.execution, self.detail.summary.revision)?;
         }
 
         let mut source_replay_correction_for: Option<String> = None;
@@ -663,6 +700,17 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .map_err(|error| error.preparation_at(PreparationPhase::Finish))?
             {
                 if terminal(self.detail.summary.status) {
+                    return Ok(());
+                }
+                #[cfg(test)]
+                if let Some(probe) = self.audit_probe
+                    && probe(self.execution, &self.detail, &input, &prepared)?
+                {
+                    return Ok(());
+                }
+                if self.dispatch_audit
+                    && self.dispatch_semantic_audit(provider, &input, &prepared, &context)?
+                {
                     return Ok(());
                 }
                 continue;
@@ -1521,6 +1569,8 @@ pub(super) fn handle_gated_response(
         clock: &mut clock,
         task_limits: None,
         request_timeout_ms: saved.prepared().limits().values().request_timeout_ms,
+        dispatch_audit: false,
+        audit_probe: None,
     };
     before_handle();
     let result = validate_completion(completion, saved.prepared())

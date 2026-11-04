@@ -156,7 +156,24 @@ impl NextFixture {
     fn run_gated_inner_frozen_active(&self, provider: &dyn LlmProvider) {
         self.run_gated_inner_with_clock(provider, RunClock::frozen_active(Instant::now()));
     }
-    fn run_gated_inner_with_clock(&self, provider: &dyn LlmProvider, mut clock: RunClock) {
+    fn run_gated_inner_with_clock(&self, provider: &dyn LlmProvider, clock: RunClock) {
+        self.run_with_audit_probe(provider, clock, None);
+    }
+    fn run_with_audit_probe(
+        &self,
+        provider: &dyn LlmProvider,
+        clock: RunClock,
+        audit_probe: Option<&AuditProbe<'_>>,
+    ) {
+        self.run_with_audit_options(provider, clock, audit_probe, false);
+    }
+    fn run_with_audit_options(
+        &self,
+        provider: &dyn LlmProvider,
+        mut clock: RunClock,
+        audit_probe: Option<&AuditProbe<'_>>,
+        dispatch_audit: bool,
+    ) {
         let app = self.base.base.app.handle();
         let state = app.state::<AppState>();
         let _cleanup = Cleanup {
@@ -176,6 +193,8 @@ impl NextFixture {
             clock: &mut clock,
             task_limits: None,
             request_timeout_ms: CompletionLimits::default().values().request_timeout_ms,
+            audit_probe,
+            dispatch_audit,
         };
         let outcome = worker
             .execute_inner(&request, Some(&self.request), provider)
@@ -185,6 +204,9 @@ impl NextFixture {
                     worker.detail.usage.model_invocations,
                 )
             });
+        if audit_probe.is_some() {
+            assert!(outcome.is_ok(), "audit probe worker failed: {outcome:?}");
+        }
         if let Err(failure) = outcome
             && let Some(reason) = failure.reason()
         {
@@ -252,6 +274,9 @@ struct NextProvider {
     exact_targets: bool,
     auditor_finish: bool,
     gated_flow: Option<GatedFlow>,
+    audit_verdict: Option<&'static str>,
+    audit_cancel: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    deadlines: std::sync::Mutex<Vec<Instant>>,
 }
 impl NextProvider {
     fn new(malformed: bool) -> Self {
@@ -278,6 +303,9 @@ impl NextProvider {
             exact_targets: false,
             auditor_finish: false,
             gated_flow: None,
+            audit_verdict: None,
+            audit_cancel: std::sync::Mutex::new(None),
+            deadlines: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -317,6 +345,67 @@ impl LlmProvider for NextProvider {
                 .push(request.payload().clone());
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        self.deadlines.lock().unwrap().push(control.deadline);
+        if prompt["role"] == "candidate-evidence-auditor@1" {
+            let verdict = self.audit_verdict.expect("unexpected audit dispatch");
+            assert_eq!(self.observed.calls.fetch_add(1, Ordering::SeqCst), 4);
+            if verdict == "provider_failure" {
+                return Err(BoundedCallError {
+                    code: llm::bounded::FailureCode::Transport,
+                    outcome: llm::bounded::InvocationOutcome::Unknown,
+                });
+            }
+            if verdict == "cancelled_pass" {
+                self.audit_cancel.lock().unwrap().as_ref().unwrap()();
+                assert_eq!((control.check)(), CallDirective::Cancelled);
+            }
+            let verdict = if verdict == "cancelled_pass" {
+                "pass"
+            } else {
+                verdict
+            };
+
+            let mut reviews: Vec<_> = prompt["subjects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|subject| json!({"subject":subject,"assessment":{"verdict":verdict}}))
+                .collect();
+            if matches!(verdict, "duplicate_subject" | "foreign_citation") {
+                for review in &mut reviews {
+                    review["assessment"] = json!({"verdict":"pass"});
+                }
+                if verdict == "duplicate_subject" {
+                    assert!(
+                        reviews.len() >= 2,
+                        "fixture must exercise same-length duplication"
+                    );
+                    reviews[1]["subject"] = reviews[0]["subject"].clone();
+                } else {
+                    reviews[0]["assessment"] = json!({
+                        "verdict":"contradiction", "citation_id":"foreign-audit-witness-canary"
+                    });
+                }
+            }
+            let text = if verdict == "invalid" {
+                "not-json".into()
+            } else {
+                json!({"schema_version":1,"candidate_hash":prompt["candidate_hash"],
+                    "acquired_ledger_hash":prompt["acquired_ledger_hash"],
+                    "contract_hash":prompt["contract_hash"],"reviews":reviews})
+                .to_string()
+            };
+            return Ok(BoundedCompletion {
+                text,
+                requested_model: "scripted-model".into(),
+                response_model: Some("scripted-model-observed".into()),
+                provider_request_id: None,
+                usage: None,
+                request_bytes: 100,
+                response_bytes: 100,
+            });
+        }
+
         if let Some(schema) = &request.payload().response_schema
             && self.gated_flow.is_none()
             // @18 selects its schema from current acquisition choices; the
@@ -2495,3 +2584,6 @@ fn configured_desktop_worker_time_limits(cancel_finish: bool, elapsed_seconds: u
 
 #[path = "typed_correction_tests.rs"]
 mod typed_correction_tests;
+
+#[path = "semantic_audit_start_tests.rs"]
+mod semantic_audit_start_tests;
