@@ -534,6 +534,32 @@ impl InvestigationInput {
         &self.ledger
     }
 
+    /// Prepare the compact semantic review of a host-authenticated candidate.
+    /// This does not reserve resources, dispatch, or grant result publication.
+    pub fn semantic_audit_payload(
+        &self,
+        candidate: &InvestigationResult,
+        policy: &InvestigationPolicy,
+    ) -> Result<super::semantic_audit::PreparedSemanticAudit, InvestigationError> {
+        let hash = self.ledger.fingerprint_with_policy(policy)?;
+        if candidate.input_ledger_hash != hash {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let citations = self
+            .ledger
+            .citations
+            .iter()
+            // Graph metadata citations have no acquired source span. Keep the
+            // same source identity boundary as input construction; every actual
+            // acquired source must still be present in the audit projection.
+            .filter(|citation| {
+                !matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata)
+            })
+            .map(|citation| citation.citation_id.clone())
+            .collect();
+        super::semantic_audit::prepare_payload(&self.payload, candidate, &citations)
+    }
+
     /// Host-selected bounded working set. Acquisition and replay guards retain
     /// every source; omitted source handles remain visible for reacquisition.
     pub fn select_sources(
