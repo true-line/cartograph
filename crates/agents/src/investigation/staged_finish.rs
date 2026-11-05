@@ -133,6 +133,7 @@ pub struct FeedbackEntry {
 #[serde(rename_all = "snake_case")]
 pub enum ProseCorrection {
     RewriteSchemaPlaceholdersAsPlainProse,
+    ParaphraseWithoutQuotingSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,8 +511,28 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         consistency,
     );
     let mut citation_correction = None;
+    let mut prose_correction = None;
     let admitted = match admitted {
-        Ok(result) => Some(input.admit_narrative(result, finish)?),
+        Ok(result) => match input.admit_narrative(result, finish) {
+            Err(InvestigationError::SourceReplay) => Err(InvestigationError::SourceReplay),
+            other => Ok(other?),
+        },
+        error => error,
+    };
+    let admitted = match admitted {
+        Ok(result) => Some(result),
+        Err(InvestigationError::SourceReplay)
+            if request.specialist_id == "domain-analyst@20" && consistency.is_some() =>
+        {
+            // Check all authored fields, including narrative, for sensitive output.
+            match input.validate_correction_prose(finish, model.as_deref()) {
+                Err(InvestigationError::SourceReplay) => (),
+                Err(error) => return Err(error),
+                Ok(()) => return Err(InvestigationError::SourceReplay),
+            }
+            prose_correction = Some(ProseCorrection::ParaphraseWithoutQuotingSource);
+            None
+        }
         Err(InvestigationError::InvalidCitation)
             if request.specialist_id == "domain-analyst@19"
                 && input.eligible_citation_correction(
@@ -551,10 +572,12 @@ pub(super) fn admit_finish_with_policy_using_consistency(
             })
         })
         .collect::<Vec<_>>();
-    let prose_correction = (request.specialist_id == "domain-analyst@20"
+    if request.specialist_id == "domain-analyst@20"
         && admitted.is_some()
-        && prose::has_placeholder(finish))
-    .then_some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+        && prose::has_placeholder(finish)
+    {
+        prose_correction = Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+    }
     if unmet.is_empty() && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;

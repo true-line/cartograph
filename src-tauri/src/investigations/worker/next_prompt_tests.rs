@@ -210,6 +210,9 @@ enum GatedFlow {
     TypedCorrection,
     ProseCorrection,
     ExhaustedProseCorrection,
+    RepairReplay,
+    RepeatReplay,
+    SpentReplay,
     ReceiptCorrection,
     OfferedTargets,
     RetainedSourceFinish,
@@ -422,6 +425,11 @@ impl LlmProvider for NextProvider {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
             if matches!(
+                flow,
+                GatedFlow::RepairReplay | GatedFlow::RepeatReplay | GatedFlow::SpentReplay
+            ) {
+                typed_correction_tests::replay_action(prompt, call, flow).to_string()
+            } else if matches!(
                 flow,
                 GatedFlow::ProseCorrection | GatedFlow::ExhaustedProseCorrection
             ) {

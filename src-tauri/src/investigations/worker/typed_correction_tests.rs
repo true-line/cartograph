@@ -100,7 +100,13 @@ pub(super) fn source_finish_action(prompts: &[Value], call: usize, paraphrase: b
     if call == 2 {
         return prompts[0]["turn_progress"]["acquisition_choices"]["entries"][0]["action"].clone();
     }
-    assert_eq!(call, 3);
+    assert!(matches!(call, 3 | 4));
+    if call == 4 {
+        assert_eq!(
+            prompts[call]["completion_metadata"]["feedback"]["prose_correction"],
+            "paraphrase_without_quoting_source"
+        );
+    }
     assert_eq!(
         prompts[call]["turn_progress"]["admission_mode"],
         "finish_only"
@@ -132,7 +138,11 @@ fn analyst20_retained_finish_after_duplicate_source_read() {
         f.run(provider.clone());
         let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
         let detail = reopened.investigation(&f.id).unwrap();
-        assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 4);
+        let expected_calls = if paraphrase { 4 } else { 5 };
+        assert_eq!(
+            provider.observed.calls.load(Ordering::SeqCst),
+            expected_calls
+        );
         assert_eq!(detail.usage.evidence_items, 1);
         let payloads = provider.received_payloads.lock().unwrap();
         let source = &payloads[3].spans[0].text;
@@ -172,7 +182,7 @@ fn analyst20_retained_finish_after_duplicate_source_read() {
                 .iter()
                 .filter(|e| e.kind == InvestigationEventKind::ModelCompleted)
                 .count(),
-            4
+            expected_calls
         );
         assert!(detail.usage.reported_input_tokens.is_some());
         assert!(detail.usage.reported_output_tokens.is_some());
@@ -193,7 +203,7 @@ fn analyst20_retained_finish_after_duplicate_source_read() {
                     .iter()
                     .filter(|e| e.kind == InvestigationEventKind::FinishRefused)
                     .count(),
-                1
+                2
             );
             assert_eq!(
                 detail.error.as_deref(),
@@ -291,6 +301,62 @@ fn analyst20_prose_refusal_precedes_audit_and_shares_correction_allowance() {
         assert_eq!(
             state.jobs.lock().unwrap().investigation(&f.id).unwrap(),
             detail
+        );
+    }
+}
+
+pub(super) fn replay_action(prompt: &Value, call: usize, flow: GatedFlow) -> Value {
+    if flow == GatedFlow::SpentReplay && call < 3 {
+        return next_action(prompt, call, false);
+    }
+    if call < 2 {
+        return prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"].clone();
+    }
+    let mut response = next_action(prompt, call, false);
+    if call == 3 && flow != GatedFlow::SpentReplay {
+        assert_eq!(
+            prompt["completion_metadata"]["feedback"],
+            json!({
+                "schema_version":3, "unmet":[], "prose_correction":"paraphrase_without_quoting_source"
+            })
+        );
+        if flow == GatedFlow::RepairReplay {
+            return response;
+        }
+    }
+    response["action"]["findings"][0]["statement"] = json!("The guard quotes ok === false here.");
+    response
+}
+
+#[test]
+fn analyst20_source_replay_shares_correction_and_requires_audit() {
+    for flow in [
+        GatedFlow::RepairReplay,
+        GatedFlow::RepeatReplay,
+        GatedFlow::SpentReplay,
+    ] {
+        let mut scripted = NextProvider::new(false);
+        scripted.gated_flow = Some(flow);
+        scripted.audit_verdict = Some("pass");
+        let provider = Arc::new(scripted);
+        let f = NextFixture::with_source_obligation(
+            provider.as_ref(),
+            SpecialistId::DomainAnalystV20,
+            true,
+        );
+        f.run_with_audit_options(provider.as_ref(), RunClock::new(Instant::now()), None, true);
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        let detail = reopened.investigation(&f.id).unwrap();
+        let repaired = flow == GatedFlow::RepairReplay;
+        assert_eq!(detail.summary.has_result, repaired, "{:?}", detail.error);
+        assert_eq!(
+            reopened.investigation_result(&f.id).unwrap().is_some(),
+            repaired
+        );
+        assert_eq!(detail.usage.model_invocations, if repaired { 5 } else { 4 });
+        assert_eq!(
+            detail.error.as_deref(),
+            (!repaired).then_some("Investigation finish refused: source_replay.")
         );
     }
 }

@@ -153,6 +153,10 @@ mod tests {
             serde_json::from_slice::<RefusalFeedback>(&bytes).unwrap(),
             feedback
         );
+        // The existing schema-v3 reservation uses the placeholder variant as its bound.
+        let mut replay = feedback.clone();
+        replay.prose_correction = Some(ProseCorrection::ParaphraseWithoutQuotingSource);
+        assert!(replay.bytes().unwrap().len() <= bytes.len());
         let mut forged = feedback.clone();
         forged.schema_version = 1;
         assert!(forged.bytes().is_err());

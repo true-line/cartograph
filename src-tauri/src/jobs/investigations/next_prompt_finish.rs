@@ -155,6 +155,16 @@ impl JobStore {
                         policy,
                     )
                 };
+                // A spent allowance keeps the original terminal replay path and accounting.
+                let decision = match decision {
+                    Ok(Err(FinishDecision::Refused { ref feedback, .. }))
+                        if feedback.prose_correction == Some(agents::investigation::staged_finish::ProseCorrection::ParaphraseWithoutQuotingSource)
+                            && task.detail.completion.as_ref().is_some_and(|c| c.refusal_count > 0) =>
+                    {
+                        Err(InvestigationError::SourceReplay)
+                    }
+                    other => other,
+                };
                 match decision {
                     Ok(Ok(result)) => {
                         validate_result_basis(
