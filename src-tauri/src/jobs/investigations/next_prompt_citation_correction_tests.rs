@@ -291,6 +291,9 @@ fn assert_ollama_wire(input: &InvestigationInput, expected_prompt: &str) {
                 Err(e) => panic!("{e}"),
             }
         };
+        // Windows sockets inherit the listener's non-blocking mode; read the
+        // request blocking (bounded by the timeout) on every platform.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
