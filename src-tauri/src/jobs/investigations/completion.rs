@@ -2114,6 +2114,8 @@ pub(super) fn refused(
         task.detail.error = Some(
             if task.detail.summary.cancel_requested {
                 "Cancellation won over a late unmet finish."
+            } else if matches!(entry.record.feedback.prose_correction, Some(agents::investigation::staged_finish::ProseCorrection::LimitationDeniesAcquiredEvidence(_))) {
+                "The corrected answer still denied acquired evidence. No findings were saved."
             } else if entry.record.feedback.prose_correction.is_some() {
                 "The answer still contained incomplete or placeholder text after one correction. No findings were saved."
             } else {

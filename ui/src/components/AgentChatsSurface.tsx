@@ -288,7 +288,7 @@ export function AgentChatsSurface({ state, onOpenResult, onFollowUp, onReplyHost
               onRefresh={() => dock.open(chat.task_id)} onOpenResult={onOpenResult} />
             {settled && <InvestigationActivity events={state.events} />}
             {answer && <InvestigationFindings readOnly sectionId={`saved-chat-findings-${chat.chat_id}`}
-              result={answer.result} producerId={chat.producer.specialist_id} citations={answer.citations}
+              result={answer.result} advisoryAudit={answer.advisoryAudit} producerId={chat.producer.specialist_id} citations={answer.citations}
               citationId={dock.citation?.taskId === chat.task_id ? dock.citation.citationId : null}
               read={dock.citation?.taskId === chat.task_id ? dock.citation.read : null}
               loading={dock.citation?.taskId === chat.task_id && dock.citation.loading}

@@ -129,11 +129,18 @@ pub struct FeedbackEntry {
     pub kind: String,
     pub reason: RefusalReason,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProseCorrection {
     RewriteSchemaPlaceholdersAsPlainProse,
     ParaphraseWithoutQuotingSource,
+    LimitationDeniesAcquiredEvidence(Box<ConflictingEvidence>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictingEvidence {
+    pub evidence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +290,26 @@ impl RefusalFeedback {
                 (&entries[0].kind, &entries[0].obligation_id)
                     >= (&entries[1].kind, &entries[1].obligation_id)
             })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(ProseCorrection::LimitationDeniesAcquiredEvidence(conflict)) =
+            &self.prose_correction
+            && (conflict.evidence_ids.is_empty()
+                || conflict.evidence_ids.len() > policy.limits().evidence_items
+                || !conflict
+                    .evidence_ids
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                || !conflict.evidence_ids.iter().all(|id| {
+                    id.strip_prefix("evidence-").is_some_and(|digits| {
+                        !digits.starts_with('0')
+                            && digits.bytes().all(|b| b.is_ascii_digit())
+                            && digits
+                                .parse::<usize>()
+                                .is_ok_and(|n| n <= policy.limits().evidence_items)
+                    })
+                }))
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -578,6 +605,24 @@ pub(super) fn admit_finish_with_policy_using_consistency(
     {
         prose_correction = Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
     }
+    if request.specialist_id == "domain-analyst@20"
+        && consistency.is_some()
+        && prose_correction.is_none()
+        && let Some(result) = &admitted
+    {
+        let overall = result
+            .limitations
+            .iter()
+            .map(|text| (text.as_str(), &[][..]));
+        let local = result.findings.iter().flat_map(|finding| {
+            finding
+                .limitations
+                .iter()
+                .map(|text| (text.as_str(), finding.citation_ids.as_slice()))
+        });
+        let limitations = overall.chain(local);
+        prose_correction = limitation_check::correction(ledger, limitations);
+    }
     if unmet.is_empty() && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
@@ -590,7 +635,6 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         }))
     } else {
         let feedback = RefusalFeedback {
-            prose_correction,
             schema_version: if prose_correction.is_some() {
                 3
             } else if citation_correction.is_some() {
@@ -598,6 +642,7 @@ pub(super) fn admit_finish_with_policy_using_consistency(
             } else {
                 1
             },
+            prose_correction,
             citation_correction,
             unmet,
         };
@@ -890,3 +935,6 @@ fn nested_finish_failure_mapping_preserves_errors_without_claiming_reachability(
 
 #[path = "finish_prose.rs"]
 mod prose;
+
+#[path = "limitation_check.rs"]
+mod limitation_check;

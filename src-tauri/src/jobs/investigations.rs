@@ -82,6 +82,8 @@ pub(crate) use semantic_audit_settlement::SemanticAuditResponse;
 mod semantic_audit_state;
 #[path = "investigations/semantic_audit_workspace.rs"]
 mod semantic_audit_workspace;
+#[path = "investigations/specialist_history.rs"]
+mod specialist_history;
 pub(crate) use semantic_audit_journal::SeparateAuditor;
 pub(crate) use semantic_audit_state::SemanticAuditStart;
 #[cfg(unix)]
@@ -1061,6 +1063,7 @@ impl JobStore {
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
+                advisory_audit: None,
                 inspection_requirements: if completion_intent.is_some() {
                     None
                 } else {

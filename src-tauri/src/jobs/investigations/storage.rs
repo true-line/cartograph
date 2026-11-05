@@ -537,7 +537,7 @@ fn validate_task_contract(
             .context_owner
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        || detail.specialist != summary.specialist_id.definition()?
+        || !saved_specialist_matches(task)?
         || detail.provider.mode != summary.provider_mode
         || summary.specialist_id.uses_policy_selection()
             != (policy.profile() == INVESTIGATION_V2_POLICY.profile())
@@ -569,7 +569,9 @@ fn validate_task_contract(
     }
     if let Some(audit) = &task.semantic_audit {
         audit.validate(task)?;
-    } else if matches!(task.phase, Phase::AuditPending | Phase::AuditInvocation) {
+    } else if task.detail.advisory_audit.is_some()
+        || matches!(task.phase, Phase::AuditPending | Phase::AuditInvocation)
+    {
         return Err(InvestigationStoreError::Invalid);
     }
     if let Some(pending) = &task.pending_source_read {
@@ -1867,3 +1869,12 @@ pub(super) fn version_one_fixture(connection: &Connection) {
 #[cfg(test)]
 #[path = "finding_review_migration_tests.rs"]
 mod finding_review_migration_tests;
+
+/// History-only compatibility does not authorize old prompts for live work.
+fn saved_specialist_matches(task: &StoredTask) -> Result<bool, InvestigationStoreError> {
+    super::specialist_history::matches(
+        &task.detail.specialist,
+        task.detail.summary.specialist_id,
+        task.phase == Phase::Terminal,
+    )
+}

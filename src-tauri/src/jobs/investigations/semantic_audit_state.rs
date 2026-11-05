@@ -144,7 +144,7 @@ impl JobStore {
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
         let record = super::semantic_audit_journal::AuditInvocation {
-            schema_version: 1,
+            schema_version: audit.schema_version,
             task_id: id.clone(),
             finishing_step_id: candidate
                 .invocation_step_id
@@ -205,7 +205,7 @@ impl JobStore {
             return Err(InvestigationStoreError::Invalid);
         }
         task.semantic_audit = Some(StoredSemanticAudit {
-            schema_version: 1,
+            schema_version: 2,
             account: SemanticAuditAccount::new(&task.detail.limits)?
                 .analyst_usage(&task.detail.usage, &task.detail.limits)?,
             candidate: None,
@@ -229,6 +229,10 @@ pub(super) fn prepare_payload_for_task(
         .semantic_audit
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
+    if !audit.is_advisory() {
+        // Historical definitions may reopen but never acquire new contract semantics.
+        return Err(InvestigationStoreError::Invalid);
+    }
     let candidate = audit
         .candidate
         .as_ref()
@@ -262,6 +266,10 @@ pub(super) fn prepare_payload_for_task(
 }
 
 impl StoredSemanticAudit {
+    pub(super) fn is_advisory(&self) -> bool {
+        self.schema_version == 2
+    }
+
     /// Authenticate retained candidate fields against the immutable finishing
     /// response and the same saved disclosure/attempt basis as accepted results.
     pub(super) fn validate_saved(
@@ -337,11 +345,13 @@ impl StoredSemanticAudit {
                 .analyst_usage(&invocation.pre_usage, &task.detail.limits)?
                 .begin_audit(&task.detail.limits)?
                 .stop_auditor(&receipt.auditor_usage, &task.detail.limits)?;
-            if expected.usage()? != task.detail.usage {
+            if expected.usage()? != task.detail.usage
+                || task.detail.advisory_audit != receipt.advisory()?
+            {
                 return Err(InvestigationStoreError::Invalid);
             }
-            let publish = disposition
-                == agents::investigation::semantic_audit::AuditDisposition::Pass
+            let publish = (self.is_advisory()
+                || disposition == agents::investigation::semantic_audit::AuditDisposition::Pass)
                 && !task.detail.summary.cancel_requested
                 && task.detail.usage.active_milliseconds
                     < task
@@ -365,7 +375,8 @@ impl StoredSemanticAudit {
             if publish && load_result(connection, task)?.as_ref() != Some(candidate) {
                 return Err(InvestigationStoreError::Invalid);
             }
-        } else if task.detail.summary.has_result
+        } else if task.detail.advisory_audit.is_some()
+            || task.detail.summary.has_result
             || task.detail.summary.status == InvestigationStatus::Completed
         {
             return Err(InvestigationStoreError::Invalid);
@@ -374,7 +385,11 @@ impl StoredSemanticAudit {
     }
 
     pub(super) fn validate(&self, task: &StoredTask) -> Result<(), InvestigationStoreError> {
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
+            || (task.detail.advisory_audit.is_some()
+                && (!self.is_advisory()
+                    || self.candidate.is_none()
+                    || task.phase != Phase::Terminal))
             || task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20
             || task.detail.provider.mode != InvestigationProviderMode::Local
             || self.candidate.is_some() != self.candidate_hash.is_some()
@@ -457,7 +472,11 @@ pub(super) fn validate_invocation_journal(
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?
             .effective_request_timeout_ms();
-        if Some(record.candidate_hash.as_str()) != audit.candidate_hash.as_deref()
+        if record.schema_version != audit.schema_version
+            || audit.is_advisory()
+                != (record.contract_hash
+                    == agents::investigation::semantic_audit::advisory_contract_hash()?)
+            || Some(record.candidate_hash.as_str()) != audit.candidate_hash.as_deref()
             || record.acquired_ledger_hash != candidate.input_ledger_hash
             || Some(&record.finishing_step_id) != candidate.invocation_step_id.as_ref()
             || &record.pre_usage != audit.account.analyst_counters()
@@ -609,7 +628,7 @@ pub(super) fn hold_candidate(
     let account = audit.account.analyst_usage(usage, &task.detail.limits)?;
     let candidate_hash = core_prov::content_hash(&encode(&candidate, MAX_RESULT_BYTES)?);
     task.semantic_audit = Some(StoredSemanticAudit {
-        schema_version: 1,
+        schema_version: audit.schema_version,
         account,
         candidate: Some(candidate),
         candidate_hash: Some(candidate_hash),

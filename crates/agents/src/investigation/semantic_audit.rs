@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 #[path = "semantic_audit_payload.rs"]
 mod payload;
-pub use payload::PreparedSemanticAudit;
 pub(super) use payload::prepare_payload;
+pub use payload::{PreparedSemanticAudit, advisory_contract_hash};
 pub use payload::{projection_wire_bounds, projection_workspace_bytes};
 
 #[path = "semantic_audit_account.rs"]
@@ -367,6 +367,53 @@ mod tests {
         assert!(prepare_payload(&duplicated, &candidate, &ids).is_err());
     }
 
+    #[test]
+    fn auditor_v2_subjects_link_parent_citations_at_finish_cardinality_limits() {
+        let (mut candidate, _, _) = fixture();
+        let ids: BTreeSet<_> = (1..=8).map(|i| format!("evidence-{i}")).collect();
+        let finding: InvestigationFinding = serde_json::from_value(serde_json::json!({
+            "finding_id":"finding-1", "claim_kind":"inferred_interpretation",
+            "confidence_tier":"InferredWeak", "tier":"Agentic", "title":"title",
+            "statement":"statement", "citation_ids":ids, "limitations":vec!["gap"; 8]
+        }))
+        .unwrap();
+        candidate.findings = vec![finding; 12];
+        candidate.limitations = vec!["overall".into(); 8];
+        let original = llm::CompletionPayload {
+            response_schema: None,
+            system: String::new(),
+            prompt: r#"{"question":"why?"}"#.into(),
+            spans: ids
+                .iter()
+                .map(|id| llm::PayloadSpan {
+                    id: id.clone(),
+                    repo: "test".into(),
+                    path: "p".into(),
+                    byte_start: 0,
+                    byte_end: 1,
+                    commit_sha: "a".repeat(40),
+                    text: "x".into(),
+                })
+                .collect(),
+        };
+        let audit = prepare_payload(&original, &candidate, &ids).unwrap();
+        let prompt: serde_json::Value = serde_json::from_str(&audit.payload().prompt).unwrap();
+        assert_eq!(prompt["role"], "candidate-evidence-auditor@3");
+        let list = prompt["subjects"].as_array().unwrap();
+        assert_eq!(list.len(), 12 * 9 + 8);
+        for descriptor in list {
+            match descriptor["subject"]["kind"].as_str().unwrap() {
+                "limitation" => assert_eq!(descriptor["scope"], "all_acquired_spans"),
+                "finding" | "finding_limitation" => {
+                    assert_eq!(descriptor["parent_citation_ids"], serde_json::json!(ids))
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(audit.payload().spans, original.spans);
+        assert!(audit.encoded_bytes().unwrap() <= MAX_INPUT_BYTES);
+    }
+
     // AC-0566: model replies contain only closed, typed review data.
     #[test]
     fn strict_reply_rejects_duplicate_keys_and_untyped_prose() {
@@ -401,4 +448,21 @@ mod tests {
             serde_json::to_vec(&local).unwrap()
         );
     }
+}
+
+/// Content-free terminal audit state. These are model observations, not proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdvisoryAudit {
+    Completed { reviews: Vec<SubjectReview> },
+    NotCompleted { reason: AuditFailure },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditFailure {
+    Transport,
+    Timeout,
+    Length,
+    InvalidOutput,
 }

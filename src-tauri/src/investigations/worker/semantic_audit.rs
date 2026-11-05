@@ -100,20 +100,42 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         drop(selected);
         drop(keys);
         super::super::emit_changed(self.app, &self.detail);
-        // The durable debit precedes the call. Every error returns through the
-        // ordinary worker stop path, retaining the audit charge and clock sample.
+        // The durable debit precedes the one call. Only bounded transport/output
+        // failures are advisory; privacy, cancellation and ownership still stop.
         let deadline = self.clock.deadline()?;
         let directive = || execution_directive(self.state, self.execution, self.id);
-        let completion = provider
-            .complete_bounded(
-                &authorized,
-                &CompletionControl {
-                    deadline,
-                    check: &directive,
-                },
-            )
-            .map_err(provider_failure)?;
-        validate_completion(&completion, &prepared)?;
+        let completion = provider.complete_bounded(
+            &authorized,
+            &CompletionControl {
+                deadline,
+                check: &directive,
+            },
+        );
+        let completion = match &completion {
+            Ok(completion) => Ok(completion),
+            Err(error) => Err(match error.code {
+                llm::bounded::FailureCode::Transport | llm::bounded::FailureCode::HttpStatus => {
+                    agents::investigation::semantic_audit::AuditFailure::Transport
+                }
+                // A request timeout can precede the task deadline; settlement
+                // still refuses publication when the task clock is exhausted.
+                llm::bounded::FailureCode::DeadlineExceeded => {
+                    agents::investigation::semantic_audit::AuditFailure::Timeout
+                }
+                llm::bounded::FailureCode::ResponseTooLarge
+                | llm::bounded::FailureCode::OutputTooLarge => {
+                    agents::investigation::semantic_audit::AuditFailure::Length
+                }
+                llm::bounded::FailureCode::UnsupportedEncoding
+                | llm::bounded::FailureCode::InvalidResponse
+                | llm::bounded::FailureCode::IncompleteResponse
+                | llm::bounded::FailureCode::Refused
+                | llm::bounded::FailureCode::EmptyCompletion => {
+                    agents::investigation::semantic_audit::AuditFailure::InvalidOutput
+                }
+                _ => return Err(provider_failure(*error)),
+            }),
+        };
         self.detail = {
             let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
             // Cancellation may increment revision while the bounded provider is
@@ -128,7 +150,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     input,
                     original_prepared: original,
                     audit_prepared: &prepared,
-                    completion: &completion,
+                    completion,
                     active_milliseconds: self.clock.active_milliseconds(),
                 },
             )?

@@ -100,8 +100,15 @@ pub(in crate::investigation) fn feedback_encoded_bound(
     let citation_bytes = bounded_bytes(&feedback, cap).map_or(cap, |bytes| bytes.len());
     feedback.schema_version = 3;
     feedback.citation_correction = None;
-    feedback.prose_correction =
-        Some(staged_finish::ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+    feedback.prose_correction = Some(
+        staged_finish::ProseCorrection::LimitationDeniesAcquiredEvidence(Box::new(
+            staged_finish::ConflictingEvidence {
+                evidence_ids: (1..=policy.limits().evidence_items)
+                    .map(|i| format!("evidence-{i}"))
+                    .collect(),
+            },
+        )),
+    );
     let prose_bytes = bounded_bytes(&feedback, cap).map_or(cap, |bytes| bytes.len());
     Ok(citation_bytes.max(prose_bytes))
 }

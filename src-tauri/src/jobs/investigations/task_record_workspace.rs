@@ -20,6 +20,7 @@ pub(crate) fn next_prompt_record_workspace(bytes: usize) -> Option<(usize, usize
         size_of::<String>(),
         size_of::<InvestigationCitation>(),
         size_of::<InvestigationFinding>(),
+        size_of::<agents::investigation::semantic_audit::SubjectReview>(),
         size_of::<context_hub::coverage::RepoQualification>(),
         size_of::<InvestigationInspectionTarget>(),
         size_of::<InvestigationInspectionObservation>(),

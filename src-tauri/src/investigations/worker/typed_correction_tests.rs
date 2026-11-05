@@ -360,3 +360,19 @@ fn analyst20_source_replay_shares_correction_and_requires_audit() {
         );
     }
 }
+
+#[test]
+fn analyst20_denied_source_stops_after_one_correction_and_reopens() {
+    let mut provider = NextProvider::new(false);
+    provider.gated_flow = Some(GatedFlow::RepeatDeniedEvidence);
+    let f = NextFixture::with_source_obligation(&provider, SpecialistId::DomainAnalystV20, true);
+    f.run_with_audit_options(&provider, RunClock::new(Instant::now()), None, true);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    let detail = reopened.investigation(&f.id).unwrap();
+    assert_eq!(
+        detail.error.as_deref(),
+        Some("The corrected answer still denied acquired evidence. No findings were saved.")
+    );
+    assert_eq!(detail.usage.model_invocations, 4);
+    assert!(reopened.investigation_result(&f.id).unwrap().is_none());
+}

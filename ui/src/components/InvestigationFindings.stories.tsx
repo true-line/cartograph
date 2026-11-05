@@ -111,3 +111,26 @@ export const SavedAnswerWithoutReviewControls: Story = {
     await expect(canvasElement.querySelector('#saved-answer-fixture')).not.toBeNull();
   },
 };
+
+// AC-0566: feedback is visible as advisory without changing the saved finding.
+export const AdvisoryNonPass: Story = {
+  args: { advisoryAudit: { status: 'completed', reviews: [
+    { subject: { kind: 'finding', finding_index: 0 }, assessment: { verdict: 'unsupported_scope' } },
+    { subject: { kind: 'limitation', limitation_index: 0 }, assessment: { verdict: 'contradiction', citation_id: 'C1' } },
+  ] } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Finding 1: Unsupported scope (advisory)')).toBeVisible();
+    await expect(canvas.getByText(/It does not verify these findings/)).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Inspect advisory citation C1' })).toBeEnabled();
+    await expect(canvas.getAllByText(/T3 · InferredWeak/)).toHaveLength(2);
+  },
+};
+export const AdvisoryNotCompleted: Story = {
+  args: { advisoryAudit: { status: 'not_completed', reason: 'invalid_output' } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Audit not completed: invalid model output.')).toBeVisible();
+    await expect(canvas.getAllByText(/T3 · InferredWeak/)).toHaveLength(2);
+  },
+};

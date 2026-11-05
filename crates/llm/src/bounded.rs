@@ -89,7 +89,7 @@ pub struct CompletionLimits(CompletionLimitValues);
 pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
 
 /// Reserved only for the single semantic-audit invocation.
-pub const AUDIT_OUTPUT_TOKENS: u32 = 8192;
+pub const AUDIT_OUTPUT_TOKENS: u32 = 16384;
 
 impl CompletionLimits {
     pub fn for_semantic_audit(self) -> Self {
@@ -101,12 +101,15 @@ impl CompletionLimits {
 
     /// Validate the stored audit wire limits, including historical analyst-sized calls.
     pub fn from_audit_values(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
-        if values.max_output_tokens == AUDIT_OUTPUT_TOKENS {
+        if matches!(values.max_output_tokens, 8192 | AUDIT_OUTPUT_TOKENS) {
             let regular = Self::new(CompletionLimitValues {
                 max_output_tokens: 1,
                 ..values
             })?;
-            Ok(regular.for_semantic_audit())
+            Ok(Self(CompletionLimitValues {
+                max_output_tokens: values.max_output_tokens,
+                ..regular.0
+            }))
         } else {
             Self::new(values)
         }

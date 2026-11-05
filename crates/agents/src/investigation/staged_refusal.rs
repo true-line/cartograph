@@ -174,6 +174,20 @@ impl RefusalRecord {
         if self.feedback.prose_correction.is_some() && consistency.is_none() {
             return Err(InvestigationError::InvalidInput);
         }
+        if let Some(ProseCorrection::LimitationDeniesAcquiredEvidence(conflict)) =
+            &self.feedback.prose_correction
+            && !conflict.evidence_ids.iter().all(|id| {
+                ledger.citations.iter().any(|c| {
+                    c.citation_id == *id
+                        && matches!(
+                            c.origin,
+                            InvestigationEvidenceOrigin::CapturedPrimarySource { .. }
+                        )
+                })
+            })
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         let obligations = envelope.normalized_with_policy(policy)?;
         if self.schema_version != 1
             || !super::records::opaque_id(&self.task_id)

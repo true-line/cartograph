@@ -8,8 +8,17 @@ fn supported_candidate_audit_start_rolls_back_and_reopens_without_publication() 
 }
 
 #[test]
-fn semantic_audit_settlement_publishes_only_pass_and_rejects_forged_binding() {
-    for verdict in ["pass", "unsupported_scope", "indeterminate", "late_pass"] {
+fn semantic_audit_settlement_publishes_advisory_and_records_invalid_binding() {
+    for verdict in [
+        "pass",
+        "unsupported_scope",
+        "indeterminate",
+        "late_pass",
+        "forged_binding",
+        "invalid_output",
+        "transport_failure",
+        "length_failure",
+    ] {
         run_audit_checkpoint(Some(verdict));
     }
 }
@@ -165,31 +174,6 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
         }
         if let Some(verdict) = settlement {
             if matches!(verdict, "provider_failure" | "invalid_reply") {
-                if verdict == "invalid_reply" {
-                    let completion = BoundedCompletion {
-                        text: "not-json".into(),
-                        requested_model: prepared.profile().requested_model.clone(),
-                        response_model: None,
-                        provider_request_id: None,
-                        usage: None,
-                        request_bytes: 1,
-                        response_bytes: 8,
-                    };
-                    assert!(
-                        jobs.settle_next_prompt_semantic_audit(
-                            execution,
-                            started.summary.revision,
-                            &SemanticAuditResponse {
-                                input,
-                                original_prepared: original,
-                                audit_prepared: &prepared,
-                                completion: &completion,
-                                active_milliseconds: started.usage.active_milliseconds
-                            }
-                        )
-                        .is_err()
-                    );
-                }
                 let reason = if verdict == "provider_failure" {
                     InvestigationStopReason::OutcomeUnknown
                 } else {
@@ -250,7 +234,15 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
                 assert_eq!(receipts, 0);
                 return Ok(true);
             }
-            let wire_verdict = if matches!(verdict, "late_pass" | "cancelled_pass") {
+            let wire_verdict = if matches!(
+                verdict,
+                "late_pass"
+                    | "cancelled_pass"
+                    | "forged_binding"
+                    | "invalid_output"
+                    | "transport_failure"
+                    | "length_failure"
+            ) {
                 "pass"
             } else {
                 verdict
@@ -265,7 +257,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
             };
             let prompt: serde_json::Value = serde_json::from_str(&audit.payload().prompt).unwrap();
             let reviews = prompt["subjects"].as_array().unwrap().iter().map(|subject|
-                    serde_json::json!({"subject":subject,"assessment":{"verdict":wire_verdict}})).collect::<Vec<_>>();
+                    serde_json::json!({"subject":subject["subject"],"assessment":{"verdict":wire_verdict}})).collect::<Vec<_>>();
             let reply = serde_json::json!({"schema_version":1,"candidate_hash":prompt["candidate_hash"],
                     "acquired_ledger_hash":prompt["acquired_ledger_hash"],"contract_hash":prompt["contract_hash"],"reviews":reviews});
             let completion = BoundedCompletion {
@@ -277,33 +269,27 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
                 request_bytes: 1,
                 response_bytes: reply.to_string().len() as u64,
             };
-            let mut forged = completion.clone();
-            let mut bad = reply.clone();
-            bad["candidate_hash"] = serde_json::json!("f".repeat(64));
-            forged.text = bad.to_string();
-            assert!(
-                jobs.settle_next_prompt_semantic_audit(
-                    execution,
-                    started.summary.revision,
-                    &SemanticAuditResponse {
-                        input,
-                        original_prepared: original,
-                        audit_prepared: &prepared,
-                        completion: &forged,
-                        active_milliseconds: started.usage.active_milliseconds
-                    }
-                )
-                .is_err()
-            );
-            assert_eq!(
-                serde_json::to_value(jobs.investigation(&f.id).unwrap()).unwrap(),
-                serde_json::to_value(&started).unwrap()
-            );
+            let mut completion = completion;
+            if verdict == "forged_binding" {
+                let mut bad = reply.clone();
+                bad["candidate_hash"] = serde_json::json!("f".repeat(64));
+                completion.text = bad.to_string();
+            } else if verdict == "invalid_output" {
+                completion.text = "not-json".into();
+            }
             let response = SemanticAuditResponse {
                 input,
                 original_prepared: original,
                 audit_prepared: &prepared,
-                completion: &completion,
+                completion: match verdict {
+                    "transport_failure" => {
+                        Err(agents::investigation::semantic_audit::AuditFailure::Transport)
+                    }
+                    "length_failure" => {
+                        Err(agents::investigation::semantic_audit::AuditFailure::Length)
+                    }
+                    _ => Ok(&completion),
+                },
                 active_milliseconds: if verdict == "late_pass" {
                     started.limits.active_seconds * 1000 + 1
                 } else {
@@ -313,10 +299,21 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
             let settled = jobs
                 .settle_next_prompt_semantic_audit(execution, started.summary.revision, &response)
                 .unwrap_or_else(|e| panic!("settlement {verdict}: {e:?}"));
-            assert_eq!(settled.summary.has_result, verdict == "pass");
+            let publish = !matches!(verdict, "late_pass" | "cancelled_pass");
+            assert_eq!(settled.summary.has_result, publish);
+            use agents::investigation::semantic_audit::AdvisoryAudit;
+            assert!(
+                matches!(
+                    &settled.advisory_audit,
+                    Some(AdvisoryAudit::NotCompleted { .. })
+                ) == matches!(
+                    verdict,
+                    "forged_binding" | "invalid_output" | "transport_failure" | "length_failure"
+                )
+            );
             assert_eq!(
                 settled.summary.status,
-                if verdict == "pass" {
+                if publish {
                     InvestigationStatus::Completed
                 } else if verdict == "cancelled_pass" {
                     InvestigationStatus::Cancelled
@@ -326,10 +323,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
             );
             assert_eq!(settled.usage.model_invocations, 5);
             assert!(!settled.summary.invocation_pending);
-            assert_eq!(
-                jobs.investigation_result(&f.id).unwrap().is_some(),
-                verdict == "pass"
-            );
+            assert_eq!(jobs.investigation_result(&f.id).unwrap().is_some(), publish);
             for revision in [started.summary.revision, settled.summary.revision] {
                 assert!(
                     jobs.settle_next_prompt_semantic_audit(execution, revision, &response)
@@ -450,9 +444,9 @@ fn semantic_audit_worker_failure_and_inflight_cancellation_keep_charge() {
     }
 }
 
-// AC-0566: well-formed but unauthenticated audit content cannot publish or survive as a receipt.
+// AC-0566: invalid audit output is recorded only as not-completed, never retained as reviews.
 #[test]
-fn semantic_audit_worker_duplicate_subject_and_foreign_citation_fail_durably() {
+fn semantic_audit_worker_duplicate_subject_and_foreign_citation_record_not_completed() {
     for verdict in ["duplicate_subject", "foreign_citation"] {
         run_audit_dispatch(verdict);
     }
@@ -487,11 +481,9 @@ fn run_audit_dispatch(verdict: &'static str) {
         "{verdict}: {:?}",
         detail.summary.status
     );
-    assert_eq!(detail.summary.has_result, verdict == "pass");
-    assert_eq!(
-        jobs.investigation_result(&f.id).unwrap().is_some(),
-        verdict == "pass"
-    );
+    let publish = verdict != "cancelled_pass";
+    assert_eq!(detail.summary.has_result, publish, "{verdict}");
+    assert_eq!(jobs.investigation_result(&f.id).unwrap().is_some(), publish);
     if matches!(
         verdict,
         "provider_failure" | "audit_timeout" | "cancelled_pass"
@@ -501,7 +493,7 @@ fn run_audit_dispatch(verdict: &'static str) {
             if verdict == "cancelled_pass" {
                 InvestigationStatus::Cancelled
             } else {
-                InvestigationStatus::OutcomeUnknown
+                InvestigationStatus::Completed
             }
         );
         assert_eq!(
@@ -514,13 +506,13 @@ fn run_audit_dispatch(verdict: &'static str) {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(receipts, if verdict == "cancelled_pass" { 1 } else { 0 });
+        assert_eq!(receipts, 1);
     }
     if matches!(
         verdict,
         "invalid" | "duplicate_subject" | "foreign_citation"
     ) {
-        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.summary.status, InvestigationStatus::Completed);
         assert_eq!(
             detail.usage.generated_token_reservations,
             4 * detail.limits.generated_tokens_per_invocation + llm::bounded::AUDIT_OUTPUT_TOKENS
@@ -531,7 +523,11 @@ fn run_audit_dispatch(verdict: &'static str) {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(receipts, 0);
+        assert_eq!(receipts, 1);
+        assert!(matches!(
+            detail.advisory_audit,
+            Some(agents::investigation::semantic_audit::AdvisoryAudit::NotCompleted { .. })
+        ));
         assert!(
             !serde_json::to_string(&detail)
                 .unwrap()
@@ -659,7 +655,7 @@ impl LlmProvider for SeparateTestAuditor {
         control: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
-        assert_eq!(prompt["role"], "candidate-evidence-auditor@1");
+        assert_eq!(prompt["role"], "candidate-evidence-auditor@3");
         self.calls.fetch_add(1, Ordering::SeqCst);
         let mut reply = self.inner.complete_bounded(request, control)?;
         reply.requested_model = "separate-audit-model".into();
@@ -703,12 +699,7 @@ fn semantic_audit_separate_provider_identity_and_failures_reopen() {
         let detail = reopened.investigation(&f.id).unwrap();
         assert_eq!(auditor.calls.load(Ordering::SeqCst), 1);
         assert_eq!(detail.usage.model_invocations, 5);
-        assert_eq!(
-            detail.summary.has_result,
-            verdict == "pass",
-            "{:?}",
-            detail.error
-        );
+        assert!(detail.summary.has_result, "{:?}", detail.error);
         assert!(!detail.summary.invocation_pending);
         assert!(terminal(detail.summary.status));
         let connection = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();

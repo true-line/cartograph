@@ -33,6 +33,9 @@ pub(super) fn receipt_replay_workspace() -> Option<usize> {
     ])?;
     let validation = sum(&[
         retained,
+        // Public advisory projection is compared against the immutable receipt.
+        MAX_RECORD_BYTES,
+        slots::<SubjectReview>(RECORD_MAX_VALUES)?,
         MAX_RECORD_BYTES,   // receipt re-encoding before semantic admission
         MAX_MANIFEST_BYTES, // invocation fingerprint
         MAX_ACTION_BYTES,   // typed reply bound
@@ -123,6 +126,9 @@ pub(crate) fn next_prompt_audit_transaction_workspace(
     // a selected basis/step survives completion::accepted on the pass branch.
     let publish = sum(&[
         receipt,
+        // Settlement clones receipt reviews into saved public task detail.
+        MAX_RECORD_BYTES,
+        slots::<SubjectReview>(RECORD_MAX_VALUES)?,
         ledger,
         result,
         ids,

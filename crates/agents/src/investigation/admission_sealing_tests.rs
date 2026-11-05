@@ -633,10 +633,10 @@ fn acquisition_finish_consistency_binds_identity_policy_and_stamp() {
             policy,
         );
         if role != SpecialistId::DomainAnalystV18 {
-            generic
-                .unwrap_or_else(|error| panic!("{role:?}: {error:?}"))
-                .ok()
-                .expect("historical typed finish");
+            assert!(
+                matches!(generic, Ok(Ok(_))),
+                "{role:?}: expected a historical typed finish"
+            );
             continue;
         }
         assert!(generic.is_err(), "unbound Some must remain rejected");

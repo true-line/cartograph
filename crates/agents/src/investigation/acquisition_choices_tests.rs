@@ -1023,9 +1023,23 @@ fn citation_correction_analyst20_prompt_qualifies_finish_without_rewriting_19() 
     assert!(new.prompt().contains(paraphrase));
     assert!(!old.prompt().contains(paraphrase));
     assert!(!SpecialistId::DomainAnalystV18.prompt().contains(paraphrase));
+    // AC-0566: the qualifier hunk changes only @20 guidance; reconstruct the
+    // retained run-8 prompt to independently pin the exact preceding contract.
+    let qualifiers = "Qualifiers in findings and limitations must be established by the cited spans. Describe a value by how the cited code obtains it (for example, a passed-in argument), not by a state the spans do not establish (for example, active, current, authenticated or validated). Do not turn an unknown state into an asserted qualifier. ";
+    assert_eq!(new.prompt().matches(qualifiers).count(), 1);
+    assert!(!old.prompt().contains(qualifiers));
+    let preceding_prompt = new.prompt().replace(qualifiers, "");
+    let preceding_fingerprint = crate::source_basis::domain_hash(
+        b"cartograph:specialist-definition:v1\0",
+        &super::bounded_bytes(&(new, 20u32, &preceding_prompt), 16 * 1024).unwrap(),
+    );
     assert_eq!(
+        preceding_fingerprint,
+        "9f038354ab93e5734fe38d4481dfa07ec23e08aa6f93a17b0f76db23883887db"
+    );
+    assert_ne!(
         new.definition().unwrap().prompt_fingerprint,
-        "25ae99fe3e2a6611db20cc673b27190a59dfe1061aa5a786cbe351b29d9e65e4"
+        preceding_fingerprint
     );
     assert_eq!(new.definition().unwrap().version, 20);
     assert_ne!(

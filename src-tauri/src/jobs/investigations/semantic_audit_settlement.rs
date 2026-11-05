@@ -1,14 +1,14 @@
 //! Authenticate a completed audit against the original input and durable call.
 //! The receipt is transient until the owning settlement transaction saves it.
 use super::*;
-use agents::investigation::semantic_audit::SemanticAuditReply;
+use agents::investigation::semantic_audit::{AuditFailure, SemanticAuditReply};
 use llm::bounded::{BoundedCompletion, PreparedBoundedCompletion};
 
 pub(crate) struct SemanticAuditResponse<'a> {
     pub input: &'a InvestigationInput,
     pub original_prepared: &'a PreparedBoundedCompletion,
     pub audit_prepared: &'a PreparedBoundedCompletion,
-    pub completion: &'a BoundedCompletion,
+    pub completion: Result<&'a BoundedCompletion, AuditFailure>,
     pub active_milliseconds: u64,
 }
 
@@ -30,25 +30,39 @@ pub(super) fn authenticate(
     let invocation =
         super::semantic_audit_journal::load(tx, id)?.ok_or(InvestigationStoreError::Invalid)?;
     let prepared = response.audit_prepared;
-    let completion = response.completion;
     let limits = prepared.limits().values();
     if !prepared.matches_action(&expected.action(invocation.action_id.clone())?)
         || prepared.preview().egress.payload_hash != invocation.payload_hash
         || prepared.profile() != &invocation.provider
         || limits != invocation.limits
-        || completion.text.is_empty()
-        || completion.text.len() as u64 > limits.output_text_bytes
-        || completion.requested_model != invocation.provider.requested_model
-        || completion.request_bytes > limits.request_bytes
-        || completion.response_bytes > limits.response_bytes
         || response.active_milliseconds < task.detail.usage.active_milliseconds
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    response
-        .input
-        .validate_response_metadata(completion.response_model.as_deref())?;
-    let reply = SemanticAuditReply::decode(&completion.text)?;
+    // Privacy and provider identity remain hard failures. Only model output or
+    // bounded transport failure may become a typed advisory not-completed state.
+    let (reply, not_completed) = match response.completion {
+        Ok(completion) => {
+            response
+                .input
+                .validate_response_metadata(completion.response_model.as_deref())?;
+            if completion.requested_model != invocation.provider.requested_model
+                || completion.request_bytes > limits.request_bytes
+                || completion.response_bytes > limits.response_bytes
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            if completion.text.len() as u64 > limits.output_text_bytes {
+                (None, Some(AuditFailure::Length))
+            } else {
+                match SemanticAuditReply::decode(&completion.text) {
+                    Ok(reply) => (Some(reply), None),
+                    Err(_) => (None, Some(AuditFailure::InvalidOutput)),
+                }
+            }
+        }
+        Err(reason) => (None, Some(reason)),
+    };
     let mut usage = InvestigationUsage {
         model_invocations: 1,
         generated_token_reservations: limits.max_output_tokens,
@@ -58,16 +72,21 @@ pub(super) fn authenticate(
             .ok_or(InvestigationStoreError::Invalid)?,
         ..Default::default()
     };
-    if let Some(reported) = &completion.usage {
+    if let Some(reported) = response
+        .completion
+        .ok()
+        .and_then(|completion| completion.usage.as_ref())
+    {
         usage.reported_input_tokens = reported.input_tokens;
         usage.reported_output_tokens = reported.output_tokens;
         usage.reported_cache_read_tokens = reported.cache_read_input_tokens;
     }
-    let receipt = super::semantic_audit_receipt::AuditReceipt {
-        schema_version: 1,
+    let mut receipt = super::semantic_audit_receipt::AuditReceipt {
+        schema_version: invocation.schema_version,
         task_id: id.clone(),
         invocation_hash: core_prov::content_hash(&encode(&invocation, MAX_MANIFEST_BYTES)?),
         reply,
+        not_completed,
         auditor_usage: usage,
     };
     let audit = task
@@ -86,6 +105,21 @@ pub(super) fn authenticate(
         .filter(|citation| !matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata))
         .map(|citation| citation.citation_id.clone())
         .collect();
+    // A well-shaped but unbound model reply is invalid output, never evidence.
+    if let Some(reply) = &receipt.reply
+        && reply
+            .validate_bound(
+                candidate,
+                &invocation.candidate_hash,
+                &invocation.acquired_ledger_hash,
+                &invocation.contract_hash,
+                &ids,
+            )
+            .is_err()
+    {
+        receipt.reply = None;
+        receipt.not_completed = Some(AuditFailure::InvalidOutput);
+    }
     receipt.validate(&invocation, candidate, &ids)?;
     // Validate aggregate settlement now, including terminal overrun accounting.
     audit
@@ -95,8 +129,9 @@ pub(super) fn authenticate(
 }
 
 impl JobStore {
-    /// Persist the authenticated decision and publish only a timely, uncancelled
-    /// pass. No retry, repair, or new provider call is authorized by this writer.
+    /// Persist advisory outcome and the timely, uncancelled candidate. Historical
+    /// contracts continue to require a pass. No retry, repair, or new provider
+    /// call is authorized by this writer.
     pub(crate) fn settle_next_prompt_semantic_audit(
         &mut self,
         execution: &JobExecution,
@@ -149,7 +184,8 @@ impl JobStore {
                 .active_seconds
                 .checked_mul(1000)
                 .ok_or(InvestigationStoreError::Capacity)?;
-        let publish = disposition == agents::investigation::semantic_audit::AuditDisposition::Pass
+        let publish = (audit.is_advisory()
+            || disposition == agents::investigation::semantic_audit::AuditDisposition::Pass)
             && timely
             && !task.detail.summary.cancel_requested;
         if publish {
@@ -183,6 +219,7 @@ impl JobStore {
             completion::refresh_observation(&tx, &mut task)?;
         }
         task.phase = Phase::Terminal;
+        task.detail.advisory_audit = receipt.advisory()?;
         bump(&tx, &mut task)?;
         let event_kind = if publish {
             InvestigationEventKind::ResultPersisted
@@ -198,7 +235,7 @@ impl JobStore {
             None,
             None,
             if publish {
-                "The audited candidate was persisted against its original evidence."
+                "The candidate was persisted with advisory model feedback; this is not verification."
             } else {
                 "Semantic audit ended without publishing a candidate."
             },

@@ -16,7 +16,7 @@ pub struct SemanticAuditAccount {
 impl SemanticAuditAccount {
     /// Reserve one audit invocation under the original immutable task limits.
     pub fn new(limits: &InvestigationLimits) -> Result<Self, InvestigationError> {
-        Self::with_version(limits, 2)
+        Self::with_version(limits, 3)
     }
 
     fn with_version(
@@ -38,6 +38,8 @@ impl SemanticAuditAccount {
     pub fn output_tokens(&self, limits: &InvestigationLimits) -> u32 {
         if self.schema_version == 1 {
             limits.generated_tokens_per_invocation
+        } else if self.schema_version == 2 {
+            8192
         } else {
             llm::bounded::AUDIT_OUTPUT_TOKENS
         }
@@ -199,7 +201,7 @@ impl SemanticAuditAccount {
     /// Validate after decoding against the host's original limits, never limits
     /// supplied by a child. Active time is aggregate; wall deadline stays host-owned.
     pub fn validate(&self, limits: &InvestigationLimits) -> Result<(), InvestigationError> {
-        if !matches!(self.schema_version, 1 | 2)
+        if !matches!(self.schema_version, 1..=3)
             || self.limits_hash != limits_hash(limits)?
             || (!self.audit_started && self.auditor != InvestigationUsage::default())
             || (self.audit_started
@@ -331,6 +333,7 @@ mod tests {
     // AC-0566: unknown terminal totals never refund a debit or weaken live accounting.
     #[test]
     fn audit_output_reservation_fits_exact_remaining_budget() {
+        assert_eq!(llm::bounded::AUDIT_OUTPUT_TOKENS, 16384);
         let limits = INVESTIGATION_V2_POLICY.limits();
         let account = SemanticAuditAccount::new(&limits).unwrap();
         let mut analyst = InvestigationUsage {
@@ -359,6 +362,27 @@ mod tests {
                 .generated_token_reservations,
             limits.generated_tokens_per_invocation
         );
+    }
+
+    #[test]
+    fn historical_audit_account_preserves_8192_reservation() {
+        let limits = INVESTIGATION_V2_POLICY.limits();
+        let started = SemanticAuditAccount::with_version(&limits, 2)
+            .unwrap()
+            .begin_audit(&limits)
+            .unwrap();
+        let saved = serde_json::to_vec(&started).unwrap();
+        let reopened: SemanticAuditAccount = serde_json::from_slice(&saved).unwrap();
+        reopened.validate(&limits).unwrap();
+        assert_eq!(reopened.usage().unwrap().generated_token_reservations, 8192);
+        assert_eq!(
+            reopened
+                .empty_for_replay(&limits)
+                .unwrap()
+                .output_tokens(&limits),
+            8192
+        );
+        assert!(reopened.begin_audit(&limits).is_err());
     }
 
     #[test]

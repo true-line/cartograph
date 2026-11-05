@@ -2001,3 +2001,22 @@ fn openai_compatible_oversize_schema_never_connects() {
         io::ErrorKind::WouldBlock
     );
 }
+
+#[test]
+fn semantic_audit_limits_preserve_historical_reservations() {
+    let current = CompletionLimits::default().for_semantic_audit();
+    assert_eq!(current.values().max_output_tokens, 16384);
+    for tokens in [2048, 8192, 16384] {
+        let values = CompletionLimitValues {
+            max_output_tokens: tokens,
+            ..CompletionLimitValues::default()
+        };
+        assert_eq!(
+            CompletionLimits::from_audit_values(values)
+                .unwrap()
+                .values()
+                .max_output_tokens,
+            tokens
+        );
+    }
+}

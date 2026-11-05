@@ -1,7 +1,9 @@
 //! Content-limited audit decision receipt, never raw model prose or source text.
 //! Insert only inside the task's authenticated response settlement transaction.
 use super::*;
-use agents::investigation::semantic_audit::{AuditDisposition, SemanticAuditReply};
+use agents::investigation::semantic_audit::{
+    AdvisoryAudit, AuditDisposition, AuditFailure, SemanticAuditReply,
+};
 
 pub(super) const TABLE: &str = "candidate_audit_responses";
 
@@ -11,11 +13,25 @@ pub(super) struct AuditReceipt {
     pub schema_version: u32,
     pub task_id: String,
     pub invocation_hash: String,
-    pub reply: SemanticAuditReply,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<SemanticAuditReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_completed: Option<AuditFailure>,
     pub auditor_usage: InvestigationUsage,
 }
 
 impl AuditReceipt {
+    pub(super) fn advisory(&self) -> Result<Option<AdvisoryAudit>, InvestigationStoreError> {
+        match (self.schema_version, &self.reply, self.not_completed) {
+            (1, Some(_), None) => Ok(None),
+            (2, Some(reply), None) => Ok(Some(AdvisoryAudit::Completed {
+                reviews: reply.reviews.clone(),
+            })),
+            (2, None, Some(reason)) => Ok(Some(AdvisoryAudit::NotCompleted { reason })),
+            _ => Err(InvestigationStoreError::Invalid),
+        }
+    }
+
     /// Re-derive the disposition on every read; no stored boolean grants pass.
     pub(super) fn validate(
         &self,
@@ -23,9 +39,12 @@ impl AuditReceipt {
         candidate: &InvestigationResult,
         acquired_ids: &std::collections::BTreeSet<String>,
     ) -> Result<AuditDisposition, InvestigationStoreError> {
-        if self.schema_version != 1
+        if self.schema_version != invocation.schema_version
             || self.task_id != invocation.task_id
             || self.task_id != candidate.investigation_id
+            || invocation.candidate_hash
+                != core_prov::content_hash(&encode(candidate, MAX_RESULT_BYTES)?)
+            || invocation.acquired_ledger_hash != candidate.input_ledger_hash
             || self.invocation_hash
                 != core_prov::content_hash(&encode(invocation, MAX_MANIFEST_BYTES)?)
             || self.auditor_usage.model_invocations != 1
@@ -35,7 +54,19 @@ impl AuditReceipt {
             return Err(InvestigationStoreError::Invalid);
         }
         encode(self, MAX_RECORD_BYTES)?;
-        Ok(self.reply.validate_bound(
+        if !matches!(
+            (self.schema_version, &self.reply, self.not_completed),
+            (1 | 2, Some(_), None) | (2, None, Some(_))
+        ) || (self.schema_version == 2)
+            != (invocation.contract_hash
+                == agents::investigation::semantic_audit::advisory_contract_hash()?)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let Some(reply) = &self.reply else {
+            return Ok(AuditDisposition::Indeterminate);
+        };
+        Ok(reply.validate_bound(
             candidate,
             &invocation.candidate_hash,
             &invocation.acquired_ledger_hash,
@@ -125,7 +156,8 @@ mod tests {
             invocation_hash: core_prov::content_hash(
                 &encode(&invocation, MAX_MANIFEST_BYTES).unwrap(),
             ),
-            reply: SemanticAuditReply {
+            not_completed: None,
+            reply: Some(SemanticAuditReply {
                 schema_version: 1,
                 candidate_hash: invocation.candidate_hash.clone(),
                 acquired_ledger_hash: invocation.acquired_ledger_hash.clone(),
@@ -136,22 +168,99 @@ mod tests {
                     },
                     assessment: SubjectVerdict::Pass {},
                 }],
-            },
+            }),
             auditor_usage: InvestigationUsage {
                 model_invocations: 1,
                 generated_token_reservations: invocation.limits.max_output_tokens,
                 ..Default::default()
             },
         };
+        // AC-0566: advisory failure is authenticated, content-free and versioned.
+        let mut advisory_invocation = invocation.clone();
+        advisory_invocation.schema_version = 2;
+        advisory_invocation.contract_hash =
+            agents::investigation::semantic_audit::advisory_contract_hash().unwrap();
+        let mut incomplete = receipt.clone();
+        incomplete.schema_version = 2;
+        incomplete.invocation_hash =
+            core_prov::content_hash(&encode(&advisory_invocation, MAX_MANIFEST_BYTES).unwrap());
+        incomplete.reply = None;
+        incomplete.not_completed = Some(AuditFailure::InvalidOutput);
+        assert_eq!(
+            incomplete
+                .validate(
+                    &advisory_invocation,
+                    &candidate,
+                    &std::collections::BTreeSet::new()
+                )
+                .unwrap(),
+            AuditDisposition::Indeterminate
+        );
+        assert_eq!(
+            incomplete.advisory().unwrap(),
+            Some(AdvisoryAudit::NotCompleted {
+                reason: AuditFailure::InvalidOutput
+            })
+        );
+        assert!(
+            incomplete
+                .validate(&invocation, &candidate, &std::collections::BTreeSet::new())
+                .is_err()
+        );
+        let mut changed_candidate = candidate.clone();
+        changed_candidate.limitations[0] = "changed after invocation".into();
+        assert!(
+            incomplete
+                .validate(
+                    &advisory_invocation,
+                    &changed_candidate,
+                    &std::collections::BTreeSet::new()
+                )
+                .is_err()
+        );
+        let mut invalid = incomplete.clone();
+        invalid.reply = receipt.reply.clone();
+        assert!(
+            invalid
+                .validate(
+                    &advisory_invocation,
+                    &candidate,
+                    &std::collections::BTreeSet::new()
+                )
+                .is_err()
+        );
+        invalid = incomplete.clone();
+        invalid.not_completed = None;
+        assert!(
+            invalid
+                .validate(
+                    &advisory_invocation,
+                    &candidate,
+                    &std::collections::BTreeSet::new()
+                )
+                .is_err()
+        );
+        invalid = incomplete.clone();
+        invalid.auditor_usage.model_invocations = 0;
+        assert!(
+            invalid
+                .validate(
+                    &advisory_invocation,
+                    &candidate,
+                    &std::collections::BTreeSet::new()
+                )
+                .is_err()
+        );
         let mut rejected = receipt.clone();
-        rejected.reply.reviews[0].assessment = SubjectVerdict::UnsupportedScope {};
+        rejected.reply.as_mut().unwrap().reviews[0].assessment =
+            SubjectVerdict::UnsupportedScope {};
         assert_eq!(
             rejected
                 .validate(&invocation, &candidate, &std::collections::BTreeSet::new())
                 .unwrap(),
             AuditDisposition::Rejected
         );
-        rejected.reply.reviews[0].assessment = SubjectVerdict::Indeterminate {};
+        rejected.reply.as_mut().unwrap().reviews[0].assessment = SubjectVerdict::Indeterminate {};
         assert_eq!(
             rejected
                 .validate(&invocation, &candidate, &std::collections::BTreeSet::new())

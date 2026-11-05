@@ -212,6 +212,7 @@ enum GatedFlow {
     ExhaustedProseCorrection,
     RepairReplay,
     RepeatReplay,
+    RepeatDeniedEvidence,
     SpentReplay,
     ReceiptCorrection,
     OfferedTargets,
@@ -316,7 +317,7 @@ impl LlmProvider for NextProvider {
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         self.deadlines.lock().unwrap().push(control.deadline);
-        if prompt["role"] == "candidate-evidence-auditor@1" {
+        if prompt["role"] == "candidate-evidence-auditor@3" {
             let verdict = self.audit_verdict.expect("unexpected audit dispatch");
             assert_eq!(self.observed.calls.fetch_add(1, Ordering::SeqCst), 4);
             if matches!(verdict, "provider_failure" | "audit_timeout") {
@@ -343,7 +344,7 @@ impl LlmProvider for NextProvider {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|subject| json!({"subject":subject,"assessment":{"verdict":verdict}}))
+                .map(|subject| json!({"subject":subject["subject"],"assessment":{"verdict":verdict}}))
                 .collect();
             if matches!(verdict, "duplicate_subject" | "foreign_citation") {
                 for review in &mut reviews {
@@ -424,7 +425,23 @@ impl LlmProvider for NextProvider {
         let text = if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            if matches!(
+            if flow == GatedFlow::RepeatDeniedEvidence {
+                if call < 2 {
+                    prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"]
+                        .to_string()
+                } else {
+                    if call == 3 {
+                        assert_eq!(
+                            prompt["completion_metadata"]["feedback"]["prose_correction"],
+                            json!({"limitation_denies_acquired_evidence":{"evidence_ids":["evidence-1"]}})
+                        );
+                    }
+                    let mut response = typed_correction_tests::next_action(prompt, call, false);
+                    response["action"]["limitations"] =
+                        json!([format!("{} was not read.", request.payload().spans[0].path)]);
+                    response.to_string()
+                }
+            } else if matches!(
                 flow,
                 GatedFlow::RepairReplay | GatedFlow::RepeatReplay | GatedFlow::SpentReplay
             ) {

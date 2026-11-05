@@ -237,7 +237,19 @@ export interface ReportedTaskUsage {
 }
 
 /** Definition/provider are the saved identities, not the current catalog entries. */
+export type AdvisoryAuditSubject =
+  | { kind: 'finding'; finding_index: number }
+  | { kind: 'limitation'; limitation_index: number }
+  | { kind: 'finding_limitation'; finding_index: number; limitation_index: number };
+export type AdvisoryAuditAssessment =
+  | { verdict: 'pass' | 'unsupported_scope' | 'indeterminate' }
+  | { verdict: 'contradiction' | 'answer_coverage'; citation_id: string };
+export type AdvisoryAudit =
+  | { status: 'completed'; reviews: { subject: AdvisoryAuditSubject; assessment: AdvisoryAuditAssessment }[] }
+  | { status: 'not_completed'; reason: 'transport' | 'timeout' | 'length' | 'invalid_output' };
+
 export interface InvestigationDetail extends InvestigationSummary {
+  advisory_audit?: AdvisoryAudit;
   reported_usage_exact?: ReportedTaskUsage;
   completion?: InvestigationCompletionDetail;
   coverage_context?: InvestigationCoverageContext;

@@ -78,7 +78,10 @@ impl AuditInvocation {
                 return Err(InvestigationStoreError::Invalid);
             }
         }
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
+            || (self.schema_version == 2)
+                != (self.contract_hash
+                    == agents::investigation::semantic_audit::advisory_contract_hash()?)
             || !valid_id(&self.task_id)
             || !valid_id(&self.finishing_step_id)
             || self.action_id != format!("{}:audit-1", self.task_id)
