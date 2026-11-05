@@ -1889,8 +1889,10 @@ fn configured_timeout_changes_consent_identity_without_provider_execution() {
 // AC-0342 / #1654: actual synthetic HTTP bytes retain schema and bounded metrics.
 #[test]
 fn openai_compatible_strict_schema_and_thinking_are_bounded() {
+    let duplicate_finish =
+        include_str!("../../tests/fixtures/duplicate-citation-finish.json").trim();
     for disable in [false, true] {
-        let mut body: Value = serde_json::from_slice(&openai_body("{}")).unwrap();
+        let mut body: Value = serde_json::from_slice(&openai_body(duplicate_finish)).unwrap();
         body["choices"][0]["message"]["reasoning_content"] = json!("PRIVATE REASONING");
         body["usage"]["prompt_tokens_details"] = json!({"cached_tokens": 11});
         let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
@@ -1908,7 +1910,8 @@ fn openai_compatible_strict_schema_and_thinking_are_bounded() {
         assert!(provider.supports_bounded_response_schema());
         let firewall = EgressFirewall::new(EgressPolicy::default());
         let mut selected = action();
-        selected.payload.response_schema = Some(RESPONSE_SCHEMA.into());
+        selected.payload.response_schema =
+            Some(r#"{"type":"array","uniqueItems":true,"items":{"type":"string"}}"#.into());
         let prepared = firewall
             .prepare_bounded(&provider, &selected, &CompletionLimits::default())
             .unwrap();
@@ -1922,7 +1925,7 @@ fn openai_compatible_strict_schema_and_thinking_are_bounded() {
             wire["response_format"],
             json!({"type":"json_schema", "json_schema":{
             "name":"cartograph_bounded_response", "strict":true,
-            "schema":serde_json::from_str::<Value>(RESPONSE_SCHEMA).unwrap()}})
+            "schema":json!({"type":"array","items":{"type":"string"}})}})
         );
         if disable {
             assert_eq!(
@@ -1932,7 +1935,7 @@ fn openai_compatible_strict_schema_and_thinking_are_bounded() {
         } else {
             assert!(wire.get("chat_template_kwargs").is_none());
         }
-        assert_eq!(output.text, "{}");
+        assert_eq!(output.text, duplicate_finish);
         assert_eq!(output.usage.unwrap().cache_read_input_tokens, Some(11));
         assert_eq!(output.request_bytes, request.body.len() as u64);
     }

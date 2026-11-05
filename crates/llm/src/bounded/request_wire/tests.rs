@@ -71,17 +71,20 @@ fn borrowed_openai_compatible_request_preserves_wire_and_exact_cap() {
 #[test]
 fn openai_schema_and_template_fields_count_toward_exact_request_cap() {
     let schema = serde_json::value::RawValue::from_string(
-        r#"{"type":"object","additionalProperties":false}"#.into(),
-    )
-    .unwrap();
+        r#"{"type":"object","dependencies":{"x":["uniqueItems"],"y":{"type":"array","uniqueItems":true}},"properties":{"uniqueItems":{"const":{"uniqueItems":true}}},"$defs":{"z":{"anyOf":[{"uniqueItems":true,"type":"array"}]},"a":{"type":"array","uniqueItems":false}}}"#.into(),
+    ).unwrap();
     let wire = openai_compatible("model", "system", "user", 37, Some(&schema), true);
-    let bytes = serde_json::to_vec(&wire).unwrap();
-    assert!(std::str::from_utf8(&bytes).unwrap().contains(schema.get()));
-    assert_eq!(
-        encode(&wire, bytes.len() as u64, FailureCode::RequestTooLarge).unwrap(),
-        bytes
-    );
-    let error = encode(&wire, bytes.len() as u64 - 1, FailureCode::RequestTooLarge).unwrap_err();
+    let expected = br#"{"chat_template_kwargs":{"enable_thinking":false},"max_tokens":37,"messages":[{"content":"system","role":"system"},{"content":"user","role":"user"}],"model":"model","response_format":{"type":"json_schema","json_schema":{"name":"cartograph_bounded_response","strict":true,"schema":{"type":"object","dependencies":{"x":["uniqueItems"],"y":{"type":"array"}},"properties":{"uniqueItems":{"const":{"uniqueItems":true}}},"$defs":{"z":{"anyOf":[{"type":"array"}]},"a":{"type":"array"}}}}},"stream":false}"#;
+    let encode_at = |limit| {
+        crate::bounded::encode_with_formatter(
+            &wire,
+            limit,
+            FailureCode::RequestTooLarge,
+            OpenAiSchemaFormatter,
+        )
+    };
+    assert_eq!(encode_at(expected.len() as u64).unwrap(), expected);
+    let error = encode_at(expected.len() as u64 - 1).unwrap_err();
     assert_eq!(error.code, FailureCode::RequestTooLarge);
     assert_eq!(error.outcome, InvocationOutcome::NotDispatched);
 }

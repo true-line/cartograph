@@ -2,6 +2,9 @@
 //! Field order preserves the compact JSON emitted by the former Value maps.
 use serde::Serialize;
 
+mod openai_schema;
+pub(super) use openai_schema::OpenAiSchemaFormatter;
+
 #[derive(Serialize)]
 struct Message<'a> {
     content: &'a str,

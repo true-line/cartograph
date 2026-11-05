@@ -739,18 +739,32 @@ fn encode(
     limit: u64,
     code: FailureCode,
 ) -> Result<Vec<u8>, BoundedCallError> {
+    encode_with_formatter(value, limit, code, serde_json::ser::CompactFormatter)
+}
+
+fn encode_with_formatter(
+    value: &impl Serialize,
+    limit: u64,
+    code: FailureCode,
+    formatter: impl serde_json::ser::Formatter,
+) -> Result<Vec<u8>, BoundedCallError> {
     let mut writer = LimitedWriter {
         bytes: Vec::new(),
         limit: usize::try_from(limit).map_err(|_| not_sent(FailureCode::InvalidLimits))?,
         exceeded: false,
     };
-    serde_json::to_writer(&mut writer, value).map_err(|_| {
-        not_sent(if writer.exceeded {
-            code
-        } else {
-            FailureCode::InvalidInput
-        })
-    })?;
+    value
+        .serialize(&mut serde_json::Serializer::with_formatter(
+            &mut writer,
+            formatter,
+        ))
+        .map_err(|_| {
+            not_sent(if writer.exceeded {
+                code
+            } else {
+                FailureCode::InvalidInput
+            })
+        })?;
     Ok(writer.bytes)
 }
 
@@ -1204,7 +1218,7 @@ pub(super) fn complete_openai_compatible(
 ) -> Result<BoundedCompletion, BoundedCallError> {
     check_request(profile, request, control)?;
     let user = user_message(request)?;
-    let body = encode(
+    let body = encode_with_formatter(
         &request_wire::openai_compatible(
             &profile.requested_model,
             &request.payload().system,
@@ -1215,6 +1229,7 @@ pub(super) fn complete_openai_compatible(
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
+        request_wire::OpenAiSchemaFormatter,
     )?;
     acquire(
         client.post(&profile.endpoint_id),
