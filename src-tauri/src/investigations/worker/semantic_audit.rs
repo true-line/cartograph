@@ -12,7 +12,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         context: &FrozenContext,
     ) -> Result<bool, Failure> {
         self.check_new_work()?;
-        let audit = match self
+        let (audit, audit_limits) = match self
             .state
             .jobs
             .lock()
@@ -39,7 +39,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         }
         let action = audit.action(format!("{}:audit-1", self.id))?;
         let prepared = firewall(self.state)?
-            .prepare_bounded(provider, &action, original.limits())
+            .prepare_bounded(provider, &action, &audit_limits)
             .map_err(provider_failure)?;
         drop(action);
         let auditor_selection =

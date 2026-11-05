@@ -39,6 +39,7 @@ pub(super) fn ollama<'a>(
     user: &'a str,
     max_tokens: u32,
     schema: Option<&'a serde_json::value::RawValue>,
+    think: bool,
 ) -> impl Serialize + 'a {
     Ollama {
         format: schema.map_or(Format::Json("json"), Format::Schema),
@@ -58,7 +59,7 @@ pub(super) fn ollama<'a>(
         },
         stream: false,
         // Advisory only; full-body and time limits remain authoritative.
-        think: false,
+        think,
     }
 }
 
@@ -126,12 +127,10 @@ pub(super) fn openai_compatible<'a>(
     user: &'a str,
     max_tokens: u32,
     schema: Option<&'a serde_json::value::RawValue>,
-    disable_thinking: bool,
+    thinking: Option<bool>,
 ) -> impl Serialize + 'a {
     OpenAiCompatible {
-        chat_template_kwargs: disable_thinking.then_some(ChatTemplate {
-            enable_thinking: false,
-        }),
+        chat_template_kwargs: thinking.map(|enable_thinking| ChatTemplate { enable_thinking }),
         max_tokens,
         messages: [
             Message {

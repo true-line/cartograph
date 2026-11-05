@@ -96,7 +96,7 @@ impl AuditInvocation {
                         .bytes()
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             })
-            || CompletionLimits::new(self.limits).is_err()
+            || CompletionLimits::from_audit_values(self.limits).is_err()
         {
             return Err(InvestigationStoreError::Invalid);
         }

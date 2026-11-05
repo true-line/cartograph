@@ -43,7 +43,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
      -> Result<bool, Failure> {
         let state = f.base.base.app.state::<AppState>();
         let mut jobs = state.jobs.lock().unwrap();
-        let audit = match jobs.prepare_next_prompt_semantic_audit(
+        let (audit, audit_limits) = match jobs.prepare_next_prompt_semantic_audit(
             execution,
             detail.summary.revision,
             input,
@@ -73,20 +73,20 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
         let action = audit.action(format!("{}:audit-1", f.id)).unwrap();
         let firewall = firewall(&state).unwrap();
         let prepared = firewall
-            .prepare_bounded(provider.as_ref(), &action, original.limits())
+            .prepare_bounded(provider.as_ref(), &action, &audit_limits)
             .unwrap();
         let authorized = firewall
             .authorize_bounded(provider.as_ref(), &prepared, None)
             .unwrap();
         // Wrong transport limit reaches post-insert validation, so the complete
         // journal creation and debit must roll back in the owning transaction.
-        let mut values = original.limits().values();
+        let mut values = audit_limits.values();
         values.request_timeout_ms -= 1;
         let wrong = firewall
             .prepare_bounded(
                 provider.as_ref(),
                 &action,
-                &CompletionLimits::new(values).unwrap(),
+                &CompletionLimits::from_audit_values(values).unwrap(),
             )
             .unwrap();
         let wrong_grant = firewall
@@ -141,8 +141,7 @@ fn run_audit_checkpoint(settlement: Option<&str>) {
         );
         assert_eq!(
             started.usage.generated_token_reservations,
-            detail.usage.generated_token_reservations
-                + detail.limits.generated_tokens_per_invocation
+            detail.usage.generated_token_reservations + llm::bounded::AUDIT_OUTPUT_TOKENS
         );
         assert!(started.summary.invocation_pending);
         assert!(!started.summary.has_result);
@@ -507,7 +506,7 @@ fn run_audit_dispatch(verdict: &'static str) {
         );
         assert_eq!(
             detail.usage.generated_token_reservations,
-            5 * detail.limits.generated_tokens_per_invocation
+            4 * detail.limits.generated_tokens_per_invocation + llm::bounded::AUDIT_OUTPUT_TOKENS
         );
         let db = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
         let receipts: i64 = db
@@ -524,7 +523,7 @@ fn run_audit_dispatch(verdict: &'static str) {
         assert_eq!(detail.summary.status, InvestigationStatus::Failed);
         assert_eq!(
             detail.usage.generated_token_reservations,
-            5 * detail.limits.generated_tokens_per_invocation
+            4 * detail.limits.generated_tokens_per_invocation + llm::bounded::AUDIT_OUTPUT_TOKENS
         );
         let db = rusqlite::Connection::open(f.base.base.app_data.join("state.db")).unwrap();
         let receipts: i64 = db

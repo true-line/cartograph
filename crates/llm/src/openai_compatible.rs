@@ -28,7 +28,7 @@ pub struct OpenAiCompatibleProvider {
     model: String,
     provider_id: String,
     client: Client,
-    disable_thinking: bool,
+    bounded_thinking: Option<bool>,
     pub(crate) bounded_client: Client,
 }
 
@@ -49,7 +49,7 @@ impl OpenAiCompatibleProvider {
             provider_id: format!("openai-compatible:{model}"),
             base_url,
             model,
-            disable_thinking: false,
+            bounded_thinking: None,
             client: build_direct_loopback_client(Client::builder(), timeout)?,
             bounded_client: bounded::build_client(Client::builder(), true)?,
         })
@@ -58,8 +58,15 @@ impl OpenAiCompatibleProvider {
     /// Opt in to the local server's chat-template switch for bounded calls.
     /// The option is part of provider identity and the bounded request bytes.
     pub fn with_thinking_disabled(mut self) -> Self {
-        self.disable_thinking = true;
+        self.bounded_thinking = Some(false);
         self.provider_id = format!("openai-compatible:{}:thinking-disabled", self.model);
+        self
+    }
+
+    /// Explicitly enable reasoning in the separate bounded auditor's chat template.
+    pub fn with_thinking_enabled(mut self) -> Self {
+        self.bounded_thinking = Some(true);
+        self.provider_id = format!("openai-compatible:{}:thinking-enabled", self.model);
         self
     }
 
@@ -199,7 +206,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         bounded::complete_openai_compatible(
             &self.bounded_client,
             &self.bounded_profile()?,
-            self.disable_thinking,
+            self.bounded_thinking,
             request,
             control,
         )

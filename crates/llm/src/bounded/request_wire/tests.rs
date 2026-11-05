@@ -22,7 +22,7 @@ fn borrowed_ollama_request_preserves_wire_and_exact_cap() {
     for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
         for tokens in [0, 1, u32::MAX] {
             matches_wire_and_cap(
-                &ollama(&text, &text, &text, tokens, None),
+                &ollama(&text, &text, &text, tokens, None, false),
                 json!({
                     "model":text,
                     "messages":[{"role":"system","content":text},{"role":"user","content":text}],
@@ -57,7 +57,7 @@ fn borrowed_openai_compatible_request_preserves_wire_and_exact_cap() {
     for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
         for tokens in [0, 1, u32::MAX] {
             matches_wire_and_cap(
-                &openai_compatible(&text, &text, &text, tokens, None, false),
+                &openai_compatible(&text, &text, &text, tokens, None, None),
                 json!({
                     "model":text,"max_tokens":tokens,"stream":false,
                     "response_format":{"type":"json_object"},
@@ -73,7 +73,7 @@ fn openai_schema_and_template_fields_count_toward_exact_request_cap() {
     let schema = serde_json::value::RawValue::from_string(
         r#"{"type":"object","dependencies":{"x":["uniqueItems"],"y":{"type":"array","uniqueItems":true}},"properties":{"uniqueItems":{"const":{"uniqueItems":true}}},"$defs":{"z":{"anyOf":[{"uniqueItems":true,"type":"array"}]},"a":{"type":"array","uniqueItems":false}}}"#.into(),
     ).unwrap();
-    let wire = openai_compatible("model", "system", "user", 37, Some(&schema), true);
+    let wire = openai_compatible("model", "system", "user", 37, Some(&schema), Some(false));
     let expected = br#"{"chat_template_kwargs":{"enable_thinking":false},"max_tokens":37,"messages":[{"content":"system","role":"system"},{"content":"user","role":"user"}],"model":"model","response_format":{"type":"json_schema","json_schema":{"name":"cartograph_bounded_response","strict":true,"schema":{"type":"object","dependencies":{"x":["uniqueItems"],"y":{"type":"array"}},"properties":{"uniqueItems":{"const":{"uniqueItems":true}}},"$defs":{"z":{"anyOf":[{"type":"array"}]},"a":{"type":"array"}}}}},"stream":false}"#;
     let encode_at = |limit| {
         crate::bounded::encode_with_formatter(

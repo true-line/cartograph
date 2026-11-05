@@ -31,8 +31,13 @@ impl JobStore {
         revision: u64,
         input: &InvestigationInput,
         original_prepared: &llm::bounded::PreparedBoundedCompletion,
-    ) -> Result<agents::investigation::semantic_audit::PreparedSemanticAudit, InvestigationStoreError>
-    {
+    ) -> Result<
+        (
+            agents::investigation::semantic_audit::PreparedSemanticAudit,
+            llm::bounded::CompletionLimits,
+        ),
+        InvestigationStoreError,
+    > {
         execution.verify()?;
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
@@ -50,7 +55,17 @@ impl JobStore {
         if task.detail.summary.cancel_requested {
             return Err(InvestigationStoreError::Cancelled);
         }
-        prepare_payload_for_task(&tx, &task, input, original_prepared)
+        let payload = prepare_payload_for_task(&tx, &task, input, original_prepared)?;
+        let account = &task
+            .semantic_audit
+            .as_ref()
+            .ok_or(InvestigationStoreError::Invalid)?
+            .account;
+        let mut values = original_prepared.limits().values();
+        values.max_output_tokens = account.output_tokens(&task.detail.limits);
+        let limits = llm::bounded::CompletionLimits::from_audit_values(values)
+            .map_err(|_| InvestigationStoreError::Invalid)?;
+        Ok((payload, limits))
     }
 
     /// Commit the one reserved audit invocation before the worker can dispatch.
@@ -316,7 +331,9 @@ impl StoredSemanticAudit {
             }
             let invocation = super::semantic_audit_journal::load(connection, id)?
                 .ok_or(InvestigationStoreError::Invalid)?;
-            let expected = SemanticAuditAccount::new(&task.detail.limits)?
+            let expected = self
+                .account
+                .empty_for_replay(&task.detail.limits)?
                 .analyst_usage(&invocation.pre_usage, &task.detail.limits)?
                 .begin_audit(&task.detail.limits)?
                 .stop_auditor(&receipt.auditor_usage, &task.detail.limits)?;
@@ -432,7 +449,7 @@ pub(super) fn validate_invocation_journal(
             .ok_or(InvestigationStoreError::Invalid)?;
         let provider = &task.detail.provider;
         let mut limits = llm::bounded::CompletionLimits::default().values();
-        limits.max_output_tokens = task.detail.limits.generated_tokens_per_invocation;
+        limits.max_output_tokens = audit.account.output_tokens(&task.detail.limits);
         limits.max_spans = u32::try_from(task.detail.limits.evidence_items)
             .map_err(|_| InvestigationStoreError::Invalid)?;
         limits.request_timeout_ms = task
@@ -494,7 +511,7 @@ pub(super) fn stop_started_audit(task: &mut StoredTask) -> Result<(), Investigat
         .ok_or(InvestigationStoreError::Invalid)?;
     let usage = InvestigationUsage {
         model_invocations: 1,
-        generated_token_reservations: task.detail.limits.generated_tokens_per_invocation,
+        generated_token_reservations: audit.account.output_tokens(&task.detail.limits),
         active_milliseconds: task
             .detail
             .usage

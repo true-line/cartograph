@@ -92,7 +92,7 @@ pub(in crate::investigation) fn prepare_payload(
         prompt: String::from_utf8(bounded_bytes(&compact, MAX_INPUT_BYTES)?)
             .map_err(|_| InvestigationError::InvalidInput)?,
         response_schema: Some(
-            String::from_utf8(bounded_bytes(&schema, MAX_INPUT_BYTES)?)
+            String::from_utf8(bounded_bytes(&AuditSchemaWire(&schema), MAX_INPUT_BYTES)?)
                 .map_err(|_| InvestigationError::InvalidInput)?,
         ),
         spans: original.spans.clone(),
@@ -103,6 +103,45 @@ pub(in crate::investigation) fn prepare_payload(
         candidate_hash,
         contract_hash,
     })
+}
+
+/// Keep sorted schema keys except where the order steers constrained decoding.
+/// The subject identifies what to judge; only witness-bearing verdicts need a citation.
+struct AuditSchemaWire<'a>(&'a Value);
+
+impl serde::Serialize for AuditSchemaWire<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self.0 {
+            Value::Array(values) => {
+                let mut seq = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    seq.serialize_element(&AuditSchemaWire(value))?;
+                }
+                seq.end()
+            }
+            Value::Object(fields) => {
+                let first = if fields.contains_key("assessment") && fields.contains_key("subject") {
+                    Some("subject")
+                } else if fields.contains_key("citation_id") && fields.contains_key("verdict") {
+                    Some("verdict")
+                } else {
+                    None
+                };
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                if let Some(key) = first {
+                    map.serialize_entry(key, &AuditSchemaWire(&fields[key]))?;
+                }
+                for (key, value) in fields {
+                    if Some(key.as_str()) != first {
+                        map.serialize_entry(key, &AuditSchemaWire(value))?;
+                    }
+                }
+                map.end()
+            }
+            value => value.serialize(serializer),
+        }
+    }
 }
 
 fn closed(properties: Value, required: Vec<&str>) -> Value {
@@ -308,7 +347,23 @@ mod bounds_tests {
         let hash = "f".repeat(64);
         let schema = audit_schema(&hash, &hash, &hash, &subjects, &ids, true, subjects.len());
         let (schema_bound, _) = projection_wire_bounds().unwrap();
-        let actual = serde_json::to_vec(&schema).unwrap();
+        let wire = serde_json::to_string(&AuditSchemaWire(&schema)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&wire).unwrap(), schema);
+        assert_eq!(
+            wire.matches(r#""properties":{"subject":"#).count(),
+            subjects.len()
+        );
+        assert_eq!(
+            wire.matches(r#""properties":{"verdict":{"const":"contradiction"},"citation_id":"#)
+                .count(),
+            1
+        );
+        assert_eq!(
+            wire.matches(r#""properties":{"verdict":{"const":"answer_coverage"},"citation_id":"#)
+                .count(),
+            1
+        );
+        let actual = wire.as_bytes();
         assert!(actual.len() > MAX_INPUT_BYTES);
         assert!(actual.len() <= schema_bound);
         assert_eq!(

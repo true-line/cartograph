@@ -1591,6 +1591,7 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         "user",
         2048,
         response_schema(authorized.payload()).unwrap(),
+        false,
     );
     let bytes = encode(
         &wire,
@@ -1891,21 +1892,21 @@ fn configured_timeout_changes_consent_identity_without_provider_execution() {
 fn openai_compatible_strict_schema_and_thinking_are_bounded() {
     let duplicate_finish =
         include_str!("../../tests/fixtures/duplicate-citation-finish.json").trim();
-    for disable in [false, true] {
+    for thinking in [None, Some(false), Some(true)] {
         let mut body: Value = serde_json::from_slice(&openai_body(duplicate_finish)).unwrap();
         body["choices"][0]["message"]["reasoning_content"] = json!("PRIVATE REASONING");
         body["usage"]["prompt_tokens_details"] = json!({"cached_tokens": 11});
         let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
         let base = openai(&endpoint);
         let base_profile = base.bounded_profile().unwrap();
-        let provider = if disable {
-            base.with_thinking_disabled()
-        } else {
-            base
+        let provider = match thinking {
+            Some(true) => base.with_thinking_enabled(),
+            Some(false) => base.with_thinking_disabled(),
+            None => base,
         };
         assert_eq!(
             provider.bounded_profile().unwrap() == base_profile,
-            !disable
+            thinking.is_none()
         );
         assert!(provider.supports_bounded_response_schema());
         let firewall = EgressFirewall::new(EgressPolicy::default());
@@ -1927,10 +1928,10 @@ fn openai_compatible_strict_schema_and_thinking_are_bounded() {
             "name":"cartograph_bounded_response", "strict":true,
             "schema":json!({"type":"array","items":{"type":"string"}})}})
         );
-        if disable {
+        if let Some(enabled) = thinking {
             assert_eq!(
                 wire["chat_template_kwargs"],
-                json!({"enable_thinking":false})
+                json!({"enable_thinking":enabled})
             );
         } else {
             assert!(wire.get("chat_template_kwargs").is_none());
@@ -1939,6 +1940,33 @@ fn openai_compatible_strict_schema_and_thinking_are_bounded() {
         assert_eq!(output.usage.unwrap().cache_read_input_tokens, Some(11));
         assert_eq!(output.request_bytes, request.body.len() as u64);
     }
+}
+
+#[test]
+fn ollama_reasoning_auditor_only_returns_content() {
+    let mut body: Value = serde_json::from_slice(&ollama_body("answer")).unwrap();
+    body["message"]["thinking"] = json!("private reasoning");
+    body["eval_count"] = json!(6807);
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let (endpoint, server) = http(framed(&bytes));
+    let provider = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(2))
+        .unwrap()
+        .with_thinking_enabled();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let limits = CompletionLimits::default().for_semantic_audit();
+    let prepared = firewall
+        .prepare_bounded(&provider, &action(), &limits)
+        .unwrap();
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    let output = provider.complete_bounded(&authorized, &control()).unwrap();
+    let wire: Value = serde_json::from_slice(&server.join().unwrap().body).unwrap();
+    assert_eq!(wire["think"], true);
+    assert_eq!(wire["options"]["num_predict"], AUDIT_OUTPUT_TOKENS);
+    assert_eq!(output.text, "answer");
+    assert_eq!(output.usage.unwrap().output_tokens, Some(6807));
+    assert_eq!(output.response_bytes, bytes.len() as u64);
 }
 
 #[test]

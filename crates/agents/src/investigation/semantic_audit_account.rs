@@ -16,8 +16,15 @@ pub struct SemanticAuditAccount {
 impl SemanticAuditAccount {
     /// Reserve one audit invocation under the original immutable task limits.
     pub fn new(limits: &InvestigationLimits) -> Result<Self, InvestigationError> {
+        Self::with_version(limits, 2)
+    }
+
+    fn with_version(
+        limits: &InvestigationLimits,
+        schema_version: u32,
+    ) -> Result<Self, InvestigationError> {
         let account = Self {
-            schema_version: 1,
+            schema_version,
             limits_hash: limits_hash(limits)?,
             analyst: InvestigationUsage::default(),
             auditor: InvestigationUsage::default(),
@@ -26,6 +33,22 @@ impl SemanticAuditAccount {
         };
         account.validate(limits)?;
         Ok(account)
+    }
+
+    pub fn output_tokens(&self, limits: &InvestigationLimits) -> u32 {
+        if self.schema_version == 1 {
+            limits.generated_tokens_per_invocation
+        } else {
+            llm::bounded::AUDIT_OUTPUT_TOKENS
+        }
+    }
+
+    /// Rebuild the original account under its saved accounting rules during replay.
+    pub fn empty_for_replay(
+        &self,
+        limits: &InvestigationLimits,
+    ) -> Result<Self, InvestigationError> {
+        Self::with_version(limits, self.schema_version)
     }
 
     /// Cumulative task usage, not a caller-supplied delta. Regressions fail.
@@ -56,7 +79,7 @@ impl SemanticAuditAccount {
         let mut next = self.clone();
         next.audit_started = true;
         next.auditor.model_invocations = 1;
-        next.auditor.generated_token_reservations = limits.generated_tokens_per_invocation;
+        next.auditor.generated_token_reservations = self.output_tokens(limits);
         next.validate(limits)?;
         Ok(next)
     }
@@ -71,7 +94,7 @@ impl SemanticAuditAccount {
         if self.terminal
             || !self.audit_started
             || usage.model_invocations != 1
-            || usage.generated_token_reservations != limits.generated_tokens_per_invocation
+            || usage.generated_token_reservations != self.output_tokens(limits)
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -152,7 +175,7 @@ impl SemanticAuditAccount {
         if self.terminal
             || !self.audit_started
             || usage.model_invocations != 1
-            || usage.generated_token_reservations != limits.generated_tokens_per_invocation
+            || usage.generated_token_reservations != self.output_tokens(limits)
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -176,13 +199,12 @@ impl SemanticAuditAccount {
     /// Validate after decoding against the host's original limits, never limits
     /// supplied by a child. Active time is aggregate; wall deadline stays host-owned.
     pub fn validate(&self, limits: &InvestigationLimits) -> Result<(), InvestigationError> {
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
             || self.limits_hash != limits_hash(limits)?
             || (!self.audit_started && self.auditor != InvestigationUsage::default())
             || (self.audit_started
                 && (self.auditor.model_invocations != 1
-                    || self.auditor.generated_token_reservations
-                        != limits.generated_tokens_per_invocation))
+                    || self.auditor.generated_token_reservations != self.output_tokens(limits)))
         {
             return Err(InvestigationError::InvalidInput);
         }
@@ -194,7 +216,7 @@ impl SemanticAuditAccount {
                 .ok_or(InvestigationError::LimitExceeded)?;
             usage.generated_token_reservations = usage
                 .generated_token_reservations
-                .checked_add(limits.generated_tokens_per_invocation)
+                .checked_add(self.output_tokens(limits))
                 .ok_or(InvestigationError::LimitExceeded)?;
         }
         if usage.model_invocations > limits.model_invocations
@@ -308,6 +330,38 @@ mod tests {
 
     // AC-0566: unknown terminal totals never refund a debit or weaken live accounting.
     #[test]
+    fn audit_output_reservation_fits_exact_remaining_budget() {
+        let limits = INVESTIGATION_V2_POLICY.limits();
+        let account = SemanticAuditAccount::new(&limits).unwrap();
+        let mut analyst = InvestigationUsage {
+            generated_token_reservations: limits.generated_token_reservations
+                - llm::bounded::AUDIT_OUTPUT_TOKENS,
+            ..Default::default()
+        };
+        let started = account
+            .analyst_usage(&analyst, &limits)
+            .unwrap()
+            .begin_audit(&limits)
+            .unwrap();
+        assert_eq!(
+            started.usage().unwrap().generated_token_reservations,
+            limits.generated_token_reservations
+        );
+        analyst.generated_token_reservations += 1;
+        assert!(account.analyst_usage(&analyst, &limits).is_err());
+        let legacy = SemanticAuditAccount::with_version(&limits, 1).unwrap();
+        assert_eq!(
+            legacy
+                .begin_audit(&limits)
+                .unwrap()
+                .usage()
+                .unwrap()
+                .generated_token_reservations,
+            limits.generated_tokens_per_invocation
+        );
+    }
+
+    #[test]
     fn audit_account_unmeasured_analyst_stop_preserves_debits() {
         let limits = INVESTIGATION_V2_POLICY.limits();
         let measured = InvestigationUsage {
@@ -365,7 +419,7 @@ mod tests {
         let initial = SemanticAuditAccount::new(&limits).unwrap();
         let mut usage = InvestigationUsage {
             model_invocations: 1,
-            generated_token_reservations: limits.generated_tokens_per_invocation,
+            generated_token_reservations: llm::bounded::AUDIT_OUTPUT_TOKENS,
             active_milliseconds: limits.active_seconds * 1000 + 1,
             ..InvestigationUsage::default()
         };
@@ -412,7 +466,7 @@ mod tests {
         );
         assert_eq!(
             started.usage().unwrap().generated_token_reservations,
-            limits.generated_tokens_per_invocation
+            llm::bounded::AUDIT_OUTPUT_TOKENS
         );
         assert!(started.begin_audit(&limits).is_err());
         assert!(started.analyst_usage(&usage, &limits).is_err());
@@ -439,7 +493,7 @@ mod tests {
         reopened.validate(&limits).unwrap();
         let mut audit = InvestigationUsage {
             model_invocations: 1,
-            generated_token_reservations: limits.generated_tokens_per_invocation,
+            generated_token_reservations: llm::bounded::AUDIT_OUTPUT_TOKENS,
             active_milliseconds: 2,
             ..InvestigationUsage::default()
         };

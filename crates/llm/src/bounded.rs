@@ -88,7 +88,30 @@ pub struct CompletionLimits(CompletionLimitValues);
 /// Explicit configurable timeout ceiling; the default remains 180 seconds.
 pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
 
+/// Reserved only for the single semantic-audit invocation.
+pub const AUDIT_OUTPUT_TOKENS: u32 = 8192;
+
 impl CompletionLimits {
+    pub fn for_semantic_audit(self) -> Self {
+        Self(CompletionLimitValues {
+            max_output_tokens: AUDIT_OUTPUT_TOKENS,
+            ..self.0
+        })
+    }
+
+    /// Validate the stored audit wire limits, including historical analyst-sized calls.
+    pub fn from_audit_values(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
+        if values.max_output_tokens == AUDIT_OUTPUT_TOKENS {
+            let regular = Self::new(CompletionLimitValues {
+                max_output_tokens: 1,
+                ..values
+            })?;
+            Ok(regular.for_semantic_audit())
+        } else {
+            Self::new(values)
+        }
+    }
+
     pub fn new(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
         let ceiling = CompletionLimitValues::default();
         let pairs = [
@@ -1093,6 +1116,7 @@ fn preflight_response(bytes: &[u8]) -> Result<(), BoundedCallError> {
 pub(super) fn complete_ollama(
     client: &Client,
     profile: &ProviderProfile,
+    think: bool,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
@@ -1105,6 +1129,7 @@ pub(super) fn complete_ollama(
             &user,
             request.limits().0.max_output_tokens,
             response_schema(request.payload())?,
+            think,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
@@ -1212,7 +1237,7 @@ pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, Bound
 pub(super) fn complete_openai_compatible(
     client: &Client,
     profile: &ProviderProfile,
-    disable_thinking: bool,
+    thinking: Option<bool>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
@@ -1225,7 +1250,7 @@ pub(super) fn complete_openai_compatible(
             &user,
             request.limits().0.max_output_tokens,
             response_schema(request.payload())?,
-            disable_thinking,
+            thinking,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
