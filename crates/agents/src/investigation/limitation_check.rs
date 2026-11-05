@@ -33,7 +33,8 @@ pub(super) fn correction<'a>(
             .split([';', '\n'])
             .flat_map(|part| part.split(". "))
         {
-            let clause = clause.trim().trim_end_matches('.');
+            let normalized = normalize_negation(clause.trim().trim_end_matches('.'));
+            let clause = normalized.as_str();
             let exclusive = clause.strip_prefix("Only ").and_then(|s| {
                 s.strip_suffix(" was read")
                     .or_else(|| s.strip_suffix(" was acquired"))
@@ -121,6 +122,31 @@ fn exclusive_conflicts(
     }
 }
 
+// Rewrite common direct-negative forms ("wasn't read", "was never read",
+// "We never read X") to the "not" forms the denial parser understands.
+fn normalize_negation(clause: &str) -> String {
+    let mut text = clause.replace('\u{2019}', "'");
+    for (from, to) in [
+        ("wasn't ", "was not "),
+        ("weren't ", "were not "),
+        ("isn't ", "is not "),
+        ("aren't ", "are not "),
+        ("didn't ", "did not "),
+        (" was never ", " was not "),
+        (" were never ", " were not "),
+        (" is never ", " is not "),
+        (" are never ", " are not "),
+    ] {
+        text = text.replace(from, to);
+    }
+    for subject in ["We", "I"] {
+        if let Some(rest) = text.strip_prefix(&format!("{subject} never ")) {
+            text = format!("{subject} did not {rest}");
+        }
+    }
+    text
+}
+
 fn denied_name(clause: &str) -> Option<&str> {
     // A consequence introduced by ", so" does not qualify the denial.
     let words = clause
@@ -144,10 +170,11 @@ fn denied_name(clause: &str) -> Option<&str> {
     };
     if matches!(prefix, "We did" | "I did") {
         let (verb, subject) = rest.split_once(' ')?;
-        return matches!(
+        // "We never inspected X" normalizes to "We did not inspected X".
+        return (matches!(
             verb,
             "read" | "acquire" | "capture" | "cover" | "inspect" | "examine" | "trace" | "review"
-        )
+        ) || is_read(verb))
         .then_some(subject);
     }
     let (subject, auxiliary) = prefix.rsplit_once(' ')?;
@@ -240,6 +267,23 @@ mod tests {
             "Other callers of handleNewRandomAlias were not read."
         ));
         assert!(!matches("handleNewRandomAlias was not captured in full."));
+        // Contractions and "never" forms deny the same acquired evidence.
+        for text in [
+            "src/background/create-alias.js wasn't read.",
+            "src/background/create-alias.js wasn\u{2019}t read.",
+            "src/background/create-alias.js was never read.",
+            "We never read src/background/create-alias.js.",
+            "We didn't read src/background/create-alias.js.",
+            "I never inspected handleNewRandomAlias.",
+            "`handleNewRandomAlias` wasn't captured.",
+        ] {
+            assert!(matches(text), "{text}");
+        }
+        assert!(!matches(
+            "Other callers of handleNewRandomAlias weren't read."
+        ));
+        assert!(!matches("handleNewRandomAlias was never captured in full."));
+        assert!(!matches("We never read the context-menu wiring."));
     }
 
     #[test]
