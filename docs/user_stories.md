@@ -1145,3 +1145,26 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Security:** Assumed caller sets stay Semantic/InferredWeak conventions; no provider call, graph write or new route is added.
 - **Performance:** The existing capture and compile reservations are extended by the retained Actor slots and the logical Actor workspace bound; no new numeric policy or RSS guarantee.
 - **Trace:** P1 (#1443, #1539) · `app`, `core-graph`, `spec` · ADR-0051, ADR-0037 · T-0535
+
+### Decision #1692 — diagnostic foundations (US-0032 / AC-0287)
+
+The next analyst family will use text-free replay locations and a separate
+capacity-excluded obligation projection. The foundation provides typed field
+paths and one-based sentence ranges, including matches spanning multiple fields.
+It preserves the existing joined-prose detector, thresholds and metadata rules;
+no rejected model/source text is included in diagnostic output. Capacity-excluded
+IDs are collected at the exact hash filter before menu truncation, separately
+from other blocked obligations. Exclusion never establishes an attempt,
+acquisition or satisfaction.
+
+These helpers are not runtime activation: analyst @20/@21 prompts and canonical
+menu bytes remain unchanged. Activation requires a new family, independent
+invocation-bound authentication of saved diagnostics, host workspace charges,
+missing-history/tamper rejection and the existing correction allowance. A clean
+development result and semantic review remain separate from release acceptance.
+
+For the planned @22 witness, admission establishes locator correctness from the
+transient refused finish. Reopen can prove only integrity and binding after text
+is discarded: an independent immutable response-metadata digest must bind the
+response hash, finish hash, refusal ID and step. Missing or mismatched @22
+witnesses fail closed; older roles omit the field entirely.

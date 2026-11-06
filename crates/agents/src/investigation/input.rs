@@ -103,6 +103,86 @@ impl InvestigationInput {
         super::privacy::reject_metadata_replay(prose, self.graph_strings.iter().map(String::as_str))
     }
 
+    /// Text-free diagnostic for the exact refused finish. This does not admit
+    /// output or authenticate feedback; the host must bind it to the finish hash.
+    pub fn correction_replay_location(
+        &self,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+    ) -> Result<Option<ReplayLocation>, InvestigationError> {
+        match self.validate_correction_prose(finish, model) {
+            Ok(()) => return Ok(None),
+            Err(InvestigationError::SourceReplay) => (),
+            Err(error) => return Err(error),
+        }
+        let InvestigationAction::Finish {
+            findings,
+            limitations,
+            ..
+        } = &finish.action
+        else {
+            return Err(InvestigationError::InvalidAction);
+        };
+        let ordinal =
+            |index: usize| u32::try_from(index).map_err(|_| InvestigationError::LimitExceeded);
+        let mut fields = Vec::new();
+        for (index, finding) in findings.iter().enumerate() {
+            let finding_index = ordinal(index)?;
+            fields.push((
+                ProseField::FindingTitle {
+                    finding: finding_index,
+                },
+                finding.title.as_str(),
+            ));
+            fields.push((
+                ProseField::FindingStatement {
+                    finding: finding_index,
+                },
+                finding.statement.as_str(),
+            ));
+            for (index, limitation) in finding.limitations.iter().enumerate() {
+                fields.push((
+                    ProseField::FindingLimitation {
+                        finding: finding_index,
+                        limitation: ordinal(index)?,
+                    },
+                    limitation.as_str(),
+                ));
+            }
+        }
+        for (index, limitation) in limitations.iter().enumerate() {
+            fields.push((
+                ProseField::Limitation {
+                    limitation: ordinal(index)?,
+                },
+                limitation.as_str(),
+            ));
+        }
+        if let Some(model) = model {
+            fields.push((ProseField::Model, model));
+        }
+        if let Some(narrative) = &finish.narrative {
+            fields.push((ProseField::Narrative, narrative.text.as_str()));
+        }
+        let sources = self
+            .supplied_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if let Some(location) = locate_prose_replay(&fields, &sources, false)? {
+            return Ok(Some(location));
+        }
+        let metadata = self
+            .graph_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        match locate_prose_replay(&fields, &metadata, true)? {
+            Some(location) => Ok(Some(location)),
+            None => Err(InvestigationError::SourceReplay),
+        }
+    }
+
     /// Only the new analyst may turn known missing source citations into feedback.
     /// The caller has already authenticated the completion binding and attempts.
     fn citation_correction_targets(

@@ -29,6 +29,7 @@ mod protocol;
 pub mod query_refusal;
 mod record_workspace;
 mod records;
+mod replay_location;
 mod response_schema;
 mod result_workspace;
 mod sealing;
@@ -67,6 +68,9 @@ pub use projection::*;
 pub use protocol::*;
 pub use record_workspace::record_decode_scratch_bytes;
 pub use records::*;
+pub use replay_location::{
+    ProseField, ProsePosition, ReplayLocation, locate_prose_replay, replay_location_workspace_bytes,
+};
 pub use result_workspace::{
     completion_result_validation_workspace, stored_refusal_validation_workspace,
 };

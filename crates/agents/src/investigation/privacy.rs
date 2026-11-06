@@ -83,3 +83,64 @@ fn reject_replay<'p, 's>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod detector_audit {
+    use super::*;
+
+    #[test]
+    fn identifier_vocabulary_depends_on_source_vs_metadata_and_exact_window() {
+        let short = "InventoryStrategy";
+        let prose = "InventoryStrategy chooses a location.";
+        assert_eq!(
+            reject_prose_replay([prose], [short]),
+            Err(InvestigationError::SourceReplay)
+        );
+        assert!(reject_metadata_replay([prose], [short]).is_ok());
+        for width in [47, 48, 49] {
+            let identifier = "X".repeat(width);
+            let prose = format!("The {identifier} symbol is referenced.");
+            assert_eq!(
+                reject_prose_replay([prose.as_str()], [identifier.as_str()]),
+                Err(InvestigationError::SourceReplay)
+            );
+            assert_eq!(
+                reject_metadata_replay([prose.as_str()], [identifier.as_str()]).is_err(),
+                width >= 48
+            );
+        }
+    }
+
+    #[test]
+    fn concatenation_can_create_a_window_absent_from_each_authored_field() {
+        let left = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let right = "abcdefghijklmnopqrstuvwxyz";
+        let source = format!("prefix {left}{right} suffix");
+        assert!(reject_prose_replay([left], [source.as_str()]).is_ok());
+        assert!(reject_prose_replay([right], [source.as_str()]).is_ok());
+        assert_eq!(
+            reject_prose_replay([left, right], [source.as_str()]),
+            Err(InvestigationError::SourceReplay)
+        );
+        // A whitespace separator is ineffective: normalization removes it.
+        assert_eq!(
+            reject_prose_replay([left, " ", right], [source.as_str()]),
+            Err(InvestigationError::SourceReplay)
+        );
+    }
+
+    #[test]
+    fn within_field_replay_survives_whitespace_and_unicode_scalars() {
+        let source = "界".repeat(48);
+        let spaced = source
+            .chars()
+            .map(|c| format!("{c}\u{2003}"))
+            .collect::<String>();
+        assert_eq!(
+            reject_prose_replay([spaced.as_str()], [source.as_str()]),
+            Err(InvestigationError::SourceReplay)
+        );
+        assert!(reject_prose_replay(["An independent explanation."], [source.as_str()]).is_ok());
+        assert!(reject_prose_replay([""], [""]).is_ok());
+    }
+}
