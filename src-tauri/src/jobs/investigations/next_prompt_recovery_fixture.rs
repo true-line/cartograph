@@ -280,6 +280,7 @@ fn begin(
 }
 fn measured_response(f: &InitialFixture, action: &serde_json::Value) -> InvestigationResponseMeta {
     InvestigationResponseMeta {
+        finish_feedback_witness: None,
         step_id: format!("step-{}", f.task.detail.usage.model_invocations),
         response_hash: core_prov::content_hash(b"complete recovery fixture response"),
         action_hash: core_prov::content_hash(&encode(action, MAX_ACTION_BYTES).unwrap()),

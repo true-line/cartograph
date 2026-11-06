@@ -3,13 +3,14 @@ use super::*;
 use llm::CompletionPayload;
 use serde_json::json;
 
-fn reasons() -> [RefusalReason; 5] {
+fn reasons() -> [RefusalReason; 6] {
     [
         RefusalReason::NotAttempted,
         RefusalReason::AcquiredNotSupplied,
         RefusalReason::Redacted,
         RefusalReason::HashMismatch,
         RefusalReason::Unavailable,
+        RefusalReason::ExcludedByCapacity,
     ]
 }
 
@@ -21,6 +22,7 @@ fn reason_index(reason: RefusalReason) -> usize {
         RefusalReason::Redacted => 2,
         RefusalReason::HashMismatch => 3,
         RefusalReason::Unavailable => 4,
+        RefusalReason::ExcludedByCapacity => 5,
     }
 }
 

@@ -586,7 +586,10 @@ fn task_phase_workspaces(
         .checked_add(crate::jobs::investigations::next_prompt_saved_call_workspace()?.0)?
         .checked_add(context_hub::logical::json_bytes(
             agents::investigation::MAX_ACTION_BYTES.checked_mul(2)?,
-        )?)?; // saved call DTO plus separately encoded original action
+        )?)? // saved call DTO plus separately encoded original action
+        .checked_add(
+            agents::investigation::InvestigationInput::correction_replay_workspace_bytes()?,
+        )?;
     let audit_limits = llm::bounded::CompletionLimits::new(
         crate::investigations::provider_workspace::completion_limit_values(
             &agents::investigation::INVESTIGATION_V2_POLICY,

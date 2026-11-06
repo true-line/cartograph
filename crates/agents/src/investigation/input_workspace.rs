@@ -4,6 +4,27 @@ use context_hub::logical::{count, json_bytes, map, set, slots, sum};
 use std::mem::size_of;
 
 impl InvestigationInput {
+    /// Additional transient owners for @22 correction diagnostics. Caller input,
+    /// finish and provider completion remain live and are charged separately.
+    pub fn correction_replay_workspace_bytes() -> Option<usize> {
+        let fields = 12 * (2 + 8) + 8 + 2;
+        let projection = sum(&[
+            slots::<(ProseField, &str)>(fields)?,
+            slots::<Vec<(ProseField, &str)>>(1)?,
+            slots::<&str>(16384)?.checked_mul(2)?,
+            slots::<Vec<&str>>(2)?,
+            replay_location_workspace_bytes()?,
+        ])?;
+        let validation = sum(&[
+            json_bytes(MAX_ACTION_BYTES)?, // fingerprint/shape preflight
+            MAX_ACTION_BYTES.checked_mul(2)?,
+            slots::<Vec<u8>>(2)?,
+            slots::<&str>(fields)?,
+            replay_location_workspace_bytes()?, // includes unchanged detector
+        ])?;
+        Some(projection.max(validation))
+    }
+
     /// Construction through the final wire check, including rejected growth.
     /// Caller pages/evidence/request and its already bounded ledger acquisition
     /// are separate; the owned ledger passed to the builder is included here.

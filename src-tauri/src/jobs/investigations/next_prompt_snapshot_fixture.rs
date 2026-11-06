@@ -189,6 +189,7 @@ impl Fixture {
     }
     fn response(&self, original: &serde_json::Value) -> InvestigationResponseMeta {
         InvestigationResponseMeta {
+            finish_feedback_witness: None,
             step_id: if self
                 .f
                 .task

@@ -270,6 +270,7 @@ impl Fixture {
     }
     fn response(step: &PendingInvestigationStep, action_hash: String) -> InvestigationResponseMeta {
         InvestigationResponseMeta {
+            finish_feedback_witness: None,
             step_id: step.step_id.clone(),
             response_hash: core_prov::content_hash(b"actual bounded fixture response"),
             action_hash,

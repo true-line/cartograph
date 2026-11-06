@@ -319,6 +319,26 @@ impl<'a> SavedMetadataHistory<'a> {
                 cutoff,
                 ledger,
             )?;
+            if self
+                .task
+                .detail
+                .summary
+                .specialist_id
+                .uses_finish_feedback_witness()
+            {
+                return Ok(choices.with_capacity_obligations(
+                    &self
+                        .task
+                        .completion_intent
+                        .as_ref()
+                        .ok_or(InvestigationStoreError::Invalid)?
+                        .contract(),
+                    metadata,
+                    ledger,
+                    &refused,
+                    &saved_policy(self.task)?,
+                )?);
+            }
             return Ok(choices.excluding_capacity_refusals(
                 &self
                     .task

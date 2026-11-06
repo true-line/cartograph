@@ -1146,9 +1146,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Performance:** The existing capture and compile reservations are extended by the retained Actor slots and the logical Actor workspace bound; no new numeric policy or RSS guarantee.
 - **Trace:** P1 (#1443, #1539) · `app`, `core-graph`, `spec` · ADR-0051, ADR-0037 · T-0535
 
-### Decision #1692 — diagnostic foundations (US-0032 / AC-0287)
+### Decision #1692 — authenticated analyst diagnostics (US-0032 / AC-0287)
 
-The next analyst family will use text-free replay locations and a separate
+Analyst @22 uses text-free replay locations and a separate
 capacity-excluded obligation projection. The foundation provides typed field
 paths and one-based sentence ranges, including matches spanning multiple fields.
 It preserves the existing joined-prose detector, thresholds and metadata rules;
@@ -1157,14 +1157,20 @@ IDs are collected at the exact hash filter before menu truncation, separately
 from other blocked obligations. Exclusion never establishes an attempt,
 acquisition or satisfaction.
 
-These helpers are not runtime activation: analyst @20/@21 prompts and canonical
-menu bytes remain unchanged. Activation requires a new family, independent
-invocation-bound authentication of saved diagnostics, host workspace charges,
-missing-history/tamper rejection and the existing correction allowance. A clean
-development result and semantic review remain separate from release acceptance.
+Analyst @20/@21 prompts and canonical menu bytes remain unchanged. Analyst @22
+has a distinct prompt and receipt family, invocation-bound authentication of saved
+diagnostics, host workspace charges and missing-history/tamper rejection. The
+correction allowance is unchanged. Capacity exclusions are recomputed at the
+authenticated ledger cutoff and clear on a new ledger revision; they remain
+unresolved, unattempted and unacquired. A clean development result and semantic
+review remain separate from release acceptance.
 
-For the planned @22 witness, admission establishes locator correctness from the
+For the @22 witness, admission establishes locator correctness from the
 transient refused finish. Reopen can prove only integrity and binding after text
 is discarded: an independent immutable response-metadata digest must bind the
 response hash, finish hash, refusal ID and step. Missing or mismatched @22
 witnesses fail closed; older roles omit the field entirely.
+If diagnostic location disagrees with the replay detector, the finish stays
+refused and uses generic schema-3 replay feedback, preserving the existing
+correction allowance. Sensitive-output, size and invalid-action errors still
+propagate; diagnostic fallback never admits a result.

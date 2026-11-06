@@ -58,6 +58,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             None
         };
         let response = InvestigationResponseMeta {
+            finish_feedback_witness: None,
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
             action_hash: content_hash(&bounded_json(&original, 32 * 1024)?),

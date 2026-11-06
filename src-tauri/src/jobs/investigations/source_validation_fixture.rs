@@ -169,6 +169,7 @@ fn reserve_fixture(
         index: source.index,
     };
     let response = InvestigationResponseMeta {
+        finish_feedback_witness: None,
         step_id: f.step.step_id.clone(),
         response_hash: core_prov::content_hash(b"actual saved scripted response"),
         action_hash: staged::read_action_hash(&read).unwrap(),

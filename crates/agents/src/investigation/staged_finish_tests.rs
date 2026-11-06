@@ -619,6 +619,43 @@ fn staged_refusal_cap_requires_terminal_and_cannot_prepare_next_input() {
         feedback,
     };
     first.refusal_id = first.content_id().unwrap();
+    // AC-0287 / #1695: a separately retained witness catches recomputed
+    // record identities, without pretending to recover discarded prose.
+    let witness = first.feedback_witness_hash().unwrap();
+    assert_eq!(
+        first.validate_feedback_witness(&witness, &first.response_hash, &first.step_id),
+        Ok(())
+    );
+    assert!(
+        first
+            .validate_feedback_witness("", &first.response_hash, &first.step_id)
+            .is_err()
+    );
+    assert!(
+        first
+            .validate_feedback_witness(&witness, &content_hash(b"other response"), &first.step_id)
+            .is_err()
+    );
+    assert!(
+        first
+            .validate_feedback_witness(&witness, &first.response_hash, "other-step")
+            .is_err()
+    );
+    for field in 0..4 {
+        let mut altered = first.clone();
+        match field {
+            0 => altered.finish_hash = content_hash(b"other finish"),
+            1 => altered.step_id = "other-step".into(),
+            2 => altered.response_hash = content_hash(b"other response"),
+            _ => altered.feedback.unmet[0].reason = RefusalReason::Unavailable,
+        }
+        altered.refusal_id = altered.content_id().unwrap();
+        assert!(
+            altered
+                .validate_feedback_witness(&witness, &first.response_hash, &first.step_id)
+                .is_err()
+        );
+    }
     assert_eq!(
         first
             .validate(&fixture.request, ledger, &fixture.disclosure, &finish, None)

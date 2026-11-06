@@ -885,6 +885,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 ));
             }
             let response = InvestigationResponseMeta {
+                finish_feedback_witness: None,
                 step_id: step_id.clone(),
                 response_hash: content_hash(completion.text.as_bytes()),
                 action_hash,

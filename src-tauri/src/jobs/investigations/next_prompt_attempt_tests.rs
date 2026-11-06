@@ -53,6 +53,7 @@ fn publication(tx: &Transaction<'_>, f: &InternalFixture) -> Publication {
         max_bytes: request.max_bytes,
     };
     let response = InvestigationResponseMeta {
+        finish_feedback_witness: None,
         step_id: f.step.step_id.clone(),
         response_hash: core_prov::content_hash(b"complete inventory action"),
         action_hash: staged::read_action_hash(&read).unwrap(),

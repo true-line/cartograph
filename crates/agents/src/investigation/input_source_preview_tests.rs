@@ -1335,3 +1335,108 @@ fn analyst20_receipt_correction_is_role_bound_and_authenticated() {
         }
     }
 }
+
+#[test]
+fn analyst22_locator_discrepancy_preserves_refusal_and_real_errors() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let role = SpecialistId::DomainAnalystV22;
+    let (f, raw, _, _) = source_fixture(role, "bounded source");
+    let input = source_choices(
+        &f,
+        build_source(&f, &raw, &[], role, CompletionCallMode::Choice),
+        &[],
+        &f.ledger,
+    );
+    let disclosure = input
+        .seal_disclosure_with_policy(&prepare(&input), policy)
+        .unwrap()
+        .unwrap();
+    let contract = InvestigationCompletionContract {
+        schema_version: 1,
+        request_hash: f.metadata.request_hash.clone(),
+        obligations_hash: f.metadata.obligations_hash.clone(),
+        obligations: f.request.obligations.clone(),
+    };
+    let bound = input
+        .acquisition_choices
+        .as_ref()
+        .unwrap()
+        .bind_completion_disclosure(
+            "source-preview-task",
+            "current:1",
+            &contract,
+            &f.metadata,
+            input.ledger(),
+            &disclosure,
+            None,
+            policy,
+        )
+        .unwrap();
+    let finish = staged_finish::StagedFinish {
+        schema_version: 1,
+        outcome: staged_finish::CompletionOutcome::InsufficientEvidence,
+        narrative: None,
+        action: InvestigationAction::Finish {
+            findings: vec![],
+            knowledge_completeness: KnowledgeCompleteness::InsufficientEvidence,
+            limitations: vec![
+                input
+                    .ledger()
+                    .coverage
+                    .as_ref()
+                    .unwrap()
+                    .qualification
+                    .coverage_id
+                    .clone(),
+            ],
+        },
+    };
+    assert_eq!(
+        input.validate_correction_prose(&finish, None),
+        Err(InvestigationError::SourceReplay)
+    );
+    for diagnostic in [
+        Ok(None),
+        Err(InvestigationError::SourceReplay),
+        Err(InvestigationError::SensitiveOutput),
+        Err(InvestigationError::LimitExceeded),
+        Err(InvestigationError::InvalidAction),
+    ] {
+        let expected = diagnostic.clone();
+        let called = std::cell::Cell::new(false);
+        let result = staged_finish::admit_finish_with_locator(
+            &f.request,
+            "source-preview-task",
+            "current:1",
+            &input,
+            &disclosure,
+            &finish,
+            &[],
+            None,
+            "2026-11-06T00:00:00Z".into(),
+            policy,
+            Some(&bound),
+            |_, _, _| {
+                called.set(true);
+                diagnostic
+            },
+        );
+        assert!(called.get());
+        match expected {
+            Ok(None) | Err(InvestigationError::SourceReplay) => {
+                let staged_finish::FinishDecision::Refused { feedback, .. } = result.unwrap()
+                else {
+                    panic!("diagnostic discrepancy must preserve a recoverable refusal");
+                };
+                assert_eq!(feedback.schema_version, 3);
+                assert_eq!(
+                    feedback.prose_correction,
+                    Some(staged_finish::ProseCorrection::ParaphraseWithoutQuotingSource)
+                );
+                assert!(!feedback.unmet.is_empty());
+            }
+            Err(error) => assert!(matches!(result, Err(actual) if actual == error)),
+            Ok(Some(_)) => unreachable!(),
+        }
+    }
+}

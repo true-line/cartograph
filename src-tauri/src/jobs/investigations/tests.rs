@@ -216,6 +216,7 @@ fn begin(
 }
 fn response(step_id: &str, active_milliseconds: u64) -> InvestigationResponseMeta {
     InvestigationResponseMeta {
+        finish_feedback_witness: None,
         step_id: step_id.into(),
         response_hash: hash("response"),
         action_hash: hash("action"),
@@ -3161,4 +3162,19 @@ fn investigation_detail_read_exact_reports_preserve_base_and_capacity() {
         serde_json::to_vec(&fallback).unwrap(),
         serde_json::to_vec(&detail).unwrap()
     );
+}
+
+#[test]
+fn finish_feedback_witness_absence_preserves_response_wire() {
+    // AC-0287 / #1695: historical response JSON has no diagnostic field.
+    let value = response("step", 7);
+    let expected = format!(
+        r#"{{"step_id":"step","response_hash":"{}","action_hash":"{}","observed_model":"fixture-model","reported_input_tokens":null,"reported_output_tokens":null,"active_milliseconds":7}}"#,
+        hash("response"),
+        hash("action"),
+    );
+    assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+    let decoded: InvestigationResponseMeta = serde_json::from_str(&expected).unwrap();
+    assert!(decoded.finish_feedback_witness.is_none());
+    assert_eq!(decoded, value);
 }

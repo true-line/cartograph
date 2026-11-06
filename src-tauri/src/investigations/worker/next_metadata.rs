@@ -39,6 +39,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         let original: serde_json::Value = serde_json::from_str(&completion.text)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
         let response = InvestigationResponseMeta {
+            finish_feedback_witness: None,
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
             action_hash: content_hash(&bounded_json(&original, 32 * 1024)?),
