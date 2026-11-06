@@ -1,9 +1,17 @@
 //! Provider-free fixture transport witness. No model or official profile access.
 use adapters_lang_ts::{SourceId, captured::extract_file};
+use sha2::{Digest, Sha256};
 use source_capture::{
     CaptureLimits, CaptureStore, SourceId as CaptureSourceId, StoreLimits, capture_working_tree,
 };
 use std::fs;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 const INPUTS: &[(&str, &str)] = &[
     (
@@ -50,6 +58,11 @@ fn acceptance598_complete_evidence_survives_checkout_change_and_removal() {
             assert!(checked.insert(path), "duplicate manifest input");
             let source = INPUTS.iter().find(|(p, _)| *p == path).unwrap().1;
             assert_eq!(source.len() as u64, input["bytes"].as_u64().unwrap());
+            assert_eq!(
+                sha256_hex(source.as_bytes()),
+                input["sha256"].as_str().unwrap(),
+                "fixture source hash drifted: {path}"
+            );
             let file = checkout.join(path);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             fs::write(file, source).unwrap();
@@ -69,6 +82,11 @@ fn acceptance598_complete_evidence_survives_checkout_change_and_removal() {
             let end = input["evidence_byte_range"][1].as_u64().unwrap() as usize;
             let evidence = &source[start..end];
             assert!(!evidence.is_empty());
+            assert_eq!(
+                sha256_hex(evidence.as_bytes()),
+                input["original_sha256"].as_str().unwrap(),
+                "evidence no longer matches the original: {path}"
+            );
             assert_eq!(
                 evidence,
                 source

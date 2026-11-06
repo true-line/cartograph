@@ -27,4 +27,5 @@ cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 
 [dev-dependencies]
+sha2 = "0.10"
 tempfile = "3"

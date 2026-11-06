@@ -107,6 +107,7 @@ dependencies = [
  "iac",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "source-capture",
  "source-walk",
  "streaming-iterator",
