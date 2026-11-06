@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 // A workflow's top-level `on:` block, which alone decides what triggers it.
@@ -533,6 +534,42 @@ test('every job runs on organisation self-hosted runners', () => {
         /runs-on: \[self-hosted, (Linux, X64|Windows, X64|macOS, ARM64)\]$/u,
         `${name}: ${line.trim()}`,
       );
+    }
+  }
+});
+
+test('release symbols persist with versioned assets and short-lived Actions copies (#1676)', () => {
+  const packaging = readFileSync(path.join(root, '.github/workflows/package.yml'), 'utf8');
+  const release = readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  assert.match(packaging, /DSYM_PATH: \$\{\{ steps\.dsym\.outputs\.path \}\}/u);
+  assert.ok(packaging.includes('ditto -c -k --sequesterRsrc --keepParent "$DSYM_PATH"'));
+  assert.ok(packaging.includes('"dist/Cartograph_${version}_universal_${SIGNING_MODE}.dSYM.zip"'));
+  for (const name of ['Upload versioned artifacts', 'Upload dSYM']) {
+    const block = packaging.split(`      - name: ${name}\n`)[1]?.split(/\n      - name:/u)[0] ?? '';
+    assert.match(block, /retention-days: 3(?:\n|$)/u);
+    assert.match(block, /if-no-files-found: error/u);
+  }
+  assert.match(release, /for extension in app\.zip dmg dSYM\.zip; do/u);
+  assert.match(release, /gh release upload "\$TAG" dist\/\* --clobber/u);
+  assert.match(release, /LC_ALL=C sort/u);
+  // Exercise the actual publisher guard, including missing or unexpected symbols.
+  const declarations = release.match(/          expected_app=.*\n          expected_dmg=.*\n          expected_dsym=.*\n/u)?.[0];
+  const guard = release.match(/          if \[ "\$\{#assets\[@\]\}"[\s\S]*?          fi\n/u)?.[0];
+  assert.ok(declarations && guard);
+  for (const mode of ['signed', 'unsigned-dev']) {
+    const prefix = `Cartograph_0.63.0_universal_${mode}`;
+    const valid = [`${prefix}.app.zip`, `${prefix}.dSYM.zip`, `${prefix}.dmg`];
+    for (const [assets, pass] of [
+      [valid, true],
+      [valid.filter((name) => !name.endsWith('.dSYM.zip')), false],
+      [[...valid, 'extra.zip'], false],
+      [[valid[0], 'Cartograph_0.62.0_universal_signed.dSYM.zip', valid[2]], false],
+    ]) {
+      const script = `${declarations}\nassets=(${assets.map((name) => `'${name}'`).join(' ')})\n${guard}`;
+      const result = spawnSync('bash', ['-c', script], {
+        env: { ...process.env, VERSION: '0.63.0', SIGNING_MODE: mode }, encoding: 'utf8',
+      });
+      assert.equal(result.status, pass ? 0 : 1, result.stderr || result.stdout);
     }
   }
 });

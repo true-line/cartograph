@@ -362,6 +362,7 @@ jobs:
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
           APP_PATH: ${{ steps.bundles.outputs.app }}
           DMG_PATH: ${{ steps.bundles.outputs.dmg }}
+          DSYM_PATH: ${{ steps.dsym.outputs.path }}
         run: |
           set -euo pipefail
           version=$(node -p 'require("./package.json").version')
@@ -370,10 +371,12 @@ jobs:
           cp "$DMG_PATH" "dist/Cartograph_${version}_universal_${SIGNING_MODE}.dmg"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
             "dist/Cartograph_${version}_universal_${SIGNING_MODE}.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$DSYM_PATH" \
+            "dist/Cartograph_${version}_universal_${SIGNING_MODE}.dSYM.zip"
           # Note: LICENSE + THIRD-PARTY-NOTICES are NOT staged into dist/ — the
-          # release-publish job asserts dist/ holds exactly the .app.zip + .dmg.
+          # release-publish job asserts dist/ holds exactly the .app.zip + .dmg + .dSYM.zip.
           # The notices ship inside the .app itself (Settings › About & licenses
-          # embeds the freshly-generated notices), so they travel with both
+          # embeds the freshly-generated notices), so they travel with the app
           # artifacts without breaking that check.
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
@@ -383,17 +386,14 @@ jobs:
           name: ${{ steps.metadata.outputs.artifact_name }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
-      # Internal artifact (#249), not a release asset: kept separate from
-      # dist/ so it never affects the release-publish job's "dist/ holds
-      # exactly the .app.zip + .dmg" assertion above. Symbolicates crash
-      # reports (.ips) and `sample`/`atos` profiles against this exact build
-      # with `dsymutil -s Cartograph.dSYM` / `atos -o Cartograph.dSYM ...`.
+      # Short-lived raw symbols for build diagnostics. The versioned ZIP in
+      # dist/ is also published with the release for durable symbolication.
       - name: Upload dSYM
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.metadata.outputs.artifact_name }}-dSYM
           path: ${{ steps.dsym.outputs.path }}
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 3
