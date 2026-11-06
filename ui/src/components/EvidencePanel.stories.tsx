@@ -257,3 +257,24 @@ export const RecordedScreenRoute: Story = {
     await expect(canvasElement.querySelector('mark')?.textContent).toBe(SPAN_TEXT);
   },
 };
+
+export const ScreenWithoutRouteUsesStableId: Story = {
+  // AC-0028: a source path must not replace a route-less Screen's stable ID.
+  args: {
+    node: { id: 'screen:stable-id', label: 'Screen', props: { path: 'src/pages/index.tsx' } },
+    source: 'unavailable',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'screen:stable-id' })).toBeVisible());
+    await expect(canvas.queryByRole('heading', { name: 'src/pages/index.tsx' })).not.toBeInTheDocument();
+  },
+};
+
+export const ScreenWithBlankRouteUsesStableId: Story = {
+  ...ScreenWithoutRouteUsesStableId,
+  args: {
+    ...ScreenWithoutRouteUsesStableId.args,
+    node: { id: 'screen:stable-id', label: 'Screen', props: { route: '  ', path: 'src/pages/index.tsx' } },
+  },
+};
