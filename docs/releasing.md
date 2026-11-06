@@ -48,7 +48,9 @@ gh release download vX.Y.Z --pattern 'Cartograph_*_universal_*' --dir dist
 ```
 
 For a production release, require `isDraft: false`, `isPrerelease: false`, and
-exactly the versioned `signed` app zip and DMG. Then perform the manual
+exactly three versioned `signed` assets: the app zip, the DMG and the dSYM zip
+(`Cartograph_X.Y.Z_universal_signed.dSYM.zip`, the debug symbols for crash
+symbolication). Then perform the manual
 Gatekeeper installation smoke test below and record the evidence on the release
 task.
 
