@@ -1577,3 +1577,27 @@ finding, no semantic query refusal and no subsequent call are required.
 Any failed assertion or missing receipt remains failed/unexecuted as appropriate;
 never rerun implicitly. This is controlled transport evidence, not model
 robustness, positive analyst acceptance or native restart evidence.
+
+### Decision #1688 — analyst capacity-refusal exclusion
+
+Status: implementation validation pending; this note is not real-model acceptance.
+Use a disposable fixture profile with `domain-analyst@21`. When a source-read
+proposal receives `prompt_capacity`, inspect the next prepared acquisition menu:
+that action must be absent. Refuse a different offered read and confirm both
+remain absent at the same input revision. Once no acquisition remains, confirm
+the next call is finish-only and unresolved obligations remain unresolved.
+Reopen the profile before each inspection; deleting or changing a saved refusal
+must fail authentication. A successful acquisition that advances the input
+revision clears the exclusion set. Replay the retained `domain-analyst@20`
+receipt and verify its saved hashes and serialized output remain unchanged.
+
+Run these checks without a provider first. The separately authorized post-merge
+Sparks dev validation and subsequent single release attempt retain Decision
+#1688's model, question, selections, rubric and stop conditions; fixture success
+does not establish semantic acceptance or authorize a retry.
+
+The `read_evidence.index` field is the stable source-range selector for the
+specified fact and role; it is not the acquisition menu position. Exclusion
+removes entries without renumbering selectors. Admission compares the complete
+fact/role/index tuple with an offered action. A changed index may name another
+explicitly offered range, but cannot redirect a removed entry by menu position.

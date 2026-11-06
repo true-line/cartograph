@@ -101,6 +101,7 @@ pub(super) fn validate_acquisition(
     stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
     if stamp.acquisition.as_ref()
         != Some(&agents::investigation::AcquisitionAdmission {
+            capacity_exhausted: false,
             finish_reason: None,
             choices_hash: choices.stamp_hash()?,
             action_feedback_hash: None,

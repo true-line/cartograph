@@ -98,7 +98,10 @@ impl RefusalRecord {
         if request.limit_profile != policy.profile()
             || ((self.feedback.citation_correction.is_some()
                 || self.feedback.prose_correction.is_some())
-                && request.specialist_id != "domain-analyst@20")
+                && !matches!(
+                    request.specialist_id.as_str(),
+                    "domain-analyst@20" | "domain-analyst@21"
+                ))
         {
             return Err(InvestigationError::InvalidInput);
         }

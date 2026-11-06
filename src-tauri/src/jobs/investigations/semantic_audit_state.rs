@@ -197,7 +197,11 @@ impl JobStore {
         }
         if task.phase != Phase::Ready
             || task.detail.summary.cancel_requested
-            || task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20
+            || !task
+                .detail
+                .summary
+                .specialist_id
+                .uses_typed_citation_correction()
             || task.detail.provider.mode != InvestigationProviderMode::Local
             || task.detail.usage.model_invocations != 0
             || task.semantic_audit.is_some()
@@ -390,7 +394,11 @@ impl StoredSemanticAudit {
                 && (!self.is_advisory()
                     || self.candidate.is_none()
                     || task.phase != Phase::Terminal))
-            || task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20
+            || !task
+                .detail
+                .summary
+                .specialist_id
+                .uses_typed_citation_correction()
             || task.detail.provider.mode != InvestigationProviderMode::Local
             || self.candidate.is_some() != self.candidate_hash.is_some()
             || (self.account.audit_started() && self.candidate.is_none())

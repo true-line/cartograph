@@ -53,7 +53,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         let response = InvestigationResponseMeta {
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
-            action_hash: content_hash(&bounded_json(&original, 32 * 1024)?),
+            action_hash: source_response_action_hash(&original)?,
             observed_model: completion.response_model.clone(),
             reported_input_tokens: completion
                 .usage
@@ -189,5 +189,38 @@ fn cleanup_failure(failure: SourceCleanupFailure) -> Failure {
     match failure.error() {
         SourceCleanupError::Host(error) => Failure::Host(*error),
         SourceCleanupError::Store(error) => Failure::Store(*error),
+    }
+}
+
+fn source_response_action_hash(original: &serde_json::Value) -> Result<String, Failure> {
+    Ok(content_hash(&bounded_json(original, 32 * 1024)?))
+}
+
+#[cfg(test)]
+mod capacity_hash_tests {
+    use super::*;
+    use agents::investigation::acquisition_choices::AcquisitionAction;
+
+    #[test]
+    fn run10_model_response_and_capacity_menu_match_saved_action_hash() {
+        // AC-0287 / #1689: independent run-10 original and saved hash, not
+        // a response synthesized by serializing the offered menu entry.
+        let original: serde_json::Value = serde_json::from_str(r#"{
+            "type":"read_evidence", "role":"provenance", "index":0,
+            "fact":{"kind":"node","id":"sym:local/src_95d3545ed92d87f7f0bf82ad9f31fe26@packages/core/src/config/catalog/multi-channel-stock-location-strategy.ts#MultiChannelStockLocationStrategy.forAllocation"}
+        }"#).unwrap();
+        let expected = "d92e64c2baec5e69580bfc68b4a956f006148b6e93856c44c8280f17c00c092c";
+        let offered = AcquisitionAction::ReadEvidence {
+            fact: agents::TaskFactKey::Node { id: "sym:local/src_95d3545ed92d87f7f0bf82ad9f31fe26@packages/core/src/config/catalog/multi-channel-stock-location-strategy.ts#MultiChannelStockLocationStrategy.forAllocation".into() },
+            role: agents::TaskRangeRole::Provenance,
+            index: 0,
+        };
+        assert_eq!(source_response_action_hash(&original).unwrap(), expected);
+        assert_eq!(offered.capacity_refusal_hash().unwrap(), expected);
+        let mut shifted = offered.clone();
+        if let AcquisitionAction::ReadEvidence { index, .. } = &mut shifted {
+            *index = 1;
+        }
+        assert_ne!(shifted.capacity_refusal_hash().unwrap(), expected);
     }
 }

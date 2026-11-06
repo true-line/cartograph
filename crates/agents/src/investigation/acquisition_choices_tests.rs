@@ -1130,3 +1130,50 @@ fn citation_correction_shared_receipt_maps_all_targets_and_rejects_attempted_mem
 
 #[path = "acquisition_eligibility_tests.rs"]
 mod eligibility;
+
+// Decision #1688: a refused acquisition cannot remain in the offered menu.
+#[test]
+fn capacity_exclusion_preserves_legacy_menu_and_all_refused_obligations() {
+    let fixture = Fixture::new();
+    let choices = fixture.derive(&fixture.ledger, &[]).unwrap();
+    assert_eq!(choices.entries().len(), 2);
+    let legacy_bytes = serde_json::to_vec(&choices).unwrap();
+    let legacy_hash = choices.stamp_hash().unwrap();
+    let project = |refused: &BTreeSet<String>| {
+        choices
+            .excluding_capacity_refusals(
+                &fixture.contract,
+                &fixture.metadata,
+                &fixture.ledger,
+                refused,
+                POLICY,
+            )
+            .unwrap()
+    };
+    let mut refused = BTreeSet::new();
+    assert_eq!(
+        serde_json::to_vec(&project(&refused)).unwrap(),
+        legacy_bytes
+    );
+    for (index, entry) in choices.entries().iter().enumerate() {
+        let action = serde_json::to_value(&entry.action).unwrap();
+        refused.insert(core_prov::content_hash(
+            &bounded_bytes(&action, MAX_ACTION_BYTES).unwrap(),
+        ));
+        let projected = project(&refused);
+        assert_eq!(
+            projected.entries().len(),
+            choices.entries().len() - index - 1
+        );
+        assert_eq!(projected.blocked().len(), index + 1);
+        assert!(!projected.attempts_complete());
+        assert!(!projected.all_acquired());
+        assert_ne!(projected.stamp_hash().unwrap(), legacy_hash);
+        // Repeated feedback is idempotent; earlier refusals stay excluded.
+        assert_eq!(projected, project(&refused));
+    }
+    assert!(project(&refused).entries().is_empty());
+    assert_eq!(serde_json::to_vec(&choices).unwrap(), legacy_bytes);
+    // A cleared turn's empty refusal set restores the original derivation.
+    assert_eq!(project(&BTreeSet::new()).stamp_hash().unwrap(), legacy_hash);
+}

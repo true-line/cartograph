@@ -265,7 +265,11 @@ impl JobStore {
                         invalid_citation(&tx, &mut task, &input.response.step_id)?;
                     }
                     Err(InvestigationError::SourceReplay)
-                        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV20 =>
+                        if task
+                            .detail
+                            .summary
+                            .specialist_id
+                            .uses_typed_citation_correction() =>
                     {
                         persist_response(
                             &tx,

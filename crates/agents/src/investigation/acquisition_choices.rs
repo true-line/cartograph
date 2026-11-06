@@ -17,6 +17,7 @@ pub enum AcquisitionAction {
     ReadEvidence {
         fact: TaskFactKey,
         role: TaskRangeRole,
+        /// Stable source-range index for this fact and role, never menu position.
         index: u32,
     },
     ReadCoverageInventory {
@@ -25,6 +26,17 @@ pub enum AcquisitionAction {
         inventory_hash: String,
         max_bytes: usize,
     },
+}
+
+impl AcquisitionAction {
+    /// Same canonical JSON Value framing as saved model-response action hashes.
+    pub fn capacity_refusal_hash(&self) -> Result<String, InvestigationError> {
+        let value = serde_json::to_value(self).map_err(|_| InvestigationError::InvalidInput)?;
+        Ok(core_prov::content_hash(&bounded_bytes(
+            &value,
+            MAX_ACTION_BYTES,
+        )?))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -261,6 +273,8 @@ pub struct AcquisitionChoices {
     pending: Vec<bool>,
     #[serde(skip)]
     all_acquired: bool,
+    #[serde(skip)]
+    capacity_exhausted: bool,
 }
 impl AcquisitionChoices {
     /// Canonical typed JSON under the existing action cap; not a publication
@@ -271,6 +285,42 @@ impl AcquisitionChoices {
             MAX_ACTION_BYTES,
         )?))
     }
+    /// Project authenticated, turn-local capacity refusals before truncating
+    /// the offered prefix. This is not journal authentication: the saved host
+    /// must supply the complete refusal set at the invocation's exact cutoff.
+    /// Refused obligations stay blocked/unattempted; they never become acquired.
+    pub fn excluding_capacity_refusals(
+        &self,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        refused: &BTreeSet<String>,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        self.validate_basis(contract, metadata, ledger, policy)?;
+        if refused.len() > policy.limits().model_invocations as usize
+            || refused.iter().any(|hash| !crate::source_basis::hash(hash))
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut projected = Self::from_pending_excluding(
+            contract,
+            ledger,
+            self.completion_metadata_hash.clone(),
+            self.pending.clone(),
+            policy,
+            refused,
+        )?;
+        projected.all_acquired = self.all_acquired;
+        projected.capacity_exhausted =
+            !refused.is_empty() && projected.entries.is_empty() && !projected.all_acquired;
+        Ok(projected)
+    }
+
+    pub fn capacity_exhausted(&self) -> bool {
+        self.capacity_exhausted
+    }
+
     pub fn entries(&self) -> &[AcquisitionChoice] {
         &self.entries
     }
@@ -572,14 +622,14 @@ impl AcquisitionChoices {
     pub fn private_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
         context_hub::logical::sum(&[
             std::mem::size_of::<Vec<bool>>(),
-            std::mem::size_of::<bool>(),
+            std::mem::size_of::<bool>().checked_mul(2)?,
             context_hub::logical::slots::<bool>(policy.max_completion_obligations())?,
         ])
     }
     #[cfg(test)]
     pub(super) fn private_bytes(&self) -> usize {
         std::mem::size_of::<Vec<bool>>()
-            + std::mem::size_of::<bool>()
+            + 2 * std::mem::size_of::<bool>()
             + std::mem::size_of_val(self.pending.as_slice())
     }
     /// Candidate construction before prefix truncation. Borrowed contract,
@@ -647,6 +697,24 @@ impl AcquisitionChoices {
         pending: Vec<bool>,
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
+        Self::from_pending_excluding(
+            contract,
+            ledger,
+            completion_metadata_hash,
+            pending,
+            policy,
+            &BTreeSet::new(),
+        )
+    }
+
+    fn from_pending_excluding(
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        completion_metadata_hash: String,
+        pending: Vec<bool>,
+        policy: &InvestigationPolicy,
+        refused: &BTreeSet<String>,
+    ) -> Result<Self, InvestigationError> {
         if pending.len() != contract.obligations.obligations.len() {
             return Err(InvestigationError::InvalidInput);
         }
@@ -663,6 +731,7 @@ impl AcquisitionChoices {
             deferred: 0,
             pending,
             all_acquired: false,
+            capacity_exhausted: false,
         };
         // Validate every obligation, including the eventual deferred suffix.
         let byte_limit = MAX_ACTION_BYTES.min(policy.envelope_bytes());
@@ -746,6 +815,15 @@ impl AcquisitionChoices {
                         max_bytes: MAX_QUERY_BYTES,
                     })
                 }
+            };
+            // Saved response action hashes use canonical JSON Value ordering,
+            // not the enum's field order. Match that exact framing.
+            let action = match action {
+                Some(action) if !refused.is_empty() => {
+                    let hash = action.capacity_refusal_hash()?;
+                    (!refused.contains(&hash)).then_some(action)
+                }
+                other => other,
             };
             if output.pending[position] {
                 if let Some(action) = action {

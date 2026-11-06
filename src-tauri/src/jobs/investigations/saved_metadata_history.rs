@@ -143,6 +143,11 @@ impl<'a> SavedMetadataHistory<'a> {
             .as_ref()
             .map(|stamp| stamp.choices_hash.as_str())
             != Some(choices.stamp_hash()?.as_str())
+            || basis
+                .admission
+                .acquisition
+                .as_ref()
+                .is_some_and(|stamp| stamp.capacity_exhausted != choices.capacity_exhausted())
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -301,6 +306,32 @@ impl<'a> SavedMetadataHistory<'a> {
             &evidence,
             &saved_policy(self.task)?,
         )?;
+        if self
+            .task
+            .detail
+            .summary
+            .specialist_id
+            .uses_capacity_exclusions()
+        {
+            let refused = admission_journal::capacity_exclusion_candidates(
+                self.connection,
+                self.task,
+                cutoff,
+                ledger,
+            )?;
+            return Ok(choices.excluding_capacity_refusals(
+                &self
+                    .task
+                    .completion_intent
+                    .as_ref()
+                    .ok_or(InvestigationStoreError::Invalid)?
+                    .contract(),
+                metadata,
+                ledger,
+                &refused,
+                &saved_policy(self.task)?,
+            )?);
+        }
         Ok(choices)
     }
 

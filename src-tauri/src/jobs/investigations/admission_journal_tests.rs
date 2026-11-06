@@ -1070,3 +1070,47 @@ fn configured_desktop_start_freezes_time_limits_and_nonce_retry_keeps_them() {
         );
     }
 }
+
+#[test]
+fn capacity_exclusion_resolves_replay_query_without_rewriting_journal_hash() {
+    let mut f = internal_next_prompt_fixture();
+    let (page, previous) = accept_query(&mut f);
+    start_call(&mut f, &[page], Some(previous));
+    let reference = QueryHistoryReference::from_ledger(
+        &f.basis.request_hash,
+        &f.ledger,
+        0,
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
+    let direct = proposal(&f, 12);
+    let replay = json!({"type":"replay_query", "context_id":f.request.expected_context_id,
+        "query_index":reference.query_index,"query_id":reference.query_id});
+    let mut entry = refuse(&mut f, 12);
+    entry.proposal = replay.clone();
+    entry.response.action_hash =
+        core_prov::content_hash(&encode(&replay, MAX_ACTION_BYTES).unwrap());
+    let original_hash = entry.response.action_hash.clone();
+    let role = SpecialistId::DomainAnalystV21;
+    let expected = core_prov::content_hash(&encode(&direct, MAX_ACTION_BYTES).unwrap());
+    assert_ne!(original_hash, expected);
+    assert_eq!(
+        capacity_exclusion_hash(&entry, &f.ledger, role, &INVESTIGATION_V2_POLICY).unwrap(),
+        expected
+    );
+    assert_eq!(entry.response.action_hash, original_hash);
+    // A different request binding, invalid reference, or changed wire hash
+    // must not acquire exclusion authority from an otherwise valid ledger.
+    for mutation in ["request", "reference", "hash"] {
+        let mut bad = entry.clone();
+        match mutation {
+            "request" => bad.call.request_hash = "f".repeat(64),
+            "reference" => bad.proposal["query_id"] = json!("f".repeat(64)),
+            _ => bad.response.action_hash = "f".repeat(64),
+        }
+        assert!(
+            capacity_exclusion_hash(&bad, &f.ledger, role, &INVESTIGATION_V2_POLICY).is_err(),
+            "{mutation}"
+        );
+    }
+}

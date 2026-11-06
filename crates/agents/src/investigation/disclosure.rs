@@ -513,8 +513,17 @@ impl acquisition_choices::AcquisitionChoices {
         policy: &'a InvestigationPolicy,
     ) -> Result<AcquisitionDisclosureConsistency<'a>, InvestigationError> {
         self.validate_basis(contract, metadata, ledger, policy)?;
-        disclosure.validate_saved_role_shape(ledger, policy, SpecialistId::DomainAnalystV18)?;
+        disclosure.validate_saved_role_shape(
+            ledger,
+            policy,
+            if self.capacity_exhausted() {
+                SpecialistId::DomainAnalystV21
+            } else {
+                SpecialistId::DomainAnalystV18
+            },
+        )?;
         let expected = AcquisitionAdmission {
+            capacity_exhausted: self.capacity_exhausted(),
             finish_reason: feedback
                 .filter(|value| value.reason == ActionRefusalReason::RepeatedRead)
                 .map(|value| value.reason),

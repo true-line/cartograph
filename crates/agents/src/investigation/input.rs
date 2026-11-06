@@ -114,7 +114,7 @@ impl InvestigationInput {
         consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
     ) -> Result<Option<Vec<String>>, InvestigationError> {
         if self.payload.system != SpecialistId::DomainAnalystV19.prompt()
-            && self.payload.system != SpecialistId::DomainAnalystV20.prompt()
+            && !SpecialistId::is_typed_citation_prompt(&self.payload.system)
         {
             return Ok(None);
         }
@@ -152,7 +152,7 @@ impl InvestigationInput {
             .acquisition_choices
             .as_ref()
             .ok_or(InvestigationError::InvalidInput)?;
-        if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+        if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             choices.unacquired_citation_handles(
                 &invalid,
                 &contract,
@@ -192,7 +192,7 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
         consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
     ) -> Result<Option<acquisition_choices::CitationCorrection>, InvestigationError> {
-        if self.payload.system != SpecialistId::DomainAnalystV20.prompt() {
+        if !SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             return Ok(None);
         }
         let Some(ids) =

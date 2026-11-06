@@ -7,6 +7,14 @@ fn correction_fixture_role(role: &str) -> Fixture {
 }
 
 fn correction_fixture_configured(role: &str, active_seconds: Option<u64>) -> Fixture {
+    correction_fixture_sources(role, active_seconds, false)
+}
+
+fn correction_fixture_sources(
+    role: &str,
+    active_seconds: Option<u64>,
+    two_sources: bool,
+) -> Fixture {
     use completion::next_prompt_snapshot::tests::fixture::Fixture as Acquisition;
     let mut target_id = String::new();
     let base = Acquisition::configured_request(
@@ -24,6 +32,23 @@ fn correction_fixture_configured(role: &str, active_seconds: Option<u64>) -> Fix
             source.target_id = source.content_id().unwrap();
             source.validate().unwrap();
             target_id = source.target_id.clone();
+            if two_sources {
+                let mut second = source.clone();
+                second.index = 1;
+                second.source.byte_end = 6;
+                second.captured.byte_end = 6;
+                second.target_id = second.content_id().unwrap();
+                second.validate().unwrap();
+                let mut extra = Obligation::Source {
+                    obligation_id: String::new(),
+                    target: Box::new(second),
+                };
+                let id = extra.content_id().unwrap();
+                if let Obligation::Source { obligation_id, .. } = &mut extra {
+                    *obligation_id = id;
+                }
+                request.obligations.obligations.push(extra);
+            }
             let mut obligation = Obligation::Source {
                 obligation_id: String::new(),
                 target: Box::new(source),
@@ -366,4 +391,114 @@ fn assert_ollama_wire(input: &InvestigationInput, expected_prompt: &str) {
         )
     );
     assert_eq!(wire["stream"], false);
+}
+
+#[test]
+fn analyst21_durable_capacity_refusals_exclude_two_distinct_reads() {
+    let initial = correction_fixture_sources("domain-analyst@21", None, true);
+    let mut query = metadata_admission::MetadataProposalFixture::from_fixture(
+        initial,
+        ContextPreviewKind::Query,
+        false,
+    );
+    let snapshot = query.snapshot().unwrap();
+    query.publish(&snapshot);
+    query.f.base.f.ledger = query.ledger.clone();
+    query.f.base.f.metadata = snapshot.metadata().clone();
+    let page = query.raw;
+    let mut f = query.f;
+    f.next_with_pages(&[&page]);
+    let mut refused = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let choices = {
+            let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+            let task = load_next_prompt_task(&tx, f.base.id()).unwrap();
+            completion::SavedMetadataHistory::load(&tx, &task)
+                .unwrap()
+                .current_choices(&f.base.f.ledger, &f.base.f.metadata)
+                .unwrap()
+                .unwrap()
+        };
+        let offered: Vec<Value> = choices
+            .entries()
+            .iter()
+            .map(|entry| serde_json::to_value(&entry.action).unwrap())
+            .collect();
+        for action in &offered {
+            let hash = core_prov::content_hash(&encode(action, MAX_ACTION_BYTES).unwrap());
+            assert!(!refused.contains(&hash));
+        }
+        let action = offered
+            .iter()
+            .find(|action| action["type"] == "read_evidence")
+            .unwrap();
+        let hash = core_prov::content_hash(&encode(action, MAX_ACTION_BYTES).unwrap());
+        assert!(refused.insert(hash.clone()));
+        f.begin();
+        let mut response = f.response.clone();
+        response.action_hash = hash;
+        f.base
+            .f
+            .store
+            .refuse_next_prompt_capacity(
+                &f.base.f.execution,
+                f.base.f.task.detail.summary.revision,
+                &response,
+                action,
+                CapacityRefusalReason::PromptCapacity,
+            )
+            .unwrap();
+        f.next_with_pages(&[&page]);
+    }
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    let snapshot = reopened
+        .investigation_next_prompt_snapshot(f.base.id(), &f.base.f.request)
+        .unwrap();
+    assert_eq!(snapshot.capacity_refusal_count(), 2);
+    let tx = reopened.conn.unchecked_transaction().unwrap();
+    let task = load_next_prompt_task(&tx, f.base.id()).unwrap();
+    let choices = completion::SavedMetadataHistory::load(&tx, &task)
+        .unwrap()
+        .current_choices(snapshot.ledger(), snapshot.metadata())
+        .unwrap()
+        .unwrap();
+    for entry in choices.entries() {
+        let action = serde_json::to_value(&entry.action).unwrap();
+        assert!(!refused.contains(&core_prov::content_hash(
+            &encode(&action, MAX_ACTION_BYTES).unwrap()
+        )));
+    }
+    assert_eq!(refused.len(), 2);
+    tx.commit().unwrap();
+    drop(reopened);
+    let prior_revision = snapshot.ledger().revision;
+    let Fixture {
+        mut base,
+        input,
+        prepared,
+        ..
+    } = f;
+    base.input = input;
+    base.prepared = prepared;
+    base.acquire_inventory_with_pages(&[&page]);
+    let reset = base.snapshot();
+    assert_eq!(reset.ledger().revision, prior_revision + 1);
+    assert!(reset.capacity_feedback().is_none());
+    assert_eq!(reset.capacity_refusal_count(), 2); // Historical charges survive reset.
+    let tx = base.f.store.conn.unchecked_transaction().unwrap();
+    let task = load_next_prompt_task(&tx, base.id()).unwrap();
+    let choices = completion::SavedMetadataHistory::load(&tx, &task)
+        .unwrap()
+        .current_choices(reset.ledger(), reset.metadata())
+        .unwrap()
+        .unwrap();
+    let offered = choices
+        .entries()
+        .iter()
+        .map(|entry| {
+            let action = serde_json::to_value(&entry.action).unwrap();
+            core_prov::content_hash(&encode(&action, MAX_ACTION_BYTES).unwrap())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(refused.is_subset(&offered));
 }

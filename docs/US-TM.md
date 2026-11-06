@@ -133,3 +133,8 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0050 | Journey identity and tier: T0 navigation facts, T2 journey candidates (proposed; owner review required) |
 
 | ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (accepted 2026-11-06, #1678) |
+
+Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
+exclusion, exhaustion and successful-publication reset. The focused regression
+names and historical @20 checks are listed in the Decision #1688 section of
+[test-map.md](test-map.md); fixture results do not establish #598 acceptance.

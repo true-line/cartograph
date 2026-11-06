@@ -224,6 +224,12 @@ impl SavedCallBasis {
                     .acquisition
                     .as_ref()
                     .map(|stamp| stamp.choices_hash.clone())
+                || choices.as_ref().map(|choices| choices.capacity_exhausted())
+                    != value
+                        .admission
+                        .acquisition
+                        .as_ref()
+                        .map(|stamp| stamp.capacity_exhausted)
             {
                 return Err(InvestigationStoreError::Invalid);
             }

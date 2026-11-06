@@ -138,6 +138,13 @@ pub(super) fn acquisition_choices_workspace() -> Option<usize> {
         agents::investigation::acquisition_choices::AcquisitionChoices::candidate_workspace_bytes(
             policy,
         )?,
+        // @21 retains the original candidate while scanning refusals and
+        // constructing a filtered candidate; older versions use less workspace.
+        admission_journal::refusal_workspace::capacity_exclusion_workspace()?,
+        agents::investigation::acquisition_choices::AcquisitionChoices::candidate_workspace_bytes(
+            policy,
+        )?,
+        json_bytes(MAX_ACTION_BYTES)?, // action Value used for canonical hash
         MAX_ACTION_BYTES,
         slots::<Vec<u8>>(1)?,               // rejected/final bounded encoding
         MAX_MANIFEST_BYTES.checked_mul(2)?, // canonical encoding/domain fingerprints

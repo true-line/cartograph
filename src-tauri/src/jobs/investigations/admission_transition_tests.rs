@@ -313,16 +313,20 @@ fn admission_namespace_count(connection: &Connection) -> i64 {
 
 // Explicit cold @18 witnesses: no sealer, worker or provider is activated.
 fn action_fixture() -> (completion::InternalFixture, Value) {
+    action_fixture_for("domain-analyst@18")
+}
+fn action_fixture_for(role_name: &str) -> (completion::InternalFixture, Value) {
     use agents::investigation::{AcquisitionAdmission, acquisition_choices::AcquisitionChoices};
     let mut f = internal_next_prompt_fixture();
     let policy = &INVESTIGATION_V2_POLICY;
-    f.request.specialist_id = "domain-analyst@18".into();
+    f.request.specialist_id = role_name.into();
+    let role: SpecialistId = serde_json::from_value(serde_json::json!(role_name)).unwrap();
     let intent = completion::host_fixture_intent(&f.request).unwrap();
     f.task.intent_hash = intent.request_hash.clone();
     f.task.completion_intent = Some(intent.clone());
     f.task.detail.completion = Some(completion::initial_detail(&intent));
-    f.task.detail.summary.specialist_id = SpecialistId::DomainAnalystV18;
-    f.task.detail.specialist = SpecialistId::DomainAnalystV18.definition().unwrap();
+    f.task.detail.summary.specialist_id = role;
+    f.task.detail.specialist = role.definition().unwrap();
     f.metadata.request_hash = intent.request_hash.clone();
     let choices = AcquisitionChoices::derive(
         &intent.contract(),
@@ -349,6 +353,7 @@ fn action_fixture() -> (completion::InternalFixture, Value) {
     disclosure.query_history.as_mut().unwrap().request_hash = intent.request_hash.clone();
     disclosure.query_history.as_mut().unwrap().registry_hash = registry.registry_hash;
     disclosure.admission.as_mut().unwrap().acquisition = Some(AcquisitionAdmission {
+        capacity_exhausted: false,
         finish_reason: None,
         choices_hash: choices.stamp_hash().unwrap(),
         action_feedback_hash: None,
@@ -618,4 +623,90 @@ fn repeated_read_notice_rejects_unacquired_action_without_charging() {
         before_inputs
     );
     assert!(fixture::state(&f).action_feedback.is_none());
+}
+
+#[test]
+fn capacity_exclusion_durable_replay_preserves_analyst20_and_excludes_for_21() {
+    for role in ["domain-analyst@20", "domain-analyst@21"] {
+        let (mut f, offered) = action_fixture_for(role);
+        let response = fixture::response(&f, &offered);
+        let original_ledger = f.ledger.clone();
+        let tx = f.store.conn.transaction().unwrap();
+        let next = refuse_capacity(
+            &tx,
+            &f.task,
+            &response,
+            &offered,
+            CapacityRefusalReason::PromptCapacity,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        f.task = next;
+        assert_eq!(fixture::state(&f).count, 1);
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let choices = completion::SavedMetadataHistory::load(&tx, &f.task)
+            .unwrap()
+            .current_choices(&f.ledger, &f.metadata)
+            .unwrap()
+            .unwrap();
+        let still_offered = choices
+            .entries()
+            .iter()
+            .any(|entry| serde_json::to_value(&entry.action).unwrap() == offered);
+        assert_eq!(still_offered, role == "domain-analyst@20");
+        if role == "domain-analyst@21" {
+            assert!(choices.entries().is_empty());
+            assert!(choices.capacity_exhausted());
+        }
+        assert_eq!(f.ledger, original_ledger);
+        let cutoff = f.basis.invocation_ordinal;
+        assert!(
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff, &f.ledger)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            admission_journal::capacity_exclusion_candidates(
+                &tx,
+                &f.task,
+                cutoff + 1,
+                &InvestigationInputLedger {
+                    revision: f.ledger.revision + 1,
+                    ..f.ledger.clone()
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let excluded =
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff + 1, &f.ledger)
+                .unwrap();
+        assert_eq!(
+            excluded.contains(&response.action_hash),
+            role == "domain-analyst@21"
+        );
+        drop(choices);
+        tx.commit().unwrap();
+        // Reconstruct, seal and authenticate the next call from durable state.
+        fixture::start_call(&mut f, &[], None);
+        assert_eq!(fixture::state(&f).count, 1);
+        assert_eq!(
+            f.basis.admission.mode == CompletionCallMode::FinishOnly,
+            role == "domain-analyst@21"
+        );
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let trigger: String = tx.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='investigation_admission_refusals_no_delete'",
+            [], |row| row.get(0)).unwrap();
+        tx.execute_batch("DROP TRIGGER investigation_admission_refusals_no_delete")
+            .unwrap();
+        tx.execute(
+            "DELETE FROM investigation_admission_refusals WHERE task_id=?1",
+            params![f.basis.task_id],
+        )
+        .unwrap();
+        tx.execute_batch(&trigger).unwrap();
+        assert!(admission_journal::derive_current(&tx, &f.task).is_err());
+        // Roll back the corruption; missing history must never authenticate.
+    }
 }

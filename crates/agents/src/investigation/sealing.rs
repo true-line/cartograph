@@ -62,7 +62,14 @@ pub(super) fn seal_admission_inner(
     }
     if let Some(state) = &admission {
         if let Some(input) = acquisition {
-            state.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
+            state.validate_saved_role_shape(
+                if original.system == SpecialistId::DomainAnalystV21.prompt() {
+                    SpecialistId::DomainAnalystV21
+                } else {
+                    SpecialistId::DomainAnalystV18
+                },
+                policy,
+            )?;
             if state.acquisition.as_ref() != Some(&input.acquisition_stamp(original)?) {
                 return Err(InvestigationError::InvalidInput);
             }
@@ -485,7 +492,15 @@ pub(super) fn seal_admission_inner(
             .transpose()?,
     };
     if acquisition.is_some() {
-        disclosure.validate_saved_role_shape(ledger, policy, SpecialistId::DomainAnalystV18)?;
+        disclosure.validate_saved_role_shape(
+            ledger,
+            policy,
+            if original.system == SpecialistId::DomainAnalystV21.prompt() {
+                SpecialistId::DomainAnalystV21
+            } else {
+                SpecialistId::DomainAnalystV18
+            },
+        )?;
     } else {
         disclosure.validate_with_policy(ledger, policy)?;
     }

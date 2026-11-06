@@ -506,6 +506,7 @@ fn reserved_acquisition_stamp_preserves_legacy_bytes_and_rejects_present() {
             .is_ok()
         );
         let reserved = AcquisitionAdmission {
+            capacity_exhausted: false,
             finish_reason: None,
             choices_hash: "b".repeat(64),
             action_feedback_hash: Some("c".repeat(64)),
@@ -542,6 +543,7 @@ fn reserved_acquisition_stamp_checks_hash_shape() {
     ] {
         assert_eq!(
             AcquisitionAdmission {
+                capacity_exhausted: false,
                 finish_reason: None,
                 choices_hash,
                 action_feedback_hash
@@ -743,6 +745,7 @@ fn acquisition_finish_consistency_binds_identity_policy_and_stamp() {
 #[test]
 fn repeated_read_finish_stamp_preserves_legacy_bytes_and_rejects_other_reasons() {
     let mut stamp = AcquisitionAdmission {
+        capacity_exhausted: false,
         finish_reason: None,
         choices_hash: "a".repeat(64),
         action_feedback_hash: None,
@@ -870,6 +873,71 @@ fn citation_correction_authentication_uses_sealed_invocation_basis() {
                 None,
                 policy,
             )
+            .is_err()
+    );
+}
+
+// Decision #1688: exhausted menus have an explicit @21-only finish witness.
+#[test]
+fn capacity_exhausted_analyst21_seals_finish_only_without_action_refusal() {
+    let role = SpecialistId::DomainAnalystV21;
+    let policy = &INVESTIGATION_V2_POLICY;
+    let f = Fixture::new(role, 7);
+    let contract = InvestigationCompletionContract {
+        schema_version: 1,
+        request_hash: f.metadata.request_hash.clone(),
+        obligations_hash: f.metadata.obligations_hash.clone(),
+        obligations: f.request.obligations.clone(),
+    };
+    let original = acquisition_choices::AcquisitionChoices::derive(
+        &contract,
+        &f.metadata,
+        "task:admission",
+        &f.ledger,
+        &[],
+        policy,
+    )
+    .unwrap();
+    let refused = original
+        .entries()
+        .iter()
+        .map(|entry| {
+            let value = serde_json::to_value(&entry.action).unwrap();
+            core_prov::content_hash(&bounded_bytes(&value, MAX_ACTION_BYTES).unwrap())
+        })
+        .collect();
+    let choices = original
+        .excluding_capacity_refusals(&contract, &f.metadata, &f.ledger, &refused, policy)
+        .unwrap();
+    assert!(choices.capacity_exhausted());
+    assert!(!choices.attempts_complete());
+    let input = f
+        .build(
+            role,
+            &usage(CompletionCallMode::Choice),
+            CompletionCallMode::Choice,
+            0,
+            None,
+        )
+        .unwrap()
+        .with_acquisition_choices(std::sync::Arc::new(choices))
+        .unwrap();
+    let disclosure = seal(&input);
+    let stamp = disclosure.admission.as_ref().unwrap();
+    assert_eq!(stamp.mode, CompletionCallMode::FinishOnly);
+    let acquisition = stamp.acquisition.as_ref().unwrap();
+    assert!(acquisition.capacity_exhausted);
+    assert!(acquisition.finish_reason.is_none());
+    assert!(acquisition.action_feedback_hash.is_none());
+    assert!(stamp.validate_saved_role_shape(role, policy).is_ok());
+    assert!(
+        stamp
+            .validate_saved_role_shape(SpecialistId::DomainAnalystV20, policy)
+            .is_err()
+    );
+    assert!(
+        stamp
+            .validate_saved_role_shape(SpecialistId::EvidenceAuditorV11, policy)
             .is_err()
     );
 }

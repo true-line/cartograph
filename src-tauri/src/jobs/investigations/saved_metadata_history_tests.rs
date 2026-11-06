@@ -339,6 +339,7 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
             let admission = disclosure.admission.as_mut().unwrap();
             admission.acquisition =
                 (role == SpecialistId::DomainAnalystV18).then(|| AcquisitionAdmission {
+                    capacity_exhausted: false,
                     finish_reason: None,
                     choices_hash: choices.stamp_hash().unwrap(),
                     action_feedback_hash: None,

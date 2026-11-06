@@ -21,11 +21,17 @@ pub struct DisclosedAdmissionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionAdmission {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub capacity_exhausted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<ActionRefusalReason>,
     pub choices_hash: String,
     pub action_feedback_hash: Option<String>,
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl AcquisitionAdmission {
     pub fn validate(&self) -> Result<(), InvestigationError> {
         if self
@@ -112,6 +118,9 @@ impl DisclosedAdmissionState {
         }
         if let Some(acquisition) = &self.acquisition {
             acquisition.validate()?;
+            if acquisition.capacity_exhausted && !role.uses_capacity_exclusions() {
+                return Err(InvestigationError::InvalidInput);
+            }
         }
         self.validate_shape_with_policy(policy)
     }
@@ -151,11 +160,10 @@ impl DisclosedAdmissionState {
         metadata: &ProtectedCompletionMetadata,
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
-        let expected = if self
-            .acquisition
-            .as_ref()
-            .is_some_and(|stamp| stamp.finish_reason == Some(ActionRefusalReason::RepeatedRead))
-        {
+        let expected = if self.acquisition.as_ref().is_some_and(|stamp| {
+            stamp.capacity_exhausted
+                || stamp.finish_reason == Some(ActionRefusalReason::RepeatedRead)
+        }) {
             CompletionCallMode::FinishOnly
         } else {
             metadata.next_call_mode_with_policy(&self.consumed_budgets, policy)?

@@ -647,6 +647,90 @@ fn validate_publication_response(
     Ok(())
 }
 
+/// Reconstruction only, not journal authority. Full replay still validates
+/// every entry against the response, call, event timeline and prior chain.
+/// Keeping this separate avoids recursively replaying while validating a call's
+/// choices_hash. ToolCompleted advances input_revision before clearing feedback.
+pub(super) fn capacity_exclusion_candidates(
+    connection: &Connection,
+    task: &StoredTask,
+    cutoff: u32,
+    ledger: &InvestigationInputLedger,
+) -> Result<std::collections::BTreeSet<String>, InvestigationStoreError> {
+    require_transaction(connection)?;
+    let mut hashes = std::collections::BTreeSet::new();
+    if !task.detail.summary.specialist_id.uses_capacity_exclusions() || !preflight(connection)? {
+        return Ok(hashes);
+    }
+    let policy = super::policy_for_detail(&task.detail)?;
+    let id = &task.detail.summary.investigation_id;
+    let sequences = connection.prepare(
+        "SELECT sequence FROM investigation_admission_refusals WHERE task_id=?1 ORDER BY sequence LIMIT ?2",
+    )?.query_map(params![id, policy.limits().model_invocations + 1], |row| row.get::<_, u32>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if sequences.len() > policy.limits().model_invocations as usize {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    for sequence in sequences {
+        let entry: Entry = read_body(connection, TABLE, "sequence", id, &sequence)?
+            .ok_or(InvestigationStoreError::Invalid)?;
+        if entry.sequence != sequence
+            || !hash_valid(&entry.response.action_hash)
+            || entry.call.task_id != *id
+            || entry.entry_id != entry.content_id()?
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        if entry.call.invocation_ordinal < cutoff
+            && entry.call.input_revision == ledger.revision
+            && entry.reason == RefusalReason::Capacity(CapacityRefusalReason::PromptCapacity)
+        {
+            hashes.insert(capacity_exclusion_hash(
+                &entry,
+                ledger,
+                task.detail.summary.specialist_id,
+                &policy,
+            )?);
+        }
+    }
+    Ok(hashes)
+}
+
+/// Resolve replay references against this exact revision and the refused call's
+/// request authority. The journal retains its original wire hash unchanged.
+fn capacity_exclusion_hash(
+    entry: &Entry,
+    ledger: &InvestigationInputLedger,
+    role: SpecialistId,
+    policy: &InvestigationPolicy,
+) -> Result<String, InvestigationStoreError> {
+    if entry.proposal["type"] != "replay_query" {
+        return Ok(entry.response.action_hash.clone());
+    }
+    let action = validate_proposal(
+        &entry.proposal,
+        &entry.response,
+        ledger,
+        &entry.call,
+        role,
+        policy,
+    )?;
+    let CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {
+        context_id,
+        query,
+    }) = action
+    else {
+        return Err(InvestigationStoreError::Invalid);
+    };
+    Ok(
+        agents::investigation::acquisition_choices::AcquisitionAction::QueryContext {
+            context_id,
+            query,
+        }
+        .capacity_refusal_hash()?,
+    )
+}
+
 fn read_entries(
     connection: &Connection,
     task: &StoredTask,
