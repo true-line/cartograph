@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { HelpTip } from './HelpTip';
 import {
   STRUCTURED_VIEW_UNAVAILABLE_NOTICE,
@@ -34,6 +34,8 @@ export interface FlowsCardProps {
   /** Exported flow-dossiers artifact for content-identity verification and copyable source (AC-0246). */
   artifact?: SpecArtifact | null;
   pageSize?: number;
+  /** Read a late selected flow without widening overview limits (#1669). */
+  readSelectedFlowView?: (trigger: string, mode: FlowExportMode, contentId: string) => Promise<SpecDiagramView | null>;
   /** Open the evidence drawer for a node in the flow/infrastructure diagram. */
   onSelectNode?: (node: GraphNode) => void;
   /** Open the evidence drawer for a hop's own provenance. */
@@ -280,6 +282,7 @@ export function FlowsCard({
   view,
   artifact,
   pageSize,
+  readSelectedFlowView,
   onSelectNode,
   onSelectHop,
   onOpenResolution,
@@ -298,7 +301,7 @@ export function FlowsCard({
   );
   const selected: Flow | undefined = flows[selectedIndex];
   const projected = selected ? projectFlow(selected, mode) : null;
-  const diagramView = useMemo<SpecDiagramView | null>(() => {
+  const overviewDiagramView = useMemo<SpecDiagramView | null>(() => {
     if (!selected || !view) return null;
     if (!verifyDiagramViewIdentity(view, artifact)) return view;
     if (view.mode !== mode) return null;
@@ -313,6 +316,27 @@ export function FlowsCard({
       verifyDiagramViewIdentity(view, artifact) &&
       !view.flows?.some((flow) => flow.trigger === selected.trigger),
   );
+  const selectionKey = JSON.stringify([selected?.trigger, mode, artifact?.content_id]);
+  const [selectedRead, setSelectedRead] = useState<{ key: string; view: SpecDiagramView | null; error: string | null } | null>(null);
+  useEffect(() => {
+    if (!flowBeyondHostView || !selected || !artifact || !readSelectedFlowView) return;
+    let current = true;
+    const key = selectionKey;
+    void readSelectedFlowView(selected.trigger, mode, artifact.content_id).then((result) => {
+      if (!current) return;
+      if (!result || result.mode !== mode || !verifyDiagramViewIdentity(result, artifact) ||
+          result.flows?.length !== 1 || result.flows[0].trigger !== selected.trigger) {
+        setSelectedRead({ key, view: null, error: 'The selected flow view did not match this preview. Refresh and try again.' });
+        return;
+      }
+      setSelectedRead({ key, view: result, error: null });
+    }).catch((error: unknown) => {
+      if (current) setSelectedRead({ key, view: null, error: String(error) });
+    });
+    return () => { current = false; };
+  }, [flowBeyondHostView, selected, mode, artifact, selectionKey, readSelectedFlowView]);
+  const currentRead = selectedRead?.key === selectionKey ? selectedRead : null;
+  const diagramView = overviewDiagramView ?? (flowBeyondHostView ? currentRead?.view ?? null : null);
   const matchingArtifact =
     artifact &&
     (artifact.id === 'flow-dossiers' || artifact.file_name === 'flow_dossiers.md') &&
@@ -484,7 +508,9 @@ export function FlowsCard({
               className="muted spec-diagram-unavailable"
               data-testid="diagram-view-unavailable"
             >
-              {flowBeyondHostView
+              {flowBeyondHostView && readSelectedFlowView
+                ? currentRead?.error ?? 'Loading selected flow diagram…'
+                : flowBeyondHostView
                 ? `This flow is beyond the ${view?.flows?.length ?? 0} of ${view?.flows_total ?? 0} flows the core view includes; its hops are listed below.`
                 : STRUCTURED_VIEW_UNAVAILABLE_NOTICE}
             </p>

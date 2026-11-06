@@ -524,6 +524,29 @@ pub(super) fn all(
     let edges = filter_edges(&projection.edges, mode, rejected);
     bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected)
 }
+pub(crate) fn flow_artifact_from_filtered(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> SpecArtifact {
+    let descriptor = ARTIFACTS
+        .iter()
+        .find(|artifact| artifact.id == "flow-dossiers")
+        .expect("official flow dossier descriptor");
+    produce(
+        descriptor,
+        nodes,
+        edges,
+        flows,
+        0,
+        (mode, rejected, None),
+        None,
+    )
+    .expect("unbounded flow dossier renderer")
+}
+
 pub(crate) fn bundle_from_filtered(
     nodes: &[&Node],
     edges: &[&Edge],

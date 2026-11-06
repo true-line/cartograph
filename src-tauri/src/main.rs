@@ -6254,6 +6254,41 @@ fn read_spec_artifact(
     build_spec_artifact(&*graph, &decisions, mode, &artifact_id).map(full_artifact_preview)
 }
 
+/// Selected flow diagram, bound to the preview's full dossier identity (#1669).
+#[tauri::command]
+async fn read_selected_flow_view(
+    mode: spec::ExportMode,
+    trigger: String,
+    content_id: String,
+    app: tauri::AppHandle,
+) -> Result<spec::SpecDiagramView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let graph = state.graph.lock().map_err(|error| error.to_string())?;
+        let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+        let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
+        let flows = flowtracer::trace(&nodes, &edges);
+        let rejected = decisions
+            .list_assertions()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+            .map(|record| record.assertion.provenance.content_hash)
+            .collect();
+        spec::compile_selected_flow_view(
+            &nodes,
+            &edges,
+            &flows,
+            mode,
+            &rejected,
+            &trigger,
+            &content_id,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// Nodes carrying `label` (e.g. `Endpoint`, `Repo`), ordered by id.
 #[tauri::command]
 fn list_nodes(label: String, state: State<'_, AppState>) -> Result<Vec<Node>, String> {
@@ -6673,6 +6708,7 @@ fn main() {
             export_spec_views,
             export_spec_with_views,
             read_spec_artifact,
+            read_selected_flow_view,
             semantic_preview,
             add_repo,
             add_system

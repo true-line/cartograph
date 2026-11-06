@@ -877,7 +877,7 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Actor:** Engineer or architect
 - **As a** architect **I want** topology, flow and deployment views rendered in the app from the same projection as the export **so that** I can see how requests move and which infrastructure each step uses.
 - **Priority:** Should · **Status:** Draft
-- **AC-0246** Given a compiled topology, flow or deployment view, when it is opened in the app, then it renders as a diagram rather than copyable text and matches the exported projection's content identity.
+- **AC-0246** Given a compiled topology, flow or deployment view, when it is opened in the app, then it renders as a diagram rather than copyable text and matches the exported projection's content identity. Selecting a flow beyond the overview cap fetches that exact flow before unchanged diagram bounds; stale identities and superseded selections cannot replace the current view (#1669).
 - **AC-0247** Given a node or edge in a rendered view, when it is selected, then its evidence, tier and confidence open, and Gap or partial hops are visibly distinct from confirmed ones.
 - **Security:** Rendering is local; no external diagram service.
 - **Performance:** Views render within existing payload bounds; large systems page or collapse rather than truncate silently.

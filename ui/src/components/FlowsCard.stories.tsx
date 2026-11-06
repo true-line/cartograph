@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, fn, userEvent, within } from 'storybook/test';
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import type { Flow, FlowHop, SpecArtifact, SpecDiagramView, Tier } from '../store';
 import { FlowsCard, type FlowExportMode, hopKind, projectedDossier, statusBadge } from './FlowsCard';
 import { STRUCTURED_VIEW_UNAVAILABLE_NOTICE } from './SpecDiagramView';
@@ -734,3 +734,65 @@ export const StartsInVerifiedOnlyWithHostView: Story = {
   },
 };
 
+
+// AC-0246 / #1669: a host-selected late flow retains identity and evidence.
+export const SelectedFlowBeyondOverview: Story = {
+  args: {
+    flows: [VERIFIED, DEPLOYED_FLOW],
+    mode: 'best-effort',
+    view: { ...FLOW_DOSSIERS_HOST_VIEW, flows: [VERIFIED], flows_total: 201, truncated: true },
+    artifact: FLOW_DOSSIERS_ARTIFACT,
+    readSelectedFlowView: fn(async () => ({ ...FLOW_DOSSIERS_HOST_VIEW, flows: [DEPLOYED_FLOW], flows_total: 1 })),
+    onSelectNode: fn(),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), DEPLOYED_FLOW.trigger);
+    await waitFor(() => expect(args.readSelectedFlowView).toHaveBeenCalledWith(
+      DEPLOYED_FLOW.trigger, 'best-effort', FLOW_DOSSIERS_ARTIFACT.content_id,
+    ));
+    await waitFor(() => expect(canvas.getByTestId('spec-diagram-flow-dossiers')).toBeInTheDocument());
+    await expect(canvas.getByLabelText('Diagram nodes')).toHaveTextContent('guessedTarget');
+    await expect(canvas.getByTestId('diagram-content-identity')).toHaveAttribute('data-content-id', FLOW_DOSSIERS_ARTIFACT.content_id);
+  },
+};
+
+export const SelectedFlowIgnoresSupersededResponse: Story = {
+  args: SelectedFlowBeyondOverview.args,
+  render: function DeferredSelectedFlow(args) {
+    const [mode, setMode] = useState<FlowExportMode>('best-effort');
+    const pending = useRef<((view: SpecDiagramView) => void) | null>(null);
+    const read = useMemo(() => () => new Promise<SpecDiagramView>((resolve) => { pending.current = resolve; }), []);
+    return <><FlowsCard {...args} mode={mode} onModeChange={setMode} readSelectedFlowView={read} />
+      <button onClick={() => pending.current?.({ ...FLOW_DOSSIERS_HOST_VIEW, flows: [DEPLOYED_FLOW], flows_total: 1 })}>Deliver previous selection</button>
+    </>;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), DEPLOYED_FLOW.trigger);
+    await expect(canvas.getByText('Loading selected flow diagram…')).toBeInTheDocument();
+    await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), VERIFIED.trigger);
+    await userEvent.click(canvas.getByRole('button', { name: 'Deliver previous selection' }));
+    await expect(canvas.getByLabelText('Diagram nodes')).not.toHaveTextContent('guessedTarget');
+    await expect(canvas.getByLabelText('Diagram nodes')).toHaveTextContent('createOrder');
+    // Changing export mode also invalidates an outstanding selection request.
+    await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), DEPLOYED_FLOW.trigger);
+    await userEvent.click(canvas.getByRole('button', { name: 'verified-only' }));
+    await expect(canvas.getByRole('button', { name: 'verified-only' })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(canvas.getByRole('button', { name: 'Deliver previous selection' }));
+    await expect(canvas.queryByTestId('spec-diagram-flow-dossiers')).not.toBeInTheDocument();
+  },
+};
+
+export const SelectedFlowRejectsStaleIdentity: Story = {
+  args: {
+    ...SelectedFlowBeyondOverview.args,
+    readSelectedFlowView: fn(async () => ({ ...FLOW_DOSSIERS_HOST_VIEW, content_id: 'stale', flows: [DEPLOYED_FLOW], flows_total: 1 })),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), DEPLOYED_FLOW.trigger);
+    await waitFor(() => expect(canvas.getByText('The selected flow view did not match this preview. Refresh and try again.')).toBeInTheDocument());
+    await expect(canvas.queryByTestId('spec-diagram-flow-dossiers')).not.toBeInTheDocument();
+  },
+};
