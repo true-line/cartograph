@@ -315,6 +315,31 @@ fn obligation_acquisition_choices_reject_foreign_state_and_suppress_empty_discov
     let blocked = f.derive(&empty, &[]).unwrap();
     assert_eq!(blocked.entries().len(), 1);
     assert_eq!(blocked.blocked().len(), 1);
+    let refused = BTreeSet::from([blocked.entries()[0].action.capacity_refusal_hash().unwrap()]);
+    let (projected, excluded) = blocked
+        .excluding_capacity_refusals_with_obligations(
+            &f.contract,
+            &f.metadata,
+            &empty,
+            &refused,
+            POLICY,
+        )
+        .unwrap();
+    assert_eq!(excluded, vec![blocked.entries()[0].obligation_id.clone()]);
+    assert!(!excluded.contains(&blocked.blocked()[0]));
+    assert_eq!(projected.blocked().len(), 2);
+    assert!(!projected.attempts_complete());
+    assert!(!projected.all_acquired());
+    let (_, reset) = blocked
+        .excluding_capacity_refusals_with_obligations(
+            &f.contract,
+            &f.metadata,
+            &empty,
+            &BTreeSet::new(),
+            POLICY,
+        )
+        .unwrap();
+    assert!(reset.is_empty());
     assert!(matches!(
         blocked.entries()[0].action,
         AcquisitionAction::ReadCoverageInventory { .. }
@@ -1161,6 +1186,21 @@ fn capacity_exclusion_preserves_legacy_menu_and_all_refused_obligations() {
             &bounded_bytes(&action, MAX_ACTION_BYTES).unwrap(),
         ));
         let projected = project(&refused);
+        let (with_obligations, excluded) = choices
+            .excluding_capacity_refusals_with_obligations(
+                &fixture.contract,
+                &fixture.metadata,
+                &fixture.ledger,
+                &refused,
+                POLICY,
+            )
+            .unwrap();
+        assert_eq!(with_obligations, projected);
+        assert_eq!(
+            serde_json::to_vec(&with_obligations).unwrap(),
+            serde_json::to_vec(&projected).unwrap()
+        );
+        assert_eq!(excluded, projected.blocked());
         assert_eq!(
             projected.entries().len(),
             choices.entries().len() - index - 1
@@ -1176,4 +1216,58 @@ fn capacity_exclusion_preserves_legacy_menu_and_all_refused_obligations() {
     assert_eq!(serde_json::to_vec(&choices).unwrap(), legacy_bytes);
     // A cleared turn's empty refusal set restores the original derivation.
     assert_eq!(project(&BTreeSet::new()).stamp_hash().unwrap(), legacy_hash);
+}
+
+#[test]
+fn analyst20_and_21_foundations_preserve_menu_and_feedback_wire() {
+    // AC-0287 / Decision #1692: independent historical wire field layout.
+    let f = Fixture::new();
+    let choices = f.derive(&f.ledger, &[]).unwrap();
+    let refused = choices
+        .entries()
+        .iter()
+        .map(|entry| entry.action.capacity_refusal_hash().unwrap())
+        .collect();
+    let excluded = choices
+        .excluding_capacity_refusals(&f.contract, &f.metadata, &f.ledger, &refused, POLICY)
+        .unwrap();
+    for (role, menu) in [
+        ("domain-analyst@20", &choices),
+        ("domain-analyst@21", &excluded),
+    ] {
+        let entries = if role.ends_with("@20") {
+            serde_json::to_string(choices.entries()).unwrap()
+        } else {
+            "[]".into()
+        };
+        let blocked = if role.ends_with("@21") {
+            serde_json::to_string(
+                &f.contract
+                    .obligations
+                    .obligations
+                    .iter()
+                    .map(|o| o.key().1)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        } else {
+            "[]".into()
+        };
+        let expected = format!(
+            r#"{{"contract_hash":"{}","input_ledger_hash":"{}","completion_metadata_hash":"{}","entries":{},"blocked":{},"deferred":0}}"#,
+            f.contract.fingerprint_with_policy(POLICY).unwrap(),
+            f.ledger.fingerprint_with_policy(POLICY).unwrap(),
+            f.metadata.fingerprint_with_policy(POLICY).unwrap(),
+            entries,
+            blocked,
+        );
+        assert_eq!(
+            serde_json::to_vec(menu).unwrap(),
+            expected.as_bytes(),
+            "{role}"
+        );
+        let wire = br#"{"prose_correction":"paraphrase_without_quoting_source","schema_version":3,"unmet":[]}"#;
+        let feedback: staged_finish::RefusalFeedback = serde_json::from_slice(wire).unwrap();
+        assert_eq!(feedback.bytes_with_policy(POLICY).unwrap(), wire, "{role}");
+    }
 }

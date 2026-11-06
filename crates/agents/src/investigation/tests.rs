@@ -671,6 +671,7 @@ fn correction_prose_is_checked_even_with_unadmitted_citations() {
         findings[0].citation_ids = vec!["unacquired-target".into()];
     }
     assert_eq!(input.validate_correction_prose(&finish, None), Ok(()));
+    assert_eq!(input.correction_replay_location(&finish, None), Ok(None));
     // Passing prose validation does not admit the target as a citation.
     assert_eq!(
         input.admit_result(
@@ -688,11 +689,26 @@ fn correction_prose_is_checked_even_with_unadmitted_citations() {
         input.validate_correction_prose(&finish, None),
         Err(InvestigationError::SourceReplay)
     );
+    let location = input
+        .correction_replay_location(&finish, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        location.start.field,
+        ProseField::FindingStatement { finding: 0 }
+    );
+    assert_eq!(location.end.field, location.start.field);
+    assert_eq!(location.start.sentence, 1);
+    assert!(!serde_json::to_string(&location).unwrap().contains(private));
     if let InvestigationAction::Finish { findings, .. } = &mut finish.action {
         findings[0].statement = "password=synthetic-secret".into();
     }
     assert_eq!(
         input.validate_correction_prose(&finish, None),
+        Err(InvestigationError::SensitiveOutput)
+    );
+    assert_eq!(
+        input.correction_replay_location(&finish, None),
         Err(InvestigationError::SensitiveOutput)
     );
 }

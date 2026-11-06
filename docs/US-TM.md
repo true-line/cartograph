@@ -138,3 +138,8 @@ Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression
 names and historical @20 checks are listed in the Decision #1688 section of
 [test-map.md](test-map.md); fixture results do not establish #598 acceptance.
+
+Decision #1692 diagnostic foundations extend US-0032 / AC-0287 with text-free
+replay locations and a separate capacity-excluded obligation projection. The
+Decision #1692 section of [test-map.md](test-map.md) maps provider-free coverage.
+These helpers do not activate analyst @22 or establish actual-model acceptance.

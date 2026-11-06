@@ -633,3 +633,25 @@ exists, not that its AC or delivery gate has passed.
 - `app::run10_model_response_and_capacity_menu_match_saved_action_hash`:
   independently parsed run-10 model response and typed offered action both match
   the saved `d92e64c2…` hash through the production response and menu hash paths.
+
+## Decision #1692 diagnostic foundations (AC-0287)
+
+- `agents::replay_location_spans_fields_without_echoing_text`: intentional
+  cross-field detection produces typed endpoints without copied text.
+- `agents::replay_location_tracks_sentence_and_preserves_metadata_and_sensitive_verdicts`:
+  source/metadata distinction, sentence position and sensitive-output refusal.
+- `agents::replay_location_reports_unicode_and_sentence_ranges`: Unicode
+  scalar ranges, whitespace boundaries and oversized prose rejection.
+- `agents::replay_location_rejects_reversed_and_out_of_shape_positions`:
+  shape/order checks; these do not authenticate saved diagnostic correctness.
+- `agents::correction_prose_is_checked_even_with_unadmitted_citations`:
+  input adapter preserves rejection and never admits invalid citations.
+- `agents::capacity_exclusion_preserves_legacy_menu_and_all_refused_obligations`
+  and `agents::obligation_acquisition_choices_reject_foreign_state_and_suppress_empty_discovery`:
+  separate capacity IDs, unrelated blocked targets, legacy menu equality and reset.
+
+Runtime integration, durable witness authentication and host workspace charging
+remain prerequisites. No provider execution or release acceptance is claimed.
+
+- `agents::analyst20_and_21_foundations_preserve_menu_and_feedback_wire`: independent
+  historical menu field layout and exact shared replay-feedback JSON bytes.

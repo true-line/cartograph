@@ -297,6 +297,52 @@ impl AcquisitionChoices {
         refused: &BTreeSet<String>,
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
+        self.project_capacity_refusals(contract, metadata, ledger, refused, policy, None)
+    }
+
+    /// Separate unresolved-obligation projection for new feedback. The caller
+    /// authenticates refusal hashes at the exact invocation cutoff, just as for
+    /// the legacy menu. Generic blocked targets are deliberately not included.
+    /// This does not mark an obligation attempted, acquired, or satisfied.
+    pub fn excluding_capacity_refusals_with_obligations(
+        &self,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        refused: &BTreeSet<String>,
+        policy: &InvestigationPolicy,
+    ) -> Result<(Self, Vec<String>), InvestigationError> {
+        let mut excluded = Vec::new();
+        let choices = self.project_capacity_refusals(
+            contract,
+            metadata,
+            ledger,
+            refused,
+            policy,
+            Some(&mut excluded),
+        )?;
+        Ok((choices, excluded))
+    }
+
+    /// Additional owned ID projection, alongside the existing candidate bound.
+    pub fn capacity_obligations_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+        context_hub::logical::sum(&[
+            std::mem::size_of::<Vec<String>>(),
+            context_hub::logical::slots::<String>(policy.max_completion_obligations())?,
+            policy.max_completion_obligations().checked_mul(64)?,
+        ])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_capacity_refusals(
+        &self,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        refused: &BTreeSet<String>,
+        policy: &InvestigationPolicy,
+        excluded: Option<&mut Vec<String>>,
+    ) -> Result<Self, InvestigationError> {
         self.validate_basis(contract, metadata, ledger, policy)?;
         if refused.len() > policy.limits().model_invocations as usize
             || refused.iter().any(|hash| !crate::source_basis::hash(hash))
@@ -310,6 +356,7 @@ impl AcquisitionChoices {
             self.pending.clone(),
             policy,
             refused,
+            excluded,
         )?;
         projected.all_acquired = self.all_acquired;
         projected.capacity_exhausted =
@@ -704,6 +751,7 @@ impl AcquisitionChoices {
             pending,
             policy,
             &BTreeSet::new(),
+            None,
         )
     }
 
@@ -714,6 +762,7 @@ impl AcquisitionChoices {
         pending: Vec<bool>,
         policy: &InvestigationPolicy,
         refused: &BTreeSet<String>,
+        mut excluded: Option<&mut Vec<String>>,
     ) -> Result<Self, InvestigationError> {
         if pending.len() != contract.obligations.obligations.len() {
             return Err(InvestigationError::InvalidInput);
@@ -821,7 +870,16 @@ impl AcquisitionChoices {
             let action = match action {
                 Some(action) if !refused.is_empty() => {
                     let hash = action.capacity_refusal_hash()?;
-                    (!refused.contains(&hash)).then_some(action)
+                    if refused.contains(&hash) {
+                        if output.pending[position]
+                            && let Some(excluded) = excluded.as_deref_mut()
+                        {
+                            excluded.push(id.into());
+                        }
+                        None
+                    } else {
+                        Some(action)
+                    }
                 }
                 other => other,
             };
