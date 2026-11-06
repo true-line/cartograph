@@ -132,4 +132,4 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0048 | MCP investigation authority and durable client identity (proposed; owner review required) |
 | ADR-0050 | Journey identity and tier: T0 navigation facts, T2 journey candidates (proposed; owner review required) |
 
-| ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (proposed; owner review required) |
+| ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (accepted 2026-11-06, #1678) |
