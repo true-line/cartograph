@@ -94,7 +94,7 @@ export function docChip(artifact: SpecArtifact): { text: string; tone: 'default'
     case 'gap_register.md':
     case 'drift_register.md':
     case 'security.md':
-      return { text: `${count}`, tone: count > 0 ? 'alert' : 'default' };
+      return { text: `${count} assertion rows`, tone: count > 0 ? 'alert' : 'default' };
     default:
       return { text: `${count}`, tone: 'default' };
   }
@@ -209,7 +209,7 @@ export function SpecWorkbench({
           <div className="spec-workbench-summary" role="status">
             <span>{bundle.artifacts.length} artifacts</span>
             <span>{bundle.assertion_count} visible assertions</span>
-            <span className="tier-gap">{bundle.gap_count} gaps</span>
+            <span className="tier-gap">Unresolved findings: {bundle.gap_count}</span>
             <span>{bundle.drift_count} drift findings</span>
             <span>{bundle.security_count} security findings</span>
             {busy && <span>Refreshing…</span>}
@@ -270,6 +270,13 @@ export function SpecWorkbench({
                     Copy artifact
                   </button>
                 </header>
+
+                {selected.file_name === 'gap_register.md' && (
+                  <p className="muted">
+                    Unresolved findings count distinct gaps. Assertion rows include supporting
+                    evidence and can refer to the same finding.
+                  </p>
+                )}
 
                 {selected.file_name === 'rule-evidence.md' && (
                   <p className="muted">
