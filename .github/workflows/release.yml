@@ -225,12 +225,14 @@ jobs:
 
           expected_app="Cartograph_${VERSION}_universal_${SIGNING_MODE}.app.zip"
           expected_dmg="Cartograph_${VERSION}_universal_${SIGNING_MODE}.dmg"
-          mapfile -t assets < <(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
-          if [ "${#assets[@]}" -ne 2 ] \
+          expected_dsym="Cartograph_${VERSION}_universal_${SIGNING_MODE}.dSYM.zip"
+          mapfile -t assets < <(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          if [ "${#assets[@]}" -ne 3 ] \
             || [ "${assets[0]}" != "$expected_app" ] \
-            || [ "${assets[1]}" != "$expected_dmg" ]; then
-            printf '::error::Expected only %s and %s; found: %s\n' \
-              "$expected_app" "$expected_dmg" "${assets[*]}"
+            || [ "${assets[1]}" != "$expected_dsym" ] \
+            || [ "${assets[2]}" != "$expected_dmg" ]; then
+            printf '::error::Expected only %s, %s and %s; found: %s\n' \
+              "$expected_app" "$expected_dsym" "$expected_dmg" "${assets[*]}"
             exit 1
           fi
 
@@ -280,7 +282,7 @@ jobs:
               --title "$RELEASE_TITLE" \
               --notes-file release-notes.md
 
-            for extension in app.zip dmg; do
+            for extension in app.zip dmg dSYM.zip; do
               stale_asset="Cartograph_${VERSION}_universal_${stale_mode}.${extension}"
               if gh release view "$TAG" --json assets \
                 --jq ".assets[].name | select(. == \"$stale_asset\")" | grep -q .; then
