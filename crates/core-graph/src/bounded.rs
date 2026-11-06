@@ -324,6 +324,10 @@ impl JsonBudget {
         }
     }
 
+    pub(crate) fn consumed_values(&self) -> usize {
+        self.limits.max_values - self.remaining
+    }
+
     pub(crate) fn enter(&mut self, depth: usize) -> Result<(), SnapshotBoundsError> {
         if depth > self.limits.max_depth {
             return Err(SnapshotBoundsError::JsonDepthLimit);

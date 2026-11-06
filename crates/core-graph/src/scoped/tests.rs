@@ -738,3 +738,26 @@ fn scoped_selected_omission_is_pinned_while_supported_publication_commits() {
         Err(GraphError::Generation(GenerationError::Changed))
     ));
 }
+
+// AC-0304: cumulative paging charges decoder work, not only normalized values.
+#[test]
+fn scoped_window_json_accounting_preserves_duplicate_property_values() {
+    let store = SqliteGraphStore::open_in_memory().unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO nodes(id,label,props) VALUES('a','Symbol',?1)",
+            [r#"{"x":1,"x":2}"#],
+        )
+        .unwrap();
+    let duplicate = nodes(&store, 1);
+    store
+        .conn
+        .execute("UPDATE nodes SET props=?1 WHERE id='a'", [r#"{"x":2}"#])
+        .unwrap();
+    let normalized = nodes(&store, 1);
+    assert_eq!(duplicate.rows, normalized.rows);
+    assert_eq!(duplicate.canonical_bytes, normalized.canonical_bytes);
+    assert_eq!(duplicate.json_values, normalized.json_values + 1);
+    assert!(duplicate.raw_bytes > normalized.raw_bytes);
+}

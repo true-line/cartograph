@@ -68,6 +68,8 @@ pub struct FactWindow<T, K> {
     pub raw_bytes: usize,
     /// Canonical complete-graph tuple encoding of these rows only.
     pub canonical_bytes: usize,
+    /// Decoded JSON values including envelopes and duplicate input properties.
+    pub json_values: usize,
     /// Last delivered key when More; None when Exhausted.
     pub next_key: Option<K>,
     /// Explicit remaining raw coverage at this revision.
@@ -305,6 +307,17 @@ fn more(
     )?)
 }
 impl SqliteGraphStore {
+    /// Probe only edge existence at a frozen revision, without copying keys or
+    /// properties. This admits no graph row and grants no further read budget.
+    pub fn has_edges_at_revision(&self, expected: &StoreRevision) -> Result<bool, GraphError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        check_revision(&transaction, Some(expected))?;
+        preflight_schema(&transaction)?;
+        let exists = more(&transaction, Kind::Edge, "LIMIT 1", &[])?;
+        transaction.commit()?;
+        Ok(exists)
+    }
+
     /// Read a bounded node keyset window without counting/admitting the whole graph.
     pub fn read_node_window(
         &self,
@@ -350,6 +363,7 @@ impl SqliteGraphStore {
             rows: graph.0,
             raw_bytes: request.limits.max_bytes - remaining_bytes,
             canonical_bytes,
+            json_values: budget.consumed_values(),
             next_key: if has_more { last } else { None },
             remaining: if has_more {
                 Remaining::More
@@ -408,6 +422,7 @@ impl SqliteGraphStore {
             rows: graph.1,
             raw_bytes: request.limits.max_bytes - remaining_bytes,
             canonical_bytes,
+            json_values: budget.consumed_values(),
             next_key: if has_more { last } else { None },
             remaining: if has_more {
                 Remaining::More
