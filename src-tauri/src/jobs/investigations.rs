@@ -55,7 +55,10 @@ mod source_settlement;
 pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
 pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
 #[cfg(unix)]
-pub(crate) use source_settlement::snapshot_workspace::workspace as source_snapshot_workspace;
+pub(crate) use source_settlement::snapshot_workspace::{
+    correction_workspace as next_prompt_correction_workspace,
+    workspace as source_snapshot_workspace,
+};
 #[cfg(unix)]
 pub(crate) use source_settlement::writer_workspace::workspace as source_settlement_workspace;
 #[path = "investigations/source_validation.rs"]
@@ -68,6 +71,23 @@ mod finding_reviews;
 #[path = "investigations/staged.rs"]
 mod staged;
 pub(crate) use finding_reviews::FindingReviewError;
+#[path = "investigations/semantic_audit_journal.rs"]
+mod semantic_audit_journal;
+#[path = "investigations/semantic_audit_receipt.rs"]
+mod semantic_audit_receipt;
+#[path = "investigations/semantic_audit_settlement.rs"]
+mod semantic_audit_settlement;
+pub(crate) use semantic_audit_settlement::SemanticAuditResponse;
+#[path = "investigations/semantic_audit_state.rs"]
+mod semantic_audit_state;
+#[path = "investigations/semantic_audit_workspace.rs"]
+mod semantic_audit_workspace;
+#[path = "investigations/specialist_history.rs"]
+mod specialist_history;
+pub(crate) use semantic_audit_journal::SeparateAuditor;
+pub(crate) use semantic_audit_state::SemanticAuditStart;
+#[cfg(unix)]
+pub(crate) use semantic_audit_workspace::next_prompt_audit_transaction_workspace;
 #[path = "investigations/storage.rs"]
 mod storage;
 #[cfg(any(unix, test))]
@@ -76,7 +96,9 @@ mod task_record_workspace;
 #[cfg(any(unix, test))]
 pub(crate) use task_record_workspace::next_prompt_record_workspace;
 #[cfg(unix)]
-pub(crate) use task_record_workspace::next_prompt_task_load_workspace;
+pub(crate) use task_record_workspace::{
+    next_prompt_task_load_workspace, next_prompt_task_write_workspace,
+};
 #[cfg(any(unix, test))]
 #[path = "investigations/attempt_record_workspace.rs"]
 mod attempt_record_workspace;
@@ -750,6 +772,8 @@ enum Phase {
     Action,
     Tool,
     Reservation,
+    AuditPending,
+    AuditInvocation,
     Terminal,
 }
 
@@ -767,6 +791,8 @@ struct StoredExecution {
 #[serde(deny_unknown_fields)]
 struct StoredTask {
     schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_audit: Option<semantic_audit_state::StoredSemanticAudit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admission_state: Option<admission_contract::StoredAdmissionState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1017,6 +1043,9 @@ impl JobStore {
             [job_id],
         )?)?;
         let record = StoredTask {
+            // Activation follows the separately reviewed aggregate reservation
+            // and worker dispatch integration. Historical records stay absent.
+            semantic_audit: None,
             schema_version: if next_prompt {
                 3
             } else if completion_intent.is_some() {
@@ -1034,6 +1063,7 @@ impl JobStore {
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
+                advisory_audit: None,
                 inspection_requirements: if completion_intent.is_some() {
                     None
                 } else {

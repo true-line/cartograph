@@ -428,6 +428,7 @@ fn investigation_short_graph_names_remain_usable_but_raw_excerpts_do_not() {
 fn investigation_detail_roundtrip_closes_flattened_and_nested_unknown_fields() {
     // AC-0188: reusable public DTOs have a strict new storage contract.
     let detail = InvestigationDetail {
+        advisory_audit: None,
         completion: None,
         inspection_requirements: None,
         inspection_assessment: None,

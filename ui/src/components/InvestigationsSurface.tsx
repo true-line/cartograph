@@ -401,7 +401,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
               state.result?.investigation_id === state.chat?.task_id ? state.detail.citations : undefined}
             error={state.chatError} onRefresh={() => void state.refreshSelected()} />}
           <InvestigationActivity events={state.events} />
-          <InvestigationFindings reviews={state.findingReviews} reviewLoading={state.reviewLoading} reviewBusy={state.reviewBusy} reviewError={state.reviewError}
+          <InvestigationFindings advisoryAudit={state.detail?.investigation_id === state.result?.investigation_id ? state.detail?.advisory_audit : undefined} reviews={state.findingReviews} reviewLoading={state.reviewLoading} reviewBusy={state.reviewBusy} reviewError={state.reviewError}
             onRefreshReviews={() => void state.refreshReviews()} onReview={(id, decision) => void state.reviewFinding(id, decision)} producerId={state.detail?.specialist_id} result={state.result} citations={state.detail?.citations ?? []}
             citationId={state.citationId} read={state.citationRead} loading={state.citationLoading} error={state.citationError}
             onRead={(id) => void state.readCitation(id)} onClose={state.clearCitation} />

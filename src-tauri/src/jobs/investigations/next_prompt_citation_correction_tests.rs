@@ -2,11 +2,17 @@
 //! transactions. No provider dispatch or source read is performed by this fixture.
 use super::*;
 
-fn correction_fixture() -> Fixture {
+fn correction_fixture_role(role: &str) -> Fixture {
+    correction_fixture_configured(role, None)
+}
+
+fn correction_fixture_configured(role: &str, active_seconds: Option<u64>) -> Fixture {
     use completion::next_prompt_snapshot::tests::fixture::Fixture as Acquisition;
     let mut target_id = String::new();
-    let base = Acquisition::with_request(false, |request, archive| {
-        let mut source: InvestigationInspectionTarget = serde_json::from_value(serde_json::json!({
+    let base = Acquisition::configured_request(
+        false,
+        |request, archive| {
+            let mut source: InvestigationInspectionTarget = serde_json::from_value(serde_json::json!({
             "schema_version":1,"target_id":"","graph_snapshot_id":archive.proof().snapshot_id,
             "fact":{"kind":"node","id":"node:checkout"},"fact_digest":format!("node-v1:{}","b".repeat(64)),
             "registered_source_id":format!("src_{}","d".repeat(32)),"receipt_id":format!("ts-primary-v2:{}","c".repeat(64)),
@@ -15,25 +21,28 @@ fn correction_fixture() -> Fixture {
             "captured":{"file":{"source_id":format!("src_{}","d".repeat(32)),"capture_id":format!("capture-v1:{}","e".repeat(64)),
             "path":"guard.ts","digest":core_prov::content_hash(b"private text"),"byte_len":12},"byte_start":0,"byte_end":12}
         })).unwrap();
-        source.target_id = source.content_id().unwrap();
-        source.validate().unwrap();
-        target_id = source.target_id.clone();
-        let mut obligation = Obligation::Source {
-            obligation_id: String::new(),
-            target: Box::new(source),
-        };
-        let id = obligation.content_id().unwrap();
-        if let Obligation::Source { obligation_id, .. } = &mut obligation {
-            *obligation_id = id;
-        }
-        request.specialist_id = "domain-analyst@19".into();
-        request.expected_graph_revision = Some(archive.proof().snapshot_id.clone());
-        request.obligations.obligations.push(obligation);
-        request.obligations = request
-            .obligations
-            .normalized_with_policy(&INVESTIGATION_V2_POLICY)
-            .unwrap();
-    });
+            source.target_id = source.content_id().unwrap();
+            source.validate().unwrap();
+            target_id = source.target_id.clone();
+            let mut obligation = Obligation::Source {
+                obligation_id: String::new(),
+                target: Box::new(source),
+            };
+            let id = obligation.content_id().unwrap();
+            if let Obligation::Source { obligation_id, .. } = &mut obligation {
+                *obligation_id = id;
+            }
+            request.specialist_id = role.into();
+            request.expected_graph_revision = Some(archive.proof().snapshot_id.clone());
+            request.obligations.obligations.push(obligation);
+            request.obligations = request
+                .obligations
+                .normalized_with_policy(&INVESTIGATION_V2_POLICY)
+                .unwrap();
+        },
+        |_| {},
+        active_seconds,
+    );
     let mut f = Fixture::from_base(base, false);
     f.original = serde_json::json!({
         "schema_version":1,"outcome":"supported",
@@ -50,7 +59,13 @@ fn correction_fixture() -> Fixture {
 
 #[test]
 fn citation_correction_is_once_only_after_reopen_and_duplicate_publication() {
-    let mut f = correction_fixture();
+    for role in ["domain-analyst@19", "domain-analyst@20"] {
+        assert_citation_correction_is_once_only_after_reopen_and_duplicate_publication(role);
+    }
+}
+
+fn assert_citation_correction_is_once_only_after_reopen_and_duplicate_publication(role: &str) {
+    let mut f = correction_fixture_role(role);
     f.begin();
     let charged = f.base.f.task.detail.usage.clone();
     let first = f.publish().unwrap();
@@ -86,7 +101,13 @@ fn citation_correction_is_once_only_after_reopen_and_duplicate_publication() {
 
 #[test]
 fn citation_correction_late_cancel_never_offers_another_call() {
-    let mut f = correction_fixture();
+    for role in ["domain-analyst@19", "domain-analyst@20"] {
+        assert_citation_correction_late_cancel_never_offers_another_call(role);
+    }
+}
+
+fn assert_citation_correction_late_cancel_never_offers_another_call(role: &str) {
+    let mut f = correction_fixture_role(role);
     f.begin();
     let id = f.base.id().to_owned();
     f.base
@@ -103,7 +124,13 @@ fn citation_correction_late_cancel_never_offers_another_call() {
 
 #[test]
 fn citation_correction_mixed_foreign_id_is_terminal_without_feedback_allowance() {
-    let mut f = correction_fixture();
+    for role in ["domain-analyst@19", "domain-analyst@20"] {
+        assert_citation_correction_mixed_foreign_id_is_terminal_without_feedback_allowance(role);
+    }
+}
+
+fn assert_citation_correction_mixed_foreign_id_is_terminal_without_feedback_allowance(role: &str) {
+    let mut f = correction_fixture_role(role);
     f.original["action"]["findings"][0]["citation_ids"]
         .as_array_mut()
         .unwrap()
@@ -120,7 +147,13 @@ fn citation_correction_mixed_foreign_id_is_terminal_without_feedback_allowance()
 
 #[test]
 fn citation_correction_stale_revision_cannot_consume_allowance() {
-    let mut f = correction_fixture();
+    for role in ["domain-analyst@19", "domain-analyst@20"] {
+        assert_citation_correction_stale_revision_cannot_consume_allowance(role);
+    }
+}
+
+fn assert_citation_correction_stale_revision_cannot_consume_allowance(role: &str) {
+    let mut f = correction_fixture_role(role);
     f.begin();
     let revision = f.base.f.task.detail.summary.revision;
     assert!(revision > 0);
@@ -136,7 +169,13 @@ fn citation_correction_stale_revision_cannot_consume_allowance() {
 
 #[test]
 fn citation_correction_shares_allowance_with_ordinary_finish_refusal() {
-    let mut f = correction_fixture();
+    for role in ["domain-analyst@19", "domain-analyst@20"] {
+        assert_citation_correction_shares_allowance_with_ordinary_finish_refusal(role);
+    }
+}
+
+fn assert_citation_correction_shares_allowance_with_ordinary_finish_refusal(role: &str) {
+    let mut f = correction_fixture_role(role);
     let correction = f.original.clone();
     f.original = serde_json::json!({
         "schema_version":1,"outcome":"insufficient_evidence",
@@ -156,4 +195,175 @@ fn citation_correction_shares_allowance_with_ordinary_finish_refusal() {
     assert_eq!(second.summary.status, InvestigationStatus::Failed);
     assert_eq!(second.completion.as_ref().unwrap().refusal_count, 2);
     assert!(!second.summary.has_result);
+}
+
+// AC-0566: genuine @20 admission, durable refusal, store reopen and new
+// firewall preparation. No real provider dispatch or acceptance claim.
+#[test]
+fn typed_citation_correction_survives_store_reopen_into_prepared_prompt() {
+    for active_seconds in [None, Some(3_600)] {
+        let mut f = correction_fixture_configured("domain-analyst@20", active_seconds);
+        assert_eq!(
+            f.base.f.task.detail.limits.active_seconds,
+            active_seconds.unwrap_or(600)
+        );
+        f.begin();
+        let first = f.publish().unwrap();
+        assert_eq!(first.summary.status, InvestigationStatus::Running);
+        assert_eq!(first.completion.as_ref().unwrap().refusal_count, 1);
+        let before = f.rows();
+        assert!(
+            before
+                .iter()
+                .all(|row| !String::from_utf8_lossy(row).contains("Withheld candidate"))
+        );
+        f.base.f.store = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+        f.next();
+        let prompt: Value =
+            serde_json::from_str(&f.prepared.preview().egress.payload.prompt).unwrap();
+        assert_ollama_wire(&f.input, &f.prepared.preview().egress.payload.prompt);
+        let correction = &prompt["turn_progress"]["citation_correction"];
+        let entries = correction["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["target_id"],
+            f.original["action"]["findings"][0]["citation_ids"][0]
+        );
+        assert_eq!(entries[0]["action"]["type"], "query_context");
+        let choices = &prompt["turn_progress"]["acquisition_choices"];
+        assert!(
+            choices["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|offered| {
+                    offered["obligation_id"] == entries[0]["obligation_id"]
+                        && offered["action"] == entries[0]["action"]
+                })
+        );
+        assert_eq!(
+            prompt["completion_metadata"]["feedback"]["schema_version"],
+            2
+        );
+        assert!(
+            !f.prepared
+                .preview()
+                .egress
+                .payload
+                .prompt
+                .contains("Withheld candidate")
+        );
+        assert_eq!(
+            f.rows(),
+            before,
+            "reopening and preparation must not spend another call"
+        );
+        f.begin();
+        let second = f.publish().unwrap();
+        assert_eq!(second.summary.status, InvestigationStatus::Failed);
+        assert_eq!(second.completion.as_ref().unwrap().refusal_count, 2);
+        assert!(!second.summary.has_result);
+    }
+}
+
+// Synthetic loopback only: exercise the production Ollama serializer using the
+// reopened input. The fixture's offline provider is not dispatched, and this
+// transport check publishes no invocation/result or source acquisition.
+fn assert_ollama_wire(input: &InvestigationInput, expected_prompt: &str) {
+    use llm::LlmProvider;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::{Duration, Instant},
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "no synthetic request");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        };
+        // Windows sockets inherit the listener's non-blocking mode; read the
+        // request blocking (bounded by the timeout) on every platform.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut received = Vec::new();
+        let (header_end, length) = loop {
+            let mut chunk = [0; 4096];
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0);
+            received.extend_from_slice(&chunk[..n]);
+            assert!(received.len() <= 1024 * 1024);
+            if let Some(end) = received.windows(4).position(|s| s == b"\r\n\r\n") {
+                let header = std::str::from_utf8(&received[..end]).unwrap();
+                assert!(header.starts_with("POST /api/chat HTTP/1.1"));
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                assert!(length <= 1024 * 1024);
+                break (end + 4, length);
+            }
+        };
+        while received.len() < header_end + length {
+            let mut chunk = [0; 4096];
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0);
+            received.extend_from_slice(&chunk[..n]);
+        }
+        let body: Value =
+            serde_json::from_slice(&received[header_end..header_end + length]).unwrap();
+        let response = serde_json::json!({"model":"test-model","message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}).to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.len(),
+            response
+        )
+        .unwrap();
+        body
+    });
+    let provider =
+        llm::OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let firewall = next_prompt_invocation::tests::firewall();
+    let action = input.action("synthetic-reopened-wire".into()).unwrap();
+    let prepared = firewall
+        .prepare_bounded(&provider, &action, &next_prompt_invocation::tests::limits())
+        .unwrap();
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    provider
+        .complete_bounded(
+            &authorized,
+            &llm::bounded::CompletionControl {
+                deadline: Instant::now() + Duration::from_secs(10),
+                check: &|| llm::bounded::CallDirective::Continue,
+            },
+        )
+        .unwrap();
+    let wire = server.join().unwrap();
+    assert_eq!(
+        wire["messages"][1]["content"],
+        format!(
+            "{}\n\nEvidence spans (JSON):\n{}",
+            expected_prompt,
+            serde_json::to_string(&prepared.preview().egress.payload.spans).unwrap()
+        )
+    );
+    assert_eq!(wire["stream"], false);
 }

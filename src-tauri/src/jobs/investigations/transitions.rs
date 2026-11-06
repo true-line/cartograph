@@ -778,6 +778,9 @@ impl JobStore {
         if active_milliseconds < task.detail.usage.active_milliseconds {
             return Err(InvestigationStoreError::Invalid);
         }
+        if let Some(audit) = &task.semantic_audit {
+            audit.validate_saved(&tx, &task)?;
+        }
         task.detail.usage.active_milliseconds = active_milliseconds;
         if task.phase == Phase::Consent {
             // This prospective call was never invoked; it has no invocation row.
@@ -788,6 +791,9 @@ impl JobStore {
         }
         stop(&tx, &mut task, reason)?;
         save_next_prompt_task(&tx, &task, revision, true)?;
+        if task.semantic_audit.is_some() {
+            load_next_prompt_task(&tx, &id)?;
+        }
         tx.commit()?;
         Ok(task.detail)
     }
@@ -867,7 +873,7 @@ impl JobStore {
                 .map(Some);
         }
         let expected = task.detail.summary.revision;
-        let unknown = task.phase == Phase::Invocation;
+        let unknown = matches!(task.phase, Phase::Invocation | Phase::AuditInvocation);
         if next_family && task.phase == Phase::Consent {
             // An uninvoked consent stamp is not a provider call. Preserve all
             // earlier measured usage while removing only that prospective call.
@@ -876,7 +882,9 @@ impl JobStore {
                 .ok_or(InvestigationStoreError::Invalid)?
                 .current_call = None;
         }
-        if unknown {
+        if task.phase == Phase::AuditInvocation {
+            super::semantic_audit_state::interrupt_started_audit(&mut task)?;
+        } else if unknown {
             clear_unmeasured_usage(&mut task);
         }
         task.phase = Phase::Terminal;
@@ -1186,11 +1194,20 @@ pub(super) fn stop(
     reason: InvestigationStopReason,
 ) -> Result<(), InvestigationStoreError> {
     let terminal = reason.terminal_class();
-    if terminal == InvestigationStopReason::OutcomeUnknown && task.phase != Phase::Invocation {
+    if terminal == InvestigationStopReason::OutcomeUnknown
+        && !matches!(task.phase, Phase::Invocation | Phase::AuditInvocation)
+    {
         return Err(InvestigationStoreError::Stale);
     }
-    if task.phase == Phase::Invocation {
+    if task.phase == Phase::AuditInvocation {
+        super::semantic_audit_state::stop_started_audit(task)?;
+    } else if task.phase == Phase::Invocation {
         clear_unmeasured_usage(task);
+        if let Some(audit) = task.semantic_audit.as_mut() {
+            audit.account = audit
+                .account
+                .stop_unmeasured_analyst(&task.detail.usage, &task.detail.limits)?;
+        }
     }
     let cancelled = task.detail.summary.cancel_requested
         || matches!(

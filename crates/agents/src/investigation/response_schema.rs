@@ -4,6 +4,10 @@ use super::*;
 use llm::CompletionPayload;
 use serde_json::Value;
 
+#[path = "response_schema_eligibility.rs"]
+mod eligibility;
+pub(super) use eligibility::{reserve_eligible_acquisition, select_eligible_acquisition};
+
 pub(super) const CHOICE: &str = include_str!("data/analyst-v13-choice.json");
 const EXACT_NODE_SCOPE: &str = r#"{"type":"object","properties":{"type":{"const":"node"},"id":{"type":"string","minLength":1,"maxLength":1024}},"required":["type","id"],"additionalProperties":false}"#;
 pub(super) const FINISH: &str = include_str!("data/analyst-v13-finish-only.json");
@@ -90,6 +94,12 @@ pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
     sum(&[
         super::task_validation_workspace::definition_workspace(SpecialistId::DomainAnalystV17)?,
         slots::<&crate::TaskFactKey>(policy.limits().selected_facts)?,
+        slots::<&str>(
+            policy
+                .limits()
+                .evidence_items
+                .checked_add(policy.limits().selected_facts)?,
+        )?, // @20 citation enum borrowed handles
         MAX_MANIFEST_BYTES,              // bounded borrowed-key encoding
         json_bytes(MAX_MANIFEST_BYTES)?, // decoded exact keys
         json_bytes(MAX_INPUT_BYTES)?,    // finite @18 enum and projection validation

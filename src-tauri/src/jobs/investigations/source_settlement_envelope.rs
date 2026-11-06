@@ -132,6 +132,24 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
                     sizing_before.detail.summary.actions.can_cancel = false;
                 }
                 // Internal projection only: never wrap this in SettlementPlan.
+                // An audit account validates its active-stage budget while
+                // materializing the exact serialized replacement. Successful
+                // continuations can only reach the original active-time cap;
+                // terminal overruns retain the full-width measurement bound.
+                let active_bound = if sizing_before.semantic_audit.is_some()
+                    && matches!(
+                        kind,
+                        DispositionKind::Acquired | DispositionKind::ReadUnavailable
+                    ) {
+                    sizing_before
+                        .detail
+                        .limits
+                        .active_seconds
+                        .checked_mul(1000)
+                        .ok_or(InvestigationStoreError::Capacity)?
+                } else {
+                    u64::MAX
+                };
                 let mut sizing = materialize(
                     connection,
                     &sizing_before,
@@ -141,7 +159,7 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
                     ledger.clone(),
                     kind,
                     reason.clone(),
-                    u64::MAX,
+                    active_bound,
                 )?;
                 // One cancellation/owner-loss barrier can advance the revision.
                 // Reserve full SQL integer widths and the pinned journal ceiling,

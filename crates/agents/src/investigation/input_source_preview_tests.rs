@@ -385,7 +385,9 @@ fn source_preview_bound_covers_all_feedback_values_after_actual_append() {
         RefusalReason::Unavailable,
     ] {
         fixture.metadata.feedback = Some(RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
+            citation_correction: None,
             unmet: fixture
                 .request
                 .obligations
@@ -937,6 +939,11 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
     for (role, mode) in [
         (SpecialistId::DomainAnalystV18, CompletionCallMode::Choice),
         (SpecialistId::DomainAnalystV19, CompletionCallMode::Choice),
+        (SpecialistId::DomainAnalystV20, CompletionCallMode::Choice),
+        (
+            SpecialistId::DomainAnalystV20,
+            CompletionCallMode::FinishOnly,
+        ),
         (
             SpecialistId::DomainAnalystV18,
             CompletionCallMode::FinishOnly,
@@ -958,6 +965,7 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
             obligations_hash: f.metadata.obligations_hash.clone(),
             obligations: f.request.obligations.clone(),
         };
+        let saved_metadata = f.metadata.clone();
         let bound = input
             .acquisition_choices
             .as_ref()
@@ -966,7 +974,7 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
                 "source-preview-task",
                 "current:1",
                 &contract,
-                &f.metadata,
+                &saved_metadata,
                 input.ledger(),
                 &disclosure,
                 None,
@@ -1007,8 +1015,10 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
                 policy,
                 Some(&bound),
             );
-            if role == SpecialistId::DomainAnalystV19
-                && !foreign
+            if matches!(
+                role,
+                SpecialistId::DomainAnalystV19 | SpecialistId::DomainAnalystV20
+            ) && !foreign
                 && mode == CompletionCallMode::Choice
             {
                 let staged_finish::FinishDecision::Refused {
@@ -1018,6 +1028,18 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
                 else {
                     panic!("unacquired target must produce feedback, never a result");
                 };
+                assert_eq!(
+                    feedback.citation_correction.is_some(),
+                    role == SpecialistId::DomainAnalystV20
+                );
+                assert_eq!(
+                    feedback.schema_version,
+                    if role == SpecialistId::DomainAnalystV20 {
+                        2
+                    } else {
+                        1
+                    }
+                );
                 assert!(
                     !feedback.unmet.is_empty(),
                     "eligible pending source must remain unmet"
@@ -1052,9 +1074,119 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
                         .unwrap(),
                     staged_refusal::RefusalDisposition::Continue
                 );
+                // AC-0566: pure stored mapping validation at the original
+                // cutoff. Host role/response journal checks are separate.
+                let mut typed = refusal.clone();
+                typed.feedback.schema_version = 2;
+                typed.feedback.citation_correction = input
+                    .acquisition_choices
+                    .as_ref()
+                    .unwrap()
+                    .citation_correction(
+                        std::slice::from_ref(&target.target_id),
+                        &contract,
+                        &saved_metadata,
+                        input.ledger(),
+                        policy,
+                    )
+                    .unwrap();
+                typed.refusal_id = typed.content_id().unwrap();
+                assert!(
+                    bound
+                        .validate_refusal(
+                            &typed,
+                            &contract.request_hash,
+                            &contract.obligations,
+                            &[],
+                            None
+                        )
+                        .is_ok()
+                );
+                assert!(
+                    typed
+                        .validate_stored_basis_with_policy(
+                            &contract.request_hash,
+                            &contract.obligations,
+                            input.ledger(),
+                            &disclosure,
+                            None,
+                            policy
+                        )
+                        .is_err()
+                );
+                let mut changed = serde_json::to_value(&typed).unwrap();
+                changed["feedback"]["citation_correction"]["choices_hash"] = "d".repeat(64).into();
+                let mut forged: staged_refusal::RefusalRecord =
+                    serde_json::from_value(changed).unwrap();
+                forged.refusal_id = forged.content_id().unwrap();
+                assert!(
+                    bound
+                        .validate_refusal(
+                            &forged,
+                            &contract.request_hash,
+                            &contract.obligations,
+                            &[],
+                            None
+                        )
+                        .is_err()
+                );
+                let saved_correction = refusal.feedback.citation_correction.clone();
+                let authenticated = saved_correction.as_ref().map(|correction| {
+                    bound
+                        .authenticate_citation_correction(
+                            correction,
+                            std::slice::from_ref(&target.target_id),
+                        )
+                        .unwrap()
+                });
                 f.metadata.refusal_count = 1;
                 f.metadata.last_refusal_id = Some(refusal.refusal_id);
                 f.metadata.feedback = Some(refusal.feedback);
+                if role == SpecialistId::DomainAnalystV20 {
+                    let choices = derive_source_choices(&f, &[], &f.ledger);
+                    let base = build_source(&f, &raw, &[], role, CompletionCallMode::Choice);
+                    assert!(
+                        base.clone()
+                            .with_acquisition_choices(choices.clone())
+                            .is_err()
+                    );
+                    let next = base
+                        .with_acquisition_correction(choices, None, authenticated.as_ref())
+                        .unwrap();
+                    let prepared = prepare(&next);
+                    let reserve = input
+                        .measure_v9_reserve_with_policy(
+                            prepared.profile(),
+                            prepared.limits(),
+                            "current:1",
+                            policy,
+                        )
+                        .unwrap();
+                    let actual = llm::bounded::measure_bounded_action(
+                        prepared.profile(),
+                        &next.action("current:1".into()).unwrap(),
+                        prepared.limits(),
+                    )
+                    .unwrap();
+                    assert_dominates(reserve.choice, actual);
+                    let prompt: serde_json::Value =
+                        serde_json::from_str(&prepared.preview().egress.payload.prompt).unwrap();
+                    assert_eq!(
+                        prompt["turn_progress"]["citation_correction"]["entries"][0]["target_id"],
+                        target.target_id
+                    );
+                    assert_eq!(
+                        prompt["turn_progress"]["citation_correction"]["entries"][0]["action"]["type"],
+                        "read_evidence"
+                    );
+                    let mut forged = next.clone();
+                    let mut wire: serde_json::Value =
+                        serde_json::from_str(&forged.payload.prompt).unwrap();
+                    wire["turn_progress"]["citation_correction"]["entries"][0]["target_id"] =
+                        "f".repeat(64).into();
+                    forged.payload.prompt = wire.to_string();
+                    assert!(forged.action("tampered".into()).is_err());
+                }
                 // This is a synthetic acquisition observation, not native I/O.
                 // No citation exists until the explicit source acquisition below.
                 let prior = f.ledger.clone();
@@ -1070,12 +1202,13 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
                 );
                 f.metadata.completed_attempt_ids = vec![record.attempt_id.clone()];
                 let records = [record];
-                let acquired = source_choices(
-                    &f,
-                    build_source(&f, &raw, &evidence, role, CompletionCallMode::Choice),
-                    &records,
-                    &prior,
-                );
+                let acquired = build_source(&f, &raw, &evidence, role, CompletionCallMode::Choice)
+                    .with_acquisition_correction(
+                        derive_source_choices(&f, &records, &prior),
+                        None,
+                        authenticated.as_ref(),
+                    )
+                    .unwrap();
                 let disclosed = acquired
                     .seal_disclosure_with_policy(&prepare(&acquired), policy)
                     .unwrap()
@@ -1131,6 +1264,74 @@ fn analyst19_only_recovers_known_unacquired_citations_without_result() {
                     .iter()
                     .all(|citation| citation.citation_id != target.target_id)
             );
+        }
+    }
+}
+
+// AC-0566: only @20 accepts receipt handles through real input/sealing.
+#[test]
+fn analyst20_receipt_correction_is_role_bound_and_authenticated() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in [
+        SpecialistId::DomainAnalystV19,
+        SpecialistId::DomainAnalystV20,
+    ] {
+        let (f, raw, target, _) = source_fixture(role, "bounded source");
+        let input = source_choices(
+            &f,
+            build_source(&f, &raw, &[], role, CompletionCallMode::Choice),
+            &[],
+            &f.ledger,
+        );
+        let disclosure = input
+            .seal_disclosure_with_policy(&prepare(&input), policy)
+            .unwrap()
+            .unwrap();
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let bound = input
+            .acquisition_choices
+            .as_ref()
+            .unwrap()
+            .bind_completion_disclosure(
+                "source-preview-task",
+                "current:1",
+                &contract,
+                &f.metadata,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .unwrap();
+        let finish = staged_finish::StagedFinish {
+            schema_version: 1,
+            outcome: staged_finish::CompletionOutcome::Supported,
+            narrative: None,
+            action: InvestigationAction::Finish {
+                findings: vec![ProposedInvestigationFinding {
+                    claim_kind: InvestigationClaimKind::InferredInterpretation,
+                    title: "Candidate interpretation".into(),
+                    statement: "A candidate interpretation requires a source check.".into(),
+                    citation_ids: vec![target.receipt_id.clone()],
+                    limitations: vec!["Only selected material was considered.".into()],
+                }],
+                knowledge_completeness: KnowledgeCompleteness::Partial,
+                limitations: vec!["Only selected material was considered.".into()],
+            },
+        };
+        let correction = input
+            .typed_citation_correction(&disclosure, &finish, None, policy, Some(&bound))
+            .unwrap();
+        assert_eq!(correction.is_some(), role == SpecialistId::DomainAnalystV20);
+        if let Some(correction) = correction {
+            bound
+                .authenticate_citation_correction(&correction, &[target.target_id])
+                .unwrap();
         }
     }
 }

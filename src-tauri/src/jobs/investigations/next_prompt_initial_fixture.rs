@@ -23,6 +23,15 @@ pub(in crate::jobs::investigations) fn initial_fixture_with_request(
     provider: InvestigationProvider,
     customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
 ) -> InitialFixture {
+    initial_fixture_with_configured_request(mode, provider, customize, None)
+}
+
+pub(in crate::jobs::investigations) fn initial_fixture_with_configured_request(
+    mode: InvestigationProviderMode,
+    provider: InvestigationProvider,
+    customize: impl FnOnce(&mut StagedObligationRequest, &InvestigationCoverageArchive),
+    active_seconds: Option<u64>,
+) -> InitialFixture {
     let fixture = Fixture::with_family_preparation(mode, &INVESTIGATION_V2_POLICY, true, false);
     let mut request = fixture.request;
     request.schema_version = 7;
@@ -33,9 +42,16 @@ pub(in crate::jobs::investigations) fn initial_fixture_with_request(
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let mut store = JobStore::open(directory.path().join("state.db")).unwrap();
-    let started = store
-        .start_next_prompt_investigation(&request, Some(&provider))
-        .unwrap();
+    let started = match active_seconds {
+        Some(seconds) => store.start_configured_next_prompt_investigation(
+            &request,
+            Some(&provider),
+            seconds,
+            180_000,
+        ),
+        None => store.start_next_prompt_investigation(&request, Some(&provider)),
+    }
+    .unwrap();
     let locks = JobExecutionLocks::open(directory.path(), store.execution_namespace()).unwrap();
     let plan = store
         .claim_plan(started.detail.summary.job_id, ClaimMode::StartQueued)

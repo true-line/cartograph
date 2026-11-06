@@ -447,6 +447,7 @@ impl EgressFirewall {
 
 /// Local Ollama provider using `/api/embed` and `/api/chat`.
 pub struct OllamaProvider {
+    bounded_thinking: bool,
     base_url: Url,
     embedding_model: String,
     completion_model: String,
@@ -527,6 +528,7 @@ impl OllamaProvider {
             format!("ollama:{embedding_model}+{completion_model}")
         };
         Ok(Self {
+            bounded_thinking: false,
             base_url,
             embedding_model,
             completion_model,
@@ -534,6 +536,15 @@ impl OllamaProvider {
             client,
             bounded_client,
         })
+    }
+
+    /// Select reasoning for bounded auditor calls and bind it to the provider profile.
+    pub fn with_thinking_enabled(mut self) -> Self {
+        if !self.bounded_thinking {
+            self.provider_id.push_str(":thinking-enabled");
+            self.bounded_thinking = true;
+        }
+        self
     }
 
     /// Construct the default local provider.
@@ -741,6 +752,7 @@ impl LlmProvider for OllamaProvider {
         bounded::complete_ollama(
             &self.bounded_client,
             &self.bounded_profile()?,
+            self.bounded_thinking,
             request,
             control,
         )
@@ -1132,6 +1144,7 @@ mod tests {
             embedding_model: "test-model".into(),
             completion_model: "test-model".into(),
             provider_id: "ollama:test-model".into(),
+            bounded_thinking: false,
             client,
             bounded_client: bounded::build_client(Client::builder(), true).unwrap(),
         };

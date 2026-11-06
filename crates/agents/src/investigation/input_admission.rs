@@ -235,6 +235,20 @@ impl InvestigationInput {
             )
             .map_err(|_| InvestigationError::InvalidInput)?,
         );
+        if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+            let upper = serde_json::to_value(
+                staged_finish::RefusalFeedback::sizing_typed_contract_envelope(
+                    &contract,
+                    &self.ledger,
+                    policy,
+                )?,
+            )
+            .map_err(|_| InvestigationError::InvalidInput)?;
+            // Both the immutable historical mapping and the current-action
+            // projection may coexist; reserve each at the unchanged ceiling.
+            reserved["completion_metadata"]["feedback"] = upper.clone();
+            reserved["turn_progress"]["citation_correction"] = upper;
+        }
         // Numeric width, not invented usage authority. The actual usage DTO
         // admits optional token counters which may become present without
         // acquisition; unknown optional/structured fields fail closed.
@@ -318,6 +332,13 @@ impl InvestigationInput {
             } else {
                 None
             };
+            if action.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+                action.payload.response_schema = response_schema::reserve_eligible_acquisition(
+                    action.payload.response_schema.take(),
+                    mode,
+                    &prompt,
+                )?;
+            }
             #[cfg(test)]
             assert!(
                 context_hub::logical::count(&prompt).unwrap()
@@ -701,6 +722,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV17,
             SpecialistId::DomainAnalystV18,
             SpecialistId::DomainAnalystV19,
+            SpecialistId::DomainAnalystV20,
             SpecialistId::EvidenceAuditorV11,
         ]
         .into_iter()
@@ -743,7 +765,13 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
-            if role.uses_acquisition_choices() {
+            if role == SpecialistId::DomainAnalystV20 {
+                &[
+                    "acquisition_choices",
+                    "action_feedback",
+                    "citation_correction",
+                ]
+            } else if role.uses_acquisition_choices() {
                 &["acquisition_choices", "action_feedback"]
             } else {
                 &[]
@@ -856,6 +884,11 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
         count(&metadata)?,
         progress_bytes,
         staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?,
+        // Two version-two sizing strings: each encodes to 2B+2, plus key/frame.
+        staged_finish::RefusalFeedback::max_bytes_with_policy(policy)
+            .ok()?
+            .checked_mul(4)?
+            .checked_add(128)?,
     ])
 }
 
@@ -965,6 +998,7 @@ impl InvestigationInput {
         [
             SpecialistId::DomainAnalystV18,
             SpecialistId::DomainAnalystV19,
+            SpecialistId::DomainAnalystV20,
         ]
         .iter()
         .any(|role| self.payload.system == role.prompt())
@@ -979,15 +1013,65 @@ impl InvestigationInput {
         self.with_acquisition_admission(choices, None)
     }
     pub fn with_acquisition_admission(
+        self,
+        choices: std::sync::Arc<acquisition_choices::AcquisitionChoices>,
+        feedback: Option<ActionRefusalFeedback>,
+    ) -> Result<Self, InvestigationError> {
+        self.with_acquisition_correction(choices, feedback, None)
+    }
+
+    /// The host authenticates the saved refusal at its original cutoff before
+    /// passing this witness. Current actions are rederived, never replayed.
+    pub fn with_acquisition_correction(
         mut self,
         choices: std::sync::Arc<acquisition_choices::AcquisitionChoices>,
         feedback: Option<ActionRefusalFeedback>,
+        correction: Option<&acquisition_choices::AuthenticatedCitationCorrection>,
     ) -> Result<Self, InvestigationError> {
         if !self.uses_acquisition_prompt() {
             return Err(InvestigationError::InvalidInput);
         }
         let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata: ProtectedCompletionMetadata =
+            serde_json::from_value(prompt["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        let saved = metadata
+            .feedback
+            .as_ref()
+            .and_then(|feedback| feedback.citation_correction.as_ref());
+        let typed_role = self.payload.system == SpecialistId::DomainAnalystV20.prompt();
+        if !typed_role
+            && metadata
+                .feedback
+                .as_ref()
+                .is_some_and(|f| f.prose_correction.is_some())
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+
+        self.citation_correction = match (saved, correction) {
+            (Some(saved), Some(authenticated))
+                if typed_role && saved == authenticated.original() =>
+            {
+                let contract = serde_json::from_value(prompt["completion_contract"].clone())
+                    .map_err(|_| InvestigationError::InvalidInput)?;
+                authenticated.project(
+                    &choices,
+                    &contract,
+                    &metadata,
+                    &self.ledger,
+                    &INVESTIGATION_V2_POLICY,
+                )?
+            }
+            (None, None) => None,
+            _ => return Err(InvestigationError::InvalidInput),
+        };
+        if typed_role {
+            prompt["turn_progress"]["citation_correction"] =
+                serde_json::to_value(&self.citation_correction)
+                    .map_err(|_| InvestigationError::InvalidInput)?;
+        }
         prompt["turn_progress"]["acquisition_choices"] =
             serde_json::to_value(&*choices).map_err(|_| InvestigationError::InvalidInput)?;
         prompt["turn_progress"]["action_feedback"] =
@@ -1015,6 +1099,14 @@ impl InvestigationInput {
                 .ok_or(InvestigationError::InvalidInput)?,
             self.action_feedback.as_ref(),
         )?;
+        if typed_role {
+            self.payload.response_schema = response_schema::select_eligible_acquisition(
+                self.payload.response_schema.take(),
+                mode,
+                &choices,
+                &self.ledger,
+            )?;
+        }
         self.acquisition_choices = Some(choices);
         self.acquisition_mode = Some(mode);
         wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
@@ -1060,6 +1152,7 @@ impl InvestigationInput {
         if !self.uses_acquisition_prompt() {
             return if self.acquisition_choices.is_none()
                 && self.action_feedback.is_none()
+                && self.citation_correction.is_none()
                 && self.acquisition_mode.is_none()
             {
                 Ok(())
@@ -1081,6 +1174,41 @@ impl InvestigationInput {
         choices.validate_basis(&contract, &metadata, &self.ledger, &INVESTIGATION_V2_POLICY)?;
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
+        if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+            if prompt["turn_progress"].get("citation_correction")
+                != Some(
+                    &serde_json::to_value(&self.citation_correction)
+                        .map_err(|_| InvestigationError::InvalidInput)?,
+                )
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else if self.citation_correction.is_some()
+            || prompt["turn_progress"].get("citation_correction").is_some()
+            || metadata
+                .feedback
+                .as_ref()
+                .is_some_and(|feedback| feedback.citation_correction.is_some())
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let ordinary_schema = response_schema::select_acquisition_recovery(
+            mode,
+            choices,
+            &self.ledger,
+            &contract.request_hash,
+            self.action_feedback.as_ref(),
+        )?;
+        let expected_schema = if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+            response_schema::select_eligible_acquisition(
+                ordinary_schema,
+                mode,
+                choices,
+                &self.ledger,
+            )?
+        } else {
+            ordinary_schema
+        };
         if self.acquisition_mode != Some(mode)
             || prompt["turn_progress"]["acquisition_choices"]
                 != serde_json::to_value(&**choices).map_err(|_| InvestigationError::InvalidInput)?
@@ -1089,14 +1217,7 @@ impl InvestigationInput {
                     &serde_json::to_value(&self.action_feedback)
                         .map_err(|_| InvestigationError::InvalidInput)?,
                 )
-            || self.payload.response_schema
-                != response_schema::select_acquisition_recovery(
-                    mode,
-                    choices,
-                    &self.ledger,
-                    &contract.request_hash,
-                    self.action_feedback.as_ref(),
-                )?
+            || self.payload.response_schema != expected_schema
         {
             return Err(InvestigationError::InvalidInput);
         }

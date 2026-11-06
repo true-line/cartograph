@@ -51,6 +51,9 @@ impl InvestigationInput {
         let details = queries.checked_mul(MAX_QUERY_BYTES.checked_add(1)?)?;
         sum(&[
             Self::retained_workspace_bytes(policy)?,
+            acquisition_choices::AuthenticatedCitationCorrection::projection_workspace_bytes(
+                policy,
+            )?,
             response_schema::workspace_bytes(policy)?,
             json_bytes(MAX_RECORD_BYTES)?, // incoming owned ledger, before validation
             ledger_validation_workspace(policy, MAX_RECORD_BYTES)?,
@@ -96,6 +99,7 @@ impl InvestigationInput {
             size_of::<Self>(),
             json_bytes(MAX_ACTION_BYTES)?, // cached, final bounded acquisition choices
             acquisition_choices::AcquisitionChoices::private_workspace_bytes(policy)?,
+            json_bytes(staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?)?,
             128,                                  // cached feedback action/choices hashes
             json_bytes(MAX_MANIFEST_BYTES)?,      // validated owned ledger
             json_bytes(MAX_INPUT_BYTES)?,         // complete accepted payload wire
@@ -135,6 +139,7 @@ impl InvestigationInput {
                 .as_ref()
                 .map_or(0, |choices| choices.private_bytes()),
             json_bytes(count(&self.action_feedback).unwrap()).unwrap(),
+            json_bytes(count(&self.citation_correction).unwrap()).unwrap(),
             strings.clone().map(String::len).sum(),
             slots::<String>(strings.count()).unwrap(),
         ])

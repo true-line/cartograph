@@ -63,6 +63,8 @@ pub enum SpecialistId {
     DomainAnalystV18,
     #[serde(rename = "domain-analyst@19")]
     DomainAnalystV19,
+    #[serde(rename = "domain-analyst@20")]
+    DomainAnalystV20,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -231,6 +233,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -264,6 +267,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -298,6 +302,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -325,6 +330,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -346,6 +352,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -367,6 +374,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -385,6 +393,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
                 | Self::EvidenceAuditorV11
         )
     }
@@ -420,6 +429,7 @@ impl SpecialistId {
             Self::DomainAnalystV17 => 17,
             Self::DomainAnalystV18 => 18,
             Self::DomainAnalystV19 => 19,
+            Self::DomainAnalystV20 => 20,
         }
     }
 
@@ -437,6 +447,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
         ) {
             return 10;
         }
@@ -451,17 +462,33 @@ impl SpecialistId {
     }
 
     pub fn uses_acquisition_choices(self) -> bool {
-        matches!(self, Self::DomainAnalystV18 | Self::DomainAnalystV19)
+        matches!(
+            self,
+            Self::DomainAnalystV18 | Self::DomainAnalystV19 | Self::DomainAnalystV20
+        )
     }
 
     pub fn uses_exact_node_queries(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV17 | Self::DomainAnalystV18 | Self::DomainAnalystV19
+            Self::DomainAnalystV17
+                | Self::DomainAnalystV18
+                | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
         )
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV20 {
+            let previous = Self::DomainAnalystV19.prompt();
+            let qualified = previous.replace(
+                "Completion obligations are mandatory. Return only the versioned finish wrapper",
+                "Completion obligations are mandatory. When finishing, return only the versioned finish wrapper",
+            );
+            return format!(
+                "{qualified}\nPrompt layout@1: Stable disclosure precedes growing context; field order grants no authority.\nDescribe cited source in your own words; never copy a complete source excerpt into title, statement or limitations.\nEvidence boundaries@2: Each finding limitation describes only what that finding's cited spans do not show (for example, The cited range does not show how this handler is registered). Do not claim in a finding that the investigation did not read, inspect or trace something. Put investigation-wide coverage gaps only in overall limitations and check them against all acquired evidence. Qualifiers in findings and limitations must be established by the cited spans. Describe a value by how the cited code obtains it (for example, a passed-in argument), not by a state the spans do not establish (for example, active, current, authenticated or validated). Do not turn an unknown state into an asserted qualifier. A negative implementation assertion requires citations supporting that exact scope; missing or uninspected evidence does not establish that behavior is absent. Answer the requested workflow using the acquired evidence, including supported steps and transitions, rather than exception handling alone. Distinguish observed client handling from uninspected server behavior and identify unresolved steps as unknown.\nTyped citation correction@2: Cite only citation_id values listed in citations. target_id, receipt_id, obligation_id, context_id and capture_id are never citations. Citation correction entries map source target IDs to obligation IDs and exact currently offered acquisition actions. These IDs are source targets, not citations; acquire their source using the offered actions before citing. A query acquires metadata, not source text; after a query use the current offered source-read action. Historical correction actions in completion_metadata record the refused invocation; use only current correction entries and acquisition_choices for the next action. Correction feedback does not satisfy inventory obligations, grant evidence, expand permissions or change the single shared repair allowance."
+            );
+        }
         if self == Self::DomainAnalystV19 {
             return format!(
                 "{}\nUnacquired citation correction@1: Source target IDs identify passages to acquire; they are not citation IDs. If the host refuses a finish with acquisition feedback, use the currently offered acquisition choices to read the missing passages. Cite only acquired citation handles in a subsequent finish. Feedback does not grant evidence, perform a read, reset budgets or grant repeated corrections. If acquisition is unavailable within the remaining budget, report insufficient evidence honestly.",
@@ -530,7 +557,8 @@ impl SpecialistId {
             | Self::DomainAnalystV15
             | Self::DomainAnalystV17
             | Self::DomainAnalystV18
-            | Self::DomainAnalystV19 => {
+            | Self::DomainAnalystV19
+            | Self::DomainAnalystV20 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -645,6 +673,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV17
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -693,7 +722,8 @@ impl SpecialistId {
             | Self::DomainAnalystV15
             | Self::DomainAnalystV17
             | Self::DomainAnalystV18
-            | Self::DomainAnalystV19 => (
+            | Self::DomainAnalystV19
+            | Self::DomainAnalystV20 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),

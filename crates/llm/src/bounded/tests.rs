@@ -1591,6 +1591,7 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         "user",
         2048,
         response_schema(authorized.payload()).unwrap(),
+        false,
     );
     let bytes = encode(
         &wire,
@@ -1643,12 +1644,7 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         Duration::from_secs(1),
     )
     .unwrap();
-    assert_eq!(
-        firewall
-            .prepare_bounded(&other, &original, &limits)
-            .unwrap_err(),
-        BoundedCallError::unsupported()
-    );
+    assert!(firewall.prepare_bounded(&other, &original, &limits).is_ok());
     assert!(matches!(
         firewall.complete(&provider, &original, None),
         Err(ProviderError::Unsupported("legacy response schema"))
@@ -1889,4 +1885,138 @@ fn configured_timeout_changes_consent_identity_without_provider_execution() {
     firewall
         .authorize_bounded(&cloud, &changed, Some(&fresh))
         .unwrap();
+}
+
+// AC-0342 / #1654: actual synthetic HTTP bytes retain schema and bounded metrics.
+#[test]
+fn openai_compatible_strict_schema_and_thinking_are_bounded() {
+    let duplicate_finish =
+        include_str!("../../tests/fixtures/duplicate-citation-finish.json").trim();
+    for thinking in [None, Some(false), Some(true)] {
+        let mut body: Value = serde_json::from_slice(&openai_body(duplicate_finish)).unwrap();
+        body["choices"][0]["message"]["reasoning_content"] = json!("PRIVATE REASONING");
+        body["usage"]["prompt_tokens_details"] = json!({"cached_tokens": 11});
+        let (endpoint, server) = http(framed(&serde_json::to_vec(&body).unwrap()));
+        let base = openai(&endpoint);
+        let base_profile = base.bounded_profile().unwrap();
+        let provider = match thinking {
+            Some(true) => base.with_thinking_enabled(),
+            Some(false) => base.with_thinking_disabled(),
+            None => base,
+        };
+        assert_eq!(
+            provider.bounded_profile().unwrap() == base_profile,
+            thinking.is_none()
+        );
+        assert!(provider.supports_bounded_response_schema());
+        let firewall = EgressFirewall::new(EgressPolicy::default());
+        let mut selected = action();
+        selected.payload.response_schema =
+            Some(r#"{"type":"array","uniqueItems":true,"items":{"type":"string"}}"#.into());
+        let prepared = firewall
+            .prepare_bounded(&provider, &selected, &CompletionLimits::default())
+            .unwrap();
+        let authorized = firewall
+            .authorize_bounded(&provider, &prepared, None)
+            .unwrap();
+        let output = provider.complete_bounded(&authorized, &control()).unwrap();
+        let request = server.join().unwrap();
+        let wire: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            wire["response_format"],
+            json!({"type":"json_schema", "json_schema":{
+            "name":"cartograph_bounded_response", "strict":true,
+            "schema":json!({"type":"array","items":{"type":"string"}})}})
+        );
+        if let Some(enabled) = thinking {
+            assert_eq!(
+                wire["chat_template_kwargs"],
+                json!({"enable_thinking":enabled})
+            );
+        } else {
+            assert!(wire.get("chat_template_kwargs").is_none());
+        }
+        assert_eq!(output.text, duplicate_finish);
+        assert_eq!(output.usage.unwrap().cache_read_input_tokens, Some(11));
+        assert_eq!(output.request_bytes, request.body.len() as u64);
+    }
+}
+
+#[test]
+fn ollama_reasoning_auditor_only_returns_content() {
+    let mut body: Value = serde_json::from_slice(&ollama_body("answer")).unwrap();
+    body["message"]["thinking"] = json!("private reasoning");
+    body["eval_count"] = json!(6807);
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let (endpoint, server) = http(framed(&bytes));
+    let provider = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(2))
+        .unwrap()
+        .with_thinking_enabled();
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let limits = CompletionLimits::default().for_semantic_audit();
+    let prepared = firewall
+        .prepare_bounded(&provider, &action(), &limits)
+        .unwrap();
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    let output = provider.complete_bounded(&authorized, &control()).unwrap();
+    let wire: Value = serde_json::from_slice(&server.join().unwrap().body).unwrap();
+    assert_eq!(wire["think"], true);
+    assert_eq!(wire["options"]["num_predict"], AUDIT_OUTPUT_TOKENS);
+    assert_eq!(output.text, "answer");
+    assert_eq!(output.usage.unwrap().output_tokens, Some(6807));
+    assert_eq!(output.response_bytes, bytes.len() as u64);
+}
+
+#[test]
+fn openai_compatible_oversize_schema_never_connects() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let provider =
+        openai(&format!("http://{}/", listener.local_addr().unwrap())).with_thinking_disabled();
+    let limits = CompletionLimits::new(CompletionLimitValues {
+        request_bytes: 512,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut selected = action();
+    selected.payload.response_schema =
+        Some(json!({"type":"object","description":"x".repeat(1024)}).to_string());
+    let firewall = EgressFirewall::new(EgressPolicy::default());
+    let prepared = firewall
+        .prepare_bounded(&provider, &selected, &limits)
+        .unwrap();
+    let authorized = firewall
+        .authorize_bounded(&provider, &prepared, None)
+        .unwrap();
+    assert_eq!(
+        provider
+            .complete_bounded(&authorized, &control())
+            .unwrap_err(),
+        not_sent(FailureCode::RequestTooLarge)
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn semantic_audit_limits_preserve_historical_reservations() {
+    let current = CompletionLimits::default().for_semantic_audit();
+    assert_eq!(current.values().max_output_tokens, 16384);
+    for tokens in [2048, 8192, 16384] {
+        let values = CompletionLimitValues {
+            max_output_tokens: tokens,
+            ..CompletionLimitValues::default()
+        };
+        assert_eq!(
+            CompletionLimits::from_audit_values(values)
+                .unwrap()
+                .values()
+                .max_output_tokens,
+            tokens
+        );
+    }
 }

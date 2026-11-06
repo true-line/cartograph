@@ -1,13 +1,13 @@
 import { create } from 'zustand';
 import { useInvestigationStore, validReportedTaskUsage, type InvestigationState } from './investigationStore';
-import type { InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead, InvestigationScope, ReportedTaskUsage } from './investigationTypes';
+import type { AdvisoryAudit, InvestigationChat, InvestigationSummary, InvestigationResult, InvestigationCitation, InvestigationCitationRead, InvestigationScope, ReportedTaskUsage } from './investigationTypes';
 
 export type ChatTurn = Pick<InvestigationSummary, 'investigation_id' | 'conversation_id' | 'parent_id' |
   'question' | 'specialist_id' | 'status' | 'updated_at' | 'revision'>;
 export interface ChatDock {
   chat: InvestigationChat; question: string; specialistName: string; turn: ChatTurn; scope: InvestigationScope;
   reportedUsage?: ReportedTaskUsage;
-  answer: { result: InvestigationResult; citations: InvestigationCitation[] } | null;
+  answer: { advisoryAudit?: AdvisoryAudit; result: InvestigationResult; citations: InvestigationCitation[] } | null;
 }
 interface CitationInspection {
   taskId: string; citationId: string; read: InvestigationCitationRead | null; loading: boolean; error: string | null;
@@ -63,7 +63,12 @@ function captureDock(state: InvestigationState, taskId: string, previous?: ChatD
       reference.task_id !== taskId || reference.result_id !== result.result_id : reference !== undefined) return null;
   const { investigation_id, conversation_id, parent_id, question, specialist_id, status, updated_at, revision } = detail;
   const referenced = new Set(result?.findings.flatMap((finding) => finding.citation_ids));
-  const answer = result ? { result, citations: detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
+  if (detail.advisory_audit?.status === 'completed') {
+    for (const { assessment } of detail.advisory_audit.reviews) {
+      if ('citation_id' in assessment) referenced.add(assessment.citation_id);
+    }
+  }
+  const answer = result ? { result, ...(detail.advisory_audit ? { advisoryAudit: detail.advisory_audit } : {}), citations: detail.citations.filter((citation) => referenced.has(citation.citation_id)) } : null;
   if (previous && ((revision === previous.turn.revision &&
       JSON.stringify(reportedUsage) !== JSON.stringify(previous.reportedUsage)) ||
       revision < previous.turn.revision || chat.chat_id !== previous.chat.chat_id ||

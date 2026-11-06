@@ -685,6 +685,11 @@ pub(super) fn load_for_task(
             RefusalFeedback::max_bytes_with_policy(&policy)?,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
+        if feedback.citation_correction.is_some()
+            && task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let ledger = saved_ledger(connection, id, entry.ledger_revision)?;
         let step: PendingInvestigationStep = read_body(
             connection,
@@ -994,6 +999,11 @@ pub(super) fn append_for_task(
     }
     .map_err(|_| InvestigationStoreError::Invalid)?;
     if response.action_hash != core_prov::content_hash(&encode(&canonical, MAX_ACTION_BYTES)?) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if (feedback.citation_correction.is_some() || feedback.prose_correction.is_some())
+        && request.specialist_id != "domain-analyst@20"
+    {
         return Err(InvestigationStoreError::Invalid);
     }
     let mut record = RefusalRecord {

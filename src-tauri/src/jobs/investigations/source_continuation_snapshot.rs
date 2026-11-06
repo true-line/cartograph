@@ -33,6 +33,7 @@ pub(crate) struct SourceContinuationSnapshot {
     capacity_refusal_count: u32,
     next_action_id: String,
     choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
+    correction: Option<agents::investigation::acquisition_choices::AuthenticatedCitationCorrection>,
 }
 impl SourceContinuationSnapshot {
     pub(crate) fn attach_acquisition(
@@ -40,7 +41,9 @@ impl SourceContinuationSnapshot {
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationError> {
         match &self.choices {
-            Some(choices) => input.with_acquisition_admission(choices.clone(), None),
+            Some(choices) => {
+                input.with_acquisition_correction(choices.clone(), None, self.correction.as_ref())
+            }
             None => Ok(input),
         }
     }
@@ -242,6 +245,9 @@ impl JobStore {
         };
         basis.validate_with_policy(input.candidate_ledger, policy)?;
         let result = SourceContinuationSnapshot {
+            correction: completion::next_prompt_snapshot::authenticated_citation_correction(
+                &tx, &task, &metadata,
+            )?,
             saved_revision: task.detail.summary.revision,
             request,
             base_ledger: core.ledger,

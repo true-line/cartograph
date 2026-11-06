@@ -88,7 +88,33 @@ pub struct CompletionLimits(CompletionLimitValues);
 /// Explicit configurable timeout ceiling; the default remains 180 seconds.
 pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
 
+/// Reserved only for the single semantic-audit invocation.
+pub const AUDIT_OUTPUT_TOKENS: u32 = 16384;
+
 impl CompletionLimits {
+    pub fn for_semantic_audit(self) -> Self {
+        Self(CompletionLimitValues {
+            max_output_tokens: AUDIT_OUTPUT_TOKENS,
+            ..self.0
+        })
+    }
+
+    /// Validate the stored audit wire limits, including historical analyst-sized calls.
+    pub fn from_audit_values(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
+        if matches!(values.max_output_tokens, 8192 | AUDIT_OUTPUT_TOKENS) {
+            let regular = Self::new(CompletionLimitValues {
+                max_output_tokens: 1,
+                ..values
+            })?;
+            Ok(Self(CompletionLimitValues {
+                max_output_tokens: values.max_output_tokens,
+                ..regular.0
+            }))
+        } else {
+            Self::new(values)
+        }
+    }
+
     pub fn new(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
         let ceiling = CompletionLimitValues::default();
         let pairs = [
@@ -739,18 +765,32 @@ fn encode(
     limit: u64,
     code: FailureCode,
 ) -> Result<Vec<u8>, BoundedCallError> {
+    encode_with_formatter(value, limit, code, serde_json::ser::CompactFormatter)
+}
+
+fn encode_with_formatter(
+    value: &impl Serialize,
+    limit: u64,
+    code: FailureCode,
+    formatter: impl serde_json::ser::Formatter,
+) -> Result<Vec<u8>, BoundedCallError> {
     let mut writer = LimitedWriter {
         bytes: Vec::new(),
         limit: usize::try_from(limit).map_err(|_| not_sent(FailureCode::InvalidLimits))?,
         exceeded: false,
     };
-    serde_json::to_writer(&mut writer, value).map_err(|_| {
-        not_sent(if writer.exceeded {
-            code
-        } else {
-            FailureCode::InvalidInput
-        })
-    })?;
+    value
+        .serialize(&mut serde_json::Serializer::with_formatter(
+            &mut writer,
+            formatter,
+        ))
+        .map_err(|_| {
+            not_sent(if writer.exceeded {
+                code
+            } else {
+                FailureCode::InvalidInput
+            })
+        })?;
     Ok(writer.bytes)
 }
 
@@ -1079,6 +1119,7 @@ fn preflight_response(bytes: &[u8]) -> Result<(), BoundedCallError> {
 pub(super) fn complete_ollama(
     client: &Client,
     profile: &ProviderProfile,
+    think: bool,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
@@ -1091,6 +1132,7 @@ pub(super) fn complete_ollama(
             &user,
             request.limits().0.max_output_tokens,
             response_schema(request.payload())?,
+            think,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
@@ -1182,7 +1224,9 @@ pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, Bound
     let usage = response.usage.map(|usage| ReportedUsage {
         input_tokens: usage.prompt_tokens,
         output_tokens: usage.completion_tokens,
-        cache_read_input_tokens: None,
+        cache_read_input_tokens: usage
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens),
         cache_creation_input_tokens: None,
     });
     Ok((
@@ -1196,23 +1240,24 @@ pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, Bound
 pub(super) fn complete_openai_compatible(
     client: &Client,
     profile: &ProviderProfile,
+    thinking: Option<bool>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
     check_request(profile, request, control)?;
-    if request.payload().response_schema.is_some() {
-        return Err(BoundedCallError::unsupported());
-    }
     let user = user_message(request)?;
-    let body = encode(
+    let body = encode_with_formatter(
         &request_wire::openai_compatible(
             &profile.requested_model,
             &request.payload().system,
             &user,
             request.limits().0.max_output_tokens,
+            response_schema(request.payload())?,
+            thinking,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
+        request_wire::OpenAiSchemaFormatter,
     )?;
     acquire(
         client.post(&profile.endpoint_id),

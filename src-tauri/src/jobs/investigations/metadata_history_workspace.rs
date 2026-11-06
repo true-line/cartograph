@@ -161,6 +161,9 @@ pub(crate) fn next_prompt_metadata_continuation_workspace() -> Option<(usize, us
             &INVESTIGATION_V2_POLICY,
         )?,
         64,
+        agents::investigation::acquisition_choices::AuthenticatedCitationCorrection::retained_workspace_bytes(
+            &INVESTIGATION_V2_POLICY,
+        )?,
         128 + 6 + 20, // ledger hash and next action ID
     ])?;
     let stable = sum(&[
@@ -173,6 +176,7 @@ pub(crate) fn next_prompt_metadata_continuation_workspace() -> Option<(usize, us
     ])?;
     let peak = stable.checked_add(
         load.max(core_load)
+            .max(next_prompt_correction_workspace()?)
             .max(history.checked_add(acquisition_choices_workspace()?)?),
     )?;
     Some((retained, peak))

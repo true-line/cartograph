@@ -1,4 +1,4 @@
-import { correctionCatalog, admissionCatalog, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from './completionFixtures';
+import { typedCorrectionCatalog, admissionCatalog, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionCatalog, completionChoices, inventoryObligation, sourceObligation, specWriterDetail, specWriterResult } from './completionFixtures';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
@@ -2044,7 +2044,7 @@ describe('remembered budget and specialist (AC-0563, #1636)', () => {
     const saved: unknown[] = [];
     let stored: unknown = null;
     mockIPC((command, args) => {
-      if (command === 'investigation_specialists') return correctionCatalog;
+      if (command === 'investigation_specialists') return typedCorrectionCatalog;
       if (command === 'get_investigation_choice') return stored;
       if (command === 'set_investigation_choice') {
         saved.push(args);
@@ -2055,7 +2055,7 @@ describe('remembered budget and specialist (AC-0563, #1636)', () => {
       throw new Error('Unexpected command.');
     });
     await useInvestigationStore.getState().loadCatalog();
-    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@19', limitProfile: 'investigation-v2' });
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@20', limitProfile: 'investigation-v2' });
     expect(saved).toEqual([]);
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
     await vi.waitFor(() => expect(saved).toEqual([{ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' }]));
@@ -2067,47 +2067,47 @@ describe('remembered budget and specialist (AC-0563, #1636)', () => {
 
   it('falls back to the first-run default when the stored pair is no longer offered', () => {
     const composer = useInvestigationStore.getState().composer;
-    expect(restoredComposer(composer, correctionCatalog, { specialist_id: 'domain-analyst@99', limit_profile: 'investigation-v1' }))
-      .toMatchObject({ specialistId: 'domain-analyst@19', limitProfile: 'investigation-v2' });
-    expect(restoredComposer(composer, correctionCatalog, null))
-      .toMatchObject({ specialistId: 'domain-analyst@19', limitProfile: 'investigation-v2' });
+    expect(restoredComposer(composer, typedCorrectionCatalog, { specialist_id: 'domain-analyst@99', limit_profile: 'investigation-v1' }))
+      .toMatchObject({ specialistId: 'domain-analyst@20', limitProfile: 'investigation-v2' });
+    expect(restoredComposer(composer, typedCorrectionCatalog, null))
+      .toMatchObject({ specialistId: 'domain-analyst@20', limitProfile: 'investigation-v2' });
   });
 
   it('never overrides a choice made in this session', () => {
     const chosen = { ...useInvestigationStore.getState().composer, specialistId: 'domain-analyst@7' as const, limitProfile: 'investigation-v1' };
-    expect(restoredComposer(chosen, correctionCatalog, { specialist_id: 'domain-analyst@3', limit_profile: 'investigation-v1' })).toBeNull();
+    expect(restoredComposer(chosen, typedCorrectionCatalog, { specialist_id: 'domain-analyst@3', limit_profile: 'investigation-v1' })).toBeNull();
   });
 });
 
 describe('desktop default specialist (AC-0559, #1618)', () => {
-  it('adopts schema-backed @19 under Expanded when the host advertises it', async () => {
-    mockIPC((command) => { if (command === 'investigation_specialists') return correctionCatalog; throw new Error('Unexpected command.'); });
+  it('adopts schema-backed @20 under Expanded when the host advertises it', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return typedCorrectionCatalog; throw new Error('Unexpected command.'); });
     await useInvestigationStore.getState().loadCatalog();
-    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@19', limitProfile: 'investigation-v2' });
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@20', limitProfile: 'investigation-v2' });
   });
 
-  it('keeps @3 and Standard when @19 or its policy is not advertised', async () => {
+  it('keeps @3 and Standard when @20 or its policy is not advertised', async () => {
     mockIPC((command) => { if (command === 'investigation_specialists') return admissionCatalog; throw new Error('Unexpected command.'); });
     await useInvestigationStore.getState().loadCatalog();
     expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
     expect(useInvestigationStore.getState().composer.limitProfile).toBeUndefined();
-    const noPolicy = { ...correctionCatalog, policies: correctionCatalog.policies!.map((policy) =>
-      ({ ...policy, specialist_ids: policy.specialist_ids.filter((id) => id !== 'domain-analyst@19') })) };
+    const noPolicy = { ...typedCorrectionCatalog, policies: typedCorrectionCatalog.policies!.map((policy) =>
+      ({ ...policy, specialist_ids: policy.specialist_ids.filter((id) => id !== 'domain-analyst@20') })) };
     expect(desktopDefaultComposer(useInvestigationStore.getState().composer, noPolicy)).toBeNull();
   });
 
   it('never overrides an explicit choice or a captured parent on a later catalog refresh', async () => {
-    mockIPC((command) => { if (command === 'investigation_specialists') return correctionCatalog; throw new Error('Unexpected command.'); });
+    mockIPC((command) => { if (command === 'investigation_specialists') return typedCorrectionCatalog; throw new Error('Unexpected command.'); });
     useInvestigationStore.getState().updateComposer({ limitProfile: 'investigation-v1' });
     await useInvestigationStore.getState().loadCatalog();
     expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
     const base = { ...useInvestigationStore.getState().composer, limitProfile: undefined };
-    expect(desktopDefaultComposer({ ...base, specialistId: 'domain-analyst@7' }, correctionCatalog)).toBeNull();
-    expect(desktopDefaultComposer({ ...base, parent: { conversation_id: 'c', parent_id: 'p' } }, correctionCatalog)).toBeNull();
+    expect(desktopDefaultComposer({ ...base, specialistId: 'domain-analyst@7' }, typedCorrectionCatalog)).toBeNull();
+    expect(desktopDefaultComposer({ ...base, parent: { conversation_id: 'c', parent_id: 'p' } }, typedCorrectionCatalog)).toBeNull();
   });
 
-  it('keeps an explicitly reselected @3 across a refresh that advertises @19', async () => {
-    mockIPC((command) => { if (command === 'investigation_specialists') return correctionCatalog; throw new Error('Unexpected command.'); });
+  it('keeps an explicitly reselected @3 across a refresh that advertises @20', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return typedCorrectionCatalog; throw new Error('Unexpected command.'); });
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@7' });
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3' });
     await useInvestigationStore.getState().loadCatalog();
@@ -2120,10 +2120,17 @@ describe('desktop default specialist (AC-0559, #1618)', () => {
 });
 
 describe('correction specialist compatibility (AC-0565)', () => {
-  it('preserves an explicitly restored historical analyst when @19 is available', () => {
+  it('preserves an explicitly restored historical analyst when @20 is available', () => {
     const composer = useInvestigationStore.getState().composer;
-    expect(restoredComposer(composer, correctionCatalog, {
+    expect(restoredComposer(composer, typedCorrectionCatalog, {
       specialist_id: 'domain-analyst@18', limit_profile: 'investigation-v2',
     })).toMatchObject({ specialistId: 'domain-analyst@18', limitProfile: 'investigation-v2' });
   });
+});
+
+// AC-0566: changing the first-run default never rewrites a saved historical role.
+it('preserves explicitly restored analyst19 with typed correction available', () => {
+  expect(restoredComposer(useInvestigationStore.getState().composer, typedCorrectionCatalog, {
+    specialist_id: 'domain-analyst@19', limit_profile: 'investigation-v2',
+  })).toMatchObject({ specialistId: 'domain-analyst@19', limitProfile: 'investigation-v2' });
 });

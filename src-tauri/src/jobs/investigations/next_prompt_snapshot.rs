@@ -11,6 +11,7 @@ pub(crate) struct NextPromptSnapshot {
     capacity: admission_journal::CapacityState,
     pending: Option<PendingInvestigationStep>,
     choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
+    correction: Option<agents::investigation::acquisition_choices::AuthenticatedCitationCorrection>,
 }
 
 impl NextPromptSnapshot {
@@ -57,9 +58,10 @@ impl NextPromptSnapshot {
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationStoreError> {
         match &self.choices {
-            Some(choices) => Ok(input.with_acquisition_admission(
+            Some(choices) => Ok(input.with_acquisition_correction(
                 choices.clone(),
                 self.capacity.action_feedback.clone(),
+                self.correction.as_ref(),
             )?),
             None => Ok(input),
         }
@@ -146,7 +148,9 @@ impl JobStore {
         } else {
             None
         };
+        let correction = authenticated_citation_correction(&tx, &task, &metadata)?;
         let snapshot = NextPromptSnapshot {
+            correction,
             request,
             choices,
             saved: CompletionPromptSnapshot {
@@ -170,3 +174,46 @@ impl JobStore {
 #[cfg(test)]
 #[path = "next_prompt_snapshot_tests.rs"]
 pub(in crate::jobs::investigations) mod tests;
+
+/// Load authenticated immutable refusal evidence before projecting new actions.
+/// The supplied metadata may include prospective attempts, but its refusal
+/// identity and complete feedback must still match the durable journal.
+pub(in crate::jobs::investigations) fn authenticated_citation_correction(
+    connection: &Connection,
+    task: &StoredTask,
+    metadata: &ProtectedCompletionMetadata,
+) -> Result<
+    Option<agents::investigation::acquisition_choices::AuthenticatedCitationCorrection>,
+    InvestigationStoreError,
+> {
+    let Some(correction) = metadata
+        .feedback
+        .as_ref()
+        .and_then(|feedback| feedback.citation_correction.as_ref())
+    else {
+        return Ok(None);
+    };
+    if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20 {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let entries = staged::load_for_task(connection, task)?;
+    let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
+    if metadata.last_refusal_id.as_deref() != Some(entry.record.refusal_id.as_str())
+        || metadata.refusal_count != entry.record.refusal_count
+        || metadata.feedback.as_ref() != Some(&entry.record.feedback)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let basis = admission_journal::AuthenticatedRefusalBasis::load(
+        connection,
+        task,
+        entry.record.refusal_count,
+        entry,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
+    Ok(Some(
+        basis
+            .binding()?
+            .authenticate_stored_citation_correction(correction)?,
+    ))
+}

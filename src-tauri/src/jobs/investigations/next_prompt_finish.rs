@@ -155,6 +155,16 @@ impl JobStore {
                         policy,
                     )
                 };
+                // A spent allowance keeps the original terminal replay path and accounting.
+                let decision = match decision {
+                    Ok(Err(FinishDecision::Refused { ref feedback, .. }))
+                        if feedback.prose_correction == Some(agents::investigation::staged_finish::ProseCorrection::ParaphraseWithoutQuotingSource)
+                            && task.detail.completion.as_ref().is_some_and(|c| c.refusal_count > 0) =>
+                    {
+                        Err(InvestigationError::SourceReplay)
+                    }
+                    other => other,
+                };
                 match decision {
                     Ok(Ok(result)) => {
                         validate_result_basis(
@@ -165,45 +175,67 @@ impl JobStore {
                             basis.as_ref(),
                         )?;
                         validate_inspection_result(&task, &result)?;
-                        accepted(
-                            &tx,
-                            &mut task,
-                            &result,
-                            &authenticated.core.ledger,
-                            &authenticated.core.step,
-                            basis.as_ref(),
-                        )?;
-                        let body = encode(&result, MAX_RESULT_BYTES)?;
-                        let result_hash = core_prov::content_hash(&body);
-                        one(tx.execute(
-                            "INSERT INTO investigation_results VALUES (?1,?2,?3)",
-                            params![id, body, result_hash],
-                        )?)?;
-                        super::chat::insert_result_reference(
-                            &tx,
-                            &id,
-                            &result.result_id,
-                            &result_hash,
-                        )?;
-                        persist_response(
-                            &tx,
-                            &mut task,
-                            input.response,
-                            authenticated.admitted_usage,
-                        )?;
-                        task.phase = Phase::Terminal;
-                        task.detail.summary.status = InvestigationStatus::Completed;
-                        task.detail.summary.has_result = true;
-                        bump(&tx, &mut task)?;
-                        event(
-                            &tx,
-                            &mut task,
-                            InvestigationEventKind::ResultPersisted,
-                            Some(&input.response.step_id),
-                            None,
-                            "Cited findings were persisted against the original input ledger.",
-                        )?;
-                        transitions::sync_terminal_job(&tx, &task)?;
+                        if task.semantic_audit.is_some()
+                            && result.completion.as_ref().is_some_and(|completion| {
+                                completion.outcome == CompletionOutcome::Supported
+                            })
+                        {
+                            // Structural admission is not semantic acceptance.
+                            // Save usage and candidate atomically without a result
+                            // row, chat reference, or Completed publication.
+                            persist_response(
+                                &tx,
+                                &mut task,
+                                input.response,
+                                authenticated.admitted_usage.clone(),
+                            )?;
+                            super::super::semantic_audit_state::hold_candidate(
+                                &mut task,
+                                result,
+                                &authenticated.admitted_usage,
+                            )?;
+                            bump(&tx, &mut task)?;
+                        } else {
+                            accepted(
+                                &tx,
+                                &mut task,
+                                &result,
+                                &authenticated.core.ledger,
+                                &authenticated.core.step,
+                                basis.as_ref(),
+                            )?;
+                            let body = encode(&result, MAX_RESULT_BYTES)?;
+                            let result_hash = core_prov::content_hash(&body);
+                            one(tx.execute(
+                                "INSERT INTO investigation_results VALUES (?1,?2,?3)",
+                                params![id, body, result_hash],
+                            )?)?;
+                            super::chat::insert_result_reference(
+                                &tx,
+                                &id,
+                                &result.result_id,
+                                &result_hash,
+                            )?;
+                            persist_response(
+                                &tx,
+                                &mut task,
+                                input.response,
+                                authenticated.admitted_usage,
+                            )?;
+                            task.phase = Phase::Terminal;
+                            task.detail.summary.status = InvestigationStatus::Completed;
+                            task.detail.summary.has_result = true;
+                            bump(&tx, &mut task)?;
+                            event(
+                                &tx,
+                                &mut task,
+                                InvestigationEventKind::ResultPersisted,
+                                Some(&input.response.step_id),
+                                None,
+                                "Cited findings were persisted against the original input ledger.",
+                            )?;
+                            transitions::sync_terminal_job(&tx, &task)?;
+                        }
                     }
                     Ok(Err(FinishDecision::Refused { .. })) => {
                         refused(
@@ -231,6 +263,25 @@ impl JobStore {
                             authenticated.admitted_usage,
                         )?;
                         invalid_citation(&tx, &mut task, &input.response.step_id)?;
+                    }
+                    Err(InvestigationError::SourceReplay)
+                        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV20 =>
+                    {
+                        persist_response(
+                            &tx,
+                            &mut task,
+                            input.response,
+                            authenticated.admitted_usage,
+                        )?;
+                        finish_refused(
+                            &tx,
+                            &mut task,
+                            &input.response.step_id,
+                            InvestigationStopReason::InvalidFinish(
+                                InvestigationError::SourceReplay,
+                            )
+                            .message(),
+                        )?;
                     }
                     Err(error) => return Err(error.into()),
                 }
@@ -288,13 +339,22 @@ fn invalid_citation(
 ) -> Result<(), InvestigationStoreError> {
     const MESSAGE: &str =
         "The model's answer cited evidence it had not acquired. No findings were saved.";
+    finish_refused(tx, task, step_id, MESSAGE)
+}
+
+fn finish_refused(
+    tx: &Transaction<'_>,
+    task: &mut StoredTask,
+    step_id: &str,
+    message: &'static str,
+) -> Result<(), InvestigationStoreError> {
     task.phase = Phase::Terminal;
     task.detail.summary.status = if task.detail.summary.cancel_requested {
         InvestigationStatus::Cancelled
     } else {
         InvestigationStatus::Failed
     };
-    task.detail.error = Some(MESSAGE.into());
+    task.detail.error = Some(message.into());
     bump(tx, task)?;
     event(
         tx,
@@ -302,14 +362,14 @@ fn invalid_citation(
         InvestigationEventKind::FinishRefused,
         Some(step_id),
         None,
-        MESSAGE,
+        message,
     )?;
     let kind = if task.detail.summary.cancel_requested {
         InvestigationEventKind::Cancelled
     } else {
         InvestigationEventKind::Failed
     };
-    event(tx, task, kind, Some(step_id), None, MESSAGE)?;
+    event(tx, task, kind, Some(step_id), None, message)?;
     refresh_observation(tx, task)?;
     transitions::sync_terminal_job(tx, task)
 }

@@ -32,6 +32,8 @@ mod records;
 mod response_schema;
 mod result_workspace;
 mod sealing;
+#[doc(hidden)]
+pub mod semantic_audit;
 mod specialists;
 #[doc(hidden)]
 pub mod staged_attempt;

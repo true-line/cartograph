@@ -139,7 +139,9 @@ fn feedback_capacity_mixed_envelope_preserves_exact_sorted_kind_and_id_output() 
         inventory_ids.sort();
         assert_eq!(inventory_ids.len(), 2);
         let expected = RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
+            citation_correction: None,
             unmet: vec![
                 FeedbackEntry {
                     kind: "inventory".into(),
@@ -216,7 +218,9 @@ fn feedback_capacity_upper_envelope_covers_every_reason_and_mixed_subset() {
             dominates(
                 serialized_sizes(
                     &RefusalFeedback {
+                        prose_correction: None,
                         schema_version: 1,
+                        citation_correction: None,
                         unmet,
                     },
                     &obligations,
@@ -245,7 +249,9 @@ fn feedback_capacity_upper_envelope_covers_maximum_saved_policy_sets() {
         for count in 1..=upper.feedback.unmet.len() {
             for reason in reasons() {
                 let actual = RefusalFeedback {
+                    prose_correction: None,
                     schema_version: 1,
+                    citation_correction: None,
                     unmet: upper.feedback.unmet[..count]
                         .iter()
                         .cloned()
@@ -259,7 +265,9 @@ fn feedback_capacity_upper_envelope_covers_maximum_saved_policy_sets() {
             }
         }
         let mixed = RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
+            citation_correction: None,
             unmet: upper
                 .feedback
                 .unmet
@@ -310,4 +318,46 @@ fn feedback_capacity_upper_envelope_rejects_noncanonical_or_foreign_inputs() {
         RefusalFeedback::max_bytes_with_policy(policy).unwrap(),
         9088
     );
+}
+
+// AC-0566: sizing only, through the production CompletionPayload serializer.
+// Admitted feedback is already bounded JSON: even hostile escaped values
+// cannot outgrow the synthetic envelope at subsequent embedding layers.
+#[test]
+fn typed_feedback_upper_envelope_dominates_escaped_payload_layers() {
+    for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+        let bound = RefusalFeedback::max_bytes_with_policy(policy).unwrap();
+        let upper = serde_json::to_value(
+            RefusalFeedback::sizing_typed_upper_envelope_with_policy(policy).unwrap(),
+        )
+        .unwrap();
+        for pattern in ["plain", "\"\\", "\u{1}\n\r\t", "é漢🦀"] {
+            let mut text = String::new();
+            while serde_json::to_vec(&text).unwrap().len() + pattern.len() * 6 + 2 <= bound {
+                text.push_str(pattern);
+            }
+            let actual = serde_json::json!({"mapping": text});
+            // Include the mapping frame in the existing cap.
+            if serde_json::to_vec(&actual).unwrap().len() > bound {
+                continue;
+            }
+            let payload = |feedback: serde_json::Value| CompletionPayload {
+                response_schema: None,
+                system: "fixed bounded role".into(),
+                prompt: serde_json::json!({
+                    "completion_metadata": {"feedback": feedback},
+                    "unchanged": "quoted \" context"
+                })
+                .to_string(),
+                spans: vec![],
+            };
+            let mut actual = serde_json::to_vec(&payload(actual)).unwrap();
+            let mut ceiling = serde_json::to_vec(&payload(upper.clone())).unwrap();
+            for _ in 0..4 {
+                assert!(actual.len() <= ceiling.len());
+                actual = serde_json::to_vec(&String::from_utf8(actual).unwrap()).unwrap();
+                ceiling = serde_json::to_vec(&String::from_utf8(ceiling).unwrap()).unwrap();
+            }
+        }
+    }
 }

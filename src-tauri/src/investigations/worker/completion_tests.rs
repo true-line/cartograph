@@ -215,35 +215,14 @@ impl CompletionFixture {
     ) -> Self {
         // Reuse real parser/receipt/context setup, then retire its unused legacy
         // task before creating the genuine request4 task under test.
-        let base = Fixture::with_prepared_contract(
+        let base = Fixture::with_padded_contract(
             provider,
             tempfile::tempdir().unwrap(),
             "Inspect selected source and recorded analysis limits.",
             SpecialistId::DomainAnalystV6,
             source.then_some(agents::TaskRangeRole::DefinitionInitializer),
             original,
-            None,
-            |_, state, _| {
-                if padding_nodes > 0 {
-                    let mut graph = state.graph.lock().unwrap();
-                    let expected = graph.read_snapshot().unwrap();
-                    let patch = core_graph::GraphPatch {
-                        upsert_nodes: (0..padding_nodes)
-                            .map(|i| core_graph::Node {
-                                id: format!("padding:{i}"),
-                                label: "Module".into(),
-                                props: json!({"name":format!("padding{i}")}),
-                            })
-                            .collect(),
-                        ..Default::default()
-                    };
-                    assert!(
-                        graph
-                            .apply_patch_if_snapshot_matches(&expected, &patch)
-                            .unwrap()
-                    );
-                }
-            },
+            padding_nodes,
         );
         let state = base.app.state::<AppState>();
         {
@@ -1544,6 +1523,43 @@ fn desktop_v7_unknown_anchor_refusal_continues_and_reopens() {
         assert_eq!(
             reopened.investigation_events(&fixture.id, 0).unwrap(),
             events
+        );
+    }
+}
+
+#[test]
+fn completion_fixture_releases_stores_after_closed_padding_setup() {
+    // AC-0266: preserve real worker behavior while releasing completed fixture stores.
+    for padding in [0, 1] {
+        let provider = Arc::new(Scripted::new(Mode::CompletionSupported));
+        let fixture = CompletionFixture::with_padding(
+            provider.as_ref(),
+            SpecialistId::DomainAnalystV7,
+            false,
+            true,
+            ORIGINAL,
+            padding,
+        );
+        let weak = Arc::downgrade(&fixture.base.app.state::<AppState>().sources);
+        fixture.run(provider);
+        assert_eq!(
+            fixture
+                .base
+                .app
+                .state::<AppState>()
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation(&fixture.id)
+                .unwrap()
+                .summary
+                .status,
+            InvestigationStatus::Completed
+        );
+        drop(fixture);
+        assert!(
+            weak.upgrade().is_none(),
+            "completed fixture retained stores"
         );
     }
 }

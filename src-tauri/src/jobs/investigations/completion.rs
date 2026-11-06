@@ -1365,7 +1365,8 @@ fn raw_next_prompt_invocations(
         [id], |row| Ok((row.get(0)?,row.get(1)?)))?;
     if !bounded
         || u32::try_from(count).ok().is_none_or(|n| n > limit)
-        || u32::try_from(count).ok() != Some(task.detail.usage.model_invocations)
+        || u32::try_from(count).ok()
+            != Some(super::semantic_audit_state::analyst_counters(task).model_invocations)
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -2113,6 +2114,10 @@ pub(super) fn refused(
         task.detail.error = Some(
             if task.detail.summary.cancel_requested {
                 "Cancellation won over a late unmet finish."
+            } else if matches!(entry.record.feedback.prose_correction, Some(agents::investigation::staged_finish::ProseCorrection::LimitationDeniesAcquiredEvidence(_))) {
+                "The corrected answer still denied acquired evidence. No findings were saved."
+            } else if entry.record.feedback.prose_correction.is_some() {
+                "The answer still contained incomplete or placeholder text after one correction. No findings were saved."
             } else {
                 "Two well-formed finishes left completion obligations unmet."
             }
@@ -2156,7 +2161,7 @@ pub(super) use settlement_projection::{
 pub(super) use next_prompt_snapshot::tests::rewrite as rewrite_test_body;
 #[cfg(test)]
 pub(super) use tests::next_prompt_initial_fixture::{
-    InitialFixture, initial_fixture, initial_fixture_with_request,
+    InitialFixture, initial_fixture, initial_fixture_with_configured_request,
 };
 
 #[cfg(test)]

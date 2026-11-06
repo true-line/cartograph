@@ -830,6 +830,24 @@ fn action_decode_stages_preserve_legacy_results_without_reflecting_content() {
     // Ordered predicates and nested stages retain the old public InvalidAction.
     let supported = json!({"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Title","statement":"Statement","citation_ids":["citation"],"limitations":["Limited."]}],"knowledge_completeness":"partial","limitations":["Limited."]}});
     assert!(decode(&supported.to_string()).is_ok());
+    // Exact content returned by the bounded OpenAI loopback transport fixture.
+    let duplicate_finish =
+        include_str!("../../../llm/tests/fixtures/duplicate-citation-finish.json").trim();
+    assert_eq!(
+        decode(duplicate_finish).unwrap_err().stage,
+        Stage::SemanticRule(ActionSemanticRule::FindingCitations)
+    );
+    assert_eq!(
+        ProgressiveInvestigationAction::decode_resolved(
+            duplicate_finish,
+            &context,
+            &hash,
+            &ledger,
+            policy
+        )
+        .unwrap_err(),
+        InvestigationError::InvalidAction
+    );
     for (pointer, value, stage) in [
         (
             "/action/limitations",

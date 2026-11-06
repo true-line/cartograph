@@ -46,8 +46,8 @@ impl FixtureApp {
             self.lifetime.set(Lifetime::SynchronousReturn);
         }
     }
-    // These concrete inline calls cannot return a handle or accept an arbitrary
-    // callback. All external handle access opts out permanently, including setup.
+    // These concrete inline calls do not expose App or State to callbacks.
+    // All external handle access opts out permanently, including setup.
     pub(super) fn run_legacy(
         &self,
         id: String,
@@ -78,16 +78,101 @@ impl FixtureApp {
         live: Arc<LiveTask>,
         started: Instant,
     ) {
+        self.run_completion_with_audit(
+            id, request, execution, provider, live, started, false, None,
+        );
+    }
+    // Test/development only: exercise the real entry and dispatch, never audit_probe.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_completion_with_audit(
+        &self,
+        id: String,
+        request: StagedObligationRequest,
+        execution: JobExecution,
+        provider: Arc<dyn LlmProvider>,
+        live: Arc<LiveTask>,
+        started: Instant,
+        dispatch_audit: bool,
+        auditor: Option<ConfiguredAuditor>,
+    ) {
         self.begin();
-        super::run_completion(
+        super::run_completion_with_clock(
             self.app.handle().clone(),
             id,
             request,
             execution,
             provider,
             live,
-            started,
+            RunClock::new(started),
+            None,
+            dispatch_audit,
+            auditor,
         );
+        self.end();
+    }
+    // AuditProbe receives execution/DTO references only. A captured handle must
+    // already have opted out through handle(); a panic never reaches end().
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_gated_completion_inner(
+        &self,
+        id: &str,
+        staged: &StagedObligationRequest,
+        execution: &JobExecution,
+        live: &Arc<LiveTask>,
+        provider: &dyn LlmProvider,
+        mut clock: RunClock,
+        audit_probe: Option<&AuditProbe<'_>>,
+        dispatch_audit: bool,
+    ) {
+        self.begin();
+        {
+            let app = self.app.handle();
+            let state = app.state::<AppState>();
+            let _cleanup = Cleanup {
+                state: &state,
+                id,
+                live,
+            };
+            let detail = read_detail(&state, id, execution).unwrap();
+            let request = FrozenContext::completion_acquisition_request(staged).unwrap();
+            let mut worker = Worker {
+                app,
+                state: &state,
+                id,
+                execution,
+                live,
+                detail,
+                clock: &mut clock,
+                task_limits: None,
+                request_timeout_ms: CompletionLimits::default().values().request_timeout_ms,
+                audit_probe,
+                dispatch_audit,
+                auditor: None,
+            };
+            let outcome = worker
+                .execute_inner(&request, Some(staged), provider)
+                .map_err(|failure| {
+                    failure.preparation_after_call(
+                        request.specialist_id,
+                        worker.detail.usage.model_invocations,
+                    )
+                });
+            if audit_probe.is_some() {
+                assert!(outcome.is_ok(), "audit probe worker failed: {outcome:?}");
+            }
+            if let Err(failure) = outcome
+                && let Some(reason) = failure.reason()
+            {
+                stop(
+                    app,
+                    &state,
+                    id,
+                    execution,
+                    reason,
+                    clock.active_milliseconds(),
+                );
+            }
+        }
         self.end();
     }
     // FrozenContext owns snapshots/DTOs/archive/static policy, never App/State.

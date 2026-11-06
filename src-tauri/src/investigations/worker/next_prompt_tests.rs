@@ -156,47 +156,34 @@ impl NextFixture {
     fn run_gated_inner_frozen_active(&self, provider: &dyn LlmProvider) {
         self.run_gated_inner_with_clock(provider, RunClock::frozen_active(Instant::now()));
     }
-    fn run_gated_inner_with_clock(&self, provider: &dyn LlmProvider, mut clock: RunClock) {
-        let app = self.base.base.app.handle();
-        let state = app.state::<AppState>();
-        let _cleanup = Cleanup {
-            state: &state,
-            id: &self.id,
-            live: &self.live,
-        };
-        let detail = read_detail(&state, &self.id, &self.execution).unwrap();
-        let request = FrozenContext::completion_acquisition_request(&self.request).unwrap();
-        let mut worker = Worker {
-            app,
-            state: &state,
-            id: &self.id,
-            execution: &self.execution,
-            live: &self.live,
-            detail,
-            clock: &mut clock,
-            task_limits: None,
-            request_timeout_ms: CompletionLimits::default().values().request_timeout_ms,
-        };
-        let outcome = worker
-            .execute_inner(&request, Some(&self.request), provider)
-            .map_err(|failure| {
-                failure.preparation_after_call(
-                    request.specialist_id,
-                    worker.detail.usage.model_invocations,
-                )
-            });
-        if let Err(failure) = outcome
-            && let Some(reason) = failure.reason()
-        {
-            stop(
-                app,
-                &state,
-                &self.id,
-                &self.execution,
-                reason,
-                clock.active_milliseconds(),
-            );
-        }
+    fn run_gated_inner_with_clock(&self, provider: &dyn LlmProvider, clock: RunClock) {
+        self.run_with_audit_probe(provider, clock, None);
+    }
+    fn run_with_audit_probe(
+        &self,
+        provider: &dyn LlmProvider,
+        clock: RunClock,
+        audit_probe: Option<&AuditProbe<'_>>,
+    ) {
+        self.run_with_audit_options(provider, clock, audit_probe, false);
+    }
+    fn run_with_audit_options(
+        &self,
+        provider: &dyn LlmProvider,
+        clock: RunClock,
+        audit_probe: Option<&AuditProbe<'_>>,
+        dispatch_audit: bool,
+    ) {
+        self.base.base.app.run_gated_completion_inner(
+            &self.id,
+            &self.request,
+            &self.execution,
+            &self.live,
+            provider,
+            clock,
+            audit_probe,
+            dispatch_audit,
+        );
     }
     fn run(&self, provider: Arc<dyn LlmProvider>) {
         self.base.base.app.run_completion(
@@ -220,7 +207,17 @@ enum SourceScenario {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatedFlow {
+    TypedCorrection,
+    ProseCorrection,
+    ExhaustedProseCorrection,
+    RepairReplay,
+    RepeatReplay,
+    RepeatDeniedEvidence,
+    SpentReplay,
+    ReceiptCorrection,
     OfferedTargets,
+    RetainedSourceFinish,
+    ParaphrasedSourceFinish,
     Repair,
     Repeat,
     Cancel,
@@ -248,6 +245,9 @@ struct NextProvider {
     exact_targets: bool,
     auditor_finish: bool,
     gated_flow: Option<GatedFlow>,
+    audit_verdict: Option<&'static str>,
+    audit_cancel: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    deadlines: std::sync::Mutex<Vec<Instant>>,
 }
 impl NextProvider {
     fn new(malformed: bool) -> Self {
@@ -274,6 +274,9 @@ impl NextProvider {
             exact_targets: false,
             auditor_finish: false,
             gated_flow: None,
+            audit_verdict: None,
+            audit_cancel: std::sync::Mutex::new(None),
+            deadlines: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -313,6 +316,71 @@ impl LlmProvider for NextProvider {
                 .push(request.payload().clone());
         }
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        self.deadlines.lock().unwrap().push(control.deadline);
+        if prompt["role"] == "candidate-evidence-auditor@3" {
+            let verdict = self.audit_verdict.expect("unexpected audit dispatch");
+            assert_eq!(self.observed.calls.fetch_add(1, Ordering::SeqCst), 4);
+            if matches!(verdict, "provider_failure" | "audit_timeout") {
+                return Err(BoundedCallError {
+                    code: if verdict == "audit_timeout" {
+                        llm::bounded::FailureCode::DeadlineExceeded
+                    } else {
+                        llm::bounded::FailureCode::Transport
+                    },
+                    outcome: llm::bounded::InvocationOutcome::Unknown,
+                });
+            }
+            if verdict == "cancelled_pass" {
+                self.audit_cancel.lock().unwrap().as_ref().unwrap()();
+                assert_eq!((control.check)(), CallDirective::Cancelled);
+            }
+            let verdict = if verdict == "cancelled_pass" {
+                "pass"
+            } else {
+                verdict
+            };
+
+            let mut reviews: Vec<_> = prompt["subjects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|subject| json!({"subject":subject["subject"],"assessment":{"verdict":verdict}}))
+                .collect();
+            if matches!(verdict, "duplicate_subject" | "foreign_citation") {
+                for review in &mut reviews {
+                    review["assessment"] = json!({"verdict":"pass"});
+                }
+                if verdict == "duplicate_subject" {
+                    assert!(
+                        reviews.len() >= 2,
+                        "fixture must exercise same-length duplication"
+                    );
+                    reviews[1]["subject"] = reviews[0]["subject"].clone();
+                } else {
+                    reviews[0]["assessment"] = json!({
+                        "verdict":"contradiction", "citation_id":"foreign-audit-witness-canary"
+                    });
+                }
+            }
+            let text = if verdict == "invalid" {
+                "not-json".into()
+            } else {
+                json!({"schema_version":1,"candidate_hash":prompt["candidate_hash"],
+                    "acquired_ledger_hash":prompt["acquired_ledger_hash"],
+                    "contract_hash":prompt["contract_hash"],"reviews":reviews})
+                .to_string()
+            };
+            return Ok(BoundedCompletion {
+                text,
+                requested_model: "scripted-model".into(),
+                response_model: Some("scripted-model-observed".into()),
+                provider_request_id: None,
+                usage: None,
+                request_bytes: 100,
+                response_bytes: 100,
+            });
+        }
+
         if let Some(schema) = &request.payload().response_schema
             && self.gated_flow.is_none()
             // @18 selects its schema from current acquisition choices; the
@@ -357,7 +425,73 @@ impl LlmProvider for NextProvider {
         let text = if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            if flow == GatedFlow::OfferedTargets {
+            if flow == GatedFlow::RepeatDeniedEvidence {
+                if call < 2 {
+                    prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"]
+                        .to_string()
+                } else {
+                    if call == 3 {
+                        assert_eq!(
+                            prompt["completion_metadata"]["feedback"]["prose_correction"],
+                            json!({"limitation_denies_acquired_evidence":{"evidence_ids":["evidence-1"]}})
+                        );
+                    }
+                    let mut response = typed_correction_tests::next_action(prompt, call, false);
+                    response["action"]["limitations"] =
+                        json!([format!("{} was not read.", request.payload().spans[0].path)]);
+                    response.to_string()
+                }
+            } else if matches!(
+                flow,
+                GatedFlow::RepairReplay | GatedFlow::RepeatReplay | GatedFlow::SpentReplay
+            ) {
+                typed_correction_tests::replay_action(prompt, call, flow).to_string()
+            } else if matches!(
+                flow,
+                GatedFlow::ProseCorrection | GatedFlow::ExhaustedProseCorrection
+            ) {
+                typed_correction_tests::prose_action(
+                    prompt,
+                    call,
+                    flow == GatedFlow::ExhaustedProseCorrection,
+                )
+                .to_string()
+            } else if matches!(
+                flow,
+                GatedFlow::TypedCorrection | GatedFlow::ReceiptCorrection
+            ) {
+                if call == 0 {
+                    // AC-0566: the real prepared worker request offers only
+                    // acquisition. This scripted provider deliberately ignores
+                    // grammar to keep testing host correction defense in depth.
+                    let schema: Value =
+                        serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
+                            .unwrap();
+                    let branches = schema["anyOf"].as_array().unwrap();
+                    assert_eq!(branches.len(), 1);
+                    assert!(
+                        branches[0]["enum"]
+                            .as_array()
+                            .is_some_and(|a| !a.is_empty())
+                    );
+                }
+                typed_correction_tests::next_action(
+                    prompt,
+                    call,
+                    flow == GatedFlow::ReceiptCorrection,
+                )
+                .to_string()
+            } else if matches!(
+                flow,
+                GatedFlow::RetainedSourceFinish | GatedFlow::ParaphrasedSourceFinish
+            ) {
+                typed_correction_tests::source_finish_action(
+                    &prompts,
+                    call,
+                    flow == GatedFlow::ParaphrasedSourceFinish,
+                )
+                .to_string()
+            } else if flow == GatedFlow::OfferedTargets {
                 let schema: Value =
                     serde_json::from_str(request.payload().response_schema.as_deref().unwrap())
                         .unwrap();
@@ -2452,4 +2586,43 @@ fn configured_desktop_worker_time_limits(cancel_finish: bool, elapsed_seconds: u
             .unwrap(),
         (detail, timeout)
     );
+}
+
+#[path = "typed_correction_tests.rs"]
+mod typed_correction_tests;
+
+#[path = "semantic_audit_start_tests.rs"]
+mod semantic_audit_start_tests;
+
+#[test]
+fn inline_completion_fixture_releases_stores_and_preserves_handle_escape() {
+    // AC-0287: lifecycle follows the real worker, including ordinary failure.
+    for escape in [false, true] {
+        let provider = NextProvider::new(false);
+        let fixture = NextFixture::new(&provider, SpecialistId::DomainAnalystV10);
+        let weak = Arc::downgrade(&fixture.base.base.app.state::<AppState>().sources);
+        let escaped = escape.then(|| fixture.base.base.app.handle().clone());
+        fixture.run_gated_inner(&provider);
+        assert_eq!(
+            fixture
+                .base
+                .base
+                .app
+                .state::<AppState>()
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation(&fixture.id)
+                .unwrap()
+                .summary
+                .status,
+            InvestigationStatus::Failed
+        );
+        assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 2);
+        drop(fixture);
+        assert_eq!(weak.upgrade().is_some(), escape);
+        if let Some(handle) = escaped {
+            assert!(handle.try_state::<AppState>().is_some());
+        }
+    }
 }

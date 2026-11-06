@@ -289,6 +289,7 @@ pub(super) fn project_validation(
         "Exact captured-file validation charge committed before source access.",
         created_at,
     )?;
+    super::semantic_audit_state::account_analyst_save(&mut next)?;
     let task_growth = encode(&next, MAX_RECORD_BYTES)?
         .len()
         .saturating_sub(before_bytes);

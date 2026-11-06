@@ -1,6 +1,6 @@
 import type { FindingReview, FindingReviewDecision } from '../findingReviews';
 import type {
-  InvestigationCitation, InvestigationCitationRead, InvestigationFinding, InvestigationResult,
+  AdvisoryAudit, InvestigationCitation, InvestigationCitationRead, InvestigationFinding, InvestigationResult,
 } from '../investigationTypes';
 import { TierBadge } from './TierBadge';
 import { InvestigationMessageMeta } from './InvestigationMessageMeta';
@@ -17,6 +17,7 @@ const READ_STATUS: Record<InvestigationCitationRead['status'], string> = {
 };
 
 export interface InvestigationFindingsProps {
+  advisoryAudit?: AdvisoryAudit;
   readOnly?: boolean;
   producerId?: string;
   sectionId?: string;
@@ -36,10 +37,25 @@ export interface InvestigationFindingsProps {
   onClose: () => void;
 }
 
-export function InvestigationFindings({ result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, readOnly = false, producerId, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
+export function InvestigationFindings({ advisoryAudit, result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, readOnly = false, producerId, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
   const selected = citations.find((citation) => citation.citation_id === citationId);
   return <section id={sectionId} className="investigation-section" aria-label="Investigation findings">
     <h3>Findings <TierBadge tier="InferredWeak" /></h3>
+    {result && advisoryAudit && <aside aria-label="Advisory model audit">
+      <h4>Advisory model audit</h4>
+      <p>Model feedback is advisory. It does not verify these findings or change their T3 / InferredWeak status.</p>
+      {advisoryAudit.status === 'not_completed'
+        ? <p>Audit not completed: {{ transport: 'transport failure', timeout: 'request timed out', length: 'output limit reached', invalid_output: 'invalid model output' }[advisoryAudit.reason]}.</p>
+        : <ul>{advisoryAudit.reviews.map(({ subject, assessment }, index) => <li key={index}>
+          {subject.kind === 'limitation' ? `Overall limitation ${subject.limitation_index + 1}`
+            : subject.kind === 'finding' ? `Finding ${subject.finding_index + 1}`
+              : `Finding ${subject.finding_index + 1}, limitation ${subject.limitation_index + 1}`}:
+          {' '}{{ pass: 'Pass', contradiction: 'Contradiction', unsupported_scope: 'Unsupported scope', answer_coverage: 'Answer coverage', indeterminate: 'Indeterminate' }[assessment.verdict]} (advisory)
+          {'citation_id' in assessment && <button type="button" className="secondary-button"
+            disabled={!citations.some((citation) => citation.citation_id === assessment.citation_id)}
+            onClick={() => onRead(assessment.citation_id)}>Inspect advisory citation {assessment.citation_id}</button>}
+        </li>)}</ul>}
+    </aside>}
     <p className="muted">Every specialist finding is T3 / InferredWeak, including statements about implemented behavior.
       Findings do not change confirmed facts, accepted proposals, context or exports.</p>
     {!result ? <p className="muted">No admitted result is available yet.</p> : <>

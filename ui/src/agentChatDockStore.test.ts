@@ -708,3 +708,26 @@ it('binds exact usage to settled revisions and retains it across refusal, focus 
     expect(h.dock.getState().docks.map((pane) => pane.chat.task_id)).toEqual(['b']);
   } finally { h.cleanup(); }
 });
+
+// AC-0566: saved chats retain authenticated advisory feedback and its witnesses.
+it('retains advisory audit witnesses and refuses changes to a completed snapshot', async () => {
+  const h = harness();
+  try {
+    await h.open('advisory');
+    const saved = completedState('advisory');
+    const advisoryAudit = { status: 'completed' as const, reviews: [{
+      subject: { kind: 'finding' as const, finding_index: 0 },
+      assessment: { verdict: 'contradiction' as const, citation_id: 'audit-only' },
+    }] };
+    h.coordinator.setState({ ...saved, detail: { ...saved.detail!, advisory_audit: advisoryAudit,
+      citations: [...saved.detail!.citations, { ...investigationCitations[0], citation_id: 'audit-only' }] } });
+    await tick();
+    const snapshot = h.dock.getState().docks[0];
+    expect(snapshot.answer?.advisoryAudit).toEqual(advisoryAudit);
+    expect(snapshot.answer?.citations.map((citation) => citation.citation_id)).toContain('audit-only');
+    h.coordinator.setState({ detail: { ...h.coordinator.getState().detail!,
+      advisory_audit: { status: 'not_completed', reason: 'invalid_output' } } });
+    await tick();
+    expect(h.dock.getState().docks[0]).toBe(snapshot);
+  } finally { h.leave(); }
+});

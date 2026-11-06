@@ -130,9 +130,30 @@ pub struct FeedbackEntry {
     pub reason: RefusalReason,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProseCorrection {
+    RewriteSchemaPlaceholdersAsPlainProse,
+    ParaphraseWithoutQuotingSource,
+    LimitationDeniesAcquiredEvidence(Box<ConflictingEvidence>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictingEvidence {
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefusalFeedback {
+    /// Fixed correction instruction; rejected authored text is never echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose_correction: Option<ProseCorrection>,
     pub schema_version: u32,
+    /// Version two stores exact citation guidance. Absent for every historical
+    /// version-one record, preserving its canonical bytes and fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_correction: Option<acquisition_choices::CitationCorrection>,
     pub unmet: Vec<FeedbackEntry>,
 }
 
@@ -147,6 +168,12 @@ pub struct RefusalFeedback {
 pub struct RefusalFeedbackSizeEnvelope {
     feedback: RefusalFeedback,
 }
+/// Conservative serializer-only envelope for version-two feedback and its
+/// projected correction. Never decodable as authoritative feedback.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct TypedFeedbackSizeEnvelope(String);
+
 /// Feedback entries are at most 137 encoded bytes (a 64-hex id, `inventory`,
 /// `acquired_not_supplied`); the frame is 31. These allowances keep v1's
 /// literal 2 KiB bound for its 12 obligations and scale with the saved policy.
@@ -162,6 +189,33 @@ fn feedback_bytes(policy: &InvestigationPolicy) -> Result<usize, InvestigationEr
 }
 
 impl RefusalFeedback {
+    /// Any admitted complete feedback has at most B encoded UTF-8 bytes.
+    /// B literal backslashes serialize to 2B+2 bytes; every further JSON-string
+    /// embedding at most doubles each already encoded byte. Thus this string
+    /// dominates every feedback at every enclosing escape layer, with other
+    /// fields unchanged, including escaped actions and multibyte identities.
+    /// It contains no source/secret recognizer text. This is deliberately a
+    /// sizing value, not a new feedback protocol or a larger admission limit.
+    pub fn sizing_typed_upper_envelope_with_policy(
+        policy: &InvestigationPolicy,
+    ) -> Result<TypedFeedbackSizeEnvelope, InvestigationError> {
+        Ok(TypedFeedbackSizeEnvelope(
+            "\\".repeat(feedback_bytes(policy)?),
+        ))
+    }
+
+    /// The fixed contract bounds every possible query/read correction; the
+    /// unchanged total admission ceiling is still the fallback upper bound.
+    pub(super) fn sizing_typed_contract_envelope(
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<TypedFeedbackSizeEnvelope, InvestigationError> {
+        Ok(TypedFeedbackSizeEnvelope("\\".repeat(
+            acquisition_choices::feedback_encoded_bound(contract, ledger, policy)?,
+        )))
+    }
+
     /// Derive a maximal feedback representation for this exact normalized
     /// obligation set and the immutable policy resolved from saved task limits.
     ///
@@ -182,7 +236,9 @@ impl RefusalFeedback {
             return Err(InvestigationError::InvalidInput);
         }
         let feedback = Self {
+            prose_correction: None,
             schema_version: 1,
+            citation_correction: None,
             unmet: obligations
                 .obligations
                 .iter()
@@ -215,8 +271,16 @@ impl RefusalFeedback {
         &self,
         policy: &InvestigationPolicy,
     ) -> Result<Vec<u8>, InvestigationError> {
-        if self.schema_version != 1
-            || self.unmet.is_empty()
+        if self.schema_version
+            != if self.prose_correction.is_some() {
+                3
+            } else if self.citation_correction.is_some() {
+                2
+            } else {
+                1
+            }
+            || (self.unmet.is_empty() && self.prose_correction.is_none())
+            || (self.prose_correction.is_some() && self.citation_correction.is_some())
             || self.unmet.len() > policy.max_completion_obligations()
             || self.unmet.iter().any(|entry| {
                 !crate::source_basis::hash(&entry.obligation_id)
@@ -229,6 +293,31 @@ impl RefusalFeedback {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        if let Some(ProseCorrection::LimitationDeniesAcquiredEvidence(conflict)) =
+            &self.prose_correction
+            && (conflict.evidence_ids.is_empty()
+                || conflict.evidence_ids.len() > policy.limits().evidence_items
+                || !conflict
+                    .evidence_ids
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                || !conflict.evidence_ids.iter().all(|id| {
+                    id.strip_prefix("evidence-").is_some_and(|digits| {
+                        !digits.starts_with('0')
+                            && digits.bytes().all(|b| b.is_ascii_digit())
+                            && digits
+                                .parse::<usize>()
+                                .is_ok_and(|n| n <= policy.limits().evidence_items)
+                    })
+                }))
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(correction) = &self.citation_correction {
+            correction.validate_feedback(&self.unmet, policy)?;
+        }
+        // The correction shares the old total ceiling with generic feedback.
+        // Component validity never implies that their combination fits.
         bounded_bytes(self, feedback_bytes(policy)?)
     }
     pub fn fingerprint(&self) -> Result<String, InvestigationError> {
@@ -448,8 +537,29 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         policy,
         consistency,
     );
+    let mut citation_correction = None;
+    let mut prose_correction = None;
     let admitted = match admitted {
-        Ok(result) => Some(input.admit_narrative(result, finish)?),
+        Ok(result) => match input.admit_narrative(result, finish) {
+            Err(InvestigationError::SourceReplay) => Err(InvestigationError::SourceReplay),
+            other => Ok(other?),
+        },
+        error => error,
+    };
+    let admitted = match admitted {
+        Ok(result) => Some(result),
+        Err(InvestigationError::SourceReplay)
+            if request.specialist_id == "domain-analyst@20" && consistency.is_some() =>
+        {
+            // Check all authored fields, including narrative, for sensitive output.
+            match input.validate_correction_prose(finish, model.as_deref()) {
+                Err(InvestigationError::SourceReplay) => (),
+                Err(error) => return Err(error),
+                Ok(()) => return Err(InvestigationError::SourceReplay),
+            }
+            prose_correction = Some(ProseCorrection::ParaphraseWithoutQuotingSource);
+            None
+        }
         Err(InvestigationError::InvalidCitation)
             if request.specialist_id == "domain-analyst@19"
                 && input.eligible_citation_correction(
@@ -460,6 +570,21 @@ pub(super) fn admit_finish_with_policy_using_consistency(
                     consistency,
                 )? =>
         {
+            None
+        }
+        Err(InvestigationError::InvalidCitation)
+            if request.specialist_id == "domain-analyst@20" =>
+        {
+            citation_correction = input.typed_citation_correction(
+                disclosure,
+                finish,
+                model.as_deref(),
+                policy,
+                consistency,
+            )?;
+            if citation_correction.is_none() {
+                return Err(InvestigationError::InvalidCitation);
+            }
             None
         }
         Err(error) => return Err(error),
@@ -474,7 +599,31 @@ pub(super) fn admit_finish_with_policy_using_consistency(
             })
         })
         .collect::<Vec<_>>();
-    if unmet.is_empty() {
+    if request.specialist_id == "domain-analyst@20"
+        && admitted.is_some()
+        && prose::has_placeholder(finish)
+    {
+        prose_correction = Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+    }
+    if request.specialist_id == "domain-analyst@20"
+        && consistency.is_some()
+        && prose_correction.is_none()
+        && let Some(result) = &admitted
+    {
+        let overall = result
+            .limitations
+            .iter()
+            .map(|text| (text.as_str(), &[][..]));
+        let local = result.findings.iter().flat_map(|finding| {
+            finding
+                .limitations
+                .iter()
+                .map(|text| (text.as_str(), finding.citation_ids.as_slice()))
+        });
+        let limitations = overall.chain(local);
+        prose_correction = limitation_check::correction(ledger, limitations);
+    }
+    if unmet.is_empty() && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
         Ok(FinishDecision::Accepted(AcceptedCandidate {
@@ -486,7 +635,15 @@ pub(super) fn admit_finish_with_policy_using_consistency(
         }))
     } else {
         let feedback = RefusalFeedback {
-            schema_version: 1,
+            schema_version: if prose_correction.is_some() {
+                3
+            } else if citation_correction.is_some() {
+                2
+            } else {
+                1
+            },
+            prose_correction,
+            citation_correction,
             unmet,
         };
         feedback.bytes_with_policy(policy)?;
@@ -775,3 +932,9 @@ fn nested_finish_failure_mapping_preserves_errors_without_claiming_reachability(
         assert_eq!(nested_finish_failure(semantic), semantic);
     }
 }
+
+#[path = "finish_prose.rs"]
+mod prose;
+
+#[path = "limitation_check.rs"]
+mod limitation_check;

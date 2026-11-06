@@ -393,7 +393,9 @@ fn admission_prompt_reserve_dominates_actual_simultaneous_feedback_in_both_modes
         fixture.metadata.refusal_count = 1;
         fixture.metadata.last_refusal_id = Some("e".repeat(64));
         fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
+            prose_correction: None,
             schema_version: 1,
+            citation_correction: None,
             unmet: fixture
                 .request
                 .obligations
@@ -982,7 +984,9 @@ fn admission_reserve_redaction_boundary_witnesses_preserve_the_wire_bound() {
             let item = &fixture.request.obligations.obligations[0];
             let (kind, id) = item.key();
             fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
+                prose_correction: None,
                 schema_version: 1,
+                citation_correction: None,
                 unmet: vec![staged_finish::FeedbackEntry {
                     obligation_id: id.into(),
                     kind: kind.into(),
@@ -1050,14 +1054,23 @@ fn analyst_schema_is_exact_for_role_mode_and_reserve() {
         let prepared = firewall
             .prepare_bounded(&provider, &action, &limits)
             .unwrap();
-        let unsupported = llm::openai_compatible::OpenAiCompatibleProvider::new(
+        let openai = llm::openai_compatible::OpenAiCompatibleProvider::new(
             "http://127.0.0.1:8000",
             "test",
             std::time::Duration::from_secs(1),
         )
         .unwrap();
+        let openai_prepared = firewall.prepare_bounded(&openai, &action, &limits).unwrap();
         assert_eq!(
-            firewall
+            openai_prepared.preview().egress.payload.response_schema,
+            action.payload.response_schema
+        );
+        let unsupported =
+            llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Haiku, "test")
+                .unwrap();
+        let preview_firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([action.tier]));
+        assert_eq!(
+            preview_firewall
                 .prepare_bounded(&unsupported, &action, &limits)
                 .unwrap_err()
                 .code,

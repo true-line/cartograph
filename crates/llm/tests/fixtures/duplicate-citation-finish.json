@@ -1,0 +1,1 @@
+{"schema_version":1,"outcome":"supported","action":{"type":"finish","findings":[{"claim_kind":"inferred_interpretation","title":"Title","statement":"Statement","citation_ids":["citation","citation"],"limitations":["Limited."]}],"knowledge_completeness":"partial","limitations":["Limited."]}}

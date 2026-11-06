@@ -241,8 +241,9 @@ fn timeline(
         [id],
         |row| row.get(0),
     )?;
+    super::semantic_audit_state::validate_invocation_journal(connection, task)?;
     if invocations > policy.limits().model_invocations
-        || invocations != task.detail.usage.model_invocations
+        || invocations != super::semantic_audit_state::analyst_counters(task).model_invocations
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -1013,7 +1014,7 @@ impl AuthenticatedCompletionBasis {
             .last_key_value()
             .ok_or(InvestigationStoreError::Missing)?;
         if witness.call.step_id != step
-            || ordinal != task.detail.usage.model_invocations
+            || ordinal != super::semantic_audit_state::analyst_counters(task).model_invocations
             || state.current_call.as_ref() != Some(&witness.call)
             || task.ledger_revision != Some(witness.core.ledger.revision)
             || task.ledger_hash.as_ref() != Some(&witness.call.input_ledger_hash)

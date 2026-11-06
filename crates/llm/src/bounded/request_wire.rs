@@ -2,6 +2,9 @@
 //! Field order preserves the compact JSON emitted by the former Value maps.
 use serde::Serialize;
 
+mod openai_schema;
+pub(super) use openai_schema::OpenAiSchemaFormatter;
+
 #[derive(Serialize)]
 struct Message<'a> {
     content: &'a str,
@@ -36,6 +39,7 @@ pub(super) fn ollama<'a>(
     user: &'a str,
     max_tokens: u32,
     schema: Option<&'a serde_json::value::RawValue>,
+    think: bool,
 ) -> impl Serialize + 'a {
     Ollama {
         format: schema.map_or(Format::Json("json"), Format::Schema),
@@ -55,7 +59,7 @@ pub(super) fn ollama<'a>(
         },
         stream: false,
         // Advisory only; full-body and time limits remain authoritative.
-        think: false,
+        think,
     }
 }
 
@@ -87,17 +91,33 @@ pub(super) fn anthropic<'a>(
 }
 
 #[derive(Serialize)]
-struct ResponseFormat {
+struct JsonSchema<'a> {
+    name: &'static str,
+    strict: bool,
+    schema: &'a serde_json::value::RawValue,
+}
+
+#[derive(Serialize)]
+struct ResponseFormat<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<JsonSchema<'a>>,
+}
+
+#[derive(Serialize)]
+struct ChatTemplate {
+    enable_thinking: bool,
 }
 
 #[derive(Serialize)]
 struct OpenAiCompatible<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplate>,
     max_tokens: u32,
     messages: [Message<'a>; 2],
     model: &'a str,
-    response_format: ResponseFormat,
+    response_format: ResponseFormat<'a>,
     stream: bool,
 }
 
@@ -106,8 +126,11 @@ pub(super) fn openai_compatible<'a>(
     system: &'a str,
     user: &'a str,
     max_tokens: u32,
+    schema: Option<&'a serde_json::value::RawValue>,
+    thinking: Option<bool>,
 ) -> impl Serialize + 'a {
     OpenAiCompatible {
+        chat_template_kwargs: thinking.map(|enable_thinking| ChatTemplate { enable_thinking }),
         max_tokens,
         messages: [
             Message {
@@ -121,7 +144,16 @@ pub(super) fn openai_compatible<'a>(
         ],
         model,
         response_format: ResponseFormat {
-            kind: "json_object",
+            kind: if schema.is_some() {
+                "json_schema"
+            } else {
+                "json_object"
+            },
+            json_schema: schema.map(|schema| JsonSchema {
+                name: "cartograph_bounded_response",
+                strict: true,
+                schema,
+            }),
         },
         stream: false,
     }

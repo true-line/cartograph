@@ -277,7 +277,9 @@ fn admission_sealing_mode_survives_receipt_roundtrip_at_every_finish_reserve_bou
                 fixture.metadata.refusal_count = 1;
                 fixture.metadata.last_refusal_id = Some("b".repeat(64));
                 fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
+                    prose_correction: None,
                     schema_version: 1,
+                    citation_correction: None,
                     unmet: vec![staged_finish::FeedbackEntry {
                         kind: "source".into(),
                         obligation_id: fixture.request.obligations.obligations[0].key().1.into(),
@@ -631,10 +633,10 @@ fn acquisition_finish_consistency_binds_identity_policy_and_stamp() {
             policy,
         );
         if role != SpecialistId::DomainAnalystV18 {
-            generic
-                .unwrap_or_else(|error| panic!("{role:?}: {error:?}"))
-                .ok()
-                .expect("historical typed finish");
+            assert!(
+                matches!(generic, Ok(Ok(_))),
+                "{role:?}: expected a historical typed finish"
+            );
             continue;
         }
         assert!(generic.is_err(), "unbound Some must remain rejected");
@@ -757,4 +759,117 @@ fn repeated_read_finish_stamp_preserves_legacy_bytes_and_rejects_other_reasons()
     assert!(stamp.validate().is_ok());
     stamp.finish_reason = Some(ActionRefusalReason::UnknownAnchor);
     assert!(stamp.validate().is_err());
+}
+
+// AC-0566: the sealed invocation binds correction authentication to its exact
+// choices/metadata. This is a pure witness test, not durable journal replay.
+#[test]
+fn citation_correction_authentication_uses_sealed_invocation_basis() {
+    let role = SpecialistId::DomainAnalystV20;
+    let policy = &INVESTIGATION_V2_POLICY;
+    let f = Fixture::new(role, 7);
+    let contract = InvestigationCompletionContract {
+        schema_version: 1,
+        request_hash: f.metadata.request_hash.clone(),
+        obligations_hash: f.metadata.obligations_hash.clone(),
+        obligations: f.request.obligations.clone(),
+    };
+    let Obligation::Source { target, .. } = &contract.obligations.obligations[0] else {
+        panic!("source fixture")
+    };
+    let ids = vec![target.target_id.clone()];
+    let choices = acquisition_choices::AcquisitionChoices::derive(
+        &contract,
+        &f.metadata,
+        "task:admission",
+        &f.ledger,
+        &[],
+        policy,
+    )
+    .unwrap();
+    let mode = CompletionCallMode::Choice;
+    let input = f
+        .build(role, &usage(mode), mode, 0, None)
+        .unwrap()
+        .with_acquisition_choices(std::sync::Arc::new(choices.clone()))
+        .unwrap();
+    use llm::LlmProvider;
+    let provider = OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let profile = provider.bounded_profile().unwrap();
+    let limits = CompletionLimits::default();
+    let reserve = input
+        .measure_v9_reserve_with_policy(&profile, &limits, "step:admission", policy)
+        .unwrap();
+    let actual = llm::bounded::measure_bounded_action(
+        &profile,
+        &input.action("step:admission".into()).unwrap(),
+        &limits,
+    )
+    .unwrap();
+    assert_dominates(reserve.choice, actual);
+    let disclosure = seal(&input);
+    let correction = choices
+        .citation_correction(&ids, &contract, &f.metadata, &f.ledger, policy)
+        .unwrap()
+        .unwrap();
+    let bound = choices
+        .bind_completion_disclosure(
+            "task:admission",
+            "step:admission",
+            &contract,
+            &f.metadata,
+            input.ledger(),
+            &disclosure,
+            None,
+            policy,
+        )
+        .unwrap();
+    let authenticated = bound
+        .authenticate_citation_correction(&correction, &ids)
+        .unwrap();
+    assert_eq!(
+        authenticated
+            .project(&choices, &contract, &f.metadata, &f.ledger, policy)
+            .unwrap(),
+        Some(correction.clone())
+    );
+    assert!(
+        bound
+            .authenticate_citation_correction(&correction, &[])
+            .is_err()
+    );
+    assert!(
+        bound
+            .authenticate_citation_correction(&correction, &["f".repeat(64)])
+            .is_err()
+    );
+    let mut wire = serde_json::to_value(&correction).unwrap();
+    wire["choices_hash"] = "e".repeat(64).into();
+    let forged = serde_json::from_value(wire).unwrap();
+    assert!(
+        bound
+            .authenticate_citation_correction(&forged, &ids)
+            .is_err()
+    );
+    let mut changed = f.metadata.clone();
+    changed.request_hash = "b".repeat(64);
+    assert!(
+        choices
+            .bind_completion_disclosure(
+                "task:admission",
+                "step:admission",
+                &contract,
+                &changed,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .is_err()
+    );
 }

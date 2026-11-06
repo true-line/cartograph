@@ -324,7 +324,7 @@ impl SavedCallBasis {
         step: &PendingInvestigationStep,
     ) -> Result<(), InvestigationStoreError> {
         let pre = &self.admission.consumed_budgets;
-        let current = &task.detail.usage;
+        let current = super::semantic_audit_state::analyst_counters(task);
         if current.model_invocations != self.invocation_ordinal
             || current.generated_token_reservations
                 != pre

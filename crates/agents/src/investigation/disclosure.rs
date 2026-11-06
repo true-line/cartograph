@@ -495,15 +495,18 @@ pub struct AcquisitionDisclosureConsistency<'a> {
     pub(super) step: &'a str,
     pub(super) ledger: &'a InvestigationInputLedger,
     pub(super) disclosure: &'a InvestigationDisclosure,
+    choices: &'a acquisition_choices::AcquisitionChoices,
+    contract: &'a InvestigationCompletionContract,
+    metadata: &'a staged_refusal::ProtectedCompletionMetadata,
 }
 impl acquisition_choices::AcquisitionChoices {
     #[allow(clippy::too_many_arguments)]
     pub fn bind_completion_disclosure<'a>(
-        &self,
+        &'a self,
         task: &'a str,
         step: &'a str,
-        contract: &InvestigationCompletionContract,
-        metadata: &staged_refusal::ProtectedCompletionMetadata,
+        contract: &'a InvestigationCompletionContract,
+        metadata: &'a staged_refusal::ProtectedCompletionMetadata,
         ledger: &'a InvestigationInputLedger,
         disclosure: &'a InvestigationDisclosure,
         feedback: Option<&ActionRefusalFeedback>,
@@ -540,10 +543,60 @@ impl acquisition_choices::AcquisitionChoices {
             ledger,
             disclosure,
             policy,
+            choices: self,
+            contract,
+            metadata,
         })
     }
 }
 impl AcquisitionDisclosureConsistency<'_> {
+    /// The host must already authenticate the refusal journal and response
+    /// binding. This reconstructs owned guidance from its original cutoff.
+    pub fn authenticate_stored_citation_correction(
+        &self,
+        correction: &acquisition_choices::CitationCorrection,
+    ) -> Result<acquisition_choices::AuthenticatedCitationCorrection, InvestigationError> {
+        correction.authenticate_stored(
+            self.choices,
+            self.contract,
+            self.metadata,
+            self.ledger,
+            self.policy,
+        )
+    }
+
+    pub(super) fn validate_stored_citation_correction(
+        &self,
+        correction: &acquisition_choices::CitationCorrection,
+    ) -> Result<(), InvestigationError> {
+        correction.validate_stored_mapping(
+            self.choices,
+            self.contract,
+            self.metadata,
+            self.ledger,
+            self.policy,
+        )
+    }
+
+    /// Authenticate correction bytes against this exact invocation's sealed
+    /// choices and metadata. The caller supplies the complete invalid-ID set
+    /// derived from the refused response; this witness supplies no response.
+    pub fn authenticate_citation_correction(
+        &self,
+        correction: &acquisition_choices::CitationCorrection,
+        invalid_ids: &[String],
+    ) -> Result<acquisition_choices::AuthenticatedCitationCorrection, InvestigationError> {
+        self.check(self.task, self.step, self.ledger, self.disclosure)?;
+        correction.authenticate(
+            invalid_ids,
+            self.choices,
+            self.contract,
+            self.metadata,
+            self.ledger,
+            self.policy,
+        )
+    }
+
     pub(super) fn check(
         &self,
         task: &str,

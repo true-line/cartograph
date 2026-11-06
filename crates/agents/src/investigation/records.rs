@@ -319,6 +319,8 @@ pub struct InvestigationUsage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvestigationDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory_audit: Option<super::semantic_audit::AdvisoryAudit>,
     #[serde(flatten)]
     pub summary: InvestigationSummary,
     pub context_owner: String,

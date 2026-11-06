@@ -239,7 +239,9 @@ fn obligation_acquisition_choices_follow_admission_and_attempts() {
     f.metadata.refusal_count = 1;
     f.metadata.last_refusal_id = Some("d".repeat(64));
     f.metadata.feedback = Some(staged_finish::RefusalFeedback {
+        prose_correction: None,
         schema_version: 1,
+        citation_correction: None,
         unmet: f
             .contract
             .obligations
@@ -791,3 +793,340 @@ fn unacquired_citation_feedback_rejects_foreign_mixed_and_attempted_targets() {
         None
     );
 }
+
+// #1650: correction maps a mistaken target ID to the exact current action,
+// never to an invented citation or an action from another acquisition phase.
+#[test]
+fn citation_correction_projects_exact_query_then_source_read() {
+    let f = Fixture::new();
+    let empty = f.empty();
+    let ids = vec![f.target.target_id.clone(), f.target.target_id.clone()];
+    for (ledger, expected_kind) in [(&empty, "query_context"), (&f.ledger, "read_evidence")] {
+        let choices = f.derive(ledger, &[]).unwrap();
+        let correction = choices
+            .citation_correction(&ids, &f.contract, &f.metadata, ledger, POLICY)
+            .unwrap()
+            .unwrap();
+        let value = serde_json::to_value(correction).unwrap();
+        assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(value["entries"][0]["target_id"], f.target.target_id);
+        assert_eq!(value["choices_hash"], choices.stamp_hash().unwrap());
+        assert_eq!(value["entries"][0]["action"]["type"], expected_kind);
+        let offered = choices
+            .entries()
+            .iter()
+            .find(|entry| value["entries"][0]["obligation_id"] == entry.obligation_id)
+            .unwrap();
+        assert_eq!(
+            value["entries"][0]["action"],
+            serde_json::to_value(&offered.action).unwrap()
+        );
+        let mut mixed = ids.clone();
+        mixed.push("foreign-target".into());
+        assert!(
+            choices
+                .citation_correction(&mixed, &f.contract, &f.metadata, ledger, POLICY)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn citation_correction_decoding_does_not_authorize_forged_mapping() {
+    let f = Fixture::new();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    let ids = vec![f.target.target_id.clone()];
+    let correction = choices
+        .citation_correction(&ids, &f.contract, &f.metadata, &ledger, POLICY)
+        .unwrap()
+        .unwrap();
+    correction
+        .validate(&ids, &choices, &f.contract, &f.metadata, &ledger, POLICY)
+        .unwrap();
+    for change in 0..4 {
+        let mut wire = serde_json::to_value(&correction).unwrap();
+        match change {
+            0 => wire["choices_hash"] = "a".repeat(64).into(),
+            1 => wire["entries"][0]["target_id"] = "b".repeat(64).into(),
+            2 => wire["entries"][0]["obligation_id"] = "c".repeat(64).into(),
+            _ => wire["entries"][0]["action"]["query"]["max_facts"] = 2.into(),
+        }
+        let forged: acquisition_choices::CitationCorrection = serde_json::from_value(wire).unwrap();
+        assert!(
+            forged
+                .validate(&ids, &choices, &f.contract, &f.metadata, &ledger, POLICY)
+                .is_err()
+        );
+    }
+    let mut wire = serde_json::to_value(&correction).unwrap();
+    wire["candidate_prose"] = "must not survive decoding".into();
+    assert!(serde_json::from_value::<acquisition_choices::CitationCorrection>(wire).is_err());
+}
+
+// AC-0566: decoded storage is authenticated at the original cutoff, while
+// continuation guidance follows current acquisition state, not stale actions.
+#[test]
+fn citation_correction_reopen_reprojects_and_drops_attempted_targets() {
+    let f = Fixture::new();
+    let empty = f.empty();
+    let original = f.derive(&empty, &[]).unwrap();
+    let ids = vec![f.target.target_id.clone()];
+    let saved = original
+        .citation_correction(&ids, &f.contract, &f.metadata, &empty, POLICY)
+        .unwrap()
+        .unwrap();
+    let wire = serde_json::to_vec(&saved).unwrap();
+    let reopened: acquisition_choices::CitationCorrection = serde_json::from_slice(&wire).unwrap();
+    let authenticated = reopened
+        .authenticate(&ids, &original, &f.contract, &f.metadata, &empty, POLICY)
+        .unwrap();
+    let current = f.derive(&f.ledger, &[]).unwrap();
+    let projected = authenticated
+        .project(&current, &f.contract, &f.metadata, &f.ledger, POLICY)
+        .unwrap()
+        .unwrap();
+    let value = serde_json::to_value(&projected).unwrap();
+    assert_eq!(value["entries"][0]["action"]["type"], "read_evidence");
+    assert_eq!(value["choices_hash"], current.stamp_hash().unwrap());
+    assert_ne!(projected, reopened);
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), wire);
+    // Historical guidance is never valid at the new cutoff.
+    assert!(
+        reopened
+            .authenticate(&ids, &current, &f.contract, &f.metadata, &f.ledger, POLICY)
+            .is_err()
+    );
+    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+        reason: UnavailableReason::PinnedTargetAbsent,
+    });
+    let mut metadata = f.metadata.clone();
+    metadata
+        .completed_attempt_ids
+        .push(attempt.attempt_id.clone());
+    let attempted = f.derive(&f.ledger, &[attempt]).unwrap();
+    assert!(
+        authenticated
+            .project(&attempted, &f.contract, &metadata, &f.ledger, POLICY)
+            .unwrap()
+            .is_none()
+    );
+    let mut foreign = f.contract.clone();
+    foreign.request_hash = "b".repeat(64);
+    assert!(
+        authenticated
+            .project(&current, &foreign, &f.metadata, &f.ledger, POLICY)
+            .is_err()
+    );
+}
+
+// AC-0566: additive wire field preserves legacy bytes and shares, rather than
+// increases, the existing feedback limit. This does not activate stored v2.
+#[test]
+fn citation_correction_feedback_version_and_shared_budget() {
+    use staged_finish::{FeedbackEntry, RefusalFeedback, RefusalReason};
+    let f = Fixture::new();
+    let empty = f.empty();
+    let choices = f.derive(&empty, &[]).unwrap();
+    let correction = choices
+        .citation_correction(
+            std::slice::from_ref(&f.target.target_id),
+            &f.contract,
+            &f.metadata,
+            &empty,
+            POLICY,
+        )
+        .unwrap()
+        .unwrap();
+    let id = correction.entries[0].obligation_id.clone();
+    let legacy = serde_json::json!({
+        "schema_version": 1,
+        "unmet": [{"obligation_id": id, "kind": "source", "reason": "not_attempted"}]
+    });
+    let mut feedback: RefusalFeedback = serde_json::from_value(legacy.clone()).unwrap();
+    let old_bytes = feedback.bytes_with_policy(POLICY).unwrap();
+    assert_eq!(serde_json::to_value(&feedback).unwrap(), legacy);
+    feedback.citation_correction = Some(correction);
+    assert!(feedback.bytes_with_policy(POLICY).is_err());
+    feedback.schema_version = 2;
+    let bytes = feedback.bytes_with_policy(POLICY).unwrap();
+    let reopened: RefusalFeedback = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reopened, feedback);
+    assert_eq!(reopened.bytes_with_policy(POLICY).unwrap(), bytes);
+    feedback.unmet[0].reason = RefusalReason::Unavailable;
+    assert!(feedback.bytes_with_policy(POLICY).is_err());
+    feedback.unmet[0].reason = RefusalReason::NotAttempted;
+    // Fill the original v1 ceiling with valid generic entries; adding the
+    // separately bounded mapping must fail the complete feedback admission.
+    for i in 0..11 {
+        feedback.unmet.push(FeedbackEntry {
+            obligation_id: format!("{i:064x}"),
+            kind: "inventory".into(),
+            reason: RefusalReason::AcquiredNotSupplied,
+        });
+    }
+    feedback
+        .unmet
+        .sort_by(|a, b| (&a.kind, &a.obligation_id).cmp(&(&b.kind, &b.obligation_id)));
+    assert!(
+        feedback
+            .citation_correction
+            .as_ref()
+            .unwrap()
+            .bytes_with_policy(&INVESTIGATION_V1_POLICY)
+            .is_ok()
+    );
+    assert!(matches!(
+        feedback.bytes_with_policy(&INVESTIGATION_V1_POLICY),
+        Err(InvestigationError::LimitExceeded)
+    ));
+    feedback.citation_correction = None;
+    feedback.schema_version = 1;
+    assert!(feedback.bytes_with_policy(&INVESTIGATION_V1_POLICY).is_ok());
+    feedback.unmet.retain(|entry| entry.kind == "source");
+    assert_eq!(feedback.bytes_with_policy(POLICY).unwrap(), old_bytes);
+}
+
+#[test]
+fn citation_correction_analyst20_prompt_qualifies_finish_without_rewriting_19() {
+    let old = SpecialistId::DomainAnalystV19;
+    assert_eq!(
+        old.prompt()
+            .matches("Completion obligations are mandatory. Return only")
+            .count(),
+        1
+    );
+    let new = SpecialistId::DomainAnalystV20;
+    assert_eq!(
+        old.definition().unwrap().prompt_fingerprint,
+        "6bce88ebb8d1a745172d4faf79294d29f919f140775b5d0794ac35c8e7c9214f"
+    );
+    assert!(
+        old.prompt()
+            .contains("Completion obligations are mandatory. Return only")
+    );
+    assert!(
+        !new.prompt()
+            .contains("Completion obligations are mandatory. Return only")
+    );
+    assert!(
+        new.prompt()
+            .contains("When finishing, return only the versioned finish wrapper")
+    );
+    assert!(
+        new.prompt()
+            .contains("These IDs are source targets, not citations")
+    );
+    let paraphrase =
+        "Describe cited source in your own words; never copy a complete source excerpt";
+    assert!(new.prompt().contains(paraphrase));
+    assert!(!old.prompt().contains(paraphrase));
+    assert!(!SpecialistId::DomainAnalystV18.prompt().contains(paraphrase));
+    // AC-0566: the qualifier hunk changes only @20 guidance; reconstruct the
+    // retained run-8 prompt to independently pin the exact preceding contract.
+    let qualifiers = "Qualifiers in findings and limitations must be established by the cited spans. Describe a value by how the cited code obtains it (for example, a passed-in argument), not by a state the spans do not establish (for example, active, current, authenticated or validated). Do not turn an unknown state into an asserted qualifier. ";
+    assert_eq!(new.prompt().matches(qualifiers).count(), 1);
+    assert!(!old.prompt().contains(qualifiers));
+    let preceding_prompt = new.prompt().replace(qualifiers, "");
+    let preceding_fingerprint = crate::source_basis::domain_hash(
+        b"cartograph:specialist-definition:v1\0",
+        &super::bounded_bytes(&(new, 20u32, &preceding_prompt), 16 * 1024).unwrap(),
+    );
+    assert_eq!(
+        preceding_fingerprint,
+        "9f038354ab93e5734fe38d4481dfa07ec23e08aa6f93a17b0f76db23883887db"
+    );
+    assert_ne!(
+        new.definition().unwrap().prompt_fingerprint,
+        preceding_fingerprint
+    );
+    assert_eq!(new.definition().unwrap().version, 20);
+    assert_ne!(
+        new.definition().unwrap().prompt_fingerprint,
+        old.definition().unwrap().prompt_fingerprint
+    );
+}
+
+// AC-0566: receipt handles map to offered targets, never to citations.
+#[test]
+fn citation_correction_receipt_handles_preserve_historical_and_foreign_boundaries() {
+    let f = Fixture::new();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    let receipt = f.target.receipt_id.clone();
+    let classify = |ids: &[String]| {
+        choices.unacquired_citation_handles(ids, &f.contract, &f.metadata, &ledger, POLICY)
+    };
+    assert_eq!(
+        classify(std::slice::from_ref(&receipt)).unwrap(),
+        Some(vec![f.target.target_id.clone()])
+    );
+    assert_eq!(
+        classify(&[receipt.clone(), "foreign".into()]).unwrap(),
+        None
+    );
+    assert_eq!(
+        choices
+            .unacquired_citation_targets(&[receipt], &f.contract, &f.metadata, &ledger, POLICY)
+            .unwrap(),
+        None
+    );
+}
+
+// AC-0566: every target sharing a receipt must remain pending and offered.
+#[test]
+fn citation_correction_shared_receipt_maps_all_targets_and_rejects_attempted_member() {
+    let mut f = Fixture::new();
+    let mut second = f.target.clone();
+    second.fact = TaskFactKey::Node {
+        id: "second-source-fact".into(),
+    };
+    second.target_id = second.content_id().unwrap();
+    f.contract
+        .obligations
+        .obligations
+        .push(identified(Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(second.clone()),
+        }));
+    f.contract.obligations = f
+        .contract
+        .obligations
+        .normalized_with_policy(POLICY)
+        .unwrap();
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    let mut expected = vec![f.target.target_id.clone(), second.target_id];
+    expected.sort();
+    let ids = vec![f.target.receipt_id.clone()];
+    assert_eq!(
+        choices
+            .unacquired_citation_handles(&ids, &f.contract, &f.metadata, &ledger, POLICY)
+            .unwrap(),
+        Some(expected)
+    );
+    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+        reason: UnavailableReason::PinnedTargetAbsent,
+    });
+    let mut metadata = f.metadata.clone();
+    metadata
+        .completed_attempt_ids
+        .push(attempt.attempt_id.clone());
+    let attempted = f.derive(&f.ledger, &[attempt]).unwrap();
+    assert_eq!(
+        attempted
+            .unacquired_citation_handles(&ids, &f.contract, &metadata, &f.ledger, POLICY)
+            .unwrap(),
+        None
+    );
+}
+
+#[path = "acquisition_eligibility_tests.rs"]
+mod eligibility;

@@ -245,6 +245,7 @@ impl JobStore {
             )?,
         ];
         task = projected;
+        super::semantic_audit_state::account_analyst_save(&mut task)?;
         let validation = source_validation::validation_storage_bound(&tx, &task, &reservation)?;
         let envelope = if task.detail.summary.specialist_id.uses_acquisition_choices() {
             source_settlement::envelope_with_authenticated_core(
