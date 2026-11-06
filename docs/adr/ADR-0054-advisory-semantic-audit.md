@@ -1,6 +1,6 @@
 # ADR-0054 — Advisory semantic audit
 
-- **Status:** Proposed; implementation direction authorized by the owner on 2026-11-05 through Claude. ADR acceptance remains pending.
+- **Status:** Accepted (2026-11-06, decision [#1678](https://github.com/true-line/cartograph/discussions/1678), answered by the owner's delegate on the owner's behalf). Implementation direction was authorized on 2026-11-05 and shipped in #1651.
 - **Date:** 2026-11-05
 - **Deciders:** Cartograph owner; Claude and Codex implementation/review
 - **Related:** #1654, #1651, #598, #1611; AC-0566
