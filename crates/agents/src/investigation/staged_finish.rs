@@ -637,6 +637,13 @@ pub(super) fn admit_finish_with_locator(
             }
             prose_correction = Some(if request.specialist_id == "domain-analyst@22" {
                 match locator(input, finish, model.as_deref()) {
+                    Ok(Some(location))
+                        if matches!(location.start.field, replay_location::ProseField::Model)
+                            || matches!(location.end.field, replay_location::ProseField::Model) =>
+                    {
+                        // Provider metadata cannot be rewritten by the analyst.
+                        ProseCorrection::ParaphraseWithoutQuotingSource
+                    }
                     Ok(Some(location)) => ProseCorrection::ParaphraseReplayAt(location),
                     // A diagnostic discrepancy must not consume the correction
                     // turn. The finish remains refused by the guard above.

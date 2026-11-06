@@ -1395,7 +1395,50 @@ fn analyst22_locator_discrepancy_preserves_refusal_and_real_errors() {
         input.validate_correction_prose(&finish, None),
         Err(InvestigationError::SourceReplay)
     );
+    // Provider metadata is not authored by the analyst and cannot be rewritten.
+    let mut metadata_finish = finish.clone();
+    let InvestigationAction::Finish { limitations, .. } = &mut metadata_finish.action else {
+        unreachable!();
+    };
+    let observed_model = limitations.remove(0);
+    limitations.push("Additional evidence is required.".into());
+    assert_eq!(
+        input.validate_correction_prose(&metadata_finish, None),
+        Ok(())
+    );
+    let location = input
+        .correction_replay_location(&metadata_finish, Some(&observed_model))
+        .unwrap()
+        .unwrap();
+    assert_eq!(location.start.field, replay_location::ProseField::Model);
+    let metadata_result = staged_finish::admit_finish_with_policy_using_consistency(
+        &f.request,
+        "source-preview-task",
+        "current:1",
+        &input,
+        &disclosure,
+        &metadata_finish,
+        &[],
+        Some(observed_model),
+        "2026-11-06T00:00:00Z".into(),
+        policy,
+        Some(&bound),
+    );
+    assert!(matches!(
+        metadata_result,
+        Err(InvestigationError::SourceReplay)
+    ));
+    use replay_location::{ProseField, ProsePosition, ReplayLocation};
+    let position = |field| ProsePosition { field, sentence: 1 };
     for diagnostic in [
+        Ok(Some(ReplayLocation {
+            start: position(ProseField::Model),
+            end: position(ProseField::Narrative),
+        })),
+        Ok(Some(ReplayLocation {
+            start: position(ProseField::Limitation { limitation: 0 }),
+            end: position(ProseField::Model),
+        })),
         Ok(None),
         Err(InvestigationError::SourceReplay),
         Err(InvestigationError::SensitiveOutput),
@@ -1423,7 +1466,7 @@ fn analyst22_locator_discrepancy_preserves_refusal_and_real_errors() {
         );
         assert!(called.get());
         match expected {
-            Ok(None) | Err(InvestigationError::SourceReplay) => {
+            Ok(_) | Err(InvestigationError::SourceReplay) => {
                 let staged_finish::FinishDecision::Refused { feedback, .. } = result.unwrap()
                 else {
                     panic!("diagnostic discrepancy must preserve a recoverable refusal");
@@ -1436,7 +1479,6 @@ fn analyst22_locator_discrepancy_preserves_refusal_and_real_errors() {
                 assert!(!feedback.unmet.is_empty());
             }
             Err(error) => assert!(matches!(result, Err(actual) if actual == error)),
-            Ok(Some(_)) => unreachable!(),
         }
     }
 }
