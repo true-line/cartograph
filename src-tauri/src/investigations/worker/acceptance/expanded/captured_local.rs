@@ -83,14 +83,41 @@ pub(in super::super) fn with_auditor_output<T>(
 // Same explicit loopback constructor as the existing manual local acceptance.
 // Construction performs no model call; the frozen descriptor remains authority.
 fn configured_provider(
+    protocol: &str,
+    thinking: &str,
     url: &str,
     model: &str,
     expected: &InvestigationProvider,
 ) -> Result<std::sync::Arc<dyn llm::LlmProvider>, String> {
-    let provider = std::sync::Arc::new(
-        llm::OllamaProvider::new(url, model, std::time::Duration::from_secs(180))
-            .map_err(|error| error.to_string())?,
-    );
+    let enabled = match thinking {
+        "enabled" => true,
+        "disabled" => false,
+        _ => return Err("Explicit local thinking must be enabled or disabled.".into()),
+    };
+    let timeout = std::time::Duration::from_secs(180);
+    let provider: std::sync::Arc<dyn llm::LlmProvider> = match protocol {
+        "ollama" => {
+            let provider =
+                llm::OllamaProvider::new(url, model, timeout).map_err(|error| error.to_string())?;
+            // Ollama's constructor explicitly disables thinking; only enabled has a setter.
+            std::sync::Arc::new(if enabled {
+                provider.with_thinking_enabled()
+            } else {
+                provider
+            })
+        }
+        "openai" => {
+            let provider =
+                llm::openai_compatible::OpenAiCompatibleProvider::new(url, model, timeout)
+                    .map_err(|error| error.to_string())?;
+            std::sync::Arc::new(if enabled {
+                provider.with_thinking_enabled()
+            } else {
+                provider.with_thinking_disabled()
+            })
+        }
+        _ => return Err("Explicit local protocol must be ollama or openai.".into()),
+    };
     if crate::investigations::runtime::descriptor(
         provider.as_ref(),
         InvestigationProviderMode::Local,
@@ -115,8 +142,14 @@ fn captured_local_explicit_configuration_matches_only_frozen_descriptor() {
         available: true,
         unavailable_reason: None,
     };
-    let provider =
-        configured_provider("http://127.0.0.1:1/", "explicit-control-model", &expected).unwrap();
+    let provider = configured_provider(
+        "ollama",
+        "disabled",
+        "http://127.0.0.1:1/",
+        "explicit-control-model",
+        &expected,
+    )
+    .unwrap();
     assert_eq!(
         crate::investigations::runtime::descriptor(
             provider.as_ref(),
@@ -125,18 +158,137 @@ fn captured_local_explicit_configuration_matches_only_frozen_descriptor() {
         .unwrap(),
         expected
     );
-    assert!(configured_provider("http://127.0.0.1:1/", "different-model", &expected).is_err());
     assert!(
-        configured_provider("http://127.0.0.1:2/", "explicit-control-model", &expected).is_err()
+        configured_provider(
+            "ollama",
+            "disabled",
+            "http://127.0.0.1:1/",
+            "different-model",
+            &expected
+        )
+        .is_err()
     );
     assert!(
         configured_provider(
+            "ollama",
+            "disabled",
+            "http://127.0.0.1:2/",
+            "explicit-control-model",
+            &expected
+        )
+        .is_err()
+    );
+    assert!(
+        configured_provider(
+            "ollama",
+            "disabled",
             "http://example.invalid/",
             "explicit-control-model",
             &expected
         )
         .is_err()
     );
+}
+// Constructor-only checks: no server or inference; protocol cannot override identity.
+#[test]
+fn captured_local_openai_configuration_binds_protocol_model_and_endpoint() {
+    let expected = InvestigationProvider {
+        mode: InvestigationProviderMode::Local,
+        provider_id: "openai-compatible:explicit-control-model:thinking-disabled".into(),
+        model: "explicit-control-model".into(),
+        endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
+        deployment: None,
+        protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+        available: true,
+        unavailable_reason: None,
+    };
+    assert!(
+        configured_provider(
+            "openai",
+            "disabled",
+            "http://127.0.0.1:1/",
+            "explicit-control-model",
+            &expected
+        )
+        .is_ok()
+    );
+    for (protocol, url, model) in [
+        ("ollama", "http://127.0.0.1:1/", "explicit-control-model"),
+        ("", "http://127.0.0.1:1/", "explicit-control-model"),
+        ("unknown", "http://127.0.0.1:1/", "explicit-control-model"),
+        ("openai", "http://127.0.0.1:2/", "explicit-control-model"),
+        ("openai", "http://127.0.0.1:1/", "different-model"),
+        (
+            "openai",
+            "http://example.invalid/",
+            "explicit-control-model",
+        ),
+    ] {
+        assert!(configured_provider(protocol, "disabled", url, model, &expected).is_err());
+    }
+    let ollama = InvestigationProvider {
+        provider_id: "ollama:explicit-control-model".into(),
+        endpoint: "http://127.0.0.1:1/api/chat".into(),
+        ..expected
+    };
+    assert!(
+        configured_provider(
+            "openai",
+            "disabled",
+            "http://127.0.0.1:1/",
+            "explicit-control-model",
+            &ollama
+        )
+        .is_err()
+    );
+}
+// Neither a missing/unknown mode nor the opposite mode can match frozen identity.
+#[test]
+fn captured_local_thinking_is_explicit_and_bound() {
+    for (protocol, thinking, opposite, provider_id, endpoint) in [
+        (
+            "openai",
+            "disabled",
+            "enabled",
+            "openai-compatible:explicit-control-model:thinking-disabled",
+            "http://127.0.0.1:1/v1/chat/completions",
+        ),
+        (
+            "openai",
+            "enabled",
+            "disabled",
+            "openai-compatible:explicit-control-model:thinking-enabled",
+            "http://127.0.0.1:1/v1/chat/completions",
+        ),
+        (
+            "ollama",
+            "enabled",
+            "disabled",
+            "ollama:explicit-control-model:thinking-enabled",
+            "http://127.0.0.1:1/api/chat",
+        ),
+    ] {
+        let expected = InvestigationProvider {
+            mode: InvestigationProviderMode::Local,
+            provider_id: provider_id.into(),
+            model: "explicit-control-model".into(),
+            endpoint: endpoint.into(),
+            deployment: None,
+            protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+            available: true,
+            unavailable_reason: None,
+        };
+        for mode in [thinking, opposite, "", "unknown"] {
+            let result = configured_provider(
+                protocol,
+                mode,
+                "http://127.0.0.1:1/",
+                "explicit-control-model",
+                &expected,
+            );
+            assert_eq!(result.is_ok(), mode == thinking);
+        }
+    }
 }
 // AC-0429: explicit manual adapter; ordinary tests do not execute a real provider.
 #[test]
@@ -160,6 +312,8 @@ fn vendure_captured_local_analyst() {
     let provider = if execute {
         Some(
             configured_provider(
+                &super::super::required("CARTOGRAPH_ACCEPTANCE_PROTOCOL"),
+                &super::super::required("CARTOGRAPH_ACCEPTANCE_THINKING"),
                 &super::super::required("CARTOGRAPH_ACCEPTANCE_URL"),
                 &super::super::required("CARTOGRAPH_ACCEPTANCE_MODEL"),
                 &expected.provider,
@@ -299,6 +453,8 @@ fn run_captured_auditor(action: &str) {
                         "execute" => {
                             captured_auditor::stage(&parent, &artifacts, &expected, false)?;
                             let provider = configured_provider(
+                                &super::super::required("CARTOGRAPH_ACCEPTANCE_PROTOCOL"),
+                                &super::super::required("CARTOGRAPH_ACCEPTANCE_THINKING"),
                                 &super::super::required("CARTOGRAPH_ACCEPTANCE_URL"),
                                 &super::super::required("CARTOGRAPH_ACCEPTANCE_MODEL"),
                                 &expected.provider,
