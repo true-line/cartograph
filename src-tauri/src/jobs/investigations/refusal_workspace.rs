@@ -124,6 +124,10 @@ pub(in crate::jobs::investigations) fn capacity_exclusion_workspace() -> Option<
         context_hub::logical::set::<String>(calls)?,
         calls.checked_mul(64)?,
         row,
-        acquisition.max(identity),
+        acquisition.max(identity).max(sum(&[
+            proposal_workspace()?,
+            json_bytes(MAX_ACTION_BYTES)?, // normalized query Value and encoding
+            MAX_ACTION_BYTES,
+        ])?),
     ])
 }

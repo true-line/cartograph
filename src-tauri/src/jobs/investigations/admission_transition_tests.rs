@@ -661,32 +661,26 @@ fn capacity_exclusion_durable_replay_preserves_analyst20_and_excludes_for_21() {
         assert_eq!(f.ledger, original_ledger);
         let cutoff = f.basis.invocation_ordinal;
         assert!(
-            admission_journal::capacity_exclusion_candidates(
-                &tx,
-                &f.task,
-                cutoff,
-                f.ledger.revision
-            )
-            .unwrap()
-            .is_empty()
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff, &f.ledger)
+                .unwrap()
+                .is_empty()
         );
         assert!(
             admission_journal::capacity_exclusion_candidates(
                 &tx,
                 &f.task,
                 cutoff + 1,
-                f.ledger.revision + 1
+                &InvestigationInputLedger {
+                    revision: f.ledger.revision + 1,
+                    ..f.ledger.clone()
+                }
             )
             .unwrap()
             .is_empty()
         );
-        let excluded = admission_journal::capacity_exclusion_candidates(
-            &tx,
-            &f.task,
-            cutoff + 1,
-            f.ledger.revision,
-        )
-        .unwrap();
+        let excluded =
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff + 1, &f.ledger)
+                .unwrap();
         assert_eq!(
             excluded.contains(&response.action_hash),
             role == "domain-analyst@21"

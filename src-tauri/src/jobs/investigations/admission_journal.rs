@@ -655,7 +655,7 @@ pub(super) fn capacity_exclusion_candidates(
     connection: &Connection,
     task: &StoredTask,
     cutoff: u32,
-    revision: u64,
+    ledger: &InvestigationInputLedger,
 ) -> Result<std::collections::BTreeSet<String>, InvestigationStoreError> {
     require_transaction(connection)?;
     let mut hashes = std::collections::BTreeSet::new();
@@ -682,13 +682,53 @@ pub(super) fn capacity_exclusion_candidates(
             return Err(InvestigationStoreError::Invalid);
         }
         if entry.call.invocation_ordinal < cutoff
-            && entry.call.input_revision == revision
+            && entry.call.input_revision == ledger.revision
             && entry.reason == RefusalReason::Capacity(CapacityRefusalReason::PromptCapacity)
         {
-            hashes.insert(entry.response.action_hash);
+            hashes.insert(capacity_exclusion_hash(
+                &entry,
+                ledger,
+                task.detail.summary.specialist_id,
+                &policy,
+            )?);
         }
     }
     Ok(hashes)
+}
+
+/// Resolve replay references against this exact revision and the refused call's
+/// request authority. The journal retains its original wire hash unchanged.
+fn capacity_exclusion_hash(
+    entry: &Entry,
+    ledger: &InvestigationInputLedger,
+    role: SpecialistId,
+    policy: &InvestigationPolicy,
+) -> Result<String, InvestigationStoreError> {
+    if entry.proposal["type"] != "replay_query" {
+        return Ok(entry.response.action_hash.clone());
+    }
+    let action = validate_proposal(
+        &entry.proposal,
+        &entry.response,
+        ledger,
+        &entry.call,
+        role,
+        policy,
+    )?;
+    let CompletionInvestigationAction::Read(QualifiedInvestigationAction::QueryContext {
+        context_id,
+        query,
+    }) = action
+    else {
+        return Err(InvestigationStoreError::Invalid);
+    };
+    Ok(
+        agents::investigation::acquisition_choices::AcquisitionAction::QueryContext {
+            context_id,
+            query,
+        }
+        .capacity_refusal_hash()?,
+    )
 }
 
 fn read_entries(

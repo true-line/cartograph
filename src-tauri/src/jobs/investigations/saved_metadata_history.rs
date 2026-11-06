@@ -317,7 +317,7 @@ impl<'a> SavedMetadataHistory<'a> {
                 self.connection,
                 self.task,
                 cutoff,
-                ledger.revision,
+                ledger,
             )?;
             return Ok(choices.excluding_capacity_refusals(
                 &self
