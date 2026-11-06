@@ -18,7 +18,7 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Most bytes of decoded text kept from one request or response body.
@@ -205,18 +205,31 @@ impl Recorder {
     }
 }
 
-static RECORDER: LazyLock<Arc<Recorder>> = LazyLock::new(|| Recorder::new(QUEUE_BYTES));
+// llm unit tests select a per-thread recorder instead (test_support).
+#[cfg(not(test))]
+static RECORDER: std::sync::LazyLock<Arc<Recorder>> =
+    std::sync::LazyLock::new(|| Recorder::new(QUEUE_BYTES));
 static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
 
 /// Install (or replace) the process sink. Pass `None` to stop recording.
 /// The sink runs on a dedicated thread, never on a provider call.
+/// In `llm` unit tests this is the calling thread's capture recorder, the
+/// same one `enabled` and `begin` use.
 pub fn set_sink(sink: Option<Arc<Sink>>) {
-    RECORDER.set_sink(sink);
+    #[cfg(test)]
+    let recorder = test_support::recorder();
+    #[cfg(not(test))]
+    let recorder = &RECORDER;
+    recorder.set_sink(sink);
 }
 
 /// Wait up to `timeout` for queued entries to reach the sink.
 pub fn flush(timeout: Duration) -> bool {
-    RECORDER.flush(timeout)
+    #[cfg(test)]
+    let recorder = test_support::recorder();
+    #[cfg(not(test))]
+    let recorder = &RECORDER;
+    recorder.flush(timeout)
 }
 
 /// Whether a sink is installed, so callers can skip recording entirely.
@@ -427,6 +440,29 @@ mod tests {
             error: None,
             dropped_before: 0,
         }
+    }
+
+    // #1674 review: the public sink API selects the same test recorder that
+    // `enabled` and `begin` use, so an installed sink receives entries.
+    #[test]
+    fn public_sink_api_uses_the_selected_test_recorder() {
+        std::thread::spawn(|| {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&seen);
+            set_sink(Some(Arc::new(move |exchange: &ModelExchange| {
+                sink.lock().unwrap().push(exchange.call);
+            })));
+            assert!(enabled());
+            let call = begin("test", "synthetic", &[b"public-sink"]);
+            let id = call.call;
+            call.finish(None, None);
+            assert!(flush(Duration::from_secs(10)));
+            assert_eq!(*seen.lock().unwrap(), vec![id, id]);
+            set_sink(None);
+            assert!(!enabled());
+        })
+        .join()
+        .unwrap();
     }
 
     // AC-0560 (#1674): capture pools remain independent under parallel
