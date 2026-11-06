@@ -634,7 +634,7 @@ exists, not that its AC or delivery gate has passed.
   independently parsed run-10 model response and typed offered action both match
   the saved `d92e64c2…` hash through the production response and menu hash paths.
 
-## Decision #1692 diagnostic foundations (AC-0287)
+## Decision #1692 authenticated diagnostics (AC-0287)
 
 - `agents::replay_location_spans_fields_without_echoing_text`: intentional
   cross-field detection produces typed endpoints without copied text.
@@ -650,8 +650,25 @@ exists, not that its AC or delivery gate has passed.
   and `agents::obligation_acquisition_choices_reject_foreign_state_and_suppress_empty_discovery`:
   separate capacity IDs, unrelated blocked targets, legacy menu equality and reset.
 
-Runtime integration, durable witness authentication and host workspace charging
-remain prerequisites. No provider execution or release acceptance is claimed.
+No provider execution or release acceptance is claimed by these fixtures.
+Admission checks locator correctness against transient text; reopen checks only
+integrity and invocation binding after that text has been discarded.
 
 - `agents::analyst20_and_21_foundations_preserve_menu_and_feedback_wire`: independent
   historical menu field layout and exact shared replay-feedback JSON bytes.
+
+- Native `analyst22_replay_locator_is_bound_and_survives_reopen_without_text`:
+  schema-4 typed location, no copied metadata in feedback, independent response
+  witness and authenticated durable reopen.
+- Native `analyst21_durable_capacity_refusals_exclude_two_distinct_reads`:
+  @21/@22 exact-hash exclusions across reopen; @22 feedback separates excluded
+  obligations without marking attempts/acquisition, and ledger advancement clears
+  the private exclusion projection while preserving historical charges.
+- Native `analyst22_latest_refusal_requires_independent_feedback_witness`:
+  missing/changed digest in both journal and response, rewritten feedback with
+  recomputed identities, and missing independent response all fail closed even
+  before another invocation exists; transactional mutations are rolled back.
+
+- `agents::analyst22_locator_discrepancy_preserves_refusal_and_real_errors`:
+  injected missing/disagreeing diagnostics retain a refused finish with generic
+  schema-3 feedback; sensitive-output, size and invalid-action failures propagate.

@@ -105,6 +105,7 @@ impl Fixture {
     }
     fn response(base: &acquisition::Fixture, original: &Value) -> InvestigationResponseMeta {
         InvestigationResponseMeta {
+            finish_feedback_witness: None,
             step_id: format!("step-{}", base.f.task.detail.usage.model_invocations + 1),
             response_hash: core_prov::content_hash(b"complete finish response"),
             action_hash: core_prov::content_hash(&encode(original, MAX_ACTION_BYTES).unwrap()),

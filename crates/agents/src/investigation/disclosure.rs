@@ -782,3 +782,10 @@ impl AcquisitionDisclosureConsistency<'_> {
         )
     }
 }
+
+impl AcquisitionDisclosureConsistency<'_> {
+    /// Host-authenticated exact-cutoff projection; generic blocked IDs are excluded.
+    pub(super) fn capacity_excluded_obligations(&self) -> &[String] {
+        self.choices.capacity_excluded_obligations()
+    }
+}

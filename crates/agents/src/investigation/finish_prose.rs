@@ -173,4 +173,37 @@ mod tests {
         let old: RefusalFeedback = serde_json::from_str(historical).unwrap();
         assert_eq!(old.bytes().unwrap(), historical.as_bytes());
     }
+    #[test]
+    fn analyst22_replay_feedback_requires_new_schema_and_valid_location() {
+        // AC-0287 / #1695: schema alone grants neither admission nor a retry.
+        let location = ReplayLocation {
+            start: ProsePosition {
+                field: ProseField::FindingStatement { finding: 0 },
+                sentence: 1,
+            },
+            end: ProsePosition {
+                field: ProseField::Limitation { limitation: 0 },
+                sentence: 2,
+            },
+        };
+        let mut feedback = RefusalFeedback {
+            schema_version: 4,
+            prose_correction: Some(ProseCorrection::ParaphraseReplayAt(location)),
+            citation_correction: None,
+            unmet: vec![],
+        };
+        let bytes = feedback.bytes().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<RefusalFeedback>(&bytes).unwrap(),
+            feedback
+        );
+        feedback.schema_version = 3;
+        assert!(feedback.bytes().is_err());
+        feedback.schema_version = 4;
+        if let Some(ProseCorrection::ParaphraseReplayAt(location)) = &mut feedback.prose_correction
+        {
+            location.start.sentence = 0;
+        }
+        assert!(feedback.bytes().is_err());
+    }
 }

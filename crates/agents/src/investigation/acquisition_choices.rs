@@ -275,6 +275,8 @@ pub struct AcquisitionChoices {
     all_acquired: bool,
     #[serde(skip)]
     capacity_exhausted: bool,
+    #[serde(skip)]
+    capacity_excluded_obligations: Vec<String>,
 }
 impl AcquisitionChoices {
     /// Canonical typed JSON under the existing action cap; not a publication
@@ -362,6 +364,26 @@ impl AcquisitionChoices {
         projected.capacity_exhausted =
             !refused.is_empty() && projected.entries.is_empty() && !projected.all_acquired;
         Ok(projected)
+    }
+
+    /// @22-only retained projection; the host must charge its additional owners.
+    pub fn with_capacity_obligations(
+        &self,
+        contract: &InvestigationCompletionContract,
+        metadata: &ProtectedCompletionMetadata,
+        ledger: &InvestigationInputLedger,
+        refused: &BTreeSet<String>,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        let (mut projected, ids) = self.excluding_capacity_refusals_with_obligations(
+            contract, metadata, ledger, refused, policy,
+        )?;
+        projected.capacity_excluded_obligations = ids;
+        Ok(projected)
+    }
+
+    pub fn capacity_excluded_obligations(&self) -> &[String] {
+        &self.capacity_excluded_obligations
     }
 
     pub fn capacity_exhausted(&self) -> bool {
@@ -669,6 +691,7 @@ impl AcquisitionChoices {
     pub fn private_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
         context_hub::logical::sum(&[
             std::mem::size_of::<Vec<bool>>(),
+            Self::capacity_obligations_workspace_bytes(policy)?,
             std::mem::size_of::<bool>().checked_mul(2)?,
             context_hub::logical::slots::<bool>(policy.max_completion_obligations())?,
         ])
@@ -678,6 +701,13 @@ impl AcquisitionChoices {
         std::mem::size_of::<Vec<bool>>()
             + 2 * std::mem::size_of::<bool>()
             + std::mem::size_of_val(self.pending.as_slice())
+            + std::mem::size_of_val(&self.capacity_excluded_obligations)
+            + std::mem::size_of_val(self.capacity_excluded_obligations.as_slice())
+            + self
+                .capacity_excluded_obligations
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
     }
     /// Candidate construction before prefix truncation. Borrowed contract,
     /// ledgers, attempt witnesses and their validation remain caller-owned.
@@ -781,6 +811,7 @@ impl AcquisitionChoices {
             pending,
             all_acquired: false,
             capacity_exhausted: false,
+            capacity_excluded_obligations: Vec::new(),
         };
         // Validate every obligation, including the eventual deferred suffix.
         let byte_limit = MAX_ACTION_BYTES.min(policy.envelope_bytes());

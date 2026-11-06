@@ -1254,6 +1254,7 @@ impl AuthenticatedRefusalBasis {
         if response != expected.response {
             return Err(InvestigationStoreError::Invalid);
         }
+        staged::validate_finish_feedback_witness(task, &response, &expected.record)?;
         drop(response); // both row reloads precede the shared replay epoch
 
         let history = completion::SavedMetadataHistory::load(connection, task)?;

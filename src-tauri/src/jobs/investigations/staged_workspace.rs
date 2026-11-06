@@ -74,6 +74,11 @@ pub(crate) fn next_prompt_staged_workspace() -> Option<(usize, usize)> {
         slots::<Vec<u8>>(2)?,
         256,
         slots::<String>(2)?,
+        // Independent feedback witness framing follows record identity; charge
+        // both encodings conservatively rather than relying on phase reuse.
+        MAX_MANIFEST_BYTES.checked_mul(2)?,
+        slots::<Vec<u8>>(2)?,
+        64,
     ])?;
     // Ordered invocation DTOs coexist with the new step-ID vector during
     // collection; the response sweep keeps the prior response during next read.

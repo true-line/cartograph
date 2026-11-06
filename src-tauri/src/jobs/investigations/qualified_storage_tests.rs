@@ -178,6 +178,7 @@ fn fixture(targeted: bool) -> Fixture {
             current.summary.revision,
             InvestigationTransition::ActionAdmitted {
                 response: InvestigationResponseMeta {
+                    finish_feedback_witness: None,
                     step_id: step.step_id.clone(),
                     response_hash: content_hash(b"fixture response"),
                     action_hash: content_hash(&serde_json::to_vec(&finish).unwrap()),

@@ -962,6 +962,7 @@ fn gated_feedback_sealing_runs_real_invocation_consent_and_reopen() {
                 "query":{"scope":{"type":"all"},"kind":null,"labels":[],
                     "max_facts":12,"max_bytes":16384,"cursor":null}});
             let response = InvestigationResponseMeta {
+                finish_feedback_witness: None,
                 step_id,
                 response_hash: core_prov::content_hash(b"bounded scripted response"),
                 action_hash: core_prov::content_hash(&encode(&original, MAX_ACTION_BYTES).unwrap()),

@@ -925,10 +925,13 @@ pub(super) fn append_for_task(
     request: &StagedObligationRequest,
     input: &InvestigationInput,
     finish: &StagedFinish,
-    response: InvestigationResponseMeta,
+    mut response: InvestigationResponseMeta,
     attempts: &[AttemptRecord],
     basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
 ) -> Result<RefusalDisposition, InvestigationStoreError> {
+    if response.finish_feedback_witness.is_some() {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let id = task.detail.summary.investigation_id.clone();
     let policy = super::completion::saved_policy(task)?;
     transitions::check_identity(task, execution)?;
@@ -1008,6 +1011,7 @@ pub(super) fn append_for_task(
     if (feedback.citation_correction.is_some() || feedback.prose_correction.is_some())
         && request.specialist_id != "domain-analyst@20"
         && request.specialist_id != "domain-analyst@21"
+        && request.specialist_id != "domain-analyst@22"
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -1032,6 +1036,15 @@ pub(super) fn append_for_task(
         feedback,
     };
     record.refusal_id = record.content_id()?;
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_finish_feedback_witness()
+    {
+        response.finish_feedback_witness = Some(record.feedback_witness_hash()?);
+    }
+
     let disposition = if let Some(basis) = basis {
         if record.finish_hash != finish.fingerprint()? || record.outcome != finish.outcome {
             return Err(InvestigationStoreError::Invalid);
@@ -1159,3 +1172,37 @@ pub(super) fn journal_bytes(
 #[cfg(test)]
 #[path = "staged_tests.rs"]
 mod tests;
+
+/// The response must be independently loaded, not copied from the refusal row.
+pub(super) fn validate_finish_feedback_witness(
+    task: &StoredTask,
+    response: &InvestigationResponseMeta,
+    record: &RefusalRecord,
+) -> Result<(), InvestigationStoreError> {
+    if task
+        .detail
+        .summary
+        .specialist_id
+        .uses_finish_feedback_witness()
+    {
+        record.validate_feedback_witness(
+            response
+                .finish_feedback_witness
+                .as_deref()
+                .ok_or(InvestigationStoreError::Missing)?,
+            &response.response_hash,
+            &response.step_id,
+        )?;
+    } else if response.finish_feedback_witness.is_some()
+        || record.feedback.unmet.iter().any(|entry| {
+            entry.reason == agents::investigation::staged_finish::RefusalReason::ExcludedByCapacity
+        })
+        || matches!(
+            record.feedback.prose_correction,
+            Some(agents::investigation::staged_finish::ProseCorrection::ParaphraseReplayAt(_))
+        )
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
+}

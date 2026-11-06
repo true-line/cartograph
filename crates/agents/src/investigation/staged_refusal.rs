@@ -37,6 +37,50 @@ impl RefusalRecord {
             &bounded_bytes(&record, MAX_MANIFEST_BYTES)?,
         ))
     }
+    /// Digest for an independent immutable response-metadata witness (@22).
+    /// Admission establishes diagnostic correctness before discarding text;
+    /// this digest establishes only integrity and binding during reopen.
+    /// Store it outside this record to avoid a circular refusal identity.
+    pub fn feedback_witness_hash(&self) -> Result<String, InvestigationError> {
+        if !crate::source_basis::hash(&self.response_hash)
+            || !crate::source_basis::hash(&self.finish_hash)
+            || !super::records::opaque_id(&self.step_id)
+            || self.refusal_id != self.content_id()?
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(crate::source_basis::domain_hash(
+            b"cartograph:finish-feedback-witness:v1\0",
+            &bounded_bytes(
+                &(
+                    &self.response_hash,
+                    &self.finish_hash,
+                    &self.refusal_id,
+                    &self.step_id,
+                ),
+                MAX_MANIFEST_BYTES,
+            )?,
+        ))
+    }
+
+    /// The host must read the witness and response identity from the independent
+    /// immutable invocation row, and separately authenticate the call history.
+    /// Passing copies from this record alone would grant no authentication.
+    pub fn validate_feedback_witness(
+        &self,
+        witness: &str,
+        response_hash: &str,
+        step_id: &str,
+    ) -> Result<(), InvestigationError> {
+        if self.response_hash != response_hash
+            || self.step_id != step_id
+            || self.feedback_witness_hash()? != witness
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+
     /// Content/basis validation complements, never replaces, host comparison
     /// with the immutable task, actual invoked step and rederived finish decision.
     pub fn validate(
@@ -95,12 +139,21 @@ impl RefusalRecord {
         previous: Option<&RefusalRecord>,
         policy: &InvestigationPolicy,
     ) -> Result<RefusalDisposition, InvestigationError> {
-        if request.limit_profile != policy.profile()
+        if ((matches!(
+            self.feedback.prose_correction,
+            Some(ProseCorrection::ParaphraseReplayAt(_))
+        ) || self
+            .feedback
+            .unmet
+            .iter()
+            .any(|entry| entry.reason == RefusalReason::ExcludedByCapacity))
+            && request.specialist_id != "domain-analyst@22")
+            || request.limit_profile != policy.profile()
             || ((self.feedback.citation_correction.is_some()
                 || self.feedback.prose_correction.is_some())
                 && !matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@20" | "domain-analyst@21"
+                    "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22"
                 ))
         {
             return Err(InvestigationError::InvalidInput);
@@ -221,7 +274,18 @@ impl RefusalRecord {
                 observed.unmet.map(|reason| FeedbackEntry {
                     obligation_id: observed.obligation_id.clone(),
                     kind: observed.kind.clone(),
-                    reason,
+                    reason: if !observed.attempted
+                        && !observed.acquired
+                        && reason == RefusalReason::NotAttempted
+                        && consistency.is_some_and(|bound| {
+                            bound
+                                .capacity_excluded_obligations()
+                                .contains(&observed.obligation_id)
+                        }) {
+                        RefusalReason::ExcludedByCapacity
+                    } else {
+                        reason
+                    },
                 })
             })
             .collect();

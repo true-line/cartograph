@@ -85,6 +85,9 @@ pub(super) fn authenticate_response(
     prepared: &PreparedBoundedCompletion,
     active_milliseconds: u64,
 ) -> Result<AuthenticatedResponse, InvestigationStoreError> {
+    if response.finish_feedback_witness.is_some() {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let authenticated = authenticate_saved_response(
         tx,
         task,

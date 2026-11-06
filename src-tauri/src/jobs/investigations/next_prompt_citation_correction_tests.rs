@@ -84,7 +84,11 @@ fn correction_fixture_sources(
 
 #[test]
 fn citation_correction_is_once_only_after_reopen_and_duplicate_publication() {
-    for role in ["domain-analyst@19", "domain-analyst@20"] {
+    for role in [
+        "domain-analyst@19",
+        "domain-analyst@20",
+        "domain-analyst@22",
+    ] {
         assert_citation_correction_is_once_only_after_reopen_and_duplicate_publication(role);
     }
 }
@@ -395,7 +399,13 @@ fn assert_ollama_wire(input: &InvestigationInput, expected_prompt: &str) {
 
 #[test]
 fn analyst21_durable_capacity_refusals_exclude_two_distinct_reads() {
-    let initial = correction_fixture_sources("domain-analyst@21", None, true);
+    for role in ["domain-analyst@21", "domain-analyst@22"] {
+        assert_durable_capacity_refusals_exclude_two_distinct_reads(role);
+    }
+}
+
+fn assert_durable_capacity_refusals_exclude_two_distinct_reads(role: &str) {
+    let initial = correction_fixture_sources(role, None, true);
     let mut query = metadata_admission::MetadataProposalFixture::from_fixture(
         initial,
         ContextPreviewKind::Query,
@@ -469,8 +479,45 @@ fn analyst21_durable_capacity_refusals_exclude_two_distinct_reads() {
         )));
     }
     assert_eq!(refused.len(), 2);
+    let excluded = choices.capacity_excluded_obligations().to_vec();
+    assert_eq!(
+        excluded.len(),
+        if role == "domain-analyst@22" { 2 } else { 0 }
+    );
     tx.commit().unwrap();
     drop(reopened);
+    if role == "domain-analyst@22" {
+        f.original = serde_json::json!({
+            "schema_version":1,"outcome":"insufficient_evidence",
+            "action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence",
+                "limitations":["The required passages have not been inspected."]}
+        });
+        f.response.action_hash =
+            core_prov::content_hash(&encode(&f.original, MAX_ACTION_BYTES).unwrap());
+        f.begin();
+        assert_eq!(
+            f.publish().unwrap().summary.status,
+            InvestigationStatus::Running
+        );
+        let task = f.saved();
+        let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+        let records = staged::load_for_task(&tx, &task).unwrap();
+        let feedback = &records[0].record.feedback;
+        for id in &excluded {
+            assert!(feedback.unmet.iter().any(|item| &item.obligation_id == id
+                && item.reason
+                    == agents::investigation::staged_finish::RefusalReason::ExcludedByCapacity));
+            let observed = records[0]
+                .record
+                .assessment
+                .iter()
+                .find(|item| &item.obligation_id == id)
+                .unwrap();
+            assert!(!observed.attempted && !observed.acquired);
+        }
+        drop(tx);
+        f.next_with_pages(&[&page]);
+    }
     let prior_revision = snapshot.ledger().revision;
     let Fixture {
         mut base,
@@ -492,6 +539,7 @@ fn analyst21_durable_capacity_refusals_exclude_two_distinct_reads() {
         .current_choices(reset.ledger(), reset.metadata())
         .unwrap()
         .unwrap();
+    assert!(choices.capacity_excluded_obligations().is_empty());
     let offered = choices
         .entries()
         .iter()
@@ -502,3 +550,6 @@ fn analyst21_durable_capacity_refusals_exclude_two_distinct_reads() {
         .collect::<std::collections::BTreeSet<_>>();
     assert!(refused.is_subset(&offered));
 }
+
+#[path = "finish_feedback_witness_tests.rs"]
+mod feedback_witness;
