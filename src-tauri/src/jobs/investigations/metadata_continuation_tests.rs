@@ -1,7 +1,7 @@
 //! AC-0287: the worker's read snapshot and publication share exact derivation.
 use super::*;
 #[path = "metadata_continuation_fixture.rs"]
-mod fixture;
+pub(in crate::jobs::investigations) mod fixture;
 use fixture::Proposal;
 
 fn assert_read_only(proposal: &Proposal) -> MetadataContinuationSnapshot {

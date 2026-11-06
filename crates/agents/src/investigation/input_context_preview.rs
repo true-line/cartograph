@@ -147,7 +147,7 @@ impl InvestigationInput {
         // admission_reserve_basis already authenticated the candidate's
         // private correction projection. Include that same field when checking
         // the complete metadata continuation shape for the new role only.
-        if candidate.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+        if SpecialistId::is_typed_citation_prompt(&candidate.payload.system) {
             progress["citation_correction"] = serde_json::to_value(&candidate.citation_correction)
                 .map_err(|_| InvestigationError::InvalidInput)?;
         }

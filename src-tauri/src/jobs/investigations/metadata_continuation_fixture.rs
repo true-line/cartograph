@@ -5,7 +5,7 @@ use context_hub::coverage::{CoverageContext, QualifiedRequest};
 use next_prompt_invocation::tests::{firewall, limits, provider};
 use std::sync::Arc;
 
-pub(super) struct Proposal {
+pub(in crate::jobs::investigations) struct Proposal {
     pub f: FinishFixture,
     pub ledger: InvestigationInputLedger,
     pub raw: String,
@@ -52,7 +52,11 @@ impl Proposal {
         });
         Self::from_fixture(FinishFixture::from_base(base, false), kind, false)
     }
-    fn from_fixture(mut f: FinishFixture, kind: ContextPreviewKind, refusal: bool) -> Self {
+    pub(in crate::jobs::investigations) fn from_fixture(
+        mut f: FinishFixture,
+        kind: ContextPreviewKind,
+        refusal: bool,
+    ) -> Self {
         if refusal {
             f.capacity_refusal();
         }
@@ -291,8 +295,15 @@ impl Proposal {
                     })
                     .unwrap();
                 self.raw = serde_json::json!({"context":page,"evidence_options":[]}).to_string();
-                let target = if self.f.base.f.task.detail.summary.specialist_id
-                    == SpecialistId::DomainAnalystV18
+                let target = if self
+                    .f
+                    .base
+                    .f
+                    .task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_acquisition_choices()
                 {
                     self.f
                         .base

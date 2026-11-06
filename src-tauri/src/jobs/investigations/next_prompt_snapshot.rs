@@ -116,9 +116,18 @@ impl JobStore {
         let metadata = metadata_current_next_prompt(&tx, &task)?;
         let basis = super::super::turn::basis(&tx, &task)?;
         let capacity = admission_journal::derive_current(&tx, &task)?;
-        let derived_mode = if capacity.action_feedback.as_ref().is_some_and(|feedback| {
-            feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
-        }) {
+        let choices = if task.detail.summary.specialist_id.uses_acquisition_choices() {
+            completion::SavedMetadataHistory::load(&tx, &task)?
+                .current_choices(&ledger, &metadata)?
+        } else {
+            None
+        };
+        let derived_mode = if choices
+            .as_ref()
+            .is_some_and(|choices| choices.capacity_exhausted())
+            || capacity.action_feedback.as_ref().is_some_and(|feedback| {
+                feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
+            }) {
             CompletionCallMode::FinishOnly
         } else {
             metadata.next_call_mode_with_policy(&task.detail.usage, policy)?
@@ -141,12 +150,6 @@ impl JobStore {
             call.mode()
         } else {
             derived_mode
-        };
-        let choices = if task.detail.summary.specialist_id.uses_acquisition_choices() {
-            completion::SavedMetadataHistory::load(&tx, &task)?
-                .current_choices(&ledger, &metadata)?
-        } else {
-            None
         };
         let correction = authenticated_citation_correction(&tx, &task, &metadata)?;
         let snapshot = NextPromptSnapshot {
@@ -193,7 +196,12 @@ pub(in crate::jobs::investigations) fn authenticated_citation_correction(
     else {
         return Ok(None);
     };
-    if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20 {
+    if !task
+        .detail
+        .summary
+        .specialist_id
+        .uses_typed_citation_correction()
+    {
         return Err(InvestigationStoreError::Invalid);
     }
     let entries = staged::load_for_task(connection, task)?;

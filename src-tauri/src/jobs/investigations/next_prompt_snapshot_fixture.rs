@@ -241,6 +241,12 @@ impl Fixture {
         &mut self,
         observe: impl FnOnce(&Self),
     ) {
+        self.acquire_inventory_pages_observed(&[], observe);
+    }
+    pub(in crate::jobs::investigations) fn acquire_inventory_with_pages(&mut self, pages: &[&str]) {
+        self.acquire_inventory_pages_observed(pages, |_| {});
+    }
+    fn acquire_inventory_pages_observed(&mut self, pages: &[&str], observe: impl FnOnce(&Self)) {
         self.begin();
         observe(self);
         let policy = &INVESTIGATION_V2_POLICY;
@@ -340,7 +346,7 @@ impl Fixture {
             &self.f.request.question,
             self.f.task.detail.summary.specialist_id,
             ledger.clone(),
-            &[],
+            pages,
             &[],
             &[],
             snapshot.as_ref().map_or(&usage, |s| s.usage()),

@@ -101,7 +101,7 @@ pub(super) fn replace_prompt(
     prompt: &Value,
     limit: usize,
 ) -> Result<(), InvestigationError> {
-    if payload.system == SpecialistId::DomainAnalystV20.prompt() {
+    if SpecialistId::is_typed_citation_prompt(&payload.system) {
         let ordered = super::prompt_layout::OrderedPrompt(prompt);
         measure_replacement(payload, &ordered, limit)?;
         payload.prompt = encode_prompt(&ordered, limit)?;

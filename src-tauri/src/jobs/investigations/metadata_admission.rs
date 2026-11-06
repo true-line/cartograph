@@ -9,6 +9,8 @@ mod metadata_continuation;
 pub(crate) use metadata_continuation::MetadataContinuationRead;
 #[cfg(unix)]
 pub(super) use metadata_continuation::MetadataContinuationSnapshot;
+#[cfg(test)]
+pub(super) use metadata_continuation::tests::fixture::Proposal as MetadataProposalFixture;
 
 pub(crate) struct MetadataAdmission<'a> {
     pub response: &'a InvestigationResponseMeta,

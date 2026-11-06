@@ -45,6 +45,12 @@ impl Fixture {
         }
     }
     fn prepare(base: &acquisition::Fixture) -> (InvestigationInput, PreparedBoundedCompletion) {
+        Self::prepare_with_pages(base, &[])
+    }
+    fn prepare_with_pages(
+        base: &acquisition::Fixture,
+        pages: &[&str],
+    ) -> (InvestigationInput, PreparedBoundedCompletion) {
         let saved = base.snapshot();
         let effective = crate::jobs::investigations::policy_for_detail(saved.detail()).unwrap();
         let policy = &effective;
@@ -70,7 +76,7 @@ impl Fixture {
             &base.f.request.question,
             saved.detail().summary.specialist_id,
             saved.ledger().clone(),
-            &[],
+            pages,
             &[],
             &[],
             &usage,
@@ -146,8 +152,11 @@ impl Fixture {
         )
     }
     pub(in crate::jobs::investigations) fn next(&mut self) {
+        self.next_with_pages(&[]);
+    }
+    pub(in crate::jobs::investigations) fn next_with_pages(&mut self, pages: &[&str]) {
         self.base.refresh();
-        (self.input, self.prepared) = Self::prepare(&self.base);
+        (self.input, self.prepared) = Self::prepare_with_pages(&self.base, pages);
         self.response = Self::response(&self.base, &self.original);
     }
     pub(in crate::jobs::investigations) fn capacity_refusal(&mut self) {

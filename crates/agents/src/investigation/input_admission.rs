@@ -235,7 +235,7 @@ impl InvestigationInput {
             )
             .map_err(|_| InvestigationError::InvalidInput)?,
         );
-        if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+        if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             let upper = serde_json::to_value(
                 staged_finish::RefusalFeedback::sizing_typed_contract_envelope(
                     &contract,
@@ -332,7 +332,7 @@ impl InvestigationInput {
             } else {
                 None
             };
-            if action.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+            if SpecialistId::is_typed_citation_prompt(&action.payload.system) {
                 action.payload.response_schema = response_schema::reserve_eligible_acquisition(
                     action.payload.response_schema.take(),
                     mode,
@@ -696,7 +696,14 @@ impl InvestigationInput {
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         if self.acquisition_choices.is_some() {
-            state.validate_saved_role_shape(SpecialistId::DomainAnalystV18, policy)?;
+            state.validate_saved_role_shape(
+                if self.payload.system == SpecialistId::DomainAnalystV21.prompt() {
+                    SpecialistId::DomainAnalystV21
+                } else {
+                    SpecialistId::DomainAnalystV18
+                },
+                policy,
+            )?;
             state.validate_mode_with_metadata(&metadata, policy)?;
         } else {
             state.validate_with_metadata(&metadata, policy)?;
@@ -723,6 +730,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV18,
             SpecialistId::DomainAnalystV19,
             SpecialistId::DomainAnalystV20,
+            SpecialistId::DomainAnalystV21,
             SpecialistId::EvidenceAuditorV11,
         ]
         .into_iter()
@@ -765,7 +773,7 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
-            if role == SpecialistId::DomainAnalystV20 {
+            if role.uses_typed_citation_correction() {
                 &[
                     "acquisition_choices",
                     "action_feedback",
@@ -804,10 +812,11 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let mode = if self
-            .action_feedback
-            .as_ref()
-            .is_some_and(|feedback| feedback.reason == ActionRefusalReason::RepeatedRead)
+        let mode = if self.capacity_exhausted()
+            || self
+                .action_feedback
+                .as_ref()
+                .is_some_and(|feedback| feedback.reason == ActionRefusalReason::RepeatedRead)
         {
             CompletionCallMode::FinishOnly
         } else {
@@ -994,11 +1003,20 @@ impl InvestigationInput {
 }
 
 impl InvestigationInput {
+    fn capacity_exhausted(&self) -> bool {
+        self.payload.system == SpecialistId::DomainAnalystV21.prompt()
+            && self
+                .acquisition_choices
+                .as_ref()
+                .is_some_and(|choices| choices.capacity_exhausted())
+    }
+
     fn uses_acquisition_prompt(&self) -> bool {
         [
             SpecialistId::DomainAnalystV18,
             SpecialistId::DomainAnalystV19,
             SpecialistId::DomainAnalystV20,
+            SpecialistId::DomainAnalystV21,
         ]
         .iter()
         .any(|role| self.payload.system == role.prompt())
@@ -1040,7 +1058,7 @@ impl InvestigationInput {
             .feedback
             .as_ref()
             .and_then(|feedback| feedback.citation_correction.as_ref());
-        let typed_role = self.payload.system == SpecialistId::DomainAnalystV20.prompt();
+        let typed_role = SpecialistId::is_typed_citation_prompt(&self.payload.system);
         if !typed_role
             && metadata
                 .feedback
@@ -1077,10 +1095,12 @@ impl InvestigationInput {
         prompt["turn_progress"]["action_feedback"] =
             serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
         self.action_feedback = feedback;
-        if self
-            .action_feedback
-            .as_ref()
-            .is_some_and(|value| value.reason == ActionRefusalReason::RepeatedRead)
+        if (self.payload.system == SpecialistId::DomainAnalystV21.prompt()
+            && choices.capacity_exhausted())
+            || self
+                .action_feedback
+                .as_ref()
+                .is_some_and(|value| value.reason == ActionRefusalReason::RepeatedRead)
         {
             prompt["turn_progress"]["admission_mode"] =
                 serde_json::to_value(CompletionCallMode::FinishOnly)
@@ -1131,6 +1151,7 @@ impl InvestigationInput {
         }
         self.validate_acquisition_projection()?;
         Ok(AcquisitionAdmission {
+            capacity_exhausted: self.capacity_exhausted(),
             finish_reason: self
                 .action_feedback
                 .as_ref()
@@ -1174,7 +1195,7 @@ impl InvestigationInput {
         choices.validate_basis(&contract, &metadata, &self.ledger, &INVESTIGATION_V2_POLICY)?;
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+        if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             if prompt["turn_progress"].get("citation_correction")
                 != Some(
                     &serde_json::to_value(&self.citation_correction)
@@ -1199,7 +1220,7 @@ impl InvestigationInput {
             &contract.request_hash,
             self.action_feedback.as_ref(),
         )?;
-        let expected_schema = if self.payload.system == SpecialistId::DomainAnalystV20.prompt() {
+        let expected_schema = if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             response_schema::select_eligible_acquisition(
                 ordinary_schema,
                 mode,

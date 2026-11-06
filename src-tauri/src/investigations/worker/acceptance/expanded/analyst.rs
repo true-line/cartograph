@@ -106,6 +106,15 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
     collect_role(authority, "analyst")
 }
 fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "domain-analyst@21" || saved == SpecialistId::DomainAnalystV21 {
+        if frozen != "domain-analyst@21"
+            || saved != SpecialistId::DomainAnalystV21
+            || role != "analyst"
+        {
+            return Err("Capacity exclusion receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist21-prompt11-disclosure6-result7");
+    }
     if frozen == "domain-analyst@20" || saved == SpecialistId::DomainAnalystV20 {
         if frozen != "domain-analyst@20"
             || saved != SpecialistId::DomainAnalystV20
@@ -425,7 +434,19 @@ mod tests {
             .unwrap(),
             "request7-specialist20-prompt9-disclosure6-result7"
         );
+        assert_eq!(
+            receipt_family(
+                "domain-analyst@21",
+                SpecialistId::DomainAnalystV21,
+                "analyst"
+            )
+            .unwrap(),
+            "request7-specialist21-prompt11-disclosure6-result7"
+        );
         for (frozen, saved, role) in [
+            ("domain-analyst@21", "domain-analyst@20", "analyst"),
+            ("domain-analyst@20", "domain-analyst@21", "analyst"),
+            ("domain-analyst@21", "domain-analyst@21", "auditor"),
             ("domain-analyst@20", "domain-analyst@19", "analyst"),
             ("domain-analyst@19", "domain-analyst@20", "analyst"),
             ("domain-analyst@20", "domain-analyst@20", "auditor"),

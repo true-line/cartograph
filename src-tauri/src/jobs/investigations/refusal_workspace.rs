@@ -91,3 +91,39 @@ fn proposal_workspace() -> Option<usize> {
         slots::<String>(2)?,
     ])
 }
+
+/// Prefix reconstruction used by choices derivation. Does not recurse through
+/// timeline/history replay; borrowed task, history and original choices belong
+/// to the caller. Hash strings are validated before entering the retained set.
+pub(in crate::jobs::investigations) fn capacity_exclusion_workspace() -> Option<usize> {
+    let calls = usize::try_from(INVESTIGATION_V2_POLICY.limits().model_invocations).ok()?;
+    let row = sum(&[
+        size_of::<Entry>(),
+        MAX_RECORD_BYTES,
+        json_bytes(MAX_RECORD_BYTES)?,
+    ])?;
+    let acquisition = sum(&[
+        record_decode_scratch_bytes()?,
+        MAX_RECORD_BYTES,
+        slots::<Vec<u8>>(1)?,
+        slots::<String>(2)?,
+        4096,
+    ])?;
+    let identity = sum(&[
+        row,
+        MAX_ENTRY_BYTES.checked_mul(2)?,
+        b"cartograph:investigation-admission-refusal:v1\0".len(),
+        slots::<Vec<u8>>(2)?,
+        64,
+        slots::<String>(1)?,
+    ])?;
+    sum(&[
+        storage::archive_schema_workspace()?,
+        slots::<Vec<u32>>(1)?,
+        slots::<u32>(calls.checked_add(1)?)?,
+        context_hub::logical::set::<String>(calls)?,
+        calls.checked_mul(64)?,
+        row,
+        acquisition.max(identity),
+    ])
+}

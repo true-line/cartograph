@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Task ownership, bounded row decoding, saved-call/ledger/result replay and
 /// host encodings are separate. Regex/native allocations are not modeled.
 pub fn next_prompt_validation_workspace() -> Option<usize> {
-    let definition = definition_workspace(SpecialistId::DomainAnalystV20)?
+    let definition = definition_workspace(SpecialistId::DomainAnalystV21)?
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
@@ -40,7 +40,10 @@ pub(super) fn definition_workspace(role: SpecialistId) -> Option<usize> {
     // @19 retains both the @18 acquisition suffix and its own correction
     // suffix during formatting. This accounts owners; it raises no ceiling.
     // @20 retains @19 plus its qualified replacement while appending guidance.
-    let owners = if role == SpecialistId::DomainAnalystV20 {
+    // @21 retains the @20 prompt while appending capacity-exclusion guidance.
+    let owners = if role == SpecialistId::DomainAnalystV21 {
+        17
+    } else if role == SpecialistId::DomainAnalystV20 {
         16
     } else if role == SpecialistId::DomainAnalystV19 {
         14

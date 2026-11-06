@@ -65,6 +65,8 @@ pub enum SpecialistId {
     DomainAnalystV19,
     #[serde(rename = "domain-analyst@20")]
     DomainAnalystV20,
+    #[serde(rename = "domain-analyst@21")]
+    DomainAnalystV21,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -234,6 +236,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -268,6 +271,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -303,6 +307,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -331,6 +336,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -353,6 +359,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -375,6 +382,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -394,6 +402,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
                 | Self::EvidenceAuditorV11
         )
     }
@@ -430,12 +439,16 @@ impl SpecialistId {
             Self::DomainAnalystV18 => 18,
             Self::DomainAnalystV19 => 19,
             Self::DomainAnalystV20 => 20,
+            Self::DomainAnalystV21 => 21,
         }
     }
 
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
+        if self == Self::DomainAnalystV21 {
+            return 11;
+        }
         if matches!(
             self,
             Self::DomainAnalystV11
@@ -448,6 +461,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
         ) {
             return 10;
         }
@@ -464,7 +478,10 @@ impl SpecialistId {
     pub fn uses_acquisition_choices(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV18 | Self::DomainAnalystV19 | Self::DomainAnalystV20
+            Self::DomainAnalystV18
+                | Self::DomainAnalystV19
+                | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
         )
     }
 
@@ -475,10 +492,29 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
         )
     }
 
+    pub fn uses_capacity_exclusions(self) -> bool {
+        self == Self::DomainAnalystV21
+    }
+
+    pub fn uses_typed_citation_correction(self) -> bool {
+        matches!(self, Self::DomainAnalystV20 | Self::DomainAnalystV21)
+    }
+
+    pub(super) fn is_typed_citation_prompt(system: &str) -> bool {
+        system == Self::DomainAnalystV20.prompt() || system == Self::DomainAnalystV21.prompt()
+    }
+
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV21 {
+            return format!(
+                "{}\nCapacity exclusion@1: The current acquisition menu excludes actions refused for prompt capacity in this turn. Do not repeat an excluded action. If no affordable acquisition remains, use the offered finish-only response and report unresolved obligations honestly. Exclusion does not acquire evidence or satisfy an obligation.",
+                Self::DomainAnalystV20.prompt()
+            );
+        }
         if self == Self::DomainAnalystV20 {
             let previous = Self::DomainAnalystV19.prompt();
             let qualified = previous.replace(
@@ -558,7 +594,8 @@ impl SpecialistId {
             | Self::DomainAnalystV17
             | Self::DomainAnalystV18
             | Self::DomainAnalystV19
-            | Self::DomainAnalystV20 => {
+            | Self::DomainAnalystV20
+            | Self::DomainAnalystV21 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -674,6 +711,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV18
                 | Self::DomainAnalystV19
                 | Self::DomainAnalystV20
+                | Self::DomainAnalystV21
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -723,7 +761,8 @@ impl SpecialistId {
             | Self::DomainAnalystV17
             | Self::DomainAnalystV18
             | Self::DomainAnalystV19
-            | Self::DomainAnalystV20 => (
+            | Self::DomainAnalystV20
+            | Self::DomainAnalystV21 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1134,3 +1173,35 @@ mod finish_example_tests {
 
 /// Dispatch remains disabled until the complete authenticated workflow lands.
 pub const GATED_ANALYST_DISPATCH_REASON: &str = "domain-analyst@18 dispatch is disabled until authenticated acquisition workflow integration is complete.";
+
+#[cfg(test)]
+mod capacity_exclusion_identity_tests {
+    use super::*;
+
+    #[test]
+    fn analyst21_has_distinct_prompt_family_and_preserves_run10_analyst20() {
+        let old = SpecialistId::DomainAnalystV20;
+        let new = SpecialistId::DomainAnalystV21;
+        assert_eq!(
+            old.definition().unwrap().prompt_fingerprint,
+            "76d719fa9bfda4e9a73a2cd0695f9f905c8c50cba02a487ea67b82f5f5c99d89"
+        );
+        assert!(!old.uses_capacity_exclusions());
+        assert!(!SpecialistId::EvidenceAuditorV11.uses_capacity_exclusions());
+        assert!(new.uses_capacity_exclusions());
+        assert!(new.uses_acquisition_choices());
+        assert!(new.uses_typed_citation_correction());
+        assert_eq!(new.definition().unwrap().version, 21);
+        assert_eq!(new.prompt_generation(), 11);
+        assert_eq!(old.prompt_generation(), 10);
+        assert!(new.prompt().starts_with(&old.prompt()));
+        assert_ne!(
+            new.definition().unwrap().prompt_fingerprint,
+            old.definition().unwrap().prompt_fingerprint
+        );
+        assert_eq!(
+            new.definition().unwrap().operations,
+            old.definition().unwrap().operations
+        );
+    }
+}

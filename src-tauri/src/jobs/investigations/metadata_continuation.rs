@@ -46,6 +46,7 @@ impl MetadataContinuationSnapshot {
         if let Some(choices) = &self.choices {
             stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, &self.policy)?;
             let expected = agents::investigation::AcquisitionAdmission {
+                capacity_exhausted: false,
                 finish_reason: None,
                 choices_hash: choices.stamp_hash()?,
                 action_feedback_hash: None,
@@ -309,4 +310,4 @@ pub(super) fn derive(
 
 #[cfg(test)]
 #[path = "metadata_continuation_tests.rs"]
-mod tests;
+pub(in crate::jobs::investigations) mod tests;

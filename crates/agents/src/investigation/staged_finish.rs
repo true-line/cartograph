@@ -549,7 +549,10 @@ pub(super) fn admit_finish_with_policy_using_consistency(
     let admitted = match admitted {
         Ok(result) => Some(result),
         Err(InvestigationError::SourceReplay)
-            if request.specialist_id == "domain-analyst@20" && consistency.is_some() =>
+            if matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@20" | "domain-analyst@21"
+            ) && consistency.is_some() =>
         {
             // Check all authored fields, including narrative, for sensitive output.
             match input.validate_correction_prose(finish, model.as_deref()) {
@@ -573,7 +576,10 @@ pub(super) fn admit_finish_with_policy_using_consistency(
             None
         }
         Err(InvestigationError::InvalidCitation)
-            if request.specialist_id == "domain-analyst@20" =>
+            if matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@20" | "domain-analyst@21"
+            ) =>
         {
             citation_correction = input.typed_citation_correction(
                 disclosure,
@@ -599,14 +605,18 @@ pub(super) fn admit_finish_with_policy_using_consistency(
             })
         })
         .collect::<Vec<_>>();
-    if request.specialist_id == "domain-analyst@20"
-        && admitted.is_some()
+    if matches!(
+        request.specialist_id.as_str(),
+        "domain-analyst@20" | "domain-analyst@21"
+    ) && admitted.is_some()
         && prose::has_placeholder(finish)
     {
         prose_correction = Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
     }
-    if request.specialist_id == "domain-analyst@20"
-        && consistency.is_some()
+    if matches!(
+        request.specialist_id.as_str(),
+        "domain-analyst@20" | "domain-analyst@21"
+    ) && consistency.is_some()
         && prose_correction.is_none()
         && let Some(result) = &admitted
     {

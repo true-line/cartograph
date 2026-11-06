@@ -686,7 +686,11 @@ pub(super) fn load_for_task(
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
         if feedback.citation_correction.is_some()
-            && task.detail.summary.specialist_id != SpecialistId::DomainAnalystV20
+            && !task
+                .detail
+                .summary
+                .specialist_id
+                .uses_typed_citation_correction()
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -1003,6 +1007,7 @@ pub(super) fn append_for_task(
     }
     if (feedback.citation_correction.is_some() || feedback.prose_correction.is_some())
         && request.specialist_id != "domain-analyst@20"
+        && request.specialist_id != "domain-analyst@21"
     {
         return Err(InvestigationStoreError::Invalid);
     }
