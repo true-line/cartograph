@@ -1203,3 +1203,16 @@ Historical @20–@22 behavior and canonical bytes, privacy detectors, limits and
 correction allowance remain unchanged. Refused prose is never stored. Golden
 regressions bind the r3 findings to the actual captured source span; these local
 checks do not establish real-provider or release acceptance.
+
+### Decision #1701 — exact captured reservation and combined corrections (US-0032 / AC-0287)
+
+Analyst @24 uses receipt-bound original and production-redacted serialized source
+sizes when available, retaining the 6x fallback for historical captures. No source
+read precedes the existing charge/access gate. After a charged digest-verified
+read, both actual sizes must fit their reserved values before context installation.
+Schema-6 feedback reports all applicable correction locations up to the existing
+byte ceiling, with deterministic deduplication and an explicit omitted count.
+The single correction allowance, detectors, privacy rules and numeric limits stay
+unchanged. Historical @20–@23 bytes and reopen behavior remain unchanged.
+Joint r3/r4 capacity measurements and real-model acceptance are separate gates.
+See [implementation design](design/analyst24-reservation-feedback.md).

@@ -14,6 +14,7 @@ fn source_settlement_final_save_failure_rolls_back_every_publication_effect() {
     };
     storage_writer::fail_once(storage_writer::SettlementFailure::AfterTaskSave);
     let c = SourceContinuation {
+        size_binding: None,
         current: &fixture.current,
         current_prepared: &fixture.prepared,
         candidate: &candidate,
@@ -73,6 +74,7 @@ fn source_settlement_lost_commit_ack_retains_one_acquisition_and_refuses_same_st
     let retained_checks = std::cell::Cell::new(0);
     storage_writer::fail_once(storage_writer::SettlementFailure::AfterCommitAck);
     let c = SourceContinuation {
+        size_binding: None,
         current: &fixture.current,
         current_prepared: &fixture.prepared,
         candidate: &candidate,
@@ -108,6 +110,7 @@ fn source_settlement_lost_commit_ack_retains_one_acquisition_and_refuses_same_st
     );
     drop(tx);
     let c = SourceContinuation {
+        size_binding: None,
         current: &fixture.current,
         current_prepared: &fixture.prepared,
         candidate: &candidate,

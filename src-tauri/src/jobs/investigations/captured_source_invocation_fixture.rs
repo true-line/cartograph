@@ -335,6 +335,7 @@ impl CapturedSourceInvocationFixture {
                 &self.inner._execution_guard,
                 self.inner.task.detail.summary.revision,
                 &SourceAdmission {
+                    size_binding: None,
                     response: &response,
                     original_action: &self.action,
                     current: &self.current,
@@ -372,11 +373,30 @@ impl CapturedSourceInvocationFixture {
     pub(crate) fn prepared(&self) -> &PreparedBoundedCompletion {
         &self.prepared
     }
+    pub(crate) fn use_measured_proof(&mut self, sizes: core_redact::DirectSourceJsonContentSizes) {
+        self.proof = self
+            .current
+            .certify_measured_unread_source_v9_with_policy(
+                &self.prepared,
+                &self.target,
+                self.prepared.profile(),
+                self.prepared.limits(),
+                &format!(
+                    "{}:step-{}",
+                    self.inner.basis.task_id,
+                    self.inner.task.detail.usage.model_invocations + 1
+                ),
+                &INVESTIGATION_V2_POLICY,
+                sizes,
+            )
+            .unwrap();
+    }
     pub(crate) fn proof(&self) -> &UnreadSourcePreviewBound {
         &self.proof
     }
     pub(crate) fn admission(&self) -> SourceAdmission<'_> {
         SourceAdmission {
+            size_binding: None,
             response: &self.response,
             original_action: &self.action,
             current: &self.current,

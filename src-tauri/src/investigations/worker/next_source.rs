@@ -85,14 +85,34 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .checked_add(1)
             .ok_or(HostError::LimitExceeded)?;
         let next_action_id = format!("{}:step-{next_ordinal}", self.id);
-        let proof = match current.certify_unread_source_v9_with_policy(
-            current_prepared,
-            source.target(),
-            current_prepared.profile(),
-            current_prepared.limits(),
-            &next_action_id,
-            policy,
-        ) {
+        let sizes = if self.detail.summary.specialist_id == SpecialistId::DomainAnalystV24 {
+            source
+                .size_binding()
+                .sizes_for(source.target(), current.ledger())?
+        } else {
+            None
+        };
+        let certification = if let Some(sizes) = sizes {
+            current.certify_measured_unread_source_v9_with_policy(
+                current_prepared,
+                source.target(),
+                current_prepared.profile(),
+                current_prepared.limits(),
+                &next_action_id,
+                policy,
+                sizes,
+            )
+        } else {
+            current.certify_unread_source_v9_with_policy(
+                current_prepared,
+                source.target(),
+                current_prepared.profile(),
+                current_prepared.limits(),
+                &next_action_id,
+                policy,
+            )
+        };
+        let proof = match certification {
             Ok(proof) => proof,
             Err(InvestigationError::LimitExceeded) => {
                 self.detail = self
@@ -125,6 +145,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.detail.summary.revision,
                 self.clock,
                 &SourceAdmission {
+                    size_binding: (self.detail.summary.specialist_id
+                        == SpecialistId::DomainAnalystV24)
+                        .then(|| source.size_binding()),
                     response: &response,
                     original_action: &original,
                     current,

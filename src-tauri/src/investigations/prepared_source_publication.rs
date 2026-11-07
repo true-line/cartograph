@@ -176,18 +176,43 @@ impl RetainedOutcome {
         if snapshot.base_ledger() != &context.ledger || input.current.ledger() != &context.ledger {
             return Err(HostError::InputChanged.into());
         }
-        input
-            .proof
-            .verify_with_policy(
-                input.current,
-                input.current_prepared,
-                &self.prepared().target,
-                input.current_prepared.profile(),
-                input.current_prepared.limits(),
-                snapshot.next_action_id(),
-                &context.policy,
-            )
-            .map_err(HostError::from)?;
+        let sizes = if receipt.detail().summary.specialist_id == SpecialistId::DomainAnalystV24 {
+            self.prepared()
+                .size_binding()
+                .sizes_for(&self.prepared().target, input.current.ledger())
+                .map_err(HostError::from)?
+        } else {
+            None
+        };
+        if let Some(sizes) = sizes {
+            input
+                .proof
+                .verify_measured_with_policy(
+                    input.current,
+                    input.current_prepared,
+                    &self.prepared().target,
+                    input.current_prepared.profile(),
+                    input.current_prepared.limits(),
+                    snapshot.next_action_id(),
+                    &context.policy,
+                    sizes,
+                )
+                .map_err(HostError::from)?;
+        } else {
+            input
+                .proof
+                .verify_with_policy(
+                    input.current,
+                    input.current_prepared,
+                    &self.prepared().target,
+                    input.current_prepared.profile(),
+                    input.current_prepared.limits(),
+                    snapshot.next_action_id(),
+                    &context.policy,
+                )
+                .map_err(HostError::from)?;
+        }
+
         let mut evidence = context.evidence.clone();
         if let Self::Acquired(candidate) = self {
             context
@@ -318,6 +343,7 @@ impl RetainedOutcome {
                 execution,
                 saved_revision,
                 SourceContinuation {
+                    size_binding: Some(self.prepared().size_binding()),
                     current: input.current,
                     current_prepared: input.current_prepared,
                     candidate: &candidate,

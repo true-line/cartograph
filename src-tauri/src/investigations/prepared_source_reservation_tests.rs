@@ -34,9 +34,21 @@ fn fixture_for_role(
     InvestigationInspectionTarget,
     std::path::PathBuf,
 ) {
+    fixture_for_role_capture(role, role == Some(SpecialistId::DomainAnalystV24))
+}
+fn fixture_for_role_capture(
+    role: Option<SpecialistId>,
+    measured: bool,
+) -> (
+    CapturedSourceInvocationFixture,
+    AppState,
+    FrozenContext,
+    InvestigationInspectionTarget,
+    std::path::PathBuf,
+) {
     let mut actual = None;
-    let saved = CapturedSourceInvocationFixture::with_role(role, |private| {
-        let state = Fixture::state_at(private);
+    let mut saved = CapturedSourceInvocationFixture::with_role(role, |private| {
+        let state = Fixture::state_at_with_sizes(private, measured.then_some(false));
         let (mut context, target) = Fixture::context_for(&state);
         let qualification = CoverageQualification::new(
             &[ScopedRepo {
@@ -82,6 +94,15 @@ fn fixture_for_role(
         data
     });
     let (state, context, target, private) = actual.unwrap();
+    if role == Some(SpecialistId::DomainAnalystV24) && measured {
+        let source = context.prepare_captured_source(&state, &target).unwrap();
+        let sizes = source
+            .size_binding()
+            .sizes_for(&target, &context.ledger)
+            .unwrap()
+            .unwrap();
+        saved.use_measured_proof(sizes);
+    }
     (saved, state, context, target, private)
 }
 fn clock() -> crate::investigations::runtime::RunClock {

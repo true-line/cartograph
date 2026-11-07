@@ -14,6 +14,7 @@ pub(crate) enum KnownSourceDisposition {
 }
 
 pub(crate) struct SourceContinuation<'a> {
+    pub size_binding: Option<&'a dyn SourceSizeBinding>,
     pub current: &'a InvestigationInput,
     pub current_prepared: &'a PreparedBoundedCompletion,
     pub candidate: &'a InvestigationInput,

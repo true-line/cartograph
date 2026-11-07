@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 regex = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 blake3 = { workspace = true }
-serde_json = { workspace = true }

@@ -133,6 +133,7 @@ pub struct FeedbackEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProseCorrection {
+    Combined(Box<CombinedCorrections>),
     RewriteSchemaPlaceholdersAsPlainProse,
     ParaphraseWithoutQuotingSource,
     ParaphraseReplayAt(ReplayLocation),
@@ -140,6 +141,10 @@ pub enum ProseCorrection {
     UnverifiedConfigurationClaimAt(ReplayLocation),
     LimitationDeniesAcquiredEvidence(Box<ConflictingEvidence>),
 }
+
+#[path = "combined_feedback.rs"]
+mod combined_feedback;
+pub use combined_feedback::{CombinedCorrection, CombinedCorrections};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,6 +283,30 @@ impl RefusalFeedback {
         ))))
     }
 
+    /// Schema-six structural feedback is bounded by the existing encoded-byte
+    /// cap B. A string containing ceil(B/2) backslashes serializes to at least
+    /// B+2 bytes, all quotes/backslashes. At each further string embedding every
+    /// one of those bytes doubles; arbitrary already-serialized JSON can grow
+    /// by at most that factor (plus the same two framing quotes). This proves
+    /// domination at every embedding layer, not merely in the direct mapping.
+    ///
+    /// Combined feedback has only fixed codes, integer positions and validated
+    /// evidence/obligation IDs, so redact-text@1 cannot expand its strings.
+    /// Citation guidance may contain arbitrary identities: retain its existing
+    /// conservative envelope rather than assuming those strings are inert.
+    /// This is sizing-only and does not activate the new finish family.
+    pub fn sizing_combined_contract_envelope(
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<TypedFeedbackSizeEnvelope, InvestigationError> {
+        let structural = feedback_bytes(policy)?.div_ceil(2);
+        let citation = acquisition_choices::feedback_encoded_bound(contract, ledger, policy)?;
+        Ok(TypedFeedbackSizeEnvelope(
+            "\\".repeat(structural.max(citation)),
+        ))
+    }
+
     /// Derive a maximal feedback representation for this exact normalized
     /// obligation set and the immutable policy resolved from saved task limits.
     ///
@@ -334,7 +363,9 @@ impl RefusalFeedback {
         policy: &InvestigationPolicy,
     ) -> Result<Vec<u8>, InvestigationError> {
         if self.schema_version
-            != if matches!(
+            != if matches!(self.prose_correction, Some(ProseCorrection::Combined(_))) {
+                6
+            } else if matches!(
                 self.prose_correction,
                 Some(
                     ProseCorrection::UnverifiedEnumerationClaimAt(_)
@@ -367,6 +398,9 @@ impl RefusalFeedback {
             })
         {
             return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(ProseCorrection::Combined(combined)) = &self.prose_correction {
+            combined.validate(policy)?;
         }
         if let Some(ProseCorrection::LimitationDeniesAcquiredEvidence(conflict)) =
             &self.prose_correction
@@ -669,6 +703,18 @@ pub(super) fn admit_finish_with_locator(
     let admitted = match admitted {
         Ok(result) => Some(result),
         Err(InvestigationError::SourceReplay)
+            if request.specialist_id == "domain-analyst@24" && consistency.is_some() =>
+        {
+            match input.validate_correction_prose(finish, model.as_deref()) {
+                Err(InvestigationError::SourceReplay) => (),
+                Err(error) => return Err(error),
+                Ok(()) => return Err(InvestigationError::SourceReplay),
+            }
+            // Collect every detector family below; do not select a first-only
+            // legacy correction or suppress claims because replay was found.
+            None
+        }
+        Err(InvestigationError::SourceReplay)
             if matches!(
                 request.specialist_id.as_str(),
                 "domain-analyst@20"
@@ -734,6 +780,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@21"
                     | "domain-analyst@22"
                     | "domain-analyst@23"
+                    | "domain-analyst@24"
             ) =>
         {
             citation_correction = input.typed_citation_correction(
@@ -758,7 +805,7 @@ pub(super) fn admit_finish_with_locator(
                 kind: observation.kind.clone(),
                 reason: if matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@22" | "domain-analyst@23"
+                    "domain-analyst@22" | "domain-analyst@23" | "domain-analyst@24"
                 ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
@@ -808,6 +855,22 @@ pub(super) fn admit_finish_with_locator(
         && prose_correction.is_none()
     {
         prose_correction = input.claim_correction(finish)?;
+    }
+    if request.specialist_id == "domain-analyst@24"
+        && consistency.is_some()
+        && citation_correction.is_none()
+        && let Some(feedback) = RefusalFeedback::collect_input_corrections_with_policy(
+            input,
+            finish,
+            model.as_deref(),
+            unmet.clone(),
+            policy,
+        )?
+    {
+        return Ok(FinishDecision::Refused {
+            assessment,
+            feedback,
+        });
     }
     if unmet.is_empty() && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.

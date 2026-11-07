@@ -1482,3 +1482,165 @@ fn analyst22_locator_discrepancy_preserves_refusal_and_real_errors() {
         }
     }
 }
+
+// AC-0287 / #1701: the measured claim is bound independently of its maximum.
+#[test]
+fn measured_source_preview_binds_both_sizes_and_rejects_legacy_verification() {
+    let text = "secret=abcd";
+    let role = SpecialistId::DomainAnalystV10;
+    let (fixture, raw, target, _) = source_fixture(role, text);
+    let current = build_source(&fixture, &raw, &[], role, CompletionCallMode::Choice);
+    let prepared = prepare(&current);
+    let sizes = core_redact::measure_direct_source_json_content(text).unwrap();
+    let profile = profile();
+    let limits = CompletionLimits::default();
+    let policy = &INVESTIGATION_V2_POLICY;
+    let proof = current
+        .certify_measured_unread_source_v9_with_policy(
+            &prepared, &target, &profile, &limits, "next:2", policy, sizes,
+        )
+        .unwrap();
+    proof
+        .verify_measured_with_policy(
+            &current, &prepared, &target, &profile, &limits, "next:2", policy, sizes,
+        )
+        .unwrap();
+    assert!(
+        proof
+            .verify_with_policy(
+                &current, &prepared, &target, &profile, &limits, "next:2", policy,
+            )
+            .is_err()
+    );
+    let changed = core_redact::DirectSourceJsonContentSizes {
+        original: sizes.original + 1,
+        ..sizes
+    };
+    // Same max(original, redacted), different claim: hash binding must catch it.
+    assert_eq!(
+        sizes.original.max(sizes.redacted),
+        changed.original.max(changed.redacted)
+    );
+    assert!(
+        proof
+            .verify_measured_with_policy(
+                &current, &prepared, &target, &profile, &limits, "next:2", policy, changed,
+            )
+            .is_err()
+    );
+    let legacy = current
+        .certify_unread_source_v9_with_policy(
+            &prepared, &target, &profile, &limits, "next:2", policy,
+        )
+        .unwrap();
+    assert_ne!(legacy.basis_hash(), proof.basis_hash());
+    assert!(
+        proof.continuation().choice.original_payload_bytes
+            < legacy.continuation().choice.original_payload_bytes
+    );
+}
+
+#[test]
+fn analyst24_finish_decision_combines_replays_without_rewriting_historical_roles() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for (role, expected_schema) in [
+        (SpecialistId::DomainAnalystV20, 3),
+        (SpecialistId::DomainAnalystV21, 3),
+        (SpecialistId::DomainAnalystV22, 4),
+        (SpecialistId::DomainAnalystV23, 4),
+        (SpecialistId::DomainAnalystV24, 6),
+    ] {
+        let (f, raw, _, _) = source_fixture(role, "bounded source");
+        let input = source_choices(
+            &f,
+            build_source(&f, &raw, &[], role, CompletionCallMode::Choice),
+            &[],
+            &f.ledger,
+        );
+        let disclosure = input
+            .seal_disclosure_with_policy(&prepare(&input), policy)
+            .unwrap()
+            .unwrap();
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let bound = input
+            .acquisition_choices
+            .as_ref()
+            .unwrap()
+            .bind_completion_disclosure(
+                "source-preview-task",
+                "current:1",
+                &contract,
+                &f.metadata,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .unwrap();
+        let replay = input
+            .ledger()
+            .coverage
+            .as_ref()
+            .unwrap()
+            .qualification
+            .coverage_id
+            .clone();
+        let finish = staged_finish::StagedFinish {
+            schema_version: 1,
+            outcome: staged_finish::CompletionOutcome::InsufficientEvidence,
+            narrative: None,
+            action: InvestigationAction::Finish {
+                findings: vec![],
+                knowledge_completeness: KnowledgeCompleteness::InsufficientEvidence,
+                limitations: vec![replay.clone(), replay, "not_available".into()],
+            },
+        };
+        let decision = staged_finish::admit_finish_with_policy_using_consistency(
+            &f.request,
+            "source-preview-task",
+            "current:1",
+            &input,
+            &disclosure,
+            &finish,
+            &[],
+            None,
+            "2026-11-06T00:00:00Z".into(),
+            policy,
+            Some(&bound),
+        )
+        .unwrap();
+        let staged_finish::FinishDecision::Refused { feedback, .. } = decision else {
+            panic!()
+        };
+        assert_eq!(feedback.schema_version, expected_schema);
+        if role == SpecialistId::DomainAnalystV24 {
+            let Some(staged_finish::ProseCorrection::Combined(combined)) =
+                feedback.prose_correction
+            else {
+                panic!()
+            };
+            for limitation in [0, 1] {
+                assert!(combined.entries.iter().any(|entry| matches!(entry,
+                    staged_finish::CombinedCorrection::ReplayAt(location)
+                    if location.start.field == replay_location::ProseField::Limitation { limitation })));
+            }
+            assert!(
+                combined
+                    .entries
+                    .contains(&staged_finish::CombinedCorrection::RewriteSchemaPlaceholders)
+            );
+            assert_eq!(combined.omitted, 0);
+        }
+    }
+}
+
+#[path = "frozen_admission_replay_tests.rs"]
+mod frozen_replay;
+
+#[path = "historical_analyst_goldens_tests.rs"]
+mod historical_goldens;

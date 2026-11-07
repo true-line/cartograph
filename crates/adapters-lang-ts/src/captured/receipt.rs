@@ -1,10 +1,12 @@
 use super::CapturedError;
+mod sizes;
 use crate::SourceId;
 use core_graph::rules::{DependencyResolution, GuardedExitEvidence, LocalExit};
 use core_graph::source::{FactKey, edge_digest, node_digest};
 use core_graph::{Edge, Node};
 use core_prov::{EvidenceRef, Provenance};
 use serde::{Deserialize, Deserializer, Serialize};
+pub use sizes::ReceiptSourceSizes;
 use source_capture::{CaptureFileRef, CaptureSpanRef, CapturedFile};
 use std::collections::BTreeMap;
 
@@ -210,6 +212,7 @@ struct Content {
     fact_key: FactKey,
     fact_digest: String,
     ranges: Vec<ReceiptRange>,
+    source_sizes: Option<ReceiptSourceSizes>,
     source_scope: SourceScope,
     input_closure: InputClosure,
 }
@@ -229,6 +232,8 @@ struct WireContentFull<'a> {
     fact_key: &'a FactKey,
     fact_digest: &'a str,
     ranges: &'a [ReceiptRange],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_sizes: Option<&'a ReceiptSourceSizes>,
     source_scope: SourceScope,
     input_closure: InputClosure,
 }
@@ -248,6 +253,8 @@ struct WireContentCompact<'a> {
     fact_key: &'a FactKey,
     fact_digest: &'a str,
     ranges: Vec<CompactRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_sizes: Option<&'a ReceiptSourceSizes>,
     source_scope: SourceScope,
     input_closure: InputClosure,
 }
@@ -280,6 +287,8 @@ struct WireContent {
     fact_key: FactKey,
     fact_digest: String,
     ranges: Vec<WireRange>,
+    #[serde(default, deserialize_with = "sizes::present")]
+    source_sizes: Option<ReceiptSourceSizes>,
     source_scope: SourceScope,
     input_closure: InputClosure,
 }
@@ -311,6 +320,7 @@ impl Content {
             fact_key: &self.fact_key,
             fact_digest: &self.fact_digest,
             ranges: &self.ranges,
+            source_sizes: self.source_sizes.as_ref(),
             source_scope: self.source_scope,
             input_closure: self.input_closure,
         }
@@ -343,6 +353,7 @@ impl Serialize for Content {
                 fact_key: &self.fact_key,
                 fact_digest: &self.fact_digest,
                 ranges,
+                source_sizes: self.source_sizes.as_ref(),
                 source_scope: self.source_scope,
                 input_closure: self.input_closure,
             }
@@ -465,6 +476,7 @@ impl<'de> Deserialize<'de> for Content {
             fact_key: wire.fact_key,
             fact_digest: wire.fact_digest,
             ranges,
+            source_sizes: wire.source_sizes,
             source_scope: wire.source_scope,
             input_closure: wire.input_closure,
         })
@@ -802,6 +814,7 @@ impl Receipt {
             fact_key,
             fact_digest,
             ranges,
+            source_sizes: None,
             source_scope: SourceScope::PrimarySourceOnly,
             input_closure: InputClosure::InputClosureNotEstablished,
         };
@@ -939,6 +952,9 @@ impl Receipt {
         }
         if !valid_inventory_shape(&content.ranges, content.schema_version) {
             return Err(CapturedError::Invalid("receipt range inventory order"));
+        }
+        if let Some(sizes) = &content.source_sizes {
+            sizes.validate(content)?;
         }
         let mut seen = std::collections::BTreeSet::new();
         for range in &content.ranges {

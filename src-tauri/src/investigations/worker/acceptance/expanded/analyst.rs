@@ -106,6 +106,15 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
     collect_role(authority, "analyst")
 }
 fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "domain-analyst@24" || saved == SpecialistId::DomainAnalystV24 {
+        if frozen != "domain-analyst@24"
+            || saved != SpecialistId::DomainAnalystV24
+            || role != "analyst"
+        {
+            return Err("Combined feedback receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist24-prompt14-disclosure6-result7");
+    }
     if frozen == "domain-analyst@23" || saved == SpecialistId::DomainAnalystV23 {
         if frozen != "domain-analyst@23"
             || saved != SpecialistId::DomainAnalystV23
@@ -471,7 +480,23 @@ mod tests {
             .unwrap(),
             "request7-specialist22-prompt12-disclosure6-result7"
         );
+        assert_eq!(
+            receipt_family(
+                "domain-analyst@24",
+                SpecialistId::DomainAnalystV24,
+                "analyst"
+            )
+            .unwrap(),
+            "request7-specialist24-prompt14-disclosure6-result7"
+        );
         for (frozen, saved, role) in [
+            ("domain-analyst@24", "domain-analyst@23", "analyst"),
+            ("domain-analyst@23", "domain-analyst@24", "analyst"),
+            ("domain-analyst@24", "domain-analyst@24", "auditor"),
+            ("domain-analyst@24", "domain-analyst@17", "analyst"),
+            ("domain-analyst@17", "domain-analyst@24", "analyst"),
+            ("domain-analyst@24", "evidence-auditor@11", "auditor"),
+            ("evidence-auditor@11", "domain-analyst@24", "auditor"),
             ("domain-analyst@22", "domain-analyst@21", "analyst"),
             ("domain-analyst@21", "domain-analyst@22", "analyst"),
             ("domain-analyst@22", "domain-analyst@22", "auditor"),

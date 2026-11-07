@@ -595,7 +595,7 @@ exists, not that its AC or delivery gate has passed.
 | T-0552 | AC-0552 | rust | app::explicit_acquisition_start_reopens_and_recovers_nonce, app::public_completion_consent_requires_exact_preview_for_approval_and_decline, app::mcp_adapter_runs_all_task_operations_and_preserves_principal_replay, app::mcp_granted_completion_start_preserves_families_and_refuses_revocation, app::explicit_acquisition_saved_task_runs_normal_worker | Exact @18 opt-in through ordinary App/MCP/store/worker, unchanged default/catalog order and limits, exact consent, namespace/revocation/nonce and saved-result controls; synthetic evidence only, no actual-provider acceptance. UI conditional preparation is AC-0553. |
 | T-0553 | AC-0553 | story | Surfaces/InvestigationsSurface/ExplicitAcquisitionVersion | Prospective fake catalog and mocked IPC only: explicit @18 request7 construction, absent/incompatible policy and saved summary-schema rejection, unchanged default/order/limits and historical @17 recognition. UI units: ui/src/investigationObligations.test.ts. Backend catalog and all dispatch gates remain closed; no runtime or provider acceptance claim. |
 
-| T-0554 | AC-0554 | rust | app::captured_acquisition_role_prepares_without_execution, app::captured_receipt_family_preserves_history_and_binds_acquisition_identity | Zero-dispatch explicit @18/@17 preparation and reopen; exact historical family bytes, auditor11 control and mismatched @18 identity refusal. No provider or captured-profile execution. |
+| T-0554 | AC-0554 | rust | app::captured_acquisition_role_prepares_without_execution, app::captured_combined_feedback_role_prepares_without_execution, app::captured_receipt_family_preserves_history_and_binds_acquisition_identity | Zero-dispatch explicit @24/@18/@17 preparation and reopen; exact @24/prompt14 family and mixed-role rejection; exact historical family bytes, auditor11 control and mismatched @18 identity refusal. No provider or captured-profile execution. |
 
 | T-0555 | AC-0555 | rust | adapters-lang-java::spring_method_request_mappings_yield_verbs_or_gaps, adapters-lang-java::spring_class_request_methods_combine_by_union, adapters-lang-java::spring_unresolved_method_settles_through_wildcard_shadowing | Method-level @RequestMapping: class and method `method =` restrictions combine by union (Spring `RequestMethodsRequestCondition.combine`), shorthands included; an empty union (absent or `{}`) is ALL; an unprovable class restriction is a route Gap for each handler, settled through wildcard shadowing like every other route fact; single and array verbs, unprovable verb and dynamic path become one route Gap each, lookalike without import proves nothing. |
 
@@ -697,3 +697,77 @@ integrity and invocation binding after that text has been discarded.
   response are rejected in rolled-back test transactions.
 - `agents::single_word_configuration_subject_is_not_applicable`: pins the
   delegated multiword-only scope; Redis in cited source does not bind a subject.
+
+### Decision #1701 — AC-0287 reservation and combined feedback
+
+Initial serialization primitive coverage (integration remains pending):
+
+- `rust:core-redact::source_size::tests::matches_serializer_for_controls_unicode_and_quotes`
+  measures original and redacted JSON content using the production serializer.
+- `rust:core-redact::source_size::tests::redaction_expansion_and_sequential_patterns_are_measured`
+  covers growing and sequential substitutions; original length alone is insufficient.
+- `rust:adapters-lang-ts::captured::receipt::sizes::tests::measured_receipt_roundtrips_and_compacts_without_changing_legacy`
+- `rust:adapters-lang-ts::captured::tests::captured_directory_mints_measured_receipts`
+- `rust:adapters-lang-ts::captured::tests::captured_directory_measurement_budget_diagnostic`
+- `rust:app::investigations::evidence::prepared_source::tests::reservation_tests::publication_tests::prepared_source_publication_analyst24_unmeasured_receipt_uses_legacy_bound`
+  binds optional measurements into receipt identity and preserves legacy wire.
+- `rust:adapters-lang-ts::captured::receipt::sizes::tests::measured_receipt_rejects_tampering_and_falls_back_for_unknown_redactor`
+  rejects identity/range tampering and preserves the unsupported-policy fallback;
+  content-consistent understated metadata still requires host post-read rejection.
+- `rust:app::investigations::evidence::prepared_source::tests::prepared_source_size_claim_is_checked_after_charge_before_context_installation<br>rust:app::investigations::evidence::prepared_source::tests::reservation_tests::publication_tests::prepared_source_publication_analyst24_measured_receipt_roundtrip<br>rust:agents::investigation::input::admission_input::tests::source_preview_tests::frozen_replay::frozen_run_production_admission_replay<br>rust:agents::investigation::input::admission_input::tests::source_preview_tests::historical_goldens::historical_analyst20_through23_byte_goldens`
+  exercises measured capture, persisted receipts, graph binding, charged read and
+  refusal of a content-consistent understated size before evidence installation.
+- `rust:adapters-lang-ts::captured::receipt::sizes::tests::optional_size_enrichment_preserves_original_when_it_does_not_fit`
+  retains the byte-identical original receipt when optional measurement metadata
+  does not fit, without weakening the receipt ceiling.
+- `rust:llm::bounded::wire_tests::measured_source_bound_covers_redaction_growth_and_preserves_capacity_checks`
+  compares all five measured-source wire gates with actual serialization and
+  rejects an insufficient payload ceiling, including redaction growth.
+- `rust:agents::investigation::input::admission_input::tests::source_preview_tests::measured_source_preview_binds_both_sizes_and_rejects_legacy_verification`
+  binds both metadata lengths even when their maximum is unchanged, recomputes
+  both continuation modes, and rejects measured proofs through the legacy verifier.
+- `rust:agents::investigation::enumeration_claims::tests::combined_claim_visitor_scans_every_location_and_class`
+  covers both claim classes at one sentence and continued scanning after retention fills.
+- `rust:agents::investigation::input::source_replay_feedback_tests::combined_claim_corrections_isolate_citations_and_validate_before_visiting`
+  prevents evidence from unrelated findings from affecting diagnostics; malformed
+  finish shapes fail before any callback.
+- `rust:agents::investigation::replay_location::complete::tests::complete_replay_locations_deduplicate_and_continue_after_retention_fills`
+  deduplicates repeated source matches and scans all occurrences beyond retention.
+- `rust:agents::investigation::replay_location::complete::tests::complete_replay_locations_find_all_long_windows_and_cross_field_matches`
+  covers repeated long Unicode windows and replay across authored fields.
+- `rust:agents::investigation::replay_location::complete::tests::complete_replay_locations_union_metadata_without_duplicate_counts`
+  merges source and graph replay matches without double-counting, preserving the
+  distinct complete-short-source and long-metadata thresholds.
+- `rust:agents::investigation::input::source_replay_feedback_tests::combined_replay_input_visits_all_authored_fields_and_metadata`
+  covers finding titles/statements/limitations, overall limitations and model
+  metadata through the actual input API; historical first-match output agrees.
+- `rust:agents::investigation::staged_finish::combined_feedback::tests::combined_feedback_counts_every_unique_omission_within_existing_cap`
+  retains a bounded canonical prefix, deduplicates after overflow, counts every
+  omitted entry, round-trips schema 6 and rejects wrong schema versions.
+- `rust:agents::investigation::staged_finish::combined_feedback::tests::combined_feedback_keeps_both_claim_classes_and_evidence_ids`
+  serializes replay, limitation evidence IDs and both claim classes together.
+- `rust:agents::investigation::staged_finish::combined_feedback::tests::combined_feedback_validates_after_overflow_and_rejects_noncanonical_streams`
+  rejects out-of-order, malformed and failed diagnostics after retention fills.
+- `rust:agents::investigation::staged_finish::combined_feedback::tests::combined_feedback_callback_errors_cannot_be_ignored`
+  preserves the first streaming-collector error even when detector callbacks
+  ignore it; an empty scan returns no correction envelope.
+
+The input-level citation-isolation regression also streams replay and enumeration
+corrections into one schema-6 envelope, proving replay does not suppress claims.
+- `rust:agents::investigation::acquisition_choices::tests::combined_feedback_envelope_dominates_both_slots_and_nested_payloads`
+  proves the schema-6 component envelope dominates near-cap feedback in both
+  placements through the production payload and repeated JSON-string layers,
+  retaining the existing citation-guidance bound.
+- `rust:agents::investigation::specialists::capacity_exclusion_identity_tests::analyst24_combined_feedback_identity_preserves_limits_and_operations`
+  pins analyst24/prompt14 identity and complete combined-feedback guidance while
+  preserving the existing definition ceiling, operations and witness requirements.
+- `rust:agents::investigation::input::admission_input::tests::source_preview_tests::analyst24_finish_decision_combines_replays_without_rewriting_historical_roles`
+  exercises the actual consistency-bound finish decision for analysts20–24:
+  legacy schemas remain 3/3/4/4; analyst24 emits both replay locations and the
+  placeholder correction in schema6 under the existing allowance.
+- `rust:app::jobs::investigations::completion::next_prompt_finish::tests::citation_correction::feedback_witness::analyst24_latest_refusal_requires_independent_feedback_witness`
+  rejects missing/changed independent response witnesses, changed feedback and
+  missing response rows during saved-task validation.
+- `rust:app::jobs::investigations::completion::next_prompt_finish::tests::citation_correction::feedback_witness::analyst24_combined_replay_is_bound_and_survives_reopen_without_text`
+  persists and reopens schema6 without refused prose; a modified omitted count
+  with recomputed journal hashes still fails the independent response witness.

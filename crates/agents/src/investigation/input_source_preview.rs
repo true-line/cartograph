@@ -59,6 +59,35 @@ impl UnreadSourcePreviewBound {
         }
         Ok(())
     }
+    /// Verify against independently authenticated expected metadata. The old
+    /// verifier deliberately rejects measured proofs, preventing silent opt-in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_measured_with_policy(
+        &self,
+        input: &InvestigationInput,
+        current: &PreparedBoundedCompletion,
+        target: &InvestigationInspectionTarget,
+        profile: &ProviderProfile,
+        limits: &CompletionLimits,
+        next_action_id: &str,
+        policy: &InvestigationPolicy,
+        sizes: core_redact::DirectSourceJsonContentSizes,
+    ) -> Result<(), InvestigationError> {
+        if *self
+            != input.certify_measured_unread_source_v9_with_policy(
+                current,
+                target,
+                profile,
+                limits,
+                next_action_id,
+                policy,
+                sizes,
+            )?
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
 }
 impl InvestigationInput {
     /// Prove wire/protected-field/disclosure closure for both continuation
@@ -78,6 +107,53 @@ impl InvestigationInput {
         next_action_id: &str,
         policy: &InvestigationPolicy,
     ) -> Result<UnreadSourcePreviewBound, InvestigationError> {
+        self.certify_source_with_sizes(
+            current,
+            target,
+            profile,
+            limits,
+            next_action_id,
+            policy,
+            None,
+        )
+    }
+
+    /// Separate measured-source proof. The caller authenticates sizes from the
+    /// exact captured receipt and enforces them after the charged verified read.
+    /// No historical role selects this entry point implicitly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn certify_measured_unread_source_v9_with_policy(
+        &self,
+        current: &PreparedBoundedCompletion,
+        target: &InvestigationInspectionTarget,
+        profile: &ProviderProfile,
+        limits: &CompletionLimits,
+        next_action_id: &str,
+        policy: &InvestigationPolicy,
+        sizes: core_redact::DirectSourceJsonContentSizes,
+    ) -> Result<UnreadSourcePreviewBound, InvestigationError> {
+        self.certify_source_with_sizes(
+            current,
+            target,
+            profile,
+            limits,
+            next_action_id,
+            policy,
+            Some(sizes),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn certify_source_with_sizes(
+        &self,
+        current: &PreparedBoundedCompletion,
+        target: &InvestigationInspectionTarget,
+        profile: &ProviderProfile,
+        limits: &CompletionLimits,
+        next_action_id: &str,
+        policy: &InvestigationPolicy,
+        sizes: Option<core_redact::DirectSourceJsonContentSizes>,
+    ) -> Result<UnreadSourcePreviewBound, InvestigationError> {
         let (prompt, _) = self.admission_reserve_basis(policy)?;
         if prompt["turn_progress"]["admission_mode"] != "choice"
             || current.profile() != profile
@@ -94,8 +170,15 @@ impl InvestigationInput {
         // checks real production redaction in both modes. Controlled values
         // cannot create regex prefixes, JSON separators, or private-key
         // delimiters; any cross-field private-key regions thus remain fixed.
-        let acquired =
-            self.measure_source_projection(target, profile, limits, next_action_id, policy, true)?;
+        let acquired = self.measure_source_projection_with_sizes(
+            target,
+            profile,
+            limits,
+            next_action_id,
+            policy,
+            true,
+            sizes,
+        )?;
         // A genuinely unavailable read advances usage/attempt metadata without
         // acquiring a citation or revising the ledger. Bound that complete
         // protected representation independently; no size ordering is assumed.
@@ -141,6 +224,17 @@ impl InvestigationInput {
                 MAX_INPUT_BYTES,
             )?,
         );
+        let basis_hash = if let Some(sizes) = sizes {
+            crate::source_basis::domain_hash(
+                b"cartograph:measured-unread-source-preview:v1\0",
+                &bounded_bytes(
+                    &(basis_hash, sizes.original, sizes.redacted),
+                    MAX_INPUT_BYTES,
+                )?,
+            )
+        } else {
+            basis_hash
+        };
         Ok(UnreadSourcePreviewBound {
             basis_hash,
             continuation,

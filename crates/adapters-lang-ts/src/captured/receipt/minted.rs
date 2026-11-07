@@ -50,6 +50,7 @@ pub struct MintedReceipt {
     fact_key: FactKey,
     fact_digest: String,
     spans: Box<[Span]>,
+    source_sizes: Option<super::ReceiptSourceSizes>,
 }
 
 impl MintedReceipt {
@@ -103,6 +104,7 @@ impl MintedReceipt {
             }
         };
         Ok(Self {
+            source_sizes: content.source_sizes.clone(),
             receipt_id: receipt.receipt_id,
             header: shared,
             fact_key: content.fact_key,
@@ -160,6 +162,7 @@ impl MintedReceipt {
                         },
                     })
                     .collect(),
+                source_sizes: self.source_sizes.clone(),
                 source_scope: SourceScope::PrimarySourceOnly,
                 input_closure: InputClosure::InputClosureNotEstablished,
             },
@@ -226,6 +229,10 @@ impl MintedReceipt {
             + key
             + self.fact_digest.capacity()
             + self.spans.len() * size_of::<Span>()
+            + self
+                .source_sizes
+                .as_ref()
+                .map_or(0, |sizes| sizes.heap_bytes())
     }
 
     fn matches_inventory(&self, props: &serde_json::Value) -> bool {

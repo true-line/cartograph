@@ -94,6 +94,7 @@ fn source_settlement_actual_acquired_and_unavailable_use_same_bounded_rows_as_pr
         fixture.charge();
         let (candidate, prepared) = fixture.candidate(reason.clone());
         let continuation = SourceContinuation {
+            size_binding: None,
             current: &fixture.current,
             current_prepared: &fixture.prepared,
             candidate: &candidate,
@@ -177,6 +178,7 @@ fn source_continuation_rejects_substituted_task_family() {
     fixture.charge();
     let (candidate, prepared) = fixture.candidate(None);
     let c = SourceContinuation {
+        size_binding: None,
         current: &fixture.current,
         current_prepared: &fixture.prepared,
         candidate: &candidate,

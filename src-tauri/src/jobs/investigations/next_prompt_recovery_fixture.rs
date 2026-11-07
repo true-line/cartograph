@@ -184,6 +184,7 @@ pub(super) fn source(charged: bool) -> InitialFixture {
             &f.execution,
             f.task.detail.summary.revision,
             &SourceAdmission {
+                size_binding: None,
                 response: &response,
                 original_action: &action,
                 current: &candidate,

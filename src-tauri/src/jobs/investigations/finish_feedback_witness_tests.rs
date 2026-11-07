@@ -11,6 +11,11 @@ fn analyst23_latest_refusal_requires_independent_feedback_witness() {
     assert_latest_feedback_witness("domain-analyst@23");
 }
 
+#[test]
+fn analyst24_latest_refusal_requires_independent_feedback_witness() {
+    assert_latest_feedback_witness("domain-analyst@24");
+}
+
 fn assert_latest_feedback_witness(role: &str) {
     let mut f = correction_fixture_role(role);
     f.begin();
@@ -80,7 +85,14 @@ fn assert_latest_feedback_witness(role: &str) {
 
 #[test]
 fn analyst22_replay_locator_is_bound_and_survives_reopen_without_text() {
-    let mut f = correction_fixture_role("domain-analyst@22");
+    assert_replay_locator_reopen("domain-analyst@22");
+}
+#[test]
+fn analyst24_combined_replay_is_bound_and_survives_reopen_without_text() {
+    assert_replay_locator_reopen("domain-analyst@24");
+}
+fn assert_replay_locator_reopen(role: &str) {
+    let mut f = correction_fixture_role(role);
     let replay = f
         .input
         .ledger()
@@ -102,11 +114,28 @@ fn analyst22_replay_locator_is_bound_and_survives_reopen_without_text() {
     let task = f.saved();
     let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
     let entry = completion::raw_refusals(&tx, &task).unwrap().remove(0);
-    assert_eq!(entry.record.feedback.schema_version, 4);
-    let Some(agents::investigation::staged_finish::ProseCorrection::ParaphraseReplayAt(location)) =
-        &entry.record.feedback.prose_correction
-    else {
-        panic!("expected replay locator")
+    let location = if role == "domain-analyst@24" {
+        assert_eq!(entry.record.feedback.schema_version, 6);
+        let Some(agents::investigation::staged_finish::ProseCorrection::Combined(combined)) =
+            &entry.record.feedback.prose_correction
+        else {
+            panic!("expected combined feedback")
+        };
+        let agents::investigation::staged_finish::CombinedCorrection::ReplayAt(location) =
+            &combined.entries[0]
+        else {
+            panic!("expected replay")
+        };
+        location
+    } else {
+        assert_eq!(entry.record.feedback.schema_version, 4);
+        let Some(agents::investigation::staged_finish::ProseCorrection::ParaphraseReplayAt(
+            location,
+        )) = &entry.record.feedback.prose_correction
+        else {
+            panic!("expected replay locator")
+        };
+        location
     };
     assert_eq!(
         location.start.field,
@@ -120,6 +149,34 @@ fn analyst22_replay_locator_is_bound_and_survives_reopen_without_text() {
     );
     assert!(entry.response.finish_feedback_witness.is_some());
     assert!(staged::load_for_task(&tx, &task).is_ok());
+    if role == "domain-analyst@24" {
+        let mut entry = entry;
+        let Some(agents::investigation::staged_finish::ProseCorrection::Combined(combined)) =
+            &mut entry.record.feedback.prose_correction
+        else {
+            unreachable!()
+        };
+        combined.omitted += 1;
+        entry.record.refusal_id = entry.record.content_id().unwrap();
+        entry.rehash_for_test();
+        let trigger_sql: String = tx
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='staged_completion_refusals_no_update'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tx.execute_batch("DROP TRIGGER staged_completion_refusals_no_update")
+            .unwrap();
+        let body = encode(&entry, MAX_RECORD_BYTES).unwrap();
+        tx.execute("UPDATE staged_completion_refusals SET body=?2,body_hash=?3 WHERE task_id=?1 AND sequence=1",
+            params![entry.record.task_id, body, core_prov::content_hash(&body)]).unwrap();
+        tx.execute_batch(&trigger_sql).unwrap();
+        assert!(
+            staged::load_for_task(&tx, &task).is_err(),
+            "rehashed omitted count must fail independent witness"
+        );
+    }
     drop(tx);
     let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
     assert_eq!(reopened.investigation(f.base.id()).unwrap(), detail);

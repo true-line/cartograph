@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 rusqlite = { workspace = true }
 core-graph = { workspace = true }
 core-prov = { workspace = true }
+core-redact = { workspace = true }
 source-capture = { workspace = true }
 source-walk = { workspace = true }
 cap-std = "4.0.3"

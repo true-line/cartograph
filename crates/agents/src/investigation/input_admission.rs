@@ -188,7 +188,11 @@ impl InvestigationInput {
         profile: &llm::bounded::ProviderProfile,
         limits: &llm::bounded::CompletionLimits,
         policy: &InvestigationPolicy,
-        unread_source: Option<(usize, usize)>,
+        unread_source: Option<(
+            usize,
+            usize,
+            Option<core_redact::DirectSourceJsonContentSizes>,
+        )>,
         source_target: Option<&InvestigationInspectionTarget>,
         protect: bool,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
@@ -237,7 +241,13 @@ impl InvestigationInput {
         );
         if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             let upper = serde_json::to_value(
-                if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
+                if self.payload.system == SpecialistId::DomainAnalystV24.prompt() {
+                    staged_finish::RefusalFeedback::sizing_combined_contract_envelope(
+                        &contract,
+                        &self.ledger,
+                        policy,
+                    )?
+                } else if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
                     staged_finish::RefusalFeedback::sizing_claim_contract_envelope(
                         &contract,
                         &self.ledger,
@@ -380,7 +390,12 @@ impl InvestigationInput {
                 )?;
             }
             let measurements = match unread_source {
-                Some((index, bytes)) => {
+                Some((index, bytes, Some(sizes))) => {
+                    llm::bounded::bound_measured_unread_source_action(
+                        profile, &action, limits, index, bytes, sizes,
+                    )
+                }
+                Some((index, bytes, None)) => {
                     llm::bounded::bound_unread_source_action(profile, &action, limits, index, bytes)
                 }
                 None => llm::bounded::measure_bounded_action(profile, &action, limits),
@@ -432,6 +447,22 @@ impl InvestigationInput {
         action_id: &str,
         policy: &InvestigationPolicy,
         protect: bool,
+    ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
+        self.measure_source_projection_with_sizes(
+            target, profile, limits, action_id, policy, protect, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn measure_source_projection_with_sizes(
+        &self,
+        target: &InvestigationInspectionTarget,
+        profile: &llm::bounded::ProviderProfile,
+        limits: &llm::bounded::CompletionLimits,
+        action_id: &str,
+        policy: &InvestigationPolicy,
+        protect: bool,
+        source_sizes: Option<core_redact::DirectSourceJsonContentSizes>,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
         let (mut prompt, contract) = self.admission_reserve_basis(policy)?;
         target.validate()?;
@@ -673,7 +704,7 @@ impl InvestigationInput {
             profile,
             limits,
             policy,
-            Some((span_index, bytes)),
+            Some((span_index, bytes, source_sizes)),
             Some(target),
             protect,
         )
@@ -711,7 +742,9 @@ impl InvestigationInput {
                 .map_err(|_| InvestigationError::InvalidInput)?;
         if self.acquisition_choices.is_some() {
             state.validate_saved_role_shape(
-                if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
+                if self.payload.system == SpecialistId::DomainAnalystV24.prompt() {
+                    SpecialistId::DomainAnalystV24
+                } else if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
                     SpecialistId::DomainAnalystV23
                 } else if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
                     SpecialistId::DomainAnalystV22
@@ -751,6 +784,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV21,
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
+            SpecialistId::DomainAnalystV24,
             SpecialistId::EvidenceAuditorV11,
         ]
         .into_iter()
@@ -1026,7 +1060,8 @@ impl InvestigationInput {
     fn capacity_exhausted(&self) -> bool {
         (self.payload.system == SpecialistId::DomainAnalystV21.prompt()
             || self.payload.system == SpecialistId::DomainAnalystV22.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV23.prompt())
+            || self.payload.system == SpecialistId::DomainAnalystV23.prompt()
+            || self.payload.system == SpecialistId::DomainAnalystV24.prompt())
             && self
                 .acquisition_choices
                 .as_ref()
@@ -1041,6 +1076,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV21,
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
+            SpecialistId::DomainAnalystV24,
         ]
         .iter()
         .any(|role| self.payload.system == role.prompt())
@@ -1121,7 +1157,8 @@ impl InvestigationInput {
         self.action_feedback = feedback;
         if ((self.payload.system == SpecialistId::DomainAnalystV21.prompt()
             || self.payload.system == SpecialistId::DomainAnalystV22.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV23.prompt())
+            || self.payload.system == SpecialistId::DomainAnalystV23.prompt()
+            || self.payload.system == SpecialistId::DomainAnalystV24.prompt())
             && choices.capacity_exhausted())
             || self
                 .action_feedback

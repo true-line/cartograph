@@ -304,3 +304,9 @@ mod tests {
         );
     }
 }
+
+#[path = "replay_locations.rs"]
+mod complete;
+pub use complete::{
+    replay_locations_workspace_bytes, visit_prose_replays, visit_prose_replays_with_metadata,
+};

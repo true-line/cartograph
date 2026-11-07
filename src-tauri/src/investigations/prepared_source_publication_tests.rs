@@ -36,6 +36,31 @@ fn read(
     target: &InvestigationInspectionTarget,
 ) -> Result<PreparedSourceCandidate, PreparedSourceFailure> {
     let prepared = context.prepare_captured_source(state, target).unwrap();
+    let mut admission = saved.admission();
+    if prepared
+        .size_binding()
+        .sizes_for(target, &context.ledger)
+        .unwrap()
+        .is_some()
+    {
+        // A measured proof without the independently held receipt is rejected
+        // before reservation commit, charging or text access.
+        assert!(
+            prepared
+                .reserve(
+                    context,
+                    state,
+                    saved.execution(),
+                    saved.revision(),
+                    &clock(),
+                    &admission
+                )
+                .is_err()
+        );
+        assert_eq!(saved.counts(), (0, 0, 0));
+        assert_eq!(read_count(), 0);
+    }
+    admission.size_binding = Some(prepared.size_binding());
     let reserved = prepared
         .reserve(
             context,
@@ -43,7 +68,7 @@ fn read(
             saved.execution(),
             saved.revision(),
             &clock(),
-            &saved.admission(),
+            &admission,
         )
         .unwrap();
     prepared.read_reserved(context, state, saved.execution(), &reserved.basis())
@@ -66,8 +91,11 @@ fn assert_acquired_publication(gated: bool) {
     assert_acquired_publication_role(gated.then_some(SpecialistId::DomainAnalystV18));
 }
 fn assert_acquired_publication_role(role: Option<SpecialistId>) {
+    assert_acquired_publication_capture(role, role == Some(SpecialistId::DomainAnalystV24));
+}
+fn assert_acquired_publication_capture(role: Option<SpecialistId>, measured: bool) {
     let gated = role.is_some();
-    let (saved, state, mut context, target, _) = fixture_for_role(role);
+    let (saved, state, mut context, target, _) = fixture_for_role_capture(role, measured);
     reset_reads();
     let candidate = match read(&saved, &state, &context, &target) {
         Ok(candidate) => candidate,
@@ -279,4 +307,17 @@ fn analyst23_configuration_claim_refusal_survives_captured_source_reopen() {
         &firewall,
         citation,
     );
+}
+
+// AC-0287: measured proof crosses real reservation, charged read, actual prompt
+// publication and durable reopen; the model transport is never called.
+#[test]
+fn prepared_source_publication_analyst24_measured_receipt_roundtrip() {
+    assert_acquired_publication_role(Some(SpecialistId::DomainAnalystV24));
+}
+
+// AC-0287: old receipts remain readable under conservative legacy certification.
+#[test]
+fn prepared_source_publication_analyst24_unmeasured_receipt_uses_legacy_bound() {
+    assert_acquired_publication_capture(Some(SpecialistId::DomainAnalystV24), false);
 }

@@ -114,6 +114,7 @@ impl Fixture {
             &self.f._execution_guard,
             self.f.task.detail.summary.revision,
             &SourceAdmission {
+                size_binding: None,
                 response: &self.response,
                 original_action: &self.action,
                 current: &self.current,
@@ -269,6 +270,7 @@ fn source_admission_rebound_action_target_proof_or_callback_leaves_no_partial_ad
         &f.f._execution_guard,
         f.f.task.detail.summary.revision,
         &SourceAdmission {
+            size_binding: None,
             response: &f.response,
             original_action: &f.action,
             current: &f.current,
@@ -359,6 +361,7 @@ fn source_admission_real_cancellation_and_foreign_execution_cannot_create_reserv
     let other = Fixture::new();
     let before = f.snapshot();
     let input = SourceAdmission {
+        size_binding: None,
         response: &f.response,
         original_action: &f.action,
         current: &f.current,

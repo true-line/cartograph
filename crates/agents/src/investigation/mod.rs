@@ -71,7 +71,9 @@ pub use protocol::*;
 pub use record_workspace::record_decode_scratch_bytes;
 pub use records::*;
 pub use replay_location::{
-    ProseField, ProsePosition, ReplayLocation, locate_prose_replay, replay_location_workspace_bytes,
+    ProseField, ProsePosition, ReplayLocation, locate_prose_replay,
+    replay_location_workspace_bytes, replay_locations_workspace_bytes, visit_prose_replays,
+    visit_prose_replays_with_metadata,
 };
 pub use result_workspace::{
     completion_result_validation_workspace, stored_refusal_validation_workspace,

@@ -148,3 +148,7 @@ actual-model acceptance. Development and release gates remain separate.
 Decision #1697 / issue #1698 extends US-0032 / AC-0287 with analyst @23
 literal-enumeration and configuration-claim checks. Historical @20–@22 remain
 unchanged; deterministic regressions and actual-model acceptance are separate.
+
+Decision #1701 extends US-0032 / AC-0287 with analyst @24 receipt-bound
+serialized reservation and schema-6 combined corrections. Implementation and
+joint admission validation remain in progress; no model acceptance is implied.
