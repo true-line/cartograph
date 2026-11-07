@@ -137,7 +137,11 @@ export function EvidencePanel({
       ? node.props.display_name
       : typeof node.props.name === 'string'
         ? node.props.name
-        : (node.props.path ?? node.id);
+        : node.label === 'Screen'
+          ? typeof node.props.route === 'string' && node.props.route.trim()
+            ? node.props.route
+            : node.id
+          : (node.props.path ?? node.id);
 
   return (
     <section

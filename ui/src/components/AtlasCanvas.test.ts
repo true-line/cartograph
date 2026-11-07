@@ -51,3 +51,21 @@ describe('displayName', () => {
     expect(displayName(node('s', 'Symbol'))).toBe('s');
   });
 });
+
+// AC-0028: recorded routes are display-only; do not parse stable IDs.
+describe('recorded screen route labels', () => {
+  it('uses root and named routes only for Screens after explicit names', () => {
+    expect(displayName(node('screen:r@/', 'Screen', { route: '/' }))).toBe('/');
+    expect(displayName(node('screen:r@/main', 'Screen', { route: '/main' }))).toBe('/main');
+    for (const key of ['identity', 'logical_id', 'type']) {
+      expect(displayName(node('screen:r@/main', 'Screen', { route: '/main', [key]: 'generic' }))).toBe('/main');
+      expect(displayName(node('screen:r@/main', 'Screen', { route: '/main', [key]: 'generic', name: 'Home' }))).toBe('Home');
+      expect(displayName(node('other', 'Symbol', { route: '/main', [key]: 'generic' }))).toBe('generic');
+    }
+    expect(displayName(node('screen:r@/main', 'Screen', { route: '/main', name: 'Home' }))).toBe('Home');
+    expect(displayName(node('screen:r@/main', 'Screen', { route: '/main', display_name: 'Dashboard' }))).toBe('Dashboard');
+    expect(displayName(node('screen:r@/main', 'Screen', { route: '  ' }))).toBe('screen:r@/main');
+    expect(displayName(node('screen:r@/main', 'Screen'))).toBe('screen:r@/main');
+    expect(displayName(node('other', 'Symbol', { route: '/main' }))).toBe('other');
+  });
+});
