@@ -51,3 +51,12 @@ export const FirstRefusalAwaitsNextStep: Story = {
     await expect(canvas.getByText('Assessed against the actual finishing disclosure.')).toBeVisible();
   },
 };
+
+export const FindingsWithheldAfterCorrection: Story = {
+  args: { outcome: 'findings_withheld_after_correction', completion: { ...completionDetail().completion!, refusal_count: 1 } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Some findings were withheld because their claims could not be verified.')).toBeVisible();
+    await expect(canvas.queryByText('Supported completion')).not.toBeInTheDocument();
+  },
+};

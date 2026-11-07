@@ -1013,7 +1013,10 @@ pub(super) fn append_for_task(
         && request.specialist_id != "domain-analyst@21"
         && request.specialist_id != "domain-analyst@22"
         && request.specialist_id != "domain-analyst@23"
-        && request.specialist_id != "domain-analyst@24"
+        && !matches!(
+            request.specialist_id.as_str(),
+            "domain-analyst@24" | "domain-analyst@25"
+        )
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -1184,8 +1187,11 @@ pub(super) fn validate_finish_feedback_witness(
     if matches!(
         record.feedback.prose_correction,
         Some(agents::investigation::staged_finish::ProseCorrection::Combined(_))
-    ) && task.detail.summary.specialist_id
-        != agents::investigation::SpecialistId::DomainAnalystV24
+    ) && !task
+        .detail
+        .summary
+        .specialist_id
+        .uses_combined_finish_feedback()
     {
         return Err(InvestigationStoreError::Invalid);
     }

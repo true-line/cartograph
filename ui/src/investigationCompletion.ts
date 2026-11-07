@@ -21,9 +21,11 @@ const observations = (rows: InvestigationObligationObservation[], maximum = 12) 
 export function validCompletionResult(value: InvestigationCompletionResult | undefined, result: InvestigationResult, maximum = 12): boolean {
   if (![5, 6, 7, 8].includes(result.schema_version) || !isCompletionResultId(result.result_id, result.schema_version) || !isCompletionDisclosure(result.disclosure_hash, result.schema_version) || !hash(result.input_ledger_hash) ||
       !/^context-v1:[0-9a-f]{64}$/.test(result.graph_snapshot_id) || !fields(result, ['schema_version', 'completion', 'coverage', 'investigation_id', 'result_id', 'input_ledger_hash', 'graph_snapshot_id', 'invocation_step_id', 'disclosure_hash', 'findings', 'knowledge_completeness', 'limitations', 'observed_response_model', 'created_at'], result.schema_version === 8 ? ['inspection_assessment', 'narrative'] : ['inspection_assessment']) ||
-      !value || !fields(value, ['schema_version', 'outcome', 'request_hash', 'obligations_hash', 'finishing_attempts_hash', 'assessment']) ||
-      value.schema_version !== 1 || !hash(value.request_hash) || !hash(value.obligations_hash) || !hash(value.finishing_attempts_hash) ||
+      !value || !fields(value, ['schema_version', 'outcome', 'request_hash', 'obligations_hash', 'finishing_attempts_hash', 'assessment'], ['withholding']) ||
+      value.schema_version !== (value.withholding === undefined ? 1 : 2) || !hash(value.request_hash) || !hash(value.obligations_hash) || !hash(value.finishing_attempts_hash) ||
       !observations(value.assessment, maximum) || !value.assessment.length || value.assessment.some((row) => row.unmet !== null)) return false;
+  const partial = value.outcome === 'findings_withheld_after_correction';
+  if (partial !== (value.withholding !== undefined) || (partial && !validWithholding(value, result))) return false;
   if (result.schema_version === 8) {
     const message = result.narrative;
     if (value.outcome === 'supported' ? !message : 'narrative' in result) return false;
@@ -43,6 +45,8 @@ export function validCompletionResult(value: InvestigationCompletionResult | und
         row.target_id !== row.target.target_id || !hash(row.target_id) || row.target.graph_snapshot_id !== result.graph_snapshot_id ||
         [row.acquired, row.supplied, row.cited].some((v) => typeof v !== 'boolean') ||
         !(row.status === 'supplied' ? row.supplied && row.acquired : row.status === 'unmet' && !row.supplied)))) return false;
+  if (partial) return result.findings.length > 0 && result.knowledge_completeness === 'partial' &&
+    value.assessment.every((row) => row.exactly_supplied);
   if (value.outcome === 'supported') return result.findings.length > 0 && result.knowledge_completeness !== 'insufficient_evidence' &&
     value.assessment.every((row) => row.exactly_supplied);
   return value.outcome === 'insufficient_evidence' && result.findings.length === 0 && result.knowledge_completeness === 'insufficient_evidence' &&
@@ -60,13 +64,15 @@ export function validCompletionSummary(value: InvestigationSummary): boolean {
       ['inspection_status', 'inspection_requirement_count', 'inspection_requirements', 'inspection_assessment'].some((key) => key in value)) return false;
   if (value.completion_outcome === undefined) return !value.has_result && value.status !== 'completed';
   if (value.completion_outcome === 'obligations_unmet') return value.status === 'failed' && !value.has_result && value.obligation_status === 'unmet';
-  return ['supported', 'insufficient_evidence'].includes(value.completion_outcome) && value.status === 'completed' && value.has_result &&
+  return ['supported', 'insufficient_evidence', 'findings_withheld_after_correction'].includes(value.completion_outcome) &&
+    (value.completion_outcome !== 'findings_withheld_after_correction' || value.specialist_id === 'domain-analyst@25') && value.status === 'completed' && value.has_result &&
     value.obligation_status === 'satisfied';
 }
 export function validCompletionDetail(value: InvestigationCompletionDetail | undefined, detail: InvestigationDetail,
   result: InvestigationResult | null): boolean {
   const family = completionFamily(detail.schema_version);
   if (!family) return false;
+  if (result?.completion?.withholding && (detail.specialist_id !== 'domain-analyst@25' || value?.refusal_count !== 1)) return false;
   const resultVersion = usesCitedNarrative(detail.specialist_id) ? 8 : family.resultVersion;
   const modern = family.expanded;
   const policy: InvestigationPolicy | undefined = modern ? { limits: detail.limits, request_schema_version: family.requestVersion, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2', max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536, specialist_ids: [detail.specialist_id] } : undefined;
@@ -116,4 +122,25 @@ export function validCompletionDetail(value: InvestigationCompletionDetail | und
   }
   if (detail.completion_outcome === 'obligations_unmet') return value.refusal_count === 2 && value.assessment.some((row) => row.unmet !== null);
   return detail.completion_outcome === undefined && value.refusal_count < 2;
+}
+
+/** UI shape/binding validation only; durable host authority is checked on reopen. */
+function validWithholding(value: InvestigationCompletionResult, result: InvestigationResult): boolean {
+  const w = value.withholding;
+  if (!w || result.schema_version !== 7 || !fields(w, ['schema_version', 'detector_version', 'disposition',
+    'original_finish_hash', 'original_response_hash', 'request_hash', 'obligations_hash', 'input_ledger_hash',
+    'disclosure_hash', 'prior_correction_witness_hash', 'projected_result_hash', 'original_finding_count',
+    'withheld_indexes', 'survivor_indexes']) || w.schema_version !== 1 || w.detector_version !== 1 ||
+    w.disposition !== 'findings_withheld_after_correction' || w.request_hash !== value.request_hash ||
+    w.obligations_hash !== value.obligations_hash || w.input_ledger_hash !== result.input_ledger_hash ||
+    w.disclosure_hash !== result.disclosure_hash || ![w.original_finish_hash, w.original_response_hash,
+      w.request_hash, w.obligations_hash, w.input_ledger_hash, w.prior_correction_witness_hash, w.projected_result_hash].every(hash) ||
+    !Number.isSafeInteger(w.original_finding_count) || w.original_finding_count < 2 || w.original_finding_count > 12) return false;
+  for (const indexes of [w.withheld_indexes, w.survivor_indexes]) {
+    if (!Array.isArray(indexes) || !indexes.length || indexes.length > 12 || indexes.some((n, i) =>
+      !Number.isSafeInteger(n) || n < 0 || n >= w.original_finding_count || (i > 0 && indexes[i - 1] >= n))) return false;
+  }
+  return w.survivor_indexes.length === result.findings.length &&
+    Array.from({ length: w.original_finding_count }, (_, i) => i).every((i) =>
+      w.withheld_indexes.includes(i) !== w.survivor_indexes.includes(i));
 }

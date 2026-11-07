@@ -1,6 +1,7 @@
 import type { InvestigationCompletionDetail, InvestigationCompletionOutcome } from '../investigationTypes';
 
 const OUTCOME: Record<InvestigationCompletionOutcome, string> = {
+  findings_withheld_after_correction: 'Some findings were withheld because their claims could not be verified.',
   supported: 'Supported completion', insufficient_evidence: 'Completed with insufficient evidence',
   obligations_unmet: 'Completion obligations unmet — no result was admitted',
 };

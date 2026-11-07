@@ -309,7 +309,12 @@ impl StoredSemanticAudit {
         .ok_or(InvestigationStoreError::Invalid)?;
         if step.step_id != *step_id
             || response.step_id != *step_id
-            || response.action_hash != candidate_action_hash(candidate)?
+            // Ordinary candidates reproduce the original action. A projected
+            // candidate cannot: validate_result below authenticates its separate
+            // host witness against this independently loaded response and prior
+            // correction, including the projected result hash.
+            || (candidate.completion.as_ref().and_then(|c| c.withholding.as_ref()).is_none()
+                && response.action_hash != candidate_action_hash(candidate)?)
             || response.observed_model != candidate.observed_response_model
         {
             return Err(InvestigationStoreError::Invalid);
@@ -417,7 +422,14 @@ impl StoredSemanticAudit {
                 || candidate
                     .completion
                     .as_ref()
-                    .is_none_or(|c| c.outcome != CompletionOutcome::Supported)
+                    .is_none_or(|c| match c.outcome {
+                        CompletionOutcome::Supported => c.withholding.is_some(),
+                        CompletionOutcome::FindingsWithheldAfterCorrection => {
+                            task.detail.summary.specialist_id != SpecialistId::DomainAnalystV25
+                                || c.withholding.is_none()
+                        }
+                        _ => true,
+                    })
                 || self.account.usage()? != task.detail.usage
                 || (task.detail.summary.has_result
                     && (!self.account.is_terminal() || !self.account.audit_started()))

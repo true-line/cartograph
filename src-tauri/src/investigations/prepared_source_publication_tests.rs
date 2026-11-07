@@ -309,6 +309,36 @@ fn analyst23_configuration_claim_refusal_survives_captured_source_reopen() {
     );
 }
 
+#[test]
+fn analyst25_partial_survives_captured_source_reopen() {
+    let (mut saved, state, mut context, target, _) =
+        fixture_for_role_capture(Some(SpecialistId::DomainAnalystV25), true);
+    let candidate = match read(&saved, &state, &context, &target) {
+        Ok(candidate) => candidate,
+        Err(error) => panic!("read failed: {:?}", error.kind()),
+    };
+    let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+    let provider = provider();
+    let _published = match candidate.publish_acquired(
+        &mut context,
+        &state,
+        saved.execution(),
+        &clock(),
+        &publication(&saved, &firewall, &provider),
+    ) {
+        Ok(result) => result,
+        Err(error) => panic!("publication failed: {}", error.error()),
+    };
+    let citation = &context.ledger.citations.last().unwrap().citation_id;
+    saved.assert_partial_after_capture(
+        &provider,
+        &firewall,
+        citation,
+        &context.query_pages,
+        &context.evidence,
+    );
+}
+
 // AC-0287: measured proof crosses real reservation, charged read, actual prompt
 // publication and durable reopen; the model transport is never called.
 #[test]

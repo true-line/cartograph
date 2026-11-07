@@ -85,7 +85,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .checked_add(1)
             .ok_or(HostError::LimitExceeded)?;
         let next_action_id = format!("{}:step-{next_ordinal}", self.id);
-        let sizes = if self.detail.summary.specialist_id == SpecialistId::DomainAnalystV24 {
+        let sizes = if self
+            .detail
+            .summary
+            .specialist_id
+            .uses_exact_source_reservation()
+        {
             source
                 .size_binding()
                 .sizes_for(source.target(), current.ledger())?
@@ -145,9 +150,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 self.detail.summary.revision,
                 self.clock,
                 &SourceAdmission {
-                    size_binding: (self.detail.summary.specialist_id
-                        == SpecialistId::DomainAnalystV24)
-                        .then(|| source.size_binding()),
+                    size_binding: (self
+                        .detail
+                        .summary
+                        .specialist_id
+                        .uses_exact_source_reservation())
+                    .then(|| source.size_binding()),
                     response: &response,
                     original_action: &original,
                     current,

@@ -57,7 +57,7 @@ struct Page<'a> {
 #[ignore = "requires CARTOGRAPH_FROZEN_REPLAY; read-only local artifacts"]
 fn frozen_run_production_admission_replay() {
     let data = std::fs::read(std::env::var("CARTOGRAPH_FROZEN_REPLAY").unwrap()).unwrap();
-    let mut f: FrozenReplay = serde_json::from_slice(&data).unwrap();
+    let f: FrozenReplay = serde_json::from_slice(&data).unwrap();
     let policy = &INVESTIGATION_V2_POLICY;
     f.ledger.validate_with_policy(policy).unwrap();
     let captured_text = |span: &crate::TaskCaptureSpanRef| {
@@ -201,48 +201,61 @@ fn frozen_run_production_admission_replay() {
     }
     // Counterfactual family migration changes only role/request/attempt identity.
     // Recompute identities; never present the modified contract as saved authority.
-    f.request.specialist_id = "domain-analyst@24".into();
-    let request_hash = f.request.intent_hash_with_policy(policy).unwrap();
-    f.contract.request_hash = request_hash.clone();
-    f.metadata.request_hash = request_hash.clone();
-    for record in &mut f.attempts {
-        record.request_hash = request_hash.clone();
-        record.attempt_id = record.content_id().unwrap();
-    }
-    f.metadata.completed_attempt_ids = f.attempts.iter().map(|r| r.attempt_id.clone()).collect();
-    let input = build(&f, &pages, &inventories, SpecialistId::DomainAnalystV24);
-    let action = input.action(format!("{}:step-15", f.task_id)).unwrap();
-    let prepared = firewall
-        .prepare_bounded(&DescriptorOnly, &action, &limits)
-        .unwrap();
-    let sizes = core_redact::measure_direct_source_json_content(&f.source).unwrap();
-    let bound = input
-        .certify_measured_unread_source_v9_with_policy(
-            &prepared,
-            &f.target,
-            &profile(),
-            &limits,
-            &format!("{}:step-16", f.task_id),
-            policy,
-            sizes,
-        )
-        .unwrap();
-    eprintln!(
-        "joint analyst24 production bound: {:?}; original={} redacted={}",
-        bound.continuation(),
-        sizes.original,
-        sizes.redacted
-    );
-    assert_eq!(
-        bound.continuation().choice.original_payload_bytes,
-        if original_role == SpecialistId::DomainAnalystV23 {
-            126365
-        } else {
-            126359
+    for role in [
+        SpecialistId::DomainAnalystV24,
+        SpecialistId::DomainAnalystV25,
+    ] {
+        let mut f = f.clone();
+        f.request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
+        let request_hash = f.request.intent_hash_with_policy(policy).unwrap();
+        f.contract.request_hash = request_hash.clone();
+        f.metadata.request_hash = request_hash.clone();
+        for record in &mut f.attempts {
+            record.request_hash = request_hash.clone();
+            record.attempt_id = record.content_id().unwrap();
         }
-    );
-    assert!(bound.continuation().choice.original_payload_bytes <= 131072);
-    assert!(bound.continuation().choice.redacted_payload_bytes <= 131072);
+        f.metadata.completed_attempt_ids =
+            f.attempts.iter().map(|r| r.attempt_id.clone()).collect();
+        let input = build(&f, &pages, &inventories, role);
+        let action = input.action(format!("{}:step-15", f.task_id)).unwrap();
+        let prepared = firewall
+            .prepare_bounded(&DescriptorOnly, &action, &limits)
+            .unwrap();
+        let sizes = core_redact::measure_direct_source_json_content(&f.source).unwrap();
+        let bound = input
+            .certify_measured_unread_source_v9_with_policy(
+                &prepared,
+                &f.target,
+                &profile(),
+                &limits,
+                &format!("{}:step-16", f.task_id),
+                policy,
+                sizes,
+            )
+            .unwrap();
+        eprintln!(
+            "joint {:?} production bound: {:?}; original={} redacted={}",
+            role,
+            bound.continuation(),
+            sizes.original,
+            sizes.redacted
+        );
+        assert_eq!(
+            bound.continuation().choice.original_payload_bytes,
+            if original_role == SpecialistId::DomainAnalystV23 {
+                126365
+            } else {
+                126359
+            }
+        );
+        assert!(bound.continuation().choice.original_payload_bytes <= 131072);
+        assert!(bound.continuation().choice.redacted_payload_bytes <= 131072);
+        eprintln!(
+            "{:?} choice headroom={}",
+            role,
+            131072 - bound.continuation().choice.original_payload_bytes
+        );
+    }
 }
 
 fn build(

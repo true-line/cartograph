@@ -74,6 +74,7 @@ export function InvestigationFindings({ advisoryAudit, result, citations, citati
               disabled={!citations.some((citation) => citation.citation_id === id)} onClick={() => onRead(id)}>Inspect message citation {id}</button>)}
           </div>)}
       </article>}
+      {result.completion?.outcome === 'findings_withheld_after_correction' && <p role="status">Some findings were withheld because their claims could not be verified.</p>}
       <p>{result.knowledge_completeness === 'insufficient_evidence'
         ? 'Insufficient evidence to support an answer.' : 'Findings cover the inspected scope; knowledge remains partial.'}</p>
       <ul className="investigation-limitations">{result.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>

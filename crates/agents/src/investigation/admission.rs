@@ -676,7 +676,95 @@ impl InvestigationResult {
             .chain(self.narrative.as_ref().map(|message| message.text.as_str()))
     }
 
+    /// Hash of the ordinary admitted projection before the host attaches its
+    /// partial disposition. It includes IDs and all surviving result content.
+    pub fn projected_result_hash(&self) -> Result<String, InvestigationError> {
+        if self.completion.as_ref().is_none_or(|c| {
+            c.withholding.is_some()
+                || c.schema_version != 1
+                || c.outcome != staged_finish::CompletionOutcome::Supported
+        }) || self.knowledge_completeness != KnowledgeCompleteness::Partial
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(core_prov::content_hash(&bounded_bytes(
+            self,
+            MAX_RESULT_BYTES,
+        )?))
+    }
+
+    /// Adds no authority: the host must independently authenticate the witness
+    /// against durable invocation and prior-correction records before saving.
+    pub fn with_withholding_witness(
+        mut self,
+        witness: FindingWithholdingWitness,
+        policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        witness.validate_shape()?;
+        if self.projected_result_hash()? != witness.projected_result_hash {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let completion = self
+            .completion
+            .as_mut()
+            .ok_or(InvestigationError::InvalidInput)?;
+        completion.schema_version = 2;
+        completion.outcome = staged_finish::CompletionOutcome::FindingsWithheldAfterCorrection;
+        completion.withholding = Some(witness);
+        self.result_id = self.content_id()?;
+        self.validate_withholding_binding()?;
+        self.completion
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?
+            .validate_with_policy(
+                &self.findings,
+                self.knowledge_completeness,
+                &self.limitations,
+                policy,
+            )?;
+        bounded_bytes(&self, MAX_RESULT_BYTES)?;
+        Ok(self)
+    }
+
+    fn validate_withholding_binding(&self) -> Result<(), InvestigationError> {
+        let Some(witness) = self
+            .completion
+            .as_ref()
+            .and_then(|c| c.withholding.as_ref())
+        else {
+            return Ok(());
+        };
+        witness.validate_shape()?;
+        if self.input_ledger_hash != witness.input_ledger_hash
+            || self.disclosure_hash.as_deref() != Some(witness.disclosure_hash.as_str())
+            || self.knowledge_completeness != KnowledgeCompleteness::Partial
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let mut projected = self.clone();
+        let completion = projected
+            .completion
+            .as_mut()
+            .ok_or(InvestigationError::InvalidInput)?;
+        completion.schema_version = 1;
+        completion.outcome = staged_finish::CompletionOutcome::Supported;
+        completion.withholding = None;
+        projected.result_id = projected.content_id()?;
+        if projected.projected_result_hash()? != witness.projected_result_hash {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+
     pub fn validate_specialist(&self, specialist: SpecialistId) -> Result<(), InvestigationError> {
+        if self
+            .completion
+            .as_ref()
+            .is_some_and(|c| c.withholding.is_some())
+            && specialist != SpecialistId::DomainAnalystV25
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         if (self.schema_version == 8) != specialist.uses_cited_narrative() {
             return Err(InvestigationError::InvalidInput);
         }
@@ -901,6 +989,7 @@ impl InvestigationResult {
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         ledger.validate_with_policy(policy)?;
+        self.validate_withholding_binding()?;
         if !super::records::opaque_id(&self.investigation_id)
             || !text(&self.created_at, 64)
             || self.graph_snapshot_id != ledger.graph_snapshot_id

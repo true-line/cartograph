@@ -48,6 +48,7 @@ pub(super) fn definition_workspace(role: SpecialistId) -> Option<usize> {
         SpecialistId::DomainAnalystV22
             | SpecialistId::DomainAnalystV23
             | SpecialistId::DomainAnalystV24
+            | SpecialistId::DomainAnalystV25
     ) {
         18
     } else if role == SpecialistId::DomainAnalystV21 {

@@ -84,6 +84,11 @@ fn captured_acquisition_role_prepares_without_execution() {
 fn captured_combined_feedback_role_prepares_without_execution() {
     captured_case(false, Some("domain-analyst@24"));
 }
+// AC-0554: explicit finding-withholding preparation/reopen remains zero-dispatch.
+#[test]
+fn captured_withholding_role_prepares_without_execution() {
+    captured_case(false, Some("domain-analyst@25"));
+}
 fn captured_case(execute: bool, specialist: Option<&str>) {
     let case = Case::new();
     let prepared = if execute {

@@ -13,6 +13,8 @@ const MAX_PRIVACY_STRINGS: usize = 16384;
 /// private so replacing query/source bytes requires revalidation and a new hash.
 #[derive(Clone)]
 pub struct InvestigationInput {
+    // Frozen by the builder after matching the saved request identity.
+    specialist: SpecialistId,
     ledger: InvestigationInputLedger,
     payload: CompletionPayload,
     supplied_strings: Vec<String>,
@@ -749,6 +751,7 @@ impl InvestigationInput {
         );
         wire::replace_prompt(&mut payload, &prompt_value, MAX_INPUT_BYTES)?;
         Ok(Self {
+            specialist,
             ledger,
             payload,
             supplied_strings,
@@ -760,6 +763,13 @@ impl InvestigationInput {
             citation_correction: None,
             inspection_requirements: None,
         })
+    }
+
+    pub(super) fn frozen_specialist(&self) -> Result<SpecialistId, InvestigationError> {
+        if self.payload.system != self.specialist.prompt() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(self.specialist)
     }
 
     pub fn ledger(&self) -> &InvestigationInputLedger {
@@ -1152,6 +1162,7 @@ impl InvestigationInput {
             return Ok(Err(decision));
         };
         let completion = InvestigationCompletionResult {
+            withholding: None,
             schema_version: 1,
             outcome: candidate.outcome,
             request_hash: request.intent_hash_with_policy(policy)?,
@@ -1527,6 +1538,10 @@ mod source_replay_feedback_tests {
                 limitations: vec!["Only selected evidence was assessed.".into()],
             },
         };
+        // A model cannot grant itself the host-only partial disposition.
+        let mut forged = serde_json::to_value(&finish).unwrap();
+        forged["outcome"] = serde_json::json!("findings_withheld_after_correction");
+        assert!(staged_finish::StagedFinish::decode(&forged.to_string()).is_err());
         let mut seen = Vec::new();
         input
             .visit_claim_corrections(&finish, |correction| seen.push(correction))
@@ -1544,6 +1559,88 @@ mod source_replay_feedback_tests {
                 })
             ]
         );
+        // AC-0287 / #1705: message-role narratives cannot enter projection,
+        // even if they reference a survivor or repeat the excluded claim.
+        for text in ["See the withheld finding.", "Only A is listed."] {
+            let mut message = finish.clone();
+            message.schema_version = 2;
+            message.narrative = Some(InvestigationNarrative {
+                text: text.into(),
+                finding_ids: vec!["finding-2".into()],
+            });
+            assert!(
+                input
+                    .finding_withholding_plan_with_policy(&message, None, &INVESTIGATION_V1_POLICY)
+                    .is_err()
+            );
+            message.schema_version = 1;
+            assert!(
+                input
+                    .finding_withholding_plan_with_policy(&message, None, &INVESTIGATION_V1_POLICY)
+                    .is_err()
+            );
+        }
+        // AC-0287 / #1705: derive exclusion authority again after relocation;
+        // previous feedback indexes are never an input to this API.
+        let plan = input
+            .finding_withholding_plan_with_policy(&finish, None, &INVESTIGATION_V1_POLICY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.withheld_indexes(), &[1]);
+        let original_hash = plan.finish_hash().to_owned();
+        let mut relocated = finish.clone();
+        let InvestigationAction::Finish { findings, .. } = &mut relocated.action else {
+            panic!()
+        };
+        findings.swap(0, 1);
+        let moved = input
+            .finding_withholding_plan_with_policy(&relocated, None, &INVESTIGATION_V1_POLICY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.withheld_indexes(), &[0]);
+        assert_ne!(moved.finish_hash(), original_hash);
+        assert!(
+            input
+                .project_withheld_finish_with_policy(plan, &relocated, &INVESTIGATION_V1_POLICY,)
+                .is_err()
+        );
+        let projection = input
+            .project_withheld_finish_with_policy(moved, &relocated, &INVESTIGATION_V1_POLICY)
+            .unwrap();
+        assert_eq!(
+            projection.original_finish_hash(),
+            relocated.fingerprint().unwrap()
+        );
+        assert_eq!(projection.survivor_indexes(), &[1]);
+        assert!(projection.finish().narrative.is_none());
+        let InvestigationAction::Finish { findings, .. } = &projection.finish().action else {
+            panic!()
+        };
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].citation_ids, vec!["fact-1"]);
+        let repeated = input
+            .finding_withholding_plan_with_policy(&relocated, None, &INVESTIGATION_V1_POLICY)
+            .unwrap()
+            .unwrap();
+        let repeated = input
+            .project_withheld_finish_with_policy(repeated, &relocated, &INVESTIGATION_V1_POLICY)
+            .unwrap();
+        assert_eq!(
+            projection.finish().fingerprint().unwrap(),
+            repeated.finish().fingerprint().unwrap()
+        );
+
+        let stale = input
+            .finding_withholding_plan_with_policy(&relocated, None, &INVESTIGATION_V1_POLICY)
+            .unwrap()
+            .unwrap();
+        input.ledger.revision += 1;
+        assert!(
+            input
+                .project_withheld_finish_with_policy(stale, &relocated, &INVESTIGATION_V1_POLICY,)
+                .is_err()
+        );
+        input.ledger.revision -= 1;
         input.supplied_strings = vec!["listed".into()];
         let combined = staged_finish::RefusalFeedback::collect_input_corrections_with_policy(
             &input,

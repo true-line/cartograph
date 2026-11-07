@@ -241,19 +241,19 @@ impl InvestigationInput {
         );
         if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             let upper = serde_json::to_value(
-                if self.payload.system == SpecialistId::DomainAnalystV24.prompt() {
+                if self.frozen_specialist()?.uses_combined_finish_feedback() {
                     staged_finish::RefusalFeedback::sizing_combined_contract_envelope(
                         &contract,
                         &self.ledger,
                         policy,
                     )?
-                } else if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
+                } else if self.frozen_specialist()? == SpecialistId::DomainAnalystV23 {
                     staged_finish::RefusalFeedback::sizing_claim_contract_envelope(
                         &contract,
                         &self.ledger,
                         policy,
                     )?
-                } else if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
+                } else if self.frozen_specialist()? == SpecialistId::DomainAnalystV22 {
                     staged_finish::RefusalFeedback::sizing_replay_contract_envelope(
                         &contract,
                         &self.ledger,
@@ -741,20 +741,7 @@ impl InvestigationInput {
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
         if self.acquisition_choices.is_some() {
-            state.validate_saved_role_shape(
-                if self.payload.system == SpecialistId::DomainAnalystV24.prompt() {
-                    SpecialistId::DomainAnalystV24
-                } else if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
-                    SpecialistId::DomainAnalystV23
-                } else if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
-                    SpecialistId::DomainAnalystV22
-                } else if self.payload.system == SpecialistId::DomainAnalystV21.prompt() {
-                    SpecialistId::DomainAnalystV21
-                } else {
-                    SpecialistId::DomainAnalystV18
-                },
-                policy,
-            )?;
+            state.validate_saved_role_shape(self.frozen_specialist()?, policy)?;
             state.validate_mode_with_metadata(&metadata, policy)?;
         } else {
             state.validate_with_metadata(&metadata, policy)?;
@@ -769,7 +756,8 @@ impl InvestigationInput {
         if policy.profile() != INVESTIGATION_V2_POLICY.profile() {
             return Err(InvestigationError::InvalidInput);
         }
-        let role = [
+        let role = self.frozen_specialist()?;
+        if ![
             SpecialistId::DomainAnalystV10,
             SpecialistId::EvidenceAuditorV10,
             SpecialistId::DomainAnalystV11,
@@ -785,11 +773,13 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
             SpecialistId::DomainAnalystV24,
+            SpecialistId::DomainAnalystV25,
             SpecialistId::EvidenceAuditorV11,
         ]
-        .into_iter()
-        .find(|role| self.payload.system == role.prompt())
-        .ok_or(InvestigationError::InvalidInput)?;
+        .contains(&role)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         self.ledger.validate_for_specialist(role, policy)?;
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
@@ -1058,28 +1048,22 @@ impl InvestigationInput {
 
 impl InvestigationInput {
     fn capacity_exhausted(&self) -> bool {
-        (self.payload.system == SpecialistId::DomainAnalystV21.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV22.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV23.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV24.prompt())
-            && self
-                .acquisition_choices
-                .as_ref()
-                .is_some_and(|choices| choices.capacity_exhausted())
+        matches!(
+            self.specialist,
+            SpecialistId::DomainAnalystV21
+                | SpecialistId::DomainAnalystV22
+                | SpecialistId::DomainAnalystV23
+                | SpecialistId::DomainAnalystV24
+                | SpecialistId::DomainAnalystV25
+        ) && self
+            .acquisition_choices
+            .as_ref()
+            .is_some_and(|choices| choices.capacity_exhausted())
     }
 
     fn uses_acquisition_prompt(&self) -> bool {
-        [
-            SpecialistId::DomainAnalystV18,
-            SpecialistId::DomainAnalystV19,
-            SpecialistId::DomainAnalystV20,
-            SpecialistId::DomainAnalystV21,
-            SpecialistId::DomainAnalystV22,
-            SpecialistId::DomainAnalystV23,
-            SpecialistId::DomainAnalystV24,
-        ]
-        .iter()
-        .any(|role| self.payload.system == role.prompt())
+        self.frozen_specialist()
+            .is_ok_and(SpecialistId::uses_acquisition_choices)
     }
 
     /// Acquisition input assembly; task activation is a separate host gate.
@@ -1118,7 +1102,7 @@ impl InvestigationInput {
             .feedback
             .as_ref()
             .and_then(|feedback| feedback.citation_correction.as_ref());
-        let typed_role = SpecialistId::is_typed_citation_prompt(&self.payload.system);
+        let typed_role = self.frozen_specialist()?.uses_typed_citation_correction();
         if !typed_role
             && metadata
                 .feedback
@@ -1155,11 +1139,14 @@ impl InvestigationInput {
         prompt["turn_progress"]["action_feedback"] =
             serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
         self.action_feedback = feedback;
-        if ((self.payload.system == SpecialistId::DomainAnalystV21.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV22.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV23.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV24.prompt())
-            && choices.capacity_exhausted())
+        if (matches!(
+            self.frozen_specialist()?,
+            SpecialistId::DomainAnalystV21
+                | SpecialistId::DomainAnalystV22
+                | SpecialistId::DomainAnalystV23
+                | SpecialistId::DomainAnalystV24
+                | SpecialistId::DomainAnalystV25
+        ) && choices.capacity_exhausted())
             || self
                 .action_feedback
                 .as_ref()

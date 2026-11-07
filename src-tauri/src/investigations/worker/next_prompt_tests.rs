@@ -207,6 +207,8 @@ enum SourceScenario {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatedFlow {
+    PartialWithholding,
+    AllFindingsWithheld,
     TypedCorrection,
     ProseCorrection,
     ExhaustedProseCorrection,
@@ -425,7 +427,17 @@ impl LlmProvider for NextProvider {
         let text = if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            if flow == GatedFlow::RepeatDeniedEvidence {
+            if matches!(
+                flow,
+                GatedFlow::PartialWithholding | GatedFlow::AllFindingsWithheld
+            ) {
+                let mut action = typed_correction_tests::partial_action(prompt, call);
+                if flow == GatedFlow::AllFindingsWithheld && call >= 2 {
+                    let bad = action["action"]["findings"][if call == 2 { 1 } else { 0 }].clone();
+                    action["action"]["findings"] = json!([bad]);
+                }
+                action.to_string()
+            } else if flow == GatedFlow::RepeatDeniedEvidence {
                 if call < 2 {
                     prompt["turn_progress"]["acquisition_choices"]["entries"][0]["action"]
                         .to_string()

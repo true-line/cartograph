@@ -2,6 +2,9 @@
 use super::*;
 use rusqlite::Transaction;
 
+#[path = "withholding_authority.rs"]
+mod withholding_authority;
+
 #[path = "saved_metadata_history.rs"]
 mod saved_metadata_history;
 pub(super) use saved_metadata_history::SavedMetadataHistory;
@@ -1230,7 +1233,7 @@ pub(super) fn unavailable(
     )?;
     refresh_observation(connection, task)
 }
-fn raw_refusals(
+pub(super) fn raw_refusals(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<staged::JournalEntry>, InvestigationStoreError> {
@@ -1690,6 +1693,7 @@ pub(super) fn validate_result(
 ) -> Result<(), InvestigationStoreError> {
     let policy = saved_policy(task)?;
     result.validate_specialist(task.detail.specialist.id)?;
+    withholding_authority::validate(connection, task, result)?;
     let Some(intent) = &task.completion_intent else {
         if result.completion.is_some() {
             return Err(InvestigationStoreError::Invalid);
@@ -1788,6 +1792,9 @@ pub(super) fn accepted(
     };
     task.detail.summary.completion_outcome = Some(match completion.outcome {
         CompletionOutcome::Supported => InvestigationCompletionOutcome::Supported,
+        CompletionOutcome::FindingsWithheldAfterCorrection => {
+            InvestigationCompletionOutcome::FindingsWithheldAfterCorrection
+        }
         CompletionOutcome::InsufficientEvidence => {
             InvestigationCompletionOutcome::InsufficientEvidence
         }
@@ -1932,6 +1939,9 @@ pub(super) fn validate_saved(
             || task.detail.summary.completion_outcome
                 != Some(match completion.outcome {
                     CompletionOutcome::Supported => InvestigationCompletionOutcome::Supported,
+                    CompletionOutcome::FindingsWithheldAfterCorrection => {
+                        InvestigationCompletionOutcome::FindingsWithheldAfterCorrection
+                    }
                     CompletionOutcome::InsufficientEvidence => {
                         InvestigationCompletionOutcome::InsufficientEvidence
                     }
@@ -2114,12 +2124,8 @@ pub(super) fn refused(
         task.detail.error = Some(
             if task.detail.summary.cancel_requested {
                 "Cancellation won over a late unmet finish."
-            } else if matches!(entry.record.feedback.prose_correction, Some(agents::investigation::staged_finish::ProseCorrection::LimitationDeniesAcquiredEvidence(_))) {
-                "The corrected answer still denied acquired evidence. No findings were saved."
-            } else if entry.record.feedback.prose_correction.is_some() {
-                "The answer still contained incomplete or placeholder text after one correction. No findings were saved."
             } else {
-                "Two well-formed finishes left completion obligations unmet."
+                exhausted_finish_message(entry.record.feedback.prose_correction.as_ref())
             }
             .into(),
         );
@@ -2140,6 +2146,41 @@ pub(super) fn refused(
     }
     refresh_observation(tx, task)
 }
+/// Fixed diagnostic text only; never interpolate rejected authored content.
+fn exhausted_finish_message(
+    correction: Option<&agents::investigation::staged_finish::ProseCorrection>,
+) -> &'static str {
+    use agents::investigation::staged_finish::ProseCorrection;
+    match correction {
+        Some(ProseCorrection::LimitationDeniesAcquiredEvidence(_)) => {
+            "The corrected answer still denied acquired evidence. No findings were saved."
+        }
+        Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse) => {
+            "The answer still contained incomplete or placeholder text after one correction. No findings were saved."
+        }
+        Some(
+            ProseCorrection::UnverifiedEnumerationClaimAt(_)
+            | ProseCorrection::UnverifiedConfigurationClaimAt(_),
+        ) => {
+            "The answer still contained unverified claims after one correction. No findings were saved."
+        }
+        Some(ProseCorrection::Combined(_)) => {
+            "The answer still failed verification after one correction. No findings were saved."
+        }
+        Some(
+            ProseCorrection::ParaphraseWithoutQuotingSource
+            | ProseCorrection::ParaphraseReplayAt(_),
+        ) => {
+            "The answer still failed source-replay checks after one correction. No findings were saved."
+        }
+        None => "Two well-formed finishes left completion obligations unmet.",
+    }
+}
+
+#[cfg(test)]
+#[path = "completion_error_tests.rs"]
+mod error_tests;
+
 #[cfg(test)]
 #[path = "completion_tests.rs"]
 mod tests;

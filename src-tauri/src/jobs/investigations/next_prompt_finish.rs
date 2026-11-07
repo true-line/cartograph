@@ -4,6 +4,9 @@ use super::*;
 use llm::bounded::PreparedBoundedCompletion;
 use serde_json::Value;
 
+#[path = "withholding_finish.rs"]
+mod withholding_finish;
+
 pub(crate) struct NextPromptFinish<'a> {
     pub request: &'a StagedObligationRequest,
     pub response: &'a InvestigationResponseMeta,
@@ -21,6 +24,9 @@ impl JobStore {
         input: &NextPromptFinish<'_>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
+        if input.response.finish_feedback_witness.is_some() {
+            return Err(InvestigationStoreError::Invalid);
+        }
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
         }
@@ -155,6 +161,34 @@ impl JobStore {
                         policy,
                     )
                 };
+                let decision = match decision {
+                    Ok(Err(FinishDecision::Refused {
+                        ref feedback,
+                        ref assessment,
+                    })) if feedback.unmet.is_empty()
+                        && assessment.iter().all(|item| item.unmet.is_none()) =>
+                    {
+                        if let Some(basis) = &basis {
+                            match withholding_finish::project(
+                                &tx,
+                                &task,
+                                input.current,
+                                &request,
+                                &finish,
+                                &evidence,
+                                input.response,
+                                basis,
+                                policy,
+                            )? {
+                                Some(result) => Ok(Ok(result)),
+                                None => decision,
+                            }
+                        } else {
+                            decision
+                        }
+                    }
+                    other => other,
+                };
                 // A spent allowance keeps the original terminal replay path and accounting.
                 let decision = match decision {
                     Ok(Err(FinishDecision::Refused { ref feedback, .. }))
@@ -177,16 +211,28 @@ impl JobStore {
                         validate_inspection_result(&task, &result)?;
                         if task.semantic_audit.is_some()
                             && result.completion.as_ref().is_some_and(|completion| {
-                                completion.outcome == CompletionOutcome::Supported
+                                matches!(
+                                    completion.outcome,
+                                    CompletionOutcome::Supported
+                                        | CompletionOutcome::FindingsWithheldAfterCorrection
+                                )
                             })
                         {
                             // Structural admission is not semantic acceptance.
                             // Save usage and candidate atomically without a result
                             // row, chat reference, or Completed publication.
+                            let mut response = input.response.clone();
+                            if let Some(witness) = result
+                                .completion
+                                .as_ref()
+                                .and_then(|c| c.withholding.as_ref())
+                            {
+                                response.finish_feedback_witness = Some(witness.fingerprint()?);
+                            }
                             persist_response(
                                 &tx,
                                 &mut task,
-                                input.response,
+                                &response,
                                 authenticated.admitted_usage.clone(),
                             )?;
                             super::super::semantic_audit_state::hold_candidate(
@@ -196,6 +242,22 @@ impl JobStore {
                             )?;
                             bump(&tx, &mut task)?;
                         } else {
+                            let partial = result
+                                .completion
+                                .as_ref()
+                                .and_then(|c| c.withholding.as_ref());
+                            if let Some(witness) = partial {
+                                let mut response = input.response.clone();
+                                response.finish_feedback_witness = Some(witness.fingerprint()?);
+                                // Insert independent response metadata before validating the
+                                // result; all writes roll back together if any check fails.
+                                persist_response(
+                                    &tx,
+                                    &mut task,
+                                    &response,
+                                    authenticated.admitted_usage.clone(),
+                                )?;
+                            }
                             accepted(
                                 &tx,
                                 &mut task,
@@ -216,12 +278,14 @@ impl JobStore {
                                 &result.result_id,
                                 &result_hash,
                             )?;
-                            persist_response(
-                                &tx,
-                                &mut task,
-                                input.response,
-                                authenticated.admitted_usage,
-                            )?;
+                            if partial.is_none() {
+                                persist_response(
+                                    &tx,
+                                    &mut task,
+                                    input.response,
+                                    authenticated.admitted_usage,
+                                )?;
+                            }
                             task.phase = Phase::Terminal;
                             task.detail.summary.status = InvestigationStatus::Completed;
                             task.detail.summary.has_result = true;

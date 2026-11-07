@@ -152,3 +152,8 @@ unchanged; deterministic regressions and actual-model acceptance are separate.
 Decision #1701 extends US-0032 / AC-0287 with analyst @24 receipt-bound
 serialized reservation and schema-6 combined corrections. Implementation and
 joint admission validation remain in progress; no model acceptance is implied.
+
+Decision #1704 / issue #1705 extends US-0032 / AC-0287 with an explicitly versioned
+partial result after finding-local claim withholding. Implementation and offline
+verification are in progress; full gates and separately approved DEV r6 remain
+required. No real-model acceptance or GA readiness is implied.
