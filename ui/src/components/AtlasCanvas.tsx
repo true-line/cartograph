@@ -172,11 +172,15 @@ export function displayName(node: GraphNode): string {
   const path = typeof node.props.path === 'string' ? node.props.path : null;
   if (method && path) return `${method} ${path}`;
   // `display_name` names an anonymous symbol readably; the id stays `anon@…` (#1078).
-  for (const key of ['display_name', 'name', 'identity', 'logical_id', 'type']) {
+  for (const key of ['display_name', 'name']) {
     const value = node.props[key];
     if (typeof value === 'string' && value.length > 0) return value;
   }
   if (node.label === 'Screen' && typeof node.props.route === 'string' && node.props.route.trim()) return node.props.route;
+  for (const key of ['identity', 'logical_id', 'type']) {
+    const value = node.props[key];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
   return node.id;
 }
 
