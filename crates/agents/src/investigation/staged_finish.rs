@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 #[serde(rename_all = "snake_case")]
 pub enum CompletionOutcome {
     Supported,
+    /// Host-only disposition; StagedFinish decoding rejects this outcome.
+    FindingsWithheldAfterCorrection,
     InsufficientEvidence,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -669,6 +671,7 @@ pub(super) fn admit_finish_with_locator(
     )?;
     let completion = if matches!(disclosure.schema_version, 4..=6) {
         Some(InvestigationCompletionResult {
+            withholding: None,
             schema_version: 1,
             outcome: finish.outcome,
             request_hash: request.intent_hash_with_policy(policy)?,
@@ -703,7 +706,10 @@ pub(super) fn admit_finish_with_locator(
     let admitted = match admitted {
         Ok(result) => Some(result),
         Err(InvestigationError::SourceReplay)
-            if request.specialist_id == "domain-analyst@24" && consistency.is_some() =>
+            if matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@24" | "domain-analyst@25"
+            ) && consistency.is_some() =>
         {
             match input.validate_correction_prose(finish, model.as_deref()) {
                 Err(InvestigationError::SourceReplay) => (),
@@ -781,6 +787,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@22"
                     | "domain-analyst@23"
                     | "domain-analyst@24"
+                    | "domain-analyst@25"
             ) =>
         {
             citation_correction = input.typed_citation_correction(
@@ -805,7 +812,10 @@ pub(super) fn admit_finish_with_locator(
                 kind: observation.kind.clone(),
                 reason: if matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@22" | "domain-analyst@23" | "domain-analyst@24"
+                    "domain-analyst@22"
+                        | "domain-analyst@23"
+                        | "domain-analyst@24"
+                        | "domain-analyst@25"
                 ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
@@ -856,8 +866,10 @@ pub(super) fn admit_finish_with_locator(
     {
         prose_correction = input.claim_correction(finish)?;
     }
-    if request.specialist_id == "domain-analyst@24"
-        && consistency.is_some()
+    if matches!(
+        request.specialist_id.as_str(),
+        "domain-analyst@24" | "domain-analyst@25"
+    ) && consistency.is_some()
         && citation_correction.is_none()
         && let Some(feedback) = RefusalFeedback::collect_input_corrections_with_policy(
             input,

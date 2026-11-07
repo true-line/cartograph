@@ -48,6 +48,8 @@ mod strict;
 mod task_validation_workspace;
 mod turn;
 mod validation_workspace;
+mod withholding;
+mod withholding_witness;
 
 pub use completion::*;
 pub use coverage::*;
@@ -84,6 +86,10 @@ pub use turn::*;
 pub use validation_workspace::{
     attempt_binding_validation_workspace, coverage_archive_validation_workspace,
     ledger_validation_workspace,
+};
+pub use withholding::{FindingWithholdingPlan, WithheldFinishProjection};
+pub use withholding_witness::{
+    FINDINGS_WITHHELD_MESSAGE, FindingWithholdingWitness, WithholdingDisposition,
 };
 
 #[cfg(test)]

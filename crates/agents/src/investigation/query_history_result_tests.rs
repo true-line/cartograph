@@ -64,6 +64,7 @@ fn fixture(
     // This lower-level result test checks shape and finishing disclosure binding.
     // Production completion validation separately replays durable attempts.
     let completion = InvestigationCompletionResult {
+        withholding: None,
         schema_version: 1,
         outcome: staged_finish::CompletionOutcome::InsufficientEvidence,
         request_hash,

@@ -6,7 +6,7 @@ import type { EgressPreview } from './components/EgressConsentDialog';
 import type { FactKey } from './primarySourceStore';
 import type { EvidenceRef, TaskSourceBasisV2 } from './store';
 
-export type SpecialistId = 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8' | 'domain-analyst@9' | 'evidence-auditor@9' | 'domain-analyst@10' | 'evidence-auditor@10' | 'domain-analyst@11' | 'domain-analyst@12' | 'domain-analyst@13' | 'domain-analyst@14' | 'domain-analyst@15' | 'domain-analyst@17' | 'domain-analyst@18' | 'domain-analyst@19' | 'domain-analyst@20' | 'evidence-auditor@11' | 'spec-writer@1' | 'spec-writer@2' | 'gap-triager@1' | 'gap-triager@2';
+export type SpecialistId = 'domain-analyst@25' | 'domain-analyst@1' | 'evidence-auditor@1' | 'domain-analyst@2' | 'evidence-auditor@2' | 'domain-analyst@3' | 'evidence-auditor@3' | 'domain-analyst@4' | 'evidence-auditor@4' | 'domain-analyst@5' | 'evidence-auditor@5' | 'domain-analyst@6' | 'evidence-auditor@6' | 'domain-analyst@7' | 'evidence-auditor@7' | 'domain-analyst@8' | 'evidence-auditor@8' | 'domain-analyst@9' | 'evidence-auditor@9' | 'domain-analyst@10' | 'evidence-auditor@10' | 'domain-analyst@11' | 'domain-analyst@12' | 'domain-analyst@13' | 'domain-analyst@14' | 'domain-analyst@15' | 'domain-analyst@17' | 'domain-analyst@18' | 'domain-analyst@19' | 'domain-analyst@20' | 'evidence-auditor@11' | 'spec-writer@1' | 'spec-writer@2' | 'gap-triager@1' | 'gap-triager@2';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
@@ -453,7 +453,7 @@ export interface InvestigationObligationChoices {
     obligation?: Extract<InvestigationObligation, { kind: 'inventory' }> }[];
 }
 
-export type InvestigationCompletionOutcome = 'supported' | 'insufficient_evidence' | 'obligations_unmet';
+export type InvestigationCompletionOutcome = 'findings_withheld_after_correction' | 'supported' | 'insufficient_evidence' | 'obligations_unmet';
 export type InvestigationObligationStatus = 'not_assessed' | 'satisfied' | 'unmet';
 export type InvestigationRefusalReason = 'not_attempted' | 'acquired_not_supplied' | 'redacted' | 'hash_mismatch' | 'unavailable';
 export interface InvestigationObligationObservation {
@@ -480,10 +480,28 @@ export interface InvestigationCompletionDetail {
   assessment: InvestigationObligationObservation[];
 }
 export interface InvestigationCompletionResult {
-  schema_version: 1;
-  outcome: 'supported' | 'insufficient_evidence';
+  schema_version: 1 | 2;
+  withholding?: FindingWithholdingWitness;
+  outcome: 'supported' | 'insufficient_evidence' | 'findings_withheld_after_correction';
   request_hash: string;
   obligations_hash: string;
   finishing_attempts_hash: string;
   assessment: InvestigationObligationObservation[];
+}
+
+export interface FindingWithholdingWitness {
+  schema_version: 1;
+  detector_version: 1;
+  disposition: 'findings_withheld_after_correction';
+  original_finish_hash: string;
+  original_response_hash: string;
+  request_hash: string;
+  obligations_hash: string;
+  input_ledger_hash: string;
+  disclosure_hash: string;
+  prior_correction_witness_hash: string;
+  projected_result_hash: string;
+  original_finding_count: number;
+  withheld_indexes: number[];
+  survivor_indexes: number[];
 }

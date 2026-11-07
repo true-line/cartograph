@@ -1216,3 +1216,12 @@ The single correction allowance, detectors, privacy rules and numeric limits sta
 unchanged. Historical @20–@23 bytes and reopen behavior remain unchanged.
 Joint r3/r4 capacity measurements and real-model acceptance are separate gates.
 See [implementation design](design/analyst24-reservation-feedback.md).
+
+### Decision #1704 / issue #1705 — partial findings after correction (US-0032 / AC-0287)
+
+Analyst @25 may withhold current-finish finding-local unverified enumeration or
+configuration claims after the existing single correction. Every other refusal
+class stays fatal. Re-derived unmet obligations or no surviving findings fail.
+A text-free bound witness and explicit partial disposition survive sealing,
+settlement, reopen and export; the result is never silently Supported. Historical
+@20–@24 remain unchanged. See [implementation specification](design/1705-withheld-findings.md).

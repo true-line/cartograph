@@ -176,7 +176,12 @@ impl RetainedOutcome {
         if snapshot.base_ledger() != &context.ledger || input.current.ledger() != &context.ledger {
             return Err(HostError::InputChanged.into());
         }
-        let sizes = if receipt.detail().summary.specialist_id == SpecialistId::DomainAnalystV24 {
+        let sizes = if receipt
+            .detail()
+            .summary
+            .specialist_id
+            .uses_exact_source_reservation()
+        {
             self.prepared()
                 .size_binding()
                 .sizes_for(&self.prepared().target, input.current.ledger())

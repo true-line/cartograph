@@ -92,7 +92,12 @@ pub(super) fn validate_continuation(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    let sizes = if before.detail.summary.specialist_id == SpecialistId::DomainAnalystV24 {
+    let sizes = if before
+        .detail
+        .summary
+        .specialist_id
+        .uses_exact_source_reservation()
+    {
         c.size_binding
             .as_ref()
             .map(|binding| binding.sizes_for(&saved.reservation.source, c.current.ledger()))

@@ -143,9 +143,15 @@ impl RefusalRecord {
             self.feedback.prose_correction,
             Some(ProseCorrection::Combined(_))
         );
-        if (combined && request.specialist_id != "domain-analyst@24")
-            || (request.specialist_id == "domain-analyst@24"
-                && self.feedback.prose_correction.is_some()
+        if (combined
+            && !matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@24" | "domain-analyst@25"
+            ))
+            || (matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@24" | "domain-analyst@25"
+            ) && self.feedback.prose_correction.is_some()
                 && !combined)
         {
             return Err(InvestigationError::InvalidInput);
@@ -170,7 +176,10 @@ impl RefusalRecord {
             .any(|entry| entry.reason == RefusalReason::ExcludedByCapacity))
             && !matches!(
                 request.specialist_id.as_str(),
-                "domain-analyst@22" | "domain-analyst@23" | "domain-analyst@24"
+                "domain-analyst@22"
+                    | "domain-analyst@23"
+                    | "domain-analyst@24"
+                    | "domain-analyst@25"
             ))
             || request.limit_profile != policy.profile()
             || ((self.feedback.citation_correction.is_some()
@@ -182,6 +191,7 @@ impl RefusalRecord {
                         | "domain-analyst@22"
                         | "domain-analyst@23"
                         | "domain-analyst@24"
+                        | "domain-analyst@25"
                 ))
         {
             return Err(InvestigationError::InvalidInput);

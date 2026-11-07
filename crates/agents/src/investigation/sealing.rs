@@ -62,20 +62,7 @@ pub(super) fn seal_admission_inner(
     }
     if let Some(state) = &admission {
         if let Some(input) = acquisition {
-            state.validate_saved_role_shape(
-                if original.system == SpecialistId::DomainAnalystV24.prompt() {
-                    SpecialistId::DomainAnalystV24
-                } else if original.system == SpecialistId::DomainAnalystV23.prompt() {
-                    SpecialistId::DomainAnalystV23
-                } else if original.system == SpecialistId::DomainAnalystV22.prompt() {
-                    SpecialistId::DomainAnalystV22
-                } else if original.system == SpecialistId::DomainAnalystV21.prompt() {
-                    SpecialistId::DomainAnalystV21
-                } else {
-                    SpecialistId::DomainAnalystV18
-                },
-                policy,
-            )?;
+            state.validate_saved_role_shape(input.frozen_specialist()?, policy)?;
             if state.acquisition.as_ref() != Some(&input.acquisition_stamp(original)?) {
                 return Err(InvestigationError::InvalidInput);
             }
@@ -497,22 +484,8 @@ pub(super) fn seal_admission_inner(
             })
             .transpose()?,
     };
-    if acquisition.is_some() {
-        disclosure.validate_saved_role_shape(
-            ledger,
-            policy,
-            if original.system == SpecialistId::DomainAnalystV24.prompt() {
-                SpecialistId::DomainAnalystV24
-            } else if original.system == SpecialistId::DomainAnalystV23.prompt() {
-                SpecialistId::DomainAnalystV23
-            } else if original.system == SpecialistId::DomainAnalystV22.prompt() {
-                SpecialistId::DomainAnalystV22
-            } else if original.system == SpecialistId::DomainAnalystV21.prompt() {
-                SpecialistId::DomainAnalystV21
-            } else {
-                SpecialistId::DomainAnalystV18
-            },
-        )?;
+    if let Some(input) = acquisition {
+        disclosure.validate_saved_role_shape(ledger, policy, input.frozen_specialist()?)?;
     } else {
         disclosure.validate_with_policy(ledger, policy)?;
     }

@@ -459,3 +459,6 @@ impl CapturedSourceInvocationFixture {
         )
     }
 }
+
+#[path = "captured_withholding_fixture.rs"]
+mod withholding;

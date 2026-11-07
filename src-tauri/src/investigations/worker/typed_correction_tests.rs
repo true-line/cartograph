@@ -376,3 +376,208 @@ fn analyst20_denied_source_stops_after_one_correction_and_reopens() {
     assert_eq!(detail.usage.model_invocations, 4);
     assert!(reopened.investigation_result(&f.id).unwrap().is_none());
 }
+
+// AC-0287: two genuine acquired-source finishes share the single correction.
+pub(super) fn partial_action(prompt: &Value, call: usize) -> Value {
+    if call < 2 {
+        let kind = if call == 0 {
+            "query_context"
+        } else {
+            "read_evidence"
+        };
+        return prompt["turn_progress"]["acquisition_choices"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["action"]["type"] == kind)
+            .expect("source acquisition choice")["action"]
+            .clone();
+    }
+    let citation = prompt["citations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["origin"]["kind"] == "captured_primary_source")
+        .unwrap();
+    let mut response = finish(citation["citation_id"].clone());
+    let good = response["action"]["findings"][0].clone();
+    let mut bad = good.clone();
+    bad["title"] = json!("Default MissingStrategy");
+    bad["statement"] = json!("MissingStrategy controls this behavior.");
+    response["action"]["findings"] = if call == 2 {
+        json!([good, bad])
+    } else {
+        json!([bad, good])
+    };
+    response
+}
+
+#[test]
+fn analyst25_partial_survives_advisory_audit_settlement_and_reopen() {
+    // Both verdicts publish: the in-run audit remains advisory.
+    for verdict in ["pass", "indeterminate"] {
+        let mut scripted = NextProvider::new(false);
+        scripted.gated_flow = Some(GatedFlow::PartialWithholding);
+        scripted.audit_verdict = Some(verdict);
+        let provider = Arc::new(scripted);
+        let f = NextFixture::with_source_obligation(
+            provider.as_ref(),
+            SpecialistId::DomainAnalystV25,
+            true,
+        );
+        f.run_with_audit_options(provider.as_ref(), RunClock::new(Instant::now()), None, true);
+        let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        let detail = reopened.investigation(&f.id).unwrap();
+        assert_eq!(
+            detail.summary.status,
+            InvestigationStatus::Completed,
+            "{:?}",
+            detail.error
+        );
+        assert_eq!(
+            detail.summary.completion_outcome,
+            Some(InvestigationCompletionOutcome::FindingsWithheldAfterCorrection)
+        );
+        assert_eq!(detail.completion.as_ref().unwrap().refusal_count, 1);
+        assert_eq!(detail.usage.model_invocations, 5);
+        assert!(detail.advisory_audit.is_some());
+        let result = reopened.investigation_result(&f.id).unwrap().unwrap();
+        assert_eq!(result.findings.len(), 1);
+        let completion = result.completion.as_ref().unwrap();
+        assert_eq!(completion.outcome, agents::investigation::staged_finish::CompletionOutcome::FindingsWithheldAfterCorrection);
+        assert_eq!(
+            completion.withholding.as_ref().unwrap().withheld_indexes,
+            vec![0]
+        );
+        let payloads = provider.received_payloads.lock().unwrap();
+        let audit = payloads
+            .iter()
+            .find(|payload| {
+                serde_json::from_str::<Value>(&payload.prompt).unwrap()["role"]
+                    == "candidate-evidence-auditor@3"
+            })
+            .expect("auditor was dispatched");
+        let prompt: Value = serde_json::from_str(&audit.prompt).unwrap();
+        assert_eq!(
+            prompt["candidate"]["completion_disposition"]["outcome"],
+            "findings_withheld_after_correction"
+        );
+        assert!(!audit.prompt.contains("MissingStrategy"));
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("MissingStrategy")
+        );
+        drop(payloads);
+        if verdict == "pass" {
+            assert_partial_parent_child_prompt(&f, &detail);
+        }
+    }
+}
+
+fn assert_partial_parent_child_prompt(f: &NextFixture, parent: &InvestigationDetail) {
+    let provider = Arc::new(NextProvider::new(false));
+    let mut request = f.request.clone();
+    request.request_nonce = "partial-parent-auditor-child".into();
+    request.specialist_id = "evidence-auditor@10".into();
+    request.parent_id = Some(f.id.clone());
+    request.conversation_id = Some(parent.summary.conversation_id.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let mut jobs = state.jobs.lock().unwrap();
+    let descriptor = descriptor(provider.as_ref(), InvestigationProviderMode::Local).unwrap();
+    let start = jobs
+        .start_next_prompt_investigation(&request, Some(&descriptor))
+        .unwrap();
+    let id = start.detail.summary.investigation_id;
+    let plan = jobs
+        .claim_plan(
+            start.detail.summary.job_id,
+            crate::jobs::ClaimMode::StartQueued,
+        )
+        .unwrap();
+    let lock = state
+        .job_execution_locks
+        .try_reserve(plan.lock_target())
+        .unwrap();
+    let (_, execution) = jobs.claim_execution(&plan, lock).unwrap();
+    drop(jobs);
+    let live = state.investigations.insert(&id).unwrap();
+    f.base.base.app.run_completion(
+        id,
+        request,
+        execution,
+        provider.clone(),
+        live,
+        Instant::now(),
+    );
+    let prompts = provider.observed.prompts.lock().unwrap();
+    let prompt = prompts
+        .first()
+        .expect("separate EvidenceAuditor child reached provider boundary");
+    let history = prompt["prior_findings_as_t3_history"][0].as_str().unwrap();
+    let saved: Value = serde_json::from_str(history).unwrap();
+    assert_eq!(saved["parent_investigation_id"], f.id);
+    assert_eq!(saved["saved_execution_status"], "completed");
+    assert_eq!(
+        saved["original_scope"],
+        serde_json::to_value(&parent.summary.scope).unwrap()
+    );
+    assert_eq!(
+        saved["saved_result"]["completion"]["outcome"],
+        "findings_withheld_after_correction"
+    );
+    assert!(!history.contains("MissingStrategy"));
+}
+
+// AC-0287: exclusion cannot turn an entirely unverified answer into a result.
+#[test]
+fn analyst25_all_findings_withheld_fails_and_reopens_without_result() {
+    let mut provider = NextProvider::new(false);
+    provider.gated_flow = Some(GatedFlow::AllFindingsWithheld);
+    let f = NextFixture::with_source_obligation(&provider, SpecialistId::DomainAnalystV25, true);
+    f.run_with_audit_options(&provider, RunClock::new(Instant::now()), None, true);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    let detail = reopened.investigation(&f.id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert!(!detail.summary.has_result);
+    assert!(reopened.investigation_result(&f.id).unwrap().is_none());
+    assert_ne!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::FindingsWithheldAfterCorrection)
+    );
+    assert_eq!(detail.usage.model_invocations, 4);
+    assert!(detail.advisory_audit.is_none());
+}
+
+// AC-0287: withholding cannot waive an independently unmet inventory obligation.
+#[test]
+fn analyst25_unmet_obligation_prevents_partial_result() {
+    let mut provider = NextProvider::new(false);
+    provider.gated_flow = Some(GatedFlow::PartialWithholding);
+    let base = CompletionFixture::new(&provider, SpecialistId::DomainAnalystV9, true, true, false);
+    let request = base.request.clone();
+    let f =
+        NextFixture::from_completion_base(&provider, SpecialistId::DomainAnalystV25, base, request);
+    f.run_with_audit_options(&provider, RunClock::new(Instant::now()), None, true);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    let detail = reopened.investigation(&f.id).unwrap();
+    assert_eq!(
+        detail.summary.status,
+        InvestigationStatus::Failed,
+        "{:?}",
+        detail.error
+    );
+    assert!(reopened.investigation_result(&f.id).unwrap().is_none());
+    assert!(!detail.summary.has_result);
+    assert_ne!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::FindingsWithheldAfterCorrection)
+    );
+    assert_eq!(detail.usage.model_invocations, 4);
+    let prompts = provider.observed.prompts.lock().unwrap();
+    let unmet = prompts[3]["completion_metadata"]["feedback"]["unmet"]
+        .as_array()
+        .unwrap();
+    assert!(unmet.iter().any(|item| item["kind"] == "inventory"));
+    assert!(!prompts[3]["completion_metadata"]["feedback"]["prose_correction"].is_null());
+}

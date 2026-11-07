@@ -16,6 +16,11 @@ fn analyst24_latest_refusal_requires_independent_feedback_witness() {
     assert_latest_feedback_witness("domain-analyst@24");
 }
 
+#[test]
+fn analyst25_latest_refusal_requires_independent_feedback_witness() {
+    assert_latest_feedback_witness("domain-analyst@25");
+}
+
 fn assert_latest_feedback_witness(role: &str) {
     let mut f = correction_fixture_role(role);
     f.begin();

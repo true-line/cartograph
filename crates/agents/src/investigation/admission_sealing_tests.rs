@@ -397,6 +397,74 @@ fn admission_sealing_result_seven_has_exact_disclosure_family_and_content_domain
             policy,
         )
         .unwrap();
+    // AC-0287 / #1705: lower-level projection binding only. The host must
+    // independently authorize @25 and prove the original/prior response hashes.
+    let completion = result.completion.as_ref().unwrap();
+    let witness = FindingWithholdingWitness {
+        schema_version: 1,
+        detector_version: 1,
+        disposition: WithholdingDisposition::FindingsWithheldAfterCorrection,
+        original_finish_hash: "1".repeat(64),
+        original_response_hash: "2".repeat(64),
+        request_hash: completion.request_hash.clone(),
+        obligations_hash: completion.obligations_hash.clone(),
+        input_ledger_hash: result.input_ledger_hash.clone(),
+        disclosure_hash: result.disclosure_hash.clone().unwrap(),
+        prior_correction_witness_hash: "3".repeat(64),
+        projected_result_hash: result.projected_result_hash().unwrap(),
+        original_finding_count: 2,
+        withheld_indexes: vec![0],
+        survivor_indexes: vec![1],
+    };
+    let partial = result
+        .clone()
+        .with_withholding_witness(witness, policy)
+        .unwrap();
+    assert_eq!(
+        partial.completion.as_ref().unwrap().outcome,
+        CompletionOutcome::FindingsWithheldAfterCorrection
+    );
+    assert_ne!(partial.result_id, result.result_id);
+    partial
+        .validate_specialist(SpecialistId::DomainAnalystV25)
+        .unwrap();
+    assert!(
+        partial
+            .validate_specialist(SpecialistId::DomainAnalystV24)
+            .is_err()
+    );
+    let reopened: InvestigationResult =
+        serde_json::from_slice(&serde_json::to_vec(&partial).unwrap()).unwrap();
+    reopened
+        .validate_with_disclosure_and_policy(input.ledger(), "step:admission", &disclosure, policy)
+        .unwrap();
+    assert_eq!(reopened.result_id, partial.result_id);
+    let mut changed = partial.clone();
+    changed.findings[0].statement = "A different interpretation was substituted.".into();
+    rehash(&mut changed);
+    assert!(
+        changed
+            .validate_with_disclosure_and_policy(
+                input.ledger(),
+                "step:admission",
+                &disclosure,
+                policy,
+            )
+            .is_err()
+    );
+    let mut unmet = partial.clone();
+    unmet.completion.as_mut().unwrap().assessment[0].exactly_supplied = false;
+    rehash(&mut unmet);
+    assert!(
+        unmet
+            .validate_with_disclosure_and_policy(
+                input.ledger(),
+                "step:admission",
+                &disclosure,
+                policy,
+            )
+            .is_err()
+    );
     let mut old = result.clone();
     old.schema_version = 6;
     rehash(&mut old);
@@ -940,4 +1008,78 @@ fn capacity_exhausted_analyst21_seals_finish_only_without_action_refusal() {
             .validate_saved_role_shape(SpecialistId::EvidenceAuditorV11, policy)
             .is_err()
     );
+}
+
+#[test]
+fn shared_prompt14_preserves_frozen_role_through_reserve_and_sealing() {
+    // AC-0287: identical prompt bytes cannot confer the opt-in @25 authority.
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in [
+        SpecialistId::DomainAnalystV24,
+        SpecialistId::DomainAnalystV25,
+    ] {
+        let fixture = Fixture::new(role, 7);
+        let input = fixture
+            .build(
+                role,
+                &usage(CompletionCallMode::Choice),
+                CompletionCallMode::Choice,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            input.payload.system,
+            SpecialistId::DomainAnalystV24.prompt()
+        );
+        assert_eq!(input.frozen_specialist().unwrap(), role);
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: fixture.metadata.request_hash.clone(),
+            obligations_hash: fixture.metadata.obligations_hash.clone(),
+            obligations: fixture.request.obligations.clone(),
+        };
+        let choices = std::sync::Arc::new(
+            acquisition_choices::AcquisitionChoices::derive(
+                &contract,
+                &fixture.metadata,
+                "task",
+                &fixture.ledger,
+                &[],
+                policy,
+            )
+            .unwrap(),
+        );
+        let input = input.with_acquisition_choices(choices).unwrap();
+        let prepared = prepare(&input);
+        input
+            .measure_v9_reserve_with_policy(
+                prepared.profile(),
+                prepared.limits(),
+                "step:admission",
+                policy,
+            )
+            .unwrap();
+        let disclosure = seal(&input);
+        disclosure
+            .validate_saved_role_shape(input.ledger(), policy, role)
+            .unwrap();
+        assert_eq!(input.frozen_specialist().unwrap(), role);
+        let other = if role == SpecialistId::DomainAnalystV24 {
+            SpecialistId::DomainAnalystV25
+        } else {
+            SpecialistId::DomainAnalystV24
+        };
+        assert!(
+            fixture
+                .build(
+                    other,
+                    &usage(CompletionCallMode::Choice),
+                    CompletionCallMode::Choice,
+                    0,
+                    None
+                )
+                .is_err()
+        );
+    }
 }

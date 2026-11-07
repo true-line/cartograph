@@ -304,7 +304,8 @@ pub(crate) struct PendingInvestigationStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InvestigationResponseMeta {
-    /// Host-only @22 refusal integrity witness; absent on historical records.
+    /// Host-only finish integrity witness: @22+ refusal digest, or @25
+    /// partial-projection digest in its distinct domain. Absent historically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_feedback_witness: Option<String>,
     pub step_id: String,

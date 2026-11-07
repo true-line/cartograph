@@ -17,6 +17,7 @@ pub enum CompletionStatus {
 #[serde(rename_all = "snake_case")]
 pub enum InvestigationCompletionOutcome {
     Supported,
+    FindingsWithheldAfterCorrection,
     InsufficientEvidence,
     ObligationsUnmet,
 }
@@ -65,6 +66,8 @@ pub struct InvestigationCompletionDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationCompletionResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withholding: Option<FindingWithholdingWitness>,
     pub schema_version: u32,
     pub outcome: CompletionOutcome,
     pub request_hash: String,
@@ -285,7 +288,7 @@ impl InvestigationCompletionResult {
         limitations: &[String],
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
-        if self.schema_version != 1
+        if self.schema_version != if self.withholding.is_some() { 2 } else { 1 }
             || [
                 &self.request_hash,
                 &self.obligations_hash,
@@ -309,7 +312,26 @@ impl InvestigationCompletionResult {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        if let Some(witness) = &self.withholding {
+            witness.validate_shape()?;
+            if self.outcome != CompletionOutcome::FindingsWithheldAfterCorrection
+                || witness.request_hash != self.request_hash
+                || witness.obligations_hash != self.obligations_hash
+                || witness.survivor_indexes.len() != findings.len()
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        } else if self.outcome == CompletionOutcome::FindingsWithheldAfterCorrection {
+            return Err(InvestigationError::InvalidInput);
+        }
         match self.outcome {
+            CompletionOutcome::FindingsWithheldAfterCorrection
+                if !findings.is_empty()
+                    && knowledge == KnowledgeCompleteness::Partial
+                    && self.assessment.iter().all(|item| item.exactly_supplied) =>
+            {
+                Ok(())
+            }
             CompletionOutcome::Supported
                 if !findings.is_empty()
                     && knowledge != KnowledgeCompleteness::InsufficientEvidence

@@ -187,3 +187,36 @@ it('accepts actual production mock-worker query-history wire and rejects older d
   changed.completion!.assessment_basis.disclosure_hash = changed.completion!.assessment_basis.disclosure_hash.replace('-v5:', '-v4:');
   expect(validCompletionDetail(changed.completion, changed, result)).toBe(false);
 });
+
+// AC-0287 / #1705: scripted transport validation, not durable host authentication.
+it('requires a complete text-free partition for an explicit partial result', () => {
+  const result = structuredClone(queryHistoryWire.result) as unknown as InvestigationResult;
+  result.schema_version = 7;
+  result.result_id = `investigation-result-v7:${'a'.repeat(64)}`;
+  result.disclosure_hash = `investigation-disclosure-v6:${'b'.repeat(64)}`;
+  result.inspection_assessment!.disclosure_hash = result.disclosure_hash;
+  result.knowledge_completeness = 'partial';
+  const completion = result.completion!;
+  completion.schema_version = 2;
+  completion.outcome = 'findings_withheld_after_correction';
+  completion.withholding = {
+    schema_version: 1, detector_version: 1, disposition: 'findings_withheld_after_correction',
+    original_finish_hash: '1'.repeat(64), original_response_hash: '2'.repeat(64),
+    request_hash: completion.request_hash, obligations_hash: completion.obligations_hash,
+    input_ledger_hash: result.input_ledger_hash, disclosure_hash: result.disclosure_hash,
+    prior_correction_witness_hash: '3'.repeat(64), projected_result_hash: '4'.repeat(64),
+    original_finding_count: result.findings.length + 1, withheld_indexes: [0],
+    survivor_indexes: result.findings.map((_, index) => index + 1),
+  };
+  expect(validCompletionResult(completion, result)).toBe(true);
+  for (const mutate of [
+    (r: InvestigationResult) => { delete r.completion!.withholding; },
+    (r: InvestigationResult) => { r.completion!.outcome = 'supported'; },
+    (r: InvestigationResult) => { r.completion!.withholding!.survivor_indexes = [0]; },
+    (r: InvestigationResult) => { r.completion!.withholding!.input_ledger_hash = 'f'.repeat(64); },
+    (r: InvestigationResult) => { r.completion!.assessment[0].exactly_supplied = false; },
+  ]) {
+    const changed = structuredClone(result); mutate(changed);
+    expect(validCompletionResult(changed.completion, changed)).toBe(false);
+  }
+});

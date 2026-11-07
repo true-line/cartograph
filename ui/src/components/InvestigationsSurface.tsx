@@ -320,6 +320,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
             <p className="muted">Prepared graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
             <div className="investigation-actions">
               {[4, 5, 6, 7].includes(summary.schema_version) && <p>{summary.completion_outcome === 'obligations_unmet' ? 'Completion obligations unmet; no result admitted.' :
+                summary.completion_outcome === 'findings_withheld_after_correction' ? 'Some findings were withheld because their claims could not be verified.' :
                 summary.completion_outcome === 'insufficient_evidence' ? 'Admitted insufficient-evidence completion.' : summary.completion_outcome === 'supported' ? 'Supported completion.' : 'No completion outcome recorded.'}</p>}
               {summary.actions.can_cancel && <button type="button" className="danger-button" disabled={state.actionBusy}
                 onClick={() => void state.cancel()}>Request cancellation</button>}

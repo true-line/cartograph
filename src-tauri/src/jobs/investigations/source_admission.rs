@@ -161,7 +161,12 @@ impl JobStore {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        let sizes = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV24 {
+        let sizes = if task
+            .detail
+            .summary
+            .specialist_id
+            .uses_exact_source_reservation()
+        {
             input
                 .size_binding
                 .as_ref()

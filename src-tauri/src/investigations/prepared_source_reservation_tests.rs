@@ -34,7 +34,10 @@ fn fixture_for_role(
     InvestigationInspectionTarget,
     std::path::PathBuf,
 ) {
-    fixture_for_role_capture(role, role == Some(SpecialistId::DomainAnalystV24))
+    fixture_for_role_capture(
+        role,
+        role.is_some_and(SpecialistId::uses_exact_source_reservation),
+    )
 }
 fn fixture_for_role_capture(
     role: Option<SpecialistId>,
@@ -94,7 +97,7 @@ fn fixture_for_role_capture(
         data
     });
     let (state, context, target, private) = actual.unwrap();
-    if role == Some(SpecialistId::DomainAnalystV24) && measured {
+    if role.is_some_and(SpecialistId::uses_exact_source_reservation) && measured {
         let source = context.prepare_captured_source(&state, &target).unwrap();
         let sizes = source
             .size_binding()

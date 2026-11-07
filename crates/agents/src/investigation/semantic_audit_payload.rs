@@ -94,11 +94,22 @@ pub(in crate::investigation) fn prepare_payload(
         !ids.is_empty(),
         subjects.len(),
     );
-    let compact = json!({"role":ROLE,"question":question,
+    let mut compact = json!({"role":ROLE,"question":question,
         "candidate_hash":candidate_hash,"acquired_ledger_hash":candidate.input_ledger_hash,
         "contract_hash":contract_hash,"subjects":descriptors,
         "candidate":{"findings":candidate.findings,"limitations":candidate.limitations,
             "narrative":candidate.narrative,"knowledge_completeness":candidate.knowledge_completeness}});
+    // Preserve historical audit bytes; only the new host partial route adds
+    // its fixed disclosure. Never expose discarded prose or witness internals.
+    if candidate.completion.as_ref().is_some_and(|completion| {
+        completion.outcome
+            == super::staged_finish::CompletionOutcome::FindingsWithheldAfterCorrection
+    }) {
+        compact["candidate"]["completion_disposition"] = json!({
+            "outcome": "findings_withheld_after_correction",
+            "message": super::FINDINGS_WITHHELD_MESSAGE,
+        });
+    }
     let payload = CompletionPayload {
         system: INSTRUCTIONS.into(),
         prompt: String::from_utf8(bounded_bytes(&compact, MAX_INPUT_BYTES)?)
