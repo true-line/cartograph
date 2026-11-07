@@ -237,7 +237,13 @@ impl InvestigationInput {
         );
         if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             let upper = serde_json::to_value(
-                if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
+                if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
+                    staged_finish::RefusalFeedback::sizing_claim_contract_envelope(
+                        &contract,
+                        &self.ledger,
+                        policy,
+                    )?
+                } else if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
                     staged_finish::RefusalFeedback::sizing_replay_contract_envelope(
                         &contract,
                         &self.ledger,
@@ -705,7 +711,9 @@ impl InvestigationInput {
                 .map_err(|_| InvestigationError::InvalidInput)?;
         if self.acquisition_choices.is_some() {
             state.validate_saved_role_shape(
-                if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
+                if self.payload.system == SpecialistId::DomainAnalystV23.prompt() {
+                    SpecialistId::DomainAnalystV23
+                } else if self.payload.system == SpecialistId::DomainAnalystV22.prompt() {
                     SpecialistId::DomainAnalystV22
                 } else if self.payload.system == SpecialistId::DomainAnalystV21.prompt() {
                     SpecialistId::DomainAnalystV21
@@ -742,6 +750,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV20,
             SpecialistId::DomainAnalystV21,
             SpecialistId::DomainAnalystV22,
+            SpecialistId::DomainAnalystV23,
             SpecialistId::EvidenceAuditorV11,
         ]
         .into_iter()
@@ -1016,7 +1025,8 @@ impl InvestigationInput {
 impl InvestigationInput {
     fn capacity_exhausted(&self) -> bool {
         (self.payload.system == SpecialistId::DomainAnalystV21.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV22.prompt())
+            || self.payload.system == SpecialistId::DomainAnalystV22.prompt()
+            || self.payload.system == SpecialistId::DomainAnalystV23.prompt())
             && self
                 .acquisition_choices
                 .as_ref()
@@ -1030,6 +1040,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV20,
             SpecialistId::DomainAnalystV21,
             SpecialistId::DomainAnalystV22,
+            SpecialistId::DomainAnalystV23,
         ]
         .iter()
         .any(|role| self.payload.system == role.prompt())
@@ -1109,7 +1120,8 @@ impl InvestigationInput {
             serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
         self.action_feedback = feedback;
         if ((self.payload.system == SpecialistId::DomainAnalystV21.prompt()
-            || self.payload.system == SpecialistId::DomainAnalystV22.prompt())
+            || self.payload.system == SpecialistId::DomainAnalystV22.prompt()
+            || self.payload.system == SpecialistId::DomainAnalystV23.prompt())
             && choices.capacity_exhausted())
             || self
                 .action_feedback

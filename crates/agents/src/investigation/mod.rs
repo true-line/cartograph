@@ -12,6 +12,8 @@ mod coverage;
 mod coverage_protocol;
 mod disclosure;
 mod disclosure_workspace;
+#[path = "enumeration_claims/guard.rs"]
+mod enumeration_claims;
 mod finding_review;
 mod input;
 mod inspection;

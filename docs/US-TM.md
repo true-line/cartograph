@@ -144,3 +144,7 @@ replay locations and a separate capacity-excluded obligation projection. The
 Decision #1692 section of [test-map.md](test-map.md) maps provider-free coverage.
 Provider-free coverage establishes diagnostic binding and cutoff behavior, not
 actual-model acceptance. Development and release gates remain separate.
+
+Decision #1697 / issue #1698 extends US-0032 / AC-0287 with analyst @23
+literal-enumeration and configuration-claim checks. Historical @20–@22 remain
+unchanged; deterministic regressions and actual-model acceptance are separate.

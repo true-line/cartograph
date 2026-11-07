@@ -139,6 +139,16 @@ impl RefusalRecord {
         previous: Option<&RefusalRecord>,
         policy: &InvestigationPolicy,
     ) -> Result<RefusalDisposition, InvestigationError> {
+        if matches!(
+            self.feedback.prose_correction,
+            Some(
+                ProseCorrection::UnverifiedEnumerationClaimAt(_)
+                    | ProseCorrection::UnverifiedConfigurationClaimAt(_)
+            )
+        ) && request.specialist_id != "domain-analyst@23"
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         if ((matches!(
             self.feedback.prose_correction,
             Some(ProseCorrection::ParaphraseReplayAt(_))
@@ -147,13 +157,19 @@ impl RefusalRecord {
             .unmet
             .iter()
             .any(|entry| entry.reason == RefusalReason::ExcludedByCapacity))
-            && request.specialist_id != "domain-analyst@22")
+            && !matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@22" | "domain-analyst@23"
+            ))
             || request.limit_profile != policy.profile()
             || ((self.feedback.citation_correction.is_some()
                 || self.feedback.prose_correction.is_some())
                 && !matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22"
+                    "domain-analyst@20"
+                        | "domain-analyst@21"
+                        | "domain-analyst@22"
+                        | "domain-analyst@23"
                 ))
         {
             return Err(InvestigationError::InvalidInput);

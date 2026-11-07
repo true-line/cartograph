@@ -588,7 +588,9 @@ fn task_phase_workspaces(
             agents::investigation::MAX_ACTION_BYTES.checked_mul(2)?,
         )?)? // saved call DTO plus separately encoded original action
         .checked_add(
-            agents::investigation::InvestigationInput::correction_replay_workspace_bytes()?,
+            agents::investigation::InvestigationInput::correction_replay_workspace_bytes()?.max(
+                agents::investigation::InvestigationInput::claim_correction_workspace_bytes()?,
+            ),
         )?;
     let audit_limits = llm::bounded::CompletionLimits::new(
         crate::investigations::provider_workspace::completion_limit_values(

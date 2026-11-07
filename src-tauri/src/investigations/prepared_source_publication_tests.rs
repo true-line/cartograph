@@ -249,3 +249,34 @@ mod cleanup_tests;
 fn prepared_source_publication_analyst20_source_uses_attached_candidate() {
     assert_acquired_publication_role(Some(SpecialistId::DomainAnalystV20));
 }
+
+// AC-0287 / #1698: acquired evidence, real admission, schema5 and durable reopen.
+#[test]
+fn analyst23_configuration_claim_refusal_survives_captured_source_reopen() {
+    let (mut saved, state, mut context, target, _) =
+        fixture_for_role(Some(SpecialistId::DomainAnalystV23));
+    let candidate = match read(&saved, &state, &context, &target) {
+        Ok(candidate) => candidate,
+        Err(error) => panic!("read failed: {:?}", error.kind()),
+    };
+    let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+    let provider = provider();
+    let published = match candidate.publish_acquired(
+        &mut context,
+        &state,
+        saved.execution(),
+        &clock(),
+        &publication(&saved, &firewall, &provider),
+    ) {
+        Ok(result) => result,
+        Err(error) => panic!("publication failed: {}", error.error()),
+    };
+    let citation = &context.ledger.citations.last().unwrap().citation_id;
+    saved.assert_configuration_refusal_after_capture(
+        &published.input,
+        &published.prepared,
+        &provider,
+        &firewall,
+        citation,
+    );
+}

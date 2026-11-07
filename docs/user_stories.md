@@ -1174,3 +1174,32 @@ If diagnostic location disagrees with the replay detector, the finish stays
 refused and uses generic schema-3 replay feedback, preserving the existing
 correction allowance. Sensitive-output, size and invalid-action errors still
 propagate; diagnostic fallback never admits a result.
+
+### Decision #1697 — evidence-bound analyst claims (US-0032 / AC-0287)
+
+Analyst @23 (prompt generation 13) checks literal enumeration claims against
+its cited captured spans before admitting a finish. Unbound claims and spans
+that are not literal enumerations are not applicable; bound false or
+unverifiable claims receive text-free sentence locations through the existing
+single correction turn and authenticated witness. Unsupported subset or
+exception language is unverifiable, not interpreted semantically. Bound quantified
+claims outside the grammar are refused with typed feedback, consuming the single
+correction turn; this intentional over-refusal also applies to true claims whose
+phrasing falls outside the supported grammar.
+
+Default/configured/registered assertions require configuration evidence binding
+the named identifier. Titles may resolve a subject only against identifiers in
+the same finding's statement or citations: normalized words must uniquely match
+a contiguous CamelCase prefix. No synonyms or stemming apply; unresolved or
+ambiguous subjects are not applicable. Configuration subject binding is limited
+to identifiers with multiple normalized words. Single-word identifiers (for
+example, `Redis`) do not bind a subject, even when present in cited source; such
+claims are not applicable. This is a known scope limit, not verified configuration.
+Limitations are exempt. Default-prefixed
+source paths and identifiers may establish the corresponding default identity,
+but unrelated co-occurrence does not establish configuration.
+
+Historical @20–@22 behavior and canonical bytes, privacy detectors, limits and
+correction allowance remain unchanged. Refused prose is never stored. Golden
+regressions bind the r3 findings to the actual captured source span; these local
+checks do not establish real-provider or release acceptance.

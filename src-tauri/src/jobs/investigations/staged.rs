@@ -1012,6 +1012,7 @@ pub(super) fn append_for_task(
         && request.specialist_id != "domain-analyst@20"
         && request.specialist_id != "domain-analyst@21"
         && request.specialist_id != "domain-analyst@22"
+        && request.specialist_id != "domain-analyst@23"
     {
         return Err(InvestigationStoreError::Invalid);
     }

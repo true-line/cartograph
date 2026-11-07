@@ -125,6 +125,206 @@ impl CapturedSourceInvocationFixture {
             action,
         }
     }
+    /// Submit a real finish after the captured source has been published. No transport.
+    pub(crate) fn assert_configuration_refusal_after_capture(
+        &mut self,
+        current: &InvestigationInput,
+        prepared: &PreparedBoundedCompletion,
+        provider: &dyn llm::LlmProvider,
+        firewall: &llm::EgressFirewall,
+        citation: &str,
+    ) {
+        let before = self.inner.store.investigation(self.id()).unwrap();
+        // Source-publication fixture limits are not a real invocation profile.
+        // Reprepare the same acquired input using the saved task's exact policy.
+        let tx = self.inner.store.conn.unchecked_transaction().unwrap();
+        let task = load_next_prompt_task(&tx, self.id()).unwrap();
+        let policy = super::policy_for_detail(&task.detail).unwrap();
+        let mut limits = CompletionLimits::default().values();
+        limits.request_timeout_ms = task
+            .completion_intent
+            .as_ref()
+            .unwrap()
+            .effective_request_timeout_ms();
+        limits.max_output_tokens = policy.limits().generated_tokens_per_invocation;
+        limits.max_spans = u32::try_from(policy.limits().evidence_items).unwrap();
+        drop(tx);
+        let action = current
+            .action(format!(
+                "{}:step-{}",
+                self.id(),
+                before.usage.model_invocations + 1
+            ))
+            .unwrap();
+        let invocation_prepared = firewall
+            .prepare_bounded(provider, &action, &CompletionLimits::new(limits).unwrap())
+            .unwrap();
+        // Preserve the captured-source profile while applying invocation limits.
+        assert_eq!(invocation_prepared.profile(), prepared.profile());
+        let prepared = &invocation_prepared;
+
+        let sealed_active = current
+            .seal_disclosure_with_policy(prepared, &INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .unwrap()
+            .admission
+            .unwrap()
+            .consumed_budgets
+            .active_milliseconds;
+
+        let authorized = firewall
+            .authorize_bounded(provider, prepared, None)
+            .unwrap();
+        let invoked = self
+            .inner
+            .store
+            .begin_next_prompt_invocation(
+                &self.inner._execution_guard,
+                before.summary.revision,
+                &NextPromptInvocation {
+                    input: current,
+                    prepared,
+                    active_milliseconds: sealed_active,
+                },
+                &authorized,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let original = json!({"schema_version":1,"outcome":"supported",
+            "action":{"type":"finish","findings":[{
+                "claim_kind":"inferred_interpretation","title":"Default MissingStrategy",
+                "statement":"MissingStrategy controls this behavior.","citation_ids":[citation],
+                "limitations":["Only selected material was considered."]
+            }],"knowledge_completeness":"partial","limitations":["Only selected material was considered."]}});
+        let response = InvestigationResponseMeta {
+            finish_feedback_witness: None,
+            step_id: format!("step-{}", invoked.usage.model_invocations),
+            response_hash: core_prov::content_hash(b"scripted unsupported configuration claim"),
+            action_hash: core_prov::content_hash(&encode(&original, MAX_ACTION_BYTES).unwrap()),
+            observed_model: None,
+            reported_input_tokens: Some(17),
+            reported_output_tokens: Some(9),
+            reported_cache_read_tokens: None,
+            active_milliseconds: invoked.usage.active_milliseconds + 1,
+        };
+        let detail = self
+            .inner
+            .store
+            .admit_next_prompt_finish(
+                &self.inner._execution_guard,
+                invoked.summary.revision,
+                &NextPromptFinish {
+                    request: &self.inner.request,
+                    response: &response,
+                    original_action: &original,
+                    current,
+                    current_prepared: prepared,
+                },
+            )
+            .unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Running);
+        assert!(!detail.summary.has_result);
+        let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(self.id()).unwrap(), detail);
+        let tx = reopened.conn.unchecked_transaction().unwrap();
+        let task = load_next_prompt_task(&tx, self.id()).unwrap();
+        let entry = staged::load_for_task(&tx, &task).unwrap().remove(0);
+        assert_eq!(entry.record.feedback.schema_version, 5);
+        let Some(
+            agents::investigation::staged_finish::ProseCorrection::UnverifiedConfigurationClaimAt(
+                location,
+            ),
+        ) = &entry.record.feedback.prose_correction
+        else {
+            panic!(
+                "expected configuration refusal: {:?}",
+                entry.record.feedback
+            );
+        };
+        assert_eq!(
+            location.start.field,
+            agents::investigation::ProseField::FindingTitle { finding: 0 }
+        );
+        assert_eq!(location.start.sentence, 1);
+        assert!(entry.response.finish_feedback_witness.is_some());
+        assert!(
+            !String::from_utf8(entry.record.feedback.bytes().unwrap())
+                .unwrap()
+                .contains("MissingStrategy")
+        );
+        assert!(staged::load_for_task(&tx, &task).is_ok());
+        drop(tx);
+        for mutation in [
+            "missing_digest",
+            "changed_digest",
+            "changed_feedback",
+            "missing_response",
+        ] {
+            let tx = reopened.conn.unchecked_transaction().unwrap();
+            let mut entry = staged::read::<staged::JournalEntry>(
+                &tx,
+                "staged_completion_refusals",
+                self.id(),
+                Some(1),
+                MAX_RECORD_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(entry.response.finish_feedback_witness.is_some());
+            for table in ["investigation_responses", "staged_completion_refusals"] {
+                let trigger = format!(
+                    "{table}_no_{}",
+                    if mutation == "missing_response" && table == "investigation_responses" {
+                        "delete"
+                    } else {
+                        "update"
+                    }
+                );
+                let sql: String = tx
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema WHERE name=?1",
+                        [&trigger],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                tx.execute_batch(&format!("DROP TRIGGER {trigger}"))
+                    .unwrap();
+                if table == "investigation_responses" {
+                    match mutation {
+                        "missing_digest" => entry.response.finish_feedback_witness = None,
+                        "changed_digest" => {
+                            entry.response.finish_feedback_witness = Some("f".repeat(64))
+                        }
+                        _ => (),
+                    }
+                    if mutation == "missing_response" {
+                        tx.execute(
+                            "DELETE FROM investigation_responses WHERE task_id=?1 AND step_id=?2",
+                            params![entry.record.task_id, entry.record.step_id],
+                        )
+                        .unwrap();
+                    } else {
+                        let body = encode(&entry.response, 4096).unwrap();
+                        tx.execute("UPDATE investigation_responses SET body=?3,body_hash=?4 WHERE task_id=?1 AND step_id=?2", params![entry.record.task_id,entry.record.step_id,body,core_prov::content_hash(&body)]).unwrap();
+                    }
+                } else {
+                    if mutation == "changed_feedback" {
+                        if let Some(agents::investigation::staged_finish::ProseCorrection::UnverifiedConfigurationClaimAt(location)) = &mut entry.record.feedback.prose_correction {
+                        location.start.sentence += 1;
+                        location.end.sentence += 1;
+                    } else { panic!("expected schema5 configuration correction"); }
+                        entry.record.refusal_id = entry.record.content_id().unwrap();
+                    }
+                    entry.rehash_for_test();
+                    let body = encode(&entry, MAX_RECORD_BYTES).unwrap();
+                    tx.execute("UPDATE staged_completion_refusals SET body=?2,body_hash=?3 WHERE task_id=?1 AND sequence=1", params![entry.record.task_id,body,core_prov::content_hash(&body)]).unwrap();
+                }
+                tx.execute_batch(&sql).unwrap();
+            }
+            assert!(staged::load_for_task(&tx, &task).is_err(), "{mutation}");
+            // Drop rolls back mutation and restored triggers before the next case.
+        }
+    }
     /// Negative binding tests only: actual authenticated reservation writer,
     /// scripted retention callback; grants no host source access.
     pub(crate) fn reserve_for_binding_test(&mut self) -> CommittedSourceReservation {

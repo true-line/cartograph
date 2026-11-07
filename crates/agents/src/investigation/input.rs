@@ -103,6 +103,55 @@ impl InvestigationInput {
         super::privacy::reject_metadata_replay(prose, self.graph_strings.iter().map(String::as_str))
     }
 
+    /// @23 checks only admitted citation spans belonging to each finding.
+    /// The returned diagnostic carries positions, never refused authored text.
+    pub(super) fn claim_correction(
+        &self,
+        finish: &staged_finish::StagedFinish,
+    ) -> Result<Option<staged_finish::ProseCorrection>, InvestigationError> {
+        let InvestigationAction::Finish { findings, .. } = &finish.action else {
+            return Err(InvestigationError::InvalidAction);
+        };
+        for (index, finding) in findings.iter().enumerate() {
+            let spans = self
+                .payload
+                .spans
+                .iter()
+                .filter(|span| finding.citation_ids.contains(&span.id))
+                .map(|span| (span.path.as_str(), span.text.as_str()))
+                .collect::<Vec<_>>();
+            if let Some((title, sentence, reason)) =
+                enumeration_claims::finding(&finding.title, &finding.statement, &spans)
+            {
+                let finding =
+                    u32::try_from(index).map_err(|_| InvestigationError::LimitExceeded)?;
+                let position = ProsePosition {
+                    field: if title {
+                        ProseField::FindingTitle { finding }
+                    } else {
+                        ProseField::FindingStatement { finding }
+                    },
+                    sentence: u32::try_from(sentence)
+                        .map_err(|_| InvestigationError::LimitExceeded)?,
+                };
+                let location = ReplayLocation {
+                    start: position.clone(),
+                    end: position,
+                };
+                location.validate()?;
+                return Ok(Some(match reason {
+                    enumeration_claims::Reason::Enumeration => {
+                        staged_finish::ProseCorrection::UnverifiedEnumerationClaimAt(location)
+                    }
+                    enumeration_claims::Reason::Configuration => {
+                        staged_finish::ProseCorrection::UnverifiedConfigurationClaimAt(location)
+                    }
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     /// Text-free diagnostic for the exact refused finish. This does not admit
     /// output or authenticate feedback; the host must bind it to the finish hash.
     pub fn correction_replay_location(

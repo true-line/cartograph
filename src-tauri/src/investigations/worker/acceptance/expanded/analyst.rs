@@ -106,6 +106,16 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
     collect_role(authority, "analyst")
 }
 fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "domain-analyst@23" || saved == SpecialistId::DomainAnalystV23 {
+        if frozen != "domain-analyst@23"
+            || saved != SpecialistId::DomainAnalystV23
+            || role != "analyst"
+        {
+            return Err("Claim feedback receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist23-prompt13-disclosure6-result7");
+    }
+
     if frozen == "domain-analyst@22" || saved == SpecialistId::DomainAnalystV22 {
         if frozen != "domain-analyst@22"
             || saved != SpecialistId::DomainAnalystV22
