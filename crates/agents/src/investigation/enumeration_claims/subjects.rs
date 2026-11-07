@@ -1,7 +1,7 @@
 //! Exact word-prefix resolution for configuration assertions; no synonyms.
 use std::collections::BTreeSet;
 
-pub(super) fn words(identifier: &str) -> Vec<String> {
+pub(crate) fn words(identifier: &str) -> Vec<String> {
     let chars: Vec<_> = identifier.chars().collect();
     let mut result = Vec::new();
     let mut word = String::new();
@@ -28,7 +28,7 @@ pub(super) fn words(identifier: &str) -> Vec<String> {
     result
 }
 
-pub(super) fn identifiers(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn identifiers(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
         .filter(|part| {
             part.chars()
@@ -40,7 +40,7 @@ pub(super) fn identifiers(text: &str) -> impl Iterator<Item = &str> {
 /// The caller supplies only this finding's statement and cited spans. Returned
 /// identifiers are borrowed; neither another finding nor a source outside the
 /// citation set can disambiguate a subject.
-pub(super) fn subject<'a>(
+pub(crate) fn subject<'a>(
     phrase: &str,
     candidates: impl Iterator<Item = &'a str>,
 ) -> Option<&'a str> {

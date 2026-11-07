@@ -1,11 +1,11 @@
 //! Finding-local claim checks. The host must separately authenticate citations,
 //! charge workspace, and bind the returned text-free location to the refusal.
 #[path = "claims.rs"]
-mod claims;
+pub(super) mod claims;
 #[path = "configuration.rs"]
-mod configuration;
+pub(super) mod configuration;
 #[path = "subjects.rs"]
-mod subjects;
+pub(super) mod subjects;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Reason {
