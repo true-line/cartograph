@@ -7,6 +7,7 @@
 #[doc(hidden)]
 pub mod acquisition_choices;
 mod admission;
+pub mod claim_diagnostics;
 mod completion;
 mod coverage;
 mod coverage_protocol;

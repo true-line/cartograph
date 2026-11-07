@@ -1,6 +1,6 @@
 //! Restricted literal reader. Never evaluates source or searches inside a larger expression.
 #[derive(Debug, PartialEq)]
-pub(super) enum Enumeration<'a> {
+pub(crate) enum Enumeration<'a> {
     Array(Vec<&'a str>),
     Table(Vec<(&'a str, Vec<&'a str>)>),
 }
@@ -125,7 +125,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-pub(super) fn parse(source: &str) -> Option<Enumeration<'_>> {
+pub(crate) fn parse(source: &str) -> Option<Enumeration<'_>> {
     let mut reader = Reader { rest: source };
     let mut first = reader.next()?;
     // Captured property spans commonly start at `transitions: { ... }`.
