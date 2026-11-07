@@ -1,5 +1,18 @@
 # cartograph
 
+## 0.64.0
+
+### Minor Changes
+
+- 331eaa6: Add analyst @22 finish feedback with text-free replay locations and a distinct status for obligations excluded by prompt capacity. Saved diagnostics are bound to independent response metadata and fail closed when that witness is missing or altered. Existing analyst identities and correction limits are preserved.
+- 47fb6a5: Add analyst @23 checks for unsupported claims about cited literal enumerations and configuration defaults. Typed feedback identifies the finding and sentence without retaining refused prose, using the existing single correction turn. Historical analyst definitions and limits remain unchanged.
+
+### Patch Changes
+
+- ae54a96: Prevent analyst investigations from repeatedly offering acquisitions already refused for prompt capacity. Analyst @21 excludes refused actions until acquisition progress advances the input, and offers finish-only when no acquisition remains. Historical analyst tasks retain their saved behavior.
+- 7d12b6d: Render selected flow diagrams beyond the overview cap while preserving artifact identity and existing limits.
+- 79b263f: Distinguish unresolved findings from supporting assertion rows in the Spec Workbench.
+
 ## 0.63.0
 
 ### Minor Changes
