@@ -1321,9 +1321,13 @@ pub(super) fn complete_anthropic(
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
     check_request(profile, request, control)?;
-    if request.payload().response_schema.is_some() {
-        return Err(BoundedCallError::unsupported());
-    }
+    // Wire-only projection onto the compilable subset; host validation keeps
+    // the full schema. Anything unrepresentable fails closed before sending.
+    let schema = response_schema(request.payload())?
+        .map(|raw| {
+            request_wire::anthropic_schema(raw.get()).ok_or_else(BoundedCallError::unsupported)
+        })
+        .transpose()?;
     if api_key.is_empty()
         || api_key.len() > 4096
         || reqwest::header::HeaderValue::from_str(api_key).is_err()
@@ -1337,6 +1341,7 @@ pub(super) fn complete_anthropic(
             &request.payload().system,
             &user,
             request.limits().0.max_output_tokens,
+            schema.as_ref(),
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,

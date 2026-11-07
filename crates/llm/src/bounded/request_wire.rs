@@ -2,7 +2,9 @@
 //! Field order preserves the compact JSON emitted by the former Value maps.
 use serde::Serialize;
 
+mod anthropic_schema;
 mod openai_schema;
+pub(super) use anthropic_schema::project as anthropic_schema;
 pub(super) use openai_schema::OpenAiSchemaFormatter;
 
 #[derive(Serialize)]
@@ -64,19 +66,36 @@ pub(super) fn ollama<'a>(
 }
 
 #[derive(Serialize)]
+struct AnthropicFormat<'a> {
+    schema: &'a serde_json::Value,
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct AnthropicOutput<'a> {
+    format: AnthropicFormat<'a>,
+}
+
+#[derive(Serialize)]
 struct Anthropic<'a> {
     max_tokens: u32,
     messages: [Message<'a>; 1],
     model: &'a str,
+    // Absent without a schema, so schema-free request bytes are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutput<'a>>,
     stream: bool,
     system: &'a str,
 }
 
+/// `schema` must already be the [`anthropic_schema`] wire projection.
 pub(super) fn anthropic<'a>(
     model: &'a str,
     system: &'a str,
     user: &'a str,
     max_tokens: u32,
+    schema: Option<&'a serde_json::Value>,
 ) -> impl Serialize + 'a {
     Anthropic {
         max_tokens,
@@ -85,6 +104,12 @@ pub(super) fn anthropic<'a>(
             role: "user",
         }],
         model,
+        output_config: schema.map(|schema| AnthropicOutput {
+            format: AnthropicFormat {
+                schema,
+                kind: "json_schema",
+            },
+        }),
         stream: false,
         system,
     }
