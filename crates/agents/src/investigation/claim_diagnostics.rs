@@ -24,14 +24,26 @@ pub fn explain_enumeration(
     sentence: &str,
     allocation_cap: usize,
 ) -> Option<EnumerationDiagnostic> {
-    let Err(explanation) = enumeration::explain(source, sentence)? else {
+    let Err(mut explanation) = enumeration::explain(source, sentence)? else {
         return None;
     };
     let (table_kind, shape) =
         enumeration::describe(source, sentence, allocation_cap.min(MAX_MANIFEST_BYTES))?;
+    // Resolved from the full sentence, so it survives shape truncation.
     let quantifier = explanation
         .quantifier_token
         .and_then(|index| enumeration::quantifier_at(sentence, index));
+    // Token references always index retained `shape.tokens`. A reference to an
+    // omitted token is cleared; `shape.omitted_tokens` records the truncation.
+    let retained = shape.tokens.len();
+    for index in [
+        &mut explanation.target_token,
+        &mut explanation.quantifier_token,
+    ] {
+        if index.is_some_and(|index| index >= retained) {
+            *index = None;
+        }
+    }
     Some(EnumerationDiagnostic {
         table_kind,
         quantifier,
@@ -82,7 +94,8 @@ pub enum Position {
     Value { key: Option<usize>, value: usize },
 }
 /// A missing target has no source position; its token index points into the
-/// text-free shape. The counterexample key still identifies the falsifying row.
+/// retained text-free `shape.tokens`, and is `None` when that token was omitted
+/// by truncation. The counterexample key still identifies the falsifying row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Explanation {
@@ -229,6 +242,26 @@ pub enum ConfigurationFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1707 review: truncation never leaves a token reference outside the
+    // retained shape; the quantifier word itself is still reported.
+    #[test]
+    fn truncated_shape_has_no_dangling_token_references() {
+        let full = explain_enumeration("['A', 'B']", "All entries are A", 4096).unwrap();
+        assert_eq!(full.explanation.target_token, Some(3));
+        assert_eq!(full.explanation.quantifier_token, Some(0));
+        let cut = explain_enumeration("['A', 'B']", "All entries are A", 0).unwrap();
+        assert!(cut.shape.tokens.is_empty());
+        assert_eq!(cut.shape.omitted_tokens, 4);
+        assert_eq!(cut.explanation.target_token, None);
+        assert_eq!(cut.explanation.quantifier_token, None);
+        assert_eq!(cut.quantifier, Some(GrammarWord::All));
+        assert_eq!(cut.explanation.cause, full.explanation.cause);
+        assert_eq!(
+            cut.explanation.counterexample,
+            full.explanation.counterexample
+        );
+    }
 
     // AC-0287 / #1707: the wire format cannot turn arbitrary refused words into
     // literals by claiming they belong to the detector vocabulary.
