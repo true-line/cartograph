@@ -17,7 +17,8 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    fn next(&mut self) -> Option<Token<'a>> {
+    /// Skips whitespace and comments; an unterminated block comment is None.
+    fn trivia(&mut self) -> Option<()> {
         loop {
             self.rest = self.rest.trim_start();
             if let Some(comment) = self.rest.strip_prefix("//") {
@@ -25,9 +26,13 @@ impl<'a> Reader<'a> {
             } else if let Some(comment) = self.rest.strip_prefix("/*") {
                 self.rest = comment.split_once("*/")?.1;
             } else {
-                break;
+                return Some(());
             }
         }
+    }
+
+    fn next(&mut self) -> Option<Token<'a>> {
+        self.trivia()?;
         let first = *self.rest.as_bytes().first()?;
         if first == b'\'' || first == b'"' {
             let body = &self.rest[1..];
@@ -133,9 +138,10 @@ pub(super) fn parse(source: &str) -> Option<Enumeration<'_>> {
         Token::Punct(b'{') => reader.table()?,
         _ => return None,
     };
-    // Consume trivia but reject all trailing expressions and unterminated trivia.
-    let tail = reader.rest.trim();
-    if !tail.is_empty() {
+    // Consume trailing comments/whitespace; reject trailing expressions and
+    // unterminated trivia.
+    reader.trivia()?;
+    if !reader.rest.is_empty() {
         return None;
     }
     Some(result)
@@ -170,6 +176,18 @@ mod tests {
             parse("['A', 'B',]"),
             Some(Enumeration::Array(vec!["A", "B"]))
         );
+        // Trailing comments are trivia, so the guard stays applicable.
+        for text in [
+            "{ A: [] } // explanation",
+            "{ A: [] } /* explanation */",
+            "{ A: [] }\n// a\n/* b */\n",
+        ] {
+            assert_eq!(
+                parse(text),
+                Some(Enumeration::Table(vec![("A", vec![])])),
+                "{text}"
+            );
+        }
         assert_eq!(
             parse("{ A: [/* comment */ 'B'], 'B': [] }"),
             Some(Enumeration::Table(vec![("A", vec!["B"]), ("B", vec![])]))
@@ -181,6 +199,7 @@ mod tests {
             "{A: [], A: ['B']}",
             "{A: {to: [], extra: []}}",
             "{A: []} || other",
+            "{A: []} // comment\n|| other",
             "{A: ['B']} /* unterminated",
             "{A: [`B`]}",
             "{A: ['B\\n']}",
