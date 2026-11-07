@@ -672,3 +672,28 @@ integrity and invocation binding after that text has been discarded.
 - `agents::analyst22_locator_discrepancy_preserves_refusal_and_real_errors`:
   injected missing/disagreeing diagnostics retain a refused finish with generic
   schema-3 feedback; sensitive-output, size and invalid-action failures propagate.
+
+## Decision #1697 claim diagnostics (AC-0287)
+
+- `agents::all_r3_goldens_against_exact_cited_spans`: all nine retained r3
+  findings and exact captured source ranges; false universal/default claims are
+  refused while the accurate findings and finding-5 body remain admitted by the
+  checker. This establishes checker behavior, not actual-model acceptance.
+- `agents::analyst23_claim_feedback_is_versioned_and_text_free`: schema-5
+  enumeration/configuration reasons contain only a typed sentence location;
+  historical schemas and text-bearing locator objects cannot substitute for it.
+- Native `analyst23_latest_refusal_requires_independent_feedback_witness`:
+  the @23 path rejects missing/rewritten independent response witnesses using
+  the same durable checks as @22. This fixture exercises citation correction;
+  claim-specific coverage is provided by the captured-source test below.
+- Native `citation_correction_is_once_only_after_reopen_and_duplicate_publication`:
+  includes @23 and retains the single correction allowance through reopen.
+
+- Native `analyst23_configuration_claim_refusal_survives_captured_source_reopen`:
+  real retained-source reservation/read/publication, policy-bound invocation and
+  normal finish admission produce schema-5 configuration feedback. Independent
+  reopen verifies the title/sentence locator and text-free feedback; missing or
+  changed witness, rewritten locator with recomputed journal hashes, and deleted
+  response are rejected in rolled-back test transactions.
+- `agents::single_word_configuration_subject_is_not_applicable`: pins the
+  delegated multiword-only scope; Redis in cited source does not bind a subject.

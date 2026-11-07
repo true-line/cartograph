@@ -3,7 +3,16 @@ use super::*;
 
 #[test]
 fn analyst22_latest_refusal_requires_independent_feedback_witness() {
-    let mut f = correction_fixture_role("domain-analyst@22");
+    assert_latest_feedback_witness("domain-analyst@22");
+}
+
+#[test]
+fn analyst23_latest_refusal_requires_independent_feedback_witness() {
+    assert_latest_feedback_witness("domain-analyst@23");
+}
+
+fn assert_latest_feedback_witness(role: &str) {
+    let mut f = correction_fixture_role(role);
     f.begin();
     f.publish().unwrap();
     let task = f.saved();

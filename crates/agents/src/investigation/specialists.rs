@@ -69,6 +69,8 @@ pub enum SpecialistId {
     DomainAnalystV21,
     #[serde(rename = "domain-analyst@22")]
     DomainAnalystV22,
+    #[serde(rename = "domain-analyst@23")]
+    DomainAnalystV23,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -240,6 +242,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -276,6 +279,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -313,6 +317,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -343,6 +348,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -367,6 +373,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -391,6 +398,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -412,6 +420,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
                 | Self::EvidenceAuditorV11
         )
     }
@@ -450,12 +459,16 @@ impl SpecialistId {
             Self::DomainAnalystV20 => 20,
             Self::DomainAnalystV21 => 21,
             Self::DomainAnalystV22 => 22,
+            Self::DomainAnalystV23 => 23,
         }
     }
 
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
+        if self == Self::DomainAnalystV23 {
+            return 13;
+        }
         if self == Self::DomainAnalystV22 {
             return 12;
         }
@@ -476,6 +489,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
         ) {
             return 10;
         }
@@ -497,6 +511,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
         )
     }
 
@@ -509,21 +524,28 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
         )
     }
 
     pub fn uses_capacity_exclusions(self) -> bool {
-        matches!(self, Self::DomainAnalystV21 | Self::DomainAnalystV22)
+        matches!(
+            self,
+            Self::DomainAnalystV21 | Self::DomainAnalystV22 | Self::DomainAnalystV23
+        )
     }
 
     pub fn uses_finish_feedback_witness(self) -> bool {
-        self == Self::DomainAnalystV22
+        matches!(self, Self::DomainAnalystV22 | Self::DomainAnalystV23)
     }
 
     pub fn uses_typed_citation_correction(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV20 | Self::DomainAnalystV21 | Self::DomainAnalystV22
+            Self::DomainAnalystV20
+                | Self::DomainAnalystV21
+                | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
         )
     }
 
@@ -531,9 +553,16 @@ impl SpecialistId {
         system == Self::DomainAnalystV20.prompt()
             || system == Self::DomainAnalystV21.prompt()
             || system == Self::DomainAnalystV22.prompt()
+            || system == Self::DomainAnalystV23.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV23 {
+            return format!(
+                "{}\nFinish feedback@2: rewrite_schema_placeholders_as_plain_prose: use plain prose. paraphrase_without_quoting_source/paraphrase_replay_at: rewrite without source quotes; typed one-based sentence ranges may span fields and identify refused prose, not evidence. limitation_denies_acquired_evidence: correct the scoped limitation. unverified_enumeration_claim_at: verify universal claims against literal entries or remove them. unverified_configuration_claim_at: cite configuration binding the named identifier, not a neighboring field, or remove the claim. excluded_by_capacity: disclose unresolved, unattempted, unacquired gaps. Single correction allowance unchanged.",
+                Self::DomainAnalystV21.prompt()
+            );
+        }
         if self == Self::DomainAnalystV22 {
             return format!(
                 "{}\nFinish feedback@1: Replay feedback names typed fields and one-based sentence ranges, possibly spanning fields. Rewrite the indicated prose in your own words without quoting supplied text. The location identifies the refused finish, not new evidence. An obligation excluded_by_capacity remains unresolved, unattempted and unacquired; disclose that gap without claiming satisfaction. The existing correction allowance is unchanged.",
@@ -627,7 +656,8 @@ impl SpecialistId {
             | Self::DomainAnalystV19
             | Self::DomainAnalystV20
             | Self::DomainAnalystV21
-            | Self::DomainAnalystV22 => {
+            | Self::DomainAnalystV22
+            | Self::DomainAnalystV23 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -745,6 +775,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
+                | Self::DomainAnalystV23
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -796,7 +827,8 @@ impl SpecialistId {
             | Self::DomainAnalystV19
             | Self::DomainAnalystV20
             | Self::DomainAnalystV21
-            | Self::DomainAnalystV22 => (
+            | Self::DomainAnalystV22
+            | Self::DomainAnalystV23 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1263,5 +1295,36 @@ mod capacity_exclusion_identity_tests {
             serde_json::to_string(&new).unwrap(),
             "\"domain-analyst@22\""
         );
+    }
+    // AC-0287 / #1698: every closed feedback reason has model-facing guidance.
+    #[test]
+    fn analyst23_prompt_covers_all_feedback_within_existing_definition_ceiling() {
+        let role = SpecialistId::DomainAnalystV23;
+        let prompt = role.prompt();
+        for required in [
+            "rewrite_schema_placeholders_as_plain_prose",
+            "paraphrase_without_quoting_source",
+            "paraphrase_replay_at",
+            "limitation_denies_acquired_evidence",
+            "unverified_enumeration_claim_at",
+            "unverified_configuration_claim_at",
+            "excluded_by_capacity",
+            "one-based",
+            "may span fields",
+            "unresolved, unattempted, unacquired",
+            "Single correction allowance unchanged",
+        ] {
+            assert!(prompt.contains(required), "missing {required}");
+        }
+        assert_eq!(role.prompt_generation(), 13);
+        assert!(role.uses_finish_feedback_witness());
+        // Only 30 bytes remain: offset any @23 prompt growth; never raise the ceiling.
+        assert_eq!(
+            serde_json::to_vec(&(role, role.version(), &prompt))
+                .unwrap()
+                .len(),
+            16_354
+        );
+        assert!(role.definition().is_ok()); // existing 16KiB bound, unchanged
     }
 }

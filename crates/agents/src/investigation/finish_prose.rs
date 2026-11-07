@@ -206,4 +206,43 @@ mod tests {
         }
         assert!(feedback.bytes().is_err());
     }
+    // AC-0287 / #1698: distinct text-free reasons share the existing locator.
+    #[test]
+    fn analyst23_claim_feedback_is_versioned_and_text_free() {
+        let position = ProsePosition {
+            field: ProseField::FindingTitle { finding: 0 },
+            sentence: 1,
+        };
+        let location = ReplayLocation {
+            start: position.clone(),
+            end: position,
+        };
+        for correction in [
+            ProseCorrection::UnverifiedEnumerationClaimAt(location.clone()),
+            ProseCorrection::UnverifiedConfigurationClaimAt(location.clone()),
+        ] {
+            let mut feedback = RefusalFeedback {
+                schema_version: 5,
+                prose_correction: Some(correction),
+                citation_correction: None,
+                unmet: vec![],
+            };
+            let bytes = feedback.bytes().unwrap();
+            assert_eq!(
+                serde_json::from_slice::<RefusalFeedback>(&bytes).unwrap(),
+                feedback
+            );
+            feedback.schema_version = 4;
+            assert!(feedback.bytes().is_err());
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let reason = value["prose_correction"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+                .next()
+                .unwrap();
+            reason["text"] = "withheld candidate".into();
+            assert!(serde_json::from_value::<RefusalFeedback>(value).is_err());
+        }
+    }
 }

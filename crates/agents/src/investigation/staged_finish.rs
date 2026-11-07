@@ -136,6 +136,8 @@ pub enum ProseCorrection {
     RewriteSchemaPlaceholdersAsPlainProse,
     ParaphraseWithoutQuotingSource,
     ParaphraseReplayAt(ReplayLocation),
+    UnverifiedEnumerationClaimAt(ReplayLocation),
+    UnverifiedConfigurationClaimAt(ReplayLocation),
     LimitationDeniesAcquiredEvidence(Box<ConflictingEvidence>),
 }
 
@@ -246,6 +248,36 @@ impl RefusalFeedback {
         ))))
     }
 
+    pub(super) fn sizing_claim_contract_envelope(
+        contract: &InvestigationCompletionContract,
+        ledger: &InvestigationInputLedger,
+        policy: &InvestigationPolicy,
+    ) -> Result<TypedFeedbackSizeEnvelope, InvestigationError> {
+        let mut feedback =
+            Self::sizing_upper_envelope_with_policy(&contract.obligations, policy)?.feedback;
+        feedback.schema_version = 5;
+        // FindingLimitation is the longest field encoding; the largest valid
+        // indices and sentence ordinal dominate every location at each layer.
+        let position = ProsePosition {
+            field: ProseField::FindingLimitation {
+                finding: 11,
+                limitation: 7,
+            },
+            sentence: MAX_INPUT_BYTES as u32,
+        };
+        feedback.prose_correction = Some(ProseCorrection::UnverifiedConfigurationClaimAt(
+            ReplayLocation {
+                start: position.clone(),
+                end: position,
+            },
+        ));
+        let cap = feedback_bytes(policy)?;
+        let replay = bounded_bytes(&feedback, cap).map_or(cap, |bytes| bytes.len());
+        Ok(TypedFeedbackSizeEnvelope("\\".repeat(replay.max(
+            acquisition_choices::feedback_encoded_bound(contract, ledger, policy)?,
+        ))))
+    }
+
     /// Derive a maximal feedback representation for this exact normalized
     /// obligation set and the immutable policy resolved from saved task limits.
     ///
@@ -304,6 +336,14 @@ impl RefusalFeedback {
         if self.schema_version
             != if matches!(
                 self.prose_correction,
+                Some(
+                    ProseCorrection::UnverifiedEnumerationClaimAt(_)
+                        | ProseCorrection::UnverifiedConfigurationClaimAt(_)
+                )
+            ) {
+                5
+            } else if matches!(
+                self.prose_correction,
                 Some(ProseCorrection::ParaphraseReplayAt(_))
             ) {
                 4
@@ -348,7 +388,12 @@ impl RefusalFeedback {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        if let Some(ProseCorrection::ParaphraseReplayAt(location)) = &self.prose_correction {
+        if let Some(
+            ProseCorrection::ParaphraseReplayAt(location)
+            | ProseCorrection::UnverifiedEnumerationClaimAt(location)
+            | ProseCorrection::UnverifiedConfigurationClaimAt(location),
+        ) = &self.prose_correction
+        {
             location.validate()?;
         }
         if let Some(correction) = &self.citation_correction {
@@ -626,7 +671,10 @@ pub(super) fn admit_finish_with_locator(
         Err(InvestigationError::SourceReplay)
             if matches!(
                 request.specialist_id.as_str(),
-                "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22"
+                "domain-analyst@20"
+                    | "domain-analyst@21"
+                    | "domain-analyst@22"
+                    | "domain-analyst@23"
             ) && consistency.is_some() =>
         {
             // Check all authored fields, including narrative, for sensitive output.
@@ -635,26 +683,36 @@ pub(super) fn admit_finish_with_locator(
                 Err(error) => return Err(error),
                 Ok(()) => return Err(InvestigationError::SourceReplay),
             }
-            prose_correction = Some(if request.specialist_id == "domain-analyst@22" {
-                match locator(input, finish, model.as_deref()) {
-                    Ok(Some(location))
-                        if matches!(location.start.field, replay_location::ProseField::Model)
-                            || matches!(location.end.field, replay_location::ProseField::Model) =>
-                    {
-                        // Provider metadata cannot be rewritten by the analyst.
-                        ProseCorrection::ParaphraseWithoutQuotingSource
+            prose_correction = Some(
+                if matches!(
+                    request.specialist_id.as_str(),
+                    "domain-analyst@22" | "domain-analyst@23"
+                ) {
+                    match locator(input, finish, model.as_deref()) {
+                        Ok(Some(location))
+                            if matches!(
+                                location.start.field,
+                                replay_location::ProseField::Model
+                            ) || matches!(
+                                location.end.field,
+                                replay_location::ProseField::Model
+                            ) =>
+                        {
+                            // Provider metadata cannot be rewritten by the analyst.
+                            ProseCorrection::ParaphraseWithoutQuotingSource
+                        }
+                        Ok(Some(location)) => ProseCorrection::ParaphraseReplayAt(location),
+                        // A diagnostic discrepancy must not consume the correction
+                        // turn. The finish remains refused by the guard above.
+                        Ok(None) | Err(InvestigationError::SourceReplay) => {
+                            ProseCorrection::ParaphraseWithoutQuotingSource
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Ok(Some(location)) => ProseCorrection::ParaphraseReplayAt(location),
-                    // A diagnostic discrepancy must not consume the correction
-                    // turn. The finish remains refused by the guard above.
-                    Ok(None) | Err(InvestigationError::SourceReplay) => {
-                        ProseCorrection::ParaphraseWithoutQuotingSource
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else {
-                ProseCorrection::ParaphraseWithoutQuotingSource
-            });
+                } else {
+                    ProseCorrection::ParaphraseWithoutQuotingSource
+                },
+            );
             None
         }
         Err(InvestigationError::InvalidCitation)
@@ -672,7 +730,10 @@ pub(super) fn admit_finish_with_locator(
         Err(InvestigationError::InvalidCitation)
             if matches!(
                 request.specialist_id.as_str(),
-                "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22"
+                "domain-analyst@20"
+                    | "domain-analyst@21"
+                    | "domain-analyst@22"
+                    | "domain-analyst@23"
             ) =>
         {
             citation_correction = input.typed_citation_correction(
@@ -695,8 +756,10 @@ pub(super) fn admit_finish_with_locator(
             observation.unmet.map(|reason| FeedbackEntry {
                 obligation_id: observation.obligation_id.clone(),
                 kind: observation.kind.clone(),
-                reason: if request.specialist_id == "domain-analyst@22"
-                    && !observation.attempted
+                reason: if matches!(
+                    request.specialist_id.as_str(),
+                    "domain-analyst@22" | "domain-analyst@23"
+                ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
                     && consistency.is_some_and(|bound| {
@@ -713,7 +776,7 @@ pub(super) fn admit_finish_with_locator(
         .collect::<Vec<_>>();
     if matches!(
         request.specialist_id.as_str(),
-        "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22"
+        "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22" | "domain-analyst@23"
     ) && admitted.is_some()
         && prose::has_placeholder(finish)
     {
@@ -721,7 +784,7 @@ pub(super) fn admit_finish_with_locator(
     }
     if matches!(
         request.specialist_id.as_str(),
-        "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22"
+        "domain-analyst@20" | "domain-analyst@21" | "domain-analyst@22" | "domain-analyst@23"
     ) && consistency.is_some()
         && prose_correction.is_none()
         && let Some(result) = &admitted
@@ -739,6 +802,13 @@ pub(super) fn admit_finish_with_locator(
         let limitations = overall.chain(local);
         prose_correction = limitation_check::correction(ledger, limitations);
     }
+    if request.specialist_id == "domain-analyst@23"
+        && admitted.is_some()
+        && consistency.is_some()
+        && prose_correction.is_none()
+    {
+        prose_correction = input.claim_correction(finish)?;
+    }
     if unmet.is_empty() && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
@@ -752,6 +822,14 @@ pub(super) fn admit_finish_with_locator(
     } else {
         let feedback = RefusalFeedback {
             schema_version: if matches!(
+                prose_correction,
+                Some(
+                    ProseCorrection::UnverifiedEnumerationClaimAt(_)
+                        | ProseCorrection::UnverifiedConfigurationClaimAt(_)
+                )
+            ) {
+                5
+            } else if matches!(
                 prose_correction,
                 Some(ProseCorrection::ParaphraseReplayAt(_))
             ) {

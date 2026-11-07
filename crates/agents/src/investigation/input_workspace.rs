@@ -25,6 +25,52 @@ impl InvestigationInput {
         Some(projection.max(validation))
     }
 
+    /// Additional @23 claim-check owners; borrowed input/finish and admitted
+    /// result remain charged by the caller. Logical slots, not allocator/RSS.
+    pub fn claim_correction_workspace_bytes() -> Option<usize> {
+        // Every token, entry, word or candidate consumes at least one input byte.
+        // Source spans are already within MAX_INPUT_BYTES; authored fields within
+        // MAX_ACTION_BYTES. Sum phase owners rather than depending on reuse.
+        let n = MAX_INPUT_BYTES.checked_add(MAX_ACTION_BYTES)?;
+        let normalized = n.checked_mul(3)?.checked_mul(size_of::<char>())?;
+        // Unicode lowercase emits at most three scalars per source scalar;
+        // each scalar needs at most size_of::<char>() UTF-8 bytes.
+        let words = sum(&[
+            normalized,
+            slots::<String>(n)?,
+            slots::<char>(n)?,
+            slots::<Vec<String>>(1)?,
+            slots::<Vec<char>>(1)?,
+        ])?;
+        let enumeration = sum(&[
+            slots::<(&str, Vec<&str>)>(n)?, // literal entries
+            slots::<&str>(n)?,              // literal array elements
+            slots::<&str>(n)?,              // flattened identifiers
+            slots::<&str>(n)?,              // authored clause tokens
+            words,                          // lowercase clause tokens
+            slots::<&str>(n)?,              // bound target list
+            slots::<Vec<&str>>(4)?,
+        ])?;
+        let configuration = sum(&[
+            slots::<(&str, &str)>(n)?, // finding-local span projection
+            set::<&str>(n)?,           // same-finding candidate identifiers
+            slots::<&str>(n)?,         // sentence tokens
+            n.checked_mul(2)?,         // joined candidate tail plus phrase
+            words,                     // normalized tail
+            words,                     // candidate prefix comparison
+            slots::<&str>(n)?,         // matching identifiers
+            set::<&str>(n)?,           // unique subject resolution
+            words,                     // subject phrase normalization
+            words,                     // candidate normalization during subject resolution
+            words,                     // identifier normalization in configuration witness
+            words,                     // source-path normalization
+            slots::<&str>(n)?,         // lexical configuration tokens
+            slots::<Vec<&str>>(3)?,
+        ])?;
+        // The checker runs after ordinary admission, separately from replay.
+        Some(enumeration.max(configuration))
+    }
+
     /// Construction through the final wire check, including rejected growth.
     /// Caller pages/evidence/request and its already bounded ledger acquisition
     /// are separate; the owned ledger passed to the builder is included here.
