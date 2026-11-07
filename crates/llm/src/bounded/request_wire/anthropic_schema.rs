@@ -43,7 +43,89 @@ const VERBATIM: &[&str] = &[
 
 /// Returns `None` when the schema uses anything the API cannot compile.
 pub(crate) fn project(schema: &str) -> Option<Value> {
-    node(&serde_json::from_str(schema).ok()?)
+    let wire = node(&serde_json::from_str(schema).ok()?)?;
+    references_resolve(&wire).then_some(wire)
+}
+
+/// The API accepts only local, non-recursive references. Every `$ref` must name
+/// an existing `#/$defs/<name>` or `#/definitions/<name>` entry of the root, and
+/// following references from any definition must never revisit it.
+fn references_resolve(root: &Value) -> bool {
+    let target = |reference: &Value| -> Option<(&'static str, String)> {
+        let reference = reference.as_str()?;
+        let (map, name) = ["$defs", "definitions"].into_iter().find_map(|map| {
+            Some((
+                map,
+                reference
+                    .strip_prefix("#/")?
+                    .strip_prefix(map)?
+                    .strip_prefix('/')?,
+            ))
+        })?;
+        // Escaped or nested pointers are not resolved here; fail closed.
+        if name.is_empty() || name.contains(['/', '~', '%']) {
+            return None;
+        }
+        root.get(map)?.get(name)?;
+        Some((map, name.to_owned()))
+    };
+    let mut references = Vec::new();
+    collect(root, &mut references);
+    let Some(edges_of_root) = references
+        .iter()
+        .map(|r| target(r))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let edges = |definition: &Value| -> Vec<(&'static str, String)> {
+        let mut found = Vec::new();
+        collect(definition, &mut found);
+        found.iter().filter_map(|r| target(r)).collect()
+    };
+    // Depth-first cycle search over the definition graph.
+    fn acyclic(
+        node: (&'static str, String),
+        root: &Value,
+        edges: &dyn Fn(&Value) -> Vec<(&'static str, String)>,
+        path: &mut Vec<(&'static str, String)>,
+        done: &mut Vec<(&'static str, String)>,
+    ) -> bool {
+        if done.contains(&node) {
+            return true;
+        }
+        if path.contains(&node) {
+            return false;
+        }
+        path.push(node.clone());
+        let next = edges(&root[node.0][node.1.as_str()]);
+        let ok = next
+            .into_iter()
+            .all(|n| acyclic(n, root, edges, path, done));
+        path.pop();
+        done.push(node);
+        ok
+    }
+    let mut done = Vec::new();
+    edges_of_root
+        .into_iter()
+        .all(|n| acyclic(n, root, &edges, &mut Vec::new(), &mut done))
+}
+
+fn collect<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if key == "$ref" {
+                    out.push(child);
+                } else if !matches!(key.as_str(), "const" | "enum" | "default") {
+                    collect(child, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|child| collect(child, out)),
+        _ => {}
+    }
 }
 
 fn node(value: &Value) -> Option<Value> {
@@ -188,9 +270,24 @@ mod tests {
             r#"{"minItems":-1}"#,
             r#"[]"#,
             r#"{"type":"object","properties":{"a":true}}"#,
+            r#"{"$ref":"https://example.com/schema"}"#,
+            r##"{"$ref":"#/$defs/missing","$defs":{"a":{}}}"##,
+            r##"{"$ref":"#/$defs/a~1b","$defs":{"a/b":{}}}"##,
+            r##"{"$ref":"#"}"##,
+            r##"{"$ref":"#/$defs/a","$defs":{"a":{"items":{"$ref":"#/$defs/a"}}}}"##,
+            r##"{"$ref":"#/$defs/a","$defs":{"a":{"$ref":"#/definitions/b"}},"definitions":{"b":{"anyOf":[{"$ref":"#/$defs/a"}]}}}"##,
         ] {
             assert_eq!(project(schema), None, "{schema}");
         }
+    }
+
+    // AC-0185 / #1709: local acyclic references, including shared targets, pass.
+    #[test]
+    fn local_acyclic_references_project() {
+        let schema = r##"{"anyOf":[{"$ref":"#/$defs/a"},{"$ref":"#/$defs/b"}],
+            "$defs":{"a":{"$ref":"#/$defs/c"},"b":{"$ref":"#/$defs/c"},
+                     "c":{"const":{"$ref":"#/$defs/nowhere"}}}}"##;
+        assert!(project(schema).is_some());
     }
 
     // AC-0185 / #1709: the shipped analyst schemas project without loss of structure.
