@@ -1271,3 +1271,119 @@ fn analyst20_and_21_foundations_preserve_menu_and_feedback_wire() {
         assert_eq!(feedback.bytes_with_policy(POLICY).unwrap(), wire, "{role}");
     }
 }
+
+// AC-0287 / #1701: schema-six sizing covers both feedback placements through
+// the production payload serializer; citation guidance keeps its prior bound.
+#[test]
+fn combined_feedback_envelope_dominates_both_slots_and_nested_payloads() {
+    use crate::investigation::staged_finish::{CombinedCorrection, RefusalFeedback};
+    use crate::investigation::{ProseField, ProsePosition, ReplayLocation};
+    let f = Fixture::new();
+    let upper = serde_json::to_value(
+        RefusalFeedback::sizing_combined_contract_envelope(&f.contract, &f.ledger, POLICY).unwrap(),
+    )
+    .unwrap();
+    let cap = RefusalFeedback::max_bytes_with_policy(POLICY).unwrap();
+    assert_eq!(
+        upper.as_str().unwrap().len(),
+        cap.div_ceil(2)
+            .max(feedback_encoded_bound(&f.contract, &f.ledger, POLICY).unwrap())
+    );
+    let feedback = RefusalFeedback::collect_combined_with_policy(
+        vec![],
+        (1..=200).map(|sentence| {
+            let position = ProsePosition {
+                field: ProseField::Narrative,
+                sentence,
+            };
+            Ok(CombinedCorrection::ReplayAt(ReplayLocation {
+                start: position.clone(),
+                end: position,
+            }))
+        }),
+        POLICY,
+    )
+    .unwrap();
+    let raw = feedback.bytes_with_policy(POLICY).unwrap();
+    assert!(raw.len() > cap - 200);
+    assert!(!raw.contains(&b'\\'));
+    let raw_text = String::from_utf8(raw).unwrap();
+    assert_eq!(core_redact::redact_text(&raw_text).1, 0);
+    let payload = |feedback: serde_json::Value| llm::CompletionPayload {
+        response_schema: None,
+        system: "fixed bounded role".into(),
+        spans: vec![],
+        prompt: serde_json::json!({
+            "completion_metadata": {"feedback": feedback.clone()},
+            "turn_progress": {"citation_correction": feedback},
+            "unchanged": "quoted \" context",
+        })
+        .to_string(),
+    };
+    let mut actual =
+        serde_json::to_vec(&payload(serde_json::from_str(&raw_text).unwrap())).unwrap();
+    let mut bound = serde_json::to_vec(&payload(upper)).unwrap();
+    for _ in 0..4 {
+        assert!(
+            actual.len() <= bound.len(),
+            "{} > {}",
+            actual.len(),
+            bound.len()
+        );
+        actual = serde_json::to_vec(&String::from_utf8(actual).unwrap()).unwrap();
+        bound = serde_json::to_vec(&String::from_utf8(bound).unwrap()).unwrap();
+    }
+}
+
+// AC-0287: explicit offline diagnostic against a locally supplied frozen run.
+// This is a component measurement, not a complete continuation certificate.
+#[test]
+#[ignore = "requires CARTOGRAPH_FROZEN_COMPONENTS; no model or database writes"]
+fn frozen_run_combined_feedback_and_measured_source_components() {
+    use crate::investigation::staged_finish::RefusalFeedback;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Frozen {
+        contract: InvestigationCompletionContract,
+        ledger: InvestigationInputLedger,
+        target: InvestigationInspectionTarget,
+        source: String,
+    }
+    let bytes = std::fs::read(std::env::var("CARTOGRAPH_FROZEN_COMPONENTS").unwrap()).unwrap();
+    let frozen: Frozen = serde_json::from_slice(&bytes).unwrap();
+    frozen.ledger.validate_with_policy(POLICY).unwrap();
+    frozen.target.validate().unwrap();
+    assert_eq!(
+        frozen.source.len() as u64,
+        frozen.target.source.byte_end - frozen.target.source.byte_start
+    );
+    let envelope = serde_json::to_value(
+        RefusalFeedback::sizing_combined_contract_envelope(
+            &frozen.contract,
+            &frozen.ledger,
+            POLICY,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let citation = feedback_encoded_bound(&frozen.contract, &frozen.ledger, POLICY).unwrap();
+    let cap = RefusalFeedback::max_bytes_with_policy(POLICY).unwrap();
+    assert_eq!(
+        envelope.as_str().unwrap().len(),
+        citation.max(cap.div_ceil(2))
+    );
+    let sizes = core_redact::measure_direct_source_json_content(&frozen.source).unwrap();
+    let prompt_wire = |role: SpecialistId| serde_json::to_vec(&role.prompt()).unwrap().len();
+    eprintln!(
+        "frozen component measurements: raw={} original={} redacted={} max={} citation_bound={} feedback_cap={} envelope={} prompt23_wire={} prompt24_wire={}",
+        frozen.source.len(),
+        sizes.original,
+        sizes.redacted,
+        sizes.original.max(sizes.redacted),
+        citation,
+        cap,
+        envelope.as_str().unwrap().len(),
+        prompt_wire(SpecialistId::DomainAnalystV23),
+        prompt_wire(SpecialistId::DomainAnalystV24)
+    );
+}

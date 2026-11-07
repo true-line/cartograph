@@ -5,7 +5,7 @@
 use super::*;
 use crate::jobs::investigations::{
     CommittedSourceReservation, CommittedSourceValidation, InvestigationStoreError,
-    SourceAdmission, SourceValidationBasis,
+    SourceAdmission, SourceSizeBinding, SourceValidationBasis,
 };
 
 /// Not Clone/Deserialize: preparation owns the actual retained-source leases.
@@ -23,6 +23,23 @@ pub(in crate::investigations) struct PreparedCapturedSource {
     read_limits: Option<crate::mcp_reads::dispatch::EvidenceWorkLimits>,
     // Attempt provenance only, never a durable charge or access permit.
     attempted_basis: Option<(String, String, String)>,
+}
+
+// The adapter borrows this prepared source, retaining its actual receipt and
+// leases. There is no owned or deserializable size-claim adapter.
+impl SourceSizeBinding for PreparedCapturedSource {
+    fn sizes_for(
+        &self,
+        target: &InvestigationInspectionTarget,
+        ledger: &InvestigationInputLedger,
+    ) -> Result<Option<core_redact::DirectSourceJsonContentSizes>, InvestigationError> {
+        if target != &self.target || ledger != &self.base_ledger {
+            return Err(InvestigationError::InvalidInput);
+        }
+        self.receipt
+            .source_sizes(target.receipt_inventory_index as usize)
+            .map_err(|_| InvestigationError::InvalidInput)
+    }
 }
 
 /// Borrowed exact charge request, not a charge receipt. An Ok callback is trusted
@@ -184,6 +201,10 @@ impl FrozenContext {
     }
 }
 impl PreparedCapturedSource {
+    pub(in crate::investigations) fn size_binding(&self) -> &dyn SourceSizeBinding {
+        self
+    }
+
     /// Refuse from pinned metadata before reservation/validation charges or text
     /// access. The capture store rechecks the same caps at the actual read.
     pub(in crate::investigations) fn with_read_limits(
@@ -474,6 +495,15 @@ impl PreparedCapturedSource {
             }
         };
         if text.len() as u64 != self.target.captured.byte_end - self.target.captured.byte_start {
+            return Err(self.failed(SourceReadFailureKind::KnownReadFailure(
+                HostError::InvalidInput,
+            )));
+        }
+        // Receipt identity authenticates a stored claim, not the correctness of
+        // its sizes. Recompute only after the charged, digest-verified read and
+        // reject understatement before source can enter context (AC-0287).
+        let measured_fits = self.receipt.source_sizes_fit(index, &text).unwrap_or(false);
+        if !measured_fits {
             return Err(self.failed(SourceReadFailureKind::KnownReadFailure(
                 HostError::InvalidInput,
             )));

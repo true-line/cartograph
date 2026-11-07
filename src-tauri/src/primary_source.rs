@@ -164,6 +164,8 @@ struct ReceiptBody {
     verbatim_e: Option<(String, String, String)>,
     d: String,
     r: Vec<(captured::RangeRole, u32, u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_sizes: Option<captured::ReceiptSourceSizes>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -188,6 +190,8 @@ struct StrictV3WireContent {
     fact_key: FactKey,
     fact_digest: String,
     ranges: Vec<StrictV3WireRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_sizes: Option<captured::ReceiptSourceSizes>,
     source_scope: String,
     input_closure: String,
 }
@@ -303,6 +307,7 @@ fn normalize_v3_receipt(receipt: &impl Citable, canonical_json: &str) -> Option<
         e,
         verbatim_e,
         d: wire.content.fact_digest,
+        source_sizes: wire.content.source_sizes,
         r: wire
             .content
             .ranges
@@ -436,6 +441,7 @@ fn rebuild_normalized_receipt(
             parser_package: header.parser_package,
             fact_key,
             fact_digest: body.d,
+            source_sizes: body.source_sizes,
             ranges: body
                 .r
                 .into_iter()

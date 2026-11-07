@@ -117,6 +117,7 @@ fn source_continuation_snapshot_matches_real_prompt_and_settlement_without_write
         );
         let prepared = prepared(&actual, projected.next_action_id().into());
         let continuation = SourceContinuation {
+            size_binding: None,
             current: &fixture.current,
             current_prepared: &fixture.prepared,
             candidate: &actual,
@@ -438,6 +439,7 @@ fn source_prospective_attachment_matches_outcomes_and_reopens() {
                 &fixture.f._execution_guard,
                 projection.saved_revision(),
                 SourceContinuation {
+                    size_binding: None,
                     current: &fixture.current,
                     current_prepared: &fixture.prepared,
                     candidate: &candidate,
@@ -546,6 +548,7 @@ fn source_prospective_attachment_rejects_reason_swap_before_retained_callback() 
         &fixture.f._execution_guard,
         projected_b.saved_revision(),
         SourceContinuation {
+            size_binding: None,
             current: &fixture.current,
             current_prepared: &fixture.prepared,
             candidate: &candidate_a,

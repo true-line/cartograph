@@ -14,6 +14,9 @@
 /// Version of deterministic substitutions used for persistent embedding recipes.
 pub const TEXT_POLICY_VERSION: &str = "redact-text@1";
 
+mod source_size;
+pub use source_size::{DirectSourceJsonContentSizes, measure_direct_source_json_content};
+
 use regex::Regex;
 use std::sync::OnceLock;
 

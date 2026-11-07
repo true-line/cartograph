@@ -152,6 +152,77 @@ impl InvestigationInput {
         Ok(None)
     }
 
+    /// Visit every finding-local claim correction for combined feedback. The
+    /// host must authenticate citations, charge workspace and bind the emitted
+    /// diagnostics. Collection retains only locations, never refused prose.
+    pub fn visit_claim_corrections(
+        &self,
+        finish: &staged_finish::StagedFinish,
+        mut visit: impl FnMut(staged_finish::ProseCorrection),
+    ) -> Result<(), InvestigationError> {
+        let InvestigationAction::Finish { findings, .. } = &finish.action else {
+            return Err(InvestigationError::InvalidAction);
+        };
+        // Validate the admitted shape before invoking callbacks so no invalid
+        // finding or sentence index can escape through partial visitation.
+        finish.fingerprint()?;
+        for (index, finding) in findings.iter().enumerate() {
+            let spans = self
+                .payload
+                .spans
+                .iter()
+                .filter(|span| finding.citation_ids.contains(&span.id))
+                .map(|span| (span.path.as_str(), span.text.as_str()))
+                .collect::<Vec<_>>();
+            let finding_index =
+                u32::try_from(index).map_err(|_| InvestigationError::LimitExceeded)?;
+            let mut error = None;
+            enumeration_claims::visit_finding(
+                &finding.title,
+                &finding.statement,
+                &spans,
+                |title, sentence, reason| {
+                    let Ok(sentence) = u32::try_from(sentence) else {
+                        error = Some(InvestigationError::LimitExceeded);
+                        return;
+                    };
+                    let position = ProsePosition {
+                        field: if title {
+                            ProseField::FindingTitle {
+                                finding: finding_index,
+                            }
+                        } else {
+                            ProseField::FindingStatement {
+                                finding: finding_index,
+                            }
+                        },
+                        sentence,
+                    };
+                    let location = ReplayLocation {
+                        start: position.clone(),
+                        end: position,
+                    };
+                    if let Err(failure) = location.validate() {
+                        error = Some(failure);
+                        return;
+                    }
+                    visit(match reason {
+                        enumeration_claims::Reason::Enumeration => {
+                            staged_finish::ProseCorrection::UnverifiedEnumerationClaimAt(location)
+                        }
+                        enumeration_claims::Reason::Configuration => {
+                            staged_finish::ProseCorrection::UnverifiedConfigurationClaimAt(location)
+                        }
+                    });
+                },
+            );
+            if let Some(error) = error {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     /// Text-free diagnostic for the exact refused finish. This does not admit
     /// output or authenticate feedback; the host must bind it to the finish hash.
     pub fn correction_replay_location(
@@ -164,6 +235,54 @@ impl InvestigationInput {
             Err(InvestigationError::SourceReplay) => (),
             Err(error) => return Err(error),
         }
+        let fields = Self::correction_prose_fields(finish, model)?;
+        let sources = self
+            .supplied_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if let Some(location) = locate_prose_replay(&fields, &sources, false)? {
+            return Ok(Some(location));
+        }
+        let metadata = self
+            .graph_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        match locate_prose_replay(&fields, &metadata, true)? {
+            Some(location) => Ok(Some(location)),
+            None => Err(InvestigationError::SourceReplay),
+        }
+    }
+
+    /// Visit every replay location across source and graph metadata together.
+    /// The host must charge complete replay workspace and authenticate the
+    /// resulting envelope against the refused finish before dispatch.
+    pub fn visit_correction_replay_locations(
+        &self,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+        visit: impl FnMut(ReplayLocation),
+    ) -> Result<(), InvestigationError> {
+        finish.fingerprint()?;
+        let fields = Self::correction_prose_fields(finish, model)?;
+        let sources = self
+            .supplied_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let metadata = self
+            .graph_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        visit_prose_replays_with_metadata(&fields, &sources, &metadata, visit)
+    }
+
+    fn correction_prose_fields<'a>(
+        finish: &'a staged_finish::StagedFinish,
+        model: Option<&'a str>,
+    ) -> Result<Vec<(ProseField, &'a str)>, InvestigationError> {
         let InvestigationAction::Finish {
             findings,
             limitations,
@@ -213,23 +332,7 @@ impl InvestigationInput {
         if let Some(narrative) = &finish.narrative {
             fields.push((ProseField::Narrative, narrative.text.as_str()));
         }
-        let sources = self
-            .supplied_strings
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        if let Some(location) = locate_prose_replay(&fields, &sources, false)? {
-            return Ok(Some(location));
-        }
-        let metadata = self
-            .graph_strings
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        match locate_prose_replay(&fields, &metadata, true)? {
-            Some(location) => Ok(Some(location)),
-            None => Err(InvestigationError::SourceReplay),
-        }
+        Ok(fields)
     }
 
     /// Only the new analyst may turn known missing source citations into feedback.
@@ -1323,6 +1426,160 @@ mod source_replay_feedback_tests {
             &InvestigationUsage::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn combined_replay_input_visits_all_authored_fields_and_metadata() {
+        let mut input = prepare();
+        input.supplied_strings = vec!["ExactSymbol".into()];
+        let metadata = "界".repeat(48);
+        input.graph_strings = vec![metadata.clone()];
+        let finish = staged_finish::StagedFinish {
+            schema_version: 1,
+            outcome: staged_finish::CompletionOutcome::Supported,
+            narrative: None,
+            action: InvestigationAction::Finish {
+                findings: vec![ProposedInvestigationFinding {
+                    claim_kind: InvestigationClaimKind::ImplementedBehavior,
+                    title: "ExactSymbol".into(),
+                    statement: "ExactSymbol is referenced.".into(),
+                    citation_ids: vec!["fact-1".into()],
+                    limitations: vec!["ExactSymbol was assessed.".into()],
+                }],
+                knowledge_completeness: KnowledgeCompleteness::Partial,
+                limitations: vec!["ExactSymbol was assessed.".into()],
+            },
+        };
+        let mut seen = Vec::new();
+        input
+            .visit_correction_replay_locations(&finish, Some(&metadata), |location| {
+                seen.push(location)
+            })
+            .unwrap();
+        assert_eq!(seen.len(), 5);
+        assert_eq!(
+            seen.iter()
+                .map(|location| &location.start.field)
+                .collect::<Vec<_>>(),
+            vec![
+                &ProseField::FindingTitle { finding: 0 },
+                &ProseField::FindingStatement { finding: 0 },
+                &ProseField::FindingLimitation {
+                    finding: 0,
+                    limitation: 0
+                },
+                &ProseField::Limitation { limitation: 0 },
+                &ProseField::Model,
+            ]
+        );
+        assert_eq!(
+            input
+                .correction_replay_location(&finish, Some(&metadata))
+                .unwrap(),
+            Some(seen[0].clone())
+        );
+        let mut message_finish = finish;
+        message_finish.schema_version = 2;
+        message_finish.narrative = Some(InvestigationNarrative {
+            text: "ExactSymbol is referenced.".into(),
+            finding_ids: vec!["finding-1".into()],
+        });
+        let mut with_narrative = Vec::new();
+        input
+            .visit_correction_replay_locations(&message_finish, Some(&metadata), |location| {
+                with_narrative.push(location)
+            })
+            .unwrap();
+        assert_eq!(with_narrative[..5], seen);
+        assert_eq!(with_narrative.len(), 6);
+        assert_eq!(with_narrative[5].start.field, ProseField::Narrative);
+    }
+
+    // AC-0287 / #1701: combined diagnostics remain finding-local and reject
+    // invalid finish shapes before publishing even the first callback.
+    #[test]
+    fn combined_claim_corrections_isolate_citations_and_validate_before_visiting() {
+        let mut input = prepare();
+        let source = "['A', 'B']";
+        input.payload.spans.push(PayloadSpan {
+            id: "source-1".into(),
+            repo: "fixture".into(),
+            path: "values.ts".into(),
+            byte_start: 0,
+            byte_end: source.len() as u64,
+            commit_sha: "a".repeat(40),
+            text: source.into(),
+        });
+        let finding = |citation: &str| ProposedInvestigationFinding {
+            claim_kind: InvestigationClaimKind::ImplementedBehavior,
+            title: "Listed values".into(),
+            statement: "Only A is listed.".into(),
+            citation_ids: vec![citation.into()],
+            limitations: vec!["Only selected evidence was assessed.".into()],
+        };
+        let mut finish = staged_finish::StagedFinish {
+            schema_version: 1,
+            outcome: staged_finish::CompletionOutcome::Supported,
+            narrative: None,
+            action: InvestigationAction::Finish {
+                findings: vec![finding("fact-1"), finding("source-1")],
+                knowledge_completeness: KnowledgeCompleteness::Partial,
+                limitations: vec!["Only selected evidence was assessed.".into()],
+            },
+        };
+        let mut seen = Vec::new();
+        input
+            .visit_claim_corrections(&finish, |correction| seen.push(correction))
+            .unwrap();
+        let position = ProsePosition {
+            field: ProseField::FindingStatement { finding: 1 },
+            sentence: 1,
+        };
+        assert_eq!(
+            seen,
+            vec![
+                staged_finish::ProseCorrection::UnverifiedEnumerationClaimAt(ReplayLocation {
+                    start: position.clone(),
+                    end: position
+                })
+            ]
+        );
+        input.supplied_strings = vec!["listed".into()];
+        let combined = staged_finish::RefusalFeedback::collect_input_corrections_with_policy(
+            &input,
+            &finish,
+            None,
+            vec![],
+            &INVESTIGATION_V1_POLICY,
+        )
+        .unwrap()
+        .unwrap();
+        let Some(staged_finish::ProseCorrection::Combined(corrections)) = combined.prose_correction
+        else {
+            panic!()
+        };
+        assert_eq!(corrections.entries.len(), 3);
+        assert!(matches!(
+            corrections.entries[0],
+            staged_finish::CombinedCorrection::ReplayAt(_)
+        ));
+        assert!(matches!(
+            corrections.entries[1],
+            staged_finish::CombinedCorrection::ReplayAt(_)
+        ));
+        assert!(matches!(
+            corrections.entries[2],
+            staged_finish::CombinedCorrection::EnumerationAt(_)
+        ));
+        assert_eq!(corrections.omitted, 0);
+        finish.schema_version = 99;
+        let mut callbacks = 0;
+        assert!(
+            input
+                .visit_claim_corrections(&finish, |_| callbacks += 1)
+                .is_err()
+        );
+        assert_eq!(callbacks, 0);
     }
 
     #[test]

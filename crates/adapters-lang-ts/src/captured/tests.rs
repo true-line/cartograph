@@ -708,7 +708,8 @@ export class Stock {
 export const pick = (items: string[]) => items[0];
 "#;
     let (directory, capture) = fixture(source, "source.ts");
-    let (facts, receipts) = extract_file(capture.file("source.ts").unwrap(), &parser_id()).unwrap();
+    let (facts, receipts) =
+        extract_file_with_source_sizes(capture.file("source.ts").unwrap(), &parser_id()).unwrap();
     let callables: Vec<_> = facts
         .nodes
         .iter()
@@ -978,7 +979,8 @@ export function configure(options: Options) {{
 "#
     );
     let (directory, capture) = fixture(source.as_bytes(), "config.ts");
-    let (facts, receipts) = extract_file(capture.file("config.ts").unwrap(), &parser_id()).unwrap();
+    let (facts, receipts) =
+        extract_file_with_source_sizes(capture.file("config.ts").unwrap(), &parser_id()).unwrap();
     let text = |node: &Node| {
         let evidence = &receipts
             .iter()
@@ -1219,7 +1221,8 @@ export function small() {{ const inner = 1; return inner; }}
 "#
     );
     let (directory, capture) = fixture(source.as_bytes(), "order.ts");
-    let (facts, receipts) = extract_file(capture.file("order.ts").unwrap(), &parser_id()).unwrap();
+    let (facts, receipts) =
+        extract_file_with_source_sizes(capture.file("order.ts").unwrap(), &parser_id()).unwrap();
     let text = |node: &Node| {
         let receipt = receipts
             .iter()
@@ -1354,7 +1357,7 @@ fn compact_receipts_rebuild_exactly_and_share_one_header_per_file() {
     let mut full = Vec::new();
     for path in &paths {
         full.extend(
-            extract_file(capture.file(path).unwrap(), &parser_id())
+            extract_file_with_source_sizes(capture.file(path).unwrap(), &parser_id())
                 .unwrap()
                 .1,
         );
@@ -1440,4 +1443,95 @@ fn shared_headers_are_charged_once_after_admission() {
             receipts: 1,
         }
     ));
+}
+
+// AC-0287: fresh app directory captures measure every admitted receipt range.
+#[test]
+fn captured_directory_mints_measured_receipts() {
+    let (directory, capture) = fixture(
+        b"export function guard(ok: boolean) { if (!ok) return false; return true; }",
+        "source.ts",
+    );
+    let (_, receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(!receipts.is_empty());
+    assert!(stats.omitted_rule_receipts.is_empty());
+    assert!(stats.omitted_declaration_receipts.is_empty());
+    for receipt in receipts {
+        let receipt = receipt.to_receipt().unwrap();
+        for index in 0..receipt.ranges().len() {
+            assert!(receipt.source_sizes(index).unwrap().is_some());
+        }
+    }
+}
+
+// AC-0287: authorized local comparison only; never silently ingest real targets.
+#[test]
+#[ignore = "requires explicitly authorized CARTOGRAPH_CAPTURE_BUDGET_SOURCE"]
+fn captured_directory_measurement_budget_diagnostic() {
+    let root = std::path::PathBuf::from(
+        std::env::var("CARTOGRAPH_CAPTURE_BUDGET_SOURCE").expect("explicit source"),
+    );
+    let paths = enumerate_paths(&root).unwrap();
+    let capture = capture(&root, &paths);
+    let mut reports = Vec::new();
+    let mut keys = Vec::new();
+    for measured in [false, true] {
+        let (_, receipts, stats) = extract_captured_dir_with_policy(
+            &root,
+            &parser_id(),
+            &capture,
+            Registries::builtin(),
+            &mut |_| {},
+            DirectoryReceiptPolicy {
+                budget: ReceiptBudget {
+                    bytes: MAX_EXTRACTION_RECEIPT_BYTES,
+                    receipts: MAX_EXTRACTION_RECEIPTS,
+                },
+                file_declarations: FILE_DECLARATIONS,
+                measure_source: measured,
+            },
+        )
+        .unwrap();
+        let wire: usize = receipts.iter().map(|r| r.to_json().unwrap().len()).sum();
+        let measured_ranges: usize = receipts
+            .iter()
+            .map(|r| {
+                let r = r.to_receipt().unwrap();
+                (0..r.ranges().len())
+                    .filter(|i| r.source_sizes(*i).unwrap().is_some())
+                    .count()
+            })
+            .sum();
+        reports.push(serde_json::json!({"measured":measured,"files":paths.len(),"receipts":receipts.len(),"retained_bytes":charged(receipts.iter()),"wire_bytes":wire,"measured_ranges":measured_ranges,"omitted_rules":stats.omitted_rule_receipts,"omitted_declarations":stats.omitted_declaration_receipts}));
+        keys.push(
+            receipts
+                .iter()
+                .map(|r| r.fact_key().clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&reports).unwrap());
+    assert_eq!(
+        keys[0], keys[1],
+        "measurement changed admitted receipt facts"
+    );
+    for report in reports {
+        assert_eq!(
+            report["omitted_rules"],
+            serde_json::json!({}),
+            "rule receipts dropped"
+        );
+        assert_eq!(
+            report["omitted_declarations"],
+            serde_json::json!({}),
+            "declarations dropped"
+        );
+    }
 }

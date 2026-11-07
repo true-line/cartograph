@@ -63,7 +63,9 @@ pub(super) fn seal_admission_inner(
     if let Some(state) = &admission {
         if let Some(input) = acquisition {
             state.validate_saved_role_shape(
-                if original.system == SpecialistId::DomainAnalystV23.prompt() {
+                if original.system == SpecialistId::DomainAnalystV24.prompt() {
+                    SpecialistId::DomainAnalystV24
+                } else if original.system == SpecialistId::DomainAnalystV23.prompt() {
                     SpecialistId::DomainAnalystV23
                 } else if original.system == SpecialistId::DomainAnalystV22.prompt() {
                     SpecialistId::DomainAnalystV22
@@ -499,7 +501,9 @@ pub(super) fn seal_admission_inner(
         disclosure.validate_saved_role_shape(
             ledger,
             policy,
-            if original.system == SpecialistId::DomainAnalystV23.prompt() {
+            if original.system == SpecialistId::DomainAnalystV24.prompt() {
+                SpecialistId::DomainAnalystV24
+            } else if original.system == SpecialistId::DomainAnalystV23.prompt() {
                 SpecialistId::DomainAnalystV23
             } else if original.system == SpecialistId::DomainAnalystV22.prompt() {
                 SpecialistId::DomainAnalystV22

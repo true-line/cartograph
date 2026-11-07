@@ -53,7 +53,7 @@ mod source_admission;
 mod source_settlement;
 #[cfg(test)]
 pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
-pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission};
+pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission, SourceSizeBinding};
 #[cfg(unix)]
 pub(crate) use source_settlement::snapshot_workspace::{
     correction_workspace as next_prompt_correction_workspace,

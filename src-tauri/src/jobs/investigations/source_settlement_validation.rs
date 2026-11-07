@@ -92,15 +92,38 @@ pub(super) fn validate_continuation(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    c.proof.verify_with_policy(
-        c.current,
-        c.current_prepared,
-        &saved.reservation.source,
-        c.current_prepared.profile(),
-        c.current_prepared.limits(),
-        &next_id,
-        policy,
-    )?;
+    let sizes = if before.detail.summary.specialist_id == SpecialistId::DomainAnalystV24 {
+        c.size_binding
+            .as_ref()
+            .map(|binding| binding.sizes_for(&saved.reservation.source, c.current.ledger()))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if let Some(sizes) = sizes {
+        c.proof.verify_measured_with_policy(
+            c.current,
+            c.current_prepared,
+            &saved.reservation.source,
+            c.current_prepared.profile(),
+            c.current_prepared.limits(),
+            &next_id,
+            policy,
+            sizes,
+        )?;
+    } else {
+        c.proof.verify_with_policy(
+            c.current,
+            c.current_prepared,
+            &saved.reservation.source,
+            c.current_prepared.profile(),
+            c.current_prepared.limits(),
+            &next_id,
+            policy,
+        )?;
+    }
+
     let ledger = c.candidate.ledger();
     let records = completion::derive_attempt_records(
         before,

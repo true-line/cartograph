@@ -260,6 +260,47 @@ pub fn bound_unread_source_action(
     span_index: usize,
     source_bytes: usize,
 ) -> Result<BoundedWireMeasurements, BoundedCallError> {
+    bound_source_contribution(profile, skeleton, limits, span_index, source_bytes, None)
+}
+
+/// Bound a direct source string using authenticated capture-time size claims.
+/// The caller must bind the claim to the exact receipt/range/redactor and check
+/// actual sizes after the charged digest-verified read, before context insertion.
+/// This measurement function grants no access, dispatch or receipt authority.
+/// All five wire gates remain enforced; the larger original/redacted length
+/// covers each representation, including expansion during redaction.
+pub fn bound_measured_unread_source_action(
+    profile: &ProviderProfile,
+    skeleton: &CompletionAction,
+    limits: &CompletionLimits,
+    span_index: usize,
+    source_bytes: usize,
+    measured: core_redact::DirectSourceJsonContentSizes,
+) -> Result<BoundedWireMeasurements, BoundedCallError> {
+    let fallback = core_redact::direct_source_json_content_bound(source_bytes)
+        .ok_or_else(|| not_sent(FailureCode::InputTooLarge))?;
+    let escaped = measured.original.max(measured.redacted);
+    if escaped > fallback {
+        return Err(not_sent(FailureCode::InvalidInput));
+    }
+    bound_source_contribution(
+        profile,
+        skeleton,
+        limits,
+        span_index,
+        source_bytes,
+        Some(escaped),
+    )
+}
+
+fn bound_source_contribution(
+    profile: &ProviderProfile,
+    skeleton: &CompletionAction,
+    limits: &CompletionLimits,
+    span_index: usize,
+    source_bytes: usize,
+    escaped: Option<usize>,
+) -> Result<BoundedWireMeasurements, BoundedCallError> {
     let span = skeleton
         .payload
         .spans
@@ -269,7 +310,8 @@ pub fn bound_unread_source_action(
         return Err(not_sent(FailureCode::InvalidInput));
     }
     let mut sizes = measure_bounded_action(profile, skeleton, limits)?;
-    let escaped = core_redact::direct_source_json_content_bound(source_bytes)
+    let escaped = escaped
+        .or_else(|| core_redact::direct_source_json_content_bound(source_bytes))
         .and_then(|value| u64::try_from(value).ok())
         .ok_or_else(|| not_sent(FailureCode::InputTooLarge))?;
     let raw = u64::try_from(source_bytes).map_err(|_| not_sent(FailureCode::InputTooLarge))?;

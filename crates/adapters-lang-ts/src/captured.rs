@@ -20,7 +20,8 @@ use std::sync::Arc;
 mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES, MintedHeader, MintedReceipt,
-    RangeRole, Receipt, ReceiptRange, fact_match_workspace, fact_match_workspace_bytes,
+    RangeRole, Receipt, ReceiptRange, ReceiptSourceSizes, fact_match_workspace,
+    fact_match_workspace_bytes,
 };
 
 /// Maximum directory entries examined, including excluded entries.
@@ -269,7 +270,27 @@ pub fn extract_file(
     id: &SourceId,
 ) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
     let (extraction, receipts) =
-        extract_file_with(file, id, Registries::builtin(), FILE_DECLARATIONS)?;
+        extract_file_with_measurements(file, id, Registries::builtin(), FILE_DECLARATIONS, false)?;
+    let mut receipts = receipts
+        .rules
+        .iter()
+        .chain(&receipts.declarations)
+        .map(MintedReceipt::to_receipt)
+        .collect::<Result<Vec<_>, _>>()?;
+    receipts.sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
+    Ok((extraction, receipts))
+}
+
+/// Explicit producer lane for captured-source size measurements. Historical
+/// extraction keeps its receipt bytes; callers selecting this lane must publish
+/// the returned receipt identities and use their normal retention limits.
+/// Measurement happens before receipt-budget admission, never after publication.
+pub fn extract_file_with_source_sizes(
+    file: &CapturedFile,
+    id: &SourceId,
+) -> Result<(Extraction, Vec<Receipt>), CapturedError> {
+    let (extraction, receipts) =
+        extract_file_with_measurements(file, id, Registries::builtin(), FILE_DECLARATIONS, true)?;
     let mut receipts = receipts
         .rules
         .iter()
@@ -295,11 +316,22 @@ const FILE_DECLARATIONS: ReceiptBudget = ReceiptBudget {
     receipts: MAX_FILE_DECLARATION_RECEIPTS,
 };
 
+#[cfg(test)]
 fn extract_file_with(
     file: &CapturedFile,
     id: &SourceId,
     registries: &Registries,
     file_declarations: ReceiptBudget,
+) -> Result<(Extraction, FileReceipts), CapturedError> {
+    extract_file_with_measurements(file, id, registries, file_declarations, true)
+}
+
+fn extract_file_with_measurements(
+    file: &CapturedFile,
+    id: &SourceId,
+    registries: &Registries,
+    file_declarations: ReceiptBudget,
+    measure_source: bool,
 ) -> Result<(Extraction, FileReceipts), CapturedError> {
     if !supported(&file.reference().path) || !valid_path(&file.reference().path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
@@ -316,7 +348,15 @@ fn extract_file_with(
     // Every receipt of this file shares one header.
     let mut header = None;
     let mut mint = |receipt: Result<Receipt, CapturedError>| {
-        receipt.and_then(|receipt| MintedReceipt::compact(receipt, &mut header))
+        receipt
+            .and_then(|receipt| {
+                if measure_source {
+                    receipt.with_source_sizes(file)
+                } else {
+                    Ok(receipt)
+                }
+            })
+            .and_then(|receipt| MintedReceipt::compact(receipt, &mut header))
     };
     let mut receipts = BTreeMap::new();
     for (rule, edge) in &direct.rules {
@@ -467,6 +507,39 @@ fn extract_captured_dir_bounded(
     budget: ReceiptBudget,
     file_declarations: ReceiptBudget,
 ) -> Result<(Extraction, Vec<MintedReceipt>, IncrementalStats), CapturedError> {
+    extract_captured_dir_with_policy(
+        root,
+        id,
+        capture,
+        registries,
+        on_file,
+        DirectoryReceiptPolicy {
+            budget,
+            file_declarations,
+            measure_source: true,
+        },
+    )
+}
+
+struct DirectoryReceiptPolicy {
+    budget: ReceiptBudget,
+    file_declarations: ReceiptBudget,
+    measure_source: bool,
+}
+
+fn extract_captured_dir_with_policy(
+    root: &Path,
+    id: &SourceId,
+    capture: &Capture,
+    registries: &Registries,
+    on_file: &mut dyn FnMut(&str),
+    policy: DirectoryReceiptPolicy,
+) -> Result<(Extraction, Vec<MintedReceipt>, IncrementalStats), CapturedError> {
+    let DirectoryReceiptPolicy {
+        budget,
+        file_declarations,
+        measure_source,
+    } = policy;
     receipt::validate_source_repo(&capture.manifest().source_id, id.repo)?;
     let paths: Vec<String> = capture
         .manifest()
@@ -487,7 +560,15 @@ fn extract_captured_dir_bounded(
     let mut stats = IncrementalStats::default();
     source_walk::parallel::map_ordered(
         &paths,
-        |path| extract_file_with(capture.file(path)?, id, registries, file_declarations),
+        |path| {
+            extract_file_with_measurements(
+                capture.file(path)?,
+                id,
+                registries,
+                file_declarations,
+                measure_source,
+            )
+        },
         |path, (facts, file_receipts)| {
             on_file(path);
             // Rule receipts are admitted greedily in manifest order (#722). One

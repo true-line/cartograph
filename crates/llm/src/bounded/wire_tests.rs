@@ -322,3 +322,73 @@ fn bounded_wire_inspection_is_exact_without_preparation_authority() {
         FailureCode::InvalidProfile
     );
 }
+
+// AC-0287 / #1701: exact source contribution preserves every actual wire gate.
+#[test]
+fn measured_source_bound_covers_redaction_growth_and_preserves_capacity_checks() {
+    let mut skeleton = action();
+    skeleton.payload.spans[0].text.clear();
+    let profile = profile();
+    let limits = CompletionLimits::default();
+    for source in [
+        "plain",
+        "secret=abcd",
+        "secret=Bearer abcdefgh",
+        "\0\n\"\\é",
+    ] {
+        let sizes = core_redact::measure_direct_source_json_content(source).unwrap();
+        let bound = bound_measured_unread_source_action(
+            &profile,
+            &skeleton,
+            &limits,
+            0,
+            source.len(),
+            sizes,
+        )
+        .unwrap();
+        let fallback =
+            bound_unread_source_action(&profile, &skeleton, &limits, 0, source.len()).unwrap();
+        let mut actual = skeleton.clone();
+        actual.payload.spans[0].text = source.into();
+        let actual = measure_bounded_action(&profile, &actual, &limits).unwrap();
+        assert!(actual.raw_string_bytes <= bound.raw_string_bytes);
+        assert!(actual.original_payload_bytes <= bound.original_payload_bytes);
+        assert!(actual.redacted_payload_bytes <= bound.redacted_payload_bytes);
+        assert!(actual.original_action_bytes <= bound.original_action_bytes);
+        assert!(actual.egress_fingerprint_bytes <= bound.egress_fingerprint_bytes);
+        assert!(bound.original_payload_bytes <= fallback.original_payload_bytes);
+        let short = CompletionLimits::new(CompletionLimitValues {
+            input_bytes: bound
+                .original_payload_bytes
+                .max(bound.redacted_payload_bytes)
+                - 1,
+            ..limits.values()
+        })
+        .unwrap();
+        assert!(
+            bound_measured_unread_source_action(
+                &profile,
+                &skeleton,
+                &short,
+                0,
+                source.len(),
+                sizes
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        bound_measured_unread_source_action(
+            &profile,
+            &skeleton,
+            &limits,
+            0,
+            1,
+            core_redact::DirectSourceJsonContentSizes {
+                original: 7,
+                redacted: 1
+            }
+        )
+        .is_err()
+    );
+}

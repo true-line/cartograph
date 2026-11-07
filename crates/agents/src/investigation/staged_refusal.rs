@@ -139,6 +139,17 @@ impl RefusalRecord {
         previous: Option<&RefusalRecord>,
         policy: &InvestigationPolicy,
     ) -> Result<RefusalDisposition, InvestigationError> {
+        let combined = matches!(
+            self.feedback.prose_correction,
+            Some(ProseCorrection::Combined(_))
+        );
+        if (combined && request.specialist_id != "domain-analyst@24")
+            || (request.specialist_id == "domain-analyst@24"
+                && self.feedback.prose_correction.is_some()
+                && !combined)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         if matches!(
             self.feedback.prose_correction,
             Some(
@@ -159,7 +170,7 @@ impl RefusalRecord {
             .any(|entry| entry.reason == RefusalReason::ExcludedByCapacity))
             && !matches!(
                 request.specialist_id.as_str(),
-                "domain-analyst@22" | "domain-analyst@23"
+                "domain-analyst@22" | "domain-analyst@23" | "domain-analyst@24"
             ))
             || request.limit_profile != policy.profile()
             || ((self.feedback.citation_correction.is_some()
@@ -170,6 +181,7 @@ impl RefusalRecord {
                         | "domain-analyst@21"
                         | "domain-analyst@22"
                         | "domain-analyst@23"
+                        | "domain-analyst@24"
                 ))
         {
             return Err(InvestigationError::InvalidInput);

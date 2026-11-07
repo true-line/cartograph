@@ -36,6 +36,30 @@ pub(super) fn finding(
     None
 }
 
+/// Visit every applicable claim class at every title/statement sentence. The
+/// callback receives no authored text and cannot stop traversal on overflow.
+/// Historical `finding` retains its first-match ordering and behavior.
+pub(super) fn visit_finding(
+    title: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    mut visit: impl FnMut(bool, usize, Reason),
+) {
+    for (is_title, text) in [(true, title), (false, statement)] {
+        for (index, sentence) in sentences(text).enumerate() {
+            if spans
+                .iter()
+                .any(|(_, source)| claims::check(source, sentence) == Some(false))
+            {
+                visit(is_title, index + 1, Reason::Enumeration);
+            }
+            if unverified_configuration(sentence, statement, spans, is_title) {
+                visit(is_title, index + 1, Reason::Configuration);
+            }
+        }
+    }
+}
+
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
     let mut terminal = false;
     text.split(move |ch: char| {
@@ -134,6 +158,50 @@ fn unverified_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // AC-0287 / #1701: collect both classes, repeat locations, and continue
+    // visiting after a consumer stops retaining results.
+    #[test]
+    fn combined_claim_visitor_scans_every_location_and_class() {
+        let statement = "Only A is listed, and configured MultiChannelStrategy. Only A is listed.";
+        let spans = [("values.ts", "['A', 'B']")];
+        let mut seen = Vec::new();
+        visit_finding(
+            "Configured MultiChannelStrategy",
+            statement,
+            &spans,
+            |title, sentence, reason| seen.push((title, sentence, reason)),
+        );
+        assert_eq!(
+            seen,
+            vec![
+                (true, 1, Reason::Configuration),
+                (false, 1, Reason::Enumeration),
+                (false, 1, Reason::Configuration),
+                (false, 2, Reason::Enumeration),
+            ]
+        );
+        assert_eq!(
+            finding("Configured MultiChannelStrategy", statement, &spans),
+            seen.first().copied()
+        );
+        let mut retained = Vec::new();
+        let mut omitted = 0;
+        visit_finding(
+            "Configured MultiChannelStrategy",
+            statement,
+            &spans,
+            |title, sentence, reason| {
+                if retained.is_empty() {
+                    retained.push((title, sentence, reason));
+                } else {
+                    omitted += 1;
+                }
+            },
+        );
+        assert_eq!(omitted, 3);
+        assert_eq!(retained, seen[..1]);
+    }
+
     // AC-0287 / delegated #1698 scope: single-word names remain not applicable.
     #[test]
     fn single_word_configuration_subject_is_not_applicable() {

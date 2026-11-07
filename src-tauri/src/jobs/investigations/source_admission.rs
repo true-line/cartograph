@@ -5,7 +5,20 @@ use llm::bounded::PreparedBoundedCompletion;
 use read_reservations::{ReadBinding, Reservation, StorageClaim};
 use serde_json::Value;
 
+/// Trusted native adapter over a held prepared receipt and its source guards.
+/// Implementations must reject a different target or base ledger and resolve
+/// sizes from that held receipt, never from caller-supplied size claims.
+/// This borrow must remain live through reservation and settlement.
+pub(crate) trait SourceSizeBinding {
+    fn sizes_for(
+        &self,
+        target: &InvestigationInspectionTarget,
+        ledger: &InvestigationInputLedger,
+    ) -> Result<Option<core_redact::DirectSourceJsonContentSizes>, InvestigationError>;
+}
+
 pub(crate) struct SourceAdmission<'a> {
+    pub size_binding: Option<&'a dyn SourceSizeBinding>,
     pub response: &'a InvestigationResponseMeta,
     pub original_action: &'a Value,
     pub current: &'a InvestigationInput,
@@ -148,15 +161,39 @@ impl JobStore {
         {
             return Err(InvestigationStoreError::Invalid);
         }
-        input.proof.verify_with_policy(
-            input.current,
-            input.current_prepared,
-            input.target,
-            input.current_prepared.profile(),
-            input.current_prepared.limits(),
-            &authenticated.next_action_id,
-            policy,
-        )?;
+        let sizes = if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV24 {
+            input
+                .size_binding
+                .as_ref()
+                .map(|binding| binding.sizes_for(input.target, input.current.ledger()))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(sizes) = sizes {
+            input.proof.verify_measured_with_policy(
+                input.current,
+                input.current_prepared,
+                input.target,
+                input.current_prepared.profile(),
+                input.current_prepared.limits(),
+                &authenticated.next_action_id,
+                policy,
+                sizes,
+            )?;
+        } else {
+            input.proof.verify_with_policy(
+                input.current,
+                input.current_prepared,
+                input.target,
+                input.current_prepared.profile(),
+                input.current_prepared.limits(),
+                &authenticated.next_action_id,
+                policy,
+            )?;
+        }
+
         let span_bytes = input
             .target
             .source

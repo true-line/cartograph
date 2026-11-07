@@ -97,6 +97,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
             .then(|| fixture.candidate(reason.clone()));
             let outcome = if let Some((input, prepared)) = &candidate {
                 let c = SourceContinuation {
+                    size_binding: None,
                     current: &fixture.current,
                     current_prepared: &fixture.prepared,
                     candidate: input,

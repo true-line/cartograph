@@ -45,6 +45,9 @@ impl Fixture {
         }
     }
     fn state_at(private: &std::path::Path) -> AppState {
+        Self::state_at_with_sizes(private, None)
+    }
+    fn state_at_with_sizes(private: &std::path::Path, understated: Option<bool>) -> AppState {
         let root = private.join("source");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("rule.ts"),"export function enabled(ok: boolean) { const limited = ok === false; if (limited) return false; }\n").unwrap();
@@ -54,14 +57,52 @@ impl Fixture {
             .primary_sources
             .prepare(&source, source.root(), &["client".into()])
             .unwrap();
-        let (extraction, receipts) = adapters_lang_ts::captured::extract_file(
-            input.capture.as_ref().unwrap().file("rule.ts").unwrap(),
-            &adapters_lang_ts::SourceId {
-                repo: &source.repo_key,
-                commit: "workdir",
-            },
-        )
-        .unwrap();
+        let id = adapters_lang_ts::SourceId {
+            repo: &source.repo_key,
+            commit: "workdir",
+        };
+        let (extraction, receipts) = if understated.is_some() {
+            let (extraction, receipts, stats) = adapters_lang_ts::captured::extract_captured_dir(
+                &root,
+                &id,
+                input.capture.as_ref().unwrap(),
+                adapters_fw::events::Registries::builtin(),
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(stats.omitted_rule_receipts.is_empty());
+            assert!(stats.omitted_declaration_receipts.is_empty());
+            let receipts = receipts
+                .iter()
+                .map(|r| r.to_receipt().unwrap())
+                .collect::<Vec<_>>();
+            for receipt in &receipts {
+                for index in 0..receipt.ranges().len() {
+                    assert!(receipt.source_sizes(index).unwrap().is_some());
+                }
+            }
+            (extraction, receipts)
+        } else {
+            adapters_lang_ts::captured::extract_file(
+                input.capture.as_ref().unwrap().file("rule.ts").unwrap(),
+                &id,
+            )
+            .unwrap()
+        };
+        let receipts = if let Some(understated) = understated {
+            receipts
+                .into_iter()
+                .map(|receipt| {
+                    if understated {
+                        understated_receipt(receipt)
+                    } else {
+                        receipt
+                    }
+                })
+                .collect()
+        } else {
+            receipts
+        };
         state
             .primary_sources
             .persist(&input, &source, &receipts)
@@ -448,5 +489,99 @@ fn prepared_source_admitted_caps_accept_exact_and_refuse_one_below() {
             assert_eq!(read_count(), 0);
         }
         assert!(context.evidence.is_empty());
+    }
+}
+
+// AC-0287 / #1701: a self-consistent receipt can still understate its bytes.
+// Test-only rewrite deliberately updates the content hash and graph binding;
+// rejection must therefore occur after the charged object read, not by accident
+// through stale identity checks.
+fn understated_receipt(
+    receipt: adapters_lang_ts::captured::Receipt,
+) -> adapters_lang_ts::captured::Receipt {
+    fn canonical(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(values) => serde_json::Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical(value)))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonical).collect())
+            }
+            value => value,
+        }
+    }
+    let mut wire: serde_json::Value = serde_json::from_str(&receipt.to_json().unwrap()).unwrap();
+    for range in wire["content"]["source_sizes"]["ranges"]
+        .as_array_mut()
+        .unwrap()
+    {
+        range["original"] = 0.into();
+        range["redacted"] = 0.into();
+    }
+    let mut bytes = b"cartograph:ts-primary-receipt:v3\0".to_vec();
+    bytes.extend(serde_json::to_vec(&canonical(wire["content"].clone())).unwrap());
+    wire["receipt_id"] = format!("ts-primary-v3:{}", core_prov::content_hash(&bytes)).into();
+    adapters_lang_ts::captured::Receipt::from_json(&serde_json::to_string(&wire).unwrap()).unwrap()
+}
+
+#[test]
+fn prepared_source_size_claim_is_checked_after_charge_before_context_installation() {
+    for understated in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private = crate::paths::canonicalize(private).unwrap();
+        let state = Fixture::state_at_with_sizes(&private, Some(understated));
+        let fixture = Fixture {
+            _directory: directory,
+            private,
+            state,
+        };
+        let (context, target) = fixture.context();
+        let base = context.ledger.clone();
+        reset_reads();
+        let prepared = context
+            .prepare_captured_source(&fixture.state, &target)
+            .unwrap();
+        assert_eq!(read_count(), 0);
+        // AC-0287: authority is borrowed from the held receipt, never supplied
+        // as free lengths. A different descriptor or base ledger is rejected.
+        let binding = prepared.size_binding();
+        assert!(binding.sizes_for(&target, &base).unwrap().is_some());
+        let mut wrong_target = target.clone();
+        wrong_target.receipt_id.push('0');
+        assert!(binding.sizes_for(&wrong_target, &base).is_err());
+        let mut wrong_ledger = base.clone();
+        wrong_ledger.revision += 1;
+        assert!(binding.sizes_for(&target, &wrong_ledger).is_err());
+        assert_eq!(read_count(), 0);
+        let mut charges = 0;
+        let result = prepared.read(&context, &fixture.state, |_| {
+            assert_eq!(read_count(), 0);
+            charges += 1;
+            Ok(())
+        });
+        assert_eq!(charges, 1);
+        assert_eq!(read_count(), 1);
+        if understated {
+            let failure = match result {
+                Err(failure) => failure,
+                Ok(_) => panic!("understated sizes admitted"),
+            };
+            assert_eq!(failure.stage(), SourceAccessStage::AccessStarted);
+            assert_eq!(
+                failure.kind(),
+                SourceReadFailureKind::KnownReadFailure(HostError::InvalidInput)
+            );
+        } else {
+            assert!(result.is_ok());
+        }
+        assert!(context.evidence.is_empty());
+        assert_eq!(context.ledger, base);
     }
 }

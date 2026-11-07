@@ -14,6 +14,7 @@ fn source_settlement_owner_checks_lease_revision_and_retained_gate_before_public
     let before = encode(&fixture.f.task, MAX_RECORD_BYTES).unwrap();
     for case in 0..3 {
         let c = SourceContinuation {
+            size_binding: None,
             current: &fixture.current,
             current_prepared: &fixture.prepared,
             candidate: &candidate,
@@ -52,6 +53,7 @@ fn source_settlement_owner_checks_lease_revision_and_retained_gate_before_public
         );
     }
     let c = SourceContinuation {
+        size_binding: None,
         current: &fixture.current,
         current_prepared: &fixture.prepared,
         candidate: &candidate,
@@ -161,6 +163,7 @@ fn source_settlement_post_read_deadline_failure_discards_truthfully_without_acqu
     let (candidate, prepared) = fixture.candidate(None);
     let deadline = fixture.f.task.detail.limits.active_seconds * 1000;
     let c = SourceContinuation {
+        size_binding: None,
         current: &fixture.current,
         current_prepared: &fixture.prepared,
         candidate: &candidate,

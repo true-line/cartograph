@@ -71,6 +71,45 @@ impl InvestigationInput {
         Some(enumeration.max(configuration))
     }
 
+    /// Additional owners for the complete @24 scan and bounded collector.
+    /// The collector lives across detector phases; its retained prefix, previous
+    /// and current entries, serialization scratch and unmet-obligation clone
+    /// cannot be hidden inside the detector phase maximum.
+    pub fn combined_correction_workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
+        let cap = staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?;
+        // Every retained entry consumes at least one encoded byte. This loose
+        // slot bound also covers the failed append and adjacent-dedup owner.
+        let collector = sum(&[
+            slots::<staged_finish::CombinedCorrection>(cap.checked_add(2)?)?,
+            cap.checked_mul(3)?, // retained ID bytes, previous/current IDs, encoded scratch
+            slots::<Vec<u8>>(1)?,
+            slots::<Vec<staged_finish::CombinedCorrection>>(1)?,
+            json_bytes(cap)?, // separately owned unmet envelope and collector frame
+        ])?;
+        // Complete replay adds masks/endpoints while the original field/source
+        // projections remain live. Keeping both bounds is conservative.
+        let replay = Self::correction_replay_workspace_bytes()?
+            .checked_add(replay_locations_workspace_bytes()?)?;
+        // Limitation checking holds only captured-source projections and ID
+        // sets; its normalized clause/token owners are dominated by the claim
+        // checker. Add the capture/ID projections explicitly to that bound.
+        let evidence = policy.limits().evidence_items;
+        let limitations = sum(&[
+            slots::<usize>(evidence.checked_mul(8)?)?,
+            set::<String>(evidence)?,
+            evidence.checked_mul(
+                "evidence-"
+                    .len()
+                    .checked_add(usize::MAX.to_string().len())?,
+            )?,
+        ])?;
+        sum(&[
+            collector,
+            replay.max(Self::claim_correction_workspace_bytes()?),
+            limitations,
+        ])
+    }
+
     /// Construction through the final wire check, including rejected growth.
     /// Caller pages/evidence/request and its already bounded ledger acquisition
     /// are separate; the owned ledger passed to the builder is included here.
