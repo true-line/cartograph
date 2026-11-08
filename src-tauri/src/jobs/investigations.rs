@@ -831,15 +831,24 @@ fn hosted_generation(provider: Option<&InvestigationProvider>) -> bool {
 }
 
 /// Reconstruct only saved desktop overrides (time, hosted output allowance);
-/// MCP stays on static policy.
+/// MCP stays on static policy. A saved hosted allowance is honoured only for
+/// the next-prompt task whose saved provider qualifies, as at start.
 pub(crate) fn policy_for_detail(
     detail: &InvestigationDetail,
 ) -> Result<InvestigationPolicy, InvestigationStoreError> {
     let policy = match detail.origin {
         InvestigationOrigin::App => InvestigationPolicy::for_effective_limits(&detail.limits),
         InvestigationOrigin::Mcp { .. } => InvestigationPolicy::for_limits(&detail.limits).cloned(),
-    };
-    policy.ok_or(InvestigationStoreError::Invalid)
+    }
+    .ok_or(InvestigationStoreError::Invalid)?;
+    if policy.limits().generated_tokens_per_invocation == llm::bounded::HOSTED_OUTPUT_TOKENS
+        && !(detail.summary.specialist_id.uses_next_prompt_admission()
+            && detail.summary.provider_mode == detail.provider.mode
+            && hosted_generation(Some(&detail.provider)))
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(policy)
 }
 
 /// Host-derived storage identity, never deserialized from transport arguments.

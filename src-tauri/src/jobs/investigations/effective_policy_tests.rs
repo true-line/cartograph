@@ -102,6 +102,21 @@ fn hosted_opus_output_allowance_is_lane_scoped_and_recovers_exactly() {
         .unwrap();
     detail.limits = hosted.limits();
     detail.origin = InvestigationOrigin::App;
+    // The exact hosted pair alone never authorizes it: a Local, non-Opus or
+    // non-next-prompt saved task carrying it is rejected on recovery.
+    assert!(policy_for_detail(&detail).is_err());
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV12;
+    assert!(policy_for_detail(&detail).is_err());
+    detail.provider = provider(cloud, "anthropic:claude-haiku-4-5-20251001");
+    detail.summary.provider_mode = cloud;
+    assert!(policy_for_detail(&detail).is_err());
+    detail.provider = provider(cloud, "anthropic:claude-opus-5-5");
+    detail.summary.specialist_id = SpecialistId::DomainAnalyst;
+    assert!(policy_for_detail(&detail).is_err());
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV12;
+    detail.summary.provider_mode = InvestigationProviderMode::Local;
+    assert!(policy_for_detail(&detail).is_err());
+    detail.summary.provider_mode = cloud;
     assert_eq!(policy_for_detail(&detail).unwrap().limits(), detail.limits);
     let reopened =
         serde_json::from_slice::<InvestigationDetail>(&serde_json::to_vec(&detail).unwrap())
