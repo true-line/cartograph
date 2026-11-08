@@ -32,6 +32,15 @@ pub(in super::super) struct Definition {
     pub scope: InvestigationScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specialist_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_limits: Option<RunLimits>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in super::super) struct RunLimits {
+    pub active_seconds: u64,
+    pub request_timeout_ms: u64,
 }
 fn json(value: &impl Serialize) -> Result<Vec<u8>, String> {
     crate::investigations::context::bounded_json(value, 128 * 1024)
@@ -185,6 +194,19 @@ fn validate_bound<'a>(
             | "domain-analyst@25"
     ) {
         return Err("unsupported captured analyst specialist".into());
+    }
+    if let Some(limits) = expected.run_limits {
+        let minimum = llm::bounded::CompletionLimits::default()
+            .values()
+            .request_timeout_ms;
+        if INVESTIGATION_V2_POLICY
+            .with_active_seconds(limits.active_seconds)
+            .is_none()
+            || !(minimum..=llm::bounded::MAX_REQUEST_TIMEOUT_MS)
+                .contains(&limits.request_timeout_ms)
+        {
+            return Err("invalid frozen run limits".into());
+        }
     }
     capture::validate_binding(&expected.binding)?;
     let definition = json(expected)?;
@@ -405,9 +427,18 @@ fn bound_with_scope<T>(
             }
             let (task, elapsed) = if fresh {
                 let clock = std::time::Instant::now();
-                let started = jobs
-                    .start_next_prompt_investigation(&request, Some(&expected.provider))
-                    .map_err(|e| e.to_string())?;
+                let started = match expected.run_limits {
+                    Some(limits) => jobs.start_configured_next_prompt_investigation(
+                        &request,
+                        Some(&expected.provider),
+                        limits.active_seconds,
+                        limits.request_timeout_ms,
+                    ),
+                    None => {
+                        jobs.start_next_prompt_investigation(&request, Some(&expected.provider))
+                    }
+                }
+                .map_err(|e| e.to_string())?;
                 let elapsed = clock.elapsed();
                 if !started.created {
                     return Err("fresh capture nonce already consumed".into());
@@ -421,6 +452,19 @@ fn bound_with_scope<T>(
                     None,
                 )
             };
+            let saved_limits = jobs
+                .captured_run_limits(&task.summary.investigation_id)
+                .map_err(|e| e.to_string())?;
+            if saved_limits
+                != expected
+                    .run_limits
+                    .map(|v| (v.active_seconds, v.request_timeout_ms))
+                || expected
+                    .run_limits
+                    .is_some_and(|v| task.limits.active_seconds != v.active_seconds)
+            {
+                return Err("frozen run limits differ from saved task".into());
+            }
             let start = serde_json::json!({"definition_sha256":sha(&definition), "request_sha256":sha(&wire),
                 "intent_hash":request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
                 "analyst_id":task.summary.investigation_id});
@@ -439,7 +483,7 @@ fn bound_with_scope<T>(
             {
                 return Err("stored capture task differs or was executed".into());
             }
-            let manifest = serde_json::json!({"schema_version":1,"status":"captured_analyst_preparation_only",
+            let mut manifest = serde_json::json!({"schema_version":1,"status":"captured_analyst_preparation_only",
             "definition_sha256":sha(&definition),"preparation_sha256":expected.preparation_sha256,
             "selection_sha256":sha(&json(&expected.selections)?),"question_sha256":sha(expected.question.as_bytes()),
             "source_id":graph.source_id,"capture_id":graph.capture_id,"graph_snapshot_id":graph.graph_snapshot_id,
@@ -447,6 +491,9 @@ fn bound_with_scope<T>(
             "request_sha256":sha(&wire),"intent_hash":request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
             "analyst_id":task.summary.investigation_id,"conversation_id":task.summary.conversation_id,
             "provider_calls":0,"acceptance_passed":false});
+            if let Some(limits) = expected.run_limits {
+                manifest["run_limits"] = serde_json::to_value(limits).map_err(|e| e.to_string())?;
+            }
             let path = output.join("captured-analyst.json");
             if path.exists() && read(&path)? != json(&manifest)? {
                 return Err("capture manifest differs".into());

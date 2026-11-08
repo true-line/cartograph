@@ -45,6 +45,7 @@ fn use_task_with_env(
         binding: &expected.binding,
         manifest_hash: &hash,
         provider: &expected.provider,
+        run_limits: expected.run_limits,
     };
     if execute {
         let provider = match expected.provider.mode {
@@ -565,6 +566,7 @@ fn run_captured_auditor(action: &str) {
                         binding: &parent_definition.binding,
                         manifest_hash: &hash,
                         provider: &parent_definition.provider,
+                        run_limits: parent_definition.run_limits,
                     };
                     let artifacts = Artifacts {
                         parent_output: &parent_output,

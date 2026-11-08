@@ -85,6 +85,7 @@ pub(super) struct Authority<'a> {
     pub binding: &'a PreparationBinding,
     pub manifest_hash: &'a str,
     pub provider: &'a InvestigationProvider,
+    pub run_limits: Option<super::vendure_prepare::RunLimits>,
 }
 impl<'a> Authority<'a> {
     pub(super) fn synthetic(prepared: &'a PreparedState) -> Self {
@@ -96,6 +97,7 @@ impl<'a> Authority<'a> {
             binding: &prepared.manifest.binding,
             manifest_hash: &prepared.manifest_hash,
             provider: &prepared.manifest.provider,
+            run_limits: None,
         }
     }
 }
@@ -184,14 +186,27 @@ fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'sta
 }
 
 pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Value, String> {
-    collect_saved(
+    let mut receipt = collect_saved(
         authority.app_data,
         authority.analyst_id,
         authority.request,
         authority.binding,
         authority.manifest_hash,
         role,
-    )
+    )?;
+    if let Some(expected) = authority.run_limits {
+        let jobs =
+            JobStore::open(authority.app_data.join("state.db")).map_err(|e| e.to_string())?;
+        if jobs
+            .captured_run_limits(authority.analyst_id)
+            .map_err(|e| e.to_string())?
+            != Some((expected.active_seconds, expected.request_timeout_ms))
+        {
+            return Err("receipt run limits differ from frozen definition".into());
+        }
+        receipt["run_limits"] = serde_json::to_value(expected).map_err(|e| e.to_string())?;
+    }
+    Ok(receipt)
 }
 
 fn collect_saved(
