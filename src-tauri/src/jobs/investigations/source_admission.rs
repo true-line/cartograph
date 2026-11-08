@@ -241,6 +241,8 @@ impl JobStore {
                 request_hash: call.request_hash.clone(),
                 specialist_id: task.detail.summary.specialist_id,
                 policy_profile: policy.profile().into(),
+                effective_limits: (policy.limits() != INVESTIGATION_V2_POLICY.limits())
+                    .then(|| policy.limits()),
                 execution_job: execution_identity.job_id,
                 execution_generation: execution_identity.generation,
                 owner_basis_hash: source_validation::owner_basis_hash(&task)?,

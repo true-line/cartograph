@@ -43,7 +43,7 @@ pub(super) fn usage_for(
             .ok_or(InvestigationStoreError::Capacity)?;
     }
     usage.active_milliseconds = active;
-    validate_usage(&usage, &INVESTIGATION_V2_POLICY.limits())?;
+    validate_usage(&usage, &saved.reservation.policy()?.limits())?;
     Ok(usage)
 }
 

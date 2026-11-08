@@ -204,6 +204,7 @@ fn reserve_fixture(
             request_hash: f.task.intent_hash.clone(),
             specialist_id: f.task.detail.summary.specialist_id,
             policy_profile: f.task.detail.limits.profile.clone(),
+            effective_limits: None,
             execution_job: f.task.detail.summary.job_id,
             execution_generation: f.task.execution.as_ref().unwrap().generation,
             owner_basis_hash: owner_basis_hash(&f.task).unwrap(),

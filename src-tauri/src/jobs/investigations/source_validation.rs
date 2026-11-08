@@ -120,6 +120,7 @@ pub(super) fn validate_saved_pending(
     )?
     .ok_or(InvestigationStoreError::Missing)?;
     let r = &saved.reservation;
+    r.validate_task_policy(&task.detail)?;
     let b = &r.binding;
     if saved.disposition.is_some() || r.fingerprint() != Ok(pending.reservation_hash.clone()) {
         return Err(InvestigationStoreError::Conflict);
@@ -266,6 +267,7 @@ pub(super) fn project_validation(
     {
         return Err(InvestigationStoreError::Invalid);
     }
+    reservation.validate_task_policy(&task.detail)?;
     let before_bytes = encode(task, MAX_RECORD_BYTES)?.len();
     let mut next = task.clone();
     let charge = ValidationCharge::for_reservation(reservation)?;

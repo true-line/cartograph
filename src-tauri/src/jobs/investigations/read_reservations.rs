@@ -28,6 +28,10 @@ pub(super) struct ReadBinding {
     pub request_hash: String,
     pub specialist_id: SpecialistId,
     pub policy_profile: String,
+    /// Frozen host-derived limits; absent historical bindings retain V2 bytes.
+    /// Structural validity alone never authorizes a reservation against a task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_limits: Option<InvestigationLimits>,
     pub execution_job: i64,
     pub execution_generation: i64,
     /// Digest only; never persist the execution owner token in these bodies.
@@ -92,9 +96,33 @@ pub(super) struct Reservation {
     pub storage_claim: StorageClaim,
 }
 impl Reservation {
+    pub(super) fn policy(&self) -> Result<InvestigationPolicy, InvestigationStoreError> {
+        match &self.binding.effective_limits {
+            Some(limits) => InvestigationPolicy::for_effective_limits(limits)
+                .ok_or(InvestigationStoreError::Invalid),
+            None => Ok(INVESTIGATION_V2_POLICY.clone()),
+        }
+    }
+
+    pub(super) fn validate_task_policy(
+        &self,
+        detail: &InvestigationDetail,
+    ) -> Result<(), InvestigationStoreError> {
+        let policy = super::policy_for_detail(detail)?;
+        if self
+            .binding
+            .effective_limits
+            .as_ref()
+            .is_some_and(|limits| *limits != policy.limits())
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        self.validate()
+    }
+
     pub(super) fn validate(&self) -> Result<(), InvestigationStoreError> {
         let b = &self.binding;
-        let policy = &INVESTIGATION_V2_POLICY;
+        let policy = self.policy()?;
         let hashes = [
             &b.request_hash,
             &b.owner_basis_hash,
@@ -111,6 +139,7 @@ impl Reservation {
             if fact == &self.source.fact && role == &self.source.role && index == &self.source.index);
         if self.schema_version != 2
             || !b.specialist_id.uses_next_prompt_admission()
+            || policy.profile() != INVESTIGATION_V2_POLICY.profile()
             || b.policy_profile != policy.profile()
             || !id_valid(&b.task_id)
             || !id_valid(&b.step_id)
