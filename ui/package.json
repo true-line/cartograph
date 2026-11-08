@@ -19,7 +19,7 @@
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@tauri-apps/api": "^2.12.4",
     "cytoscape": "^3.34.4",
-    "material-symbols": "^0.48.2",
+    "material-symbols": "^0.48.3",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zustand": "^5.0.16"
@@ -35,18 +35,18 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
-    "@vitest/browser-playwright": "^5.0.5",
+    "@vitejs/plugin-react": "^6.2.1",
+    "@vitest/browser-playwright": "^5.1.0",
     "@vitest/coverage-v8": "^5.0.5",
     "ajv": "8.20.0",
-    "eslint": "^10.13.0",
+    "eslint": "^10.14.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-storybook": "^10.6.5",
     "playwright": "^1.64.1",
     "storybook": "^10.4.6",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.1",
-    "vite": "^8.3.5",
+    "vite": "^8.3.6",
     "vitest": "^5.0.5"
   }
 }
