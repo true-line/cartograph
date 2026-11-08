@@ -163,3 +163,5 @@ Decision #1707 extends US-0032 / AC-0287 with independently bound text-free
 refusal sidecars (ADR-0055). T-0287 covers bounded retention, explicit capacity
 markers, atomic persistence and tamper rejection; whole-run and historical
 acceptance evidence remain required before completion.
+
+#1601 relaunch breadcrumb: US-0001 / AC-0085 uses the refreshed current graph, including a startup without an ingest summary and the empty state after clear.
