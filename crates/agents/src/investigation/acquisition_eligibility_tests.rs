@@ -676,9 +676,68 @@ fn analyst20_schema_never_empties_on_inconsistent_or_inventory_only_state() {
     );
 }
 
-// #1709 / #1710: writes representative analyst response-schema variants for
-// the owner-run hosted schema preflight (`llm` example
-// `anthropic_schema_preflight`). Ignored by default and makes no network call.
+/// Inventory attempt for `f`'s Inventory obligation, built like `source`.
+fn inventory_attempt(
+    f: &Fixture,
+    source: &AttemptRecord,
+    outcome: AttemptOutcome,
+) -> AttemptRecord {
+    let (obligation_id, target) = f
+        .contract
+        .obligations
+        .obligations
+        .iter()
+        .find_map(|o| match o {
+            Obligation::Inventory {
+                obligation_id,
+                target,
+            } => Some((obligation_id, target)),
+            _ => None,
+        })
+        .unwrap();
+    let mut inventory = source.clone();
+    inventory.obligation_id = obligation_id.clone();
+    inventory.step_id = "inventory-step".into();
+    inventory.read = ReadIntent::Inventory {
+        context_id: target.context_id.clone(),
+        repo: target.repo.clone(),
+        inventory_hash: target.inventory_hash.clone(),
+        max_bytes: MAX_QUERY_BYTES,
+    };
+    inventory.outcome = outcome;
+    inventory.attempt_id = inventory.content_id().unwrap();
+    inventory
+}
+
+/// Checks the eligibility shape a dumped schema must have for its state.
+fn assert_eligible_shape(
+    schema: &serde_json::Value,
+    choices: &AcquisitionChoices,
+    ledger: &InvestigationInputLedger,
+) {
+    let branches = schema["anyOf"].as_array().unwrap();
+    let has = |target: &str| branches.iter().any(|b| b["$ref"] == target);
+    let complete = choices.attempts_complete();
+    assert_eq!(
+        has("#/$defs/supported_wrapper"),
+        complete && !ledger.citations.is_empty()
+    );
+    assert_eq!(has("#/$defs/insufficient_wrapper"), complete);
+    let exploration = branches
+        .iter()
+        .any(|b| b["properties"]["type"]["const"] == "query_context");
+    if complete {
+        assert_eq!(exploration, !choices.all_acquired());
+    } else {
+        assert_eq!(branches.len(), 1);
+        assert!(branches[0].get("enum").is_some());
+    }
+}
+
+// #1709 / #1710: writes the analyst response-schema variants for the
+// owner-run hosted schema preflight (`llm` example `anthropic_schema_preflight`)
+// from genuine states, each asserted before it is written. Ignored by default
+// and makes no network call.
 // Run with CARTOGRAPH_SCHEMA_DUMP=<empty dir> cargo test -p agents -- --ignored dump_analyst_schema_variants
 #[test]
 #[ignore]
@@ -687,15 +746,18 @@ fn dump_analyst_schema_variants() {
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    let write = |name: &str, schema: &str| {
+    let mut written = std::collections::BTreeSet::new();
+    let mut write = |name: &str, schema: &str| {
         let value: serde_json::Value = serde_json::from_str(schema).unwrap();
+        assert!(written.insert(name.to_string()), "duplicate dump {name}");
         std::fs::write(dir.join(format!("{name}.json")), value.to_string()).unwrap();
     };
     write("finish-only", response_schema::FINISH);
     write("choice-v13", response_schema::CHOICE);
+
+    // Not complete: acquisition only.
     let f = Fixture::new();
     let pending = f.derive(&f.ledger, &[]).unwrap();
-    write("pending", &selected(&f, &pending, &f.ledger).to_string());
     let partial = f
         .derive(
             &f.ledger,
@@ -704,32 +766,187 @@ fn dump_analyst_schema_variants() {
             })],
         )
         .unwrap();
-    write("partial", &selected(&f, &partial, &f.ledger).to_string());
-    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+    for (name, choices) in [("pending", &pending), ("partial", &partial)] {
+        assert!(!choices.attempts_complete() && !choices.all_acquired());
+        let schema = selected(&f, choices, &f.ledger);
+        assert_eligible_shape(&schema, choices, &f.ledger);
+        write(name, &schema.to_string());
+    }
+
+    // Complete, both obligations attempted. Each state is dumped as the
+    // ordinary schema, the eligible schema with citations, the eligible schema
+    // after the current ledger loses its citations, and (where exploration
+    // remains) the unknown-ID recovery chain production uses.
+    let unknown = |choices: &AcquisitionChoices| ActionRefusalFeedback {
+        reason: ActionRefusalReason::UnknownAnchor,
+        invocation_ordinal: 1,
+        action_hash: "a".repeat(64),
+        choices_hash: choices.stamp_hash().unwrap(),
+    };
+    let mut dump_complete = |name: &str, f: &Fixture, records: &[AttemptRecord], all: bool| {
+        let choices = f.derive(&f.ledger, records).unwrap();
+        assert!(choices.attempts_complete());
+        assert_eq!(choices.all_acquired(), all);
+        assert!(!f.ledger.citations.is_empty());
+        let request = &f.contract.request_hash;
+        let ordinary =
+            response_schema::select_acquisition(Choice, &choices, &f.ledger, request).unwrap();
+        write(&format!("{name}-ordinary"), ordinary.as_deref().unwrap());
+        let schema = selected(f, &choices, &f.ledger);
+        assert_eligible_shape(&schema, &choices, &f.ledger);
+        write(&format!("{name}-cited"), &schema.to_string());
+        if !all {
+            let feedback = unknown(&choices);
+            let recovery = response_schema::select_acquisition_recovery(
+                Choice,
+                &choices,
+                &f.ledger,
+                request,
+                Some(&feedback),
+            )
+            .unwrap();
+            assert_ne!(
+                recovery, ordinary,
+                "unknown-ID feedback must narrow selection"
+            );
+            let schema: serde_json::Value = serde_json::from_str(
+                &response_schema::select_eligible_acquisition(
+                    recovery, Choice, &choices, &f.ledger,
+                )
+                .unwrap()
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eligible_shape(&schema, &choices, &f.ledger);
+            write(&format!("{name}-recovery"), &schema.to_string());
+        }
+        // The current ledger without evidence (citations and the facts and
+        // receipts they back); the attempts keep their historical ledger.
+        let mut uncited = f.ledger.clone();
+        uncited.citations.clear();
+        uncited.selected_facts.clear();
+        uncited.receipt_references.clear();
+        let choices = f.derive(&uncited, records).unwrap();
+        assert!(choices.attempts_complete() && !choices.all_acquired());
+        let schema = selected(f, &choices, &uncited);
+        assert_eligible_shape(&schema, &choices, &uncited);
+        write(&format!("{name}-citations-lost"), &schema.to_string());
+        ordinary
+    };
+    let source = f.source_attempt(AttemptOutcome::Unavailable {
         reason: UnavailableReason::PinnedTargetAbsent,
     });
-    let complete = f.derive(&f.ledger, std::slice::from_ref(&attempt)).unwrap();
-    let ordinary =
-        response_schema::select_acquisition(Choice, &complete, &f.ledger, &f.contract.request_hash)
-            .unwrap();
-    write("completed-ordinary", ordinary.as_deref().unwrap());
+    let unavailable = AttemptOutcome::Unavailable {
+        reason: UnavailableReason::InventoryExceedsMaxBytes,
+    };
+    let inventory = inventory_attempt(&f, &source, unavailable.clone());
+    dump_complete("completed-unavailable", &f, &[source, inventory], false);
+    let source = f.source_attempt(AttemptOutcome::SourceAcquired {
+        citation_id: "evidence-1".into(),
+    });
+    let inventory = inventory_attempt(&f, &source, unavailable);
+    let mixed_ordinary = dump_complete("completed-mixed", &f, &[source, inventory], false);
+
+    let mut acquired = Fixture::new();
+    let Some(Obligation::Inventory { target, .. }) = acquired
+        .contract
+        .obligations
+        .obligations
+        .iter()
+        .find(|o| matches!(o, Obligation::Inventory { .. }))
+        .cloned()
+    else {
+        unreachable!()
+    };
+    acquired
+        .ledger
+        .coverage_reads
+        .push(InvestigationCoverageReadManifest {
+            request: InvestigationCoverageRead {
+                context_id: target.context_id.clone(),
+                repo: target.repo.clone(),
+                inventory_hash: target.inventory_hash.clone(),
+                max_bytes: MAX_QUERY_BYTES,
+            },
+            response_hash: "a".repeat(64),
+            response_bytes: 1,
+        });
+    let source = acquired.source_attempt(AttemptOutcome::SourceAcquired {
+        citation_id: "evidence-1".into(),
+    });
+    let inventory = inventory_attempt(
+        &acquired,
+        &source,
+        AttemptOutcome::InventoryAcquired { read_index: 0 },
+    );
+    dump_complete(
+        "completed-all-acquired",
+        &acquired,
+        &[source, inventory],
+        true,
+    );
+
+    // Genuinely all acquired without citations: the inventory-only state.
+    let mut f = Fixture::new();
+    let mut record = f.source_attempt(AttemptOutcome::InventoryAcquired { read_index: 0 });
+    f.contract
+        .obligations
+        .obligations
+        .retain(|o| matches!(o, Obligation::Inventory { .. }));
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    f.ledger = f.empty();
+    let Obligation::Inventory {
+        obligation_id,
+        target,
+    } = &f.contract.obligations.obligations[0]
+    else {
+        unreachable!()
+    };
+    f.ledger
+        .coverage_reads
+        .push(InvestigationCoverageReadManifest {
+            request: InvestigationCoverageRead {
+                context_id: target.context_id.clone(),
+                repo: target.repo.clone(),
+                inventory_hash: target.inventory_hash.clone(),
+                max_bytes: MAX_QUERY_BYTES,
+            },
+            response_hash: "a".repeat(64),
+            response_bytes: 1,
+        });
+    record.obligation_id = obligation_id.clone();
+    record.obligations_hash = f.contract.obligations_hash.clone();
+    record.read = ReadIntent::Inventory {
+        context_id: target.context_id.clone(),
+        repo: target.repo.clone(),
+        inventory_hash: target.inventory_hash.clone(),
+        max_bytes: MAX_QUERY_BYTES,
+    };
+    record.input_ledger_hash = f.ledger.fingerprint_with_policy(POLICY).unwrap();
+    record.attempt_id = record.content_id().unwrap();
+    let choices = f.derive(&f.ledger, &[record]).unwrap();
+    assert!(choices.attempts_complete() && choices.all_acquired());
+    assert!(f.ledger.citations.is_empty());
+    let schema = selected(&f, &choices, &f.ledger);
+    assert_eligible_shape(&schema, &choices, &f.ledger);
+    write("completed-all-acquired-uncited", &schema.to_string());
+
+    // Sizing only, never an actual call schema: the reservation for the
+    // genuine completed (mixed) ordinary schema plus the fixture citations.
+    let fixture = Fixture::new();
+    let prompt = serde_json::json!({"citations": fixture.ledger.citations});
     write(
-        "completed-eligible",
-        &response_schema::select_eligible_acquisition(ordinary, Choice, &complete, &f.ledger)
+        "reserve-sizing-completed-mixed",
+        &response_schema::reserve_eligible_acquisition(mixed_ordinary, Choice, &prompt)
             .unwrap()
             .unwrap(),
     );
-    let prompt = serde_json::json!({"citations": f.ledger.citations});
-    write(
-        "reserve",
-        &response_schema::reserve_eligible_acquisition(
-            Some(response_schema::FINISH.into()),
-            Choice,
-            &prompt,
-        )
-        .unwrap()
-        .unwrap(),
-    );
+
     // Largest action menu exercised by the contract-bound test.
     let mut f = Fixture::new();
     f.contract
@@ -763,5 +980,9 @@ fn dump_analyst_schema_variants() {
     f.metadata.obligations_hash = f.contract.obligations_hash.clone();
     let ledger = f.empty();
     let largest = f.derive(&ledger, &[]).unwrap();
-    write("largest-menu", &selected(&f, &largest, &ledger).to_string());
+    assert!(!largest.attempts_complete());
+    let schema = selected(&f, &largest, &ledger);
+    assert_eligible_shape(&schema, &largest, &ledger);
+    write("largest-menu", &schema.to_string());
+    assert_eq!(written.len(), 18);
 }
