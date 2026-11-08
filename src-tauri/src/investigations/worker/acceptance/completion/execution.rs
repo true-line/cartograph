@@ -347,16 +347,19 @@ pub(in super::super) fn read_expanded_state(
     id: &str,
 ) -> Result<SavedState, String> {
     let detail = jobs.investigation(id).map_err(|error| error.to_string())?;
-    if detail.limits != INVESTIGATION_V2_POLICY.limits() {
+    if detail.limits.profile != INVESTIGATION_V2_POLICY.limits().profile {
         return Err("Expanded receipt requires the registered V2 policy.".into());
     }
+    let policy = crate::jobs::investigations::policy_for_detail(&detail)
+        .map_err(|error| error.to_string())?;
+    let event_limit = policy.journal_events() as usize;
     Ok((
         detail,
         jobs.investigation_result(id)
             .map_err(|error| error.to_string())?,
         jobs.investigation_ledger(id)
             .map_err(|error| error.to_string())?,
-        events(jobs, id, INVESTIGATION_V2_POLICY.journal_events() as usize)?,
+        events(jobs, id, event_limit)?,
     ))
 }
 fn revalidate(prepared: &PreparedState, request: &StagedObligationRequest) -> Result<(), String> {

@@ -392,6 +392,22 @@ impl JobStore {
         };
         self.start_investigation_internal(&projected, provider, Some(intent), next_prompt, mcp)
     }
+    /// Provider-free acceptance inspection of the already validated frozen pair.
+    #[cfg(test)]
+    pub(crate) fn captured_run_limits(
+        &self,
+        id: &str,
+    ) -> Result<Option<(u64, u64)>, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let task = load_execution_task(&tx, id)?;
+        let pair = task
+            .completion_intent
+            .as_ref()
+            .and_then(|intent| intent.active_seconds.zip(intent.request_timeout_ms));
+        tx.commit()?;
+        Ok(pair)
+    }
+
     pub(crate) fn existing_investigation_completion(
         &self,
         request: &StagedObligationRequest,

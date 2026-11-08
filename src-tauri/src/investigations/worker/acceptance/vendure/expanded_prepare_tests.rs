@@ -152,6 +152,7 @@ fn captured_analyst_entry_dispatches_cloud_definitions_to_the_hosted_gate() {
             .unwrap();
         let mut expected = Definition {
             start_sha256: None,
+            run_limits: None,
             specialist_id: None,
             binding: super::super::completion::prepare::PreparationBinding {
                 run_id: "captured-entry-test".into(),
@@ -196,7 +197,62 @@ fn captured_analyst_entry_dispatches_cloud_definitions_to_the_hosted_gate() {
         assert!(!output.join("analyst-consent-log.jsonl").exists());
     }
 }
+#[test]
+fn captured_configured_run_limits_freeze_and_reopen_without_execution() {
+    captured_case_with_limits(
+        false,
+        Some("domain-analyst@25"),
+        Some(super::super::expanded::vendure_prepare::RunLimits {
+            active_seconds: 1800,
+            request_timeout_ms: 600_000,
+        }),
+    );
+}
+
+#[test]
+fn captured_configured_run_limits_survive_synthetic_execution_receipt() {
+    captured_case_with_limits(
+        true,
+        None,
+        Some(super::super::expanded::vendure_prepare::RunLimits {
+            active_seconds: 1800,
+            request_timeout_ms: 600_000,
+        }),
+    );
+}
+
+// AC-0569: saved hosted output and configured time limits remain readable offline.
+#[test]
+fn captured_configured_hosted_limits_read_saved_state_without_dispatch() {
+    captured_case_with_provider(
+        false,
+        Some("domain-analyst@25"),
+        Some(super::super::expanded::vendure_prepare::RunLimits {
+            active_seconds: 1800,
+            request_timeout_ms: 600_000,
+        }),
+        true,
+    );
+}
+
 fn captured_case(execute: bool, specialist: Option<&str>) {
+    captured_case_with_limits(execute, specialist, None);
+}
+
+fn captured_case_with_limits(
+    execute: bool,
+    specialist: Option<&str>,
+    run_limits: Option<super::super::expanded::vendure_prepare::RunLimits>,
+) {
+    captured_case_with_provider(execute, specialist, run_limits, false);
+}
+
+fn captured_case_with_provider(
+    execute: bool,
+    specialist: Option<&str>,
+    run_limits: Option<super::super::expanded::vendure_prepare::RunLimits>,
+    hosted: bool,
+) {
     let case = Case::new();
     let prepared = if execute {
         case.prepare()
@@ -224,6 +280,7 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
         .unwrap();
     let mut expected = Definition {
         start_sha256: None,
+        run_limits,
         specialist_id: specialist.map(str::to_owned),
         binding: super::super::completion::prepare::PreparationBinding {
             run_id: "captured-test".into(),
@@ -250,6 +307,12 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
         request_nonce: "captured-test-analyst".into(),
         scope: InvestigationScope::All,
     };
+    if hosted {
+        expected.provider.mode = InvestigationProviderMode::Cloud;
+        expected.provider.provider_id = "anthropic:claude-opus-5-5".into();
+        expected.provider.model = "claude-opus-5-5".into();
+        expected.provider.endpoint = "https://api.anthropic.com/v1/messages".into();
+    }
     std::fs::write(&definition_path, serde_json::to_vec(&expected).unwrap()).unwrap();
     let job_ids = || {
         crate::jobs::JobStore::open(prepared.profile.data().join("state.db"))
@@ -288,7 +351,56 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
         let restored: Definition = serde_json::from_slice(&wire).unwrap();
         assert_eq!(serde_json::to_vec(&restored).unwrap(), wire);
     }
+    if let Some(limits) = run_limits {
+        for (active_seconds, request_timeout_ms) in [(0, 600_000), (1800, 600_001)] {
+            let mut invalid = expected.clone();
+            invalid.run_limits = Some(super::super::expanded::vendure_prepare::RunLimits {
+                active_seconds,
+                request_timeout_ms,
+            });
+            std::fs::write(&definition_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                run(&invalid)
+                    .unwrap_err()
+                    .contains("invalid frozen run limits")
+            );
+            assert_eq!(job_ids(), baseline_jobs);
+        }
+        assert_eq!(limits.active_seconds, 1800);
+        std::fs::write(&definition_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+    }
     let manifest = run(&expected).unwrap();
+    if hosted {
+        let jobs = crate::jobs::JobStore::open(prepared.profile.data().join("state.db")).unwrap();
+        let id = manifest["analyst_id"].as_str().unwrap();
+        let (detail, result, _, _) =
+            super::super::completion::execution::read_expanded_state(&jobs, id).unwrap();
+        assert_eq!(detail.limits.generated_tokens_per_invocation, 16_384);
+        assert_eq!(detail.limits.generated_token_reservations, 1_048_576);
+        assert_eq!(detail.limits.active_seconds, 1800);
+        assert_eq!(detail.usage.model_invocations, 0);
+        assert!(result.is_none());
+        assert_eq!(jobs.captured_run_limits(id).unwrap(), Some((1800, 600_000)));
+    }
+    if let Some(limits) = run_limits {
+        assert_eq!(
+            manifest["run_limits"]["active_seconds"],
+            limits.active_seconds
+        );
+        assert_eq!(
+            manifest["run_limits"]["request_timeout_ms"],
+            limits.request_timeout_ms
+        );
+    } else {
+        assert!(manifest.get("run_limits").is_none());
+        assert!(
+            serde_json::to_value(&expected)
+                .unwrap()
+                .get("run_limits")
+                .is_none()
+        );
+    }
+
     expected.start_sha256 = Some(sha(&std::fs::read(output.join("start.json")).unwrap()));
     // AC-0463 (#1626): actual staging seals its original start measurement.
     let timing_bytes = std::fs::read(output.join("start-latency.json")).unwrap();
@@ -348,7 +460,9 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
                     let provider: std::sync::Arc<dyn llm::LlmProvider> = if wrong {
                         mismatched.clone()
                     } else {
-                        expanded_scripted_provider(false)
+                        crate::investigations::worker::tests::completion_tests::expanded_scripted_provider_with_timeout(
+                            false, run_limits.map_or(180_000, |v| v.request_timeout_ms),
+                        )
                     };
                     app.state::<AppState>()
                         .investigations
@@ -372,6 +486,16 @@ fn captured_case(execute: bool, specialist: Option<&str>) {
         assert_eq!(mismatched.calls.load(Ordering::SeqCst), 0);
         assert!(!output.join("analyst-attempt.json").exists());
         let terminal = attempt(false).unwrap();
+        if let Some(limits) = run_limits {
+            assert_eq!(
+                terminal["run_limits"]["active_seconds"],
+                limits.active_seconds
+            );
+            assert_eq!(
+                terminal["run_limits"]["request_timeout_ms"],
+                limits.request_timeout_ms
+            );
+        }
         assert!(
             terminal["detail"]["usage"]["model_invocations"]
                 .as_u64()
