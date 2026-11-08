@@ -194,15 +194,14 @@ impl InvestigationInput {
             finish_only: maximum(acquired.finish_only, unavailable.finish_only),
         };
         let mut upper_disclosure = disclosure.clone();
-        if policy.local_finish_generation() {
-            if let Some(stamp) = upper_disclosure
+        if policy.local_finish_generation()
+            && let Some(stamp) = upper_disclosure
                 .admission
                 .as_mut()
                 .and_then(|a| a.acquisition.as_mut())
-            {
-                // The last acquisition can add the non-default boundary marker.
-                stamp.finish_policy_complete = true;
-            }
+        {
+            // The last acquisition can add the non-default boundary marker.
+            stamp.finish_policy_complete = true;
         }
         let disclosure_upper_bytes = disclosure_upper_bound(
             upper_disclosure,
