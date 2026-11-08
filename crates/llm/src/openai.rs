@@ -33,28 +33,31 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    /// Construct a provider for `model`. The API key comes from the caller
-    /// and is never persisted or logged here.
+    /// Construct a provider for `model` against the pinned [`API_URL`]. The API
+    /// key comes from the caller and is never persisted or logged here.
     pub fn new(
         model: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Result<Self, ProviderError> {
-        Self::with_endpoint(model, api_key, API_URL.to_string())
+        Self::build(model.into(), api_key.into(), API_URL.to_string())
     }
 
-    /// Test seam: the same provider against a local fixture transport. Not
-    /// reachable from release call sites, which pin [`API_URL`].
-    #[doc(hidden)]
-    pub fn with_endpoint(
+    /// Test-only seam: the same provider against a local fixture transport.
+    /// Release builds cannot select another destination for the bearer key.
+    #[cfg(test)]
+    pub(crate) fn with_endpoint(
         model: impl Into<String>,
         api_key: impl Into<String>,
         endpoint: String,
     ) -> Result<Self, ProviderError> {
-        let model = model.into();
+        Self::build(model.into(), api_key.into(), endpoint)
+    }
+
+    fn build(model: String, api_key: String, endpoint: String) -> Result<Self, ProviderError> {
         Ok(Self {
             provider_id: format!("openai:{model}"),
             model,
-            api_key: api_key.into(),
+            api_key,
             endpoint,
             bounded_client: bounded::build_client(Client::builder(), false)?,
         })
