@@ -58,7 +58,9 @@ const VERBATIM: &[&str] = &[
 /// still enforces `maxItems: 0` against the original schema. The OpenAI
 /// projection (`relaxed`) is unaffected.
 pub(crate) fn project(schema: &str) -> Option<Value> {
-    relaxed(schema)?;
+    if !structural(&relaxed(schema)?, true) {
+        return None;
+    }
     let mut narrowed: Value = serde_json::from_str(schema).ok()?;
     narrow_empty_arrays(&mut narrowed);
     let wire = node(&narrowed)?;
@@ -355,6 +357,32 @@ fn collect<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
+/// The structural exclusions `inline` enforces (a `$ref` with sibling keywords,
+/// definitions below the root), checked in one linear pass without following
+/// references, so narrowing cannot remove a refused shape before it is seen.
+/// Literal payloads are data; name maps recurse into their schemas only.
+fn structural(value: &Value, at_root: bool) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("$ref") && map.len() != 1 {
+                return false;
+            }
+            map.iter().all(|(key, child)| match key.as_str() {
+                "const" | "enum" | "default" | "required" | "type" => true,
+                "$defs" | "definitions" if !at_root => false,
+                "properties" | "$defs" | "definitions" => {
+                    child.as_object().is_some_and(|schemas| {
+                        schemas.values().all(|schema| structural(schema, false))
+                    })
+                }
+                _ => structural(child, false),
+            })
+        }
+        Value::Array(items) => items.iter().all(|item| structural(item, false)),
+        _ => true,
+    }
+}
+
 /// Replaces the items of every `maxItems: 0` array schema with `null`. Literal
 /// payloads are data and are left alone; name maps (`properties`, `$defs`)
 /// recurse into their schemas only.
@@ -509,6 +537,20 @@ mod tests {
                 .is_none()
         );
         assert!(project(r#"{"type":"array","maxItems":0,"items":{"not":{}}}"#).is_none());
+        // ... nor a reference with siblings or definitions below the root.
+        assert!(project(r##"{"type":"array","maxItems":0,"items":{"$ref":"#/$defs/f","description":"x"},"$defs":{"f":{"type":"string"}}}"##).is_none());
+        assert!(project(r#"{"type":"array","maxItems":0,"items":{"type":"string","$defs":{"unused":{"type":"string"}}}}"#).is_none());
+        // A property or literal merely named `$defs` is not a definition.
+        assert!(
+            project(
+                r#"{"type":"object","properties":{"$defs":{"type":"string"}},"required":["$defs"]}"#
+            )
+            .is_some()
+        );
+        assert!(
+            project(r#"{"type":"object","properties":{"a":{"const":{"$ref":"x","$defs":1}}}}"#)
+                .is_some()
+        );
         // A property merely named `maxItems` is not an array constraint.
         assert_eq!(
             project(r#"{"type":"object","properties":{"maxItems":{"const":0},"items":{"type":"string"}}}"#).unwrap()["properties"]["items"],
