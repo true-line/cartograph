@@ -164,4 +164,4 @@ refusal sidecars (ADR-0055). T-0287 covers bounded retention, explicit capacity
 markers, atomic persistence and tamper rejection; whole-run and historical
 acceptance evidence remain required before completion.
 
-#1601 relaunch breadcrumb: US-0001 / AC-0085 uses the refreshed current graph, including a startup without an ingest summary and the empty state after clear.
+#1601 relaunch breadcrumb: US-0001 / AC-0085 uses refreshed evidence-backed system contents, including startup without an ingest summary, evidence-less synthetic nodes, and the empty state after clear.

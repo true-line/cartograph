@@ -588,8 +588,8 @@ export default function App() {
       : view === 'investigations' && investigations.detail?.scope.type === 'neighborhood'
         ? { kind: 'trail', label: `Investigation · ${investigations.detail.scope.hops} hop(s)` }
       : { kind: 'system', label: 'Whole system' };
-  // The graph survives relaunch; the last ingest response does not (AC-0085).
-  const systemName = (stats?.nodes ?? 0) > 0 ? 'Ingested system' : null;
+  // Evidence-backed contents survive relaunch; synthetic nodes name no system (AC-0085).
+  const systemName = systemContents.length > 0 ? 'Ingested system' : null;
   const status = ingestBusy
     ? 'Ingesting…'
     : backend === 'up'
