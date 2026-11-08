@@ -49,3 +49,21 @@ revision and layer hints. The inventory also lists:
 
 "Complete within the declared scope only" never means global completeness.
 Anything excluded, missing or unsupported marks the repo as limited.
+
+## Create a system manifest
+
+In **Connect a target**, choose **System manifest**, then **Create new manifest**.
+Add the repositories that form your system. Relative paths resolve from the
+folder where you save the manifest. Add configuration keys exactly as the code
+reads them, including case and punctuation (for example `SETTINGS.apiUrl`).
+Declare each service's repository and base URLs explicitly; add gateway routes
+only when you know their prefix and target service.
+
+**Preview manifest** validates those declarations and shows the TOML. Editing
+any field invalidates the preview. **Save new manifest** opens the native save
+panel and selects the saved path only after the write succeeds. Choose a new
+file: existing manifests, including their advanced settings, are never replaced.
+Cancelling the save or encountering an error keeps your draft. Close the guide
+and run **Preflight** when ready; drafting and saving do not scan repositories,
+contact remote services, or start recovery. Declarations help link client calls,
+but ambiguous or unresolved calls remain gaps.
