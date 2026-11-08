@@ -66,9 +66,11 @@ pub(super) fn relaxed(schema: &str) -> Option<Value> {
     references_resolve(&wire).then_some(wire)
 }
 
-/// Upper bound on JSON nodes in an inlined wire schema. The largest shipped
-/// analyst schema needs a small fraction of it; a schema whose shared
-/// references expand past it fails closed instead of growing without bound.
+/// Expansion budget: the number of schema and literal nodes the inlining pass
+/// may visit (verbatim `enum`/`required`/`type`/`default` values are copied, not
+/// counted). The largest shipped analyst schema needs a small fraction of it; a
+/// schema whose shared references expand past it fails closed instead of
+/// growing without bound. The encoded request-byte limit still applies after.
 const INLINE_NODE_BUDGET: usize = 20_000;
 
 /// Replaces every `$ref` with a copy of its (already projected, acyclic) root
@@ -86,6 +88,17 @@ fn inline(value: &Value, root: &Value, at_root: bool, budget: &mut usize) -> Opt
                 let (definitions, name) =
                     reference.as_str()?.strip_prefix("#/")?.split_once('/')?;
                 return inline(root.get(definitions)?.get(name)?, root, false, budget);
+            }
+            if let Some(literal) = map.get("const").filter(|literal| !scalar(literal)) {
+                // The API compiles only scalar `const`. An exact structured
+                // literal becomes the closed object schema that admits only it.
+                if map
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "const" | "type"))
+                {
+                    return None;
+                }
+                return literal_schema(literal, budget);
             }
             let mut out = Map::new();
             for (key, child) in map {
@@ -115,6 +128,49 @@ fn inline(value: &Value, root: &Value, at_root: bool, budget: &mut usize) -> Opt
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),
         other => Some(other.clone()),
+    }
+}
+
+/// The closed schema admitting exactly `literal`: objects become
+/// `additionalProperties: false` with every key required, scalars stay `const`.
+/// The API cannot bound array length (`maxItems` is rejected), so an array is
+/// narrowed as far as it compiles: an empty one admits only `null` items, a
+/// non-empty one at least one item drawn from its own elements. The host's
+/// validation against the original schema still enforces the exact array.
+fn literal_schema(literal: &Value, budget: &mut usize) -> Option<Value> {
+    *budget = budget.checked_sub(1)?;
+    match literal {
+        Value::Object(fields) => {
+            let mut properties = Map::new();
+            for (name, value) in fields {
+                properties.insert(name.clone(), literal_schema(value, budget)?);
+            }
+            Some(serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": fields.keys().cloned().collect::<Vec<_>>(),
+                "properties": properties,
+            }))
+        }
+        Value::Array(items) if items.is_empty() => {
+            Some(serde_json::json!({"type": "array", "items": {"type": "null"}}))
+        }
+        Value::Array(items) => {
+            let mut branches: Vec<Value> = Vec::new();
+            for item in items {
+                let branch = literal_schema(item, budget)?;
+                if !branches.contains(&branch) {
+                    branches.push(branch);
+                }
+            }
+            let items = if branches.len() == 1 {
+                branches.remove(0)
+            } else {
+                serde_json::json!({ "anyOf": branches })
+            };
+            Some(serde_json::json!({"type": "array", "minItems": 1, "items": items}))
+        }
+        scalar => Some(serde_json::json!({ "const": scalar })),
     }
 }
 
@@ -316,9 +372,43 @@ mod tests {
     #[test]
     fn structured_enum_members_become_const_branches() {
         let action = json!({"type": "read_evidence", "fact": {"id": "f1"}, "index": 0});
+        // The API rejects structured `const` (owner hosted preflight: "Schema
+        // type 'const - complex' is not supported"), so each structured member
+        // is sent as the closed object schema that admits exactly it.
         assert_eq!(
             project(&json!({"enum": [action.clone(), "x"]}).to_string()).unwrap(),
-            json!({"anyOf": [{"const": action}, {"const": "x"}]})
+            json!({"anyOf": [
+                {"type": "object", "additionalProperties": false,
+                 "required": ["fact", "index", "type"],
+                 "properties": {
+                    "fact": {"type": "object", "additionalProperties": false,
+                             "required": ["id"], "properties": {"id": {"const": "f1"}}},
+                    "index": {"const": 0},
+                    "type": {"const": "read_evidence"}}},
+                {"const": "x"}
+            ]})
+        );
+        assert_eq!(
+            project(r#"{"type":"object","const":{"a":null}}"#).unwrap(),
+            json!({"type": "object", "additionalProperties": false, "required": ["a"],
+                   "properties": {"a": {"const": null}}})
+        );
+        // Arrays are narrowed as far as the API compiles; the host enforces
+        // the exact array against the original schema.
+        assert_eq!(
+            project(r#"{"enum":[{"labels":[],"ids":["a","b","a"]}]}"#).unwrap(),
+            json!({"anyOf": [{"type": "object", "additionalProperties": false,
+                "required": ["ids", "labels"],
+                "properties": {
+                    "ids": {"type": "array", "minItems": 1,
+                            "items": {"anyOf": [{"const": "a"}, {"const": "b"}]}},
+                    "labels": {"type": "array", "items": {"type": "null"}}}}]})
+        );
+        assert_eq!(project(r#"{"const":{"a":1},"description":"x"}"#), None);
+        // The OpenAI starting form keeps structured `const` unchanged.
+        assert_eq!(
+            super::relaxed(&json!({"enum": [action.clone()]}).to_string()).unwrap(),
+            json!({"anyOf": [{"const": action}]})
         );
         assert_eq!(
             project(r#"{"enum":["a",1,null]}"#).unwrap(),
@@ -360,8 +450,10 @@ mod tests {
         assert_eq!(
             project(schema).unwrap(),
             json!({"anyOf": [
-                {"const": {"$ref": "#/$defs/nowhere"}},
-                {"const": {"$ref": "#/$defs/nowhere"}}
+                {"type": "object", "additionalProperties": false, "required": ["$ref"],
+                 "properties": {"$ref": {"const": "#/$defs/nowhere"}}},
+                {"type": "object", "additionalProperties": false, "required": ["$ref"],
+                 "properties": {"$ref": {"const": "#/$defs/nowhere"}}}
             ]})
         );
     }
@@ -419,6 +511,17 @@ mod tests {
             let wire = project(schema).expect("analyst schema must project");
             let text = wire.to_string();
             assert!(wire.get("$defs").is_none() && wire.get("definitions").is_none());
+            fn no_structured_const(value: &serde_json::Value) -> bool {
+                match value {
+                    serde_json::Value::Object(map) => map.iter().all(|(key, child)| {
+                        (key != "const" || !(child.is_object() || child.is_array()))
+                            && no_structured_const(child)
+                    }),
+                    serde_json::Value::Array(items) => items.iter().all(no_structured_const),
+                    _ => true,
+                }
+            }
+            assert!(no_structured_const(&wire));
             for rejected in [
                 "\"$defs\"",
                 "\"$ref\":\"#/",
