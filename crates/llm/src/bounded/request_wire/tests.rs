@@ -53,7 +53,7 @@ fn borrowed_anthropic_request_preserves_wire_and_exact_cap() {
 
 #[test]
 fn anthropic_schema_request_uses_output_config() {
-    // AC-0185 / #1709: structured output travels as output_config.format; no beta header.
+    // AC-0568 / #1709: structured output travels as output_config.format; no beta header.
     let schema =
         json!({"type":"object","additionalProperties":false,"required":[],"properties":{}});
     matches_wire_and_cap(

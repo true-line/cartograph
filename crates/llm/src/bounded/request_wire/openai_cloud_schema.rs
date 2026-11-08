@@ -207,7 +207,7 @@ mod tests {
     use super::{project, unwrap};
     use serde_json::json;
 
-    // AC-0185 / #1709: an anyOf root travels wrapped with its definitions kept at
+    // AC-0567 / #1709: an anyOf root travels wrapped with its definitions kept at
     // the root; the exact inner bytes come back out.
     #[test]
     fn any_of_root_is_wrapped_and_unwrapped_exactly() {
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(project(&object.to_string()), Some((object, false)));
     }
 
-    // AC-0185 / #1709: strict-mode object rules and published limits fail closed.
+    // AC-0567 / #1709: strict-mode object rules and published limits fail closed.
     #[test]
     fn strict_rules_and_limits_fail_closed() {
         let closed = |properties: serde_json::Value, required: serde_json::Value| {
@@ -270,6 +270,10 @@ mod tests {
                 "properties": {"a": deep}, "required": ["a"]});
         }
         assert_eq!(project(&deep.to_string()), None);
+        // An unreferenced definition is depth-checked too.
+        let unreferenced = json!({"type": "object", "additionalProperties": false,
+            "required": [], "properties": {}, "$defs": {"deep": deep}});
+        assert_eq!(project(&unreferenced.to_string()), None);
         for schema in [
             // `allOf` branches and `$ref` siblings are never forwarded unchecked.
             json!({"type": "object", "additionalProperties": false, "required": [],
@@ -288,7 +292,7 @@ mod tests {
         );
     }
 
-    // AC-0185 / #1709: a reference DAG whose full expansion is exponential is
+    // AC-0567 / #1709: a reference DAG whose full expansion is exponential is
     // checked once per definition, and each definition counts once.
     #[test]
     fn reference_dag_is_checked_linearly() {
@@ -306,7 +310,7 @@ mod tests {
         assert!(project(&schema.to_string()).is_some());
     }
 
-    // AC-0185 / #1709: the shipped analyst schemas satisfy strict mode once wrapped.
+    // AC-0567 / #1709: the shipped analyst schemas satisfy strict mode once wrapped.
     #[test]
     fn analyst_schemas_project_strictly() {
         for schema in [

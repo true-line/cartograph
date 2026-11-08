@@ -2043,7 +2043,7 @@ fn authorize_schema(provider: &dyn LlmProvider, schema: &str) -> AuthorizedBound
         .unwrap()
 }
 
-// AC-0185 / #1709: hosted OpenAI gets bearer auth, store:false, a reasoning-safe
+// AC-0567 / #1709: hosted OpenAI gets bearer auth, store:false, a reasoning-safe
 // output bound and the wrapped strict schema; the host receives the exact inner
 // bytes for full-schema validation.
 #[test]
@@ -2084,7 +2084,7 @@ fn openai_cloud_bounded_wraps_schema_and_returns_inner_bytes() {
     assert_eq!(output.response_bytes, body.len() as u64);
 }
 
-// AC-0185 / #1709: a wrong envelope, a refusal, an unusable key or an
+// AC-0567 / #1709: a wrong envelope, a refusal, an unusable key or an
 // unrepresentable schema never becomes a completion.
 #[test]
 fn openai_cloud_bounded_fails_closed() {
