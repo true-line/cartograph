@@ -353,6 +353,7 @@ fn action_fixture_for(role_name: &str) -> (completion::InternalFixture, Value) {
     disclosure.query_history.as_mut().unwrap().request_hash = intent.request_hash.clone();
     disclosure.query_history.as_mut().unwrap().registry_hash = registry.registry_hash;
     disclosure.admission.as_mut().unwrap().acquisition = Some(AcquisitionAdmission {
+        finish_policy_complete: false,
         capacity_exhausted: false,
         finish_reason: None,
         choices_hash: choices.stamp_hash().unwrap(),

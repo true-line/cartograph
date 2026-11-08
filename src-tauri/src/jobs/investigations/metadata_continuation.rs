@@ -46,6 +46,8 @@ impl MetadataContinuationSnapshot {
         if let Some(choices) = &self.choices {
             stamp.validate_saved_role_shape(SpecialistId::DomainAnalystV18, &self.policy)?;
             let expected = agents::investigation::AcquisitionAdmission {
+                finish_policy_complete: self.policy.local_finish_generation()
+                    && choices.attempts_complete(),
                 capacity_exhausted: false,
                 finish_reason: None,
                 choices_hash: choices.stamp_hash()?,

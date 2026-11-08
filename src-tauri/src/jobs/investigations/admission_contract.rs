@@ -217,6 +217,21 @@ impl SavedCallBasis {
                 .current_choices(ledger, metadata)?;
             if choices
                 .as_ref()
+                .map(|c| {
+                    super::policy_for_detail(&task.detail)
+                        .map(|p| p.local_finish_generation() && c.attempts_complete())
+                })
+                .transpose()?
+                != value
+                    .admission
+                    .acquisition
+                    .as_ref()
+                    .map(|s| s.finish_policy_complete)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            if choices
+                .as_ref()
                 .map(|choices| choices.stamp_hash())
                 .transpose()?
                 != value

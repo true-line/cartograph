@@ -175,9 +175,14 @@ pub(super) fn validate_continuation(
             .ok_or(InvestigationStoreError::Invalid)?;
         source_snapshot::validate_acquisition(&choices, state, policy)?;
     }
+    if policy.local_finish_generation() {
+        state.validate_mode_with_metadata(&next_metadata, policy)?;
+    } else if state.mode
+        != next_metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)?
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
     if state.consumed_budgets != usage_for(saved, kind, active)?
-        || state.mode
-            != next_metadata.next_call_mode_with_policy(&state.consumed_budgets, policy)?
         || state.capacity_feedback.is_some()
         || state.capacity_refusal_count
             != before

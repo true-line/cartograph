@@ -22,6 +22,8 @@ pub struct DisclosedAdmissionState {
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionAdmission {
     #[serde(default, skip_serializing_if = "is_false")]
+    pub finish_policy_complete: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub capacity_exhausted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<ActionRefusalReason>,
@@ -118,6 +120,9 @@ impl DisclosedAdmissionState {
         }
         if let Some(acquisition) = &self.acquisition {
             acquisition.validate()?;
+            if acquisition.finish_policy_complete && !policy.local_finish_generation() {
+                return Err(InvestigationError::InvalidInput);
+            }
             if acquisition.capacity_exhausted && !role.uses_capacity_exclusions() {
                 return Err(InvestigationError::InvalidInput);
             }
@@ -161,7 +166,8 @@ impl DisclosedAdmissionState {
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         let expected = if self.acquisition.as_ref().is_some_and(|stamp| {
-            stamp.capacity_exhausted
+            stamp.finish_policy_complete
+                || stamp.capacity_exhausted
                 || stamp.finish_reason == Some(ActionRefusalReason::RepeatedRead)
         }) {
             CompletionCallMode::FinishOnly

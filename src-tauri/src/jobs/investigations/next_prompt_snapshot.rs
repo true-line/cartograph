@@ -122,12 +122,12 @@ impl JobStore {
         } else {
             None
         };
-        let derived_mode = if choices
-            .as_ref()
-            .is_some_and(|choices| choices.capacity_exhausted())
-            || capacity.action_feedback.as_ref().is_some_and(|feedback| {
-                feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
-            }) {
+        let derived_mode = if choices.as_ref().is_some_and(|choices| {
+            choices.capacity_exhausted()
+                || (policy.local_finish_generation() && choices.attempts_complete())
+        }) || capacity.action_feedback.as_ref().is_some_and(|feedback| {
+            feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
+        }) {
             CompletionCallMode::FinishOnly
         } else {
             metadata.next_call_mode_with_policy(&task.detail.usage, policy)?

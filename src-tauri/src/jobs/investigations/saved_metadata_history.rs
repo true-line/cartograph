@@ -143,11 +143,13 @@ impl<'a> SavedMetadataHistory<'a> {
             .as_ref()
             .map(|stamp| stamp.choices_hash.as_str())
             != Some(choices.stamp_hash()?.as_str())
-            || basis
-                .admission
-                .acquisition
-                .as_ref()
-                .is_some_and(|stamp| stamp.capacity_exhausted != choices.capacity_exhausted())
+            || basis.admission.acquisition.as_ref().is_some_and(|stamp| {
+                stamp.capacity_exhausted != choices.capacity_exhausted()
+                    || stamp.finish_policy_complete
+                        != (policy_for_detail(&self.task.detail)
+                            .is_ok_and(|policy| policy.local_finish_generation())
+                            && choices.attempts_complete())
+            })
         {
             return Err(InvestigationStoreError::Invalid);
         }

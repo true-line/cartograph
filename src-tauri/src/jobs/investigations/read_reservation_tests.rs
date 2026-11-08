@@ -653,3 +653,93 @@ fn hosted_source_binding_requires_saved_task_policy() {
         Err(InvestigationStoreError::Invalid)
     );
 }
+
+#[test]
+fn local_finish_reservation_requires_exact_saved_policy_and_reopens() {
+    // AC-0287: both reservation and settlement use this exact saved-task check.
+    let fixture = completion::internal_next_prompt_fixture();
+    let mut detail = fixture.task.detail.clone();
+    let mut r = reservation("task:1", "step-9");
+    let policy = INVESTIGATION_V2_POLICY
+        .with_local_finish_generation()
+        .unwrap();
+    r.binding.effective_limits = Some(policy.limits());
+    assert!(r.validate_task_policy(&detail).is_err());
+    detail.limits = policy.limits();
+    detail.origin = InvestigationOrigin::App;
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV26;
+    detail.summary.provider_mode = InvestigationProviderMode::Local;
+    detail.provider.mode = InvestigationProviderMode::Local;
+    r.validate_task_policy(&detail).unwrap();
+    let bytes = serde_json::to_vec(&r).unwrap();
+    let reopened: Reservation = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        reopened.binding.effective_limits,
+        Some(detail.limits.clone())
+    );
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), bytes);
+    reopened.validate_task_policy(&detail).unwrap();
+    let mut missing = reopened.clone();
+    missing.binding.effective_limits = None;
+    assert!(missing.validate_task_policy(&detail).is_err());
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV25;
+    assert!(reopened.validate_task_policy(&detail).is_err());
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV26;
+    detail.provider.mode = InvestigationProviderMode::Cloud;
+    assert!(reopened.validate_task_policy(&detail).is_err());
+    r.binding
+        .effective_limits
+        .as_mut()
+        .unwrap()
+        .generated_token_reservations += 1;
+    assert!(r.validate().is_err());
+}
+
+#[test]
+fn local_finish_step_ceiling_distinguishes_mode_and_preserves_v2() {
+    // AC-0287: structural bound is necessary, but saved-call authentication is separate.
+    let fixture = completion::internal_next_prompt_fixture();
+    let mut step = fixture.step.clone();
+    let new = INVESTIGATION_V2_POLICY
+        .with_local_finish_generation()
+        .unwrap()
+        .limits();
+    for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+        step.disclosure
+            .as_mut()
+            .unwrap()
+            .admission
+            .as_mut()
+            .unwrap()
+            .mode = mode;
+        step.disclosure
+            .as_mut()
+            .unwrap()
+            .admission
+            .as_mut()
+            .unwrap()
+            .acquisition = Some(agents::investigation::AcquisitionAdmission {
+            finish_policy_complete: mode == CompletionCallMode::FinishOnly,
+            capacity_exhausted: false,
+            finish_reason: None,
+            choices_hash: "a".repeat(64),
+            action_feedback_hash: None,
+        });
+        for tokens in [2048, 2049, 4096, 4097] {
+            step.generated_tokens = tokens;
+            assert_eq!(
+                validate_step(&step, &new).is_ok(),
+                tokens
+                    <= if mode == CompletionCallMode::FinishOnly {
+                        4096
+                    } else {
+                        2048
+                    }
+            );
+            assert_eq!(
+                validate_step(&step, &INVESTIGATION_V2_POLICY.limits()).is_ok(),
+                tokens <= 2048
+            );
+        }
+    }
+}

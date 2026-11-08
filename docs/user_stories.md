@@ -864,12 +864,18 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Unchanged:** Local definitions and their behavior. Unpinned, unavailable or mismatched hosted identities are refused (#1709, owner decision 2026-11-07).
 - **Trace:** H4 · `app` · — · T-0569
 - **AC-0570** Given a desktop next-prompt investigation on the expanded profile whose configured provider is the pinned hosted Opus lane (Cloud `anthropic:claude-opus-5-5`), when the task starts, then the owner-approved output allowance is frozen into its effective policy: 16,384 generated tokens per invocation and a total reservation of 64 × 16,384, because Opus 5.5 always runs adaptive thinking whose tokens count toward `max_tokens` (#1709).
-  - **Scope:** every other provider, MCP-origin tasks and the v1 profile keep the static 2,048-token allowance. Every other limit is unchanged.
+  - **Scope:** every other provider keeps the static 2,048-token allowance unless the separate explicit local policy in AC-0571 applies; MCP-origin tasks and the v1 profile stay static. Every other limit is unchanged.
   - **Recovery:** a saved desktop task recovers the allowance only as these exact values, composed with any saved time override, and only when the saved task is a next-prompt task whose saved provider is Cloud `anthropic:claude-opus-5-5`; the exact values on any other saved task, and any other generation value, are refused, and MCP recovery stays static.
   - **Source admission and recovery:** source-read reservations and settlement use the authenticated frozen allowance, including calls beyond the static generation budget. Historical reservation bytes remain readable; altered or mismatched saved allowances are rejected.
   - **Transport:** the bounded call admits exactly 16,384 output tokens only through the investigation constructor and the saved step-consent record's decoder; ordinary limit decoding, the general completion ceiling, the response and output-text byte caps and the request timeout are unchanged.
   - **Diagnostics:** a stop at the output limit fails as `output_limit_reached` instead of `incomplete_response` on Anthropic, OpenAI-compatible, hosted OpenAI and Ollama transports, without recording provider text.
 - **Trace:** H4 · `llm`, `agents`, `app` · — · T-0570
+
+- **AC-0571** Given an explicitly selected local `local-finish-4096-v1` policy for analyst @26, the host derives the generation mode from frozen saved acquisition state before each call: once all frozen acquisition attempts are complete, the first and every correction finish use FinishOnly, a schema without tool actions, and a 4,096-token allowance. Before that boundary Choice remains capped at 2,048, including an early finish emitted from Choice; this is a known limitation, and model output never grants the larger allowance.
+  - **Authentication:** `policy_for_detail` selects the versioned policy, `ReadBinding.effective_limits` persists its exact limits, and reservation and settlement independently reconstruct the boundary, mode and allowance from saved state and reject mismatches or missing policy binding.
+  - **Budget and receipts:** total generated-token reservations remain 131,072 and every other V2 limit is unchanged. Each 4,096-token reservation counts inside that total. Text-free invocation metadata persists `disclosure.admission.mode` and `generated_tokens`, including correction finishes; terminal receipts include these invocation records.
+  - **Compatibility:** historical V2 keeps 2,048 in both modes and preserves serialized policy, reservation and receipt bytes. Copied r6/r7 databases reopen with byte-identical receipts; no provider dispatch is needed.
+- **Trace:** H4 · `llm`, `agents`, `app` · — · T-0571
 
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
