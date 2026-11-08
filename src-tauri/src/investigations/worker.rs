@@ -1576,7 +1576,10 @@ pub(super) fn handle_gated_response(
     let mut clock = RunClock::new(Instant::now() - Duration::from_secs(1));
     let mode = saved
         .current()
-        .seal_disclosure_with_policy(saved.prepared(), &INVESTIGATION_V2_POLICY)
+        .seal_disclosure_with_policy(
+            saved.prepared(),
+            &crate::jobs::investigations::policy_for_detail(&detail).unwrap(),
+        )
         .unwrap()
         .unwrap()
         .admission

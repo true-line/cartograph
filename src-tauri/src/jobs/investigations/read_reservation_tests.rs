@@ -26,6 +26,7 @@ fn reservation(task: &str, step: &str) -> Reservation {
             request_hash: content_hash(b"request"),
             specialist_id: SpecialistId::DomainAnalystV10,
             policy_profile: "investigation-v2".into(),
+            effective_limits: None,
             execution_job: 1,
             execution_generation: 1,
             owner_basis_hash: content_hash(b"private-owner-basis"),
@@ -582,4 +583,73 @@ fn read_reservation_stage_claims_release_only_the_committed_stage() {
     assert_eq!(pending_event_claims(&tx, "task:1").unwrap(), 0);
     assert_eq!(pending_storage_claims(&tx, Some("task:1")).unwrap(), 0);
     tx.rollback().unwrap();
+}
+
+#[test]
+fn hosted_source_reservation_accepts_ninth_call_within_frozen_budget() {
+    // AC-0570: source admission must honor the task's frozen hosted allowance.
+    let hosted = INVESTIGATION_V2_POLICY.with_hosted_generation().unwrap();
+    let mut r = reservation("task:1", "step-9");
+    r.binding.specialist_id = SpecialistId::DomainAnalystV25;
+    r.binding.effective_limits = Some(hosted.limits());
+    r.binding.base_usage.model_invocations = 9;
+    r.binding.base_usage.generated_token_reservations =
+        9 * hosted.limits().generated_tokens_per_invocation;
+    validate_usage(&r.binding.base_usage, &hosted.limits()).unwrap();
+    assert_eq!(r.validate(), Ok(()));
+}
+
+#[test]
+fn legacy_source_reservation_keeps_encoding_and_static_ceiling() {
+    // AC-0570: absent fields preserve historical hashes and the Local/V2 cap.
+    let mut r = reservation("task:1", "step-9");
+    let bytes = serde_json::to_vec(&r).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("effective_limits"));
+    let reopened: Reservation = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), bytes);
+    assert_eq!(reopened.fingerprint(), r.fingerprint());
+    r.binding.base_usage.model_invocations = 9;
+    r.binding.base_usage.generated_token_reservations = 9 * llm::bounded::HOSTED_OUTPUT_TOKENS;
+    assert_eq!(r.validate(), Err(InvestigationStoreError::Capacity));
+}
+
+#[test]
+fn hosted_source_binding_requires_saved_task_policy() {
+    // AC-0570: registered limits in a row are not provider authorization.
+    let fixture = completion::internal_next_prompt_fixture();
+    let mut detail = fixture.task.detail.clone();
+    let mut r = reservation("task:1", "step-9");
+    let hosted = INVESTIGATION_V2_POLICY.with_hosted_generation().unwrap();
+    r.binding.effective_limits = Some(hosted.limits());
+    assert!(r.validate().is_ok());
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
+    detail.limits = hosted.limits();
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
+    detail.origin = InvestigationOrigin::App;
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV25;
+    detail.provider.mode = InvestigationProviderMode::Cloud;
+    detail.summary.provider_mode = InvestigationProviderMode::Cloud;
+    detail.provider.provider_id = "anthropic:claude-haiku-4-5-20251001".into();
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
+    detail.provider.provider_id = "anthropic:claude-opus-5-5".into();
+    assert!(r.validate_task_policy(&detail).is_ok());
+    r.binding
+        .effective_limits
+        .as_mut()
+        .unwrap()
+        .generated_token_reservations += 1;
+    assert_eq!(r.validate(), Err(InvestigationStoreError::Invalid));
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
 }

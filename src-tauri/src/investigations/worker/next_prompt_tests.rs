@@ -66,7 +66,12 @@ impl NextFixture {
             .as_str()
             .unwrap()
             .into();
-        let provider_descriptor = descriptor(provider, InvestigationProviderMode::Local).unwrap();
+        let mode = match provider.locality() {
+            Locality::Local => InvestigationProviderMode::Local,
+            Locality::Cloud => InvestigationProviderMode::Cloud,
+        };
+        request.provider_mode = mode;
+        let provider_descriptor = descriptor(provider, mode).unwrap();
         let start = if let Some((active, timeout)) = configured {
             jobs.start_configured_next_prompt_investigation(
                 &request,
@@ -2646,3 +2651,6 @@ fn inline_completion_fixture_releases_stores_and_preserves_handle_escape() {
         }
     }
 }
+
+#[path = "hosted_source_limits_tests.rs"]
+mod hosted_source_limits_tests;
