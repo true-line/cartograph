@@ -675,3 +675,93 @@ fn analyst20_schema_never_empties_on_inconsistent_or_inventory_only_state() {
         serde_json::json!([{ "$ref": "#/$defs/insufficient_wrapper" }])
     );
 }
+
+// #1709 / #1710: writes representative analyst response-schema variants for
+// the owner-run hosted schema preflight (`llm` example
+// `anthropic_schema_preflight`). Ignored by default and makes no network call.
+// Run with CARTOGRAPH_SCHEMA_DUMP=<empty dir> cargo test -p agents -- --ignored dump_analyst_schema_variants
+#[test]
+#[ignore]
+fn dump_analyst_schema_variants() {
+    let Some(dir) = std::env::var_os("CARTOGRAPH_SCHEMA_DUMP") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let write = |name: &str, schema: &str| {
+        let value: serde_json::Value = serde_json::from_str(schema).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")), value.to_string()).unwrap();
+    };
+    write("finish-only", response_schema::FINISH);
+    write("choice-v13", response_schema::CHOICE);
+    let f = Fixture::new();
+    let pending = f.derive(&f.ledger, &[]).unwrap();
+    write("pending", &selected(&f, &pending, &f.ledger).to_string());
+    let partial = f
+        .derive(
+            &f.ledger,
+            &[f.source_attempt(AttemptOutcome::Unavailable {
+                reason: UnavailableReason::PinnedTargetAbsent,
+            })],
+        )
+        .unwrap();
+    write("partial", &selected(&f, &partial, &f.ledger).to_string());
+    let attempt = f.source_attempt(AttemptOutcome::Unavailable {
+        reason: UnavailableReason::PinnedTargetAbsent,
+    });
+    let complete = f.derive(&f.ledger, std::slice::from_ref(&attempt)).unwrap();
+    let ordinary =
+        response_schema::select_acquisition(Choice, &complete, &f.ledger, &f.contract.request_hash)
+            .unwrap();
+    write("completed-ordinary", ordinary.as_deref().unwrap());
+    write(
+        "completed-eligible",
+        &response_schema::select_eligible_acquisition(ordinary, Choice, &complete, &f.ledger)
+            .unwrap()
+            .unwrap(),
+    );
+    let prompt = serde_json::json!({"citations": f.ledger.citations});
+    write(
+        "reserve",
+        &response_schema::reserve_eligible_acquisition(
+            Some(response_schema::FINISH.into()),
+            Choice,
+            &prompt,
+        )
+        .unwrap()
+        .unwrap(),
+    );
+    // Largest action menu exercised by the contract-bound test.
+    let mut f = Fixture::new();
+    f.contract
+        .obligations
+        .obligations
+        .retain(|o| matches!(o, Obligation::Inventory { .. }));
+    for index in 0..20 {
+        let mut target = f.target.clone();
+        target.fact = TaskFactKey::Node {
+            id: format!("node-{index}-{}", "quoted-\"-\\-é".repeat(15)),
+        };
+        target.target_id = target.content_id().unwrap();
+        f.contract
+            .obligations
+            .obligations
+            .push(identified(Obligation::Source {
+                obligation_id: String::new(),
+                target: Box::new(target),
+            }));
+    }
+    f.contract.obligations = f
+        .contract
+        .obligations
+        .normalized_with_policy(POLICY)
+        .unwrap();
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    let ledger = f.empty();
+    let largest = f.derive(&ledger, &[]).unwrap();
+    write("largest-menu", &selected(&f, &largest, &ledger).to_string());
+}

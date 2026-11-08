@@ -837,6 +837,22 @@ fn encode_with_formatter(
 }
 
 /// Construct once with the provider and retain at application/coordinator scope.
+/// The `output_config.format` wire projection of a bounded response schema,
+/// or `None` when it cannot be represented (#1709). Exposed for the owner-run
+/// hosted schema preflight example; production uses it via `complete_anthropic`.
+#[doc(hidden)]
+pub fn anthropic_wire_schema(schema: &str) -> Option<serde_json::Value> {
+    request_wire::anthropic_schema(schema)
+}
+
+/// The strict OpenAI wire projection of `schema` and whether its root is
+/// wrapped, or `None` when strict mode cannot represent it (#1709). Exposed for
+/// the offline schema preflight; production uses it via `complete_openai_cloud`.
+#[doc(hidden)]
+pub fn openai_cloud_wire_schema(schema: &str) -> Option<(serde_json::Value, bool)> {
+    request_wire::openai_cloud_schema(schema)
+}
+
 pub(super) fn build_client(builder: ClientBuilder, local: bool) -> Result<Client, reqwest::Error> {
     let builder = builder
         .redirect(reqwest::redirect::Policy::none())
@@ -1311,6 +1327,56 @@ pub(super) fn complete_openai_compatible(
             finish(text, model, id, usage, request, request_bytes, bytes.len())
         },
     )
+}
+
+pub(super) fn complete_openai_cloud(
+    client: &Client,
+    api_key: &str,
+    profile: &ProviderProfile,
+    request: &AuthorizedBoundedCompletion,
+    control: &CompletionControl<'_>,
+) -> Result<BoundedCompletion, BoundedCallError> {
+    check_request(profile, request, control)?;
+    // Wire-only strict projection; host validation keeps the full schema.
+    let schema = response_schema(request.payload())?
+        .map(|raw| {
+            request_wire::openai_cloud_schema(raw.get()).ok_or_else(BoundedCallError::unsupported)
+        })
+        .transpose()?;
+    if api_key.is_empty() || api_key.len() > 4096 {
+        return Err(not_sent(FailureCode::InvalidProfile));
+    }
+    let mut bearer = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+        .map_err(|_| not_sent(FailureCode::InvalidProfile))?;
+    // Never rendered by header debug output.
+    bearer.set_sensitive(true);
+    let user = user_message(request)?;
+    let body = encode(
+        &request_wire::openai_cloud(
+            &profile.requested_model,
+            &request.payload().system,
+            &user,
+            request.limits().0.max_output_tokens,
+            schema.as_ref().map(|(wire, _)| wire),
+        ),
+        request.limits().0.request_bytes,
+        FailureCode::RequestTooLarge,
+    )?;
+    let wrapped = schema.as_ref().is_some_and(|(_, wrapped)| *wrapped);
+    let builder = client
+        .post(&profile.endpoint_id)
+        .header(reqwest::header::AUTHORIZATION, bearer);
+    acquire(builder, body, request, control, |bytes, request_bytes| {
+        let (text, model, id, usage) = openai_compatible_envelope(bytes)?;
+        // A wrapped root yields the model's exact inner bytes for host validation.
+        let text = if wrapped {
+            request_wire::openai_cloud_unwrap(&text)
+                .ok_or_else(|| rejected(FailureCode::InvalidResponse))?
+        } else {
+            text
+        };
+        finish(text, model, id, usage, request, request_bytes, bytes.len())
+    })
 }
 
 pub(super) fn complete_anthropic(
