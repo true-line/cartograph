@@ -1167,6 +1167,7 @@ fn investigation_provider_failure_codes_preserve_terminal_semantics_and_bounds()
         (FailureCode::UnsupportedEncoding, Stop::ProviderFailure),
         (FailureCode::InvalidResponse, Stop::ProviderFailure),
         (FailureCode::IncompleteResponse, Stop::ProviderFailure),
+        (FailureCode::OutputLimitReached, Stop::ProviderFailure),
         (FailureCode::Refused, Stop::ProviderFailure),
         (FailureCode::EmptyCompletion, Stop::ProviderFailure),
     ];
@@ -1201,7 +1202,7 @@ fn investigation_provider_failure_codes_preserve_terminal_semantics_and_bounds()
             messages.insert(reason.test_message());
         }
     }
-    assert_eq!(messages.len(), 44);
+    assert_eq!(messages.len(), 46);
     let host = Failure::Host(HostError::LimitExceeded).reason().unwrap();
     let store = Failure::Store(InvestigationStoreError::Capacity)
         .reason()

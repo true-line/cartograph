@@ -129,6 +129,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 llm::bounded::FailureCode::UnsupportedEncoding
                 | llm::bounded::FailureCode::InvalidResponse
                 | llm::bounded::FailureCode::IncompleteResponse
+                | llm::bounded::FailureCode::OutputLimitReached
                 | llm::bounded::FailureCode::Refused
                 | llm::bounded::FailureCode::EmptyCompletion => {
                     agents::investigation::semantic_audit::AuditFailure::InvalidOutput

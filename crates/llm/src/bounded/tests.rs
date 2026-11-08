@@ -358,19 +358,31 @@ fn bounded_transport_rejects_content_encoding_and_oversized_action_text() {
 
 // AC-0185: a syntactically valid JSON action is still unusable if the provider
 // reports truncation/refusal, a native tool, a malformed envelope or unknown stop.
+// A stop at the output limit is reported distinctly as OutputLimitReached.
 #[test]
 fn bounded_completion_rejects_truncated_refused_and_unknown_envelopes() {
     let mut local: Value = serde_json::from_slice(&ollama_body("{}")).unwrap();
     let mut cloud: Value = serde_json::from_slice(&anthropic_body("{}")).unwrap();
     let mut cases = Vec::new();
     local["done_reason"] = json!("length");
+    cases.push((false, local.clone(), FailureCode::OutputLimitReached));
+    // Precedence: an unfinished stream never claims the output limit.
+    local["done"] = json!(false);
     cases.push((false, local.clone(), FailureCode::IncompleteResponse));
+    local["done"] = json!(true);
     local["done_reason"] = json!("unexpected");
     cases.push((false, local.clone(), FailureCode::IncompleteResponse));
     local["done_reason"] = json!("stop");
     local["message"]["tool_calls"] = json!([{"function":{"name":"shell"}}]);
     cases.push((false, local, FailureCode::InvalidResponse));
     cloud["stop_reason"] = json!("max_tokens");
+    cases.push((true, cloud.clone(), FailureCode::OutputLimitReached));
+    // Precedence: a declared refusal wins over the output limit.
+    cloud["stop_details"] = json!({"type":"refusal","explanation":"PRIVATE SOURCE"});
+    cases.push((true, cloud.clone(), FailureCode::Refused));
+    cloud["stop_details"] = Value::Null;
+    // Any other non-success stop stays Incomplete (AC-0570 diagnostic only).
+    cloud["stop_reason"] = json!("pause_turn");
     cases.push((true, cloud.clone(), FailureCode::IncompleteResponse));
     cloud["stop_reason"] = json!("end_turn");
     cloud["stop_details"] = json!({"type":"refusal","explanation":"PRIVATE SOURCE"});
@@ -931,6 +943,56 @@ fn bounded_cloud_transport_requires_verified_tls_and_hostname() {
     }
 }
 
+// AC-0570: the hosted output allowance is one exact value admitted only by the
+// investigation constructor and stored-record decoding; the general ceiling
+// and every other limit are unchanged.
+#[test]
+fn hosted_output_allowance_is_exact_and_separate_from_the_general_ceiling() {
+    let mut values = CompletionLimits::default().values();
+    values.max_output_tokens = HOSTED_OUTPUT_TOKENS;
+    assert_eq!(
+        CompletionLimits::new(values).unwrap_err().code,
+        FailureCode::InvalidLimits
+    );
+    let hosted = CompletionLimits::for_investigation(values).unwrap();
+    assert_eq!(hosted.values(), values);
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        #[serde(deserialize_with = "deserialize_investigation_limits")]
+        limits: CompletionLimits,
+    }
+    let stored = |values: CompletionLimitValues| {
+        serde_json::from_value::<Stored>(json!({ "limits": values })).map(|s| s.limits)
+    };
+    assert_eq!(stored(values).unwrap(), hosted);
+    // Ordinary decoding keeps the general ceiling.
+    assert!(
+        serde_json::from_value::<CompletionLimits>(serde_json::to_value(values).unwrap()).is_err()
+    );
+    for tokens in [
+        2049,
+        8192,
+        HOSTED_OUTPUT_TOKENS - 1,
+        HOSTED_OUTPUT_TOKENS + 1,
+    ] {
+        values.max_output_tokens = tokens;
+        assert!(
+            CompletionLimits::for_investigation(values).is_err(),
+            "{tokens}"
+        );
+        assert!(stored(values).is_err(), "{tokens}");
+    }
+    values.max_output_tokens = HOSTED_OUTPUT_TOKENS;
+    values.output_text_bytes += 1;
+    assert!(CompletionLimits::for_investigation(values).is_err());
+    values.output_text_bytes -= 1;
+    values.max_output_tokens = 2048;
+    assert_eq!(
+        CompletionLimits::for_investigation(values).unwrap(),
+        CompletionLimits::new(values).unwrap()
+    );
+}
+
 #[test]
 fn bounded_span_limits_require_explicit_capacity_and_reject_excess() {
     // AC-0281: expanded source counts require a validated declaration; the
@@ -1332,7 +1394,15 @@ fn openai_compatible_rejects_truncated_refused_and_unknown_envelopes() {
     };
     case(
         &|b| b["choices"][0]["finish_reason"] = json!("length"),
-        FailureCode::IncompleteResponse,
+        FailureCode::OutputLimitReached,
+    );
+    // Precedence: a refusal wins over the output limit.
+    case(
+        &|b| {
+            b["choices"][0]["finish_reason"] = json!("length");
+            b["choices"][0]["message"]["refusal"] = json!("PRIVATE SOURCE");
+        },
+        FailureCode::Refused,
     );
     case(
         &|b| b["choices"][0]["finish_reason"] = Value::Null,

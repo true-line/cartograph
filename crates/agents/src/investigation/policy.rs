@@ -136,11 +136,33 @@ impl InvestigationPolicy {
         Some(effective)
     }
 
+    /// Freeze the owner-approved hosted Opus output allowance (#1709): every
+    /// call may reserve `llm::bounded::HOSTED_OUTPUT_TOKENS`, and the total
+    /// reservation scales with the unchanged invocation ceiling. Only the
+    /// expanded profile takes it; the caller decides which provider qualifies.
+    pub fn with_hosted_generation(&self) -> Option<Self> {
+        if self.profile != INVESTIGATION_V2_POLICY.profile
+            || self.generated_tokens_per_invocation
+                != INVESTIGATION_V2_POLICY.generated_tokens_per_invocation
+        {
+            return None;
+        }
+        let mut effective = self.clone();
+        effective.generated_tokens_per_invocation = llm::bounded::HOSTED_OUTPUT_TOKENS;
+        effective.generated_token_reservations = self
+            .model_invocations
+            .checked_mul(llm::bounded::HOSTED_OUTPUT_TOKENS)?;
+        Some(effective)
+    }
+
     /// Recover a saved effective policy without consulting current settings.
     /// Static lookup remains exact so existing callers cannot opt in silently.
     pub fn for_effective_limits(limits: &InvestigationLimits) -> Option<Self> {
-        let effective =
+        let mut effective =
             Self::for_profile(&limits.profile)?.with_active_seconds(limits.active_seconds)?;
+        if limits.generated_tokens_per_invocation == llm::bounded::HOSTED_OUTPUT_TOKENS {
+            effective = effective.with_hosted_generation()?;
+        }
         (effective.limits() == *limits).then_some(effective)
     }
 
@@ -241,6 +263,50 @@ mod tests {
             for seconds in [0, 599, 3_601, u64::MAX] {
                 assert!(base.with_active_seconds(seconds).is_none());
             }
+        }
+    }
+    // AC-0570: the hosted output allowance exists only on the expanded profile,
+    // composes with the time override, and is recovered only as exact values.
+    #[test]
+    fn hosted_generation_is_v2_only_and_recovers_exactly() {
+        use llm::bounded::HOSTED_OUTPUT_TOKENS;
+        assert!(INVESTIGATION_V1_POLICY.with_hosted_generation().is_none());
+        for seconds in [600, 1200, 3_600] {
+            let hosted = INVESTIGATION_V2_POLICY
+                .with_active_seconds(seconds)
+                .unwrap()
+                .with_hosted_generation()
+                .unwrap();
+            assert!(hosted.with_hosted_generation().is_none());
+            let saved = hosted.limits();
+            let mut expected = INVESTIGATION_V2_POLICY.limits();
+            expected.active_seconds = seconds;
+            expected.generated_tokens_per_invocation = HOSTED_OUTPUT_TOKENS;
+            expected.generated_token_reservations = 64 * HOSTED_OUTPUT_TOKENS;
+            assert_eq!(saved, expected);
+            assert_eq!(saved.generated_token_reservations, 1_048_576);
+            assert_eq!(
+                InvestigationPolicy::for_effective_limits(&saved)
+                    .unwrap()
+                    .limits(),
+                saved
+            );
+            assert!(InvestigationPolicy::for_limits(&saved).is_none());
+            for (per_call, total) in [
+                (HOSTED_OUTPUT_TOKENS, 131_072),
+                (HOSTED_OUTPUT_TOKENS, 64 * HOSTED_OUTPUT_TOKENS + 1),
+                (8192, 64 * 8192),
+                (2048, 64 * HOSTED_OUTPUT_TOKENS),
+            ] {
+                let mut forged = saved.clone();
+                forged.generated_tokens_per_invocation = per_call;
+                forged.generated_token_reservations = total;
+                assert!(InvestigationPolicy::for_effective_limits(&forged).is_none());
+            }
+            let mut v1 = INVESTIGATION_V1_POLICY.limits();
+            v1.generated_tokens_per_invocation = HOSTED_OUTPUT_TOKENS;
+            v1.generated_token_reservations = 8 * HOSTED_OUTPUT_TOKENS;
+            assert!(InvestigationPolicy::for_effective_limits(&v1).is_none());
         }
     }
     #[test]
