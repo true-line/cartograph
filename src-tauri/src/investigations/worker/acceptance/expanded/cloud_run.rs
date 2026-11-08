@@ -216,13 +216,14 @@ impl Consent {
             "endpoint": expected.endpoint, "authority": AUTHORIZE,
             "step_cap": authorization.step_cap})
         .to_string();
-        // From here on, a failure drops `consent`, which reverts the tier.
-        settings
+        // From here on, a failure drops `consent`, which reverts the tier. The
+        // settings lock is released first, so that revert cannot deadlock.
+        let applied = settings
             .set_enabled(TIER, true)
             .and_then(|_| settings.set_provider(TIER, "cloud"))
-            .and_then(|_| settings.grant_consent(TIER, &disclosure))
-            .map_err(|e| e.to_string())?;
+            .and_then(|_| settings.grant_consent(TIER, &disclosure));
         drop(settings);
+        applied.map_err(|e| e.to_string())?;
         Ok(consent)
     }
 
@@ -234,43 +235,57 @@ impl Consent {
         run: impl FnOnce() -> R,
     ) -> Result<R, String> {
         let stop = Arc::new(AtomicBool::new(false));
-        let approver = {
-            let (handle, id, stop, cap) = (
+        // If `run` panics, `approver` is dropped (stopped and joined) before
+        // `self`, whose Drop then records and applies the revert.
+        let mut approver = {
+            let (handle, id, thread_stop, cap) = (
                 self.handle.clone(),
                 investigation_id.to_owned(),
                 stop.clone(),
                 self.step_cap,
             );
             let log = self.log.clone();
-            std::thread::spawn(move || approve(&handle, &id, cap, &stop, &log))
+            Approver {
+                stop,
+                thread: Some(std::thread::spawn(move || {
+                    approve(&handle, &id, cap, &thread_stop, &log)
+                })),
+            }
         };
         let result = run();
-        stop.store(true, Ordering::SeqCst);
-        let approvals = approver
-            .join()
-            .map_err(|_| "Consent approver panicked.".to_string())
-            .and_then(|approved| approved);
+        let approvals = approver.finish();
         // Revert even when approval failed, so no standing consent survives.
         self.revert(approvals.as_ref().ok().copied())?;
         approvals?;
         Ok(result)
     }
 
-    /// Records the revert durably, then applies it. The revert is applied even
-    /// when recording fails, so a log failure never leaves standing consent;
-    /// the recording error is still returned.
+    /// Durably records the revert request, applies it, then records the
+    /// outcome. The revert is applied even when recording fails, so a log
+    /// failure never leaves standing consent; any recording error is returned.
     fn revert(&mut self, approvals: Option<usize>) -> Result<(), String> {
-        let recorded = locked(&self.log)
-            .record(json!({"event": "tier_reverted_local", "tier": TIER, "approvals": approvals}));
+        let requested = locked(&self.log).record(
+            json!({"event": "tier_revert_requested", "tier": TIER, "approvals": approvals}),
+        );
+        let applied = self.apply_revert();
+        let outcome = locked(&self.log).record(match &applied {
+            Ok(()) => json!({"event": "tier_reverted_local", "tier": TIER}),
+            Err(error) => json!({"event": "tier_revert_failed", "tier": TIER, "error": error}),
+        });
+        if applied.is_ok() {
+            self.reverted = true;
+        }
+        applied.and(requested).and(outcome)
+    }
+
+    fn apply_revert(&self) -> Result<(), String> {
         let state = self.handle.state::<crate::AppState>();
         let mut settings = state.settings.lock().map_err(|_| "Settings unavailable.")?;
         // Switching to local also revokes the standing consent.
         settings
             .set_provider(TIER, "local")
             .and_then(|_| settings.set_enabled(TIER, self.prior_enabled))
-            .map_err(|e| e.to_string())?;
-        self.reverted = true;
-        recorded
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -278,6 +293,32 @@ impl Drop for Consent {
     fn drop(&mut self) {
         if !self.reverted {
             let _ = self.revert(None);
+        }
+    }
+}
+
+/// The approver thread. It is stopped and joined on every exit, including
+/// unwinding from a panic in the run it accompanies.
+struct Approver {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Result<usize, String>>>,
+}
+
+impl Approver {
+    fn finish(&mut self) -> Result<usize, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        self.thread
+            .take()
+            .ok_or("Consent approver already finished.")?
+            .join()
+            .map_err(|_| "Consent approver panicked.".to_string())?
+    }
+}
+
+impl Drop for Approver {
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            let _ = self.finish();
         }
     }
 }
@@ -629,45 +670,127 @@ mod tests {
                     if cap < 3 {
                         want.push("step_declined_cap");
                     }
-                    want.push("tier_reverted_local");
+                    want.extend(["tier_revert_requested", "tier_reverted_local"]);
                     assert_eq!(kinds, want);
                     for event in events.iter().filter(|e| e["event"] == "step_approved") {
                         assert_eq!(event["payload_hash"].as_str().unwrap().len(), 64);
                         assert!(event["payload_bytes"].as_u64().unwrap() > 0);
                         assert_eq!(event["provider_id"], "anthropic:claude-opus-5-5");
                     }
-                    assert_eq!(events.last().unwrap()["approvals"], approvals);
-                    // Cleanup through Drop records the revert before applying it.
-                    let dropped = app_data.join(format!("dropped-{cap}.jsonl"));
-                    drop(
-                        Consent::grant(
-                            handle,
-                            &expected,
-                            &Authorization { step_cap: cap },
-                            &dropped,
-                        )
-                        .unwrap(),
-                    );
-                    let after = t3(handle);
-                    assert_eq!(
-                        (after.provider.as_str(), after.consented, after.enabled),
-                        ("local", false, before.enabled)
-                    );
-                    let events: Vec<Value> = std::fs::read_to_string(&dropped)
-                        .unwrap()
-                        .lines()
-                        .map(|line| serde_json::from_str(line).unwrap())
-                        .collect();
-                    assert_eq!(
-                        events
-                            .iter()
-                            .map(|e| e["event"].as_str().unwrap())
-                            .collect::<Vec<_>>(),
-                        ["tier_consent_granted", "tier_reverted_local"]
-                    );
-                    assert!(events[1]["approvals"].is_null());
+                    assert_eq!(events[events.len() - 2]["approvals"], approvals);
+                    if cap == 2 {
+                        cleanup_paths_record_and_restore(handle, &expected, app_data);
+                    }
                 },
             );
+        }
+    }
+
+    fn logged(path: &Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Every exceptional exit records the revert request before applying it,
+    /// its outcome after, and leaves T3 local with its prior enabled flag.
+    fn assert_cleaned_up(
+        handle: &tauri::AppHandle<tauri::test::MockRuntime>,
+        log: &Path,
+        enabled: bool,
+    ) {
+        let after = t3(handle);
+        assert_eq!(
+            (after.provider.as_str(), after.consented, after.enabled),
+            ("local", false, enabled)
+        );
+        let events = logged(log);
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["event"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "tier_consent_granted",
+                "tier_revert_requested",
+                "tier_reverted_local"
+            ]
+        );
+        assert!(events[1]["approvals"].is_null());
+    }
+
+    // AC-0569 / #1709 review: cleanup through Drop, a panicking run and a
+    // settings write failing at each grant step all record and restore,
+    // without deadlocking on the settings lock.
+    fn cleanup_paths_record_and_restore(
+        handle: &tauri::AppHandle<tauri::test::MockRuntime>,
+        expected: &InvestigationProvider,
+        app_data: &Path,
+    ) {
+        let auth = Authorization { step_cap: 1 };
+        let enabled = t3(handle).enabled;
+        let dropped = app_data.join("dropped.jsonl");
+        drop(Consent::grant(handle, expected, &auth, &dropped).unwrap());
+        assert_cleaned_up(handle, &dropped, enabled);
+
+        let panicked = app_data.join("panicked.jsonl");
+        let consent = Consent::grant(handle, expected, &auth, &panicked).unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            consent.approve_while("no-such-investigation", || panic!("injected run panic"))
+        }));
+        assert!(unwound.is_err());
+        assert_cleaned_up(handle, &panicked, enabled);
+
+        let settings = |sql: &str| {
+            let state = handle.state::<crate::AppState>();
+            state
+                .settings
+                .lock()
+                .unwrap()
+                .execute_batch_for_test(sql)
+                .unwrap();
+        };
+        // The enabled step only writes when T3 starts disabled.
+        handle
+            .state::<crate::AppState>()
+            .settings
+            .lock()
+            .unwrap()
+            .set_enabled(TIER, false)
+            .unwrap();
+        for (step, when) in [
+            ("enabled", "NEW.enabled <> OLD.enabled"),
+            ("provider", "NEW.provider = 'cloud'"),
+            ("consent", "NEW.consented = 1"),
+        ] {
+            settings(&format!(
+                "CREATE TEMP TRIGGER fail_grant BEFORE UPDATE ON tier_settings \
+                 WHEN NEW.tier = '{TIER}' AND {when} \
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+            ));
+            let log = app_data.join(format!("failed-{step}.jsonl"));
+            let (sent, received) = std::sync::mpsc::channel();
+            let (thread_handle, thread_expected, thread_log) =
+                (handle.clone(), expected.clone(), log.clone());
+            std::thread::spawn(move || {
+                let granted = Consent::grant(
+                    &thread_handle,
+                    &thread_expected,
+                    &Authorization { step_cap: 1 },
+                    &thread_log,
+                );
+                let _ = sent.send(granted.is_err());
+            });
+            assert!(
+                received
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap_or_else(|_| panic!("grant cleanup hung at {step}")),
+                "{step}"
+            );
+            settings("DROP TRIGGER fail_grant;");
+            assert_cleaned_up(handle, &log, false);
         }
     }
 }
