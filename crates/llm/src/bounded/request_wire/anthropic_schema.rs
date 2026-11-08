@@ -107,6 +107,7 @@ fn inline(value: &Value, root: &Value, at_root: bool, budget: &mut usize) -> Opt
                     "$defs" | "definitions" => return None,
                     // Literal payloads are data, never schemas: copied verbatim.
                     "const" | "enum" | "default" | "required" | "type" => child.clone(),
+                    "anyOf" => Value::Array(alternatives(child.as_array()?, root, budget)?),
                     "properties" => Value::Object(
                         child
                             .as_object()?
@@ -128,6 +129,90 @@ fn inline(value: &Value, root: &Value, at_root: bool, budget: &mut usize) -> Opt
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),
         other => Some(other.clone()),
+    }
+}
+
+/// Projects `anyOf` alternatives. Structured literal branches (exact
+/// acquisition choices) that share one shape are merged into a single closed
+/// schema whose varying scalar leaves become `enum`s. One compiled object per
+/// shape keeps large menus within the API's grammar limit (owner preflight:
+/// "The compiled grammar is too large" on a 21-choice menu); when only one leaf
+/// varies, as in shipped menus, the merge admits exactly the original choices.
+/// Wider merges admit combinations the host's validation still rejects.
+fn alternatives(items: &[Value], root: &Value, budget: &mut usize) -> Option<Vec<Value>> {
+    let mut groups: Vec<(Value, Vec<&Value>)> = Vec::new();
+    let mut others = Vec::new();
+    for item in items {
+        match item.as_object() {
+            Some(map) if map.len() == 1 && map.get("const").is_some_and(|v| !scalar(v)) => {
+                let literal = &map["const"];
+                let shape = shape(literal);
+                match groups.iter_mut().find(|(key, _)| *key == shape) {
+                    Some((_, members)) => members.push(literal),
+                    None => groups.push((shape, vec![literal])),
+                }
+            }
+            _ => others.push(inline(item, root, false, budget)?),
+        }
+    }
+    let mut out = Vec::new();
+    for (_, members) in groups {
+        out.push(merged(&members, budget)?);
+    }
+    out.extend(others);
+    Some(out)
+}
+
+/// Literals merge only when objects have the same keys at every level and
+/// arrays are identical; scalar leaves of any value share a shape.
+fn shape(literal: &Value) -> Value {
+    match literal {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), shape(value)))
+                .collect(),
+        ),
+        Value::Array(_) => literal.clone(),
+        _ => Value::Null,
+    }
+}
+
+/// The closed schema for same-shaped literals: shared leaves stay `const`,
+/// varying scalar leaves become an `enum` of their distinct values in order.
+fn merged(members: &[&Value], budget: &mut usize) -> Option<Value> {
+    let first = *members.first()?;
+    if members.len() == 1 || first.is_array() {
+        return literal_schema(first, budget);
+    }
+    *budget = budget.checked_sub(1)?;
+    match first {
+        Value::Object(fields) => {
+            let mut properties = Map::new();
+            for name in fields.keys() {
+                let column: Vec<&Value> = members.iter().map(|m| &m[name.as_str()]).collect();
+                properties.insert(name.clone(), merged(&column, budget)?);
+            }
+            Some(serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": fields.keys().cloned().collect::<Vec<_>>(),
+                "properties": properties,
+            }))
+        }
+        _ => {
+            let mut values: Vec<Value> = Vec::new();
+            for member in members {
+                if !values.contains(member) {
+                    values.push((*member).clone());
+                }
+            }
+            Some(if values.len() == 1 {
+                serde_json::json!({ "const": values.remove(0) })
+            } else {
+                serde_json::json!({ "enum": values })
+            })
+        }
     }
 }
 
@@ -405,6 +490,32 @@ mod tests {
                     "labels": {"type": "array", "items": {"type": "null"}}}}]})
         );
         assert_eq!(project(r#"{"const":{"a":1},"description":"x"}"#), None);
+        // Same-shaped exact choices compile as one object per shape: the only
+        // varying leaf becomes an enum, so exactly the original choices pass.
+        let menu = json!({"enum": [
+            {"type": "query", "scope": {"id": "a"}, "labels": []},
+            {"type": "query", "scope": {"id": "b"}, "labels": []},
+            {"type": "read", "fact": "f"},
+            "plain"
+        ]});
+        assert_eq!(
+            project(&menu.to_string()).unwrap(),
+            json!({"anyOf": [
+                {"type": "object", "additionalProperties": false,
+                 "required": ["labels", "scope", "type"],
+                 "properties": {
+                    "labels": {"type": "array", "items": {"type": "null"}},
+                    "scope": {"type": "object", "additionalProperties": false,
+                              "required": ["id"], "properties": {"id": {"enum": ["a", "b"]}}},
+                    "type": {"const": "query"}}},
+                {"type": "object", "additionalProperties": false, "required": ["fact", "type"],
+                 "properties": {"fact": {"const": "f"}, "type": {"const": "read"}}},
+                {"const": "plain"}
+            ]})
+        );
+        // Different arrays never merge.
+        let wire = project(r#"{"enum":[{"l":[]},{"l":["x"]}]}"#).unwrap();
+        assert_eq!(wire["anyOf"].as_array().unwrap().len(), 2);
         // The OpenAI starting form keeps structured `const` unchanged.
         assert_eq!(
             super::relaxed(&json!({"enum": [action.clone()]}).to_string()).unwrap(),
