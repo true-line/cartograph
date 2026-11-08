@@ -23,11 +23,15 @@ export const CreateAndSave: Story = {
     await userEvent.click(c.getByRole('button', { name: 'Add service' }));
     await userEvent.type(c.getByLabelText('Service name 1'), 'api');
     await userEvent.selectOptions(c.getByLabelText('Service repository 1'), '../api');
-    await userEvent.type(c.getByLabelText('Service base URLs 1 (one per line)'), 'https://api.example.test');
+    const urls = ' https://api.example.test  \n\n  https://backup.example.test \n';
+    await userEvent.type(c.getByLabelText('Service base URLs 1 (one per line)'), urls);
+    await expect(c.getByLabelText('Service base URLs 1 (one per line)')).toHaveValue(urls);
     await userEvent.click(c.getByRole('button', { name: 'Preview manifest' }));
-    await expect(args.preview).toHaveBeenCalledWith({ repos: [{ url: '../api' }], env: [{ key: 'SETTINGS.apiUrl', value: 'https://api.example.test' }], services: [{ name: 'api', repo: '../api', base_urls: ['https://api.example.test'] }], gateway_routes: [] });
+    await expect(args.preview).toHaveBeenCalledWith({ repos: [{ url: '../api' }], env: [{ key: 'SETTINGS.apiUrl', value: 'https://api.example.test' }], services: [{ name: 'api', repo: '../api', base_urls: ['https://api.example.test', 'https://backup.example.test'] }], gateway_routes: [] });
     await c.findByLabelText('Manifest preview');
     await userEvent.click(c.getByRole('button', { name: 'Save new manifest' }));
+    await expect(args.save).toHaveBeenCalledWith(args.preview.mock.calls.at(-1)?.[0]);
+    await expect(c.getByLabelText('Service base URLs 1 (one per line)')).toHaveValue(urls);
     await expect(args.onSaved).toHaveBeenCalledWith('/new/cartograph.system.toml');
   },
 };

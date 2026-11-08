@@ -27,15 +27,24 @@ export function ManifestGuide({ preview, save, onSaved }: ManifestGuideProps) {
     if (running.current) return;
     running.current = true;
     setBusy(true); setMessage('');
+    // Keep editing text intact so Enter can start the next URL; normalize only
+    // the submitted draft shared by preview and save (AC-0002).
+    const submitted = {
+      ...draft,
+      services: draft.services.map(service => ({
+        ...service,
+        base_urls: service.base_urls.map(url => url.trim()).filter(url => url.length > 0),
+      })),
+    };
     try {
       if (saving) {
-        const path = await save(draft);
+        const path = await save(submitted);
         if (!alive.current) return;
         if (path === null) setMessage('Save cancelled. Your draft is still here.');
         else if (typeof path !== 'string' || path.length === 0) { throw new Error('Save did not return a file path.'); }
         else { onSaved(path); setMessage('Manifest saved and selected. Close the guide, review the target, then run Preflight when ready.'); }
       } else {
-        const rendered = await preview(draft);
+        const rendered = await preview(submitted);
         if (typeof rendered !== 'string' || rendered.length === 0) throw new Error('Preview did not return a manifest.');
         if (alive.current) setText(rendered);
       }
