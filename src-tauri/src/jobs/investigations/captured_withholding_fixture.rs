@@ -102,7 +102,7 @@ impl CapturedSourceInvocationFixture {
             usage.active_milliseconds += 1;
             let current = InvestigationInput::prepare_v9_with_policy(
                 &self.inner.request.question,
-                SpecialistId::DomainAnalystV25,
+                snapshot.detail().summary.specialist_id,
                 snapshot.ledger().clone(),
                 &pages.iter().map(String::as_str).collect::<Vec<_>>(),
                 evidence,
@@ -167,6 +167,12 @@ impl CapturedSourceInvocationFixture {
             let good = json!({"claim_kind":"inferred_interpretation","title":"Selected evidence",
                 "statement":"The selected material provides a bounded implementation view.","citation_ids":[citation],
                 "limitations":["Only selected material was considered."]});
+            // AC-0566: preserve the r6-shaped @25 bare limitation through live
+            // admission and saved-result reopen; @26 uses ordinary survivor prose.
+            let mut good = good;
+            if snapshot.detail().summary.specialist_id == SpecialistId::DomainAnalystV25 {
+                good["limitations"] = json!(["statement"]);
+            }
             let bad = json!({"claim_kind":"inferred_interpretation","title":"Default MissingStrategy",
                 "statement":"MissingStrategy controls this behavior.","citation_ids":[citation],
                 "limitations":["Only selected material was considered."]});
@@ -402,6 +408,19 @@ impl CapturedSourceInvocationFixture {
                     reopened.investigation_result(self.id()).unwrap().unwrap(),
                     result
                 );
+                assert_eq!(
+                    serde_json::to_vec(&reopened.investigation_result(self.id()).unwrap().unwrap())
+                        .unwrap(),
+                    serde_json::to_vec(&result).unwrap(),
+                );
+                if detail.summary.specialist_id == SpecialistId::DomainAnalystV25 {
+                    assert!(
+                        result
+                            .findings
+                            .iter()
+                            .any(|f| f.limitations.iter().any(|v| v == "statement"))
+                    );
+                }
                 // Development projection authenticates both refusal and final sidecar.
                 let projected = reopened
                     .investigation_refusal_diagnostics(self.id())

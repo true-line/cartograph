@@ -108,6 +108,15 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
     collect_role(authority, "analyst")
 }
 fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "domain-analyst@26" || saved == SpecialistId::DomainAnalystV26 {
+        if frozen != "domain-analyst@26"
+            || saved != SpecialistId::DomainAnalystV26
+            || role != "analyst"
+        {
+            return Err("Finding withholding receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist26-prompt14-disclosure6-result7");
+    }
     if frozen == "domain-analyst@25" || saved == SpecialistId::DomainAnalystV25 {
         if frozen != "domain-analyst@25"
             || saved != SpecialistId::DomainAnalystV25
@@ -559,7 +568,19 @@ mod tests {
             .unwrap(),
             "request7-specialist25-prompt14-disclosure6-result7"
         );
+        assert_eq!(
+            receipt_family(
+                "domain-analyst@26",
+                SpecialistId::DomainAnalystV26,
+                "analyst"
+            )
+            .unwrap(),
+            "request7-specialist26-prompt14-disclosure6-result7"
+        );
         for (frozen, saved, role) in [
+            ("domain-analyst@26", "domain-analyst@25", "analyst"),
+            ("domain-analyst@25", "domain-analyst@26", "analyst"),
+            ("domain-analyst@26", "domain-analyst@26", "auditor"),
             ("domain-analyst@25", "domain-analyst@24", "analyst"),
             ("domain-analyst@24", "domain-analyst@25", "analyst"),
             ("domain-analyst@25", "domain-analyst@25", "auditor"),

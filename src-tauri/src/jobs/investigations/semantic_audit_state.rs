@@ -425,8 +425,10 @@ impl StoredSemanticAudit {
                     .is_none_or(|c| match c.outcome {
                         CompletionOutcome::Supported => c.withholding.is_some(),
                         CompletionOutcome::FindingsWithheldAfterCorrection => {
-                            task.detail.summary.specialist_id != SpecialistId::DomainAnalystV25
-                                || c.withholding.is_none()
+                            !matches!(
+                                task.detail.summary.specialist_id,
+                                SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+                            ) || c.withholding.is_none()
                         }
                         _ => true,
                     })

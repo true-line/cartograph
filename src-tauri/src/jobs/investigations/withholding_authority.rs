@@ -13,7 +13,10 @@ pub(super) fn validate(
     else {
         return Ok(());
     };
-    if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV25 {
+    if !matches!(
+        task.detail.summary.specialist_id,
+        SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+    ) {
         return Err(InvestigationStoreError::Invalid);
     }
     witness.validate_shape()?;
