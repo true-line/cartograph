@@ -52,7 +52,8 @@ impl ClaudeLane {
             // convenience pointers, and a pinned lane must not change model
             // behind a stable identity (review fix on #131).
             Self::Haiku => "claude-haiku-4-5-20251001",
-            Self::Opus => "claude-opus-4-8",
+            // #1709: re-pinned for the v1 frontier track (owner decision 2026-11-07).
+            Self::Opus => "claude-opus-5-5",
             Self::Fable => "claude-fable-5",
         }
     }
@@ -61,7 +62,7 @@ impl ClaudeLane {
     pub fn usd_per_mtok(self) -> (f64, f64) {
         match self {
             Self::Haiku => (1.0, 5.0),
-            Self::Opus => (5.0, 25.0),
+            Self::Opus => (4.0, 20.0),
             Self::Fable => (10.0, 50.0),
         }
     }
@@ -86,7 +87,7 @@ pub fn disclosure(lane: ClaudeLane) -> CloudDisclosure {
     let mut notes = vec!["payload is the exact redacted span set shown by the egress firewall"];
     if lane == ClaudeLane::Fable {
         notes.push("requires 30-day data retention on the Anthropic organization");
-        notes.push("safety refusals fall back server-side to claude-opus-4-8");
+        notes.push("safety refusals fall back server-side to claude-opus-5-5");
     }
     CloudDisclosure {
         provider: "Anthropic",
@@ -365,7 +366,7 @@ mod tests {
 
         let raw = server.join().unwrap();
         // Pinned model, auth header, and the exact consented span text.
-        assert!(raw.contains("claude-opus-4-8"));
+        assert!(raw.contains("claude-opus-5-5"));
         assert!(raw.contains("x-api-key: sk-test"));
         assert!(raw.contains("queueUrl = env.ORDERS"));
         // Opus lane sends no fallback beta.
@@ -403,7 +404,7 @@ mod tests {
         // The beta opt-in travels as a header — `fallbacks` in the body is
         // rejected without it.
         assert!(raw.contains(&format!("anthropic-beta: {FALLBACK_BETA}")));
-        assert!(raw.contains("claude-opus-4-8")); // fallback target in body
+        assert!(raw.contains("claude-opus-5-5")); // fallback target in body
         assert!(!raw.contains("\"betas\"")); // never a body field
         assert!(!raw.contains("\"thinking\"")); // always-on: param omitted
     }

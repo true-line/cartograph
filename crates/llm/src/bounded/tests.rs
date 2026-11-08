@@ -2020,3 +2020,108 @@ fn semantic_audit_limits_preserve_historical_reservations() {
         );
     }
 }
+
+fn openai_cloud(endpoint: &str, key: &str) -> crate::openai::OpenAiProvider {
+    crate::openai::OpenAiProvider::with_endpoint(
+        "gpt-fixture",
+        key,
+        format!("{endpoint}v1/chat/completions"),
+    )
+    .unwrap()
+}
+
+fn authorize_schema(provider: &dyn LlmProvider, schema: &str) -> AuthorizedBoundedCompletion {
+    let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]));
+    let mut selected = action();
+    selected.payload.response_schema = Some(schema.into());
+    let prepared = firewall
+        .prepare_bounded(provider, &selected, &CompletionLimits::default())
+        .unwrap();
+    let grant = ConsentGrant::from_preview(&prepared.preview().egress);
+    firewall
+        .authorize_bounded(provider, &prepared, Some(&grant))
+        .unwrap()
+}
+
+// AC-0567 / #1709: hosted OpenAI gets bearer auth, store:false, a reasoning-safe
+// output bound and the wrapped strict schema; the host receives the exact inner
+// bytes for full-schema validation.
+#[test]
+fn openai_cloud_bounded_wraps_schema_and_returns_inner_bytes() {
+    const STRICT: &str = r#"{"anyOf":[{"type":"object","properties":{"type":{"enum":["query_context","read_evidence"]}},"required":["type"],"additionalProperties":false}]}"#;
+    let inner = r#"{"type" : "query_context"}"#;
+    let body = openai_body(&format!(r#"{{"response":{inner}}}"#));
+    let (endpoint, server) = http(framed(&body));
+    let provider = openai_cloud(&endpoint, "fixture-key");
+    assert_eq!(provider.locality(), Locality::Cloud);
+    assert_eq!(provider.id(), "openai:gpt-fixture");
+    let output = provider
+        .complete_bounded(&authorize_schema(&provider, STRICT), &control())
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.headers.starts_with("POST /v1/chat/completions "));
+    assert!(
+        request
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer fixture-key")
+    );
+    let wire: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(wire["store"], false);
+    assert_eq!(wire["stream"], false);
+    assert_eq!(wire["model"], "gpt-fixture");
+    assert!(wire.get("max_tokens").is_none());
+    assert!(wire["max_completion_tokens"].as_u64().unwrap() > 0);
+    assert!(wire.get("chat_template_kwargs").is_none());
+    assert_eq!(wire["response_format"]["type"], "json_schema");
+    assert_eq!(wire["response_format"]["json_schema"]["strict"], true);
+    assert_eq!(
+        wire["response_format"]["json_schema"]["schema"]["required"],
+        json!(["response"])
+    );
+    assert_eq!(output.text, inner);
+    assert_eq!(output.request_bytes, request.body.len() as u64);
+    assert_eq!(output.response_bytes, body.len() as u64);
+}
+
+// AC-0567 / #1709: a wrong envelope, a refusal, an unusable key or an
+// unrepresentable schema never becomes a completion.
+#[test]
+fn openai_cloud_bounded_fails_closed() {
+    const STRICT: &str = r#"{"anyOf":[{"type":"object","properties":{"type":{"const":"x"}},"required":["type"],"additionalProperties":false}]}"#;
+    let (endpoint, server) = http(framed(&openai_body(r#"{"type":"x"}"#)));
+    let provider = openai_cloud(&endpoint, "fixture-key");
+    let error = provider
+        .complete_bounded(&authorize_schema(&provider, STRICT), &control())
+        .unwrap_err();
+    assert_eq!(error.code, FailureCode::InvalidResponse);
+    server.join().unwrap();
+
+    let mut refused: Value = serde_json::from_slice(&openai_body("")).unwrap();
+    refused["choices"][0]["message"]["refusal"] = json!("no");
+    let (endpoint, server) = http(framed(&serde_json::to_vec(&refused).unwrap()));
+    let provider = openai_cloud(&endpoint, "fixture-key");
+    let error = provider
+        .complete_bounded(&authorize_schema(&provider, STRICT), &control())
+        .unwrap_err();
+    assert_eq!(error.code, FailureCode::Refused);
+    server.join().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    for key in ["", "bad\nkey"] {
+        let provider = openai_cloud(&endpoint, key);
+        let error = provider
+            .complete_bounded(&authorize_schema(&provider, STRICT), &control())
+            .unwrap_err();
+        assert_eq!(error.code, FailureCode::InvalidProfile, "{key:?}");
+    }
+    // `RESPONSE_SCHEMA` holds an open `{"type":"object"}`, which strict mode
+    // cannot represent.
+    let provider = openai_cloud(&endpoint, "fixture-key");
+    let error = provider
+        .complete_bounded(&authorize_schema(&provider, RESPONSE_SCHEMA), &control())
+        .unwrap_err();
+    assert_eq!(error.code, FailureCode::Unsupported);
+    assert_no_request(&listener);
+}

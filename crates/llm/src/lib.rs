@@ -10,6 +10,7 @@ pub mod anthropic;
 pub mod bounded;
 pub mod catalog;
 pub mod debug_log;
+pub mod openai;
 pub mod openai_compatible;
 
 use reqwest::Url;

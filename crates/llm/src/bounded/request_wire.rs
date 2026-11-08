@@ -3,8 +3,12 @@
 use serde::Serialize;
 
 mod anthropic_schema;
+mod openai_cloud_schema;
 mod openai_schema;
 pub(super) use anthropic_schema::project as anthropic_schema;
+pub(super) use openai_cloud_schema::{
+    project as openai_cloud_schema, unwrap as openai_cloud_unwrap,
+};
 pub(super) use openai_schema::OpenAiSchemaFormatter;
 
 #[derive(Serialize)]
@@ -180,6 +184,72 @@ pub(super) fn openai_compatible<'a>(
                 schema,
             }),
         },
+        stream: false,
+    }
+}
+
+#[derive(Serialize)]
+struct CloudJsonSchema<'a> {
+    name: &'static str,
+    schema: &'a serde_json::Value,
+    strict: bool,
+}
+
+#[derive(Serialize)]
+struct CloudResponseFormat<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<CloudJsonSchema<'a>>,
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiCloud<'a> {
+    // Reasoning models reject `max_tokens`; this bound covers reasoning too.
+    max_completion_tokens: u32,
+    messages: [Message<'a>; 2],
+    model: &'a str,
+    response_format: CloudResponseFormat<'a>,
+    // Completions are never retained for later retrieval or distillation.
+    store: bool,
+    stream: bool,
+}
+
+/// Hosted OpenAI Chat Completions. `schema` must already be the
+/// [`openai_cloud_schema`] wire projection.
+pub(super) fn openai_cloud<'a>(
+    model: &'a str,
+    system: &'a str,
+    user: &'a str,
+    max_tokens: u32,
+    schema: Option<&'a serde_json::Value>,
+) -> impl Serialize + 'a {
+    OpenAiCloud {
+        max_completion_tokens: max_tokens,
+        messages: [
+            Message {
+                content: system,
+                role: "system",
+            },
+            Message {
+                content: user,
+                role: "user",
+            },
+        ],
+        model,
+        response_format: CloudResponseFormat {
+            json_schema: schema.map(|schema| CloudJsonSchema {
+                name: "cartograph_bounded_response",
+                schema,
+                strict: true,
+            }),
+            kind: if schema.is_some() {
+                "json_schema"
+            } else {
+                "json_object"
+            },
+        },
+        store: false,
         stream: false,
     }
 }

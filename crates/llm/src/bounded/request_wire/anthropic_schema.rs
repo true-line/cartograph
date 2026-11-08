@@ -202,7 +202,7 @@ mod tests {
     use super::project;
     use serde_json::json;
 
-    // AC-0185 / #1709: constraints the API rejects are relaxed on the wire only.
+    // AC-0568 / #1709: constraints the API rejects are relaxed on the wire only.
     #[test]
     fn relaxes_rejected_constraints_and_keeps_structure() {
         let wire = project(
@@ -241,7 +241,7 @@ mod tests {
         );
     }
 
-    // AC-0185 / #1709: structured enum members (acquisition actions) become exact const
+    // AC-0568 / #1709: structured enum members (acquisition actions) become exact const
     // branches; scalar enums are unchanged.
     #[test]
     fn structured_enum_members_become_const_branches() {
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(project(r#"{"enum":[{}],"anyOf":[]}"#), None);
     }
 
-    // AC-0185 / #1709: unknown or unrepresentable forms fail closed; nothing is guessed.
+    // AC-0568 / #1709: unknown or unrepresentable forms fail closed; nothing is guessed.
     #[test]
     fn unsupported_forms_fail_closed() {
         for schema in [
@@ -281,7 +281,7 @@ mod tests {
         }
     }
 
-    // AC-0185 / #1709: local acyclic references, including shared targets, pass.
+    // AC-0568 / #1709: local acyclic references, including shared targets, pass.
     #[test]
     fn local_acyclic_references_project() {
         let schema = r##"{"anyOf":[{"$ref":"#/$defs/a"},{"$ref":"#/$defs/b"}],
@@ -290,7 +290,7 @@ mod tests {
         assert!(project(schema).is_some());
     }
 
-    // AC-0185 / #1709: the shipped analyst schemas project without loss of structure.
+    // AC-0568 / #1709: the shipped analyst schemas project without loss of structure.
     #[test]
     fn analyst_schemas_project() {
         for schema in [
