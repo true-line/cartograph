@@ -19,6 +19,22 @@ pub(in super::super) fn use_task(
     expected: &Definition,
     execute: bool,
 ) -> Result<Value, String> {
+    let env = |name: &str| std::env::var(name).ok();
+    use_task_with_env(
+        profile, request, id, manifest, output, expected, execute, &env,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn use_task_with_env(
+    profile: (&tauri::App<tauri::test::MockRuntime>, &Path),
+    request: &StagedObligationRequest,
+    id: &str,
+    manifest: &Value,
+    output: &Path,
+    expected: &Definition,
+    execute: bool,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Value, String> {
     let (app, app_data) = profile;
     let hash = core_prov::content_hash(&serde_json::to_vec(manifest).map_err(|e| e.to_string())?);
     let authority = analyst::Authority {
@@ -34,7 +50,7 @@ pub(in super::super) fn use_task(
         let provider = match expected.provider.mode {
             // Keys come only from the owner-run process environment.
             InvestigationProviderMode::Cloud => {
-                super::cloud_run::provider(&expected.provider, |name| std::env::var(name).ok())?
+                super::cloud_run::provider(&expected.provider, env)?
             }
             InvestigationProviderMode::Local => app
                 .state::<crate::AppState>()
@@ -85,6 +101,31 @@ pub(in super::super) fn with_auditor_output<T>(
 ) -> Result<T, String> {
     let _basis = vendure::reopen_basis(config, preparation, definition, output, policy)?;
     use_output()
+}
+/// The local override applies only to a Local definition. A Cloud definition is
+/// executed by `use_task` through the consented cloud harness, so it must not
+/// require (or read) the local-only protocol, thinking, URL and model variables.
+fn local_execute_provider(
+    execute: bool,
+    expected: &InvestigationProvider,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<std::sync::Arc<dyn llm::LlmProvider>>, String> {
+    if !execute || expected.mode != InvestigationProviderMode::Local {
+        return Ok(None);
+    }
+    let var = |name: &str| {
+        env(name)
+            .filter(|value| !value.trim().is_empty() && value.len() <= 4096)
+            .ok_or_else(|| format!("Set {name}; see MT-H4-02"))
+    };
+    configured_provider(
+        &var("CARTOGRAPH_ACCEPTANCE_PROTOCOL")?,
+        &var("CARTOGRAPH_ACCEPTANCE_THINKING")?,
+        &var("CARTOGRAPH_ACCEPTANCE_URL")?,
+        &var("CARTOGRAPH_ACCEPTANCE_MODEL")?,
+        expected,
+    )
+    .map(Some)
 }
 // Same explicit loopback constructor as the existing manual local acceptance.
 // Construction performs no model call; the frozen descriptor remains authority.
@@ -296,6 +337,76 @@ fn captured_local_thinking_is_explicit_and_bound() {
         }
     }
 }
+// AC-0569 / #1709: a Cloud definition executes through the consented cloud harness;
+// the manual entry must not demand local-only variables before reaching it.
+#[test]
+fn captured_analyst_entry_reads_local_variables_only_for_local_definitions() {
+    let local = InvestigationProvider {
+        mode: InvestigationProviderMode::Local,
+        provider_id: "openai-compatible:explicit-control-model:thinking-disabled".into(),
+        model: "explicit-control-model".into(),
+        endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
+        deployment: None,
+        protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+        available: true,
+        unavailable_reason: None,
+    };
+    let cloud = InvestigationProvider {
+        mode: InvestigationProviderMode::Cloud,
+        provider_id: "anthropic:claude-opus-5-5".into(),
+        model: "claude-opus-5-5".into(),
+        endpoint: "https://api.anthropic.com/v1/messages".into(),
+        ..local.clone()
+    };
+    let read = std::cell::RefCell::new(Vec::new());
+    let empty = |name: &str| {
+        read.borrow_mut().push(name.to_owned());
+        None
+    };
+    assert!(
+        local_execute_provider(true, &cloud, &empty)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        local_execute_provider(false, &cloud, &empty)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        local_execute_provider(false, &local, &empty)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        read.borrow().is_empty(),
+        "no local variable is read off the Local execute path"
+    );
+    let error = local_execute_provider(true, &local, &empty).err().unwrap();
+    assert!(error.contains("CARTOGRAPH_ACCEPTANCE_PROTOCOL"));
+    let configured = |name: &str| {
+        Some(
+            match name {
+                "CARTOGRAPH_ACCEPTANCE_PROTOCOL" => "openai",
+                "CARTOGRAPH_ACCEPTANCE_THINKING" => "disabled",
+                "CARTOGRAPH_ACCEPTANCE_URL" => "http://127.0.0.1:1/",
+                "CARTOGRAPH_ACCEPTANCE_MODEL" => "explicit-control-model",
+                _ => return None,
+            }
+            .to_owned(),
+        )
+    };
+    assert!(
+        local_execute_provider(true, &local, &configured)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        local_execute_provider(true, &cloud, &configured)
+            .unwrap()
+            .is_none()
+    );
+}
 // AC-0429: explicit manual adapter; ordinary tests do not execute a real provider.
 #[test]
 #[ignore = "manual captured-profile local provider; requires independent frozen definition and explicit execute/reopen action"]
@@ -315,22 +426,9 @@ fn vendure_captured_local_analyst() {
         "reopen" => false,
         _ => panic!("explicit execute or reopen required"),
     };
-    let provider = if execute {
-        Some(
-            configured_provider(
-                &super::super::required("CARTOGRAPH_ACCEPTANCE_PROTOCOL"),
-                &super::super::required("CARTOGRAPH_ACCEPTANCE_THINKING"),
-                &super::super::required("CARTOGRAPH_ACCEPTANCE_URL"),
-                &super::super::required("CARTOGRAPH_ACCEPTANCE_MODEL"),
-                &expected.provider,
-            )
-            .unwrap(),
-        )
-    } else {
-        None
-    };
     let output = path("CARTOGRAPH_VENDURE_ANALYST_PREPARATION_OUTPUT");
-    vendure_prepare::reopen_bound(
+    let env = |name: &str| std::env::var(name).ok();
+    analyst_entry(
         [
             &path("CARTOGRAPH_VENDURE_NATIVE_CONFIG"),
             &path("CARTOGRAPH_VENDURE_PREPARATION_RECEIPT"),
@@ -339,24 +437,46 @@ fn vendure_captured_local_analyst() {
         ],
         &expected,
         vendure::InputPolicy::FrozenVendure,
+        execute,
+        &env,
+    )
+    .unwrap();
+}
+/// The manual analyst entry after its action is chosen. A Local definition
+/// needs the explicit local override; a Cloud definition goes straight to the
+/// consented hosted harness in `use_task_with_env` and never reads local
+/// variables.
+pub(in super::super) fn analyst_entry(
+    paths: [&Path; 4],
+    expected: &Definition,
+    policy: vendure::InputPolicy,
+    execute: bool,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Value, String> {
+    let provider = local_execute_provider(execute, &expected.provider, env)?;
+    let output = paths[3];
+    vendure_prepare::reopen_bound(
+        paths,
+        expected,
+        policy,
         |app, request, id, manifest, data| {
             if let Some(provider) = provider {
                 app.state::<crate::AppState>()
                     .investigations
                     .set_test_provider(InvestigationProviderMode::Local, provider);
             }
-            use_task(
+            use_task_with_env(
                 (app, data),
                 request,
                 id,
                 manifest,
-                &output,
-                &expected,
+                output,
+                expected,
                 execute,
+                env,
             )
         },
     )
-    .unwrap();
 }
 
 // AC-0463: the closed action is selected before files or provider construction.

@@ -89,6 +89,113 @@ fn captured_combined_feedback_role_prepares_without_execution() {
 fn captured_withholding_role_prepares_without_execution() {
     captured_case(false, Some("domain-analyst@25"));
 }
+// AC-0569 / #1709: the manual analyst entry dispatches on the frozen provider
+// mode. A Cloud definition reaches the hosted key gate without any local
+// variable, before consent, an attempt marker or a provider call; a Local
+// definition still requires the explicit local override.
+#[test]
+fn captured_analyst_entry_dispatches_cloud_definitions_to_the_hosted_gate() {
+    use super::super::expanded::captured_local;
+    use crate::investigations::worker::tests::completion_tests::expanded_scripted_provider;
+    let hosted = crate::investigations::runtime::descriptor(
+        &llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, "unused")
+            .unwrap(),
+        InvestigationProviderMode::Cloud,
+    )
+    .unwrap();
+    let local = crate::investigations::runtime::descriptor(
+        expanded_scripted_provider(false).as_ref(),
+        InvestigationProviderMode::Local,
+    )
+    .unwrap();
+    let unset = |_: &str| None;
+    let local_only = |name: &str| {
+        match name {
+            "CARTOGRAPH_ACCEPTANCE_PROTOCOL" => Some("openai"),
+            "CARTOGRAPH_ACCEPTANCE_THINKING" => Some("disabled"),
+            "CARTOGRAPH_ACCEPTANCE_URL" => Some("http://127.0.0.1:1/"),
+            "CARTOGRAPH_ACCEPTANCE_MODEL" => Some("explicit-control-model"),
+            _ => None,
+        }
+        .map(str::to_owned)
+    };
+    type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+    let cases: [(InvestigationProvider, Env, &str); 3] = [
+        (hosted.clone(), &unset, "ANTHROPIC_API_KEY is not set."),
+        (hosted, &local_only, "ANTHROPIC_API_KEY is not set."),
+        (
+            local,
+            &unset,
+            "Set CARTOGRAPH_ACCEPTANCE_PROTOCOL; see MT-H4-02",
+        ),
+    ];
+    for (provider, env, error) in cases {
+        let case = Case::new();
+        let prepared = case.prepare().unwrap();
+        let base = case.root.parent().unwrap();
+        let receipt = base.join("preparation.json");
+        let definition_path = base.join("analyst-definition.json");
+        let output = base.join("analyst-output");
+        let bytes = serde_json::to_vec(&prepared).unwrap();
+        std::fs::write(&receipt, &bytes).unwrap();
+        let graph = serde_json::to_value(&prepared.graph).unwrap();
+        let candidate = graph["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| {
+                !c["receipt"]["content"]["ranges"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            })
+            .unwrap();
+        let mut expected = Definition {
+            start_sha256: None,
+            specialist_id: None,
+            binding: super::super::completion::prepare::PreparationBinding {
+                run_id: "captured-entry-test".into(),
+                protocol_hash: "a".repeat(64),
+                source_commit: "b".repeat(40),
+                source_tree: "c".repeat(40),
+            },
+            preparation_sha256: sha(&bytes),
+            provider,
+            selections: vec![Selection {
+                fact: serde_json::from_value(candidate["binding"]["fact"].clone()).unwrap(),
+                graph_snapshot_id: prepared.graph.graph_snapshot_id.clone(),
+                receipt_id: candidate["binding"]["receipt_id"].as_str().unwrap().into(),
+                ordinal: 0,
+            }],
+            question: "What does this selected source establish?".into(),
+            request_nonce: "captured-entry-test-analyst".into(),
+            scope: InvestigationScope::All,
+        };
+        std::fs::write(&definition_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        prepare_bound(
+            &case.config,
+            &receipt,
+            &definition_path,
+            &output,
+            &expected,
+            InputPolicy::OfflineFixture,
+        )
+        .unwrap();
+        expected.start_sha256 = Some(sha(&std::fs::read(output.join("start.json")).unwrap()));
+        let paths = [
+            case.config.as_path(),
+            receipt.as_path(),
+            definition_path.as_path(),
+            output.as_path(),
+        ];
+        let refused =
+            captured_local::analyst_entry(paths, &expected, InputPolicy::OfflineFixture, true, env)
+                .unwrap_err();
+        assert!(refused.contains(error), "{refused}");
+        assert!(!output.join("analyst-attempt.json").exists());
+        assert!(!output.join("analyst-consent-log.jsonl").exists());
+    }
+}
 fn captured_case(execute: bool, specialist: Option<&str>) {
     let case = Case::new();
     let prepared = if execute {

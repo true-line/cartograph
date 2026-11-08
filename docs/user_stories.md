@@ -858,6 +858,7 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Approvals:** each pending step is approved through the app's own consent path, with its exact step, revision and payload-hash check. Past the cap the next step is declined, which cancels the run.
   - **Consent log:** an exclusive append-only `analyst-consent-log.jsonl` durably records the grant, each approval (step, revision, payload hash, payload bytes, redaction count, provider id), the cap decline and the revert, each before it takes effect.
   - **Revert:** on completion, error or a partial grant, T3 reverts to local, which revokes the consent, and its prior enabled flag is restored.
+  - **Entry dispatch:** the manual analyst entry reads the local-only override variables (`CARTOGRAPH_ACCEPTANCE_PROTOCOL`, `_THINKING`, `_URL`, `_MODEL`) only for a Local definition. A hosted definition goes straight to this gate without them.
   - **Unchanged:** Local definitions and their behavior. Unpinned, unavailable or mismatched hosted identities are refused (#1709, owner decision 2026-11-07).
 - **Trace:** H4 · `app` · — · T-0569
 
