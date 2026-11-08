@@ -42,9 +42,80 @@ const VERBATIM: &[&str] = &[
 ];
 
 /// Returns `None` when the schema uses anything the API cannot compile.
+///
+/// The API rejects `$defs` alongside `anyOf` (a 400 seen by the owner's hosted
+/// preflight on every analyst schema), so the wire copy carries no definitions:
+/// each local reference is replaced by its projected definition. References are
+/// proven acyclic first, so inlining terminates, and a node budget bounds the
+/// expansion of shared references.
 pub(crate) fn project(schema: &str) -> Option<Value> {
+    let wire = relaxed(schema)?;
+    let mut budget = INLINE_NODE_BUDGET;
+    let mut inlined = inline(&wire, &wire, true, &mut budget)?;
+    if let Value::Object(map) = &mut inlined {
+        map.remove("$defs");
+        map.remove("definitions");
+    }
+    Some(inlined)
+}
+
+/// The relaxed projection with root definitions and local `$ref`s kept. The
+/// OpenAI strict projection starts from this form.
+pub(super) fn relaxed(schema: &str) -> Option<Value> {
     let wire = node(&serde_json::from_str(schema).ok()?)?;
     references_resolve(&wire).then_some(wire)
+}
+
+/// Upper bound on JSON nodes in an inlined wire schema. The largest shipped
+/// analyst schema needs a small fraction of it; a schema whose shared
+/// references expand past it fails closed instead of growing without bound.
+const INLINE_NODE_BUDGET: usize = 20_000;
+
+/// Replaces every `$ref` with a copy of its (already projected, acyclic) root
+/// definition. A reference with sibling keywords, or definitions anywhere but
+/// the root, fail closed: neither occurs in the shipped schemas and merging them
+/// would be a guess.
+fn inline(value: &Value, root: &Value, at_root: bool, budget: &mut usize) -> Option<Value> {
+    *budget = budget.checked_sub(1)?;
+    match value {
+        Value::Object(map) => {
+            if let Some(reference) = map.get("$ref") {
+                if map.len() != 1 {
+                    return None;
+                }
+                let (definitions, name) =
+                    reference.as_str()?.strip_prefix("#/")?.split_once('/')?;
+                return inline(root.get(definitions)?.get(name)?, root, false, budget);
+            }
+            let mut out = Map::new();
+            for (key, child) in map {
+                let projected = match key.as_str() {
+                    "$defs" | "definitions" if at_root => continue,
+                    "$defs" | "definitions" => return None,
+                    // Literal payloads are data, never schemas: copied verbatim.
+                    "const" | "enum" | "default" | "required" | "type" => child.clone(),
+                    "properties" => Value::Object(
+                        child
+                            .as_object()?
+                            .iter()
+                            .map(|(name, schema)| {
+                                Some((name.clone(), inline(schema, root, false, budget)?))
+                            })
+                            .collect::<Option<Map<_, _>>>()?,
+                    ),
+                    _ => inline(child, root, false, budget)?,
+                };
+                out.insert(key.clone(), projected);
+            }
+            Some(Value::Object(out))
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(|item| inline(item, root, false, budget))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        other => Some(other.clone()),
+    }
 }
 
 /// The API accepts only local, non-recursive references. Every `$ref` must name
@@ -231,8 +302,7 @@ mod tests {
                     "a": {"type": "string", "pattern": "^x"},
                     "b": {"type": "array", "items": {"type": "integer"}},
                     "minLength": {"type": "boolean"}
-                },
-                "$defs": {"c": {"anyOf": [{"const": "x"}, {"const": "y"}]}}
+                }
             })
         );
         assert_eq!(
@@ -287,7 +357,56 @@ mod tests {
         let schema = r##"{"anyOf":[{"$ref":"#/$defs/a"},{"$ref":"#/$defs/b"}],
             "$defs":{"a":{"$ref":"#/$defs/c"},"b":{"$ref":"#/$defs/c"},
                      "c":{"const":{"$ref":"#/$defs/nowhere"}}}}"##;
-        assert!(project(schema).is_some());
+        assert_eq!(
+            project(schema).unwrap(),
+            json!({"anyOf": [
+                {"const": {"$ref": "#/$defs/nowhere"}},
+                {"const": {"$ref": "#/$defs/nowhere"}}
+            ]})
+        );
+    }
+
+    // AC-0568 / #1709: the API rejects `$defs` with `anyOf` (owner hosted
+    // preflight, 400 on all eight analyst schemas). The wire copy inlines every
+    // reference and carries no definitions; forms that would need a guess fail
+    // closed.
+    #[test]
+    fn references_are_inlined_without_definitions() {
+        let schema = r##"{"anyOf":[{"$ref":"#/$defs/finding"},{"type":"null"}],
+            "$defs":{"finding":{"type":"object","additionalProperties":false,"required":["id"],
+                     "properties":{"id":{"type":"string","maxLength":8},"kind":{"$ref":"#/definitions/kind"}}}},
+            "definitions":{"kind":{"enum":["a","b"]}}}"##;
+        assert_eq!(
+            project(schema).unwrap(),
+            json!({"anyOf": [
+                {"type": "object", "additionalProperties": false, "required": ["id"],
+                 "properties": {"id": {"type": "string"}, "kind": {"enum": ["a", "b"]}}},
+                {"type": "null"}
+            ]})
+        );
+        for schema in [
+            r##"{"anyOf":[{"$ref":"#/$defs/a","description":"x"}],"$defs":{"a":{}}}"##,
+            r##"{"anyOf":[{"type":"object","$defs":{"a":{}}}]}"##,
+        ] {
+            assert_eq!(project(schema), None, "{schema}");
+        }
+        // Each level references the next twice: 2^20 leaves exceeds the budget,
+        // while a shallow chain of the same shape stays well inside it.
+        let chain = |depth: usize| {
+            let mut defs = serde_json::Map::new();
+            for level in 0..depth {
+                defs.insert(
+                    format!("d{level}"),
+                    json!({"anyOf": [{"$ref": format!("#/$defs/d{}", level + 1)},
+                                     {"$ref": format!("#/$defs/d{}", level + 1)}]}),
+                );
+            }
+            defs.insert(format!("d{depth}"), json!({"type": "null"}));
+            json!({"anyOf": [{"$ref": "#/$defs/d0"}], "$defs": defs}).to_string()
+        };
+        assert!(project(&chain(6)).is_some());
+        assert_eq!(project(&chain(20)), None);
+        assert!(super::relaxed(&chain(20)).is_some());
     }
 
     // AC-0568 / #1709: the shipped analyst schemas project without loss of structure.
@@ -299,7 +418,10 @@ mod tests {
         ] {
             let wire = project(schema).expect("analyst schema must project");
             let text = wire.to_string();
+            assert!(wire.get("$defs").is_none() && wire.get("definitions").is_none());
             for rejected in [
+                "\"$defs\"",
+                "\"$ref\":\"#/",
                 "minLength",
                 "maxLength",
                 "\"minimum\"",

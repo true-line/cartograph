@@ -1,5 +1,6 @@
 //! Project a bounded response schema onto OpenAI's strict structured-output
-//! subset (#1709). It starts from the Anthropic projection: rejected
+//! subset (#1709). It starts from the relaxed Anthropic projection (references
+//! kept, not inlined): rejected
 //! constraints relaxed, `oneOf` as `anyOf`, structured enum members as `const`
 //! branches, and local acyclic references only. Then it enforces the strict-mode
 //! rules and published limits before sending.
@@ -23,7 +24,7 @@ const MAX_STRING_BYTES: usize = 120_000;
 /// The wire schema and whether its root is wrapped. `None` when strict mode
 /// cannot represent the schema.
 pub(crate) fn project(schema: &str) -> Option<(Value, bool)> {
-    let mut wire = super::anthropic_schema::project(schema)?;
+    let mut wire = super::anthropic_schema::relaxed(schema)?;
     let wrapped = !(wire.get("type") == Some(&json!("object")) && wire.get("anyOf").is_none());
     if wrapped {
         let root = wire.as_object_mut()?;

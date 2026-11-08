@@ -848,7 +848,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Dropped from the wire copy only:** constraints the API rejects, namely string and numeric bounds, `multipleOf`, `maxItems`, `uniqueItems`, and `minItems` above 1.
   - **Rewritten:** `oneOf` becomes `anyOf`, and structured enum members become exact `const` branches.
   - **Constrained:** `additionalProperties` may only be `false`. Every `$ref` must name an existing root `$defs` or `definitions` entry, and reference cycles are refused.
-  - **Refused as Unsupported before sending:** any other keyword, an external, missing or recursive reference, and a conflicting merge.
+  - **Inlined:** the API rejects `$defs` alongside `anyOf`, so the wire copy carries no definitions. Each local reference is replaced by its projected definition, and unreferenced definitions are not sent. The expansion is bounded by a fixed node budget. The OpenAI strict projection keeps root definitions and references.
+  - **Refused as Unsupported before sending:** any other keyword, an external, missing or recursive reference, and a conflicting merge. Also refused: a `$ref` with sibling keywords, definitions below the root, and an inlined copy that exceeds the node budget.
   - **Unchanged:** absent-schema request bytes.
   - **Model pin:** the Opus lane is pinned to `claude-opus-5-5` (#1709).
 - **Trace:** H4 · `llm` · — · T-0568
