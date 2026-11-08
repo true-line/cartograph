@@ -292,6 +292,13 @@ export function FlowsCard({
     modeProp ?? view?.mode ?? 'best-effort',
   );
   const mode = modeProp ?? localMode;
+  const [triggerQuery, setTriggerQuery] = useState('');
+  const normalizedQuery = triggerQuery.trim().toLowerCase();
+  const matchingFlows = flows.filter((flow) =>
+    [flow.trigger_name, flow.trigger_kind, flow.trigger].some((value) =>
+      value.toLowerCase().includes(normalizedQuery),
+    ),
+  );
   const [zoom, setZoom] = useState(1);
   const [copied, setCopied] = useState(false);
   const rowRef = useRef<HTMLOListElement>(null);
@@ -454,19 +461,41 @@ export function FlowsCard({
       ) : (
         <>
           <div className="flow-inspector-toolbar">
+            <label htmlFor="flow-trigger-search">Find trigger</label>
+            <input
+              id="flow-trigger-search"
+              type="search"
+              value={triggerQuery}
+              placeholder="Name, kind, or ID"
+              onChange={(event) => setTriggerQuery(event.target.value)}
+            />
+            <button type="button" disabled={!triggerQuery} onClick={() => setTriggerQuery('')}>
+              Clear filter
+            </button>
+            <span role="status" aria-label="Trigger matches" className="muted">
+              {matchingFlows.length} of {flows.length} triggers match
+              {matchingFlows.length === 0 && ' — no matching triggers; current flow retained'}
+            </span>
+          </div>
+          <div className="flow-inspector-toolbar">
             <label htmlFor="flow-trigger">Trigger source</label>
             <select
               id="flow-trigger"
               value={selected.trigger}
               onChange={(event) => setSelectedTrigger(event.target.value)}
             >
-              {flows.map((flow) => (
+              {!matchingFlows.some((flow) => flow.trigger === selected.trigger) && (
+                <optgroup label="Current selection (outside filter)">
+                  <option value={selected.trigger}>{selected.trigger_name}</option>
+                </optgroup>
+              )}
+              {matchingFlows.map((flow) => (
                 <option key={flow.trigger} value={flow.trigger}>
                   {flow.trigger_name}
                 </option>
               ))}
             </select>
-            <span className="muted" role="status">
+            <span className="muted" role="status" aria-label="Flow hops">
               {projected.hops.length} of {selected.hops.length} hops shown
             </span>
           </div>

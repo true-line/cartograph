@@ -267,7 +267,7 @@ export const SequenceAndTriggerSelection: Story = {
     );
     await expect(canvas.getByText('VERIFIED')).toHaveClass('tier-confirmed');
     await expect(canvas.getByText(/Flow score 1\.00/)).toBeInTheDocument();
-    await expect(canvas.getByRole('status')).toHaveTextContent('2 of 2 hops shown');
+    await expect(canvas.getByRole('status', { name: 'Flow hops' })).toHaveTextContent('2 of 2 hops shown');
     // #164: the projection toggle explains verified-only vs best-effort.
     await expect(
       canvas.getByRole('button', { name: 'What is verified-only vs best-effort?' }),
@@ -280,7 +280,7 @@ export const SequenceAndTriggerSelection: Story = {
     );
     await expect(canvas.getByText('PARTIAL (1 gap)')).toHaveClass('tier-gap');
     await expect(canvas.getByText(/Flow score 0\.43/)).toBeInTheDocument();
-    await expect(canvas.getByRole('status')).toHaveTextContent('3 of 3 hops shown');
+    await expect(canvas.getByRole('status', { name: 'Flow hops' })).toHaveTextContent('3 of 3 hops shown');
     await expect(canvas.getByLabelText('Flow sequence')).toHaveTextContent('sendNotification');
     await expect(statusBadge(PARTIAL)).toBe('PARTIAL (1 gap)');
   },
@@ -337,7 +337,7 @@ export const VerifiedOnlyProjection: Story = {
     // #107: the excluded hop stays visible as an annotated, non-interactive
     // card; the count and the note make the projection difference explicit,
     // and the Gap node is retained (R-INT-4).
-    await expect(canvas.getByRole('status')).toHaveTextContent('2 of 3 hops shown');
+    await expect(canvas.getByRole('status', { name: 'Flow hops' })).toHaveTextContent('2 of 3 hops shown');
     await expect(canvas.getByRole('note')).toHaveTextContent(
       /Verified-only: InferredWeak hops are excluded \(1 hidden\), but the Gap node is retained/,
     );
@@ -794,5 +794,48 @@ export const SelectedFlowRejectsStaleIdentity: Story = {
     await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), DEPLOYED_FLOW.trigger);
     await waitFor(() => expect(canvas.getByText('The selected flow view did not match this preview. Refresh and try again.')).toBeInTheDocument());
     await expect(canvas.queryByTestId('spec-diagram-flow-dossiers')).not.toBeInTheDocument();
+  },
+};
+
+// AC-0065: filtering 439 loaded triggers must not silently select another flow.
+export const FilterLargeTriggerListPreservesSelection: Story = {
+  decorators: [(Story) => <div style={{ width: 500, maxWidth: '100%' }}><Story /></div>],
+  args: {
+    flows: [
+      ...Array.from({ length: 438 }, (_, index) => ({
+        ...VERIFIED,
+        trigger: `ep:${index}`,
+        trigger_name: `GET /synthetic/${index}`,
+      })),
+      { ...VERIFIED, trigger: 'screen:alias-popup', trigger_kind: 'Screen', trigger_name: 'Create alias' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const search = canvas.getByRole('searchbox', { name: 'Find trigger' });
+    const select = canvas.getByRole('combobox', { name: 'Trigger source' });
+    const toolbar = search.closest('.flow-inspector-toolbar') as HTMLElement;
+    await expect(toolbar.scrollWidth).toBeLessThanOrEqual(toolbar.clientWidth + 1);
+    await expect(within(select).getAllByRole('option')).toHaveLength(439);
+    await userEvent.type(search, '  CREATE ALIAS  ');
+    await expect(canvas.getByText('1 of 439 triggers match')).toBeInTheDocument();
+    await expect(select).toHaveValue('ep:0');
+    await expect(within(select).getByRole('group', { name: 'Current selection (outside filter)' })).toBeInTheDocument();
+    await userEvent.selectOptions(select, 'screen:alias-popup');
+    await expect(select).toHaveValue('screen:alias-popup');
+    await expect(canvas.getByRole('heading', { level: 2 })).toHaveTextContent('F-0439');
+    for (const query of ['Screen', 'screen:alias-popup']) {
+      await userEvent.clear(search);
+      await userEvent.type(search, query);
+      await expect(canvas.getByText('1 of 439 triggers match')).toBeInTheDocument();
+    }
+    await userEvent.clear(search);
+    await userEvent.type(search, 'no-such-trigger');
+    await expect(canvas.getByText(/no matching triggers; current flow retained/)).toBeInTheDocument();
+    await expect(toolbar.scrollWidth).toBeLessThanOrEqual(toolbar.clientWidth + 1);
+    await expect(select).toHaveValue('screen:alias-popup');
+    await userEvent.click(canvas.getByRole('button', { name: 'Clear filter' }));
+    await expect(within(select).getAllByRole('option')).toHaveLength(439);
+    await expect(select).toHaveValue('screen:alias-popup');
   },
 };
