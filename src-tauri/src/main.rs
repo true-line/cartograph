@@ -22,6 +22,7 @@ mod job_execution_host_tests;
 mod jobs;
 mod knowledge_phase;
 mod local_commit;
+mod manifest_draft;
 mod mcp_reads;
 mod metrics;
 mod model_debug;
@@ -6609,6 +6610,8 @@ fn main() {
             work_packets::export_work_packet,
             work_packets::draft_adapter_work_packets,
             export_save::save_export_file,
+            manifest_draft::preview_system_manifest,
+            manifest_draft::save_system_manifest,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
             investigations::commands::list_investigations,

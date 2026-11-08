@@ -114,3 +114,40 @@ export const EnterWithoutBackend: Story = {
     await expect(args.onPreflight).not.toHaveBeenCalled();
   },
 };
+
+// AC-0002: Enter in the guide must not submit Connect's surrounding form.
+export const ManifestGuideDoesNotPreflight: Story = {
+  args: { source: 'manifest', target: '/existing/manifest.toml', manifestGuide: { preview: fn().mockResolvedValue('repos = []'), save: fn().mockResolvedValue(null) } },
+  play: async ({ canvasElement, args }) => {
+    const c = within(canvasElement);
+    await userEvent.click(c.getByRole('button', { name: 'Create new manifest' }));
+    await userEvent.type(c.getByLabelText('Repository 1'), '../api{enter}');
+    await expect(args.onPreflight).not.toHaveBeenCalled();
+    await expect(c.getByRole('button', { name: 'Preflight' })).toBeDisabled();
+    await userEvent.click(c.getByRole('button', { name: 'Close manifest guide' }));
+    await expect(c.getByRole('button', { name: 'Preflight' })).toBeEnabled();
+  },
+};
+
+const abandonedSave = fn<() => Promise<string | null>>();
+const abandonedPreview = fn<() => Promise<string>>();
+export const AbandonedManifestSave: Story = {
+  args: { source: 'manifest', target: '/original/manifest.toml', manifestGuide: { preview: abandonedPreview, save: abandonedSave } },
+  play: async ({ canvasElement, args }) => {
+    let finish: (path: string) => void = () => { throw new Error('save not started'); };
+    const pending = new Promise<string>(resolve => { finish = resolve; });
+    abandonedPreview.mockResolvedValue('repos = []');
+    abandonedSave.mockReturnValue(pending);
+    const c = within(canvasElement);
+    await userEvent.click(c.getByRole('button', { name: 'Create new manifest' }));
+    await userEvent.click(c.getByRole('button', { name: 'Preview manifest' }));
+    await c.findByLabelText('Manifest preview');
+    await userEvent.click(c.getByRole('button', { name: 'Save new manifest' }));
+    await expect(c.getByLabelText('Repository 1')).toBeDisabled();
+    await userEvent.click(c.getByRole('button', { name: 'Close manifest guide' }));
+    finish('/late/manifest.toml');
+    await pending;
+    await expect(args.onTargetChange).not.toHaveBeenCalled();
+    await expect(args.onPreflight).not.toHaveBeenCalled();
+  },
+};

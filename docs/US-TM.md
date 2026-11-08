@@ -165,3 +165,5 @@ markers, atomic persistence and tamper rejection; whole-run and historical
 acceptance evidence remain required before completion.
 
 #1601 relaunch breadcrumb: US-0001 / AC-0085 uses refreshed evidence-backed system contents, including startup without an ingest summary, evidence-less synthetic nodes, and the empty state after clear.
+
+<!-- #1671: AC-0002 guided new-manifest creation is in progress; T-0002 covers the pure draft producer and service URL whitespace normalization at preview/save. -->

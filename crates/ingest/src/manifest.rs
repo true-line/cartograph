@@ -84,7 +84,7 @@ pub struct ManifestRepo {
 /// A service another repo's clients call over HTTP (#589, AC-0240): the
 /// author declares which repo serves which base URLs. A client call binds
 /// to that repo's endpoints only through such a declaration.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ManifestService {
     /// Service name, cited on bound edges.
     pub name: String,
@@ -98,7 +98,7 @@ pub struct ManifestService {
 
 /// A gateway route forwarding a path prefix under a base URL to a declared
 /// service (#589, AC-0240).
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ManifestGatewayRoute {
     /// The gateway's absolute base URL.
     pub base_url: String,

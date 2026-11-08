@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { isCompletionSpecialist } from './investigationFamilies';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
@@ -824,6 +825,10 @@ export default function App() {
       case 'connect':
         return (
           <ConnectSurface
+            manifestGuide={{
+              preview: (draft) => invoke<string>('preview_system_manifest', { draft }),
+              save: (draft) => invoke<string | null>('save_system_manifest', { draft }),
+            }}
             source={ingestSource}
             target={ingestTarget}
             canPreflight={backend === 'up'}

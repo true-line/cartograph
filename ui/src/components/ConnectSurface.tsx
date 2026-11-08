@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { ManifestGuide, type ManifestGuideProps } from './ManifestGuide';
 import { dropSetStatus, type DropItem, type DropStatus } from '../dropIntake';
 import type { IngestSource } from '../store';
 
 export interface ConnectSurfaceProps {
+  manifestGuide?: Omit<ManifestGuideProps, "onSaved">;
   source: IngestSource;
   target: string;
   /** Disabled when there is no live backend to preflight against. */
@@ -87,6 +89,7 @@ const SOURCES: { id: IngestSource; label: string; icon: string; placeholder: str
  *  reassurance strip states the egress contract before any work starts. */
 export function ConnectSurface({
   source,
+  manifestGuide,
   target,
   canPreflight,
   onSourceChange,
@@ -97,6 +100,7 @@ export function ConnectSurface({
   dropActive = false,
   onDismissDrop,
 }: ConnectSurfaceProps) {
+  const [creating, setCreating] = useState(false);
   const active = SOURCES.find((s) => s.id === source) ?? SOURCES[0];
   const input = useRef<HTMLInputElement>(null);
   // Re-opening Connect keeps the last target (#246): focus it with the whole
@@ -114,7 +118,7 @@ export function ConnectSurface({
         // Enter in the target field submits (#246); a disabled Preflight
         // stays disabled for Enter too.
         e.preventDefault();
-        if (canSubmit) onPreflight();
+        if (canSubmit && !creating) onPreflight();
       }}
     >
       <header className="ingest-hero">
@@ -132,7 +136,7 @@ export function ConnectSurface({
             role="radio"
             aria-checked={s.id === source}
             className={`source-option${s.id === source ? ' active' : ''}`}
-            onClick={() => onSourceChange(s.id)}
+            onClick={() => { setCreating(false); onSourceChange(s.id); }}
           >
             <span className="material-symbols-outlined" aria-hidden="true">
               {s.icon}
@@ -151,6 +155,10 @@ export function ConnectSurface({
           onChange={(e) => onTargetChange(e.target.value)}
         />
       </label>
+      {source === 'manifest' && manifestGuide && canPreflight && <>
+        <button type="button" onClick={() => setCreating(!creating)}>{creating ? 'Close manifest guide' : 'Create new manifest'}</button>
+        {creating && <ManifestGuide {...manifestGuide} onSaved={onTargetChange} />}
+      </>}
       <p
         className={`drop-hint${dropActive ? ' drop-hint-active' : ''}`}
         data-testid="drop-hint"
@@ -174,7 +182,7 @@ export function ConnectSurface({
         <button type="button" className="secondary-button" onClick={onBack}>
           Back
         </button>
-        <button type="submit" disabled={!canSubmit}>
+        <button type="submit" disabled={!canSubmit || creating}>
           <span className="material-symbols-outlined" aria-hidden="true">
             arrow_forward
           </span>

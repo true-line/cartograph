@@ -14,6 +14,7 @@ pub mod api_docs;
 pub mod coverage;
 pub mod managed;
 pub mod manifest;
+pub mod manifest_draft;
 pub mod matrix;
 pub mod preflight;
 pub mod schedules;
