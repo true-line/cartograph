@@ -622,6 +622,20 @@ fn staged_refusal_cap_requires_terminal_and_cannot_prepare_next_input() {
     // AC-0287 / #1695: a separately retained witness catches recomputed
     // record identities, without pretending to recover discarded prose.
     let witness = first.feedback_witness_hash().unwrap();
+    // AC-0287 / #1707: sidecar binding occupies the same witness bytes, while
+    // changing either sidecar or refusal makes the independent digest differ.
+    let sidecar_hash = content_hash(b"diagnostic sidecar");
+    let diagnostic_witness = first.diagnostic_witness_hash(&sidecar_hash).unwrap();
+    assert_eq!(diagnostic_witness.len(), witness.len());
+    assert_ne!(diagnostic_witness, witness);
+    assert_ne!(
+        diagnostic_witness,
+        first
+            .diagnostic_witness_hash(&content_hash(b"changed sidecar"))
+            .unwrap()
+    );
+    assert!(first.diagnostic_witness_hash("not-a-hash").is_err());
+
     assert_eq!(
         first.validate_feedback_witness(&witness, &first.response_hash, &first.step_id),
         Ok(())
@@ -650,6 +664,11 @@ fn staged_refusal_cap_requires_terminal_and_cannot_prepare_next_input() {
             _ => altered.feedback.unmet[0].reason = RefusalReason::Unavailable,
         }
         altered.refusal_id = altered.content_id().unwrap();
+        assert_ne!(
+            diagnostic_witness,
+            altered.diagnostic_witness_hash(&sidecar_hash).unwrap()
+        );
+
         assert!(
             altered
                 .validate_feedback_witness(&witness, &first.response_hash, &first.step_id)
@@ -1397,4 +1416,85 @@ fn cited_message_admission(role: SpecialistId) {
         admit(&insufficient),
         Ok(Err(FinishDecision::Refused { .. }))
     ));
+}
+
+// AC-0287 / #1707: lack of cited spans remains an explicit configuration
+// diagnostic; collection preserves the finish and authenticated input ledger.
+#[test]
+fn diagnostic_sidecar_collects_uncited_configuration_without_changing_input() {
+    use crate::investigation::diagnostic_sidecar::{Detail, Retention};
+    let fixture = fixture(false, false, false);
+    let mut proposed = finish(false);
+    let InvestigationAction::Finish { findings, .. } = &mut proposed.action else {
+        unreachable!()
+    };
+    findings[0].title = "Configured MultiChannelStrategy".into();
+    findings[0].statement = "MultiChannelStrategy selects the route.".into();
+    let before = proposed.fingerprint().unwrap();
+    let ledger = fixture.input.ledger().fingerprint().unwrap();
+    let sidecar = fixture
+        .input
+        .refusal_diagnostic_sidecar(&proposed, content_hash(b"refusal"))
+        .unwrap();
+    let Retention::Recorded {
+        entries,
+        omitted_entries,
+    } = sidecar.retention
+    else {
+        panic!("fits")
+    };
+    assert_eq!(omitted_entries, 0);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].citation_index, None);
+    assert!(matches!(
+        entries[0].detail,
+        Detail::Configuration {
+            reason: claim_diagnostics::ConfigurationFailure::SubjectUnbound,
+            ..
+        }
+    ));
+    assert_eq!(proposed.fingerprint().unwrap(), before);
+    assert_eq!(fixture.input.ledger().fingerprint().unwrap(), ledger);
+}
+
+// AC-0287 / #1707: unrelated authenticated spans cannot supply diagnostics;
+// retained source ordinals belong to the finding's citation list.
+#[test]
+fn diagnostic_sidecar_uses_only_finding_citations_and_their_ordinals() {
+    use crate::investigation::diagnostic_sidecar::Retention;
+    let fixture = fixture(true, false, false);
+    let mut proposed = finish(false);
+    let InvestigationAction::Finish { findings, .. } = &mut proposed.action else {
+        unreachable!()
+    };
+    findings[0].title = "Configured MultiChannelStrategy".into();
+    findings[0].statement = "MultiChannelStrategy selects the route.".into();
+    let source_id = fixture.input.ledger().citations[1].citation_id.clone();
+    assert!(!findings[0].citation_ids.contains(&source_id));
+    let collect = |finish: &StagedFinish| {
+        let sidecar = fixture
+            .input
+            .refusal_diagnostic_sidecar(finish, content_hash(b"refusal"))
+            .unwrap();
+        let body = String::from_utf8(sidecar.bytes().unwrap()).unwrap();
+        assert!(!body.contains("private text"));
+        assert!(!body.contains("MultiChannelStrategy"));
+        let Retention::Recorded {
+            entries,
+            omitted_entries,
+        } = sidecar.retention
+        else {
+            panic!("fits")
+        };
+        assert_eq!(omitted_entries, 0);
+        assert_eq!(entries.len(), 1);
+        entries
+    };
+    assert_eq!(collect(&proposed)[0].citation_index, None);
+    let InvestigationAction::Finish { findings, .. } = &mut proposed.action else {
+        unreachable!()
+    };
+    findings[0].citation_ids.push(source_id);
+    let source_ordinal = findings[0].citation_ids.len() - 1;
+    assert_eq!(collect(&proposed)[0].citation_index, Some(source_ordinal));
 }

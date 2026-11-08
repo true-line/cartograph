@@ -330,7 +330,7 @@ fn analyst25_partial_survives_captured_source_reopen() {
         Err(error) => panic!("publication failed: {}", error.error()),
     };
     let citation = &context.ledger.citations.last().unwrap().citation_id;
-    saved.assert_partial_after_capture(
+    saved.assert_diagnostic_retention_invariant(
         &provider,
         &firewall,
         citation,

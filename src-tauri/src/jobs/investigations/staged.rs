@@ -1041,14 +1041,24 @@ pub(super) fn append_for_task(
         feedback,
     };
     record.refusal_id = record.content_id()?;
-    if task
+    let sidecar = if task
         .detail
         .summary
         .specialist_id
         .uses_finish_feedback_witness()
     {
-        response.finish_feedback_witness = Some(record.feedback_witness_hash()?);
-    }
+        let sidecar = refusal_diagnostics::collect(
+            input,
+            finish,
+            record.refusal_id.clone(),
+            record.finish_hash.clone(),
+        );
+        response.finish_feedback_witness =
+            Some(record.diagnostic_witness_hash(&sidecar.content_hash()?)?);
+        Some(sidecar)
+    } else {
+        None
+    };
 
     let disposition = if let Some(basis) = basis {
         if record.finish_hash != finish.fingerprint()? || record.outcome != finish.outcome {
@@ -1110,6 +1120,9 @@ pub(super) fn append_for_task(
         || global > STORE_CAPACITY
     {
         return Err(InvestigationStoreError::Capacity);
+    }
+    if let Some(sidecar) = &sidecar {
+        refusal_diagnostics::insert(tx, &id, entry.record.refusal_count, sidecar)?;
     }
     one(tx.execute(
         "INSERT INTO investigation_responses VALUES (?1,?2,?3,?4)",
@@ -1180,6 +1193,7 @@ mod tests;
 
 /// The response must be independently loaded, not copied from the refusal row.
 pub(super) fn validate_finish_feedback_witness(
+    connection: &Connection,
     task: &StoredTask,
     response: &InvestigationResponseMeta,
     record: &RefusalRecord,
@@ -1201,14 +1215,30 @@ pub(super) fn validate_finish_feedback_witness(
         .specialist_id
         .uses_finish_feedback_witness()
     {
-        record.validate_feedback_witness(
-            response
-                .finish_feedback_witness
-                .as_deref()
-                .ok_or(InvestigationStoreError::Missing)?,
-            &response.response_hash,
-            &response.step_id,
-        )?;
+        let witness = response
+            .finish_feedback_witness
+            .as_deref()
+            .ok_or(InvestigationStoreError::Missing)?;
+        if let Some(sidecar) =
+            refusal_diagnostics::load(connection, &record.task_id, record.refusal_count)?
+        {
+            if sidecar.refusal_hash != record.refusal_id
+                || sidecar.finish_hash != record.finish_hash
+                || response.response_hash != record.response_hash
+                || response.step_id != record.step_id
+                || record.diagnostic_witness_hash(&sidecar.content_hash()?)? != witness
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        } else {
+            // Only an original historical digest can validate without a sidecar.
+            // Deleting a new sidecar cannot downgrade its domain-separated hash.
+            record.validate_feedback_witness(
+                witness,
+                &response.response_hash,
+                &response.step_id,
+            )?;
+        }
     } else if response.finish_feedback_witness.is_some()
         || record.feedback.unmet.iter().any(|entry| {
             entry.reason == agents::investigation::staged_finish::RefusalReason::ExcludedByCapacity

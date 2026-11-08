@@ -29,7 +29,11 @@ pub(super) fn validate(
     // Never accept a digest copied from the result as an independent response.
     if response.step_id != *step
         || response.response_hash != witness.original_response_hash
-        || response.finish_feedback_witness.as_deref() != Some(witness.fingerprint()?.as_str())
+        || response.finish_feedback_witness.as_deref()
+            != Some(
+                refusal_diagnostics::withholding_witness(connection, id, witness.fingerprint()?)?
+                    .as_str(),
+            )
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -37,13 +41,20 @@ pub(super) fn validate(
     let [prior] = entries.as_slice() else {
         return Err(InvestigationStoreError::Invalid);
     };
+    if let Some(sidecar) = refusal_diagnostics::load(connection, id, 2)?
+        && (sidecar.refusal_hash != prior.record.refusal_id
+            || sidecar.finish_hash != witness.original_finish_hash)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let prior_witness = prior.record.feedback_witness_hash()?;
     if prior.record.refusal_count != 1
         || prior.record.previous_refusal.is_some()
         || prior.record.task_id != *id
         || prior.record.step_id == *step
         || prior.record.request_hash != witness.request_hash
         || prior.record.obligations_hash != witness.obligations_hash
-        || prior.record.feedback_witness_hash()? != witness.prior_correction_witness_hash
+        || prior_witness != witness.prior_correction_witness_hash
     {
         return Err(InvestigationStoreError::Invalid);
     }

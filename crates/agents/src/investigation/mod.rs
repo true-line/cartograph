@@ -11,6 +11,7 @@ pub mod claim_diagnostics;
 mod completion;
 mod coverage;
 mod coverage_protocol;
+pub mod diagnostic_sidecar;
 mod disclosure;
 mod disclosure_workspace;
 #[path = "enumeration_claims/guard.rs"]

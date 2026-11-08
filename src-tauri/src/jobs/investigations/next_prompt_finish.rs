@@ -227,7 +227,12 @@ impl JobStore {
                                 .as_ref()
                                 .and_then(|c| c.withholding.as_ref())
                             {
-                                response.finish_feedback_witness = Some(witness.fingerprint()?);
+                                response.finish_feedback_witness =
+                                    Some(refusal_diagnostics::withholding_witness(
+                                        &tx,
+                                        &task.detail.summary.investigation_id,
+                                        witness.fingerprint()?,
+                                    )?);
                             }
                             persist_response(
                                 &tx,
@@ -248,7 +253,12 @@ impl JobStore {
                                 .and_then(|c| c.withholding.as_ref());
                             if let Some(witness) = partial {
                                 let mut response = input.response.clone();
-                                response.finish_feedback_witness = Some(witness.fingerprint()?);
+                                response.finish_feedback_witness =
+                                    Some(refusal_diagnostics::withholding_witness(
+                                        &tx,
+                                        &task.detail.summary.investigation_id,
+                                        witness.fingerprint()?,
+                                    )?);
                                 // Insert independent response metadata before validating the
                                 // result; all writes roll back together if any check fails.
                                 persist_response(

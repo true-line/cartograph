@@ -63,6 +63,23 @@ impl RefusalRecord {
         ))
     }
 
+    /// Bind a separately retained diagnostic sidecar through the existing
+    /// fixed-length response witness. The host validates and bounds the sidecar
+    /// before supplying its content hash. This does not alter refusal identity.
+    pub fn diagnostic_witness_hash(
+        &self,
+        sidecar_hash: &str,
+    ) -> Result<String, InvestigationError> {
+        if !crate::source_basis::hash(sidecar_hash) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        let feedback = self.feedback_witness_hash()?;
+        Ok(crate::source_basis::domain_hash(
+            b"cartograph:finish-diagnostic-witness:v1\0",
+            &bounded_bytes(&(feedback, sidecar_hash), MAX_MANIFEST_BYTES)?,
+        ))
+    }
+
     /// The host must read the witness and response identity from the independent
     /// immutable invocation row, and separately authenticate the call history.
     /// Passing copies from this record alone would grant no authentication.

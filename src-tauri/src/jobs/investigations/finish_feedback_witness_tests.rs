@@ -26,6 +26,62 @@ fn assert_latest_feedback_witness(role: &str) {
     f.begin();
     f.publish().unwrap();
     let task = f.saved();
+    // AC-0287 / #1707: sidecar bytes are independently bound and do not enter
+    // either task or global logical occupancy, including a rehashed payload.
+    for mutation in ["delete", "update"] {
+        let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+        let entry = completion::raw_refusals(&tx, &task).unwrap().remove(0);
+        assert_eq!(
+            refusal_diagnostics::project(&tx, &entry.record.task_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let before_task = stored_bytes(&tx, Some(&entry.record.task_id)).unwrap();
+        let before_global = stored_bytes(&tx, None).unwrap();
+        let mut sidecar = refusal_diagnostics::load(&tx, &entry.record.task_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sidecar.refusal_hash, entry.record.refusal_id);
+        assert_eq!(sidecar.finish_hash, entry.record.finish_hash);
+        let trigger = format!("refusal_diagnostics_records_no_{mutation}");
+        let sql: String = tx
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name=?1",
+                [&trigger],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tx.execute_batch(&format!("DROP TRIGGER {trigger}"))
+            .unwrap();
+        if mutation == "delete" {
+            tx.execute(
+                "DELETE FROM refusal_diagnostics_records WHERE task_id=?1",
+                [&entry.record.task_id],
+            )
+            .unwrap();
+        } else {
+            sidecar.finish_hash = "c".repeat(64);
+            let body = sidecar.bytes().unwrap();
+            tx.execute(
+                "UPDATE refusal_diagnostics_records SET body=?2,body_hash=?3 WHERE task_id=?1",
+                params![entry.record.task_id, body, core_prov::content_hash(&body)],
+            )
+            .unwrap();
+        }
+        tx.execute_batch(&sql).unwrap();
+        assert_eq!(
+            stored_bytes(&tx, Some(&entry.record.task_id)).unwrap(),
+            before_task
+        );
+        assert_eq!(stored_bytes(&tx, None).unwrap(), before_global);
+        assert!(refusal_diagnostics::project(&tx, &entry.record.task_id).is_err());
+        assert!(
+            staged::load_for_task(&tx, &task).is_err(),
+            "sidecar {mutation}"
+        );
+    }
+
     for mutation in [
         "missing_digest",
         "changed_digest",
@@ -185,4 +241,25 @@ fn assert_replay_locator_reopen(role: &str) {
     drop(tx);
     let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
     assert_eq!(reopened.investigation(f.base.id()).unwrap(), detail);
+}
+
+// AC-0287 / #1707: a fabricated sidecar cannot upgrade a historical role.
+#[test]
+fn historical_role_rejects_unbound_diagnostic_projection() {
+    let mut f = correction_fixture_role("domain-analyst@21");
+    f.begin();
+    f.publish().unwrap();
+    let task = f.saved();
+    let id = &task.detail.summary.investigation_id;
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    assert!(refusal_diagnostics::project(&tx, id).unwrap().is_empty());
+    let refusal = completion::raw_refusals(&tx, &task).unwrap().remove(0);
+    let sidecar = agents::investigation::diagnostic_sidecar::Sidecar::collect(
+        refusal.record.refusal_id,
+        refusal.record.finish_hash,
+        [],
+    )
+    .unwrap();
+    refusal_diagnostics::insert(&tx, id, 1, &sidecar).unwrap();
+    assert!(refusal_diagnostics::project(&tx, id).is_err());
 }
