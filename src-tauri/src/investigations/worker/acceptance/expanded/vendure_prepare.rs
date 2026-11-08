@@ -191,8 +191,9 @@ fn validate_bound<'a>(
     if read(definition_path)? != definition
         || expected.selections.is_empty()
         || expected.selections.len() > 64
-        || expected.provider.mode != InvestigationProviderMode::Local
         || !expected.provider.available
+        || (expected.provider.mode == InvestigationProviderMode::Cloud
+            && super::cloud_run::pinned(&expected.provider).is_err())
     {
         return Err("independent capture definition required".into());
     }
@@ -352,7 +353,7 @@ fn bound_with_scope<T>(
                     obligations,
                 },
                 inspection_requirements: None,
-                provider_mode: InvestigationProviderMode::Local,
+                provider_mode: expected.provider.mode,
                 limit_profile: INVESTIGATION_V2_POLICY.profile().into(),
                 expected_graph_revision: Some(graph.graph_snapshot_id.clone()),
                 expected_context_id: context,

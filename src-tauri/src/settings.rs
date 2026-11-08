@@ -809,6 +809,12 @@ impl SettingsStore {
             });
         Ok(llm::EgressPolicy::allow_cloud_for(tiers))
     }
+
+    /// Test-only: raw SQL on the settings connection, for fault injection.
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) -> rusqlite::Result<()> {
+        self.conn.execute_batch(sql)
+    }
 }
 
 #[cfg(test)]

@@ -11,6 +11,8 @@ mod analyst;
 mod captured_auditor;
 #[path = "expanded/captured_local.rs"]
 pub(super) mod captured_local;
+#[path = "expanded/cloud_run.rs"]
+mod cloud_run;
 #[path = "expanded/start_timing.rs"]
 mod start_timing;
 #[path = "expanded/vendure_prepare.rs"]

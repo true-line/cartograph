@@ -520,7 +520,7 @@ pub(crate) async fn get_investigation_chat(
     .await
 }
 
-fn pending(state: &AppState, id: &str) -> Result<Option<InvestigationConsent>, String> {
+pub(crate) fn pending(state: &AppState, id: &str) -> Result<Option<InvestigationConsent>, String> {
     let Some(live) = state.investigations.get(id).map_err(|e| e.to_string())? else {
         // A different or restarted process cannot reconstruct the raw preview.
         return Ok(None);
@@ -558,7 +558,16 @@ pub(crate) async fn investigation_consent(
     crate::off_ui_thread(move || pending(&app.state::<AppState>(), &investigation_id)).await
 }
 
-fn consent_decision<R: tauri::Runtime>(
+/// Test-only: the public completion start, for harness tests outside this module.
+#[cfg(test)]
+pub(crate) fn start_completion_for_test(
+    request: StagedObligationRequest,
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
+) -> Result<InvestigationSummary, String> {
+    completion_start::start(request, app, std::time::Instant::now()).map_err(|e| format!("{e:?}"))
+}
+
+pub(crate) fn consent_decision<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     id: &str,
     step_id: &str,
