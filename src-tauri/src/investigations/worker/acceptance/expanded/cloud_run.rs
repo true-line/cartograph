@@ -29,7 +29,7 @@ use std::{
     io::Write,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -164,11 +164,18 @@ impl Log {
     }
 }
 
+/// The consent log shared by the grant, the approver and the revert. A panic
+/// elsewhere never stops the revert from being recorded.
+fn locked(log: &Mutex<Log>) -> MutexGuard<'_, Log> {
+    log.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Scoped T3 cloud consent for one hosted run. Dropping it, including after a
-/// partial grant, reverts T3 to local and restores its prior enabled flag.
+/// partial grant, records and then reverts T3 to local, restoring its prior
+/// enabled flag.
 pub(super) struct Consent {
     handle: tauri::AppHandle<tauri::test::MockRuntime>,
-    log: Option<Log>,
+    log: Arc<Mutex<Log>>,
     prior_enabled: bool,
     step_cap: usize,
     reverted: bool,
@@ -200,7 +207,7 @@ impl Consent {
             "step_cap": authorization.step_cap}))?;
         let consent = Self {
             handle: handle.clone(),
-            log: Some(log),
+            log: Arc::new(Mutex::new(log)),
             prior_enabled: prior.enabled,
             step_cap: authorization.step_cap,
             reverted: false,
@@ -234,24 +241,27 @@ impl Consent {
                 stop.clone(),
                 self.step_cap,
             );
-            let log = self.log.take().ok_or("Consent log unavailable.")?;
-            std::thread::spawn(move || approve(&handle, &id, cap, &stop, log))
+            let log = self.log.clone();
+            std::thread::spawn(move || approve(&handle, &id, cap, &stop, &log))
         };
         let result = run();
         stop.store(true, Ordering::SeqCst);
-        let joined = approver
+        let approvals = approver
             .join()
-            .map_err(|_| "Consent approver panicked.".to_string());
+            .map_err(|_| "Consent approver panicked.".to_string())
+            .and_then(|approved| approved);
         // Revert even when approval failed, so no standing consent survives.
-        let reverted = self.revert();
-        let (mut log, approvals) = joined??;
-        log.record(json!({"event": "tier_reverted_local", "tier": TIER,
-            "approvals": approvals, "reverted": reverted.is_ok()}))?;
-        reverted?;
+        self.revert(approvals.as_ref().ok().copied())?;
+        approvals?;
         Ok(result)
     }
 
-    fn revert(&mut self) -> Result<(), String> {
+    /// Records the revert durably, then applies it. The revert is applied even
+    /// when recording fails, so a log failure never leaves standing consent;
+    /// the recording error is still returned.
+    fn revert(&mut self, approvals: Option<usize>) -> Result<(), String> {
+        let recorded = locked(&self.log)
+            .record(json!({"event": "tier_reverted_local", "tier": TIER, "approvals": approvals}));
         let state = self.handle.state::<crate::AppState>();
         let mut settings = state.settings.lock().map_err(|_| "Settings unavailable.")?;
         // Switching to local also revokes the standing consent.
@@ -260,27 +270,27 @@ impl Consent {
             .and_then(|_| settings.set_enabled(TIER, self.prior_enabled))
             .map_err(|e| e.to_string())?;
         self.reverted = true;
-        Ok(())
+        recorded
     }
 }
 
 impl Drop for Consent {
     fn drop(&mut self) {
         if !self.reverted {
-            let _ = self.revert();
+            let _ = self.revert(None);
         }
     }
 }
 
-/// Approves each newly pending step until stopped. Returns the log and the
-/// number of approvals.
+/// Approves each newly pending step until stopped. Returns the number of
+/// approvals.
 fn approve(
     handle: &tauri::AppHandle<tauri::test::MockRuntime>,
     id: &str,
     cap: usize,
     stop: &AtomicBool,
-    mut log: Log,
-) -> Result<(Log, usize), String> {
+    log: &Mutex<Log>,
+) -> Result<usize, String> {
     let mut seen: Vec<(String, u64, String)> = Vec::new();
     let mut approvals = 0;
     while !stop.load(Ordering::SeqCst) {
@@ -297,7 +307,7 @@ fn approve(
                 let payload_bytes = serde_json::to_vec(&step.preview.payload)
                     .map_err(|e| e.to_string())?
                     .len();
-                log.record(json!({
+                locked(log).record(json!({
                     "event": if approve { "step_approved" } else { "step_declined_cap" },
                     "n": approvals + usize::from(approve),
                     "step_id": step.step_id,
@@ -317,8 +327,8 @@ fn approve(
                     approve,
                 );
                 if let Err(error) = decided {
-                    log.record(json!({"event": "decision_failed", "step_id": step.step_id,
-                        "revision": step.revision, "error": error}))?;
+                    locked(log).record(json!({"event": "decision_failed",
+                        "step_id": step.step_id, "revision": step.revision, "error": error}))?;
                 } else if approve {
                     approvals += 1;
                 }
@@ -326,7 +336,7 @@ fn approve(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Ok((log, approvals))
+    Ok(approvals)
 }
 
 #[cfg(test)]
@@ -627,6 +637,35 @@ mod tests {
                         assert_eq!(event["provider_id"], "anthropic:claude-opus-5-5");
                     }
                     assert_eq!(events.last().unwrap()["approvals"], approvals);
+                    // Cleanup through Drop records the revert before applying it.
+                    let dropped = app_data.join(format!("dropped-{cap}.jsonl"));
+                    drop(
+                        Consent::grant(
+                            handle,
+                            &expected,
+                            &Authorization { step_cap: cap },
+                            &dropped,
+                        )
+                        .unwrap(),
+                    );
+                    let after = t3(handle);
+                    assert_eq!(
+                        (after.provider.as_str(), after.consented, after.enabled),
+                        ("local", false, before.enabled)
+                    );
+                    let events: Vec<Value> = std::fs::read_to_string(&dropped)
+                        .unwrap()
+                        .lines()
+                        .map(|line| serde_json::from_str(line).unwrap())
+                        .collect();
+                    assert_eq!(
+                        events
+                            .iter()
+                            .map(|e| e["event"].as_str().unwrap())
+                            .collect::<Vec<_>>(),
+                        ["tier_consent_granted", "tier_reverted_local"]
+                    );
+                    assert!(events[1]["approvals"].is_null());
                 },
             );
         }
