@@ -343,6 +343,7 @@ function savedNoticeChat(id: string, question: string, includeResult = true): In
 
 let localHealthResponse: (() => unknown) | undefined;
 function installFakeCore(options: {
+  evidenceLessGraph?: boolean;
   staged?: StagedProposal[];
   pageSize?: number;
   reviewFailure?: 'stale' | 'null';
@@ -411,7 +412,7 @@ function installFakeCore(options: {
     },
   ];
   let curation: AssertionDecisionRecord[] = [];
-  let graphStats = { nodes: 42, edges: 99 };
+  let graphStats = options.evidenceLessGraph ? { nodes: 1, edges: 0 } : { nodes: 42, edges: 99 };
   // Mirrors the #118 SettingsStore defaults and invariants.
   let tiers: MockTier[] = ['T1', 'T2', 'T3'].map((tier) => ({
     tier,
@@ -643,7 +644,9 @@ function installFakeCore(options: {
           { kind: 'externally published event channels', found: 0 },
         ];
       case 'system_contents':
-        return [{ repo: 'local/image-trail', commit: 'workdir' }];
+        return graphStats.nodes === 0 || options.evidenceLessGraph
+          ? []
+          : [{ repo: 'local/image-trail', commit: 'workdir' }];
       case 'list_plugins':
         return [];
       case 'set_plugin_enabled':
@@ -1792,10 +1795,29 @@ export const WorkbenchCurationRoundTrip: Story = {
   },
 };
 
+export const EvidenceLessGraphNamesNoSystem: Story = {
+  beforeEach: () => installFakeCore({ evidenceLessGraph: true }),
+  play: async ({ canvasElement }) => {
+    // AC-0085: a persisted synthetic Repo node has no supporting evidence.
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByTestId('graph-node-count')).toHaveTextContent('1'));
+    await expect(useAppStore.getState().ingestSummary).toBeNull();
+    const breadcrumb = within(canvas.getByRole('navigation', { name: 'Breadcrumb' }));
+    await expect(breadcrumb.getByText('No system')).toBeVisible();
+    await expect(breadcrumb.queryByText('Ingested system')).not.toBeInTheDocument();
+    await useAppStore.getState().refresh();
+    await expect(breadcrumb.getByText('No system')).toBeVisible();
+  },
+};
+
 export const ClearGraphPreservesJobs: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await waitFor(() => expect(canvas.getByTestId('graph-node-count')).toHaveTextContent('42'));
+    // AC-0085: cold UI startup reads a saved graph, not an ingest response.
+    await expect(useAppStore.getState().ingestSummary).toBeNull();
+    const breadcrumb = within(canvas.getByRole('navigation', { name: 'Breadcrumb' }));
+    await expect(breadcrumb.getByText('Ingested system')).toBeVisible();
 
     // The seeded job exists, then clear the graph from Workspace: the
     // durable job spine must survive a graph clear.
@@ -1807,6 +1829,9 @@ export const ClearGraphPreservesJobs: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Confirm clear' }));
     await waitFor(() => expect(canvas.getByTestId('graph-node-count')).toHaveTextContent('0'));
     await expect(canvas.getByTestId('graph-edge-count')).toHaveTextContent('0');
+    await expect(breadcrumb.getByText('No system')).toBeVisible();
+    await useAppStore.getState().refresh();
+    await expect(breadcrumb.getByText('No system')).toBeVisible();
 
     await userEvent.click(canvas.getByRole('button', { name: 'Jobs' }));
     await expect(canvas.getByText('ingest-source-v1:src_11111111111111111111111111111111')).toBeInTheDocument();
