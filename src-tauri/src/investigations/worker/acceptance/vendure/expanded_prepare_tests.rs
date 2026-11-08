@@ -221,6 +221,20 @@ fn captured_configured_run_limits_survive_synthetic_execution_receipt() {
     );
 }
 
+// AC-0569: saved hosted output and configured time limits remain readable offline.
+#[test]
+fn captured_configured_hosted_limits_read_saved_state_without_dispatch() {
+    captured_case_with_provider(
+        false,
+        Some("domain-analyst@25"),
+        Some(super::super::expanded::vendure_prepare::RunLimits {
+            active_seconds: 1800,
+            request_timeout_ms: 600_000,
+        }),
+        true,
+    );
+}
+
 fn captured_case(execute: bool, specialist: Option<&str>) {
     captured_case_with_limits(execute, specialist, None);
 }
@@ -229,6 +243,15 @@ fn captured_case_with_limits(
     execute: bool,
     specialist: Option<&str>,
     run_limits: Option<super::super::expanded::vendure_prepare::RunLimits>,
+) {
+    captured_case_with_provider(execute, specialist, run_limits, false);
+}
+
+fn captured_case_with_provider(
+    execute: bool,
+    specialist: Option<&str>,
+    run_limits: Option<super::super::expanded::vendure_prepare::RunLimits>,
+    hosted: bool,
 ) {
     let case = Case::new();
     let prepared = if execute {
@@ -284,6 +307,12 @@ fn captured_case_with_limits(
         request_nonce: "captured-test-analyst".into(),
         scope: InvestigationScope::All,
     };
+    if hosted {
+        expected.provider.mode = InvestigationProviderMode::Cloud;
+        expected.provider.provider_id = "anthropic:claude-opus-5-5".into();
+        expected.provider.model = "claude-opus-5-5".into();
+        expected.provider.endpoint = "https://api.anthropic.com/v1/messages".into();
+    }
     std::fs::write(&definition_path, serde_json::to_vec(&expected).unwrap()).unwrap();
     let job_ids = || {
         crate::jobs::JobStore::open(prepared.profile.data().join("state.db"))
@@ -341,6 +370,18 @@ fn captured_case_with_limits(
         std::fs::write(&definition_path, serde_json::to_vec(&expected).unwrap()).unwrap();
     }
     let manifest = run(&expected).unwrap();
+    if hosted {
+        let jobs = crate::jobs::JobStore::open(prepared.profile.data().join("state.db")).unwrap();
+        let id = manifest["analyst_id"].as_str().unwrap();
+        let (detail, result, _, _) =
+            super::super::completion::execution::read_expanded_state(&jobs, id).unwrap();
+        assert_eq!(detail.limits.generated_tokens_per_invocation, 16_384);
+        assert_eq!(detail.limits.generated_token_reservations, 1_048_576);
+        assert_eq!(detail.limits.active_seconds, 1800);
+        assert_eq!(detail.usage.model_invocations, 0);
+        assert!(result.is_none());
+        assert_eq!(jobs.captured_run_limits(id).unwrap(), Some((1800, 600_000)));
+    }
     if let Some(limits) = run_limits {
         assert_eq!(
             manifest["run_limits"]["active_seconds"],
