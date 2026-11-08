@@ -19,7 +19,7 @@ pub(crate) fn completion_limit_values(
 /// candidate preparation during sealing (including caller/sealer action clones).
 #[cfg(unix)]
 pub(crate) fn payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
-    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let limits = CompletionLimits::for_investigation(completion_limit_values(policy).ok()?).ok()?;
     let firewall = limits.firewall_workspace_bytes()?;
     let transport = limits.transport_workspace_bytes()?;
     let authorize = firewall
@@ -58,7 +58,7 @@ pub(crate) fn payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
 /// disclosure and pending-step copy; candidate disclosure is in sealing's peak.
 #[cfg(unix)]
 pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usize> {
-    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let limits = CompletionLimits::for_investigation(completion_limit_values(policy).ok()?).ok()?;
     let firewall = limits.firewall_workspace_bytes()?;
     let transport = limits.transport_workspace_bytes()?;
     firewall
@@ -82,7 +82,7 @@ pub(crate) fn continuation_retained(policy: &InvestigationPolicy) -> Option<usiz
 /// projection/validation. Current invocation owners are charged separately.
 #[cfg(unix)]
 pub(crate) fn source_settlement_retained(policy: &InvestigationPolicy) -> Option<usize> {
-    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let limits = CompletionLimits::for_investigation(completion_limit_values(policy).ok()?).ok()?;
     limits
         .firewall_workspace_bytes()?
         .prepared_bytes
@@ -98,7 +98,7 @@ pub(crate) fn source_settlement_retained(policy: &InvestigationPolicy) -> Option
 pub(crate) fn audit_payload_peak(policy: &InvestigationPolicy) -> Option<usize> {
     use agents::investigation::{MAX_RECORD_BYTES, semantic_audit};
     use context_hub::logical::{set, slots, sum};
-    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let limits = CompletionLimits::for_investigation(completion_limit_values(policy).ok()?).ok()?;
     let firewall = limits.firewall_workspace_bytes()?;
     let transport = limits.transport_workspace_bytes()?;
     let (projection, construction) = semantic_audit::projection_workspace_bytes()?;
@@ -144,7 +144,7 @@ pub(crate) fn audit_payload_peak(policy: &InvestigationPolicy) -> Option<usize> 
 /// projection/action conservatively even if a future worker drops them earlier.
 #[cfg(unix)]
 pub(crate) fn audit_retained(policy: &InvestigationPolicy) -> Option<usize> {
-    let limits = CompletionLimits::new(completion_limit_values(policy).ok()?).ok()?;
+    let limits = CompletionLimits::for_investigation(completion_limit_values(policy).ok()?).ok()?;
     let firewall = limits.firewall_workspace_bytes()?;
     context_hub::logical::sum(&[
         agents::investigation::semantic_audit::projection_workspace_bytes()?
@@ -168,7 +168,8 @@ mod tests {
     fn provider_continuation_retains_decoded_action_with_original_completion() {
         // AC-0327: candidate phase maxima cannot absorb the original action.
         let policy = &INVESTIGATION_V2_POLICY;
-        let limits = CompletionLimits::new(completion_limit_values(policy).unwrap()).unwrap();
+        let limits =
+            CompletionLimits::for_investigation(completion_limit_values(policy).unwrap()).unwrap();
         let cap = usize::try_from(limits.values().output_text_bytes).unwrap();
         let raw = format!("[{}]", vec!["[]"; (cap - 2) / 3].join(","));
         let action: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -196,9 +197,10 @@ mod tests {
     #[test]
     fn provider_limits_preserve_worker_policy_and_transport_caps() {
         for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
-            let actual = CompletionLimits::new(completion_limit_values(policy).unwrap())
-                .unwrap()
-                .values();
+            let actual =
+                CompletionLimits::for_investigation(completion_limit_values(policy).unwrap())
+                    .unwrap()
+                    .values();
             let defaults = CompletionLimits::default().values();
             assert_eq!(
                 actual.max_output_tokens,

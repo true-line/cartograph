@@ -361,7 +361,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
     fn completion_limits(&self, policy: &InvestigationPolicy) -> Result<CompletionLimits, Failure> {
         let mut values = super::provider_workspace::completion_limit_values(policy)?;
         values.request_timeout_ms = self.request_timeout_ms;
-        CompletionLimits::new(values).map_err(provider_failure)
+        CompletionLimits::for_investigation(values).map_err(provider_failure)
     }
 
     fn execute_inner(

@@ -515,6 +515,8 @@ pub struct InvestigationConsent {
     pub revision: u64,
     pub preview: llm::EgressPreview,
     pub provider_profile: llm::bounded::ProviderProfile,
+    /// May carry the hosted output allowance (AC-0570).
+    #[serde(deserialize_with = "llm::bounded::deserialize_investigation_limits")]
     pub completion_limits: llm::bounded::CompletionLimits,
     pub provider: InvestigationProvider,
     pub expires_at: String,

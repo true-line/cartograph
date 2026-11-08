@@ -726,6 +726,7 @@ impl InvestigationStopReason {
                     UnsupportedEncoding => "unsupported_encoding",
                     InvalidResponse => "invalid_response",
                     IncompleteResponse => "incomplete_response",
+                    OutputLimitReached => "output_limit_reached",
                     Refused => "refused",
                     EmptyCompletion => "empty_completion",
                 }
@@ -820,7 +821,17 @@ struct StoredTask {
     action_tool: Option<InvestigationTool>,
 }
 
-/// Reconstruct only saved desktop time overrides; MCP stays on static policy.
+/// The provider that takes the hosted output allowance: the pinned Opus lane.
+fn hosted_generation(provider: Option<&InvestigationProvider>) -> bool {
+    provider.is_some_and(|provider| {
+        provider.mode == agents::investigation::InvestigationProviderMode::Cloud
+            && provider.provider_id
+                == format!("anthropic:{}", llm::anthropic::ClaudeLane::Opus.model_id())
+    })
+}
+
+/// Reconstruct only saved desktop overrides (time, hosted output allowance);
+/// MCP stays on static policy.
 pub(crate) fn policy_for_detail(
     detail: &InvestigationDetail,
 ) -> Result<InvestigationPolicy, InvestigationStoreError> {
@@ -895,9 +906,19 @@ impl JobStore {
         if active_seconds.is_some() && (mcp.is_some() || !next_prompt) {
             return Err(InvestigationStoreError::Invalid);
         }
-        let effective_policy = base
+        let mut effective_policy = base
             .with_active_seconds(active_seconds.unwrap_or(base.limits().active_seconds))
             .ok_or(InvestigationStoreError::Invalid)?;
+        // #1709: the hosted Opus lane always thinks, so a desktop next-prompt
+        // task on it freezes the owner-approved output allowance. Other
+        // providers, MCP tasks and the v1 profile keep the static policy.
+        if next_prompt
+            && mcp.is_none()
+            && hosted_generation(provider)
+            && let Some(hosted) = effective_policy.with_hosted_generation()
+        {
+            effective_policy = hosted;
+        }
         let policy = &effective_policy;
         if request.specialist_id.uses_next_prompt_admission() != next_prompt
             || (next_prompt

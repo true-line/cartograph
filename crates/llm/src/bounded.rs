@@ -91,6 +91,13 @@ pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
 /// Reserved only for the single semantic-audit invocation.
 pub const AUDIT_OUTPUT_TOKENS: u32 = 16384;
 
+/// Owner-approved per-call output allowance for the hosted Opus lane (#1709):
+/// Opus 5.5 always runs adaptive thinking, whose tokens count toward
+/// `max_tokens`. Admitted only by [`CompletionLimits::for_investigation`] and
+/// [`deserialize_investigation_limits`]; [`CompletionLimits::new`] and ordinary
+/// decoding keep the general ceiling.
+pub const HOSTED_OUTPUT_TOKENS: u32 = 16384;
+
 impl CompletionLimits {
     pub fn for_semantic_audit(self) -> Self {
         Self(CompletionLimitValues {
@@ -113,6 +120,23 @@ impl CompletionLimits {
         } else {
             Self::new(values)
         }
+    }
+
+    /// Investigation limits: the general ceilings, except that the output
+    /// reservation may also be exactly [`HOSTED_OUTPUT_TOKENS`]. Which lane may
+    /// use it is decided by the frozen investigation policy, not here.
+    pub fn for_investigation(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
+        if values.max_output_tokens != HOSTED_OUTPUT_TOKENS {
+            return Self::new(values);
+        }
+        let regular = Self::new(CompletionLimitValues {
+            max_output_tokens: 1,
+            ..values
+        })?;
+        Ok(Self(CompletionLimitValues {
+            max_output_tokens: HOSTED_OUTPUT_TOKENS,
+            ..regular.0
+        }))
     }
 
     pub fn new(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
@@ -145,6 +169,16 @@ impl<'de> Deserialize<'de> for CompletionLimits {
         Self::new(CompletionLimitValues::deserialize(deserializer)?)
             .map_err(serde::de::Error::custom)
     }
+}
+
+/// Decodes a stored investigation record's limits under
+/// [`CompletionLimits::for_investigation`], for `#[serde(deserialize_with)]`.
+/// Ordinary [`CompletionLimits`] decoding keeps the general ceiling.
+pub fn deserialize_investigation_limits<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<CompletionLimits, D::Error> {
+    CompletionLimits::for_investigation(CompletionLimitValues::deserialize(deserializer)?)
+        .map_err(serde::de::Error::custom)
 }
 
 /// Configured identity, not proof of the model weights that actually executed.
@@ -472,6 +506,10 @@ pub enum FailureCode {
     IncompleteResponse,
     Refused,
     EmptyCompletion,
+    /// The provider stopped at the reserved output-token limit (Anthropic
+    /// `max_tokens`, OpenAI-compatible or Ollama `length`): distinct from any
+    /// other incomplete stop so a truncated generation is diagnosable.
+    OutputLimitReached,
 }
 
 /// Fixed diagnostics never retain transport URLs, body snippets, parser errors,
@@ -1204,6 +1242,9 @@ pub(super) fn complete_ollama(
             preflight_response(bytes)?;
             let response: response_wire::OllamaResponse = serde_json::from_slice(bytes)
                 .map_err(|_| rejected(FailureCode::InvalidResponse))?;
+            if response.done && response.done_reason == "length" {
+                return Err(rejected(FailureCode::OutputLimitReached));
+            }
             if !response.done || response.done_reason != "stop" {
                 return Err(rejected(FailureCode::IncompleteResponse));
             }
@@ -1264,6 +1305,9 @@ pub(super) fn openai_compatible_envelope(bytes: &[u8]) -> Result<Admitted, Bound
             .is_some_and(|refusal| !refusal.is_empty());
     if refused {
         return Err(rejected(FailureCode::Refused));
+    }
+    if choice.finish_reason.as_deref() == Some("length") {
+        return Err(rejected(FailureCode::OutputLimitReached));
     }
     if choice.finish_reason.as_deref() != Some("stop") {
         return Err(rejected(FailureCode::IncompleteResponse));
@@ -1426,6 +1470,9 @@ pub(super) fn complete_anthropic(
                 .is_some_and(|details| details.kind.as_deref() == Some("refusal"))
         {
             return Err(rejected(FailureCode::Refused));
+        }
+        if response.stop_reason == "max_tokens" {
+            return Err(rejected(FailureCode::OutputLimitReached));
         }
         if response.stop_reason != "end_turn" {
             return Err(rejected(FailureCode::IncompleteResponse));
