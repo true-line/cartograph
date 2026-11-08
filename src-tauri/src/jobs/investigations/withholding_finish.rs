@@ -81,6 +81,12 @@ pub(super) fn project(
         .completion
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?;
+    let sidecar = refusal_diagnostics::collect(
+        current,
+        finish,
+        prior.record.refusal_id.clone(),
+        projection.original_finish_hash().to_owned(),
+    );
     let witness = FindingWithholdingWitness {
         schema_version: 1,
         detector_version: 1,
@@ -104,7 +110,11 @@ pub(super) fn project(
             .map(|index| *index as u32)
             .collect(),
     };
-    Ok(Some(result.with_withholding_witness(witness, policy)?))
+    let result = result.with_withholding_witness(witness, policy)?;
+    // Sequence two is the current post-correction finish. A projected finish
+    // never also appends a second refusal; both writes share the caller tx.
+    refusal_diagnostics::insert(tx, &task.detail.summary.investigation_id, 2, &sidecar)?;
+    Ok(Some(result))
 }
 
 // A refusal is not an error transport. Recompute eligibility only for a genuine

@@ -184,16 +184,30 @@ fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'sta
 }
 
 pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Value, String> {
-    let database = authority.app_data.join("state.db");
+    collect_saved(
+        authority.app_data,
+        authority.analyst_id,
+        authority.request,
+        authority.binding,
+        authority.manifest_hash,
+        role,
+    )
+}
+
+fn collect_saved(
+    app_data: &Path,
+    analyst_id: &str,
+    request: &StagedObligationRequest,
+    binding: &PreparationBinding,
+    manifest_hash: &str,
+    role: &str,
+) -> Result<Value, String> {
+    let database = app_data.join("state.db");
     let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
     // This production reader authenticates the saved task and specialist metadata.
     let (detail, result, ledger, events) =
-        super::super::completion::execution::read_expanded_state(&jobs, authority.analyst_id)?;
-    let family = receipt_family(
-        &authority.request.specialist_id,
-        detail.summary.specialist_id,
-        role,
-    )?;
+        super::super::completion::execution::read_expanded_state(&jobs, analyst_id)?;
+    let family = receipt_family(&request.specialist_id, detail.summary.specialist_id, role)?;
     if !matches!(
         detail.summary.status,
         InvestigationStatus::Completed
@@ -207,19 +221,15 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
     let db =
         rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| e.to_string())?;
-    let invocations = rows(&db, authority.analyst_id, "investigation_invocations")?;
+    let invocations = rows(&db, analyst_id, "investigation_invocations")?;
     let calls = invocations
         .iter()
         .map(|body| {
             serde_json::from_str::<PendingInvestigationStep>(body).map_err(|e| e.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let capacity = rows(
-        &db,
-        authority.analyst_id,
-        "investigation_admission_refusals",
-    )?;
-    let finish = rows(&db, authority.analyst_id, "staged_completion_refusals")?;
+    let capacity = rows(&db, analyst_id, "investigation_admission_refusals")?;
+    let finish = rows(&db, analyst_id, "staged_completion_refusals")?;
     if calls.len() as u32 != detail.usage.model_invocations {
         return Err("Invocation denominator changed.".into());
     }
@@ -240,10 +250,10 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
             **mode == agents::investigation::staged_refusal::CompletionCallMode::FinishOnly
         })
         .count();
-    Ok(json!({"schema_version":1,"family":family,"role":role,
-        "binding":authority.binding,"manifest_hash":authority.manifest_hash,
-        "request_hash":authority.request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
-        "obligations_hash":authority.request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
+    let mut receipt = json!({"schema_version":1,"family":family,"role":role,
+        "binding":binding,"manifest_hash":manifest_hash,
+        "request_hash":request.intent_hash_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e| e.to_string())?,
+        "obligations_hash":request.obligations.fingerprint_with_policy(&INVESTIGATION_V2_POLICY).map_err(|e|e.to_string())?,
         "initial_prompt_measurement_basis":"first_saved_invocation_only_not_pre_dispatch_preparation",
         "initial_prompt_bytes":calls.first().map(|call| call.input_bytes),
         "finish_only_calls":finish_only_calls,"choice_calls":calls.len()-finish_only_calls,
@@ -251,7 +261,16 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
         "detail":detail,"result":result,"ledger":ledger,"events":events,
         "invocations":invocations,"capacity_refusals":capacity,"finish_refusals":finish,
         "tokenizer_context_capacity":"unknown","full_obligation_acceptance":"not_established",
-        "auditor":"requires_separate_independent_review_and_execution"}))
+        "auditor":"requires_separate_independent_review_and_execution"});
+    let diagnostics = jobs
+        .investigation_refusal_diagnostics(analyst_id)
+        .map_err(|e| e.to_string())?;
+    // Historical receipts retain their exact serialized shape and bytes.
+    if !diagnostics.is_empty() {
+        receipt["finish_diagnostics"] =
+            serde_json::to_value(diagnostics).map_err(|e| e.to_string())?;
+    }
+    Ok(receipt)
 }
 fn reopen_receipt(directory: &Path, expected: &PreparationBinding) -> Result<Value, String> {
     reopen_control_receipt(directory, expected, CaptureFixture::Baseline)
@@ -586,6 +605,9 @@ mod tests {
             let prepared = reopen(directory.path(), &binding()).unwrap();
             assert!(prepared.auditor_id.is_none());
             let before = collect(&prepared).unwrap();
+            // AC-0287 / #1707: historical roles retain the receipt's old shape,
+            // including after refusal and unknown-outcome recovery.
+            assert!(before.get("finish_diagnostics").is_none());
             if scenario == "receipt_error" {
                 assert!(receipt.is_err());
                 assert!(reopen_receipt(directory.path(), &binding()).is_err());
@@ -815,4 +837,77 @@ mod boundary_tests {
             receipt
         );
     }
+}
+
+// AC-0287 / #1707: offline historical compatibility; opens source read-only,
+// then runs all production state authentication against a disposable copy.
+#[test]
+#[ignore = "requires explicit historical development artifact root; no provider construction"]
+fn copied_historical_analyst_receipt_reopens_byte_identically() {
+    use sha2::{Digest, Sha256};
+    let sha = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let root =
+        std::path::PathBuf::from(super::super::required("CARTOGRAPH_HISTORICAL_ANALYST_ROOT"));
+    let output = root.join("analyst-output");
+    let read = |name: &str| {
+        super::super::vendure::read_preparation_artifact(&output.join(name), MAX_RECEIPT).unwrap()
+    };
+    let saved = read("analyst-receipt.json");
+    let request_bytes = read("analyst-request.json");
+    let request: StagedObligationRequest = serde_json::from_slice(&request_bytes).unwrap();
+    let start_bytes = read("start.json");
+    assert_eq!(
+        sha(&start_bytes),
+        super::super::required("CARTOGRAPH_HISTORICAL_START_SHA256")
+    );
+    let start: Value = serde_json::from_slice(&start_bytes).unwrap();
+    assert_eq!(
+        sha(&request_bytes),
+        start["request_sha256"].as_str().unwrap()
+    );
+    let definition_bytes = read("definition.json");
+    assert_eq!(
+        sha(&definition_bytes),
+        start["definition_sha256"].as_str().unwrap()
+    );
+    let definition: Value = serde_json::from_slice(&definition_bytes).unwrap();
+    let binding: PreparationBinding =
+        serde_json::from_value(definition["binding"].clone()).unwrap();
+    let manifest: Value = serde_json::from_slice(&read("captured-analyst.json")).unwrap();
+    let manifest_hash = content_hash(&serde_json::to_vec(&manifest).unwrap());
+    let source = rusqlite::Connection::open_with_flags(
+        root.join("profile/data/state.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let copied = tempfile::tempdir().unwrap();
+    let mut destination = rusqlite::Connection::open(copied.path().join("state.db")).unwrap();
+    assert_eq!(
+        rusqlite::backup::Backup::new(&source, &mut destination)
+            .unwrap()
+            .step(-1)
+            .unwrap(),
+        rusqlite::backup::StepResult::Done
+    );
+    drop(source);
+    drop(destination);
+    let fresh = collect_saved(
+        copied.path(),
+        start["analyst_id"].as_str().unwrap(),
+        &request,
+        &binding,
+        &manifest_hash,
+        "analyst",
+    )
+    .unwrap();
+    assert!(fresh.get("finish_diagnostics").is_none());
+    assert!(
+        saved == bytes(&fresh).unwrap(),
+        "historical receipt bytes changed"
+    );
 }

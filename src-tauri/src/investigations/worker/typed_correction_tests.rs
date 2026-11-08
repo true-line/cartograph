@@ -414,6 +414,20 @@ pub(super) fn partial_action(prompt: &Value, call: usize) -> Value {
 
 #[test]
 fn analyst25_partial_survives_advisory_audit_settlement_and_reopen() {
+    // AC-0287: diagnostic retention cannot add dispatches or alter disposition.
+    use agents::investigation::diagnostic_sidecar::UnrecordedReason;
+    for reason in [
+        None,
+        Some(UnrecordedReason::Capacity),
+        Some(UnrecordedReason::CollectorRejected),
+    ] {
+        partial_advisory_audit_round_trip(reason);
+    }
+}
+
+fn partial_advisory_audit_round_trip(
+    reason: Option<agents::investigation::diagnostic_sidecar::UnrecordedReason>,
+) {
     // Both verdicts publish: the in-run audit remains advisory.
     for verdict in ["pass", "indeterminate"] {
         let mut scripted = NextProvider::new(false);
@@ -425,8 +439,32 @@ fn analyst25_partial_survives_advisory_audit_settlement_and_reopen() {
             SpecialistId::DomainAnalystV25,
             true,
         );
-        f.run_with_audit_options(provider.as_ref(), RunClock::new(Instant::now()), None, true);
+        let run = || {
+            f.run_with_audit_options(provider.as_ref(), RunClock::new(Instant::now()), None, true);
+        };
+        use agents::investigation::diagnostic_sidecar::UnrecordedReason;
+        match reason {
+            Some(UnrecordedReason::Capacity) => {
+                crate::jobs::JobStore::without_refusal_diagnostic_detail(run)
+            }
+            Some(UnrecordedReason::CollectorRejected) => {
+                crate::jobs::JobStore::with_refusal_diagnostic_collector_rejected(run)
+            }
+            None => run(),
+        }
         let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+        let sidecars = reopened.investigation_refusal_diagnostics(&f.id).unwrap();
+        assert_eq!(sidecars.len(), 2);
+        for sidecar in sidecars {
+            use agents::investigation::diagnostic_sidecar::Retention;
+            match (reason, sidecar.retention) {
+                (Some(expected), Retention::Unrecorded { reason, .. }) => {
+                    assert_eq!(reason, expected)
+                }
+                (None, Retention::Recorded { .. }) => {}
+                _ => panic!("unexpected diagnostic retention"),
+            }
+        }
         let detail = reopened.investigation(&f.id).unwrap();
         assert_eq!(
             detail.summary.status,
@@ -450,6 +488,7 @@ fn analyst25_partial_survives_advisory_audit_settlement_and_reopen() {
             vec![0]
         );
         let payloads = provider.received_payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 5, "actual provider dispatch count");
         let audit = payloads
             .iter()
             .find(|payload| {

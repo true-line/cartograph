@@ -1,6 +1,8 @@
 //! Transient input ownership. Stored manifests contain only the fingerprints of
 //! these exact query/source/history inputs, never their raw text.
 use super::*;
+#[path = "diagnostic_sidecar_input.rs"]
+mod diagnostic_sidecar_input;
 use crate::AgentEvidence;
 use core_prov::content_hash;
 use llm::{AnalysisTier, CompletionAction, CompletionPayload, PayloadSpan};

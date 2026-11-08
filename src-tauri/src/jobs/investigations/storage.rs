@@ -395,6 +395,10 @@ pub(super) fn decode_bounded<T: serde::de::DeserializeOwned + Serialize>(
 }
 
 pub(super) fn timestamp(connection: &Connection) -> Result<String, InvestigationStoreError> {
+    #[cfg(test)]
+    if let Some(value) = super::refusal_diagnostics::fixed_timestamp() {
+        return Ok(value);
+    }
     Ok(
         connection.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
             r.get(0)

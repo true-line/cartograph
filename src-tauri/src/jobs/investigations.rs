@@ -68,6 +68,8 @@ pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBa
 pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};
 #[path = "investigations/finding_reviews.rs"]
 mod finding_reviews;
+#[path = "investigations/refusal_diagnostics.rs"]
+mod refusal_diagnostics;
 #[path = "investigations/staged.rs"]
 mod staged;
 pub(crate) use finding_reviews::FindingReviewError;

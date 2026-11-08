@@ -1252,3 +1252,15 @@ class stays fatal. Re-derived unmet obligations or no surviving findings fail.
 A text-free bound witness and explicit partial disposition survive sealing,
 settlement, reopen and export; the result is never silently Supported. Historical
 @20–@24 remain unchanged. See [implementation specification](design/1705-withheld-findings.md).
+
+### Decision #1707 — bounded refusal diagnostic sidecars (US-0032 / AC-0287)
+
+New refusal diagnostics use a separate immutable, independently witness-bound
+sidecar capped at 4096 complete serialized bytes (ADR-0055). Closed reason codes,
+source positions and token classes explain the existing verdict without raw
+prose or identifier strings. Overflow records explicit omissions or a capacity
+marker. Final withholding describes the current authored proposal. Historical
+absence remains readable; deletion or rehashed substitution of a newly bound
+sidecar is rejected. Diagnostics must preserve whole-run dispositions,
+withholding, model bytes, later capacity and provider counts. Only new records of analyst roles 22–25 receive diagnostics. Earlier roles
+remain unchanged; future roles adopt the witness at their own version bump.

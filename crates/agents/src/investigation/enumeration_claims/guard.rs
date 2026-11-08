@@ -2,6 +2,7 @@
 //! charge workspace, and bind the returned text-free location to the refusal.
 #[path = "claims.rs"]
 pub(super) mod claims;
+#[cfg(test)]
 #[path = "configuration.rs"]
 pub(super) mod configuration;
 #[path = "subjects.rs"]
@@ -60,6 +61,43 @@ pub(super) fn visit_finding(
     }
 }
 
+pub(super) fn visit_diagnostics(
+    title: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    allocation_cap: usize,
+    mut visit: impl FnMut(bool, usize, super::claim_diagnostics::ClaimDiagnostic),
+) {
+    use super::claim_diagnostics::{ClaimDiagnostic, explain_enumeration};
+    for (is_title, text) in [(true, title), (false, statement)] {
+        for (index, sentence) in sentences(text).enumerate() {
+            if let Some((span, diagnostic)) =
+                spans.iter().enumerate().find_map(|(span, (_, source))| {
+                    explain_enumeration(source, sentence, allocation_cap)
+                        .map(|diagnostic| (span, diagnostic))
+                })
+            {
+                visit(
+                    is_title,
+                    index + 1,
+                    ClaimDiagnostic::Enumeration { span, diagnostic },
+                );
+            }
+            if let Some(failure) = configuration_failure(sentence, statement, spans, is_title, true)
+            {
+                visit(
+                    is_title,
+                    index + 1,
+                    ClaimDiagnostic::Configuration {
+                        predicate_token: failure.predicate_token,
+                        failures: failure.failures,
+                    },
+                );
+            }
+        }
+    }
+}
+
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
     let mut terminal = false;
     text.split(move |ch: char| {
@@ -81,6 +119,24 @@ fn unverified_configuration(
     spans: &[(&str, &str)],
     title: bool,
 ) -> bool {
+    configuration_failure(sentence, statement, spans, title, false).is_some()
+}
+
+pub(super) struct ConfigurationDiagnostic {
+    pub predicate_token: usize,
+    pub failures: Vec<(
+        usize,
+        crate::investigation::claim_diagnostics::ConfigurationFailure,
+    )>,
+}
+
+fn configuration_failure(
+    sentence: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    title: bool,
+    retain_failures: bool,
+) -> Option<ConfigurationDiagnostic> {
     let tokens: Vec<_> = subjects::identifiers(sentence).collect();
     let candidates: std::collections::BTreeSet<_> = subjects::identifiers(statement)
         .chain(
@@ -144,20 +200,112 @@ fn unverified_configuration(
                     _ => None,
                 }
             });
-        if let Some(subject) = subject
-            && !spans
-                .iter()
-                .any(|(path, source)| configuration::binds(path, source, subject))
-        {
-            return true;
+        if let Some(subject) = subject {
+            let mut failures = Vec::new();
+            let bound = spans.iter().enumerate().any(|(span, (path, source))| {
+                match crate::investigation::claim_diagnostics::explain_configuration(
+                    path, source, subject,
+                ) {
+                    Ok(_) => true,
+                    Err(reason) => {
+                        if retain_failures {
+                            failures.push((span, reason));
+                        }
+                        false
+                    }
+                }
+            });
+            if !bound {
+                return Some(ConfigurationDiagnostic {
+                    predicate_token: index,
+                    failures,
+                });
+            }
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // AC-0287 / #1707: diagnostics preserve every verdict location/class even
+    // with zero shape allocation, and span ordinals remain finding-local.
+    #[test]
+    fn diagnostic_visitor_matches_verdict_traversal_without_shape_room() {
+        use super::super::claim_diagnostics::ClaimDiagnostic;
+        let title = "Configured MultiChannelStrategy";
+        let statement = "Only A is listed, and configured MultiChannelStrategy. Only A is listed.";
+        let spans = [
+            ("irrelevant.ts", "const unused = 1;"),
+            ("values.ts", "['A', 'B']"),
+        ];
+        let mut expected = Vec::new();
+        visit_finding(title, statement, &spans, |title, sentence, reason| {
+            expected.push((title, sentence, reason))
+        });
+        let mut actual = Vec::new();
+        visit_diagnostics(
+            title,
+            statement,
+            &spans,
+            0,
+            |title, sentence, diagnostic| {
+                let reason = match diagnostic {
+                    ClaimDiagnostic::Enumeration { span, diagnostic } => {
+                        assert_eq!(span, 1);
+                        assert!(diagnostic.shape.tokens.is_empty());
+                        assert_eq!(diagnostic.explanation.target_token, None);
+                        Reason::Enumeration
+                    }
+                    ClaimDiagnostic::Configuration { failures, .. } => {
+                        assert_eq!(
+                            failures.iter().map(|(span, _)| *span).collect::<Vec<_>>(),
+                            vec![0, 1]
+                        );
+                        Reason::Configuration
+                    }
+                };
+                actual.push((title, sentence, reason));
+            },
+        );
+        assert_eq!(actual, expected);
+    }
+
+    // AC-0287: qualifiers and unsupported shapes retain the verdict locations.
+    #[test]
+    fn diagnostic_visitor_matches_qualified_and_unsupported_verdicts() {
+        for (source, statement) in [
+            ("['A', 'B']", "All entries are A unless overridden."),
+            ("const values = source();", "Only A is listed."),
+        ] {
+            let spans = [("values.ts", source)];
+            let mut expected = Vec::new();
+            visit_finding("", statement, &spans, |title, sentence, reason| {
+                expected.push((title, sentence, reason));
+            });
+            let mut actual = Vec::new();
+            visit_diagnostics(
+                "",
+                statement,
+                &spans,
+                4096,
+                |title, sentence, diagnostic| {
+                    let reason = match diagnostic {
+                        super::super::claim_diagnostics::ClaimDiagnostic::Enumeration {
+                            ..
+                        } => Reason::Enumeration,
+                        super::super::claim_diagnostics::ClaimDiagnostic::Configuration {
+                            ..
+                        } => Reason::Configuration,
+                    };
+                    actual.push((title, sentence, reason));
+                },
+            );
+            assert_eq!(actual, expected, "{statement}");
+        }
+    }
+
     // AC-0287 / #1701: collect both classes, repeat locations, and continue
     // visiting after a consumer stops retaining results.
     #[test]

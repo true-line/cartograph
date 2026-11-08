@@ -2,7 +2,7 @@
 use super::*;
 
 impl CapturedSourceInvocationFixture {
-    pub(crate) fn assert_partial_after_capture(
+    pub(crate) fn assert_diagnostic_retention_invariant(
         &mut self,
         provider: &dyn llm::LlmProvider,
         firewall: &llm::EgressFirewall,
@@ -10,6 +10,88 @@ impl CapturedSourceInvocationFixture {
         pages: &[String],
         evidence: &[agents::AgentEvidence],
     ) {
+        let _clock = refusal_diagnostics::fix_timestamp(timestamp(&self.inner.store.conn).unwrap());
+        let mut snapshot = Connection::open_in_memory().unwrap();
+        assert_eq!(
+            rusqlite::backup::Backup::new(&self.inner.store.conn, &mut snapshot)
+                .unwrap()
+                .step(-1)
+                .unwrap(),
+            rusqlite::backup::StepResult::Done
+        );
+        let omitted = refusal_diagnostics::without_detail_room(|| {
+            self.assert_partial_after_capture(provider, firewall, citation, pages, evidence)
+        });
+        assert!(
+            self.inner
+                .store
+                .investigation_refusal_diagnostics(self.id())
+                .unwrap()
+                .iter()
+                .all(|s| matches!(
+                    s.retention,
+                    agents::investigation::diagnostic_sidecar::Retention::Unrecorded { .. }
+                ))
+        );
+        // Restore through SQLite while the fixture's other connections remain open.
+        assert_eq!(
+            rusqlite::backup::Backup::new(&snapshot, &mut self.inner.store.conn)
+                .unwrap()
+                .step(-1)
+                .unwrap(),
+            rusqlite::backup::StepResult::Done
+        );
+        let retained =
+            self.assert_partial_after_capture(provider, firewall, citation, pages, evidence);
+        assert!(
+            self.inner
+                .store
+                .investigation_refusal_diagnostics(self.id())
+                .unwrap()
+                .iter()
+                .all(|s| matches!(
+                    s.retention,
+                    agents::investigation::diagnostic_sidecar::Retention::Recorded { .. }
+                ))
+        );
+        assert_eq!(
+            rusqlite::backup::Backup::new(&snapshot, &mut self.inner.store.conn)
+                .unwrap()
+                .step(-1)
+                .unwrap(),
+            rusqlite::backup::StepResult::Done
+        );
+        let rejected = refusal_diagnostics::with_collector_rejected(|| {
+            self.assert_partial_after_capture(provider, firewall, citation, pages, evidence)
+        });
+        assert!(self.inner.store.investigation_refusal_diagnostics(self.id()).unwrap()
+            .iter().all(|s| matches!(s.retention,
+                agents::investigation::diagnostic_sidecar::Retention::Unrecorded {
+                    reason: agents::investigation::diagnostic_sidecar::UnrecordedReason::CollectorRejected,
+                    omitted_entries: 0,
+                })));
+        assert_eq!(
+            rejected, retained,
+            "collector failure changed execution observations"
+        );
+        assert_eq!(omitted.len(), retained.len());
+        for (index, (left, right)) in omitted.iter().zip(&retained).enumerate() {
+            assert!(
+                left == right,
+                "diagnostic retention changed execution observation {index}"
+            );
+        }
+    }
+
+    pub(crate) fn assert_partial_after_capture(
+        &mut self,
+        provider: &dyn llm::LlmProvider,
+        firewall: &llm::EgressFirewall,
+        citation: &str,
+        pages: &[String],
+        evidence: &[agents::AgentEvidence],
+    ) -> Vec<Value> {
+        let mut observations = Vec::new();
         for turn in 0..2 {
             let snapshot = self
                 .inner
@@ -66,6 +148,7 @@ impl CapturedSourceInvocationFixture {
             let authorized = firewall
                 .authorize_bounded(provider, &prepared, None)
                 .unwrap();
+            observations.push(serde_json::to_value(authorized.payload()).unwrap());
             let invoked = self
                 .inner
                 .store
@@ -110,6 +193,13 @@ impl CapturedSourceInvocationFixture {
                 reported_cache_read_tokens: None,
                 active_milliseconds: invoked.usage.active_milliseconds + 1,
             };
+            let mut before_finish = Connection::open_in_memory().unwrap();
+            if turn == 1 {
+                rusqlite::backup::Backup::new(&self.inner.store.conn, &mut before_finish)
+                    .unwrap()
+                    .step(-1)
+                    .unwrap();
+            }
             let detail = self
                 .inner
                 .store
@@ -125,6 +215,95 @@ impl CapturedSourceInvocationFixture {
                     },
                 )
                 .unwrap();
+            if turn == 1 {
+                // AC-0287: a later real finish admission has the same exact-fit
+                // boundary after either retained or omitted refusal diagnostics.
+                let mut completed = Connection::open_in_memory().unwrap();
+                rusqlite::backup::Backup::new(&self.inner.store.conn, &mut completed)
+                    .unwrap()
+                    .step(-1)
+                    .unwrap();
+                let used = {
+                    let tx = self.inner.store.conn.unchecked_transaction().unwrap();
+                    stored_bytes(&tx, Some(self.id())).unwrap()
+                };
+                let before_used = {
+                    let tx = before_finish.unchecked_transaction().unwrap();
+                    stored_bytes(&tx, Some(self.id())).unwrap()
+                };
+                // Find the real admission boundary, including its protected
+                // publication reservation, rather than guessing from final size.
+                let mut admit_with_padding = |charged: usize| {
+                    rusqlite::backup::Backup::new(&before_finish, &mut self.inner.store.conn)
+                        .unwrap()
+                        .step(-1)
+                        .unwrap();
+                    if charged != 0 {
+                        // Unreferenced disposable rows exercise ordinary storage
+                        // accounting while respecting replay's per-row preflight.
+                        let rows = charged.div_ceil(4096 + 64 + 256);
+                        let mut body_bytes = charged.checked_sub(rows * (64 + 256)).unwrap();
+                        for row in 0..rows {
+                            let size = body_bytes.min(4096);
+                            self.inner.store.conn.execute(
+                                "INSERT INTO investigation_responses VALUES (?1,?2,zeroblob(?3),?4)",
+                                params![self.id(), format!("capacity-padding-{row}"), i64::try_from(size).unwrap(), "0".repeat(64)],
+                            ).unwrap();
+                            body_bytes -= size;
+                        }
+                        assert_eq!(body_bytes, 0);
+                    }
+                    self.inner.store.admit_next_prompt_finish(
+                        &self.inner._execution_guard,
+                        invoked.summary.revision,
+                        &NextPromptFinish {
+                            request: &self.inner.request,
+                            response: &response,
+                            original_action: &original,
+                            current: &current,
+                            current_prepared: &prepared,
+                        },
+                    )
+                };
+                assert_eq!(admit_with_padding(0).unwrap(), detail);
+                let mut fits = 0;
+                let mut refused = TASK_CAPACITY - before_used + 1;
+                assert_eq!(
+                    admit_with_padding(refused),
+                    Err(InvestigationStoreError::Capacity)
+                );
+                while refused - fits > 1 {
+                    let midpoint = fits + (refused - fits) / 2;
+                    match admit_with_padding(midpoint) {
+                        Ok(actual) => {
+                            assert_eq!(actual, detail);
+                            fits = midpoint;
+                        }
+                        Err(InvestigationStoreError::Capacity) => refused = midpoint,
+                        Err(error) => panic!("invalid capacity fixture: {error:?}"),
+                    }
+                }
+                assert!(fits > 4096);
+                assert_eq!(admit_with_padding(fits).unwrap(), detail);
+                assert_eq!(
+                    admit_with_padding(fits + 1),
+                    Err(InvestigationStoreError::Capacity)
+                );
+                observations
+                    .push(json!({"later_finish_padding_limit": fits, "unpadded_bytes": used}));
+                rusqlite::backup::Backup::new(&completed, &mut self.inner.store.conn)
+                    .unwrap()
+                    .step(-1)
+                    .unwrap();
+            }
+            {
+                let tx = self.inner.store.conn.unchecked_transaction().unwrap();
+                observations.push(
+                    json!({"status": detail.summary.status, "usage": detail.usage,
+                    "task_bytes": stored_bytes(&tx, Some(self.id())).unwrap(),
+                    "global_bytes": stored_bytes(&tx, None).unwrap()}),
+                );
+            }
             if turn == 0 {
                 assert_eq!(detail.summary.status, InvestigationStatus::Running);
                 assert_eq!(detail.completion.as_ref().unwrap().refusal_count, 1);
@@ -190,6 +369,10 @@ impl CapturedSourceInvocationFixture {
                     serde_json::to_value(&result.findings).unwrap()
                 );
                 assert!(audit_prompt["candidate"]["narrative"].is_null());
+                observations.push(json!({"findings": result.findings,
+                    "withheld": completion.withholding.as_ref().unwrap().withheld_indexes,
+                    "survivors": completion.withholding.as_ref().unwrap().survivor_indexes,
+                    "audit_payload": audit.payload()}));
                 let history = self
                     .inner
                     .store
@@ -219,6 +402,70 @@ impl CapturedSourceInvocationFixture {
                     reopened.investigation_result(self.id()).unwrap().unwrap(),
                     result
                 );
+                // Development projection authenticates both refusal and final sidecar.
+                let projected = reopened
+                    .investigation_refusal_diagnostics(self.id())
+                    .unwrap();
+                assert_eq!(projected.len(), 2);
+                let projection_bytes = serde_json::to_string(&projected).unwrap();
+                assert!(!projection_bytes.contains("MissingStrategy"));
+                // AC-0287 / #1707: current proposal identity and sidecar loss.
+                let sidecar = refusal_diagnostics::load(&reopened.conn, self.id(), 2)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(projected[1], sidecar);
+                assert_eq!(
+                    sidecar.finish_hash,
+                    completion
+                        .withholding
+                        .as_ref()
+                        .unwrap()
+                        .original_finish_hash
+                );
+                match &sidecar.retention {
+                    agents::investigation::diagnostic_sidecar::Retention::Recorded {
+                        entries,
+                        ..
+                    } => {
+                        assert!(!entries.is_empty());
+                        assert!(entries.iter().all(|entry| matches!(
+                            entry.location.start.field,
+                            agents::investigation::ProseField::FindingTitle { finding: 0 }
+                                | agents::investigation::ProseField::FindingStatement {
+                                    finding: 0
+                                }
+                        )));
+                    }
+                    agents::investigation::diagnostic_sidecar::Retention::Unrecorded {
+                        omitted_entries,
+                        reason,
+                    } => assert!(*omitted_entries > 0 || *reason == agents::investigation::diagnostic_sidecar::UnrecordedReason::CollectorRejected),
+                }
+                for verb in ["delete", "update"] {
+                    let tx = reopened.conn.unchecked_transaction().unwrap();
+                    let task = load_next_prompt_task(&tx, self.id()).unwrap();
+                    let trigger = format!("refusal_diagnostics_records_no_{verb}");
+                    let sql: String = tx
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema WHERE name=?1",
+                            [&trigger],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    tx.execute_batch(&format!("DROP TRIGGER {trigger}"))
+                        .unwrap();
+                    if verb == "delete" {
+                        tx.execute("DELETE FROM refusal_diagnostics_records WHERE task_id=?1 AND sequence=2", [self.id()]).unwrap();
+                    } else {
+                        let mut changed = sidecar.clone();
+                        changed.finish_hash = "e".repeat(64);
+                        let body = changed.bytes().unwrap();
+                        tx.execute("UPDATE refusal_diagnostics_records SET body=?2,body_hash=?3 WHERE task_id=?1 AND sequence=2", params![self.id(), body, core_prov::content_hash(&body)]).unwrap();
+                    }
+                    tx.execute_batch(&sql).unwrap();
+                    assert!(load_result(&tx, &task).is_err(), "sidecar {verb}");
+                    assert!(refusal_diagnostics::project(&tx, self.id()).is_err());
+                }
                 for mutation in ["missing_witness", "changed_witness", "changed_response"] {
                     let tx = reopened.conn.unchecked_transaction().unwrap();
                     let task = load_next_prompt_task(&tx, self.id()).unwrap();
@@ -248,5 +495,6 @@ impl CapturedSourceInvocationFixture {
                 );
             }
         }
+        observations
     }
 }

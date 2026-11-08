@@ -290,3 +290,28 @@ mod tests {
 #[cfg(test)]
 #[path = "claim_diagnostics/r3_shapes.rs"]
 mod r3_shapes;
+
+/// Finding-local diagnostic event. Span ordinals refer only to supplied citations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimDiagnostic {
+    Enumeration {
+        span: usize,
+        diagnostic: EnumerationDiagnostic,
+    },
+    Configuration {
+        predicate_token: usize,
+        failures: Vec<(usize, ConfigurationFailure)>,
+    },
+}
+
+/// Visit the same sentence and subject grammar used by refusal detection.
+/// The caller supplies authenticated finding-local spans and bounds retention.
+pub fn visit_claim_diagnostics(
+    title: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    allocation_cap: usize,
+    visit: impl FnMut(bool, usize, ClaimDiagnostic),
+) {
+    super::enumeration_claims::visit_diagnostics(title, statement, spans, allocation_cap, visit);
+}
