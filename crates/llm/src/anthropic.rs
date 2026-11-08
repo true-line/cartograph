@@ -222,6 +222,12 @@ impl LlmProvider for AnthropicProvider {
         )
     }
 
+    /// Bounded schemas travel as `output_config.format` (#1709). Fable has no
+    /// bounded profile at all, so this never widens its surface.
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
+
     fn id(&self) -> &str {
         &self.provider_id
     }

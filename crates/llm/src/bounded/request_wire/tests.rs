@@ -40,7 +40,7 @@ fn borrowed_anthropic_request_preserves_wire_and_exact_cap() {
     for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
         for tokens in [0, 1, u32::MAX] {
             matches_wire_and_cap(
-                &anthropic(&text, &text, &text, tokens),
+                &anthropic(&text, &text, &text, tokens, None),
                 json!({
                     "model":text,"max_tokens":tokens,
                     "stream":false,"system":text,
@@ -49,6 +49,21 @@ fn borrowed_anthropic_request_preserves_wire_and_exact_cap() {
             );
         }
     }
+}
+
+#[test]
+fn anthropic_schema_request_uses_output_config() {
+    // AC-0185 / #1709: structured output travels as output_config.format; no beta header.
+    let schema =
+        json!({"type":"object","additionalProperties":false,"required":[],"properties":{}});
+    matches_wire_and_cap(
+        &anthropic("m", "s", "u", 7, Some(&schema)),
+        json!({
+            "model":"m","max_tokens":7,"stream":false,"system":"s",
+            "messages":[{"role":"user","content":"u"}],
+            "output_config":{"format":{"type":"json_schema","schema":schema}}
+        }),
+    );
 }
 
 #[test]

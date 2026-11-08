@@ -1065,16 +1065,21 @@ fn analyst_schema_is_exact_for_role_mode_and_reserve() {
             openai_prepared.preview().egress.payload.response_schema,
             action.payload.response_schema
         );
-        let unsupported =
+        // #1709: Anthropic now compiles the projected schema; the preview still
+        // carries the exact original schema for host-side validation.
+        let anthropic =
             llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Haiku, "test")
                 .unwrap();
         let preview_firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([action.tier]));
         assert_eq!(
             preview_firewall
-                .prepare_bounded(&unsupported, &action, &limits)
-                .unwrap_err()
-                .code,
-            llm::bounded::FailureCode::Unsupported
+                .prepare_bounded(&anthropic, &action, &limits)
+                .unwrap()
+                .preview()
+                .egress
+                .payload
+                .response_schema,
+            action.payload.response_schema
         );
         assert_eq!(
             prepared.preview().egress.payload.response_schema,
