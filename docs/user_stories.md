@@ -852,6 +852,14 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Unchanged:** absent-schema request bytes.
   - **Model pin:** the Opus lane is pinned to `claude-opus-5-5` (#1709).
 - **Trace:** H4 · `llm` · — · T-0568
+- **AC-0569** Given a frozen captured-analyst definition whose provider is a hosted identity pinned to a production endpoint (`anthropic:` Haiku/Opus lane at the Messages API, or `openai:<model>` at Chat Completions), when the owner runs the manual acceptance harness, then execution requires `CARTOGRAPH_ACCEPTANCE_CLOUD_AUTHORIZE` equal to that exact provider id and `CARTOGRAPH_ACCEPTANCE_CLOUD_STEP_CAP` from 1 to 64. Both are checked before the one-attempt marker is consumed.
+  - **Provider:** built from the owner-run process environment key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), which is never logged. It must reproduce the frozen descriptor exactly; the staged request records Cloud mode.
+  - **Consent grant:** T3 cloud consent is granted through the settings API only when T3 is currently local.
+  - **Approvals:** each pending step is approved through the app's own consent path, with its exact step, revision and payload-hash check. Past the cap the next step is declined, which cancels the run.
+  - **Consent log:** an exclusive append-only `analyst-consent-log.jsonl` durably records the grant, each approval (step, revision, payload hash, payload bytes, redaction count, provider id), the cap decline and the revert, each before it takes effect.
+  - **Revert:** on completion, error or a partial grant, T3 reverts to local, which revokes the consent, and its prior enabled flag is restored.
+  - **Unchanged:** Local definitions and their behavior. Unpinned, unavailable or mismatched hosted identities are refused (#1709, owner decision 2026-11-07).
+- **Trace:** H4 · `app` · — · T-0569
 
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered

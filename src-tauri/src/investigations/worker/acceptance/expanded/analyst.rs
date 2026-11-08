@@ -356,11 +356,23 @@ fn execute_role_with_clock(
     role: &str,
     clock: BoundaryClock,
 ) -> Result<(), String> {
-    if descriptor(provider.as_ref(), InvestigationProviderMode::Local).map_err(|e| e.to_string())?
+    if descriptor(provider.as_ref(), authority.provider.mode).map_err(|e| e.to_string())?
         != *authority.provider
     {
         return Err("Provider differs from frozen identity.".into());
     }
+    // A hosted run needs the owner's exact authorization and its scoped
+    // consent before the attempt marker is consumed. Any later error drops the
+    // consent, which reverts the tier.
+    let hosted = match authority.provider.mode {
+        InvestigationProviderMode::Cloud => Some(super::cloud_run::Consent::grant(
+            authority.app.handle(),
+            authority.provider,
+            &super::cloud_run::authorization_from_env(authority.provider)?,
+            &directory.join(format!("{role}-consent-log.jsonl")),
+        )?),
+        InvestigationProviderMode::Local => None,
+    };
     // Durable exclusive marker precedes every dispatch capability. Any later
     // error, unknown acknowledgement or receipt failure keeps it consumed.
     exclusive(
@@ -391,7 +403,7 @@ fn execute_role_with_clock(
         .insert(authority.analyst_id)
         .map_err(|e| e.to_string())?;
     let started = Instant::now();
-    match clock {
+    let run = move || match clock {
         BoundaryClock::Real => run_completion(
             authority.app.handle().clone(),
             authority.analyst_id.to_owned(),
@@ -412,8 +424,14 @@ fn execute_role_with_clock(
                 started,
             )
         }
+    };
+    match hosted {
+        Some(consent) => consent.approve_while(authority.analyst_id, run),
+        None => {
+            run();
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]

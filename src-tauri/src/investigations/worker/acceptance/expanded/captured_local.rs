@@ -31,11 +31,17 @@ pub(in super::super) fn use_task(
         provider: &expected.provider,
     };
     if execute {
-        let provider = app
-            .state::<crate::AppState>()
-            .investigations
-            .provider(InvestigationProviderMode::Local)
-            .map_err(|e| e.to_string())?;
+        let provider = match expected.provider.mode {
+            // Keys come only from the owner-run process environment.
+            InvestigationProviderMode::Cloud => {
+                super::cloud_run::provider(&expected.provider, |name| std::env::var(name).ok())?
+            }
+            InvestigationProviderMode::Local => app
+                .state::<crate::AppState>()
+                .investigations
+                .provider(InvestigationProviderMode::Local)
+                .map_err(|e| e.to_string())?,
+        };
         analyst::execute_bound(output, &authority, provider)?;
     }
     let saved =
