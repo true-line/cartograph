@@ -366,6 +366,10 @@ fn bounded_completion_rejects_truncated_refused_and_unknown_envelopes() {
     let mut cases = Vec::new();
     local["done_reason"] = json!("length");
     cases.push((false, local.clone(), FailureCode::OutputLimitReached));
+    // Precedence: an unfinished stream never claims the output limit.
+    local["done"] = json!(false);
+    cases.push((false, local.clone(), FailureCode::IncompleteResponse));
+    local["done"] = json!(true);
     local["done_reason"] = json!("unexpected");
     cases.push((false, local.clone(), FailureCode::IncompleteResponse));
     local["done_reason"] = json!("stop");
@@ -373,6 +377,10 @@ fn bounded_completion_rejects_truncated_refused_and_unknown_envelopes() {
     cases.push((false, local, FailureCode::InvalidResponse));
     cloud["stop_reason"] = json!("max_tokens");
     cases.push((true, cloud.clone(), FailureCode::OutputLimitReached));
+    // Precedence: a declared refusal wins over the output limit.
+    cloud["stop_details"] = json!({"type":"refusal","explanation":"PRIVATE SOURCE"});
+    cases.push((true, cloud.clone(), FailureCode::Refused));
+    cloud["stop_details"] = Value::Null;
     // Any other non-success stop stays Incomplete (AC-0570 diagnostic only).
     cloud["stop_reason"] = json!("pause_turn");
     cases.push((true, cloud.clone(), FailureCode::IncompleteResponse));
@@ -1387,6 +1395,14 @@ fn openai_compatible_rejects_truncated_refused_and_unknown_envelopes() {
     case(
         &|b| b["choices"][0]["finish_reason"] = json!("length"),
         FailureCode::OutputLimitReached,
+    );
+    // Precedence: a refusal wins over the output limit.
+    case(
+        &|b| {
+            b["choices"][0]["finish_reason"] = json!("length");
+            b["choices"][0]["message"]["refusal"] = json!("PRIVATE SOURCE");
+        },
+        FailureCode::Refused,
     );
     case(
         &|b| b["choices"][0]["finish_reason"] = Value::Null,

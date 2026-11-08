@@ -5,7 +5,7 @@ use crate::job_execution::JobExecutionLocks;
 use crate::jobs::ClaimMode;
 use completion::{InitialFixture, initial_fixture};
 use llm::{ConsentGrant, bounded::PreparedBoundedCompletion};
-use next_prompt_invocation::tests::{firewall, limits, provider};
+use next_prompt_invocation::tests::{OfflineProvider, firewall, limits, provider};
 use serde_json::json;
 
 fn selected_provider() -> InvestigationProvider {
@@ -34,8 +34,13 @@ impl Fixture {
             selected_provider(),
         ))
     }
-    fn prepare(mut f: InitialFixture) -> Self {
-        let policy = &INVESTIGATION_V2_POLICY;
+    fn prepare(f: InitialFixture) -> Self {
+        Self::prepare_with(f, &provider(true))
+    }
+    /// Prepares under the task's frozen effective policy and matching limits.
+    fn prepare_with(mut f: InitialFixture, bounded: &OfflineProvider) -> Self {
+        let effective = policy_for_detail(&f.task.detail).unwrap();
+        let policy = &effective;
         let mut usage = f.task.detail.usage.clone();
         usage.active_milliseconds += 5;
         let input = InvestigationInput::prepare_v9_with_policy(
@@ -60,13 +65,15 @@ impl Fixture {
             policy,
         )
         .unwrap();
+        let mut values = limits().values();
+        values.max_output_tokens = policy.limits().generated_tokens_per_invocation;
         let prepared = firewall()
             .prepare_bounded(
-                &provider(true),
+                bounded,
                 &input
                     .action(format!("{}:step-1", f.task.detail.summary.investigation_id))
                     .unwrap(),
-                &limits(),
+                &llm::bounded::CompletionLimits::for_investigation(values).unwrap(),
             )
             .unwrap();
         let invocation = NextPromptInvocation {
@@ -513,4 +520,56 @@ fn next_prompt_consent_decline_can_spend_terminal_reserve_at_real_retained_capac
     let task = load_next_prompt_task_base(&tx, &declined.summary.investigation_id).unwrap();
     assert_eq!(task.phase, Phase::Terminal);
     assert_eq!(task.detail.usage.model_invocations, 0);
+}
+
+// AC-0570: the real desktop start freezes the hosted output allowance only for
+// the pinned Opus lane; the persisted task and its consented step carry it.
+#[test]
+fn hosted_opus_start_freezes_output_allowance_through_consent() {
+    let opus = OfflineProvider(llm::bounded::ProviderProfile {
+        protocol_version: llm::bounded::PROTOCOL_VERSION.into(),
+        provider_id: "anthropic:claude-opus-5-5".into(),
+        locality: llm::Locality::Cloud,
+        endpoint_id: "https://api.anthropic.com/v1/messages".into(),
+        requested_model: "claude-opus-5-5".into(),
+    });
+    let descriptor = InvestigationProvider {
+        mode: InvestigationProviderMode::Cloud,
+        provider_id: opus.0.provider_id.clone(),
+        model: opus.0.requested_model.clone(),
+        endpoint: opus.0.endpoint_id.clone(),
+        deployment: None,
+        protocol_version: Some(opus.0.protocol_version.clone()),
+        available: true,
+        unavailable_reason: None,
+    };
+    let seed = initial_fixture(InvestigationProviderMode::Cloud, descriptor);
+    let limits = &seed.task.detail.limits;
+    assert_eq!(limits.generated_tokens_per_invocation, 16_384);
+    assert_eq!(limits.generated_token_reservations, 1_048_576);
+    let mut f = Fixture::prepare_with(seed, &opus);
+    assert_eq!(f.prepared.limits().values().max_output_tokens, 16_384);
+    // Reloaded from the store: the frozen limits and the pending step's charge.
+    assert_eq!(
+        f.f.task.detail.limits.generated_tokens_per_invocation,
+        16_384
+    );
+    assert_eq!(f.f.task.pending.as_ref().unwrap().generated_tokens, 16_384);
+    let detail = f.decide(true).unwrap();
+    assert_eq!(detail.limits.generated_tokens_per_invocation, 16_384);
+
+    // A Local or other cloud provider through the same start keeps 2048.
+    for (mode, provider) in [
+        (InvestigationProviderMode::Cloud, selected_provider()),
+        (
+            InvestigationProviderMode::Local,
+            InvestigationProvider {
+                mode: InvestigationProviderMode::Local,
+                ..selected_provider()
+            },
+        ),
+    ] {
+        let seed = initial_fixture(mode, provider);
+        assert_eq!(seed.task.detail.limits, INVESTIGATION_V2_POLICY.limits());
+    }
 }
