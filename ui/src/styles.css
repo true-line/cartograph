@@ -1687,13 +1687,16 @@ button.flow-hop-card:hover {
 }
 
 .md-view table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 0.74rem;
 }
 
 .md-view th,
 .md-view td {
+  min-width: 10ch;
+  max-width: 48ch;
   padding: 0.35rem 0.5rem;
   border: 1px solid var(--border);
   text-align: left;

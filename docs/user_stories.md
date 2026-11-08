@@ -276,7 +276,7 @@
 - **Actor:** Engineer
 - **As a** engineer **I want** to review compiled artifacts, accept/reject inferred items, and export **so that** I get an official, trustworthy spec.
 - **Priority:** Must · **Status:** Done
-- **AC-0032** Given compiled artifacts, when viewed, then every assertion shows inline provenance.
+- **AC-0032** Given compiled artifacts, when viewed, then every assertion shows inline provenance; rendered artifact tables keep short labels readable and long values accessible through table-local scrolling without changing export content.
 - **AC-0033** Given an inferred item, when I accept/reject/annotate, then the decision persists and survives re-ingest via content_hash.
 - **AC-0034** Given export, when run, then it honors R-INT-5 (`verified-only` vs `best-effort`) and includes Gap + Drift registers.
 - **AC-0035** Given the full set, when exported, then it produces user stories, US-TM, flow dossiers, resource topology as Markdown with fenced Mermaid plus provenance, a data model retaining READS/WRITES/MAPS_TO relations that terminate at DataEntity, ADRs, Gap + Drift registers, and mapped security findings.
