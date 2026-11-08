@@ -341,7 +341,19 @@ fn collect<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
 }
 
 fn node(value: &Value) -> Option<Value> {
-    let object = value.as_object()?;
+    let mut object = value.as_object()?;
+    // An array that must stay empty cannot carry its item grammar on the wire
+    // (`maxItems` is rejected): narrow the items to `null`, which keeps an
+    // unreachable item schema (for example a second copy of `finding` in the
+    // insufficient-evidence branch) out of the compiled grammar. The host still
+    // enforces `maxItems: 0` against the original schema.
+    let narrowed;
+    if object.get("maxItems").and_then(Value::as_u64) == Some(0) && object.contains_key("items") {
+        let mut copy = object.clone();
+        copy.insert("items".into(), serde_json::json!({"type": "null"}));
+        narrowed = copy;
+        object = &narrowed;
+    }
     let mut out = Map::new();
     for (key, value) in object {
         let key = key.as_str();
@@ -449,6 +461,11 @@ mod tests {
         assert_eq!(
             project(r#"{"type":"array","minItems":1}"#).unwrap(),
             json!({"type": "array", "minItems": 1})
+        );
+        // An array that must stay empty drops its (unreachable) item grammar.
+        assert_eq!(
+            project(r##"{"type":"array","minItems":0,"maxItems":0,"items":{"$ref":"#/$defs/f"},"$defs":{"f":{"type":"string"}}}"##).unwrap(),
+            json!({"type": "array", "minItems": 0, "items": {"type": "null"}})
         );
     }
 
