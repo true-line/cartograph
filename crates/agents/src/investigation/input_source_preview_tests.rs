@@ -1644,3 +1644,86 @@ mod frozen_replay;
 
 #[path = "historical_analyst_goldens_tests.rs"]
 mod historical_goldens;
+
+// AC-0566: the authenticated exact role gates new whole-field refusals.
+#[test]
+fn analyst26_bare_finish_fields_are_versioned_and_position_complete() {
+    use staged_finish::{
+        CombinedCorrection, CompletionOutcome, ProseCorrection, RefusalFeedback, StagedFinish,
+    };
+    for role in [
+        SpecialistId::DomainAnalystV25,
+        SpecialistId::DomainAnalystV26,
+    ] {
+        let (f, raw, _, _) = source_fixture(role, "bounded source");
+        let input = source_choices(
+            &f,
+            build_source(&f, &raw, &[], role, CompletionCallMode::Choice),
+            &[],
+            &f.ledger,
+        );
+        for text in [
+            "statement",
+            " Title ",
+            "FINDINGS",
+            "type",
+            "finish",
+            "Limitations",
+            "limitation",
+            "The statement is supported.",
+        ] {
+            for position in 0..4 {
+                let mut value = StagedFinish {
+                    schema_version: 1,
+                    outcome: CompletionOutcome::Supported,
+                    narrative: None,
+                    action: InvestigationAction::Finish {
+                        findings: vec![ProposedInvestigationFinding {
+                            claim_kind: InvestigationClaimKind::ImplementedBehavior,
+                            title: "Observed behavior".into(),
+                            statement: "The selected behavior is bounded.".into(),
+                            citation_ids: vec!["fact-1".into()],
+                            limitations: vec!["Other behavior was not assessed.".into()],
+                        }],
+                        knowledge_completeness: KnowledgeCompleteness::Partial,
+                        limitations: vec!["Other behavior was not assessed.".into()],
+                    },
+                };
+                let InvestigationAction::Finish {
+                    findings,
+                    limitations,
+                    ..
+                } = &mut value.action
+                else {
+                    unreachable!()
+                };
+                match position {
+                    0 => findings[0].title = text.into(),
+                    1 => findings[0].statement = text.into(),
+                    2 => findings[0].limitations = vec![text.into()],
+                    _ => *limitations = vec![text.into()],
+                }
+                let feedback = RefusalFeedback::collect_input_corrections_with_policy(
+                    &input,
+                    &value,
+                    None,
+                    vec![],
+                    &INVESTIGATION_V2_POLICY,
+                )
+                .unwrap();
+                let has_new = feedback
+                    .as_ref()
+                    .and_then(|v| v.prose_correction.as_ref())
+                    .is_some_and(|v| {
+                        matches!(v, ProseCorrection::Combined(c)
+                        if c.entries.contains(&CombinedCorrection::RewriteSchemaPlaceholders))
+                    });
+                let expected = role == SpecialistId::DomainAnalystV26
+                    && ["title", "statement", "findings", "type", "finish"]
+                        .iter()
+                        .any(|word| text.trim().eq_ignore_ascii_case(word));
+                assert_eq!(has_new, expected, "{role:?} {text} position {position}");
+            }
+        }
+    }
+}

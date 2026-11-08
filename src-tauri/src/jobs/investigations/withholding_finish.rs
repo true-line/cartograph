@@ -13,9 +13,17 @@ pub(super) fn project(
     basis: &admission_journal::AuthenticatedCompletionBasis,
     policy: &InvestigationPolicy,
 ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
-    if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV25
-        || request.specialist_id != "domain-analyst@25"
-        || task.detail.summary.cancel_requested
+    if !matches!(
+        task.detail.summary.specialist_id,
+        SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+    ) || !matches!(
+        (
+            task.detail.summary.specialist_id,
+            request.specialist_id.as_str()
+        ),
+        (SpecialistId::DomainAnalystV25, "domain-analyst@25")
+            | (SpecialistId::DomainAnalystV26, "domain-analyst@26")
+    ) || task.detail.summary.cancel_requested
     {
         return Ok(None);
     }

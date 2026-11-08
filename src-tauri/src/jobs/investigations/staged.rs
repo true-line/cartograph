@@ -1015,7 +1015,7 @@ pub(super) fn append_for_task(
         && request.specialist_id != "domain-analyst@23"
         && !matches!(
             request.specialist_id.as_str(),
-            "domain-analyst@24" | "domain-analyst@25"
+            "domain-analyst@24" | "domain-analyst@25" | "domain-analyst@26"
         )
     {
         return Err(InvestigationStoreError::Invalid);

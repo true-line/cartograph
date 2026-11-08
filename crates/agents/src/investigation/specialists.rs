@@ -75,6 +75,8 @@ pub enum SpecialistId {
     DomainAnalystV24,
     #[serde(rename = "domain-analyst@25")]
     DomainAnalystV25,
+    #[serde(rename = "domain-analyst@26")]
+    DomainAnalystV26,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -249,6 +251,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -288,6 +291,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -328,6 +332,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -361,6 +366,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -388,6 +394,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -415,6 +422,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -439,6 +447,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
                 | Self::EvidenceAuditorV11
         )
     }
@@ -480,13 +489,17 @@ impl SpecialistId {
             Self::DomainAnalystV23 => 23,
             Self::DomainAnalystV24 => 24,
             Self::DomainAnalystV25 => 25,
+            Self::DomainAnalystV26 => 26,
         }
     }
 
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
-        if matches!(self, Self::DomainAnalystV24 | Self::DomainAnalystV25) {
+        if matches!(
+            self,
+            Self::DomainAnalystV24 | Self::DomainAnalystV25 | Self::DomainAnalystV26
+        ) {
             return 14;
         }
         if self == Self::DomainAnalystV23 {
@@ -515,6 +528,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         ) {
             return 10;
         }
@@ -529,13 +543,19 @@ impl SpecialistId {
     }
 
     /// Same receipt sizing and correction protocol; withholding authorization
-    /// remains an independent @25-only host decision.
+    /// remains an independent @25/@26 host decision.
     pub fn uses_combined_finish_feedback(self) -> bool {
-        matches!(self, Self::DomainAnalystV24 | Self::DomainAnalystV25)
+        matches!(
+            self,
+            Self::DomainAnalystV24 | Self::DomainAnalystV25 | Self::DomainAnalystV26
+        )
     }
 
     pub fn uses_exact_source_reservation(self) -> bool {
-        matches!(self, Self::DomainAnalystV24 | Self::DomainAnalystV25)
+        matches!(
+            self,
+            Self::DomainAnalystV24 | Self::DomainAnalystV25 | Self::DomainAnalystV26
+        )
     }
 
     pub fn uses_acquisition_choices(self) -> bool {
@@ -549,6 +569,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         )
     }
 
@@ -564,6 +585,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         )
     }
 
@@ -575,6 +597,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         )
     }
 
@@ -585,6 +608,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         )
     }
 
@@ -597,6 +621,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         )
     }
 
@@ -609,7 +634,10 @@ impl SpecialistId {
     }
 
     pub fn prompt(self) -> String {
-        if matches!(self, Self::DomainAnalystV24 | Self::DomainAnalystV25) {
+        if matches!(
+            self,
+            Self::DomainAnalystV24 | Self::DomainAnalystV25 | Self::DomainAnalystV26
+        ) {
             return format!(
                 "{}\nFinish feedback@3: combined entries identify all detected corrections: replay_at gives one-based sentence ranges that may span fields; paraphrase without source quotes. limitation_denies_evidence: correct the scoped denial. enumeration_at: verify literal entries or remove the universal claim. configuration_at: cite the named configuration binding or remove the claim. rewrite_schema_placeholders: use plain prose. paraphrase_provider_metadata: avoid copying metadata. omitted counts additional corrections; recheck the entire finish. excluded_by_capacity remains unresolved, unattempted, unacquired. Single correction allowance unchanged.",
                 Self::DomainAnalystV21.prompt()
@@ -718,7 +746,8 @@ impl SpecialistId {
             | Self::DomainAnalystV22
             | Self::DomainAnalystV23
             | Self::DomainAnalystV24
-            | Self::DomainAnalystV25 => {
+            | Self::DomainAnalystV25
+            | Self::DomainAnalystV26 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -839,6 +868,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
+                | Self::DomainAnalystV26
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -893,7 +923,8 @@ impl SpecialistId {
             | Self::DomainAnalystV22
             | Self::DomainAnalystV23
             | Self::DomainAnalystV24
-            | Self::DomainAnalystV25 => (
+            | Self::DomainAnalystV25
+            | Self::DomainAnalystV26 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1378,6 +1409,26 @@ mod capacity_exclusion_identity_tests {
         assert!(role.uses_finish_feedback_witness());
         assert!(role.uses_capacity_exclusions());
         assert!(SpecialistId::is_typed_citation_prompt(&role.prompt()));
+    }
+
+    // AC-0566: opt-in identity inherits @25 without changing its prompt or budget.
+    #[test]
+    fn analyst26_inherits25_with_distinct_identity() {
+        let old = SpecialistId::DomainAnalystV25;
+        let new = SpecialistId::DomainAnalystV26;
+        assert_eq!(new.version(), 26);
+        assert_eq!(new.prompt_generation(), old.prompt_generation());
+        assert_eq!(new.prompt(), old.prompt());
+        assert_eq!(
+            new.definition().unwrap().operations,
+            old.definition().unwrap().operations
+        );
+        assert!(new.uses_combined_finish_feedback());
+        assert!(new.uses_next_prompt_admission());
+        assert_eq!(
+            serde_json::to_string(&new).unwrap(),
+            "\"domain-analyst@26\""
+        );
     }
 
     #[test]

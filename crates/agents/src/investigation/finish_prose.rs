@@ -18,6 +18,27 @@ pub(super) fn has_placeholder(finish: &StagedFinish) -> bool {
         })
 }
 
+// AC-0566: this additional vocabulary applies only to the exact opt-in role.
+pub(super) fn has_bare_finish_field(finish: &StagedFinish) -> bool {
+    let InvestigationAction::Finish {
+        findings,
+        limitations,
+        ..
+    } = &finish.action
+    else {
+        return false;
+    };
+    let bare = |value: &str| {
+        ["title", "statement", "findings", "type", "finish"]
+            .iter()
+            .any(|field| value.trim().eq_ignore_ascii_case(field))
+    };
+    limitations.iter().any(|s| bare(s))
+        || findings
+            .iter()
+            .any(|f| bare(&f.title) || bare(&f.statement) || f.limitations.iter().any(|s| bare(s)))
+}
+
 fn placeholder(value: &str) -> bool {
     let value = value.trim();
     // Empty labels and punctuation-only fields cannot express a limitation.

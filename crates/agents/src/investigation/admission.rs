@@ -761,7 +761,10 @@ impl InvestigationResult {
             .completion
             .as_ref()
             .is_some_and(|c| c.withholding.is_some())
-            && specialist != SpecialistId::DomainAnalystV25
+            && !matches!(
+                specialist,
+                SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+            )
         {
             return Err(InvestigationError::InvalidInput);
         }
