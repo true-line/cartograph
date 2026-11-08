@@ -6,6 +6,7 @@
 //! source code, ledger content or prompts.
 //!
 //!   cargo run -p llm --example anthropic_schema_preflight -- <schema-dir>            # offline: project and count only
+//!   cargo run -p llm --example anthropic_schema_preflight -- <schema-dir> --wire <out> # offline: also write each wire schema
 //!   ANTHROPIC_API_KEY=… cargo run -p llm --example anthropic_schema_preflight -- <schema-dir> --send
 //!
 //! Offline mode also reports whether OpenAI strict mode can represent each
@@ -53,7 +54,10 @@ fn counts(node: &Value, optional: &mut usize, unions: &mut usize) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().expect("usage: <schema-dir> [--send]"));
-    let send = args.next().as_deref() == Some("--send");
+    let mode = args.next();
+    let send = mode.as_deref() == Some("--send");
+    let wire_dir = (mode.as_deref() == Some("--wire"))
+        .then(|| PathBuf::from(args.next().expect("usage: <schema-dir> --wire <out-dir>")));
     let key = send.then(|| std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY unset"));
     let client = send.then(|| {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -81,6 +85,10 @@ fn main() {
         let (mut optional, mut unions) = (0, 0);
         counts(&schema, &mut optional, &mut unions);
         let wire = schema.to_string().len();
+        if let Some(out) = &wire_dir {
+            std::fs::write(out.join(format!("{name}.wire.json")), schema.to_string())
+                .expect("write wire");
+        }
         let over = optional > MAX_OPTIONAL || unions > MAX_UNION_PARAMETERS;
         let strict = llm::bounded::openai_cloud_wire_schema(&raw).is_some();
         print!(

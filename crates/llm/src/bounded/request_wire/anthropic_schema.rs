@@ -48,8 +48,23 @@ const VERBATIM: &[&str] = &[
 /// each local reference is replaced by its projected definition. References are
 /// proven acyclic first, so inlining terminates, and a node budget bounds the
 /// expansion of shared references.
+///
+/// An array that must stay empty cannot carry its item grammar on the wire
+/// (`maxItems` is rejected), so its items are narrowed to `null` before
+/// projection; this keeps an unreachable item schema (for example a second copy
+/// of `finding` in the insufficient-evidence branch) out of the compiled
+/// grammar. The complete schema is projected and reference-checked first, so
+/// narrowing never hides an unsupported or missing reference, and the host
+/// still enforces `maxItems: 0` against the original schema. The OpenAI
+/// projection (`relaxed`) is unaffected.
 pub(crate) fn project(schema: &str) -> Option<Value> {
-    let wire = relaxed(schema)?;
+    relaxed(schema)?;
+    let mut narrowed: Value = serde_json::from_str(schema).ok()?;
+    narrow_empty_arrays(&mut narrowed);
+    let wire = node(&narrowed)?;
+    if !references_resolve(&wire) {
+        return None;
+    }
     let mut budget = INLINE_NODE_BUDGET;
     let mut inlined = inline(&wire, &wire, true, &mut budget)?;
     if let Value::Object(map) = &mut inlined {
@@ -340,20 +355,34 @@ fn collect<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
-fn node(value: &Value) -> Option<Value> {
-    let mut object = value.as_object()?;
-    // An array that must stay empty cannot carry its item grammar on the wire
-    // (`maxItems` is rejected): narrow the items to `null`, which keeps an
-    // unreachable item schema (for example a second copy of `finding` in the
-    // insufficient-evidence branch) out of the compiled grammar. The host still
-    // enforces `maxItems: 0` against the original schema.
-    let narrowed;
-    if object.get("maxItems").and_then(Value::as_u64) == Some(0) && object.contains_key("items") {
-        let mut copy = object.clone();
-        copy.insert("items".into(), serde_json::json!({"type": "null"}));
-        narrowed = copy;
-        object = &narrowed;
+/// Replaces the items of every `maxItems: 0` array schema with `null`. Literal
+/// payloads are data and are left alone; name maps (`properties`, `$defs`)
+/// recurse into their schemas only.
+fn narrow_empty_arrays(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.get("maxItems").and_then(Value::as_u64) == Some(0) && map.contains_key("items") {
+                map.insert("items".into(), serde_json::json!({"type": "null"}));
+            }
+            for (key, child) in map.iter_mut() {
+                match key.as_str() {
+                    "const" | "enum" | "default" | "required" | "type" => {}
+                    "properties" | "$defs" | "definitions" => {
+                        if let Value::Object(schemas) = child {
+                            schemas.values_mut().for_each(narrow_empty_arrays);
+                        }
+                    }
+                    _ => narrow_empty_arrays(child),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(narrow_empty_arrays),
+        _ => {}
     }
+}
+
+fn node(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
     let mut out = Map::new();
     for (key, value) in object {
         let key = key.as_str();
@@ -423,7 +452,7 @@ fn list(value: &Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::project;
+    use super::{project, relaxed};
     use serde_json::json;
 
     // AC-0568 / #1709: constraints the API rejects are relaxed on the wire only.
@@ -466,6 +495,24 @@ mod tests {
         assert_eq!(
             project(r##"{"type":"array","minItems":0,"maxItems":0,"items":{"$ref":"#/$defs/f"},"$defs":{"f":{"type":"string"}}}"##).unwrap(),
             json!({"type": "array", "minItems": 0, "items": {"type": "null"}})
+        );
+        // Narrowing is Anthropic-only and never hides a bad item schema: the
+        // relaxed (OpenAI) form keeps the items, and a missing or unsupported
+        // item reference still refuses.
+        let empty = r##"{"type":"array","maxItems":0,"items":{"$ref":"#/$defs/f"},"$defs":{"f":{"type":"string"}}}"##;
+        assert_eq!(
+            relaxed(empty).unwrap()["items"],
+            json!({"$ref": "#/$defs/f"})
+        );
+        assert!(
+            project(r##"{"type":"array","maxItems":0,"items":{"$ref":"#/$defs/missing"}}"##)
+                .is_none()
+        );
+        assert!(project(r#"{"type":"array","maxItems":0,"items":{"not":{}}}"#).is_none());
+        // A property merely named `maxItems` is not an array constraint.
+        assert_eq!(
+            project(r#"{"type":"object","properties":{"maxItems":{"const":0},"items":{"type":"string"}}}"#).unwrap()["properties"]["items"],
+            json!({"type": "string"})
         );
     }
 
