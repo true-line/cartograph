@@ -219,7 +219,7 @@ it.each([13, 14, 15, 26] as const)('reopens saved @%i without advertising it for
 });
 
 // AC-0574: the default reaches the real frontend request construction path.
-it('sends the desktop analyst27 default as request7 with explicit v2 obligations', async () => {
+it('sends the desktop analyst28 default as request7 with explicit v2 obligations', async () => {
   const starts: unknown[] = [];
   mockIPC((command, args) => {
     if (command === 'investigation_specialists') return desktopAnalystCatalog;
@@ -233,7 +233,7 @@ it('sends the desktop analyst27 default as request7 with explicit v2 obligations
     limit_profile: composer.limitProfile!, question: 'Inspect the selected evidence.', scope: { type: 'all' },
     provider_mode: 'local', obligations: { schema_version: 2, contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
   expect(starts).toHaveLength(1);
-  expect(starts[0]).toMatchObject({ schema_version: 7, specialist_id: 'domain-analyst@27',
+  expect(starts[0]).toMatchObject({ schema_version: 7, specialist_id: 'domain-analyst@28',
     limit_profile: 'investigation-v2', obligations: { schema_version: 2 } });
 });
 

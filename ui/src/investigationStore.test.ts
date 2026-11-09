@@ -2055,7 +2055,7 @@ describe('remembered budget and specialist (AC-0563, #1636)', () => {
       throw new Error('Unexpected command.');
     });
     await useInvestigationStore.getState().loadCatalog();
-    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@27', limitProfile: 'investigation-v2' });
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@28', limitProfile: 'investigation-v2' });
     expect(saved).toEqual([]);
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' });
     await vi.waitFor(() => expect(saved).toEqual([{ specialistId: 'domain-analyst@3', limitProfile: 'investigation-v1' }]));
@@ -2068,9 +2068,9 @@ describe('remembered budget and specialist (AC-0563, #1636)', () => {
   it('falls back to the first-run default when the stored pair is no longer offered', () => {
     const composer = useInvestigationStore.getState().composer;
     expect(restoredComposer(composer, desktopAnalystCatalog, { specialist_id: 'domain-analyst@99', limit_profile: 'investigation-v1' }))
-      .toMatchObject({ specialistId: 'domain-analyst@27', limitProfile: 'investigation-v2' });
+      .toMatchObject({ specialistId: 'domain-analyst@28', limitProfile: 'investigation-v2' });
     expect(restoredComposer(composer, desktopAnalystCatalog, null))
-      .toMatchObject({ specialistId: 'domain-analyst@27', limitProfile: 'investigation-v2' });
+      .toMatchObject({ specialistId: 'domain-analyst@28', limitProfile: 'investigation-v2' });
   });
 
   it('never overrides a choice made in this session', () => {
@@ -2079,20 +2079,20 @@ describe('remembered budget and specialist (AC-0563, #1636)', () => {
   });
 });
 
-describe('desktop default specialist (AC-0574)', () => {
-  it('adopts schema-backed @27 under Expanded when the host advertises it', async () => {
+describe('desktop default specialist (AC-0575)', () => {
+  it('adopts schema-backed @28 under Expanded when the host advertises it', async () => {
     mockIPC((command) => { if (command === 'investigation_specialists') return desktopAnalystCatalog; throw new Error('Unexpected command.'); });
     await useInvestigationStore.getState().loadCatalog();
-    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@27', limitProfile: 'investigation-v2' });
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@28', limitProfile: 'investigation-v2' });
   });
 
-  it('keeps @3 and Standard when @27 or its policy is not advertised', async () => {
+  it('keeps @3 and Standard when @28 or its policy is not advertised', async () => {
     mockIPC((command) => { if (command === 'investigation_specialists') return admissionCatalog; throw new Error('Unexpected command.'); });
     await useInvestigationStore.getState().loadCatalog();
     expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@3');
     expect(useInvestigationStore.getState().composer.limitProfile).toBeUndefined();
     const noPolicy = { ...desktopAnalystCatalog, policies: desktopAnalystCatalog.policies!.map((policy) =>
-      ({ ...policy, specialist_ids: policy.specialist_ids.filter((id) => id !== 'domain-analyst@27') })) };
+      ({ ...policy, specialist_ids: policy.specialist_ids.filter((id) => id !== 'domain-analyst@28') })) };
     expect(desktopDefaultComposer(useInvestigationStore.getState().composer, noPolicy)).toBeNull();
   });
 
@@ -2106,7 +2106,7 @@ describe('desktop default specialist (AC-0574)', () => {
     expect(desktopDefaultComposer({ ...base, parent: { conversation_id: 'c', parent_id: 'p' } }, desktopAnalystCatalog)).toBeNull();
   });
 
-  it('keeps an explicitly reselected @3 across a refresh that advertises @27', async () => {
+  it('keeps an explicitly reselected @3 across a refresh that advertises @28', async () => {
     mockIPC((command) => { if (command === 'investigation_specialists') return desktopAnalystCatalog; throw new Error('Unexpected command.'); });
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@7' });
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@3' });
@@ -2120,7 +2120,7 @@ describe('desktop default specialist (AC-0574)', () => {
 });
 
 describe('correction specialist compatibility (AC-0565)', () => {
-  it('preserves an explicitly restored historical analyst when @27 is available', () => {
+  it('preserves an explicitly restored historical analyst when @28 is available', () => {
     const composer = useInvestigationStore.getState().composer;
     expect(restoredComposer(composer, desktopAnalystCatalog, {
       specialist_id: 'domain-analyst@18', limit_profile: 'investigation-v2',

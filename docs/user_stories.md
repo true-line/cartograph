@@ -925,6 +925,21 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   and presentation, including unsupported generations and tampered witnesses.
 
 
+- **AC-0575** Domain analyst @28 is a new versioned desktop default. It inherits
+  @27's request/result, correction, admission, privacy and finish-only policy
+  contracts without changing any numeric limit. Its @28-only finish-shape explanation is shortened without losing instructions
+  or examples, with at least 64 bytes of definition headroom. Its only new rules are
+  generic attribution and exact-sentinel rules: distinguish what code structure
+  shows from what a cited comment actually states, and name the exact constant
+  or literal instead of claiming an unbounded, infinite or unlimited value unless
+  the cited span literally says so. No target-specific facts, oracle or rubric
+  enter the prompt. @27 prompt and definition remain reproducible; saved tasks
+  retain their identities. The explicit backend/UI catalogs select @28 and the
+  desktop local lane retains LocalFinish4096V1. A versioned pre-run amendment
+  records the prior semantic failure and unchanged frozen rubric; it does not
+  authorize execution or alter the old acceptance root. T-0575 covers identity,
+  prompt delta, policy parity, actual desktop selection and UI default/results.
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

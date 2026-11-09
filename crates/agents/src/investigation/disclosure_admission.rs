@@ -127,7 +127,7 @@ impl DisclosedAdmissionState {
         }
         if let Some(acquisition) = &self.acquisition {
             acquisition.validate()?;
-            if acquisition.finish_patch.is_some() && role != SpecialistId::DomainAnalystV27 {
+            if acquisition.finish_patch.is_some() && !role.uses_patch_correction() {
                 return Err(InvestigationError::InvalidInput);
             }
             if acquisition.finish_policy_complete && !policy.local_finish_generation() {

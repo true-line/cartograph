@@ -239,3 +239,12 @@ describe('desktop analyst27 corrected results', () => {
     expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
   });
 });
+
+// AC-0575: new prompt version retains the same corrected-answer wire contract.
+it.each([false, true])('accepts analyst28 correction with withholding=%s', (partial) => {
+  const { detail, result } = analyst27Correction(partial);
+  detail.specialist_id = 'domain-analyst@28';
+  detail.specialist = { ...detail.specialist, id: 'domain-analyst@28', version: 28 };
+  expect(validCompletionSummary(detail)).toBe(true);
+  expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+});

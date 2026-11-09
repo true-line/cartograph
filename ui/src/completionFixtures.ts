@@ -179,11 +179,19 @@ export const typedCorrectionCatalog: InvestigationCatalog = {
 };
 
 /** AC-0574: production default, excluding development-only @24–@26. */
-export const desktopAnalystCatalog: InvestigationCatalog = {
+export const analyst27Catalog: InvestigationCatalog = {
   ...typedCorrectionCatalog,
   specialists: [...typedCorrectionCatalog.specialists, { ...typedCorrectionCatalog.specialists.find((item) => item.id === 'domain-analyst@20')!,
     id: 'domain-analyst@27', version: 27, prompt_fingerprint: 'fixture-domain-analyst@27' }],
   policies: typedCorrectionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@27'] })),
+};
+
+/** AC-0575: new default retains historical27 as an explicit choice. */
+export const desktopAnalystCatalog: InvestigationCatalog = {
+  ...analyst27Catalog,
+  specialists: [...analyst27Catalog.specialists, { ...analyst27Catalog.specialists.find((item) => item.id === 'domain-analyst@27')!,
+    id: 'domain-analyst@28', version: 28, prompt_fingerprint: 'fixture-domain-analyst@28' }],
+  policies: analyst27Catalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@28'] })),
 };
 
 /** Synthetic final outcomes shared by patch and whole-answer correction routes. */

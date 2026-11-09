@@ -42,7 +42,7 @@ const initialComposer: InvestigationComposer = {
   scopeType: 'all', anchor: '', hops: 1, parent: null,
 };
 /** Desktop default when the host advertises it (#1618): a schema-backed analyst. */
-export const DESKTOP_DEFAULT_SPECIALIST: SpecialistId = 'domain-analyst@27';
+export const DESKTOP_DEFAULT_SPECIALIST: SpecialistId = 'domain-analyst@28';
 const DESKTOP_DEFAULT_PROFILE = 'investigation-v2';
 /** An untouched composer adopts the schema-backed default; explicit choices are kept. */
 export function desktopDefaultComposer(composer: InvestigationComposer, catalog: InvestigationCatalog): InvestigationComposer | null {

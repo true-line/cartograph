@@ -777,6 +777,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV25,
             SpecialistId::DomainAnalystV26,
             SpecialistId::DomainAnalystV27,
+            SpecialistId::DomainAnalystV28,
             SpecialistId::EvidenceAuditorV11,
         ]
         .contains(&role)
@@ -820,7 +821,7 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
-            if role == SpecialistId::DomainAnalystV27 && self.finish_patch.is_some() {
+            if role.uses_patch_correction() && self.finish_patch.is_some() {
                 &[
                     "acquisition_choices",
                     "action_feedback",
@@ -1072,6 +1073,7 @@ impl InvestigationInput {
                 | SpecialistId::DomainAnalystV25
                 | SpecialistId::DomainAnalystV26
                 | SpecialistId::DomainAnalystV27
+                | SpecialistId::DomainAnalystV28
         ) && self
             .acquisition_choices
             .as_ref()
@@ -1167,6 +1169,7 @@ impl InvestigationInput {
                     | SpecialistId::DomainAnalystV25
                     | SpecialistId::DomainAnalystV26
                     | SpecialistId::DomainAnalystV27
+                    | SpecialistId::DomainAnalystV28
             ) && choices.capacity_exhausted())
             || self
                 .action_feedback
@@ -1210,7 +1213,7 @@ impl InvestigationInput {
         mut self,
         basis: &finish_patch::PatchBasis,
     ) -> Result<Self, InvestigationError> {
-        if self.frozen_specialist()? != SpecialistId::DomainAnalystV27
+        if !self.frozen_specialist()?.uses_patch_correction()
             || self.acquisition_choices.is_none()
             || self.finish_patch.is_some()
         {
@@ -1260,7 +1263,7 @@ impl InvestigationInput {
         basis
             .validate()
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if self.frozen_specialist()? != SpecialistId::DomainAnalystV27
+        if !self.frozen_specialist()?.uses_patch_correction()
             || self.acquisition_mode != Some(CompletionCallMode::FinishOnly)
             || metadata.refusal_count != 1
             || metadata.last_refusal_id.as_ref() != Some(&basis.refusal_hash)

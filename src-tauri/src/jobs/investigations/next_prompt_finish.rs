@@ -270,7 +270,7 @@ impl JobStore {
                     other => other,
                 };
                 let mut measured_response = input.response.clone();
-                if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27 {
+                if task.detail.summary.specialist_id.uses_patch_correction() {
                     let count = match &finish.action {
                         InvestigationAction::Finish { findings, .. } => findings.len(),
                         _ => return Err(InvestigationStoreError::Invalid),

@@ -19,6 +19,7 @@ pub(super) fn project(
         SpecialistId::DomainAnalystV25
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
+            | SpecialistId::DomainAnalystV28
     ) || !matches!(
         (
             task.detail.summary.specialist_id,
@@ -27,6 +28,7 @@ pub(super) fn project(
         (SpecialistId::DomainAnalystV25, "domain-analyst@25")
             | (SpecialistId::DomainAnalystV26, "domain-analyst@26")
             | (SpecialistId::DomainAnalystV27, "domain-analyst@27")
+            | (SpecialistId::DomainAnalystV28, "domain-analyst@28")
     ) || task.detail.summary.cancel_requested
     {
         return Ok(None);

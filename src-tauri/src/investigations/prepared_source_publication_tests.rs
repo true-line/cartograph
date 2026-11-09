@@ -385,6 +385,16 @@ fn prepared_source_publication_analyst24_unmeasured_receipt_uses_legacy_bound() 
 // AC-0572: every case starts fresh and invokes no model or provider transport.
 #[test]
 fn analyst27_volatile_patch_admission_and_reopen() {
+    analyst_patch_admission_and_reopen(SpecialistId::DomainAnalystV27);
+}
+
+// AC-0575: the prompt-only version inherits full correction/privacy admission.
+#[test]
+fn analyst28_volatile_patch_admission_and_reopen() {
+    analyst_patch_admission_and_reopen(SpecialistId::DomainAnalystV28);
+}
+
+fn analyst_patch_admission_and_reopen(role: SpecialistId) {
     for case in [
         "replace",
         "withdraw",
@@ -403,8 +413,7 @@ fn analyst27_volatile_patch_admission_and_reopen() {
         "fallback_hash",
         "fallback_swapped",
     ] {
-        let (saved, state, mut context, target, _) =
-            fixture_for_role_capture(Some(SpecialistId::DomainAnalystV27), true);
+        let (saved, state, mut context, target, _) = fixture_for_role_capture(Some(role), true);
         reset_reads();
         eprintln!("patch fixture case: {case}");
         let candidate = read(&saved, &state, &context, &target)

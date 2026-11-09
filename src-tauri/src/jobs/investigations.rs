@@ -859,7 +859,9 @@ pub(crate) fn policy_for_detail(
         && !(detail.origin == InvestigationOrigin::App
             && matches!(
                 detail.summary.specialist_id,
-                SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+                SpecialistId::DomainAnalystV26
+                    | SpecialistId::DomainAnalystV27
+                    | SpecialistId::DomainAnalystV28
             )
             && detail.summary.provider_mode == InvestigationProviderMode::Local
             && detail.provider.mode == InvestigationProviderMode::Local)
@@ -954,7 +956,9 @@ impl JobStore {
                 || mcp.is_some()
                 || !matches!(
                     request.specialist_id,
-                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+                    SpecialistId::DomainAnalystV26
+                        | SpecialistId::DomainAnalystV27
+                        | SpecialistId::DomainAnalystV28
                 )
                 || request.provider_mode != InvestigationProviderMode::Local
                 || provider.is_none_or(|p| p.mode != InvestigationProviderMode::Local)

@@ -79,6 +79,8 @@ pub enum SpecialistId {
     DomainAnalystV26,
     #[serde(rename = "domain-analyst@27")]
     DomainAnalystV27,
+    #[serde(rename = "domain-analyst@28")]
+    DomainAnalystV28,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "spec-writer@1")]
@@ -170,6 +172,10 @@ const DISCOVERY_V2: &str = "This is a multi-step host-executed tool protocol. Yo
 
 const DISCOVERY_V3: &str = "This is a multi-step host-executed tool protocol. Return query_context to discover facts, then read_evidence using an original fact/role/index to acquire exact source. The host invokes you again with the result. Initially compact_context inventories and evidence spans are empty because you have not requested evidence; start with a scoped query_context action. Compact context shares identical complete fact and evidence-option objects. Each query records ordered fact_indexes and evidence_option_indexes into those inventories, with its original selection, counts and next_cursor. Differing representations are retained. Citations name only supplied facts or source spans; an inventory range alone is not supplied source. Use exact citation IDs and original role/index values. Empty initial input is not a completed search. Finish only after relevant discovery or when the remaining budget prevents further work.\n\n";
 
+// AC-0575: wording-only compaction used exclusively by @28.
+const FINISH_SHAPE_V28: &str = "\nFinish shape (same limits; not finish permission): overall/per-finding limitations: 1..8 nonblank strings. UTF-8 byte caps: limitation 512, title 160, statement 2048, citation ID 128. Titles/statements/IDs nonblank; no NUL. Per finding: 1..8 unique exact admitted citation IDs. At most 12 findings. knowledge_completeness: partial with findings, insufficient_evidence without; outer outcome agrees. Never invent findings/citations for shape.\nBoth terminal wrapper examples are syntax, not evidence or permission to finish before required obligation attempts complete:";
+const ATTRIBUTION_SENTINELS_V28: &str = "\nFor behaviour inferred from code structure, say \"the code shows\"; \"the comment states\" only for cited comment text.\nSentinels: name exact constants/values, never \"unbounded\", \"infinite\" or \"unlimited\" unless the cited span literally says so.";
+
 // V1–V3 instructions stay byte-for-byte immutable.
 const DISCOVERY_V4: &str = "This is a multi-step host-executed protocol. The host-derived turn_progress describes the current turn, not a new session. Only phase initial needs initial discovery. After a completed query, inspect its facts and evidence options: choose a relevant read_evidence action, continue discovery using the exact returned next_cursor and same selection, or finish with honest limits when appropriate. A null input cursor restarts that selection; repeating it does not advance. Repeated-query no_progress means the same query and unchanged result added no facts; inspect the existing result instead of treating it as new discovery. After read_evidence, its citation names bytes actually supplied; decide whether further evidence is needed or finish using supported citations. The host never chooses your next action. Compact context shares only identical complete fact and evidence-option representations; differing representations remain visible. Query citation metadata and available ranges are not acquired source. The raw_query_budget charges every acquired raw page, including repeats, independently of compact prompt size. Consult its remaining bytes and other remaining budgets before another action. Never invent results or claim complete coverage.\n\n";
 
@@ -255,6 +261,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -296,6 +303,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -338,6 +346,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -373,6 +382,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -402,6 +412,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -431,6 +442,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -457,6 +469,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
         )
     }
@@ -500,6 +513,7 @@ impl SpecialistId {
             Self::DomainAnalystV25 => 25,
             Self::DomainAnalystV26 => 26,
             Self::DomainAnalystV27 => 27,
+            Self::DomainAnalystV28 => 28,
         }
     }
 
@@ -512,6 +526,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return 14;
         }
@@ -543,6 +558,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return 10;
         }
@@ -565,6 +581,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -575,6 +592,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -591,6 +609,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -608,6 +627,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -621,6 +641,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -633,6 +654,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -647,6 +669,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -656,15 +679,30 @@ impl SpecialistId {
             || system == Self::DomainAnalystV22.prompt()
             || system == Self::DomainAnalystV23.prompt()
             || system == Self::DomainAnalystV24.prompt()
+            || system == Self::DomainAnalystV28.prompt()
+    }
+
+    pub fn uses_patch_correction(self) -> bool {
+        matches!(self, Self::DomainAnalystV27 | Self::DomainAnalystV28)
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV28 {
+            // Only @28 shortens this explanation; all examples and rules survive.
+            let old = FINISH_EXAMPLES_V12.split_once("\n{").unwrap().0;
+            let base = Self::DomainAnalystV27
+                .prompt()
+                .replacen(old, FINISH_SHAPE_V28, 1);
+            return base + ATTRIBUTION_SENTINELS_V28;
+        }
+
         if matches!(
             self,
             Self::DomainAnalystV24
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return format!(
                 "{}\nFinish feedback@3: combined entries identify all detected corrections: replay_at gives one-based sentence ranges that may span fields; paraphrase without source quotes. limitation_denies_evidence: correct the scoped denial. enumeration_at: verify literal entries or remove the universal claim. configuration_at: cite the named configuration binding or remove the claim. rewrite_schema_placeholders: use plain prose. paraphrase_provider_metadata: avoid copying metadata. omitted counts additional corrections; recheck the entire finish. excluded_by_capacity remains unresolved, unattempted, unacquired. Single correction allowance unchanged.",
@@ -776,7 +814,8 @@ impl SpecialistId {
             | Self::DomainAnalystV24
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
-            | Self::DomainAnalystV27 => {
+            | Self::DomainAnalystV27
+            | Self::DomainAnalystV28 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -899,6 +938,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -955,7 +995,8 @@ impl SpecialistId {
             | Self::DomainAnalystV24
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
-            | Self::DomainAnalystV27 => (
+            | Self::DomainAnalystV27
+            | Self::DomainAnalystV28 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1549,5 +1590,79 @@ mod capacity_exclusion_identity_tests {
             16_354
         );
         assert!(role.definition().is_ok()); // existing 16KiB bound, unchanged
+    }
+}
+
+#[cfg(test)]
+mod analyst28_tests {
+    use super::*;
+    // AC-0575: exactly two generic instructions; historical prompt stays frozen.
+    #[test]
+    fn analyst28_only_adds_generic_attribution_and_sentinel_rules() {
+        let old = SpecialistId::DomainAnalystV27;
+        let new = SpecialistId::DomainAnalystV28;
+        assert_eq!(old.prompt(), SpecialistId::DomainAnalystV26.prompt());
+        let prompt = new.prompt();
+        let old_shape = FINISH_EXAMPLES_V12.split_once("\n{").unwrap().0;
+        assert_eq!(old.prompt().matches(old_shape).count(), 1);
+        let compacted = old.prompt().replacen(old_shape, FINISH_SHAPE_V28, 1);
+        // Everything outside the reviewed wording-only replacement is identical;
+        // exactly these two generic rule lines are added, with no new examples.
+        assert_eq!(prompt, compacted + ATTRIBUTION_SENTINELS_V28);
+        assert_eq!(
+            ATTRIBUTION_SENTINELS_V28
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count(),
+            2
+        );
+        for expected in [
+            "the code shows",
+            "the comment states",
+            "exact constants/values",
+            "unless the cited span literally says so",
+        ] {
+            assert!(ATTRIBUTION_SENTINELS_V28.contains(expected));
+        }
+        for forbidden in [
+            "Vendure",
+            "Number.MAX_SAFE_INTEGER",
+            "transaction",
+            "finalize",
+            "VEN-NEG",
+            "75a1c9e7",
+            "rubric",
+            "oracle",
+        ] {
+            assert!(!ATTRIBUTION_SENTINELS_V28.contains(forbidden));
+        }
+        let old_bytes = serde_json::to_vec(&(old, old.version(), old.prompt())).unwrap();
+        let new_bytes = serde_json::to_vec(&(new, new.version(), &prompt)).unwrap();
+        assert_eq!(old_bytes.len(), 16331);
+        assert!(
+            new_bytes.len() <= 16384 - 64,
+            "definition bytes {}",
+            new_bytes.len()
+        );
+        eprintln!(
+            "@27 definition bytes {}; @28 {}; headroom {}",
+            old_bytes.len(),
+            new_bytes.len(),
+            16384 - new_bytes.len()
+        );
+        assert_eq!(new.version(), 28);
+        assert_eq!(new.prompt_generation(), old.prompt_generation());
+        assert!(SpecialistId::is_typed_citation_prompt(&prompt));
+        let prior = old.definition().unwrap();
+        let mut next = new.definition().unwrap();
+        assert_ne!(next.prompt_fingerprint, prior.prompt_fingerprint);
+        next.id = prior.id;
+        next.version = prior.version;
+        next.prompt_fingerprint = prior.prompt_fingerprint.clone();
+        assert_eq!(next, prior);
+        assert_eq!(
+            serde_json::from_str::<SpecialistId>("\"domain-analyst@28\"").unwrap(),
+            new
+        );
     }
 }

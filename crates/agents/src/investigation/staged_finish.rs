@@ -712,6 +712,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@25"
                     | "domain-analyst@26"
                     | "domain-analyst@27"
+                    | "domain-analyst@28"
             ) && consistency.is_some() =>
         {
             match input.validate_correction_prose(finish, model.as_deref()) {
@@ -793,6 +794,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@25"
                     | "domain-analyst@26"
                     | "domain-analyst@27"
+                    | "domain-analyst@28"
             ) =>
         {
             citation_correction = input.typed_citation_correction(
@@ -823,6 +825,7 @@ pub(super) fn admit_finish_with_locator(
                         | "domain-analyst@25"
                         | "domain-analyst@26"
                         | "domain-analyst@27"
+                        | "domain-analyst@28"
                 ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
@@ -875,7 +878,11 @@ pub(super) fn admit_finish_with_locator(
     }
     if matches!(
         request.specialist_id.as_str(),
-        "domain-analyst@24" | "domain-analyst@25" | "domain-analyst@26" | "domain-analyst@27"
+        "domain-analyst@24"
+            | "domain-analyst@25"
+            | "domain-analyst@26"
+            | "domain-analyst@27"
+            | "domain-analyst@28"
     ) && consistency.is_some()
         && citation_correction.is_none()
         && let Some(feedback) = RefusalFeedback::collect_input_corrections_with_policy(

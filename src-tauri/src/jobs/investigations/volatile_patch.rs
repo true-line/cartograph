@@ -180,7 +180,7 @@ pub(super) const LOST_CANDIDATE: &str =
 /// foreign roles cannot smuggle patch state into a legacy task.
 pub(super) fn validate_shape(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     if let Some(marker) = &task.pending_correction {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27
+        if !task.detail.summary.specialist_id.uses_patch_correction()
             || !matches!(
                 task.phase,
                 Phase::Ready | Phase::Consent | Phase::Invocation
@@ -206,7 +206,7 @@ pub(super) fn authenticate(
 ) -> Result<Option<PatchBasis>, InvestigationStoreError> {
     validate_shape(task)?;
     let Some(marker) = &task.pending_correction else {
-        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27
+        if task.detail.summary.specialist_id.uses_patch_correction()
             && matches!(
                 task.phase,
                 Phase::Ready | Phase::Consent | Phase::Invocation
@@ -275,7 +275,7 @@ impl MergeAuthority {
         finish: &StagedFinish,
         response: &InvestigationResponseMeta,
     ) -> Result<(), InvestigationStoreError> {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27
+        if !task.detail.summary.specialist_id.uses_patch_correction()
             || task.detail.summary.cancel_requested
             || task.pending_patch() != Some(&self.first)
             || response.step_id != self.step_id
@@ -368,7 +368,7 @@ pub(super) fn result_witness(
     basis: &admission_journal::AuthenticatedCompletionBasis,
 ) -> Result<String, InvestigationStoreError> {
     let patch = basis.patch().ok_or(InvestigationStoreError::Invalid)?;
-    if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27
+    if !task.detail.summary.specialist_id.uses_patch_correction()
         || result.investigation_id != task.detail.summary.investigation_id
         || result.invocation_step_id.as_ref() != Some(&response.step_id)
         || result

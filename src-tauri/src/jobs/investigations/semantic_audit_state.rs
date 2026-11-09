@@ -431,6 +431,7 @@ impl StoredSemanticAudit {
                                 SpecialistId::DomainAnalystV25
                                     | SpecialistId::DomainAnalystV26
                                     | SpecialistId::DomainAnalystV27
+                                    | SpecialistId::DomainAnalystV28
                             ) || c.withholding.is_none()
                         }
                         _ => true,

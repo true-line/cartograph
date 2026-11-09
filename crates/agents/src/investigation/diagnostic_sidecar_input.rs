@@ -42,7 +42,7 @@ impl InvestigationInput {
                         &finding.statement,
                         &spans,
                         MAX_REFUSAL_DIAGNOSTIC_BYTES,
-                        self.frozen_specialist()? == SpecialistId::DomainAnalystV27,
+                        self.frozen_specialist()?.uses_patch_correction(),
                         |title, sentence, diagnostic| {
                             let position = ProsePosition {
                                 field: if title {

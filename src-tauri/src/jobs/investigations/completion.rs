@@ -14,7 +14,9 @@ fn desktop_generation_policy(
     (mode == InvestigationProviderMode::Local
         && matches!(
             specialist,
-            SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+            SpecialistId::DomainAnalystV26
+                | SpecialistId::DomainAnalystV27
+                | SpecialistId::DomainAnalystV28
         ))
     .then_some(LOCAL_ANALYST_POLICY)
 }
@@ -2199,7 +2201,7 @@ pub(super) fn refused(
     let entries = raw_refusals(tx, task)?;
     let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
     task.pending_correction = None;
-    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27
+    if task.detail.summary.specialist_id.uses_patch_correction()
         && entry.record.refusal_count == 1
         && !task.detail.summary.cancel_requested
     {

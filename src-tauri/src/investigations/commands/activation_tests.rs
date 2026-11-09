@@ -1063,3 +1063,56 @@ fn desktop_analyst26_command_rejects_creation_but_recovers_saved_nonce() {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     });
 }
+
+// AC-0575: new identity through the actual desktop command.
+#[test]
+fn desktop_analyst28_command_selects_finish_policy() {
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, mut request, _| {
+        request.specialist_id = "domain-analyst@28".into();
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+        let (release, gate) = std::sync::mpsc::channel();
+        *provider.pause.lock().unwrap() = Some(gate);
+        *provider.cancel_outcome.lock().unwrap() =
+            Some(llm::bounded::InvocationOutcome::NotDispatched);
+        let started = completion_start::start_access(
+            request.clone(),
+            app.clone(),
+            Instant::now(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        wait(|| provider.entered.load(Ordering::SeqCst).then_some(()));
+        let saved = detail(app, &started.investigation_id);
+        assert_eq!(saved.summary.specialist_id, SpecialistId::DomainAnalystV28);
+        assert_eq!(
+            saved.limits.generation_policy,
+            Some(agents::investigation::GenerationPolicy::LocalFinish4096V1)
+        );
+        assert_eq!(saved.limits.generated_token_reservations, 131072);
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .cancel_next_prompt_investigation(&started.investigation_id)
+            .unwrap();
+        state.investigations.wake(&started.investigation_id);
+        release.send(()).unwrap();
+        let terminal = finished(app, &started.investigation_id);
+        assert_eq!(terminal.summary.status, InvestigationStatus::Cancelled);
+        provider.available.store(false, Ordering::SeqCst);
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        assert_eq!(
+            completion_start::start_access(request, app.clone(), Instant::now(), None, None, None,)
+                .unwrap(),
+            terminal.summary
+        );
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    });
+}

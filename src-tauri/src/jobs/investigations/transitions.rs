@@ -1436,7 +1436,7 @@ pub(super) fn validate_response(
     response: &InvestigationResponseMeta,
 ) -> Result<(PendingInvestigationStep, InvestigationUsage), InvestigationStoreError> {
     if let Some(telemetry) = &response.finish_telemetry {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27 {
+        if !task.detail.summary.specialist_id.uses_patch_correction() {
             return Err(InvestigationStoreError::Invalid);
         }
         telemetry.validate()?;

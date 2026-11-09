@@ -51,6 +51,7 @@ fn analyst27_input_versions_bounded_verdicts_and_sidecars_together() {
             SpecialistId::DomainAnalystV25,
             SpecialistId::DomainAnalystV26,
             SpecialistId::DomainAnalystV27,
+            SpecialistId::DomainAnalystV28,
         ] {
             let input = input(role);
             let before = proposed.fingerprint().unwrap();
@@ -73,7 +74,7 @@ fn analyst27_input_versions_bounded_verdicts_and_sidecars_together() {
             };
             assert_eq!(omitted_entries, 0);
             assert_eq!(corrections.len(), entries.len(), "{role:?}: {statement}");
-            if role == SpecialistId::DomainAnalystV27 {
+            if role.uses_patch_correction() {
                 let rejected =
                     statement.starts_with("B is terminal") || statement.contains("payments");
                 assert_eq!(corrections.len(), usize::from(rejected), "{statement}");
