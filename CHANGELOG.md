@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.67.2
+
+### Patch Changes
+
+- d36e7e0: Allow the captured auditor harness to review bound withheld-parent results through the existing owner-authorized hosted consent gate, preserving the parent disposition and unchanged limits.
+
 ## 0.67.1
 
 ### Patch Changes
