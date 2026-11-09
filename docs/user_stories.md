@@ -924,6 +924,10 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   T-0574 covers the actual command path, default selection, result validation
   and presentation, including unsupported generations and tampered witnesses.
 
+- **AC-0576** Given a desktop next-prompt investigation on the expanded profile whose configured provider is the pinned hosted GPT model (Cloud `openai:gpt-6.1-sol`), when the task starts, then the AC-0570 hosted output allowance is frozen into its effective policy exactly as for the Opus lane: 16,384 generated tokens per invocation and a total reservation of 64 × 16,384, because its reasoning tokens count toward `max_completion_tokens` (owner decision 2026-11-09, #598 frontier track).
+  - **Scope:** only that exact Cloud provider id qualifies; a Local mode, `openai-compatible:` id, other GPT model or suffixed id keeps the static 2,048-token allowance. Recovery, source admission, transport and diagnostics follow AC-0570 unchanged. Every other limit is unchanged.
+- **Trace:** H4 · `llm`, `app` · — · T-0576
+
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer

@@ -828,12 +828,16 @@ struct StoredTask {
     action_tool: Option<InvestigationTool>,
 }
 
-/// The provider that takes the hosted output allowance: the pinned Opus lane.
+/// Providers that take the hosted output allowance: the pinned Opus lane and
+/// the pinned hosted GPT model, whose thinking/reasoning tokens count toward
+/// the output cap.
 fn hosted_generation(provider: Option<&InvestigationProvider>) -> bool {
     provider.is_some_and(|provider| {
         provider.mode == agents::investigation::InvestigationProviderMode::Cloud
-            && provider.provider_id
+            && (provider.provider_id
                 == format!("anthropic:{}", llm::anthropic::ClaudeLane::Opus.model_id())
+                || provider.provider_id
+                    == format!("openai:{}", llm::openai::HOSTED_ALLOWANCE_MODEL))
     })
 }
 
@@ -936,9 +940,10 @@ impl JobStore {
         let mut effective_policy = base
             .with_active_seconds(active_seconds.unwrap_or(base.limits().active_seconds))
             .ok_or(InvestigationStoreError::Invalid)?;
-        // #1709: the hosted Opus lane always thinks, so a desktop next-prompt
-        // task on it freezes the owner-approved output allowance. Other
-        // providers, MCP tasks and the v1 profile keep the static policy.
+        // #1709: the hosted Opus lane always thinks (and the pinned hosted GPT
+        // model reasons), so a desktop next-prompt task on either freezes the
+        // owner-approved output allowance. Other providers, MCP tasks and the
+        // v1 profile keep the static policy.
         if next_prompt
             && mcp.is_none()
             && hosted_generation(provider)
