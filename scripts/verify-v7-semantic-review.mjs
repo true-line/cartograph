@@ -193,11 +193,25 @@ export function validateLatestReview({ binding, commentId, rest, comments, issue
   assert.equal(latest?.id, commentId, 'Selected semantic review has been superseded');
 }
 
+// A full REST page of 20 comments (user, App, reactions and every body) can
+// exceed API_BYTES on a long issue. The listing keeps only the fields that
+// validateLatestReview reads. A body is kept only for a Claude App comment
+// within BODY_BYTES, the only kind reviewBlock can admit; any other body
+// becomes null, which reviewBlock rejects exactly as it rejects the original.
+// Every comment on every page is still listed, so supersession stays complete,
+// and every bound is unchanged. A projected page over API_BYTES fails closed.
+export const LISTING_PROJECTION = '[.[] | (.user.login == "trueline-claude-agent[bot]" and .user.type == "Bot"' +
+  ' and .performed_via_github_app.slug == "trueline-claude-agent") as $reviewer | {id, node_id, issue_url, html_url,' +
+  ' created_at, updated_at, user: {login: .user.login, type: .user.type},' +
+  ' performed_via_github_app: (if .performed_via_github_app then {slug: .performed_via_github_app.slug} else null end),' +
+  ` body: (if $reviewer and ((.body // "") | utf8bytelength) <= ${BODY_BYTES} then .body else null end)}]`;
+
 async function listIssueComments(transport, issue) {
   const comments = [];
   let bytes = 0;
   for (let page = 1; page <= MAX_COMMENT_PAGES; page += 1) {
-    const result = await transport([`repos/${REPO}/issues/${issue}/comments?per_page=${COMMENTS_PER_PAGE}&page=${page}`]);
+    const result = await transport([`repos/${REPO}/issues/${issue}/comments?per_page=${COMMENTS_PER_PAGE}&page=${page}`,
+      '--jq', LISTING_PROJECTION]);
     const encoded = JSON.stringify(result);
     bounded(encoded, API_BYTES); bytes += Buffer.byteLength(encoded, 'utf8');
     assert.ok(bytes <= MAX_LISTING_BYTES, 'Comment listing exceeds aggregate byte bound');

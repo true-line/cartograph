@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { main, strictJson, validateBinding, validateSemanticReview, validateLatestReview, verifyReview } from './verify-v7-semantic-review.mjs';
+import { LISTING_PROJECTION, main, strictJson, validateBinding, validateSemanticReview, validateLatestReview, verifyReview } from './verify-v7-semantic-review.mjs';
 
 function fixture(verdict = 'pass') {
   const binding = { schema: 'cartograph-v7-semantic-review-binding@1', protocol_sha256: 'a'.repeat(64),
@@ -119,7 +120,7 @@ test('AC-0267: transport verifies viewer first then only reads the selected REST
   assert.equal(calls[0][0], 'graphql'); assert.match(calls[0][2], /viewer/u);
   assert.deepEqual(calls[1], [`repos/true-line/cartograph/issues/comments/${f.commentId}`]);
   assert.equal(calls[2].at(-1), `id=${f.rest.node_id}`);
-  assert.deepEqual(calls[3], ['repos/true-line/cartograph/issues/652/comments?per_page=20&page=1']);
+  assert.deepEqual(calls[3], ['repos/true-line/cartograph/issues/652/comments?per_page=20&page=1', '--jq', LISTING_PROJECTION]);
   for (const args of calls) assert.ok(!args.some((arg) => /mutation|--method|PATCH|DELETE/u.test(arg)));
   const bad = fixture(); bad.viewer.data.viewer.login = 'human'; const badCalls = [];
   await assert.rejects(verifyReview({ ...bad, transport: transportFor(bad, badCalls) }));
@@ -223,6 +224,35 @@ test('AC-0267: paginated listings are complete and listing failures or bounds st
   assert.throws(() => validateLatestReview({ ...f, comments: [f.rest, f.rest] }), /duplicate/u);
   const changed = structuredClone(f.rest); changed.body += '\n';
   assert.throws(() => validateLatestReview({ ...f, comments: [changed] }), /changed/u);
+});
+
+// AC-0267: the listing projection keeps a long issue inside the unchanged page
+// bound without dropping any comment or any admissible review body.
+test('AC-0267: listing projection keeps every comment and only admissible review bodies', { skip: spawnSync('jq', ['--version']).status !== 0 }, () => {
+  const f = fixture();
+  const noise = { reactions: { total_count: 3 }, author_association: 'MEMBER', body_html: 'x'.repeat(4096) };
+  const page = [
+    { ...f.rest, ...noise, user: { ...f.rest.user, id: 1, avatar_url: 'https://example.invalid/a' },
+      performed_via_github_app: { slug: 'trueline-claude-agent', id: 9, permissions: {} } },
+    { ...f.rest, ...noise, id: 2, body: 'y'.repeat(100 * 1024), user: { login: 'someone', type: 'User' }, performed_via_github_app: null },
+    { ...f.rest, ...noise, id: 3, body: 'z'.repeat(32 * 1024 + 1) },
+    { ...f.rest, ...noise, id: 4, performed_via_github_app: { slug: 'other-app' } },
+  ];
+  assert.ok(Buffer.byteLength(JSON.stringify(page)) > 128 * 1024);
+  const run = spawnSync('jq', ['-c', LISTING_PROJECTION], { input: JSON.stringify(page), encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const projected = JSON.parse(run.stdout);
+  assert.ok(Buffer.byteLength(run.stdout) < 128 * 1024);
+  assert.deepEqual(projected[0], f.rest);
+  assert.deepEqual(projected.map((comment) => comment.id), [f.commentId, 2, 3, 4]);
+  assert.deepEqual(projected.slice(1).map((comment) => comment.body), [null, null, null]);
+  assert.deepEqual(projected[1].performed_via_github_app, null);
+  // The selected review is still found and still the latest matching one.
+  validateLatestReview({ ...f, comments: projected });
+  // A later matching review inside the bound keeps its body and supersedes.
+  const newer = laterComment(f, 'fail');
+  const again = JSON.parse(spawnSync('jq', ['-c', LISTING_PROJECTION], { input: JSON.stringify([...page, { ...newer, ...noise }]), encoding: 'utf8' }).stdout);
+  assert.throws(() => validateLatestReview({ ...f, comments: again }), /superseded/u);
 });
 
 // AC-0464: explicit issue selection preserves all authenticated review checks.
