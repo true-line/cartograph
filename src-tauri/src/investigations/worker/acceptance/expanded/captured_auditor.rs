@@ -18,6 +18,9 @@ pub(super) struct Definition {
     /// None permits fresh staging only; every reopen needs the independently retained pin.
     #[serde(skip)]
     pub start_sha256: Option<String>,
+    /// Omitted only for historical supported-parent definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_completion_outcome: Option<String>,
     pub parent_revision: u64,
     pub parent_result_id: String,
     pub parent_result_hash: String,
@@ -28,6 +31,24 @@ pub(super) struct Definition {
     pub request: StagedObligationRequest,
     pub specialist: InvestigationSpecialist,
     pub provider: InvestigationProvider,
+}
+fn parent_outcome_matches(fresh: &Value, declared: Option<&str>) -> bool {
+    let actual = fresh["detail"]["completion_outcome"].as_str();
+    match (actual, declared) {
+        (Some("supported"), None | Some("supported")) => true,
+        (
+            Some("findings_withheld_after_correction"),
+            Some("findings_withheld_after_correction"),
+        ) => {
+            fresh["result"]["completion"]["outcome"] == "findings_withheld_after_correction"
+                && fresh["result"]["completion"]["withholding"]["disposition"]
+                    == "findings_withheld_after_correction"
+                && fresh["result"]["findings"]
+                    .as_array()
+                    .is_some_and(|f| !f.is_empty())
+        }
+        _ => false,
+    }
 }
 fn sha(body: &[u8]) -> String {
     Sha256::digest(body)
@@ -71,7 +92,7 @@ pub(super) fn stage(
         || sha(&receipt) != expected.parent_receipt_sha256
         || fresh["detail"]["revision"] != expected.parent_revision
         || fresh["detail"]["status"] != "completed"
-        || fresh["detail"]["completion_outcome"] != "supported"
+        || !parent_outcome_matches(&fresh, expected.parent_completion_outcome.as_deref())
         || fresh["detail"]["obligation_status"] != "satisfied"
         || fresh["result"]["result_id"] != expected.parent_result_id
     {
@@ -126,10 +147,13 @@ pub(super) fn stage(
         || request.scope != parent.request.scope
         || request.expected_graph_revision != parent.request.expected_graph_revision
         || request.expected_context_id != parent.request.expected_context_id
-        || expected.provider.mode != InvestigationProviderMode::Local
+        || request.provider_mode != expected.provider.mode
         || !expected.provider.available
     {
         return Err("Auditor parent, scope, definition or provider differs.".into());
+    }
+    if expected.provider.mode == InvestigationProviderMode::Cloud {
+        super::cloud_run::pinned(&expected.provider)?;
     }
     let state = parent.app.state::<crate::AppState>();
     crate::investigations::completion_choices::validate_request(
@@ -293,12 +317,16 @@ fn collect(
         INVESTIGATION_V2_POLICY.journal_events() as usize,
         2 * 1024 * 1024,
     )?;
+    let detail: InvestigationDetail =
+        serde_json::from_value(receipt["detail"].clone()).map_err(|e| e.to_string())?;
+    let policy =
+        crate::jobs::investigations::policy_for_detail(&detail).map_err(|e| e.to_string())?;
     let (matching, bound, reviewable) = execution::sealed_checks_with_policy(
         &expected.request,
         &steps,
         &ledgers,
         &observations,
-        &INVESTIGATION_V2_POLICY,
+        &policy,
     )?;
     let parent_exact = !observations.is_empty()
         && observations.iter().all(|o| {
@@ -313,6 +341,9 @@ fn collect(
         "own_inventory_observed":observations.iter().any(|o|!o.inventory_hashes.is_empty())});
     receipt["auditor"] = json!("independent_semantic_review_pending");
     receipt["definition_sha256"] = json!(sha(&wire(expected)?));
+    if let Some(outcome) = &expected.parent_completion_outcome {
+        receipt["parent_completion_outcome"] = json!(outcome);
+    }
     Ok(receipt)
 }
 pub(super) fn reopen(
@@ -360,6 +391,8 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Scenario {
         Stage,
+        CloudStage,
+        Withheld,
         Supported,
         Unknown,
         Refused,
@@ -382,20 +415,71 @@ mod tests {
     fn captured_auditor_refused_observations_reopen_and_reject_paired_rewrites() {
         exercise_auditor(Scenario::Refused);
     }
+    // AC-0577: real saved-parent staging, zero dispatch, exact hosted policy recovery.
+    #[test]
+    fn captured_cloud_auditor_stages_pinned_policy_without_dispatch() {
+        exercise_auditor(Scenario::CloudStage);
+    }
+    // AC-0577: never relabel withheld or accept an unknown/empty disposition.
+    #[test]
+    fn captured_auditor_withheld_parent_requires_explicit_matching_disposition() {
+        let mut receipt = json!({"detail":{"completion_outcome":"findings_withheld_after_correction"},
+            "result":{"findings":[{"finding_id":"saved"}],"completion":{
+                "outcome":"findings_withheld_after_correction",
+                "withholding":{"disposition":"findings_withheld_after_correction"}}}});
+        let outcome = Some("findings_withheld_after_correction");
+        assert!(parent_outcome_matches(&receipt, outcome));
+        for declared in [None, Some("supported"), Some("insufficient_evidence")] {
+            assert!(!parent_outcome_matches(&receipt, declared));
+        }
+        receipt["result"]["completion"]["withholding"]["disposition"] = json!("supported");
+        assert!(!parent_outcome_matches(&receipt, outcome));
+        receipt["result"]["completion"]["withholding"]["disposition"] =
+            json!("findings_withheld_after_correction");
+        receipt["result"]["findings"] = json!([]);
+        assert!(!parent_outcome_matches(&receipt, outcome));
+        for actual in ["failed", "insufficient_evidence", "unknown"] {
+            receipt["detail"]["completion_outcome"] = json!(actual);
+            assert!(!parent_outcome_matches(&receipt, Some(actual)));
+        }
+    }
+    // AC-0577: durable production withholding, bound history and child receipt/reopen.
+    #[test]
+    fn captured_auditor_withheld_parent_history_and_receipt_reopen_without_relabelling() {
+        exercise_auditor(Scenario::Withheld);
+    }
     fn exercise_auditor(scenario: Scenario) {
         let directory = tempfile::tempdir().unwrap();
-        let provider = expanded_scripted_provider(true);
+        let provider = if matches!(scenario, Scenario::Withheld) {
+            crate::investigations::worker::tests::completion_tests::expanded_withheld_scripted_provider()
+        } else {
+            expanded_scripted_provider(true)
+        };
         let descriptor = crate::investigations::runtime::descriptor(
             provider.as_ref(),
             InvestigationProviderMode::Local,
         )
         .unwrap();
-        let prepared = super::super::prepare(
+        let mut prepared = super::super::prepare(
             directory.path(),
             &descriptor,
             super::super::tests::binding(),
         )
         .unwrap();
+        if matches!(scenario, Scenario::Withheld) {
+            prepared.analyst_request.specialist_id = "domain-analyst@25".into();
+            prepared.analyst_request.request_nonce = "withheld-parent".into();
+            prepared.analyst_request.conversation_id = Some(prepared.conversation_id.clone());
+            let state = prepared.app.state::<crate::AppState>();
+            let start = state
+                .jobs
+                .lock()
+                .unwrap()
+                .start_next_prompt_investigation(&prepared.analyst_request, Some(&descriptor))
+                .unwrap();
+            prepared.analyst_id = start.detail.summary.investigation_id;
+            prepared.auditor_request.parent_id = Some(prepared.analyst_id.clone());
+        }
         let parent = analyst::Authority::synthetic(&prepared);
         let receipt = analyst::execute_bound(directory.path(), &parent, provider).unwrap();
         let result: InvestigationResult =
@@ -415,6 +499,15 @@ mod tests {
         let mut expected = Definition {
             start_sha256: None,
             binding: parent.binding.clone(),
+            parent_completion_outcome: if matches!(scenario, Scenario::Withheld) {
+                assert_eq!(
+                    receipt["detail"]["completion_outcome"],
+                    "findings_withheld_after_correction"
+                );
+                Some("findings_withheld_after_correction".into())
+            } else {
+                None
+            },
             parent_revision: receipt["detail"]["revision"].as_u64().unwrap(),
             parent_result_id: result.result_id.clone(),
             parent_result_hash: content_hash(&wire(&result).unwrap()),
@@ -426,6 +519,17 @@ mod tests {
             specialist: SpecialistId::EvidenceAuditorV11.definition().unwrap(),
             provider: descriptor.clone(),
         };
+        if matches!(scenario, Scenario::CloudStage) {
+            expected.provider = InvestigationProvider {
+                mode: InvestigationProviderMode::Cloud,
+                provider_id: "openai:gpt-6.1-sol".into(),
+                model: "gpt-6.1-sol".into(),
+                endpoint: llm::openai::API_URL.into(),
+                protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+                ..descriptor.clone()
+            };
+            expected.request.provider_mode = InvestigationProviderMode::Cloud;
+        }
         let definition_path = directory.path().join("auditor-definition.json");
         std::fs::write(&definition_path, wire(&expected).unwrap()).unwrap();
         let output = directory.path().join("auditor");
@@ -437,6 +541,7 @@ mod tests {
         };
         for field in [
             "parent_revision",
+            "parent_completion_outcome",
             "parent_result_hash",
             "parent_receipt_sha256",
             "review_sha256",
@@ -468,8 +573,36 @@ mod tests {
         };
         assert!(stage(&parent, &failed_artifacts, &failed, true).is_err());
         assert!(!output.exists());
+        if matches!(scenario, Scenario::CloudStage) {
+            for mode_mismatch in [false, true] {
+                let mut changed = expected.clone();
+                if mode_mismatch {
+                    changed.request.provider_mode = InvestigationProviderMode::Local;
+                } else {
+                    changed.provider.endpoint =
+                        "https://example.invalid/v1/chat/completions".into();
+                }
+                std::fs::write(&definition_path, wire(&changed).unwrap()).unwrap();
+                assert!(stage(&parent, &artifacts, &changed, true).is_err());
+                assert!(!output.exists());
+            }
+        }
         std::fs::write(&definition_path, wire(&expected).unwrap()).unwrap();
         let id = stage(&parent, &artifacts, &expected, true).unwrap();
+        if matches!(scenario, Scenario::Withheld) {
+            let state = parent.app.state::<crate::AppState>();
+            let history = state
+                .jobs
+                .lock()
+                .unwrap()
+                .investigation_next_parent_history(
+                    parent.analyst_id,
+                    expected.request.conversation_id.as_deref().unwrap(),
+                )
+                .unwrap();
+            assert!(history.history()[0].contains("findings_withheld_after_correction"));
+            assert!(!history.history()[0].contains("MissingStrategy controls"));
+        }
         expected.start_sha256 = Some(sha(&read(&output.join("start.json")).unwrap()));
         // AC-0463 (#1626): real auditor staging and reopen preserve timing.
         let timing_bytes = read(&output.join("start-latency.json")).unwrap();
@@ -508,7 +641,15 @@ mod tests {
         );
         assert_eq!(first.usage, InvestigationUsage::default());
         assert_eq!(read_task(), first);
-        if !matches!(scenario, Scenario::Stage) {
+        if matches!(scenario, Scenario::CloudStage) {
+            let policy = crate::jobs::investigations::policy_for_detail(&first).unwrap();
+            assert_eq!(policy.limits().generated_tokens_per_invocation, 16384);
+            assert_eq!(policy.limits().generated_token_reservations, 1048576);
+            assert_eq!(first.limits, policy.limits());
+            assert!(!output.join("auditor-attempt.json").exists());
+            assert!(!output.join("auditor-consent-log.jsonl").exists());
+        }
+        if !matches!(scenario, Scenario::Stage | Scenario::CloudStage) {
             let unknown = matches!(scenario, Scenario::Unknown);
             let refused = matches!(scenario, Scenario::Refused);
             let raw: Arc<dyn LlmProvider> = if unknown {
@@ -524,6 +665,14 @@ mod tests {
             ));
             let actual = execute(&parent, &expected, &artifacts, provider.clone()).unwrap();
             assert_eq!(actual["role"], "auditor");
+            if matches!(scenario, Scenario::Withheld) {
+                assert_eq!(
+                    actual["parent_completion_outcome"],
+                    "findings_withheld_after_correction"
+                );
+            } else {
+                assert!(actual.get("parent_completion_outcome").is_none());
+            }
             assert_eq!(
                 actual["detail"]["status"],
                 if unknown {
