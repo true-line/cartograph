@@ -1070,6 +1070,14 @@ pub(super) struct AuthenticatedCompletionBasis {
     feedback: Option<ActionFeedback>,
 }
 impl AuthenticatedCompletionBasis {
+    pub(super) fn patch(&self) -> Option<&agents::investigation::finish_patch::PatchBasis> {
+        self.call
+            .admission
+            .acquisition
+            .as_ref()?
+            .finish_patch
+            .as_ref()
+    }
     pub(super) fn load(
         connection: &Connection,
         task: &StoredTask,
@@ -1152,7 +1160,7 @@ impl AuthenticatedCompletionBasis {
         &self,
     ) -> Result<agents::investigation::AcquisitionDisclosureConsistency<'_>, InvestigationStoreError>
     {
-        Ok(self.choices.bind_completion_disclosure(
+        Ok(self.choices.bind_completion_disclosure_with_patch(
             &self.call.task_id,
             &self.call.step_id,
             &self.contract,
@@ -1165,6 +1173,11 @@ impl AuthenticatedCompletionBasis {
                 .ok_or(InvestigationStoreError::Invalid)?,
             self.feedback.as_ref(),
             &self.policy,
+            self.call
+                .admission
+                .acquisition
+                .as_ref()
+                .and_then(|s| s.finish_patch.as_ref()),
         )?)
     }
     pub(super) fn check_step(

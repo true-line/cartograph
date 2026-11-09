@@ -21,6 +21,8 @@ pub struct DisclosedAdmissionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionAdmission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_patch: Option<finish_patch::PatchBasis>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub finish_policy_complete: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -36,6 +38,11 @@ fn is_false(value: &bool) -> bool {
 
 impl AcquisitionAdmission {
     pub fn validate(&self) -> Result<(), InvestigationError> {
+        if let Some(patch) = &self.finish_patch {
+            patch
+                .validate()
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        }
         if self
             .finish_reason
             .is_some_and(|reason| reason != ActionRefusalReason::RepeatedRead)
@@ -120,6 +127,9 @@ impl DisclosedAdmissionState {
         }
         if let Some(acquisition) = &self.acquisition {
             acquisition.validate()?;
+            if acquisition.finish_patch.is_some() && role != SpecialistId::DomainAnalystV27 {
+                return Err(InvestigationError::InvalidInput);
+            }
             if acquisition.finish_policy_complete && !policy.local_finish_generation() {
                 return Err(InvestigationError::InvalidInput);
             }
@@ -166,7 +176,8 @@ impl DisclosedAdmissionState {
         policy: &InvestigationPolicy,
     ) -> Result<(), InvestigationError> {
         let expected = if self.acquisition.as_ref().is_some_and(|stamp| {
-            stamp.finish_policy_complete
+            stamp.finish_patch.is_some()
+                || stamp.finish_policy_complete
                 || stamp.capacity_exhausted
                 || stamp.finish_reason == Some(ActionRefusalReason::RepeatedRead)
         }) {
@@ -174,7 +185,16 @@ impl DisclosedAdmissionState {
         } else {
             metadata.next_call_mode_with_policy(&self.consumed_budgets, policy)?
         };
-        if expected != self.mode {
+        if self
+            .acquisition
+            .as_ref()
+            .and_then(|s| s.finish_patch.as_ref())
+            .is_some_and(|p| {
+                metadata.refusal_count != 1
+                    || metadata.last_refusal_id.as_ref() != Some(&p.refusal_hash)
+            })
+            || expected != self.mode
+        {
             return Err(InvestigationError::InvalidInput);
         }
         Ok(())

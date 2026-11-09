@@ -763,7 +763,9 @@ impl InvestigationResult {
             .is_some_and(|c| c.withholding.is_some())
             && !matches!(
                 specialist,
-                SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+                SpecialistId::DomainAnalystV25
+                    | SpecialistId::DomainAnalystV26
+                    | SpecialistId::DomainAnalystV27
             )
         {
             return Err(InvestigationError::InvalidInput);

@@ -137,6 +137,33 @@ impl<'a> SavedMetadataHistory<'a> {
         }
         let choices =
             self.choices_before(cutoff, ledger, &self.metadata_at(&basis.step_id)?, &[])?;
+        let patch = basis
+            .admission
+            .acquisition
+            .as_ref()
+            .and_then(|s| s.finish_patch.as_ref());
+        if let Some(patch) = patch {
+            if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27 {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let prior = self
+                .refusals
+                .iter()
+                .filter(|entry| self.ordinals[&entry.record.step_id] < cutoff)
+                .collect::<Vec<_>>();
+            let [prior] = prior.as_slice() else {
+                return Err(InvestigationStoreError::Invalid);
+            };
+            if agents::investigation::finish_patch::PatchBasis::from_refusal(
+                &prior.record,
+                patch.finding_count,
+            )
+            .map_err(|_| InvestigationStoreError::Invalid)?
+                != *patch
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+        }
         if basis
             .admission
             .acquisition
@@ -148,7 +175,7 @@ impl<'a> SavedMetadataHistory<'a> {
                     || stamp.finish_policy_complete
                         != (policy_for_detail(&self.task.detail)
                             .is_ok_and(|policy| policy.local_finish_generation())
-                            && choices.attempts_complete())
+                            && (choices.attempts_complete() || patch.is_some()))
             })
         {
             return Err(InvestigationStoreError::Invalid);

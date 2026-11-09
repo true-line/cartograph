@@ -1750,6 +1750,7 @@ pub(super) fn validate_result(
     let policy = saved_policy(task)?;
     result.validate_specialist(task.detail.specialist.id)?;
     withholding_authority::validate(connection, task, result)?;
+    super::volatile_patch::validate_result_witness(connection, task, result, basis)?;
     let Some(intent) = &task.completion_intent else {
         if result.completion.is_some() {
             return Err(InvestigationStoreError::Invalid);
@@ -2097,6 +2098,7 @@ pub(super) fn refused(
     finish: &StagedFinish,
     response: InvestigationResponseMeta,
     basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
+    merged: Option<&super::volatile_patch::MergeAuthority>,
 ) -> Result<(), InvestigationStoreError> {
     if task.phase != Phase::Invocation || task.completion_intent.is_none() {
         return Err(InvestigationStoreError::Stale);
@@ -2112,7 +2114,7 @@ pub(super) fn refused(
         .specialist_id
         .uses_next_prompt_admission()
     {
-        staged::append_for_task(
+        staged::append_for_task_with_merge(
             tx,
             namespace,
             execution,
@@ -2123,6 +2125,7 @@ pub(super) fn refused(
             response.clone(),
             &attempts,
             basis,
+            merged,
         )?
     } else {
         staged::append(
@@ -2138,6 +2141,20 @@ pub(super) fn refused(
     };
     let entries = raw_refusals(tx, task)?;
     let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
+    task.pending_correction = None;
+    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27
+        && entry.record.refusal_count == 1
+        && !task.detail.summary.cancel_requested
+    {
+        let finding_count = match &finish.action {
+            InvestigationAction::Finish { findings, .. } => findings.len(),
+            _ => return Err(InvestigationStoreError::Invalid),
+        };
+        task.pending_correction = Some(volatile_patch::CorrectionMode::from_refusal(
+            &entry.record,
+            finding_count,
+        )?);
+    }
     task.detail.usage = entry.usage.clone();
     task.pending = None;
     task.approved = false;
@@ -2166,6 +2183,7 @@ pub(super) fn refused(
         "Completion obligations remain unmet; fixed feedback was retained.",
     )?;
     if task.detail.summary.cancel_requested || disposition == RefusalDisposition::TerminalRequired {
+        task.pending_correction = None;
         task.phase = Phase::Terminal;
         task.detail.summary.status = if task.detail.summary.cancel_requested {
             InvestigationStatus::Cancelled

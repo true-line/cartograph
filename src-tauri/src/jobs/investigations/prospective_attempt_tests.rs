@@ -259,6 +259,7 @@ fn prospective_attempt_zero_matches_preserve_no_ledger_incidental_reads() {
     }
     let response = InvestigationResponseMeta {
         finish_feedback_witness: None,
+        finish_telemetry: None,
         step_id: "incidental-step".into(),
         response_hash: "a".repeat(64),
         action_hash: staged::read_action_hash(&read).unwrap(),

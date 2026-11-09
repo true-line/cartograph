@@ -381,3 +381,53 @@ fn prepared_source_publication_analyst24_measured_receipt_roundtrip() {
 fn prepared_source_publication_analyst24_unmeasured_receipt_uses_legacy_bound() {
     assert_acquired_publication_capture(Some(SpecialistId::DomainAnalystV24), false);
 }
+
+// AC-0572: every case starts fresh and invokes no model or provider transport.
+#[test]
+fn analyst27_volatile_patch_admission_and_reopen() {
+    for case in [
+        "replace",
+        "withdraw",
+        "withhold",
+        "duplicate",
+        "unflagged",
+        "all_withdrawn",
+        "tool",
+        "binding_mismatch",
+        "missing_marker",
+        "restart",
+        "cancel",
+        "audit_replace",
+        "fallback",
+        "fallback_missing",
+        "fallback_hash",
+        "fallback_swapped",
+    ] {
+        let (saved, state, mut context, target, _) =
+            fixture_for_role_capture(Some(SpecialistId::DomainAnalystV27), true);
+        reset_reads();
+        eprintln!("patch fixture case: {case}");
+        let candidate = read(&saved, &state, &context, &target)
+            .unwrap_or_else(|e| panic!("read failed: {:?}", e.kind()));
+        let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+        let provider = provider();
+        let _published = candidate
+            .publish_acquired(
+                &mut context,
+                &state,
+                saved.execution(),
+                &clock(),
+                &publication(&saved, &firewall, &provider),
+            )
+            .unwrap_or_else(|e| panic!("publication failed: {}", e.error()));
+        let citation = &context.ledger.citations.last().unwrap().citation_id;
+        saved.assert_volatile_patch_after_capture(
+            &provider,
+            &firewall,
+            citation,
+            &context.query_pages,
+            &context.evidence,
+            case,
+        );
+    }
+}

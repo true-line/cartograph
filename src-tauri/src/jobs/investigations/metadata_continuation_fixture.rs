@@ -249,6 +249,7 @@ impl Proposal {
             .unwrap();
         self.response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: format!("step-{}", usage.model_invocations + 1),
             response_hash: core_prov::content_hash(b"complete next metadata response"),
             action_hash: "a".repeat(64),

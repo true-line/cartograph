@@ -195,11 +195,12 @@ fn validate_bound<'a>(
             | "domain-analyst@24"
             | "domain-analyst@25"
             | "domain-analyst@26"
+            | "domain-analyst@27"
     ) {
         return Err("unsupported captured analyst specialist".into());
     }
     if expected.generation_policy.is_some()
-        && (specialist != "domain-analyst@26"
+        && (!matches!(specialist, "domain-analyst@26" | "domain-analyst@27")
             || expected.provider.mode != InvestigationProviderMode::Local)
     {
         return Err("invalid local finish policy lane".into());

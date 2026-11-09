@@ -574,6 +574,7 @@ fn reserved_acquisition_stamp_preserves_legacy_bytes_and_rejects_present() {
             .is_ok()
         );
         let reserved = AcquisitionAdmission {
+            finish_patch: None,
             finish_policy_complete: false,
             capacity_exhausted: false,
             finish_reason: None,
@@ -612,6 +613,7 @@ fn reserved_acquisition_stamp_checks_hash_shape() {
     ] {
         assert_eq!(
             AcquisitionAdmission {
+                finish_patch: None,
                 finish_policy_complete: false,
                 capacity_exhausted: false,
                 finish_reason: None,
@@ -815,6 +817,7 @@ fn acquisition_finish_consistency_binds_identity_policy_and_stamp() {
 #[test]
 fn repeated_read_finish_stamp_preserves_legacy_bytes_and_rejects_other_reasons() {
     let mut stamp = AcquisitionAdmission {
+        finish_patch: None,
         finish_policy_complete: false,
         capacity_exhausted: false,
         finish_reason: None,

@@ -878,6 +878,17 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `llm`, `agents`, `app` · — · T-0571
 
 
+- **AC-0572** Given analyst @27 has an authenticated first finish refusal with complete finding-local authority, its single correction response is a finding patch, not a replacement whole answer. Only indices flagged by that saved refusal may be replaced with a full finding or explicitly withdrawn; unknown, duplicate, unflagged or ambiguous operations are rejected. Omitted indices retain their original finding. Replacements occupy the original position and withdrawals remove that position; surviving originals retain their order.
+  - **Whole-answer fallback:** a first refusal without complete finding-local authority (including whole-answer entries, citation corrections, unmet obligations or omitted feedback entries) retains the existing @26 whole-answer correction path and its single shared allowance. It holds no volatile candidate and emits no patch schema. An authenticated text-free correction-mode marker distinguishes WholeAnswer from Patch and from a missing/lost marker. Reopen accepts legitimate fallback state and rejects missing, forged or swapped modes; it never treats a lost Patch as fallback.
+  - **Volatile ownership:** the bounded first-finish candidate may remain in host memory for exactly one correction turn, bound to the persisted finish hash and refusal hash. Any binding mismatch refuses the merge. Candidate text is never written to disk, database, logs, events, receipts or crash/error output. Cancellation, interruption, restart or reopen releases it; a reopened pending patch fails deterministically and never asks the model to resend it. A text-free pending-patch marker is permitted. Scoped Drop releases the holder as soon as merge or failure resolves: **released, not securely erased**. No secure-erasure claim or new dependency is made.
+  - **Bounds:** the existing 32 KiB action cap bounds the held candidate and the patch/merged action. Existing logical workspace accounting includes the held candidate simultaneously with the correction request, patch decoding and merged admission. No numeric ceiling is enlarged; insufficient existing capacity fails closed.
+  - **Authentication and admission:** provider-authored response/action metadata remains authenticated independently of the host-merged finish fingerprint. Ordinary successful patches, as well as withheld projections, bind the merged result to the saved patch invocation and authenticated prior refusal through a distinct host-only hash domain. Provider action hashes are never replaced with merged hashes. Durable result and semantic-audit reopen revalidate this binding; telemetry is observation only and cannot supply admission authority. The whole merged answer passes the full privacy, citation, replay, configuration and @27 enumeration checks before any result text persists. Unflagged findings receive no exemption. The existing findings-withheld-after-correction projection operates on the merged candidate, and no empty/all-withdrawn result is admitted. Nonfinding fields remain subject to normal admission; finding patches cannot silently repair or discard them.
+  - **Generation:** explicitly extend the local-finish-4096-v1 lane to @27. Its finding-patch correction is FinishOnly with a tool-free patch schema and up to 4,096 output tokens, derived from authenticated saved refusal state. Whole-answer fallback retains the existing host-derived Choice/FinishOnly boundary and full-finish schema. First pre-boundary Choice calls remain capped at 2,048. The 131,072 total and all other V2 limits remain unchanged; reservation and settlement rederive and authenticate the mode and policy.
+  - **Text-free evidence:** each finish records the finding count, distinct flagged-index count, patched/withdrawn/kept counts and projection rejection code. Correction evidence distinguishes proposed patch entries from merged findings; an unavailable count is not fabricated. No retained field contains candidate or patch prose.
+  - **Compatibility and verification:** @19–@26 behavior and serialized history are unchanged, including r5/r6/r7/r8 byte-identical receipt reopening on disposable copies. Tests cover merge ordering, strict indices, withdrawal, full re-admission of an invalid unflagged finding, all-withdrawn failure, hash mismatch, cancellation and restart mid-correction, memory accounting, and scans of database/files for synthetic candidate text after patched runs. The separately versioned @27 grammar remains limited to terminal-empty and unique-subject predicates; exact-key-list expansion is not included.
+- **Trace:** H4 · `agents`, `app` · — · T-0572
+
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
@@ -1280,3 +1291,19 @@ absence remains readable; deletion or rehashed substitution of a newly bound
 sidecar is rejected. Diagnostics must preserve whole-run dispositions,
 withholding, model bytes, later capacity and provider counts. Only new records of analyst roles 22–25 receive diagnostics. Earlier roles
 remain unchanged; future roles adopt the witness at their own version bump.
+
+### Issue #1729 — bounded enumeration predicates (US-0032 / AC-0287)
+
+In progress; the new grammar is selected only by opt-in analyst @27. Historical
+roles through @26 retain their existing verdict and diagnostic behavior. This
+change is stacked on #1723 and must merge after it; adoption remains separate.
+Given a cited literal transition table, when a finding uses the complete forms
+`X is terminal` or `X is terminal and has no outgoing transitions`, the new
+grammar accepts exactly an empty X row and rejects a nonempty row with a
+text-free literal counterexample. Given `X is the only state that lists Y` or
+`X is the sole state that lists Y`, X must contain every named target and no
+other row may contain any named target. This does not constrain other targets
+in X. Explicit and/or lists use the existing target-list grammar. Additional
+prose and unknown subjects are not accepted as these predicates. Original
+positions, historical false-universal results, privacy checks and diagnostic
+schemas remain unchanged. T-0287 covers synthetic contrasts and diagnostics.

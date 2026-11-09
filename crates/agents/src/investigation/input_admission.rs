@@ -49,6 +49,7 @@ impl AdmissionCapacityFeedback {
 }
 
 const CHOICE_INSTRUCTIONS: &str = "Choose one permitted action. Capacity feedback describes only the latest refused acquisition and grants no evidence or authority. The refusal count persists when an accepted acquisition clears that feedback.";
+const PATCH_INSTRUCTIONS: &str = "Return only a finish_patch object with a patches list. Each entry names an authenticated flagged finding_index and either replaces that full finding or withdraws it with withdraw:true. Never emit tools, a full answer, duplicate indices or unflagged indices. Omitted findings are retained by the host and the entire merged answer is verified again.";
 const FINISH_ONLY_INSTRUCTIONS: &str = "Finish only: return a finish action using the already supplied evidence. Do not query context, read evidence, or read coverage inventory. Capacity feedback grants no evidence or authority.";
 
 impl InvestigationInput {
@@ -775,6 +776,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV24,
             SpecialistId::DomainAnalystV25,
             SpecialistId::DomainAnalystV26,
+            SpecialistId::DomainAnalystV27,
             SpecialistId::EvidenceAuditorV11,
         ]
         .contains(&role)
@@ -818,7 +820,14 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
-            if role.uses_typed_citation_correction() {
+            if role == SpecialistId::DomainAnalystV27 && self.finish_patch.is_some() {
+                &[
+                    "acquisition_choices",
+                    "action_feedback",
+                    "citation_correction",
+                    "finish_patch",
+                ]
+            } else if role.uses_typed_citation_correction() {
                 &[
                     "acquisition_choices",
                     "action_feedback",
@@ -857,7 +866,8 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let mode = if self.finish_policy_complete(policy)
+        let mode = if self.finish_patch.is_some()
+            || self.finish_policy_complete(policy)
             || self.capacity_exhausted()
             || self
                 .action_feedback
@@ -886,6 +896,9 @@ impl InvestigationInput {
         }
         let mut expected = prompt["turn_progress"].clone();
         apply_admission_progress(&mut expected, mode, count, &feedback)?;
+        if self.finish_patch.is_some() {
+            expected["admission_instructions"] = PATCH_INSTRUCTIONS.into();
+        }
         if expected != prompt["turn_progress"] {
             return Err(InvestigationError::InvalidInput);
         }
@@ -1058,6 +1071,7 @@ impl InvestigationInput {
                 | SpecialistId::DomainAnalystV24
                 | SpecialistId::DomainAnalystV25
                 | SpecialistId::DomainAnalystV26
+                | SpecialistId::DomainAnalystV27
         ) && self
             .acquisition_choices
             .as_ref()
@@ -1152,6 +1166,7 @@ impl InvestigationInput {
                     | SpecialistId::DomainAnalystV24
                     | SpecialistId::DomainAnalystV25
                     | SpecialistId::DomainAnalystV26
+                    | SpecialistId::DomainAnalystV27
             ) && choices.capacity_exhausted())
             || self
                 .action_feedback
@@ -1189,6 +1204,75 @@ impl InvestigationInput {
         self.validate_acquisition_projection()?;
         Ok(self)
     }
+    /// Projection only. The host authenticates this basis against the saved
+    /// refusal and live holder before dispatch, reservation and settlement.
+    pub fn with_finish_patch(
+        mut self,
+        basis: &finish_patch::PatchBasis,
+    ) -> Result<Self, InvestigationError> {
+        if self.frozen_specialist()? != SpecialistId::DomainAnalystV27
+            || self.acquisition_choices.is_none()
+            || self.finish_patch.is_some()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        basis
+            .validate()
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let mut prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let metadata: ProtectedCompletionMetadata =
+            serde_json::from_value(prompt["completion_metadata"].clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        if metadata.refusal_count != 1
+            || metadata.last_refusal_id.as_ref() != Some(&basis.refusal_hash)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        prompt["turn_progress"]["finish_patch"] =
+            serde_json::to_value(basis).map_err(|_| InvestigationError::InvalidInput)?;
+        prompt["turn_progress"]["admission_mode"] =
+            serde_json::to_value(CompletionCallMode::FinishOnly)
+                .map_err(|_| InvestigationError::InvalidInput)?;
+        prompt["turn_progress"]["phase"] = "finish_only".into();
+        prompt["turn_progress"]["admission_instructions"] = PATCH_INSTRUCTIONS.into();
+        self.payload.response_schema = Some(
+            basis
+                .response_schema(&self.ledger)
+                .map_err(|_| InvestigationError::InvalidInput)?,
+        );
+        self.finish_patch = Some(basis.clone());
+        self.acquisition_mode = Some(CompletionCallMode::FinishOnly);
+        wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
+        self.validate_acquisition_projection()?;
+        Ok(self)
+    }
+
+    fn validate_finish_patch_projection(
+        &self,
+        prompt: &Value,
+        metadata: &ProtectedCompletionMetadata,
+    ) -> Result<(), InvestigationError> {
+        let basis = self
+            .finish_patch
+            .as_ref()
+            .ok_or(InvestigationError::InvalidInput)?;
+        basis
+            .validate()
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        if self.frozen_specialist()? != SpecialistId::DomainAnalystV27
+            || self.acquisition_mode != Some(CompletionCallMode::FinishOnly)
+            || metadata.refusal_count != 1
+            || metadata.last_refusal_id.as_ref() != Some(&basis.refusal_hash)
+            || prompt["turn_progress"]["admission_instructions"] != PATCH_INSTRUCTIONS
+            || prompt["turn_progress"]["finish_patch"]
+                != serde_json::to_value(basis).map_err(|_| InvestigationError::InvalidInput)?
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
+
     /// Read the frozen policy embedded in the protected prompt. Host comparison
     /// to saved limits remains mandatory before any invocation is published.
     fn input_generation_policy(&self) -> Result<InvestigationPolicy, InvestigationError> {
@@ -1222,10 +1306,11 @@ impl InvestigationInput {
 
     fn finish_policy_complete(&self, policy: &InvestigationPolicy) -> bool {
         policy.local_finish_generation()
-            && self
-                .acquisition_choices
-                .as_ref()
-                .is_some_and(|c| c.attempts_complete())
+            && (self.finish_patch.is_some()
+                || self
+                    .acquisition_choices
+                    .as_ref()
+                    .is_some_and(|c| c.attempts_complete()))
     }
 
     pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {
@@ -1246,6 +1331,7 @@ impl InvestigationInput {
         }
         self.validate_acquisition_projection()?;
         Ok(AcquisitionAdmission {
+            finish_patch: self.finish_patch.clone(),
             finish_policy_complete: self.finish_policy_complete(&self.input_generation_policy()?),
             capacity_exhausted: self.capacity_exhausted(),
             finish_reason: self
@@ -1271,6 +1357,7 @@ impl InvestigationInput {
                 && self.action_feedback.is_none()
                 && self.citation_correction.is_none()
                 && self.acquisition_mode.is_none()
+                && self.finish_patch.is_none()
             {
                 Ok(())
             } else {
@@ -1309,6 +1396,9 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        if self.finish_patch.is_none() && prompt["turn_progress"].get("finish_patch").is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
         let ordinary_schema = response_schema::select_acquisition_recovery(
             mode,
             choices,
@@ -1316,7 +1406,14 @@ impl InvestigationInput {
             &contract.request_hash,
             self.action_feedback.as_ref(),
         )?;
-        let expected_schema = if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
+        let expected_schema = if let Some(patch) = &self.finish_patch {
+            self.validate_finish_patch_projection(&prompt, &metadata)?;
+            Some(
+                patch
+                    .response_schema(&self.ledger)
+                    .map_err(|_| InvestigationError::InvalidInput)?,
+            )
+        } else if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             response_schema::select_eligible_acquisition(
                 ordinary_schema,
                 mode,

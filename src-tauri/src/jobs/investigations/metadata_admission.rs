@@ -125,6 +125,9 @@ pub(super) fn authenticate_saved_response(
     prepared: &PreparedBoundedCompletion,
     active_milliseconds: u64,
 ) -> Result<AuthenticatedResponse, InvestigationStoreError> {
+    if response.finish_telemetry.is_some() {
+        return Err(InvestigationStoreError::Invalid);
+    }
     let effective_policy = super::policy_for_detail(&task.detail)?;
     let policy = &effective_policy;
     let id = &task.detail.summary.investigation_id;

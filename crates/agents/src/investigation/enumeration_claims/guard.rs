@@ -21,12 +21,23 @@ pub(super) fn finding(
     statement: &str,
     spans: &[(&str, &str)],
 ) -> Option<(bool, usize, Reason)> {
+    finding_with_grammar(title, statement, spans, false)
+}
+pub(super) fn finding_with_grammar(
+    title: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    bounded: bool,
+) -> Option<(bool, usize, Reason)> {
     for (is_title, text) in [(true, title), (false, statement)] {
         for (index, sentence) in sentences(text).enumerate() {
-            if spans
-                .iter()
-                .any(|(_, source)| claims::check(source, sentence) == Some(false))
-            {
+            if spans.iter().any(|(_, source)| {
+                (if bounded {
+                    claims::check_bounded(source, sentence)
+                } else {
+                    claims::check(source, sentence)
+                }) == Some(false)
+            }) {
                 return Some((is_title, index + 1, Reason::Enumeration));
             }
             if unverified_configuration(sentence, statement, spans, is_title) {
@@ -40,18 +51,31 @@ pub(super) fn finding(
 /// Visit every applicable claim class at every title/statement sentence. The
 /// callback receives no authored text and cannot stop traversal on overflow.
 /// Historical `finding` retains its first-match ordering and behavior.
+#[cfg(test)]
 pub(super) fn visit_finding(
     title: &str,
     statement: &str,
     spans: &[(&str, &str)],
+    visit: impl FnMut(bool, usize, Reason),
+) {
+    visit_finding_with_grammar(title, statement, spans, false, visit)
+}
+pub(super) fn visit_finding_with_grammar(
+    title: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    bounded: bool,
     mut visit: impl FnMut(bool, usize, Reason),
 ) {
     for (is_title, text) in [(true, title), (false, statement)] {
         for (index, sentence) in sentences(text).enumerate() {
-            if spans
-                .iter()
-                .any(|(_, source)| claims::check(source, sentence) == Some(false))
-            {
+            if spans.iter().any(|(_, source)| {
+                (if bounded {
+                    claims::check_bounded(source, sentence)
+                } else {
+                    claims::check(source, sentence)
+                }) == Some(false)
+            }) {
                 visit(is_title, index + 1, Reason::Enumeration);
             }
             if unverified_configuration(sentence, statement, spans, is_title) {
@@ -66,14 +90,24 @@ pub(super) fn visit_diagnostics(
     statement: &str,
     spans: &[(&str, &str)],
     allocation_cap: usize,
+    visit: impl FnMut(bool, usize, super::claim_diagnostics::ClaimDiagnostic),
+) {
+    visit_diagnostics_with_grammar(title, statement, spans, allocation_cap, false, visit)
+}
+pub(super) fn visit_diagnostics_with_grammar(
+    title: &str,
+    statement: &str,
+    spans: &[(&str, &str)],
+    allocation_cap: usize,
+    bounded: bool,
     mut visit: impl FnMut(bool, usize, super::claim_diagnostics::ClaimDiagnostic),
 ) {
-    use super::claim_diagnostics::{ClaimDiagnostic, explain_enumeration};
+    use super::claim_diagnostics::{ClaimDiagnostic, explain_enumeration_with_grammar};
     for (is_title, text) in [(true, title), (false, statement)] {
         for (index, sentence) in sentences(text).enumerate() {
             if let Some((span, diagnostic)) =
                 spans.iter().enumerate().find_map(|(span, (_, source))| {
-                    explain_enumeration(source, sentence, allocation_cap)
+                    explain_enumeration_with_grammar(source, sentence, allocation_cap, bounded)
                         .map(|diagnostic| (span, diagnostic))
                 })
             {

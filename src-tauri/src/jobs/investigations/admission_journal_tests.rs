@@ -23,6 +23,7 @@ pub(in crate::jobs::investigations) fn response(
 ) -> InvestigationResponseMeta {
     InvestigationResponseMeta {
         finish_feedback_witness: None,
+        finish_telemetry: None,
         step_id: f.step.step_id.clone(),
         response_hash: core_prov::content_hash(b"complete response"),
         action_hash: core_prov::content_hash(&encode(value, MAX_ACTION_BYTES).unwrap()),

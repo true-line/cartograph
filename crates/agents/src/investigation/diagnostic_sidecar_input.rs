@@ -1,5 +1,5 @@
 //! Finding-local projection from the exact authenticated input and finish.
-use super::claim_diagnostics::{ClaimDiagnostic, visit_claim_diagnostics};
+use super::claim_diagnostics::ClaimDiagnostic;
 use super::diagnostic_sidecar::{Detail, Entry, MAX_REFUSAL_DIAGNOSTIC_BYTES, Sidecar};
 use super::*;
 
@@ -37,11 +37,12 @@ impl InvestigationInput {
                         .map(|(_, span)| (span.path.as_str(), span.text.as_str()))
                         .collect();
                     let mut failure = None;
-                    visit_claim_diagnostics(
+                    super::enumeration_claims::visit_diagnostics_with_grammar(
                         &finding.title,
                         &finding.statement,
                         &spans,
                         MAX_REFUSAL_DIAGNOSTIC_BYTES,
+                        self.frozen_specialist()? == SpecialistId::DomainAnalystV27,
                         |title, sentence, diagnostic| {
                             let position = ProsePosition {
                                 field: if title {

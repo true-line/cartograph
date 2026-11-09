@@ -17,14 +17,28 @@ pub(crate) struct NextPromptFinish<'a> {
 }
 
 impl JobStore {
+    #[cfg(test)]
     pub(crate) fn admit_next_prompt_finish(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
         input: &NextPromptFinish<'_>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.admit_next_prompt_finish_with_patch(execution, expected_revision, input, None, None)
+    }
+
+    pub(crate) fn admit_next_prompt_finish_with_patch(
+        &mut self,
+        execution: &JobExecution,
+        expected_revision: u64,
+        input: &NextPromptFinish<'_>,
+        held: Option<agents::investigation::finish_patch::VolatileFinish>,
+        raw_patch: Option<&str>,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
-        if input.response.finish_feedback_witness.is_some() {
+        if input.response.finish_feedback_witness.is_some()
+            || input.response.finish_telemetry.is_some()
+        {
             return Err(InvestigationStoreError::Invalid);
         }
         if execution.inner.namespace != self.namespace {
@@ -66,15 +80,70 @@ impl JobStore {
             .coverage
             .as_ref()
             .ok_or(InvestigationStoreError::Invalid)?;
-        let action = ProgressiveInvestigationAction::decode_resolved_for_specialist(
-            std::str::from_utf8(&authenticated.original)
-                .map_err(|_| InvestigationStoreError::Invalid)?,
-            &context.context_id,
-            &task.intent_hash,
-            &authenticated.core.ledger,
-            policy,
-            task.detail.summary.specialist_id,
-        )?;
+        let merged = match (task.pending_patch(), held, raw_patch) {
+            (Some(_), Some(held), Some(raw)) => Some(super::super::volatile_patch::merge(
+                &tx,
+                &task,
+                &authenticated,
+                input.response,
+                raw,
+                held,
+            )?),
+            (None, None, None) => None,
+            _ => return Err(InvestigationStoreError::Invalid),
+        };
+        let merged = match merged {
+            Some(Ok(value)) => Some(value),
+            Some(Err(code)) => {
+                let mut response = input.response.clone();
+                response.finish_telemetry = Some(
+                    super::super::volatile_patch::FinishTelemetry::rejected(code),
+                );
+                persist_response(&tx, &mut task, &response, authenticated.admitted_usage)?;
+                task.pending_correction = None;
+                task.phase = Phase::Terminal;
+                task.detail.summary.status = InvestigationStatus::Failed;
+                task.detail.error =
+                    Some("The patch correction was rejected. No findings were saved.".into());
+                bump(&tx, &mut task)?;
+                event(
+                    &tx,
+                    &mut task,
+                    InvestigationEventKind::Failed,
+                    Some(&response.step_id),
+                    None,
+                    "The authenticated patch response failed deterministic projection.",
+                )?;
+                refresh_observation(&tx, &mut task)?;
+                transitions::sync_terminal_job(&tx, &task)?;
+                save_next_prompt_task(&tx, &task, expected_revision, true)?;
+                tx.commit()?;
+                return Ok(task.detail);
+            }
+            None => None,
+        };
+        let patch_counts = merged.as_ref().map(|(merged, _)| merged.counts.clone());
+        let (action, merge_authority, patch_eligible) = if let Some((merged, authority)) = merged {
+            (
+                CompletionInvestigationAction::Finish(merged.finish),
+                Some(authority),
+                Some(merged.flagged_merged_indices),
+            )
+        } else {
+            (
+                ProgressiveInvestigationAction::decode_resolved_for_specialist(
+                    std::str::from_utf8(&authenticated.original)
+                        .map_err(|_| InvestigationStoreError::Invalid)?,
+                    &context.context_id,
+                    &task.intent_hash,
+                    &authenticated.core.ledger,
+                    policy,
+                    task.detail.summary.specialist_id,
+                )?,
+                None,
+                None,
+            )
+        };
         match action {
             CompletionInvestigationAction::Read(_) => {
                 if authenticated.call.mode() != CompletionCallMode::FinishOnly {
@@ -179,6 +248,7 @@ impl JobStore {
                                 input.response,
                                 basis,
                                 policy,
+                                patch_eligible.as_deref(),
                             )? {
                                 Some(result) => Ok(Ok(result)),
                                 None => decision,
@@ -199,6 +269,60 @@ impl JobStore {
                     }
                     other => other,
                 };
+                let mut measured_response = input.response.clone();
+                if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27 {
+                    let count = match &finish.action {
+                        InvestigationAction::Finish { findings, .. } => findings.len(),
+                        _ => return Err(InvestigationStoreError::Invalid),
+                    };
+                    let mut telemetry = super::super::volatile_patch::FinishTelemetry::finish(
+                        count,
+                        patch_counts.as_ref(),
+                    );
+                    match &decision {
+                        Ok(Err(FinishDecision::Refused { feedback, .. })) => {
+                            telemetry.refusal(feedback)
+                        }
+                        Ok(Ok(result)) => {
+                            telemetry.flagged_count = Some(
+                                result
+                                    .completion
+                                    .as_ref()
+                                    .and_then(|c| c.withholding.as_ref())
+                                    .map_or(0, |w| w.withheld_indexes.len()),
+                            );
+                        }
+                        Err(_) => {
+                            telemetry.flagged_count = None;
+                            telemetry.projection_rejection = Some(agents::investigation::finish_patch::PatchRejection::AdmissionRejected);
+                        }
+                        _ => {}
+                    }
+                    measured_response.finish_telemetry = Some(telemetry);
+                }
+                if merge_authority.is_some()
+                    && let Ok(Ok(result)) = &decision
+                    && result
+                        .completion
+                        .as_ref()
+                        .is_some_and(|c| c.withholding.is_none())
+                {
+                    measured_response.finish_feedback_witness =
+                        Some(super::super::volatile_patch::result_witness(
+                            &task,
+                            &measured_response,
+                            result,
+                            basis.as_ref().ok_or(InvestigationStoreError::Invalid)?,
+                        )?);
+                }
+                let measured_input = NextPromptFinish {
+                    request: input.request,
+                    response: &measured_response,
+                    original_action: input.original_action,
+                    current: input.current,
+                    current_prepared: input.current_prepared,
+                };
+                let input = &measured_input;
                 match decision {
                     Ok(Ok(result)) => {
                         validate_result_basis(
@@ -251,14 +375,16 @@ impl JobStore {
                                 .completion
                                 .as_ref()
                                 .and_then(|c| c.withholding.as_ref());
-                            if let Some(witness) = partial {
+                            if partial.is_some() || merge_authority.is_some() {
                                 let mut response = input.response.clone();
-                                response.finish_feedback_witness =
-                                    Some(refusal_diagnostics::withholding_witness(
-                                        &tx,
-                                        &task.detail.summary.investigation_id,
-                                        witness.fingerprint()?,
-                                    )?);
+                                if let Some(witness) = partial {
+                                    response.finish_feedback_witness =
+                                        Some(refusal_diagnostics::withholding_witness(
+                                            &tx,
+                                            &task.detail.summary.investigation_id,
+                                            witness.fingerprint()?,
+                                        )?);
+                                }
                                 // Insert independent response metadata before validating the
                                 // result; all writes roll back together if any check fails.
                                 persist_response(
@@ -288,7 +414,7 @@ impl JobStore {
                                 &result.result_id,
                                 &result_hash,
                             )?;
-                            if partial.is_none() {
+                            if partial.is_none() && merge_authority.is_none() {
                                 persist_response(
                                     &tx,
                                     &mut task,
@@ -322,6 +448,7 @@ impl JobStore {
                             &finish,
                             input.response.clone(),
                             basis.as_ref(),
+                            merge_authority.as_ref(),
                         )?;
                     }
                     Ok(Err(FinishDecision::Accepted(_))) => {
@@ -364,6 +491,9 @@ impl JobStore {
                     Err(error) => return Err(error.into()),
                 }
             }
+        }
+        if task.phase == Phase::Terminal {
+            task.pending_correction = None;
         }
         admission_journal::derive_current(&tx, &task)?;
         validate_saved(&tx, &task)?;

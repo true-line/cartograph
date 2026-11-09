@@ -9,6 +9,11 @@ pub(crate) fn check(source: &str, sentence: &str) -> Option<bool> {
         .map(|result| result.is_ok())
 }
 
+pub(super) fn check_bounded(source: &str, sentence: &str) -> Option<bool> {
+    super::super::claim_diagnostics::enumeration::explain_bounded(source, sentence)
+        .map(|result| result.is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

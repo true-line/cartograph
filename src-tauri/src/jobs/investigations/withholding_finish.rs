@@ -12,10 +12,13 @@ pub(super) fn project(
     response: &InvestigationResponseMeta,
     basis: &admission_journal::AuthenticatedCompletionBasis,
     policy: &InvestigationPolicy,
+    patch_eligible: Option<&[usize]>,
 ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
     if !matches!(
         task.detail.summary.specialist_id,
-        SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+        SpecialistId::DomainAnalystV25
+            | SpecialistId::DomainAnalystV26
+            | SpecialistId::DomainAnalystV27
     ) || !matches!(
         (
             task.detail.summary.specialist_id,
@@ -23,6 +26,7 @@ pub(super) fn project(
         ),
         (SpecialistId::DomainAnalystV25, "domain-analyst@25")
             | (SpecialistId::DomainAnalystV26, "domain-analyst@26")
+            | (SpecialistId::DomainAnalystV27, "domain-analyst@27")
     ) || task.detail.summary.cancel_requested
     {
         return Ok(None);
@@ -44,6 +48,14 @@ pub(super) fn project(
     else {
         return Ok(None);
     };
+    if patch_eligible.is_some_and(|eligible| {
+        plan.withheld_indexes()
+            .iter()
+            .any(|index| eligible.binary_search(index).is_err())
+    }) {
+        // An originally unflagged finding does not gain a withholding escape.
+        return Ok(None);
+    }
     let withheld_indexes = plan
         .withheld_indexes()
         .iter()

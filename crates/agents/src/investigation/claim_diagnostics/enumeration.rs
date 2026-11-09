@@ -1,6 +1,8 @@
 //! Conservative checks over literal enumerations, not a natural-language truth oracle.
 use crate::investigation::enumeration_claims::claims::literal;
 use literal::Enumeration;
+#[path = "bounded.rs"]
+mod bounded;
 #[path = "shape.rs"]
 mod shape;
 
@@ -13,11 +15,34 @@ pub(super) fn check(source: &str, sentence: &str) -> Option<bool> {
     explain(source, sentence).map(|result| result.is_ok())
 }
 pub(crate) fn explain(source: &str, sentence: &str) -> Option<Result<(), Explanation>> {
+    explain_using(source, sentence, false, check_clause)
+}
+
+pub(crate) fn explain_bounded(source: &str, sentence: &str) -> Option<Result<(), Explanation>> {
+    explain_using(source, sentence, true, |table, clause| {
+        bounded::check(table, &tokens(clause)).or_else(|| check_clause(table, clause))
+    })
+}
+
+fn explain_using(
+    source: &str,
+    sentence: &str,
+    bounded: bool,
+    check: impl Fn(&Enumeration<'_>, &str) -> Option<Result<(), Explanation>>,
+) -> Option<Result<(), Explanation>> {
     let enumeration = literal::parse(source)?;
+    // A new bounded predicate cannot lend its verdict to an unchecked sibling
+    // clause. Legacy-only sentences retain historical applicability.
+    let reject_unknown = bounded
+        && sentence
+            .split(", and ")
+            .any(|clause| bounded::check(&enumeration, &tokens(clause)).is_some());
     let mut applicable = false;
     let mut token_offset = 0;
     for clause in sentence.split(", and ") {
-        if let Some(result) = check_clause(&enumeration, clause) {
+        if let Some(result) = check(&enumeration, clause)
+            .or_else(|| reject_unknown.then(|| outside(Rule::Unsupported)))
+        {
             match result {
                 Err(mut reason) => {
                     reason.quantifier_token = tokens(clause)

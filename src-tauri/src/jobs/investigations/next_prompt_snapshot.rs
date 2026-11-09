@@ -8,6 +8,7 @@ pub(crate) struct NextPromptSnapshot {
     request: StagedObligationRequest,
     saved: CompletionPromptSnapshot,
     mode: CompletionCallMode,
+    patch: Option<agents::investigation::finish_patch::PatchBasis>,
     capacity: admission_journal::CapacityState,
     pending: Option<PendingInvestigationStep>,
     choices: Option<std::sync::Arc<agents::investigation::acquisition_choices::AcquisitionChoices>>,
@@ -15,6 +16,9 @@ pub(crate) struct NextPromptSnapshot {
 }
 
 impl NextPromptSnapshot {
+    pub(crate) fn patch(&self) -> Option<&agents::investigation::finish_patch::PatchBasis> {
+        self.patch.as_ref()
+    }
     pub(crate) fn request(&self) -> &StagedObligationRequest {
         &self.request
     }
@@ -57,14 +61,18 @@ impl NextPromptSnapshot {
         &self,
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationStoreError> {
-        match &self.choices {
-            Some(choices) => Ok(input.with_acquisition_correction(
+        let input = match &self.choices {
+            Some(choices) => input.with_acquisition_correction(
                 choices.clone(),
                 self.capacity.action_feedback.clone(),
                 self.correction.as_ref(),
-            )?),
-            None => Ok(input),
-        }
+            )?,
+            None => input,
+        };
+        Ok(match &self.patch {
+            Some(patch) => input.with_finish_patch(patch)?,
+            None => input,
+        })
     }
     /// Consent retains this exact sealed step and its matching prepared payload.
     pub(crate) fn pending_step(&self) -> Option<&PendingInvestigationStep> {
@@ -122,12 +130,15 @@ impl JobStore {
         } else {
             None
         };
-        let derived_mode = if choices.as_ref().is_some_and(|choices| {
-            choices.capacity_exhausted()
-                || (policy.local_finish_generation() && choices.attempts_complete())
-        }) || capacity.action_feedback.as_ref().is_some_and(|feedback| {
-            feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
-        }) {
+        let patch = super::super::volatile_patch::authenticate(&tx, &task)?;
+        let derived_mode = if patch.is_some()
+            || choices.as_ref().is_some_and(|choices| {
+                choices.capacity_exhausted()
+                    || (policy.local_finish_generation() && choices.attempts_complete())
+            })
+            || capacity.action_feedback.as_ref().is_some_and(|feedback| {
+                feedback.reason == agents::investigation::ActionRefusalReason::RepeatedRead
+            }) {
             CompletionCallMode::FinishOnly
         } else {
             metadata.next_call_mode_with_policy(&task.detail.usage, policy)?
@@ -153,6 +164,7 @@ impl JobStore {
         };
         let correction = authenticated_citation_correction(&tx, &task, &metadata)?;
         let snapshot = NextPromptSnapshot {
+            patch,
             correction,
             request,
             choices,

@@ -68,8 +68,10 @@ impl RefusalFeedback {
                 let _ = emit(entry);
             })?;
             if prose::has_placeholder(finish)
-                || (input.frozen_specialist()? == SpecialistId::DomainAnalystV26
-                    && prose::has_bare_finish_field(finish))
+                || (matches!(
+                    input.frozen_specialist()?,
+                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+                ) && prose::has_bare_finish_field(finish))
             {
                 emit(CombinedCorrection::RewriteSchemaPlaceholders)?;
             }

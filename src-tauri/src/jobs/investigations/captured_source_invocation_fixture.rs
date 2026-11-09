@@ -106,6 +106,7 @@ impl CapturedSourceInvocationFixture {
         let action = json!({"type":"read_evidence","fact":target.fact,"role":target.role,"index":target.index});
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: f.step.step_id.clone(),
             response_hash: core_prov::content_hash(b"scripted captured-source complete action"),
             action_hash: core_prov::content_hash(&encode(&action, MAX_ACTION_BYTES).unwrap()),
@@ -198,6 +199,7 @@ impl CapturedSourceInvocationFixture {
             }],"knowledge_completeness":"partial","limitations":["Only selected material was considered."]}});
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: format!("step-{}", invoked.usage.model_invocations),
             response_hash: core_prov::content_hash(b"scripted unsupported configuration claim"),
             action_hash: core_prov::content_hash(&encode(&original, MAX_ACTION_BYTES).unwrap()),
@@ -462,3 +464,6 @@ impl CapturedSourceInvocationFixture {
 
 #[path = "captured_withholding_fixture.rs"]
 mod withholding;
+
+#[path = "captured_patch_fixture.rs"]
+mod patch;

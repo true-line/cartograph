@@ -24,6 +24,7 @@ pub struct InvestigationInput {
     compact: bool,
     acquisition_choices: Option<std::sync::Arc<acquisition_choices::AcquisitionChoices>>,
     acquisition_mode: Option<staged_refusal::CompletionCallMode>,
+    finish_patch: Option<finish_patch::PatchBasis>,
     action_feedback: Option<ActionRefusalFeedback>,
     citation_correction: Option<acquisition_choices::CitationCorrection>,
     inspection_requirements: Option<Vec<InvestigationInspectionTarget>>,
@@ -125,7 +126,16 @@ impl InvestigationInput {
                 .map(|span| (span.path.as_str(), span.text.as_str()))
                 .collect::<Vec<_>>();
             if let Some((title, sentence, reason)) =
-                enumeration_claims::finding(&finding.title, &finding.statement, &spans)
+                if self.specialist == SpecialistId::DomainAnalystV27 {
+                    enumeration_claims::finding_with_grammar(
+                        &finding.title,
+                        &finding.statement,
+                        &spans,
+                        true,
+                    )
+                } else {
+                    enumeration_claims::finding(&finding.title, &finding.statement, &spans)
+                }
             {
                 let finding =
                     u32::try_from(index).map_err(|_| InvestigationError::LimitExceeded)?;
@@ -181,10 +191,11 @@ impl InvestigationInput {
             let finding_index =
                 u32::try_from(index).map_err(|_| InvestigationError::LimitExceeded)?;
             let mut error = None;
-            enumeration_claims::visit_finding(
+            enumeration_claims::visit_finding_with_grammar(
                 &finding.title,
                 &finding.statement,
                 &spans,
+                self.specialist == SpecialistId::DomainAnalystV27,
                 |title, sentence, reason| {
                     let Ok(sentence) = u32::try_from(sentence) else {
                         error = Some(InvestigationError::LimitExceeded);
@@ -761,6 +772,7 @@ impl InvestigationInput {
             compact,
             acquisition_choices: None,
             acquisition_mode: None,
+            finish_patch: None,
             action_feedback: None,
             citation_correction: None,
             inspection_requirements: None,

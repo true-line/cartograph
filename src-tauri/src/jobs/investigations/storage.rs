@@ -1050,6 +1050,7 @@ pub(super) fn load_next_prompt_task(
         }
     }
     completion::validate_saved(connection, &task)?;
+    super::volatile_patch::authenticate(connection, &task)?;
     if let Some(audit) = &task.semantic_audit {
         audit.validate_saved(connection, &task)?;
     }
@@ -1102,6 +1103,7 @@ fn load_task_base_contract(
         return Err(InvestigationStoreError::Invalid);
     };
     let task: StoredTask = decode(&bytes, &hash)?;
+    super::volatile_patch::validate_shape(&task)?;
     // Canonical decode owns the task; its row buffers need not overlap validation.
     drop((bytes, hash));
     if next_prompt {
