@@ -29,21 +29,17 @@ not acceptance evidence. No hosted development runs are authorized.
 
 | @27 wording (unchanged) | @28 wording |
 | --- | --- |
-| Finish shape clarification (existing limits, not permission to finish): | Finish shape (same limits; not finish permission): |
-| overall limitations and each finding's limitations must contain 1..8 nonblank strings, each at most 512 UTF-8 bytes. | overall/per-finding limitations: 1..8 nonblank strings. UTF-8 byte caps: limitation 512 |
-| Titles and statements must be nonblank, at most 160 and 2048 UTF-8 bytes respectively. | title 160, statement 2048; Titles/statements/IDs nonblank |
-| No string may contain NUL. | no NUL |
-| Each finding needs 1..8 unique exact admitted citation IDs, each nonblank and at most 128 UTF-8 bytes. | citation ID 128; IDs nonblank; Per finding: 1..8 unique exact admitted citation IDs. |
-| Use at most 12 findings. | At most 12 findings. |
-| Nonempty findings require knowledge_completeness partial; empty findings require insufficient_evidence. The outer outcome must agree. | knowledge_completeness: partial with findings, insufficient_evidence without; outer outcome agrees. |
-| Do not invent findings or citations to satisfy shape constraints. | Never invent findings/citations for shape. |
-| The supported wrapper example above and this insufficient-evidence wrapper are the two terminal shapes. This example is syntax, not evidence or permission to finish before completing the required obligation attempts: | Both terminal wrapper examples are syntax, not evidence or permission to finish before required obligation attempts complete: |
+| Finish shape clarification (existing limits, not permission to finish): overall limitations and each finding's limitations must contain 1..8 nonblank strings, each at most 512 UTF-8 bytes. Titles and statements must be nonblank, at most 160 and 2048 UTF-8 bytes respectively. No string may contain NUL. Each finding needs 1..8 unique exact admitted citation IDs, each nonblank and at most 128 UTF-8 bytes. Use at most 12 findings. Nonempty findings require knowledge_completeness partial; empty findings require insufficient_evidence. The outer outcome must agree. Do not invent findings or citations to satisfy shape constraints. | Finish shape (unchanged limits; not finish permission): overall/per-finding limitations need 1..8 nonblank strings. UTF-8 byte caps: each limitation 512, nonblank title 160, nonblank statement 2048, each citation ID 128. No NUL anywhere. Each finding needs 1..8 unique exact admitted nonblank citation IDs; at most 12 findings. Nonempty findings require knowledge_completeness partial; empty require insufficient_evidence; outer outcome must agree. Never invent findings/citations to meet shape. |
+| The supported wrapper example above and this insufficient-evidence wrapper are the two terminal shapes. This example is syntax, not evidence or permission to finish before completing the required obligation attempts: | The supported example above and this insufficient-evidence example are the only two terminal shapes: syntax, not evidence or permission to finish before completing required obligation attempts: |
+| Describe cited source in your own words; never copy a complete source excerpt into title, statement or limitations. | Paraphrase cited source; never copy a complete source excerpt into title, statement or limitations. |
+| Historical correction actions in completion_metadata record the refused invocation; use only current correction entries and acquisition_choices for the next action. | Historical completion_metadata correction actions record the refused invocation; use only current correction entries and acquisition_choices next. |
+| This is a multi-step host-executed protocol. The host-derived turn_progress describes this turn, not a new session. | Multi-step host-executed protocol: host-derived turn_progress describes this turn, not a new session. |
 
 The JSON examples, tool/schema rules and guards remain unchanged. The regression
-requires at least 64 bytes under the existing 16384-byte serialized definition cap.
-The current definition is 16305 bytes (79 bytes of headroom). Table rows align
+requires at least 32 bytes under the existing 16384-byte serialized definition cap.
+The current definition is 16349 bytes (35 bytes of headroom). Table rows align
 individual constraints; the compact paragraph combines their punctuation.
 Only the following two generic rule lines are added:
 
-For behaviour inferred from code structure, say "the code shows"; "the comment states" only for cited comment text.
-Sentinels: name exact constants/values, never "unbounded", "infinite" or "unlimited" unless the cited span literally says so.
+Code-derived behaviour: say "the code shows"; say "the comment states" only for cited comment text.
+Sentinels: name exact constants/values, never "unbounded", "infinite" or "unlimited" unless cited text says so.

@@ -928,7 +928,7 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **AC-0575** Domain analyst @28 is a new versioned desktop default. It inherits
   @27's request/result, correction, admission, privacy and finish-only policy
   contracts without changing any numeric limit. Its @28-only finish-shape explanation is shortened without losing instructions
-  or examples, with at least 64 bytes of definition headroom. Its only new rules are
+  or examples, with at least 32 bytes of definition headroom. Its only new rules are
   generic attribution and exact-sentinel rules: distinguish what code structure
   shows from what a cited comment actually states, and name the exact constant
   or literal instead of claiming an unbounded, infinite or unlimited value unless
