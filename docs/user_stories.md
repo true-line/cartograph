@@ -837,6 +837,7 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Request:** the consented system and user messages, `max_completion_tokens` from the reserved output limit, `store: false` and `stream: false`. The API key travels as a sensitive bearer header and is never logged. No tools or thinking template are sent.
   - **Schema:** a bounded response schema travels as `json_schema` with `strict: true`. It uses the AC-0568 projection plus these checks:
     - every object is closed and lists every property as required;
+    - every `const` and `enum` schema carries its explicit scalar `type`, and a lone object or array `const` travels as a closed, fully required schema of typed literals with the array's exact length (strict mode cannot pin array positions, so each item admits any listed element). A structured literal with sibling keywords is refused. The live API rejects untyped and structured literals with HTTP 400, as #598 development showed;
     - `allOf`, `$ref` siblings and non-root definitions are refused;
     - the published limits (10 nesting levels, 5000 properties, 1000 enum values, 120000 schema string bytes) are enforced in one memoized pass before send, and each definition is counted once.
   - **Root wrapper:** a root that is not a plain object travels wrapped as the single required property `response`, with definitions kept at the root. Only the model's exact inner bytes reach host validation against the complete original schema. A wrapped reply in any other shape is Invalid.

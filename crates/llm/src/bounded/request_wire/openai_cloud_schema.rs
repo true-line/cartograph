@@ -44,6 +44,7 @@ pub(crate) fn project(schema: &str) -> Option<(Value, bool)> {
         outer.insert("additionalProperties".into(), json!(false));
         wire = Value::Object(outer);
     }
+    type_literals(&mut wire);
     Walk {
         root: &wire,
         totals: Totals::default(),
@@ -51,6 +52,111 @@ pub(crate) fn project(schema: &str) -> Option<(Value, bool)> {
     }
     .node(&wire)?;
     Some((wire, wrapped))
+}
+
+/// The strict JSON type of a scalar literal. Structured literals have none.
+fn scalar_type(literal: &Value) -> Option<&'static str> {
+    Some(match literal {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) | Value::Object(_) => return None,
+    })
+}
+
+/// The strict schema admitting `literal`. An object becomes a closed object
+/// whose every property is required. An array keeps its exact length, but
+/// strict mode cannot pin positions, so each item admits any listed element.
+fn literal_schema(literal: &Value) -> Value {
+    match literal {
+        Value::Object(members) => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": members.keys().collect::<Vec<_>>(),
+            "properties": members
+                .iter()
+                .map(|(name, member)| (name.clone(), literal_schema(member)))
+                .collect::<Map<_, _>>(),
+        }),
+        Value::Array(elements) => {
+            let mut alternatives: Vec<Value> = Vec::new();
+            for element in elements.iter().map(literal_schema) {
+                if !alternatives.contains(&element) {
+                    alternatives.push(element);
+                }
+            }
+            let items = match alternatives.len() {
+                // No item is admitted, but strict mode still needs an item schema.
+                0 => json!({"type": "string"}),
+                1 => alternatives.remove(0),
+                _ => json!({ "anyOf": alternatives }),
+            };
+            json!({"type": "array", "minItems": elements.len(),
+                "maxItems": elements.len(), "items": items})
+        }
+        scalar => json!({ "type": scalar_type(scalar), "const": scalar }),
+    }
+}
+
+/// Strict mode needs an explicit `type` on every literal schema and has no
+/// structured `const`; the live API rejects both with HTTP 400 (#598 sol
+/// dev3). A lone structured `const` becomes its [`literal_schema`], and an
+/// untyped scalar `const` or `enum` gains its literal types. Anything else is
+/// left for [`Walk`] to refuse. The host still validates the model's bytes
+/// against the complete original schema, so admission is unchanged.
+fn type_literals(node: &mut Value) {
+    let Some(object) = node.as_object_mut() else {
+        return;
+    };
+    if object.len() == 1
+        && let Some(literal @ (Value::Object(_) | Value::Array(_))) = object.get("const")
+    {
+        let schema = literal_schema(literal);
+        *node = schema;
+        return;
+    }
+    if !["type", "$ref", "anyOf"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+    {
+        let literals = match (object.get("const"), object.get("enum")) {
+            (Some(literal), _) => std::slice::from_ref(literal),
+            (None, Some(Value::Array(members))) => members.as_slice(),
+            _ => &[],
+        };
+        let mut types: Vec<&str> = Vec::new();
+        let mut scalar = true;
+        for literal in literals {
+            match scalar_type(literal) {
+                Some(kind) if !types.contains(&kind) => types.push(kind),
+                Some(_) => {}
+                None => scalar = false,
+            }
+        }
+        match types.as_slice() {
+            _ if !scalar => {}
+            [] => {}
+            [kind] => {
+                object.insert("type".into(), json!(kind));
+            }
+            kinds => {
+                object.insert("type".into(), json!(kinds));
+            }
+        }
+    }
+    for key in ["properties", "$defs", "definitions"] {
+        if let Some(Value::Object(schemas)) = object.get_mut(key) {
+            schemas.values_mut().for_each(type_literals);
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        type_literals(items);
+    }
+    if let Some(Value::Array(branches)) = object.get_mut("anyOf") {
+        branches.iter_mut().for_each(type_literals);
+    }
 }
 
 /// The model's exact inner bytes from a wrapped response. Anything other than
@@ -124,22 +230,24 @@ impl<'a> Walk<'a> {
             let root = self.root;
             return self.resolve(root.pointer(reference.as_str()?.strip_prefix('#')?)?);
         }
-        for literal in object
-            .get("enum")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+        // Every literal is a typed scalar here; `type_literals` expanded the
+        // representable structured ones and anything left has no strict form.
+        let literal = object.contains_key("const") || object.contains_key("enum");
+        if literal && !object.contains_key("type") {
+            return None;
+        }
+        let members: &[Value] = match object.get("enum") {
+            None => &[],
+            Some(members) => members.as_array()?,
+        };
+        for literal in members {
+            scalar_type(literal)?;
             self.totals.enum_values += 1;
             self.totals.string_bytes += literal.as_str().map_or(0, str::len);
         }
-        match object.get("const") {
-            Some(Value::String(literal)) => self.totals.string_bytes += literal.len(),
-            // Structured constants count by serialized size, which errs toward refusing.
-            Some(literal @ (Value::Object(_) | Value::Array(_))) => {
-                self.totals.string_bytes += literal.to_string().len()
-            }
-            _ => {}
+        if let Some(literal) = object.get("const") {
+            scalar_type(literal)?;
+            self.totals.string_bytes += literal.as_str().map_or(0, str::len);
         }
         self.within_limits()?;
         let mut depth = 0;
@@ -311,15 +419,96 @@ mod tests {
         assert!(project(&schema.to_string()).is_some());
     }
 
-    // AC-0567 / #1709: the shipped analyst schemas satisfy strict mode once wrapped.
+    // AC-0567 / #598: strict mode needs a `type` on every literal and has no
+    // structured `const`. Scalars gain their types; object and array literals
+    // become closed, fully required typed schemas of exact length.
+    #[test]
+    fn literals_are_typed_and_structured_constants_expanded() {
+        let schema = json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "mode", "fact", "pair", "none"],
+            "properties": {
+                "kind": {"const": "read_evidence"},
+                "mode": {"enum": ["a", "b", null]},
+                "fact": {"anyOf": [{"const": {"id": "node:checkout", "n": 2}}]},
+                "pair": {"const": ["x", "x", true]},
+                "none": {"const": []}
+            }
+        });
+        let (wire, wrapped) = project(&schema.to_string()).unwrap();
+        assert!(!wrapped);
+        assert_eq!(
+            wire["properties"],
+            json!({
+                "kind": {"type": "string", "const": "read_evidence"},
+                "mode": {"type": ["string", "null"], "enum": ["a", "b", null]},
+                "fact": {"anyOf": [{"type": "object", "additionalProperties": false,
+                    "required": ["id", "n"], "properties": {
+                        "id": {"type": "string", "const": "node:checkout"},
+                        "n": {"type": "integer", "const": 2}}}]},
+                "pair": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"anyOf": [
+                    {"type": "string", "const": "x"}, {"type": "boolean", "const": true}]}},
+                "none": {"type": "array", "minItems": 0, "maxItems": 0,
+                    "items": {"type": "string"}}
+            })
+        );
+        // A structured enum member arrives as a `const` branch and expands too.
+        let members = json!({"type": "object", "additionalProperties": false,
+            "required": ["p"], "properties": {"p": {"enum": [{"a": 1}]}}});
+        assert_eq!(
+            project(&members.to_string()).unwrap().0["properties"]["p"],
+            json!({"anyOf": [{"type": "object", "additionalProperties": false,
+                "required": ["a"], "properties": {"a": {"type": "integer", "const": 1}}}]})
+        );
+        // A structured literal with siblings has no strict form and fails closed.
+        for property in [
+            json!({"const": {"a": 1}, "description": "kept sibling"}),
+            json!({"type": "object", "const": {"a": 1}}),
+        ] {
+            let schema = json!({"type": "object", "additionalProperties": false,
+                "required": ["p"], "properties": {"p": property}});
+            assert_eq!(project(&schema.to_string()), None, "{schema}");
+        }
+    }
+
+    /// Every literal in a projected wire schema is a typed scalar.
+    fn assert_literals_typed(node: &serde_json::Value) {
+        match node {
+            serde_json::Value::Object(object) => {
+                for key in ["const", "enum"] {
+                    if let Some(literal) = object.get(key) {
+                        assert!(object.contains_key("type"), "untyped literal {node}");
+                        let members: Vec<&serde_json::Value> = match (key, literal) {
+                            ("enum", serde_json::Value::Array(members)) => members.iter().collect(),
+                            _ => vec![literal],
+                        };
+                        assert!(
+                            members.iter().all(|m| !m.is_object() && !m.is_array()),
+                            "structured literal {node}"
+                        );
+                    }
+                }
+                object
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "const" | "enum"))
+                    .for_each(|(_, value)| assert_literals_typed(value));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(assert_literals_typed),
+            _ => {}
+        }
+    }
+
+    // AC-0567 / #1709 / #598: the shipped analyst schemas satisfy strict mode once
+    // wrapped, with every literal typed (the live API refuses untyped ones).
     #[test]
     fn analyst_schemas_project_strictly() {
         for schema in [
             include_str!("../../../../agents/src/investigation/data/analyst-v13-choice.json"),
             include_str!("../../../../agents/src/investigation/data/analyst-v13-finish-only.json"),
         ] {
-            let (_, wrapped) = project(schema).expect("analyst schema must project strictly");
+            let (wire, wrapped) = project(schema).expect("analyst schema must project strictly");
             assert!(wrapped);
+            assert_literals_typed(&wire);
         }
     }
 }
