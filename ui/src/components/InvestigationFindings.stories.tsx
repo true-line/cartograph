@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
+import { analyst27Correction } from '../completionFixtures';
 import { InvestigationFindings } from './InvestigationFindings';
 import { investigationCitations, investigationResult } from '../investigationFixtures';
 
@@ -132,5 +133,22 @@ export const AdvisoryNotCompleted: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText('Audit not completed: invalid model output.')).toBeVisible();
     await expect(canvas.getAllByText(/T3 · InferredWeak/)).toHaveLength(2);
+  },
+};
+
+export const Analyst27WithheldAfterCorrection: Story = {
+  args: { result: analyst27Correction(true).result, readOnly: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/Some findings were withheld/)).toBeVisible();
+    await expect(canvas.getAllByText(/T3 · InferredWeak/)).not.toHaveLength(0);
+  },
+};
+export const Analyst27SupportedAfterCorrection: Story = {
+  args: { result: analyst27Correction(false).result, readOnly: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByText(/Some findings were withheld/)).not.toBeInTheDocument();
+    await expect(canvas.getAllByText(/T3 · InferredWeak/)).not.toHaveLength(0);
   },
 };

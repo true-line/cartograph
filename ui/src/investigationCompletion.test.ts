@@ -5,7 +5,7 @@ import terminalWire from './fixtures/completion-v7-terminal.json';
 import insufficientWire from './fixtures/completion-v7-insufficient.json';
 import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
 import { queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionDetail, completionResult,
-  gapTriagerDetail, gapTriagerResult, specWriterDetail, specWriterResult, specWriterV2Detail, specWriterV2Result } from './completionFixtures';
+  analyst27Correction, gapTriagerDetail, gapTriagerResult, specWriterDetail, specWriterResult, specWriterV2Detail, specWriterV2Result } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 
 describe('V7 completion wire coherence (AC-0266)', () => {
@@ -219,4 +219,23 @@ it('requires a complete text-free partition for an explicit partial result', () 
     const changed = structuredClone(result); mutate(changed);
     expect(validCompletionResult(changed.completion, changed)).toBe(false);
   }
+});
+
+// AC-0574: both correction routes project the same authenticated final wire.
+describe('desktop analyst27 corrected results', () => {
+  it.each([false, true])('accepts corrected result with withholding=%s and rejects changed bindings', (partial) => {
+    const { detail, result } = analyst27Correction(partial);
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionResult(result.completion, result)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+    const changed = structuredClone(result); changed.completion!.request_hash = 'f'.repeat(64);
+    expect(validCompletionDetail(detail.completion, detail, changed)).toBe(false);
+  });
+  it('retains saved analyst26 partial-result support without creating it', () => {
+    const { detail, result } = analyst27Correction(true);
+    detail.specialist_id = 'domain-analyst@26';
+    detail.specialist = { ...detail.specialist!, id: 'domain-analyst@26', version: 26 };
+    expect(validCompletionSummary(detail)).toBe(true);
+    expect(validCompletionDetail(detail.completion, detail, result)).toBe(true);
+  });
 });

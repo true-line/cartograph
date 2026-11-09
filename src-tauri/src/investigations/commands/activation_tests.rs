@@ -942,3 +942,124 @@ fn explicit_acquisition_start_reopens_and_recovers_nonce() {
         assert!(completion_start::start(changed, app.clone(), Instant::now()).is_err());
     });
 }
+
+// AC-0574: exercise the actual public coordinator, not just JobStore admission.
+#[test]
+fn desktop_analyst27_command_selects_finish_policy() {
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, mut request, _| {
+        request.specialist_id = "domain-analyst@27".into();
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+        let (release, gate) = std::sync::mpsc::channel();
+        *provider.pause.lock().unwrap() = Some(gate);
+        *provider.cancel_outcome.lock().unwrap() =
+            Some(llm::bounded::InvocationOutcome::NotDispatched);
+        let started = completion_start::start_access(
+            request.clone(),
+            app.clone(),
+            Instant::now(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        wait(|| provider.entered.load(Ordering::SeqCst).then_some(()));
+        let saved = detail(app, &started.investigation_id);
+        assert_eq!(saved.summary.specialist_id, SpecialistId::DomainAnalystV27);
+        assert_eq!(
+            saved.limits.generation_policy,
+            Some(agents::investigation::GenerationPolicy::LocalFinish4096V1)
+        );
+        assert_eq!(saved.limits.generated_token_reservations, 131072);
+        state
+            .jobs
+            .lock()
+            .unwrap()
+            .cancel_next_prompt_investigation(&started.investigation_id)
+            .unwrap();
+        state.investigations.wake(&started.investigation_id);
+        release.send(()).unwrap();
+        let terminal = finished(app, &started.investigation_id);
+        assert_eq!(terminal.summary.status, InvestigationStatus::Cancelled);
+        provider.available.store(false, Ordering::SeqCst);
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        assert_eq!(
+            completion_start::start_access(request, app.clone(), Instant::now(), None, None, None,)
+                .unwrap(),
+            terminal.summary
+        );
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn desktop_analyst26_command_rejects_creation_but_recovers_saved_nonce() {
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, mut request, _| {
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        for role in [
+            "domain-analyst@24",
+            "domain-analyst@25",
+            "domain-analyst@26",
+        ] {
+            request.specialist_id = role.into();
+            let error = completion_start::start_access(
+                request.clone(),
+                app.clone(),
+                Instant::now(),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                InvestigationStartError::Rejected {
+                    code: "invalid_input",
+                    ..
+                }
+            ));
+            assert!(
+                state
+                    .jobs
+                    .lock()
+                    .unwrap()
+                    .existing_desktop_investigation_completion(&request)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let descriptor = runtime::descriptor(provider.as_ref(), request.provider_mode).unwrap();
+        // Seed an authentic historical @26 task using the explicit captured lane.
+        let saved = state
+            .jobs
+            .lock()
+            .unwrap()
+            .start_local_finish_investigation(&request, Some(&descriptor), Some((600, 180_000)))
+            .unwrap()
+            .detail;
+        provider.available.store(false, Ordering::SeqCst);
+        let profiles = provider.profiles.load(Ordering::SeqCst);
+        let before = serde_json::to_vec(&saved).unwrap();
+        let recovered =
+            completion_start::start_access(request, app.clone(), Instant::now(), None, None, None)
+                .unwrap();
+        assert_eq!(recovered, saved.summary);
+        assert_eq!(
+            serde_json::to_vec(&detail(app, &recovered.investigation_id)).unwrap(),
+            before
+        );
+        assert_eq!(provider.profiles.load(Ordering::SeqCst), profiles);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    });
+}

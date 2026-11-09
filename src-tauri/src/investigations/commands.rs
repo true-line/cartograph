@@ -42,6 +42,7 @@ fn available_specialists() -> Vec<SpecialistId> {
             SpecialistId::DomainAnalystV21,
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
+            SpecialistId::DomainAnalystV27,
         ]);
     }
     specialists
@@ -79,6 +80,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                         SpecialistId::DomainAnalystV21,
                         SpecialistId::DomainAnalystV22,
                         SpecialistId::DomainAnalystV23,
+                        SpecialistId::DomainAnalystV27,
                     ]
                 } else {
                     vec![
@@ -833,6 +835,29 @@ mod staged_tests {
 mod policy_catalog_tests {
     use super::*;
 
+    // AC-0574: rollout changes creation, never saved identity validation.
+    #[test]
+    fn desktop_catalog_advertises_analyst27_but_not_development_roles() {
+        let expanded = policy_catalog()
+            .into_iter()
+            .find(|policy| policy.limits.profile == "investigation-v2")
+            .unwrap();
+        assert!(available_specialists().contains(&SpecialistId::DomainAnalystV27));
+        assert!(
+            expanded
+                .specialist_ids
+                .contains(&SpecialistId::DomainAnalystV27)
+        );
+        for role in [
+            SpecialistId::DomainAnalystV24,
+            SpecialistId::DomainAnalystV25,
+            SpecialistId::DomainAnalystV26,
+        ] {
+            assert!(!available_specialists().contains(&role));
+            assert!(!expanded.specialist_ids.contains(&role));
+        }
+    }
+
     #[test]
     fn admission_generation_is_advertised_only_with_registered_policy() {
         // AC-0287: new Expanded starts use the exact request7 family.
@@ -911,6 +936,7 @@ mod policy_catalog_tests {
             SpecialistId::DomainAnalystV21,
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
+            SpecialistId::DomainAnalystV27,
         ] {
             assert_eq!(
                 available_specialists().contains(&role),

@@ -1,4 +1,4 @@
-import { completionFamily, isCompletionDisclosure, isCompletionResultId, usesCitedNarrative } from './investigationFamilies';
+import { completionFamily, isCompletionDisclosure, isCompletionResultId, usesCitedNarrative, usesFindingWithholding } from './investigationFamilies';
 import type { InvestigationCompletionDetail, InvestigationCompletionResult, InvestigationDetail,
   InvestigationObligationObservation, InvestigationResult, InvestigationSummary, InvestigationPolicy } from './investigationTypes';
 import { validObligationEnvelope } from './investigationObligations';
@@ -65,14 +65,14 @@ export function validCompletionSummary(value: InvestigationSummary): boolean {
   if (value.completion_outcome === undefined) return !value.has_result && value.status !== 'completed';
   if (value.completion_outcome === 'obligations_unmet') return value.status === 'failed' && !value.has_result && value.obligation_status === 'unmet';
   return ['supported', 'insufficient_evidence', 'findings_withheld_after_correction'].includes(value.completion_outcome) &&
-    (value.completion_outcome !== 'findings_withheld_after_correction' || value.specialist_id === 'domain-analyst@25') && value.status === 'completed' && value.has_result &&
+    (value.completion_outcome !== 'findings_withheld_after_correction' || usesFindingWithholding(value.specialist_id)) && value.status === 'completed' && value.has_result &&
     value.obligation_status === 'satisfied';
 }
 export function validCompletionDetail(value: InvestigationCompletionDetail | undefined, detail: InvestigationDetail,
   result: InvestigationResult | null): boolean {
   const family = completionFamily(detail.schema_version);
   if (!family) return false;
-  if (result?.completion?.withholding && (detail.specialist_id !== 'domain-analyst@25' || value?.refusal_count !== 1)) return false;
+  if (result?.completion?.withholding && (!usesFindingWithholding(detail.specialist_id) || value?.refusal_count !== 1)) return false;
   const resultVersion = usesCitedNarrative(detail.specialist_id) ? 8 : family.resultVersion;
   const modern = family.expanded;
   const policy: InvestigationPolicy | undefined = modern ? { limits: detail.limits, request_schema_version: family.requestVersion, envelope_schema_version: 2, envelope_contract: 'investigation-completion-obligations@2', max_completion_obligations: 56, request_bytes: 65536, envelope_bytes: 65536, specialist_ids: [detail.specialist_id] } : undefined;

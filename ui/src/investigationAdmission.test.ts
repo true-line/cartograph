@@ -1,7 +1,7 @@
 // AC-0287: activated identities, explicit intent and complete bounded replay.
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, completionChoices, inventoryObligation } from './completionFixtures';
+import { desktopAnalystCatalog, admissionCatalog, admissionDetail, admissionResult, queryHistoryCatalog, queryHistoryDetail, queryHistoryResult, completionChoices, inventoryObligation } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 import { investigationPolicy } from './investigationObligations';
 import { useInvestigationStore } from './investigationStore';
@@ -203,7 +203,7 @@ it.each(['domain-analyst@11', 'evidence-auditor@11', 'domain-analyst@12'] as con
 });
 
 // AC-0445: synthetic saved-task recognition, not desktop availability.
-it.each([13, 14, 15] as const)('reopens saved @%i without advertising it for dispatch', async (version) => {
+it.each([13, 14, 15, 26] as const)('reopens saved @%i without advertising it for dispatch', async (version) => {
   const detail = structuredClone(terminalWire.detail) as unknown as InvestigationDetail;
   detail.specialist_id = `domain-analyst@${version}`;
   detail.specialist = { ...detail.specialist, id: `domain-analyst@${version}`, version };
@@ -217,3 +217,37 @@ it.each([13, 14, 15] as const)('reopens saved @%i without advertising it for dis
   expect(useInvestigationStore.getState().error).toBeNull();
   expect(useInvestigationStore.getState().detail?.specialist_id).toBe(`domain-analyst@${version}`);
 });
+
+// AC-0574: the default reaches the real frontend request construction path.
+it('sends the desktop analyst27 default as request7 with explicit v2 obligations', async () => {
+  const starts: unknown[] = [];
+  mockIPC((command, args) => {
+    if (command === 'investigation_specialists') return desktopAnalystCatalog;
+    if (command === 'start_investigation') starts.push((args as { request: unknown }).request);
+    throw new Error('uncertain');
+  });
+  await useInvestigationStore.getState().loadCatalog();
+  useInvestigationStore.setState({ obligationChoices: completionChoices });
+  const composer = useInvestigationStore.getState().composer;
+  await useInvestigationStore.getState().start({ specialist_id: composer.specialistId,
+    limit_profile: composer.limitProfile!, question: 'Inspect the selected evidence.', scope: { type: 'all' },
+    provider_mode: 'local', obligations: { schema_version: 2, contract: 'investigation-completion-obligations@2', obligations: [inventoryObligation] } });
+  expect(starts).toHaveLength(1);
+  expect(starts[0]).toMatchObject({ schema_version: 7, specialist_id: 'domain-analyst@27',
+    limit_profile: 'investigation-v2', obligations: { schema_version: 2 } });
+});
+
+it.each([['insufficient', insufficientWire], ['failed correction', terminalWire]] as const)(
+  'reopens synthetic analyst27 %s outcomes', async (_name, wire) => {
+    const detail = structuredClone(wire.detail) as unknown as InvestigationDetail;
+    detail.specialist_id = 'domain-analyst@27';
+    detail.specialist = { ...detail.specialist, id: 'domain-analyst@27', version: 27 };
+    const result = structuredClone(wire.result) as unknown as InvestigationResult | null;
+    mockIPC((command) => command === 'get_investigation' ? detail : command === 'investigation_result' ? result :
+      command === 'investigation_events' ? { investigation_id: detail.investigation_id, items: wire.events,
+        next_sequence: detail.last_event_sequence, has_more: false } : null);
+    await useInvestigationStore.getState().open(detail.investigation_id);
+    expect(useInvestigationStore.getState().error).toBeNull();
+    expect(useInvestigationStore.getState().detail).toEqual(detail);
+    expect(useInvestigationStore.getState().result).toEqual(result);
+  });
