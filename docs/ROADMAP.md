@@ -408,3 +408,24 @@ is not redacted), #1755 (topology export carries no tier), #1756 (plugin
 provenance is not validated), #1767 (egress record omits failed calls).
 Verification and delivery: #1758, #1759, #1768, #1770, #1762, #1764,
 #1769. Setup and records: #1763, #1757, #1761, #1760.
+
+### Milestones and epics
+
+Every open issue was assigned to one of these GitHub milestones on
+2026-11-09. They are worked in this order; each milestone's description
+holds the order of the issues inside it. M0–M10 remain the closed SPEC-00
+milestones.
+
+| Milestone | Exit | Holds |
+|-----------|------|-------|
+| R1 — v1.0 GA: foundation and context hub | v1.0.0 tagged per #1610 | Release-blocking defects, the acceptance track (#598, #1710), pilot findings, the readiness report |
+| R2 — Curated projection and document catalogue | An accepted proposal is visible in the Workbench, the export and an MCP read under one curated revision; the catalogue is approved | W5, W14, #1751, #1761, #1765 |
+| R3 — Agent-authored documents | One SimpleLogin document with authored sections scored against an independent expected set | W13, W16, the knowledge and semantic layer, W10 and W11 inputs |
+| R4 — Living documentation and rebuild handoff | Stale marking is exact and repeatable on a fixture; one handoff bundle passes its review | W15, W17 |
+| Engineering health | Continuous | CI, tests, release mechanics, internal scale |
+| Later | Not scheduled | Experiments and platform work off the path |
+
+Three epics group work that crosses milestones, with the work as their
+sub-issues: #1773 (the pipeline: W5, W13 to W15, W17), #1774 (trace
+completeness for the document set) and #1775 (integrity and privacy
+hardening).
