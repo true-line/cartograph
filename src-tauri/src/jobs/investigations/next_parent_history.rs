@@ -22,18 +22,22 @@ impl NextParentHistory {
 #[cfg(unix)]
 pub(crate) fn parent_history_projection_workspace() -> Option<(usize, usize)> {
     use context_hub::logical::{json_bytes, slots, sum};
-    let retained = sum(&[16 * 1024, slots::<String>(1)?, slots::<Vec<String>>(1)?])?;
+    let retained = sum(&[
+        agents::investigation::PARENT_HISTORY_32768_V1_BYTES,
+        slots::<String>(1)?,
+        slots::<Vec<String>>(1)?,
+    ])?;
     let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     let (result, _) = next_prompt_result_workspace()?;
-    // Borrowed encoding refuses above 16KiB before building a JSON tree.
+    // Borrowed encoding refuses above the selected history ceiling before building a JSON tree.
     // Canonicalization preserves historical key order after that admission.
     let projection = sum(&[
         task,
         result,
-        json_bytes(16 * 1024)?.checked_mul(2)?,
-        16 * 1024, // admitted input buffer during canonical parsing
+        json_bytes(agents::investigation::PARENT_HISTORY_32768_V1_BYTES)?.checked_mul(2)?,
+        agents::investigation::PARENT_HISTORY_32768_V1_BYTES, // admitted input buffer during canonical parsing
         retained,
-        16 * 1024, // whole-history re-encoding while the returned string lives
+        agents::investigation::PARENT_HISTORY_32768_V1_BYTES, // whole-history re-encoding while the returned string lives
         slots::<Vec<u8>>(1)?,
     ])?;
     Some((retained, projection))
@@ -129,10 +133,11 @@ fn legacy_parent_pending_workspace() -> Option<(usize, usize)> {
 
 /// Shared by task creation in its writer transaction and by the worker in a
 /// readonly snapshot. Public requests use the same saved-family validation.
-pub(super) fn load(
+pub(super) fn load_with_policy(
     connection: &Connection,
     parent_id: &str,
     conversation_id: &str,
+    policy: &InvestigationPolicy,
 ) -> Result<NextParentHistory, InvestigationStoreError> {
     let parent = load_execution_task(connection, parent_id)?;
     if parent.detail.summary.conversation_id != conversation_id {
@@ -141,15 +146,34 @@ pub(super) fn load(
     let result = load_result(connection, &parent)?;
     // Match the unchanged legacy worker representation and its whole-history
     // caps, including live/failed states with no saved result. No recursive replay.
-    let raw = encode_parent_history(parent_id, &parent.detail.summary, &result)?;
+    let raw = encode_parent_history_with_limit(
+        parent_id,
+        &parent.detail.summary,
+        &result,
+        policy.supplied_history_bytes(),
+    )?;
     let history = vec![String::from_utf8(raw).map_err(|_| InvestigationStoreError::Invalid)?];
-    encode(&history, 16 * 1024)?;
+    encode(&history, policy.supplied_history_bytes())?;
     Ok(NextParentHistory { history })
 }
+#[cfg(test)]
 fn encode_parent_history(
     parent_id: &str,
     summary: &InvestigationSummary,
     result: &Option<InvestigationResult>,
+) -> Result<Vec<u8>, InvestigationStoreError> {
+    encode_parent_history_with_limit(
+        parent_id,
+        summary,
+        result,
+        agents::investigation::LEGACY_SUPPLIED_HISTORY_BYTES,
+    )
+}
+fn encode_parent_history_with_limit(
+    parent_id: &str,
+    summary: &InvestigationSummary,
+    result: &Option<InvestigationResult>,
+    limit: usize,
 ) -> Result<Vec<u8>, InvestigationStoreError> {
     #[derive(Serialize)]
     struct Envelope<'a> {
@@ -173,24 +197,37 @@ fn encode_parent_history(
             authority: "Prior specialist findings remain T3/InferredWeak; execution status does not establish complete knowledge.",
             saved_result: result,
         },
-        16 * 1024,
+        limit,
     )?;
     // The previous json! representation sorted every nested object. Direct
     // struct serialization alone would change saved history bytes/fingerprints.
     let canonical: serde_json::Value =
         serde_json::from_slice(&raw).map_err(|_| InvestigationStoreError::Invalid)?;
-    encode(&canonical, 16 * 1024)
+    encode(&canonical, limit)
 }
 
 impl JobStore {
+    #[cfg(test)]
     pub(crate) fn investigation_next_parent_history(
         &self,
         parent_id: &str,
         conversation_id: &str,
     ) -> Result<NextParentHistory, InvestigationStoreError> {
+        self.investigation_next_parent_history_with_policy(
+            parent_id,
+            conversation_id,
+            &INVESTIGATION_V2_POLICY,
+        )
+    }
+    pub(crate) fn investigation_next_parent_history_with_policy(
+        &self,
+        parent_id: &str,
+        conversation_id: &str,
+        policy: &InvestigationPolicy,
+    ) -> Result<NextParentHistory, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let history = load(&tx, parent_id, conversation_id)?;
+        let history = load_with_policy(&tx, parent_id, conversation_id, policy)?;
         tx.commit()?;
         Ok(history)
     }

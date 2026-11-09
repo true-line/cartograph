@@ -650,7 +650,7 @@ impl FrozenContext {
         let history_bytes = if history.is_empty() {
             Vec::new()
         } else {
-            bounded_json(history, 16 * 1024)?
+            bounded_json(history, request.policy.supplied_history_bytes())?
         };
         let ledger = InvestigationInputLedger {
             schema_version: 1,

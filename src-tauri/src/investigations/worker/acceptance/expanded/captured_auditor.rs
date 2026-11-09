@@ -176,9 +176,15 @@ pub(super) fn stage(
         guards.push(guard);
     }
     let mut jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
-    // Production reader preserves exact saved status/uncertainty and refuses whole history >16KiB.
-    jobs.investigation_next_parent_history(parent.analyst_id, conversation)
-        .map_err(|e| e.to_string())?;
+    // Production reader preserves exact status/uncertainty under the fresh child history policy.
+    jobs.investigation_next_parent_history_with_policy(
+        parent.analyst_id,
+        conversation,
+        &INVESTIGATION_V2_POLICY
+            .with_parent_history_32768()
+            .ok_or("History policy unavailable")?,
+    )
+    .map_err(|e| e.to_string())?;
     let fresh_output = preparing && !output.exists();
     if fresh_output {
         if expected.start_sha256.is_some() {

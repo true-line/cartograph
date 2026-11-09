@@ -640,7 +640,7 @@ impl InvestigationInput {
                 return Err(InvestigationError::InvalidInput);
             }
         } else {
-            let history_bytes = bounded_bytes(&supplied_history, 16 * 1024)?;
+            let history_bytes = bounded_bytes(&supplied_history, policy.supplied_history_bytes())?;
             if ledger.supplied_history_bytes != history_bytes.len()
                 || ledger.supplied_history_hash.as_deref()
                     != Some(content_hash(&history_bytes).as_str())
@@ -648,7 +648,7 @@ impl InvestigationInput {
                 return Err(InvestigationError::InvalidInput);
             }
             for raw in supplied_history {
-                strict::preflight(raw, 16 * 1024, 32, 16384, 128)?;
+                strict::preflight(raw, policy.supplied_history_bytes(), 32, 16384, 128)?;
                 let history: PriorHistory = decode_record(raw)?;
                 if let Some(result) = history.saved_result {
                     for finding in result.findings {

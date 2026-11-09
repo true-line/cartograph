@@ -38,6 +38,13 @@ pub enum GenerationPolicy {
     LocalFinish4096V1,
 }
 
+/// Host-selected history allowance; absent on all historical records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryPolicy {
+    #[serde(rename = "parent-history-32768-v1")]
+    ParentHistory32768V1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationLimits {
@@ -53,6 +60,8 @@ pub struct InvestigationLimits {
     pub generated_token_reservations: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_policy: Option<GenerationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_policy: Option<HistoryPolicy>,
     pub active_seconds: u64,
     pub consent_wait_seconds: u64,
     pub wall_seconds: u64,

@@ -147,10 +147,10 @@ impl InvestigationInput {
             slots::<QueryHistoryReference>(queries)?.checked_mul(2)?,
         ])?;
         // Privacy vectors grow before their joint final check. Finding prose
-        // and history metadata each copy from the admitted 16 KiB history wire.
+        // and history metadata each copy from the policy-admitted history wire.
         let privacy = sum(&[
             MAX_TOTAL_QUERY_BYTES,
-            2 * 16 * 1024,
+            2 * policy.supplied_history_bytes(),
             policy.limits().evidence_bytes,
             MAX_MANIFEST_BYTES,
         ])?;
@@ -171,7 +171,7 @@ impl InvestigationInput {
             slots::<PayloadSpan>(sources)?,
             MAX_MANIFEST_BYTES,
             policy.limits().evidence_bytes,
-            json_bytes(16 * 1024)?.checked_mul(2)?,
+            json_bytes(policy.supplied_history_bytes())?.checked_mul(2)?,
             record_decode_scratch_bytes()?,
             // Base prompt may exceed the final cap. Later builders retain the
             // accepted base while adding contract/metadata/progress and details.
@@ -226,7 +226,7 @@ pub(super) fn base_prompt_wire_bytes() -> Option<usize> {
         MAX_TOTAL_QUERY_BYTES,
         MAX_MANIFEST_BYTES.checked_mul(3)?,
         MAX_QUESTION_BYTES.checked_mul(6)?,
-        16 * 1024,
+        PARENT_HISTORY_32768_V1_BYTES,
     ])
 }
 

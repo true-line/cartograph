@@ -1,11 +1,17 @@
 //! Closed immutable policy registry with an explicit opt-in expanded profile.
 //! Admission bounds are distinct from durable runtime counters; callers cannot
 //! deserialize or construct a policy from their own limit values.
-use super::{GenerationPolicy, InvestigationLimits, staged_refusal::CompletionCallMode};
+use super::{
+    GenerationPolicy, HistoryPolicy, InvestigationLimits, staged_refusal::CompletionCallMode,
+};
 
 /// Host completion-attempt schema ceiling. Raising it requires an explicit
 /// migration; a registry entry may never promise more durable attempt slots.
 pub const MAX_STORED_COMPLETION_ATTEMPTS: usize = 112;
+/// Immutable historical history ceiling and owner-approved versioned successor.
+pub const LEGACY_SUPPLIED_HISTORY_BYTES: usize = 16 * 1024;
+pub const PARENT_HISTORY_32768_V1_BYTES: usize = 32 * 1024;
+const _: () = assert!(PARENT_HISTORY_32768_V1_BYTES <= INVESTIGATION_V2_POLICY.request_bytes);
 
 /// Owner-approved desktop active-time maximum; defaults stay in the registry.
 pub const MAX_CONFIGURED_ACTIVE_SECONDS: u64 = 3_600;
@@ -26,6 +32,7 @@ pub struct InvestigationPolicy {
     generated_tokens_per_invocation: u32,
     generated_token_reservations: u32,
     generation_policy: Option<GenerationPolicy>,
+    history_policy: Option<HistoryPolicy>,
     active_seconds: u64,
     consent_wait_seconds: u64,
     wall_seconds: u64,
@@ -46,6 +53,7 @@ pub const INVESTIGATION_V1_POLICY: InvestigationPolicy = InvestigationPolicy {
     generated_tokens_per_invocation: 2048,
     generated_token_reservations: 16384,
     generation_policy: None,
+    history_policy: None,
     active_seconds: 600,
     consent_wait_seconds: 900,
     wall_seconds: 3600,
@@ -66,6 +74,7 @@ pub const INVESTIGATION_V2_POLICY: InvestigationPolicy = InvestigationPolicy {
     generated_tokens_per_invocation: 2048,
     generated_token_reservations: 131072,
     generation_policy: None,
+    history_policy: None,
     active_seconds: 600,
     consent_wait_seconds: 900,
     wall_seconds: 3600,
@@ -173,6 +182,22 @@ impl InvestigationPolicy {
         Some(effective)
     }
 
+    pub fn with_parent_history_32768(&self) -> Option<Self> {
+        if self.profile != INVESTIGATION_V2_POLICY.profile {
+            return None;
+        }
+        let mut effective = self.clone();
+        effective.history_policy = Some(HistoryPolicy::ParentHistory32768V1);
+        Some(effective)
+    }
+
+    pub const fn supplied_history_bytes(&self) -> usize {
+        match self.history_policy {
+            None => LEGACY_SUPPLIED_HISTORY_BYTES,
+            Some(HistoryPolicy::ParentHistory32768V1) => PARENT_HISTORY_32768_V1_BYTES,
+        }
+    }
+
     pub fn local_finish_generation(&self) -> bool {
         self.generation_policy == Some(GenerationPolicy::LocalFinish4096V1)
     }
@@ -195,6 +220,9 @@ impl InvestigationPolicy {
         }
         if limits.generation_policy.is_some() {
             effective = effective.with_local_finish_generation()?;
+        }
+        if limits.history_policy.is_some() {
+            effective = effective.with_parent_history_32768()?;
         }
         (effective.limits() == *limits).then_some(effective)
     }
@@ -225,6 +253,7 @@ impl InvestigationPolicy {
             generated_tokens_per_invocation: self.generated_tokens_per_invocation,
             generated_token_reservations: self.generated_token_reservations,
             generation_policy: self.generation_policy,
+            history_policy: self.history_policy,
             active_seconds: self.active_seconds,
             consent_wait_seconds: self.consent_wait_seconds,
             wall_seconds: self.wall_seconds,
@@ -388,3 +417,52 @@ mod tests {
 #[cfg(test)]
 #[path = "local_finish_policy_tests.rs"]
 mod local_finish_policy_tests;
+
+#[cfg(test)]
+#[test]
+fn versioned_history_policy_preserves_old_limits_and_other_allowances() {
+    // AC-0578: only the closed opt-in marker differs, no historical wire change.
+    for old in [
+        INVESTIGATION_V2_POLICY.clone(),
+        INVESTIGATION_V2_POLICY.with_hosted_generation().unwrap(),
+        INVESTIGATION_V2_POLICY
+            .with_local_finish_generation()
+            .unwrap(),
+    ] {
+        let original = serde_json::to_value(old.limits()).unwrap();
+        assert!(original.get("history_policy").is_none());
+        let expanded = old.with_parent_history_32768().unwrap();
+        assert_eq!(old.supplied_history_bytes(), LEGACY_SUPPLIED_HISTORY_BYTES);
+        assert_eq!(
+            expanded.supplied_history_bytes(),
+            PARENT_HISTORY_32768_V1_BYTES
+        );
+        let mut changed = serde_json::to_value(expanded.limits()).unwrap();
+        assert_eq!(
+            changed
+                .as_object_mut()
+                .unwrap()
+                .remove("history_policy")
+                .unwrap(),
+            "parent-history-32768-v1"
+        );
+        assert_eq!(changed, original);
+        let wire = serde_json::to_vec(&expanded.limits()).unwrap();
+        let limits = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            InvestigationPolicy::for_effective_limits(&limits)
+                .unwrap()
+                .limits(),
+            expanded.limits()
+        );
+        assert!(InvestigationPolicy::for_limits(&limits).is_none());
+        let mut bad = serde_json::to_value(limits).unwrap();
+        bad["history_policy"] = "parent-history-unknown".into();
+        assert!(serde_json::from_value::<InvestigationLimits>(bad).is_err());
+    }
+    assert!(
+        INVESTIGATION_V1_POLICY
+            .with_parent_history_32768()
+            .is_none()
+    );
+}

@@ -841,7 +841,7 @@ fn hosted_generation(provider: Option<&InvestigationProvider>) -> bool {
     })
 }
 
-/// Reconstruct only saved desktop overrides (time, hosted output allowance);
+/// Reconstruct only saved desktop overrides (time, output and parent history);
 /// MCP stays on static policy. A saved hosted allowance is honoured only for
 /// the next-prompt task whose saved provider qualifies, as at start.
 pub(crate) fn policy_for_detail(
@@ -867,6 +867,13 @@ pub(crate) fn policy_for_detail(
             )
             && detail.summary.provider_mode == InvestigationProviderMode::Local
             && detail.provider.mode == InvestigationProviderMode::Local)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if detail.limits.history_policy.is_some()
+        && !(detail.origin == InvestigationOrigin::App
+            && detail.summary.specialist_id.uses_next_prompt_admission()
+            && detail.summary.parent_id.is_some())
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -969,6 +976,13 @@ impl JobStore {
             effective_policy = effective_policy
                 .with_local_finish_generation()
                 .ok_or(InvestigationStoreError::Invalid)?;
+        }
+        if next_prompt
+            && mcp.is_none()
+            && request.parent_id.is_some()
+            && let Some(expanded) = effective_policy.with_parent_history_32768()
+        {
+            effective_policy = expanded;
         }
         let policy = &effective_policy;
         if request.specialist_id.uses_next_prompt_admission() != next_prompt
@@ -1098,7 +1112,7 @@ impl JobStore {
         if let Some(parent) = &request.parent_id {
             require_request_owner(&tx, parent, mcp.map(|identity| &identity.client))?;
             if next_prompt {
-                next_parent_history::load(&tx, parent, &conversation_id)?;
+                next_parent_history::load_with_policy(&tx, parent, &conversation_id, policy)?;
             } else {
                 let parent = load_execution_task(&tx, parent)?;
                 if parent.detail.summary.conversation_id != conversation_id {
