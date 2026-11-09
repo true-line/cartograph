@@ -79,7 +79,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
             .map_err(|_| HostError::Operational.to_string())?;
         match session {
             Some(session) => jobs.existing_investigation_completion_access(&request, Some(session)),
-            None => jobs.existing_investigation_completion(&request),
+            None => jobs.existing_desktop_investigation_completion(&request),
         }
         .map_err(|error| error.to_string())
     };
@@ -169,7 +169,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
                 let limits = configured
                     .as_ref()
                     .ok_or_else(|| "Missing desktop run limits.".to_owned())?;
-                jobs.start_configured_next_prompt_investigation(
+                jobs.start_desktop_next_prompt_investigation(
                     &request,
                     descriptor.as_ref(),
                     limits.active_seconds,

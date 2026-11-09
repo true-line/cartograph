@@ -889,6 +889,42 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agents`, `app` · — · T-0572
 
 
+- **AC-0573** New desktop `completion_start` tasks select the versioned
+  `LocalFinish4096V1` policy only for local analyst @26/@27. The configuration
+  boundary is a fixed, typed host setting in `completion::desktop_generation_policy`,
+  changed only by a reviewed host release. It is not a UI, environment, model-name
+  or request-payload override. Cloud, other specialists, MCP and captured starts
+  retain their existing selection contracts. This selects an existing policy;
+  it changes no numeric limits: Choice remains 2048, authenticated FinishOnly
+  remains 4096, and the total reservation budget remains 131072. All other V2
+  limits and configured desktop time bounds remain unchanged.
+  The policy is frozen with the completion intent and effective limits at atomic
+  insertion. Desktop nonce recovery authenticates and returns that saved policy
+  before reading current configuration, including when a historical task has no
+  selected generation policy. Reopen never infers a policy from current settings.
+  The second recovery under the jobs lock also preserves the winner of a racing
+  start. Changed request identities and tampered saved bindings still fail closed.
+  T-0573 exercises actual provider-free desktop store starts, saved/reopened
+  selection, historical retry bytes, and unchanged cloud/other-specialist starts.
+
+
+- **AC-0574** New desktop investigations default to Domain analyst @27 with
+  investigation-v2 when the host advertises that exact pair. The backend
+  creatable catalog and policy catalog include @27 and exclude @24–@26.
+  The actual completion-start command admits local @27 with the fixed
+  LocalFinish4096V1 policy, rejects new @26 before provider dispatch, and
+  recovers an existing @26 nonce from authenticated saved state before catalog
+  validation. Saved identities and explicit supported user choices are never
+  upgraded by the default. The UI uses request7/result7/disclosure6 for @27
+  and preserves @26 history. Supported, insufficient, withheld-after-correction
+  and failed correction results render from saved outcome; Patch versus
+  WholeAnswer is not inferred from prose or invented as a new wire field.
+  The existing withholding notice and T3/weak attribution remain visible.
+  No numeric limits, historical replay bytes, or privacy retention rules change.
+  T-0574 covers the actual command path, default selection, result validation
+  and presentation, including unsupported generations and tampered witnesses.
+
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

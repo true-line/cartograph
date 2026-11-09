@@ -8,6 +8,8 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
         (false, None),
         (true, Some("domain-analyst@10")),
         (true, Some("domain-analyst@18")),
+        (true, Some("domain-analyst@26")),
+        (true, Some("domain-analyst@27")),
     ] {
         let source = if next {
             Fixture::with_family_preparation(
@@ -43,6 +45,7 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
         let first = store
             .start_completion_access(&request, Some(&provider), next, Some(&session))
             .unwrap();
+        assert_eq!(first.detail.limits.generation_policy, None);
         assert_eq!(
             first.detail.origin,
             InvestigationOrigin::Mcp { client_id: client }

@@ -2,6 +2,23 @@
 use super::*;
 use rusqlite::Transaction;
 
+/// Shipped host configuration for NEW desktop completion starts only. This is
+/// not a UI/DB/environment override, model heuristic, or replay default. Changing
+/// the selected version requires a reviewed host release; saved tasks keep theirs.
+fn desktop_generation_policy(
+    specialist: agents::investigation::SpecialistId,
+    mode: agents::investigation::InvestigationProviderMode,
+) -> Option<agents::investigation::GenerationPolicy> {
+    use agents::investigation::{GenerationPolicy, InvestigationProviderMode, SpecialistId};
+    const LOCAL_ANALYST_POLICY: GenerationPolicy = GenerationPolicy::LocalFinish4096V1;
+    (mode == InvestigationProviderMode::Local
+        && matches!(
+            specialist,
+            SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+        ))
+    .then_some(LOCAL_ANALYST_POLICY)
+}
+
 #[path = "withholding_authority.rs"]
 mod withholding_authority;
 
@@ -331,6 +348,7 @@ impl JobStore {
     }
 
     /// Host-only desktop settings, frozen before the atomic task insertion.
+    #[cfg(test)]
     pub(crate) fn start_configured_next_prompt_investigation(
         &mut self,
         request: &StagedObligationRequest,
@@ -345,6 +363,31 @@ impl JobStore {
             None,
             Some((active_seconds, request_timeout_ms)),
             None,
+        )
+    }
+
+    /// Desktop entrypoint: recover saved configuration before selecting new work.
+    pub(crate) fn start_desktop_next_prompt_investigation(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+        active_seconds: u64,
+        request_timeout_ms: u64,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        if let Some(detail) = self.existing_desktop_investigation_completion(request)? {
+            return Ok(InvestigationStart {
+                detail,
+                created: false,
+            });
+        }
+        let specialist = CompletionIntent::new(request)?.specialist;
+        self.start_completion_family_configured(
+            request,
+            provider,
+            true,
+            None,
+            Some((active_seconds, request_timeout_ms)),
+            desktop_generation_policy(specialist, request.provider_mode),
         )
     }
 
@@ -435,6 +478,7 @@ impl JobStore {
         Ok(pair)
     }
 
+    #[cfg(test)]
     pub(crate) fn existing_investigation_completion(
         &self,
         request: &StagedObligationRequest,
@@ -456,7 +500,7 @@ impl JobStore {
             },
             |identity| match identity {
                 Some(identity) => mcp_start::existing(self, &request.request_nonce, identity),
-                None => self.existing_app_investigation_completion(request, None),
+                None => self.existing_app_investigation_completion(request, None, false),
             },
         )
     }
@@ -469,13 +513,22 @@ impl JobStore {
         self.existing_app_investigation_completion(
             request,
             Some(GenerationPolicy::LocalFinish4096V1),
+            false,
         )
+    }
+
+    pub(crate) fn existing_desktop_investigation_completion(
+        &self,
+        request: &StagedObligationRequest,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        self.existing_app_investigation_completion(request, None, true)
     }
 
     fn existing_app_investigation_completion(
         &self,
         request: &StagedObligationRequest,
         generation_policy: Option<GenerationPolicy>,
+        recover_saved_policy: bool,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
@@ -496,6 +549,10 @@ impl JobStore {
             // A nonce retry observes its original frozen configuration. New
             // application settings cannot rewrite an existing task.
             if let Some(saved) = &task.completion_intent {
+                if recover_saved_policy {
+                    // load_execution_task authenticated the saved intent and limits.
+                    expected.generation_policy = saved.generation_policy;
+                }
                 expected.active_seconds = saved.active_seconds;
                 expected.request_timeout_ms = saved.request_timeout_ms;
             }

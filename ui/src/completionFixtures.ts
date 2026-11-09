@@ -177,3 +177,35 @@ export const typedCorrectionCatalog: InvestigationCatalog = {
     id: 'domain-analyst@20', version: 20, prompt_fingerprint: 'fixture-domain-analyst@20' }],
   policies: correctionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@20'] })),
 };
+
+/** AC-0574: production default, excluding development-only @24–@26. */
+export const desktopAnalystCatalog: InvestigationCatalog = {
+  ...typedCorrectionCatalog,
+  specialists: [...typedCorrectionCatalog.specialists, { ...typedCorrectionCatalog.specialists.find((item) => item.id === 'domain-analyst@20')!,
+    id: 'domain-analyst@27', version: 27, prompt_fingerprint: 'fixture-domain-analyst@27' }],
+  policies: typedCorrectionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@27'] })),
+};
+
+/** Synthetic final outcomes shared by patch and whole-answer correction routes. */
+export function analyst27Correction(partial: boolean) {
+  const detail = admissionDetail(); const result = admissionResult();
+  detail.specialist_id = 'domain-analyst@27';
+  detail.specialist = desktopAnalystCatalog.specialists.find((item) => item.id === 'domain-analyst@27')!;
+  detail.completion!.refusal_count = 1;
+  if (partial) {
+    detail.completion_outcome = 'findings_withheld_after_correction';
+    result.knowledge_completeness = 'partial';
+    const completion = result.completion!;
+    completion.schema_version = 2; completion.outcome = 'findings_withheld_after_correction';
+    completion.withholding = {
+      schema_version: 1, detector_version: 1, disposition: 'findings_withheld_after_correction',
+      original_finish_hash: '1'.repeat(64), original_response_hash: '2'.repeat(64),
+      request_hash: completion.request_hash, obligations_hash: completion.obligations_hash,
+      input_ledger_hash: result.input_ledger_hash, disclosure_hash: result.disclosure_hash!,
+      prior_correction_witness_hash: '3'.repeat(64), projected_result_hash: '4'.repeat(64),
+      original_finding_count: result.findings.length + 1, withheld_indexes: [0],
+      survivor_indexes: result.findings.map((_, index) => index + 1),
+    };
+  }
+  return { detail, result };
+}
