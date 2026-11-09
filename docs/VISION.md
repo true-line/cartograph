@@ -1,8 +1,9 @@
 # Cartograph — Vision
 
-> Restated by the owner on 2026-10-19. The plan to reach it is
-> [ROADMAP.md](ROADMAP.md); the direction decisions it rests on are proposed in
-> [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md). SPEC-00 and
+> Restated by the owner on 2026-10-19 and again on 2026-11-09. The plan to
+> reach it is [ROADMAP.md](ROADMAP.md); the direction decisions it rests on are
+> proposed in [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md) and
+> [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md). SPEC-00 and
 > SPEC-01 remain the contracts for what is built; this file says where the
 > product is going and what must stay true on the way. The earlier staged
 > roadmap (ADR-0007) is kept at the end for the record.
@@ -18,6 +19,22 @@ questions, have them raise issues, hand work to other agents with issues and
 requirements detailed enough to execute. Then let humans and agents find the
 holes together and fill them, with updates to Cartograph or plugins for it.
 
+The owner's restatement of 2026-11-09 puts it as one pipeline:
+
+> Drag in an app, or as much of its code as can be gathered. Use the
+> deterministic engine to trace the infrastructure, code, UI/UX and
+> documentation to gather facts and findings. The team of agents takes this
+> work and works backwards to write the ADRs, product specifications and all
+> the other enterprise documentation the app should have had since day one,
+> had teams been properly managed or tooling been in place to avoid stale
+> documentation. As drift is caught, the documentation is updated to the
+> latest code, so that engineers can reconstruct or rebuild the app in a new
+> language or to updated requirements.
+
+The five stages are: gather, trace, write, keep current, and hand over for
+rebuild. Cartograph does the first four. The fifth is the engineers' work,
+and everything before it exists to make that work possible.
+
 ## Who it is for
 
 Enterprise estates are the hardest case and the main one: many repositories,
@@ -28,6 +45,13 @@ from systems down to the line that implements a rule, with every layer
 labeled by its evidence and the agent team on hand to answer questions about
 what is in view. Consumer apps and single repos are the same problem at a
 smaller scale. See ROADMAP §8.
+
+A project that is already well run does not need forensic recovery. Its
+engineers and agents use the same graph as a context hub and as a guide to
+the full picture: they ask questions, read cited answers and follow a flow
+from the screen to the line that implements it. That is the second mode of
+the product, and the investigation and question-answering work serves it.
+See ROADMAP §10.
 
 ## Vision elements
 
@@ -45,6 +69,10 @@ issues that implement them.
 | V7 | **Humans and agents fill the holes.** Identify what is missing and close it with updates or plugins. |
 | V8 | **Easily extensible** for new language support. |
 | V9 | **Token-efficient, progressively disclosed skills**, for the agents in the product and the agents that build it. |
+| V10 | **Agents write the document set.** From the deterministic facts, the agent team drafts the ADRs, the product specification and the rest of a catalogued enterprise document set. Every draft is cited, staged and labeled as agent-authored, and reaches a document only after human review. |
+| V11 | **Documentation follows the code.** Each section knows the facts it rests on. When drift is caught the affected sections are marked stale and redrafted for review. Existing documentation is read as evidence of stated intent and compared with the code. |
+| V12 | **Rebuild is enabled, not performed.** The document set, its evidence, the gap register and work packets are what an engineering team needs to rebuild or port the application in a new language or to new requirements. Cartograph generates no target code. |
+| V13 | **Two modes, one graph.** Reconstruction for systems whose documentation is missing or stale; context hub and guide for projects that are already well run. Both obey the same integrity rules. |
 
 ## What must stay true at every stage
 
@@ -61,6 +89,10 @@ issues that implement them.
 - **No writes to the ingested target** (NG1, ADR-0019). Work leaves the
   product as packets and issues; implementation happens in a separately
   authorized checkout and comes back through re-ingest.
+- **No target code generation** (NG2, ADR-0056). Cartograph enables a
+  rebuild and does not perform one.
+- **Agent-written is always labeled.** An authored section keeps its tier
+  and its author role after acceptance, in the app and in every export.
 - **Determinism and provenance.** Re-ingesting the same commit and source registration with the same producers and configuration yields identical graph content; every claim
   cites revision-bound evidence.
 
@@ -78,6 +110,13 @@ The restated vision keeps the integrity principles and the on-ramp, and widens
 the deliverable from a recovered spec to the reconstructed lifecycle, with the
 agent team inside the product rather than only around it. The recovery engine
 and the context hub are its evidence foundation, not its end state.
+
+The 2026-11-09 restatement
+([ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md)) names what
+the agent team is for: writing the documents, not only answering questions
+about the system. It adds that the documents stay current as the code moves,
+that a rebuild is the engineers' work, and that the context hub is a mode of
+the product for projects that need no recovery.
 
 ## Beyond v1: targets without source
 

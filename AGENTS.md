@@ -5,12 +5,12 @@ them). It holds the product invariants and the SDLC workflow. There are no tool-
 
 ## What Cartograph is
 
-A local-first **domain context hub** (Tauri 2, Rust core, React UI), built on
-cross-layer spec recovery. It connects business behavior, designs, decisions,
-and gaps to provenance across infra, cloud, server, events, and client.
-Read `docs/SPEC-00_master.md` before product code; its staged extension
-`docs/SPEC-01_context-hub.md` defines shared context, specialists, and MCP/ACP
-interoperability. Delivery gates distinguish planned capabilities from shipped ones.
+A local-first desktop app (Tauri 2, Rust core, React UI) that reconstructs the
+documentation a system should have had: it traces infra, code, UI and docs
+deterministically, agents write the document set from those facts, and the
+documents follow the code as it drifts. Engineers rebuild from the result; the
+app generates no target code. Well-run projects use it as a context hub. Goal:
+`docs/VISION.md`, ADR-0056. Read `docs/SPEC-00_master.md` before product code.
 
 ## Orientation
 
@@ -37,7 +37,7 @@ interoperability. Delivery gates distinguish planned capabilities from shipped o
 - **R-INT-5** `verified-only` export excludes InferredWeak; `best-effort`
   includes it clearly annotated.
 - **Non-goals:** no editing of ingested target code (NG1); no automatic code
-  regeneration/scaffolding in the current slice (NG2 — ADR-0019);
+  regeneration/scaffolding (NG2 — ADR-0019, ADR-0056: rebuild is enabled, not performed);
   no multi-user backend in v1 (NG5).
 - **Deterministic tier never calls the LLM.** Local-first; cloud egress is
   per-tier opt-in with explicit consent (fail closed).
@@ -190,7 +190,7 @@ Storybook itself: `npm run storybook` (from `ui/`).
 - `docs/SPEC-01_context-hub.md` — staged domain-hub and MCP/ACP extension
 - `docs/user_stories.md` / `docs/US-TM.md` — US/AC + traceability matrix
 - `docs/adr/` — ADRs for *this app's own* decisions
-- `docs/VISION.md` — post-v1 direction (SDLC-in-core); not license to build it
+- `docs/VISION.md` — the product goal and its elements V1–V13; not license to build
 - `docs/design/production-ui/` — production UI design handoff (authoritative)
 - `docs/design/` — earlier design tokens (`DESIGN.md`) + Stitch mockups per view
 - `docs/adapters/AUTHORING_GUIDE.md` — how to add language-adapter coverage
