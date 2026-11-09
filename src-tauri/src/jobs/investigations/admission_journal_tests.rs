@@ -1116,3 +1116,144 @@ fn capacity_exclusion_resolves_replay_query_without_rewriting_journal_hash() {
         );
     }
 }
+
+#[test]
+fn desktop_generation_start_selects_only_local_analysts_and_reopens() {
+    for (role, mode, selected) in [
+        ("domain-analyst@26", InvestigationProviderMode::Local, true),
+        ("domain-analyst@27", InvestigationProviderMode::Local, true),
+        ("domain-analyst@26", InvestigationProviderMode::Cloud, false),
+        ("domain-analyst@27", InvestigationProviderMode::Cloud, false),
+        ("domain-analyst@25", InvestigationProviderMode::Local, false),
+        (
+            "evidence-auditor@11",
+            InvestigationProviderMode::Local,
+            false,
+        ),
+    ] {
+        let mut f = internal_next_prompt_fixture();
+        let mut request = f.request.clone();
+        request.specialist_id = role.into();
+        request.request_nonce = "desktop-generation-start".into();
+        request.provider_mode = mode;
+        let mut provider = f.task.detail.provider.clone();
+        provider.mode = mode;
+        let hosted = mode == InvestigationProviderMode::Cloud && role == "domain-analyst@27";
+        if hosted {
+            provider.provider_id =
+                format!("anthropic:{}", llm::anthropic::ClaudeLane::Opus.model_id());
+        }
+        // The same host-only method used by completion_start: no model call.
+        let started = f
+            .store
+            .start_desktop_next_prompt_investigation(&request, Some(&provider), 600, 180_000)
+            .unwrap();
+        let expected = selected.then_some(GenerationPolicy::LocalFinish4096V1);
+        assert!(started.created, "{role} {mode:?}");
+        assert_eq!(started.detail.limits.generation_policy, expected);
+        let mut expected_limits = if hosted {
+            INVESTIGATION_V2_POLICY
+                .with_hosted_generation()
+                .unwrap()
+                .limits()
+        } else {
+            INVESTIGATION_V2_POLICY.limits()
+        };
+        expected_limits.generation_policy = expected;
+        assert_eq!(started.detail.limits, expected_limits);
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let task = load_execution_task(&tx, &started.detail.summary.investigation_id).unwrap();
+        assert_eq!(task.completion_intent.unwrap().generation_policy, expected);
+        tx.commit().unwrap();
+        let path = f.directory.path().join("state.db");
+        drop(f.store);
+        let mut store = JobStore::open(path).unwrap();
+        assert_eq!(
+            store
+                .existing_desktop_investigation_completion(&request)
+                .unwrap(),
+            Some(started.detail.clone())
+        );
+        // Recovery wins over missing provider and invalid current time settings.
+        let retry = store
+            .start_desktop_next_prompt_investigation(&request, None, 0, 0)
+            .unwrap();
+        assert!(!retry.created);
+        assert_eq!(retry.detail, started.detail);
+        request.question.push_str(" changed");
+        assert!(
+            store
+                .existing_desktop_investigation_completion(&request)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn desktop_generation_retry_preserves_historical_unselected_policy() {
+    let mut f = internal_next_prompt_fixture();
+    let mut request = f.request.clone();
+    request.specialist_id = "domain-analyst@26".into();
+    request.request_nonce = "desktop-before-policy-release".into();
+    let provider = f.task.detail.provider.clone();
+    let historical = f
+        .store
+        .start_configured_next_prompt_investigation(&request, Some(&provider), 600, 180_000)
+        .unwrap();
+    assert_eq!(historical.detail.limits.generation_policy, None);
+    let before = serde_json::to_vec(&historical.detail).unwrap();
+    let retry = f
+        .store
+        .start_desktop_next_prompt_investigation(&request, None, 3600, 600_000)
+        .unwrap();
+    assert!(!retry.created);
+    assert_eq!(serde_json::to_vec(&retry.detail).unwrap(), before);
+    // Generic/captured starts retain the previous explicit opt-in boundary.
+    let mut f = internal_next_prompt_fixture();
+    request.request_nonce = "non-desktop-start".into();
+    let generic = f
+        .store
+        .start_completion_family(&request, Some(&provider), true, None)
+        .unwrap();
+    assert_eq!(generic.detail.limits.generation_policy, None);
+}
+
+#[test]
+fn desktop_generation_recovery_rejects_tampered_saved_policy() {
+    for change_intent in [false, true] {
+        let mut f = internal_next_prompt_fixture();
+        let mut request = f.request.clone();
+        request.specialist_id = "domain-analyst@27".into();
+        request.request_nonce = "desktop-policy-tamper".into();
+        let provider = f.task.detail.provider.clone();
+        let started = f
+            .store
+            .start_desktop_next_prompt_investigation(&request, Some(&provider), 600, 180_000)
+            .unwrap();
+        let id = &started.detail.summary.investigation_id;
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let mut task = load_execution_task(&tx, id).unwrap();
+        if change_intent {
+            task.completion_intent.as_mut().unwrap().generation_policy = None;
+        } else {
+            task.detail.limits.generation_policy = None;
+        }
+        let raw = encode(&task, MAX_RECORD_BYTES).unwrap();
+        tx.execute(
+            "UPDATE investigation_tasks SET record=?2,record_hash=?3 WHERE id=?1",
+            params![id, raw, core_prov::content_hash(&raw)],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert!(
+            f.store
+                .existing_desktop_investigation_completion(&request)
+                .is_err()
+        );
+        assert!(
+            f.store
+                .start_desktop_next_prompt_investigation(&request, None, 600, 180_000,)
+                .is_err()
+        );
+    }
+}
