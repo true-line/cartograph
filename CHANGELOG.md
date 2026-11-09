@@ -1,5 +1,28 @@
 # cartograph
 
+## 0.65.0
+
+### Minor Changes
+
+- 66e41dd: Add an opt-in analyst @26 role that requests correction of bare finish field names in authored prose while preserving historical analyst behavior.
+- 7552e1a: Add an opt-in analyst @27 with bounded terminal-empty and exclusive-subject transition predicates. Add one-turn memory-only finding patch corrections with full merged-answer admission and explicit local finish allowance support. Historical analyst grammar, diagnostics and replay remain unchanged.
+- e1543ac: Add opt-in analyst24 support for measured captured-source reservations and combined correction feedback, preserving historical analyst behavior and the existing capacity limits.
+- 59d0fd8: Filter loaded flow triggers by name, kind or ID while retaining the current selection.
+- 0539506: Create a new system manifest from Connect with explicit repository, configuration, service and gateway declarations, a validated TOML preview, and a save action that preserves existing files.
+- f454d7d: Hosted Opus investigations reserve 16,384 output tokens per call, because Opus 5.5's always-on thinking counts toward the limit. A provider stop at the output limit now reports `output_limit_reached` instead of `incomplete_response`.
+- 9858136: Add an explicit versioned local finish-only allowance while preserving historical investigation budgets.
+- e5d79dd: Retain bounded, text-free diagnostics for newly refused or withheld findings from analyst roles 22–25. Development receipts expose authenticated reason codes and positions, with explicit omission markers when details do not fit. Diagnostics preserve model-facing feedback and existing workspace capacity accounting.
+- 68f6a74: Add opt-in analyst25 support for withholding unverified findings after the shared correction, with an explicit partial result preserved through audit and saved history. Keep historical analyst behavior and existing capacity limits unchanged.
+
+### Patch Changes
+
+- cc863cb: The response schema sent to Anthropic for hosted Claude investigation calls is now in a form the Messages API accepts. References are inlined instead of carried as `$defs`, and exact structured choices are sent as closed object schemas instead of structured `const`.
+- 495b871: Captured analyst validation can freeze an explicit desktop run-limit pair and verify it on reopen, with the saved settings included in new configured receipts. Product defaults are unchanged.
+- 5b143e0: Keep rendered artifact table labels readable and long provenance accessible through horizontal scrolling.
+- 407b70b: Keep the system breadcrumb correct after relaunch by reading current graph state, and show No system after clearing it.
+- c31c833: Show recorded screen routes in Atlas and evidence titles while preserving stable identities and provenance.
+- 17bc07a: Honor the saved hosted output allowance when reserving and settling source reads, so valid investigations can continue beyond eight calls without a spurious storage-capacity failure.
+
 ## 0.64.0
 
 ### Minor Changes
