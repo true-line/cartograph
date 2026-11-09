@@ -74,10 +74,9 @@ fn hosted_opus_output_allowance_is_lane_scoped_and_recovers_exactly() {
         unavailable_reason: None,
     };
     let cloud = InvestigationProviderMode::Cloud;
-    assert!(hosted_generation(Some(&provider(
-        cloud,
-        "anthropic:claude-opus-5-5"
-    ))));
+    for id in ["anthropic:claude-opus-5-5", "openai:gpt-6.1-sol"] {
+        assert!(hosted_generation(Some(&provider(cloud, id))), "{id}");
+    }
     for (mode, id) in [
         (
             InvestigationProviderMode::Local,
@@ -85,7 +84,10 @@ fn hosted_opus_output_allowance_is_lane_scoped_and_recovers_exactly() {
         ),
         (cloud, "anthropic:claude-haiku-4-5-20251001"),
         (cloud, "anthropic:claude-fable-5"),
-        (cloud, "openai:gpt-6.1-sol"),
+        (InvestigationProviderMode::Local, "openai:gpt-6.1-sol"),
+        (cloud, "openai:gpt-6.1-terra"),
+        (cloud, "openai:gpt-6.1-sol-preview"),
+        (cloud, "openai-compatible:gpt-6.1-sol"),
     ] {
         assert!(!hosted_generation(Some(&provider(mode, id))), "{id}");
     }
@@ -125,6 +127,13 @@ fn hosted_opus_output_allowance_is_lane_scoped_and_recovers_exactly() {
         policy_for_detail(&reopened).unwrap().limits(),
         detail.limits
     );
+    // AC-0576: the pinned hosted GPT model recovers the same exact allowance;
+    // its unpinned sibling does not.
+    detail.provider = provider(cloud, "openai:gpt-6.1-sol");
+    assert_eq!(policy_for_detail(&detail).unwrap().limits(), detail.limits);
+    detail.provider = provider(cloud, "openai:gpt-6.1-terra");
+    assert!(policy_for_detail(&detail).is_err());
+    detail.provider = provider(cloud, "anthropic:claude-opus-5-5");
     detail.origin = InvestigationOrigin::Mcp {
         client_id: McpClientId::from_host_bytes([7; 16]),
     };

@@ -22,6 +22,11 @@ use reqwest::blocking::Client;
 /// The production Chat Completions endpoint. Not configurable in release code.
 pub const API_URL: &str = "https://api.openai.com/v1/chat/completions";
 
+/// The hosted GPT model that takes the investigation output allowance
+/// ([`crate::bounded::HOSTED_OUTPUT_TOKENS`]). Its reasoning tokens count toward
+/// `max_completion_tokens`, so the static 2,048 cap starves the finish turn.
+pub const HOSTED_ALLOWANCE_MODEL: &str = "gpt-6.1-sol";
+
 /// Cloud provider for one hosted OpenAI model. The model id is the caller's
 /// reviewed choice and is bound into the provider id and bounded profile.
 pub struct OpenAiProvider {
