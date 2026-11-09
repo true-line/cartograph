@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.66.0
+
+### Minor Changes
+
+- 47406f4: Make Domain analyst @27 the desktop default, with the versioned local finish-only allowance and complete correction-result display. Keep @24–@26 out of new-task choices while existing @26 tasks reopen with their saved identity and policy.
+
 ## 0.65.0
 
 ### Minor Changes
