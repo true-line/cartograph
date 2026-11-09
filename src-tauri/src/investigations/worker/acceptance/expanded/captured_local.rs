@@ -580,13 +580,9 @@ fn run_captured_auditor(action: &str) {
                         "reopen" => captured_auditor::reopen(&parent, &expected, &artifacts),
                         "execute" => {
                             captured_auditor::stage(&parent, &artifacts, &expected, false)?;
-                            let provider = configured_provider(
-                                &super::super::required("CARTOGRAPH_ACCEPTANCE_PROTOCOL"),
-                                &super::super::required("CARTOGRAPH_ACCEPTANCE_THINKING"),
-                                &super::super::required("CARTOGRAPH_ACCEPTANCE_URL"),
-                                &super::super::required("CARTOGRAPH_ACCEPTANCE_MODEL"),
-                                &expected.provider,
-                            )?;
+                            let provider = auditor_execute_provider(&expected.provider, &|key| {
+                                std::env::var(key).ok()
+                            })?;
                             captured_auditor::execute(&parent, &expected, &artifacts, provider)
                         }
                         _ => unreachable!("validated before opening profile"),
@@ -596,4 +592,71 @@ fn run_captured_auditor(action: &str) {
         },
     )
     .unwrap();
+}
+
+// Construct only on execute; the shared execute_role gate owns consent and the attempt.
+fn auditor_execute_provider(
+    expected: &InvestigationProvider,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<std::sync::Arc<dyn llm::LlmProvider>, String> {
+    match expected.mode {
+        InvestigationProviderMode::Cloud => {
+            super::cloud_run::authorization(
+                expected,
+                env(super::cloud_run::AUTHORIZE).as_deref(),
+                env(super::cloud_run::STEP_CAP).as_deref(),
+            )?;
+            super::cloud_run::provider(expected, env)
+        }
+        InvestigationProviderMode::Local => local_execute_provider(true, expected, env)?
+            .ok_or_else(|| "Local auditor provider missing.".into()),
+    }
+}
+
+// AC-0577: constructor-only, no network and no real key; fail before key access without go.
+#[test]
+fn captured_auditor_cloud_entry_requires_go_and_never_reads_local_override() {
+    let expected = InvestigationProvider {
+        mode: InvestigationProviderMode::Cloud,
+        provider_id: "openai:gpt-6.1-sol".into(),
+        model: "gpt-6.1-sol".into(),
+        endpoint: llm::openai::API_URL.into(),
+        deployment: None,
+        protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+        available: true,
+        unavailable_reason: None,
+    };
+    for cap in [None, Some("0"), Some("65"), Some("not-a-number")] {
+        assert!(
+            auditor_execute_provider(&expected, &|key| match key {
+                super::cloud_run::AUTHORIZE => Some(expected.provider_id.clone()),
+                super::cloud_run::STEP_CAP => cap.map(str::to_owned),
+                _ => panic!("key/local override read before authorization"),
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        auditor_execute_provider(&expected, &|key| match key {
+            super::cloud_run::AUTHORIZE => Some("openai:other".into()),
+            super::cloud_run::STEP_CAP => Some("32".into()),
+            _ => panic!("key/local override read before authorization"),
+        })
+        .is_err()
+    );
+    let provider = auditor_execute_provider(&expected, &|key| match key {
+        super::cloud_run::AUTHORIZE => Some(expected.provider_id.clone()),
+        super::cloud_run::STEP_CAP => Some("32".into()),
+        "OPENAI_API_KEY" => Some("synthetic-constructor-only".into()),
+        _ => panic!("Cloud entry read a local override"),
+    })
+    .unwrap();
+    assert_eq!(
+        crate::investigations::runtime::descriptor(
+            provider.as_ref(),
+            InvestigationProviderMode::Cloud
+        )
+        .unwrap(),
+        expected
+    );
 }

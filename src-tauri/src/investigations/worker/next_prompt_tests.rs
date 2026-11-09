@@ -251,6 +251,7 @@ struct NextProvider {
     large_finish: bool,
     exact_targets: bool,
     auditor_finish: bool,
+    captured_withheld_finish: bool,
     gated_flow: Option<GatedFlow>,
     audit_verdict: Option<&'static str>,
     audit_cancel: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -280,6 +281,7 @@ impl NextProvider {
             large_finish: false,
             exact_targets: false,
             auditor_finish: false,
+            captured_withheld_finish: false,
             gated_flow: None,
             audit_verdict: None,
             audit_cancel: std::sync::Mutex::new(None),
@@ -390,6 +392,7 @@ impl LlmProvider for NextProvider {
 
         if let Some(schema) = &request.payload().response_schema
             && self.gated_flow.is_none()
+            && !self.captured_withheld_finish
             // @18 selects its schema from current acquisition choices; the
             // fixed historical action-count assertion does not apply.
             && request.payload().system != SpecialistId::DomainAnalystV18.prompt()
@@ -429,7 +432,26 @@ impl LlmProvider for NextProvider {
         if call == 0 && self.lose_metadata_ack {
             crate::jobs::investigations::metadata_host_fixture::lose_next_ack();
         }
-        let text = if let Some(flow) = self.gated_flow {
+        let text = if self.captured_withheld_finish {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            if call == 2 {
+                let target = &prompt["completion_contract"]["obligations"]["obligations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|o| o["kind"] == "inventory")
+                    .unwrap()["target"];
+                json!({"type":"read_coverage_inventory","context_id":target["context_id"],
+                    "repo":target["repo"],"inventory_hash":target["inventory_hash"],"max_bytes":32768}).to_string()
+            } else {
+                typed_correction_tests::partial_action(
+                    prompt,
+                    if call > 2 { call - 1 } else { call },
+                )
+                .to_string()
+            }
+        } else if let Some(flow) = self.gated_flow {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
             if matches!(
@@ -1482,6 +1504,15 @@ pub(in crate::investigations) fn expanded_scripted_provider_with_timeout(
         provider.source_scenario = Some(SourceScenario::Acquired);
         provider.extra_inventory = true;
     }
+    Arc::new(provider)
+}
+
+// AC-0577: real acquisition and two refused finishes produce a saved withheld parent.
+pub(in crate::investigations) fn expanded_withheld_scripted_provider() -> Arc<dyn LlmProvider> {
+    let mut provider = NextProvider::new(false);
+    provider.source_scenario = Some(SourceScenario::Acquired);
+    provider.extra_inventory = true;
+    provider.captured_withheld_finish = true;
     Arc::new(provider)
 }
 

@@ -930,6 +930,11 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `llm`, `app` · — · T-0576
 
 
+- **AC-0577** Given a captured evidence-auditor@11 definition, when preparing or reopening, then a Cloud provider must be pinned to the same production identity rules as AC-0569 and must match the request mode. Preparation and reopen never construct a provider or consume an attempt.
+  - **Execution:** the Cloud auditor uses the existing exact-provider owner authorization, capped per-step consent approval, exclusive auditor attempt marker and durable auditor-consent-log with T3 restoration. Local overrides are read only for Local execution. No numeric limits change.
+  - **Parent:** a completed, obligation-satisfied parent may be supported or findings_withheld_after_correction. A withheld parent requires an explicit matching parent_completion_outcome in the frozen definition; its saved result, withholding disposition, revision, receipt and independently authenticated PASS review remain bound. The status is disclosed unchanged in history and receipt, never relabelled supported. Failed, insufficient, mismatched or changed parents fail closed. Omitted status retains historical supported-parent definition/receipt compatibility.
+- **Trace:** H4 · `app` · — · T-0577
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
