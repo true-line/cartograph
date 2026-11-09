@@ -276,7 +276,9 @@ fn publish(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    if stamp.mode != snapshot.mode() {
+    if policy.local_finish_generation() {
+        stamp.validate_mode_with_metadata(metadata, policy)?;
+    } else if stamp.mode != snapshot.mode() {
         return Err(InvestigationStoreError::Invalid);
     }
     snapshot.validate_acquisition(stamp)?;

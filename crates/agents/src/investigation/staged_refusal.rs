@@ -416,7 +416,7 @@ impl ProtectedCompletionMetadata {
             .and_then(|repairs| repairs.checked_add(1))
             .ok_or(InvestigationError::InvalidInput)?;
         let generated_token_reservations = model_invocations
-            .checked_mul(policy.limits().generated_tokens_per_invocation)
+            .checked_mul(policy.output_tokens_for_mode(CompletionCallMode::FinishOnly))
             .ok_or(InvestigationError::LimitExceeded)?;
         Ok(FinishCallReserve {
             model_invocations,

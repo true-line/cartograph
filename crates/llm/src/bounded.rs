@@ -123,10 +123,11 @@ impl CompletionLimits {
     }
 
     /// Investigation limits: the general ceilings, except that the output
-    /// reservation may also be exactly [`HOSTED_OUTPUT_TOKENS`]. Which lane may
-    /// use it is decided by the frozen investigation policy, not here.
+    /// reservation may also be exactly 4096 (local finish) or
+    /// [`HOSTED_OUTPUT_TOKENS`]. The frozen investigation policy and authenticated
+    /// pre-call mode decide which allowance is permitted.
     pub fn for_investigation(values: CompletionLimitValues) -> Result<Self, BoundedCallError> {
-        if values.max_output_tokens != HOSTED_OUTPUT_TOKENS {
+        if !matches!(values.max_output_tokens, 4096 | HOSTED_OUTPUT_TOKENS) {
             return Self::new(values);
         }
         let regular = Self::new(CompletionLimitValues {
@@ -134,7 +135,7 @@ impl CompletionLimits {
             ..values
         })?;
         Ok(Self(CompletionLimitValues {
-            max_output_tokens: HOSTED_OUTPUT_TOKENS,
+            max_output_tokens: values.max_output_tokens,
             ..regular.0
         }))
     }

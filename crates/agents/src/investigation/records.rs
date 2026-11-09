@@ -31,6 +31,13 @@ pub struct InvestigationProvider {
     pub unavailable_reason: Option<String>,
 }
 
+/// Closed opt-in generation policy; absence preserves historical wire bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GenerationPolicy {
+    #[serde(rename = "local-finish-4096-v1")]
+    LocalFinish4096V1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationLimits {
@@ -44,6 +51,8 @@ pub struct InvestigationLimits {
     pub captured_validation_bytes: u64,
     pub generated_tokens_per_invocation: u32,
     pub generated_token_reservations: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_policy: Option<GenerationPolicy>,
     pub active_seconds: u64,
     pub consent_wait_seconds: u64,
     pub wall_seconds: u64,

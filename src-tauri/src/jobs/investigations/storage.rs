@@ -722,7 +722,22 @@ pub(super) fn validate_step(
         || step.input_bytes == 0
         || step.input_bytes > MAX_INPUT_BYTES
         || step.generated_tokens == 0
-        || step.generated_tokens > policy.limits().generated_tokens_per_invocation
+        || step.generated_tokens
+            > policy.output_tokens_for_mode(
+                step.disclosure
+                    .as_ref()
+                    .and_then(|d| d.admission.as_ref())
+                    .filter(|s| {
+                        !policy.local_finish_generation()
+                            || s.acquisition
+                                .as_ref()
+                                .is_some_and(|a| a.finish_policy_complete)
+                    })
+                    .map_or(
+                        agents::investigation::staged_refusal::CompletionCallMode::Choice,
+                        |s| s.mode,
+                    ),
+            )
     {
         return Err(InvestigationStoreError::Invalid);
     }

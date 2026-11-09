@@ -484,6 +484,7 @@ fn saved_call_core_acquisition_stamp_uses_saved_task_role() {
             .unwrap();
         basis.admission.acquisition = (role == SpecialistId::DomainAnalystV18).then(|| {
             agents::investigation::AcquisitionAdmission {
+                finish_policy_complete: false,
                 capacity_exhausted: false,
                 finish_reason: None,
                 choices_hash: "a".repeat(64),
@@ -572,6 +573,7 @@ fn saved_call_core_acquisition_stamp_uses_saved_task_role() {
             }
         } else {
             changed.admission.acquisition = Some(agents::investigation::AcquisitionAdmission {
+                finish_policy_complete: false,
                 capacity_exhausted: false,
                 finish_reason: None,
                 choices_hash: "a".repeat(64),

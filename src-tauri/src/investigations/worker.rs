@@ -358,9 +358,14 @@ struct Worker<'a, R: tauri::Runtime> {
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
-    fn completion_limits(&self, policy: &InvestigationPolicy) -> Result<CompletionLimits, Failure> {
+    fn completion_limits(
+        &self,
+        policy: &InvestigationPolicy,
+        input: &InvestigationInput,
+    ) -> Result<CompletionLimits, Failure> {
         let mut values = super::provider_workspace::completion_limit_values(policy)?;
         values.request_timeout_ms = self.request_timeout_ms;
+        values.max_output_tokens = input.invocation_output_tokens(policy)?;
         CompletionLimits::for_investigation(values).map_err(provider_failure)
     }
 
@@ -634,7 +639,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             let step_id = format!("step-{}", self.detail.usage.model_invocations + 1);
             let action = input.action(format!("{}:{step_id}", self.id))?;
             let input_bytes = bounded_json(&action.payload, 128 * 1024)?.len();
-            let limits = self.completion_limits(policy)?;
+            let limits = self.completion_limits(policy, &input)?;
             let prepared = firewall(self.state)?
                 .prepare_bounded(provider, &action, &limits)
                 .map_err(provider_failure)?;

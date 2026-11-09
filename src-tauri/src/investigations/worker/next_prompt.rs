@@ -276,7 +276,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             None => input,
         }; // construction-only contract is dropped before firewall/sealing
         let action = input.action(format!("{}:step-1", self.id))?;
-        let limits = self.completion_limits(policy)?;
+        let limits = self.completion_limits(policy, &input)?;
         let prepared = firewall(self.state)?
             .prepare_bounded(provider, &action, &limits)
             .map_err(provider_failure)?;

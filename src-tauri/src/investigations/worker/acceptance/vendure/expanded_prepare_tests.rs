@@ -151,6 +151,7 @@ fn captured_analyst_entry_dispatches_cloud_definitions_to_the_hosted_gate() {
             })
             .unwrap();
         let mut expected = Definition {
+            generation_policy: None,
             start_sha256: None,
             run_limits: None,
             specialist_id: None,
@@ -253,6 +254,28 @@ fn captured_case_with_provider(
     run_limits: Option<super::super::expanded::vendure_prepare::RunLimits>,
     hosted: bool,
 ) {
+    captured_case_with_generation(execute, specialist, run_limits, hosted, None);
+}
+
+#[test]
+fn captured_local_finish_policy_freezes_and_reopens_without_execution() {
+    // AC-0287: independent frozen definition opts in; reopening never consults live settings.
+    captured_case_with_generation(
+        false,
+        Some("domain-analyst@26"),
+        None,
+        false,
+        Some(GenerationPolicy::LocalFinish4096V1),
+    );
+}
+
+fn captured_case_with_generation(
+    execute: bool,
+    specialist: Option<&str>,
+    run_limits: Option<super::super::expanded::vendure_prepare::RunLimits>,
+    hosted: bool,
+    generation_policy: Option<GenerationPolicy>,
+) {
     let case = Case::new();
     let prepared = if execute {
         case.prepare()
@@ -279,6 +302,7 @@ fn captured_case_with_provider(
         })
         .unwrap();
     let mut expected = Definition {
+        generation_policy,
         start_sha256: None,
         run_limits,
         specialist_id: specialist.map(str::to_owned),
@@ -370,6 +394,43 @@ fn captured_case_with_provider(
         std::fs::write(&definition_path, serde_json::to_vec(&expected).unwrap()).unwrap();
     }
     let manifest = run(&expected).unwrap();
+    if generation_policy.is_some() {
+        let mut jobs =
+            crate::jobs::JobStore::open(prepared.profile.data().join("state.db")).unwrap();
+        let saved_request: StagedObligationRequest =
+            serde_json::from_slice(&std::fs::read(output.join("analyst-request.json")).unwrap())
+                .unwrap();
+        assert!(
+            jobs.existing_investigation_completion(&saved_request)
+                .is_err()
+        );
+        assert!(
+            jobs.start_next_prompt_investigation(&saved_request, Some(&expected.provider))
+                .is_err()
+        );
+        assert!(
+            jobs.existing_local_finish_investigation(&saved_request)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !jobs
+                .start_local_finish_investigation(&saved_request, Some(&expected.provider), None)
+                .unwrap()
+                .created
+        );
+        let id = manifest["analyst_id"].as_str().unwrap();
+        let detail = jobs.investigation(id).unwrap();
+        assert_eq!(
+            detail.limits,
+            INVESTIGATION_V2_POLICY
+                .with_local_finish_generation()
+                .unwrap()
+                .limits()
+        );
+        assert_eq!(detail.usage.model_invocations, 0);
+    }
+
     if hosted {
         let jobs = crate::jobs::JobStore::open(prepared.profile.data().join("state.db")).unwrap();
         let id = manifest["analyst_id"].as_str().unwrap();

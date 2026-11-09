@@ -1727,3 +1727,121 @@ fn analyst26_bare_finish_fields_are_versioned_and_position_complete() {
         }
     }
 }
+
+#[test]
+fn local_finish_policy_authenticates_complete_acquisition_and_restricts_schema() {
+    use staged_finish::{FeedbackEntry, RefusalFeedback, RefusalReason};
+    // AC-0287: the same completed attempt stays Choice under V2, but only
+    // the opt-in lane becomes FinishOnly with a 4096-token allowance.
+    for opted in [false, true] {
+        for (complete, correction) in [(false, false), (true, false), (true, true)] {
+            let policy = if opted {
+                INVESTIGATION_V2_POLICY
+                    .with_local_finish_generation()
+                    .unwrap()
+            } else {
+                INVESTIGATION_V2_POLICY.clone()
+            };
+            let role = SpecialistId::DomainAnalystV26;
+            let (mut f, raw, target, _) = source_fixture(role, "bounded source");
+            let records = if complete {
+                vec![source_record(
+                    &f,
+                    &target,
+                    "step-1",
+                    staged_attempt::AttemptOutcome::Unavailable {
+                        reason: staged_attempt::UnavailableReason::PinnedTargetAbsent,
+                    },
+                )]
+            } else {
+                vec![]
+            };
+            f.metadata.completed_attempt_ids =
+                records.iter().map(|r| r.attempt_id.clone()).collect();
+            if correction {
+                f.metadata.refusal_count = 1;
+                f.metadata.last_refusal_id = Some("c".repeat(64));
+                f.metadata.feedback = Some(RefusalFeedback {
+                    schema_version: 1,
+                    prose_correction: None,
+                    citation_correction: None,
+                    unmet: vec![FeedbackEntry {
+                        obligation_id: f.request.obligations.obligations[0].key().1.into(),
+                        kind: "source".into(),
+                        reason: RefusalReason::NotAttempted,
+                    }],
+                });
+            }
+            let input = InvestigationInput::prepare_v9_with_policy(
+                &f.request.question,
+                role,
+                f.ledger.clone(),
+                &[&raw],
+                &[],
+                &[],
+                &usage(CompletionCallMode::Choice),
+                &f.basis,
+                &f.request,
+                &f.metadata,
+                &[],
+                CompletionCallMode::Choice,
+                0,
+                None,
+                &policy,
+            )
+            .unwrap();
+            let input = source_choices(&f, input, &records, &f.ledger);
+            let expected = if opted && complete { 4096 } else { 2048 };
+            assert_eq!(input.invocation_output_tokens(&policy).unwrap(), expected);
+            let mut values = CompletionLimits::default().values();
+            values.max_output_tokens = expected;
+            let limits = CompletionLimits::for_investigation(values).unwrap();
+            let prepared = llm::EgressFirewall::new(llm::EgressPolicy::default())
+                .prepare_bounded(
+                    &DescriptorOnly,
+                    &input.action("current:1".into()).unwrap(),
+                    &limits,
+                )
+                .unwrap();
+            let disclosure = input
+                .seal_disclosure_with_policy(&prepared, &policy)
+                .unwrap()
+                .unwrap();
+            let state = disclosure.admission.unwrap();
+            assert_eq!(
+                state.acquisition.as_ref().unwrap().finish_policy_complete,
+                opted && complete
+            );
+            assert_eq!(
+                state.mode == CompletionCallMode::FinishOnly,
+                opted && complete
+            );
+            if opted && complete {
+                let schema = input.payload.response_schema.as_ref().unwrap();
+                assert!(!schema.contains("query_context"));
+                assert!(!schema.contains("replay_query"));
+                assert!(
+                    !input.permits_acquisition(&QualifiedInvestigationAction::SourceOrFinish(
+                        InvestigationAction::ReadEvidence {
+                            fact: target.fact.clone(),
+                            role: target.role,
+                            index: target.index,
+                        },
+                    ))
+                );
+                let mut changed_mode = state.clone();
+                changed_mode.mode = CompletionCallMode::Choice;
+                assert!(
+                    changed_mode
+                        .validate_mode_with_metadata(&f.metadata, &policy)
+                        .is_err()
+                );
+                assert!(
+                    state
+                        .validate_saved_role_shape(role, &INVESTIGATION_V2_POLICY)
+                        .is_err()
+                );
+            }
+        }
+    }
+}

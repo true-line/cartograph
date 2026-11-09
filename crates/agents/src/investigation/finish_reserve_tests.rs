@@ -113,3 +113,30 @@ fn finish_reserve_selects_mode_at_independent_call_and_token_boundaries() {
         }
     }
 }
+
+#[test]
+fn local_finish_reserve_keeps_corrections_inside_total_budget() {
+    let policy = INVESTIGATION_V2_POLICY
+        .with_local_finish_generation()
+        .unwrap();
+    for count in [0, 1] {
+        let value = metadata(count);
+        let reserve = value.finish_call_reserve_with_policy(&policy).unwrap();
+        assert_eq!(reserve.generated_token_reservations, (2 - count) * 4096);
+        let mut usage = InvestigationUsage {
+            generated_token_reservations: 131072 - reserve.generated_token_reservations,
+            ..Default::default()
+        };
+        assert_eq!(
+            value.next_call_mode_with_policy(&usage, &policy).unwrap(),
+            CompletionCallMode::FinishOnly
+        );
+        usage.generated_token_reservations += 1;
+        assert!(value.next_call_mode_with_policy(&usage, &policy).is_err());
+        usage.generated_token_reservations -= 2049;
+        assert_eq!(
+            value.next_call_mode_with_policy(&usage, &policy).unwrap(),
+            CompletionCallMode::Choice
+        );
+    }
+}

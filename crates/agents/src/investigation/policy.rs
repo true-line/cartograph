@@ -1,7 +1,7 @@
 //! Closed immutable policy registry with an explicit opt-in expanded profile.
 //! Admission bounds are distinct from durable runtime counters; callers cannot
 //! deserialize or construct a policy from their own limit values.
-use super::InvestigationLimits;
+use super::{GenerationPolicy, InvestigationLimits, staged_refusal::CompletionCallMode};
 
 /// Host completion-attempt schema ceiling. Raising it requires an explicit
 /// migration; a registry entry may never promise more durable attempt slots.
@@ -25,6 +25,7 @@ pub struct InvestigationPolicy {
     captured_validation_bytes: u64,
     generated_tokens_per_invocation: u32,
     generated_token_reservations: u32,
+    generation_policy: Option<GenerationPolicy>,
     active_seconds: u64,
     consent_wait_seconds: u64,
     wall_seconds: u64,
@@ -44,6 +45,7 @@ pub const INVESTIGATION_V1_POLICY: InvestigationPolicy = InvestigationPolicy {
     captured_validation_bytes: 128 * 1024 * 1024,
     generated_tokens_per_invocation: 2048,
     generated_token_reservations: 16384,
+    generation_policy: None,
     active_seconds: 600,
     consent_wait_seconds: 900,
     wall_seconds: 3600,
@@ -63,6 +65,7 @@ pub const INVESTIGATION_V2_POLICY: InvestigationPolicy = InvestigationPolicy {
     captured_validation_bytes: 128 * 1024 * 1024,
     generated_tokens_per_invocation: 2048,
     generated_token_reservations: 131072,
+    generation_policy: None,
     active_seconds: 600,
     consent_wait_seconds: 900,
     wall_seconds: 3600,
@@ -141,7 +144,8 @@ impl InvestigationPolicy {
     /// reservation scales with the unchanged invocation ceiling. Only the
     /// expanded profile takes it; the caller decides which provider qualifies.
     pub fn with_hosted_generation(&self) -> Option<Self> {
-        if self.profile != INVESTIGATION_V2_POLICY.profile
+        if self.generation_policy.is_some()
+            || self.profile != INVESTIGATION_V2_POLICY.profile
             || self.generated_tokens_per_invocation
                 != INVESTIGATION_V2_POLICY.generated_tokens_per_invocation
         {
@@ -155,6 +159,32 @@ impl InvestigationPolicy {
         Some(effective)
     }
 
+    /// Owner-approved local lane. Host authentication of provider and mode is separate.
+    pub fn with_local_finish_generation(&self) -> Option<Self> {
+        if self.profile != INVESTIGATION_V2_POLICY.profile
+            || self.generated_tokens_per_invocation != 2048
+            || self.generated_token_reservations != 131072
+            || self.generation_policy.is_some()
+        {
+            return None;
+        }
+        let mut effective = self.clone();
+        effective.generation_policy = Some(GenerationPolicy::LocalFinish4096V1);
+        Some(effective)
+    }
+
+    pub fn local_finish_generation(&self) -> bool {
+        self.generation_policy == Some(GenerationPolicy::LocalFinish4096V1)
+    }
+
+    pub fn output_tokens_for_mode(&self, mode: CompletionCallMode) -> u32 {
+        if self.local_finish_generation() && mode == CompletionCallMode::FinishOnly {
+            4096
+        } else {
+            self.generated_tokens_per_invocation
+        }
+    }
+
     /// Recover a saved effective policy without consulting current settings.
     /// Static lookup remains exact so existing callers cannot opt in silently.
     pub fn for_effective_limits(limits: &InvestigationLimits) -> Option<Self> {
@@ -162,6 +192,9 @@ impl InvestigationPolicy {
             Self::for_profile(&limits.profile)?.with_active_seconds(limits.active_seconds)?;
         if limits.generated_tokens_per_invocation == llm::bounded::HOSTED_OUTPUT_TOKENS {
             effective = effective.with_hosted_generation()?;
+        }
+        if limits.generation_policy.is_some() {
+            effective = effective.with_local_finish_generation()?;
         }
         (effective.limits() == *limits).then_some(effective)
     }
@@ -191,6 +224,7 @@ impl InvestigationPolicy {
             captured_validation_bytes: self.captured_validation_bytes,
             generated_tokens_per_invocation: self.generated_tokens_per_invocation,
             generated_token_reservations: self.generated_token_reservations,
+            generation_policy: self.generation_policy,
             active_seconds: self.active_seconds,
             consent_wait_seconds: self.consent_wait_seconds,
             wall_seconds: self.wall_seconds,
@@ -350,3 +384,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "local_finish_policy_tests.rs"]
+mod local_finish_policy_tests;

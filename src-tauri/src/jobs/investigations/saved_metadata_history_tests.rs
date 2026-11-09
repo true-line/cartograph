@@ -339,6 +339,7 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
             let admission = disclosure.admission.as_mut().unwrap();
             admission.acquisition =
                 (role == SpecialistId::DomainAnalystV18).then(|| AcquisitionAdmission {
+                    finish_policy_complete: false,
                     capacity_exhausted: false,
                     finish_reason: None,
                     choices_hash: choices.stamp_hash().unwrap(),
@@ -421,8 +422,9 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
                 assert!(next_prompt_invocations(&tx, &task).is_ok()); // full prefix authentication
             }
         }
-        for mutation in ["choices", "feedback", "ledger", "attempt"] {
-            if role != SpecialistId::DomainAnalystV18 && matches!(mutation, "choices" | "feedback")
+        for mutation in ["choices", "feedback", "finish_policy", "ledger", "attempt"] {
+            if role != SpecialistId::DomainAnalystV18
+                && matches!(mutation, "choices" | "feedback" | "finish_policy")
             {
                 continue;
             }
@@ -435,10 +437,12 @@ fn saved_acquisition_authority_rederives_exact_historical_cutoffs() {
                 validate_step_basis(&tx, &task, &step).unwrap();
             }
             match mutation {
-                "choices" | "feedback" => {
+                "choices" | "feedback" | "finish_policy" => {
                     let stamp = call.admission.acquisition.as_mut().unwrap();
                     if mutation == "choices" {
                         stamp.choices_hash = "f".repeat(64);
+                    } else if mutation == "finish_policy" {
+                        stamp.finish_policy_complete = true;
                     } else {
                         stamp.action_feedback_hash = Some("f".repeat(64));
                     }

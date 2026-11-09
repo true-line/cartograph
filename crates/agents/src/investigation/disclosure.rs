@@ -523,6 +523,7 @@ impl acquisition_choices::AcquisitionChoices {
             },
         )?;
         let expected = AcquisitionAdmission {
+            finish_policy_complete: policy.local_finish_generation() && self.attempts_complete(),
             capacity_exhausted: self.capacity_exhausted(),
             finish_reason: feedback
                 .filter(|value| value.reason == ActionRefusalReason::RepeatedRead)

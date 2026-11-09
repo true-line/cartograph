@@ -31,6 +31,8 @@ pub(super) struct CompletionIntent {
     pub(super) request_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) active_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) generation_policy: Option<GenerationPolicy>,
     pub request_hash: String,
     pub obligations: ObligationEnvelope,
     pub obligations_hash: String,
@@ -67,6 +69,7 @@ impl CompletionIntent {
                 .then(|| policy.profile().into()),
             request_timeout_ms: None,
             active_seconds: None,
+            generation_policy: None,
             request_hash: request.intent_hash_with_policy(policy)?,
             obligations: request.obligations.clone(),
             obligations_hash: request.obligations.fingerprint_with_policy(policy)?,
@@ -127,6 +130,9 @@ impl CompletionIntent {
         let policy = saved_policy(task)?;
         let legacy = policy.profile() == "investigation-v1";
         self.validate_frozen_timeout(task)?;
+        if self.generation_policy != task.detail.limits.generation_policy {
+            return Err(InvestigationStoreError::Invalid);
+        }
         let summary = &task.detail.summary;
         if self.schema_version
             != if summary.specialist_id.uses_next_prompt_admission() {
@@ -321,7 +327,7 @@ impl JobStore {
         next_prompt: bool,
         mcp: Option<&McpRequestIdentity>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
-        self.start_completion_family_configured(request, provider, next_prompt, mcp, None)
+        self.start_completion_family_configured(request, provider, next_prompt, mcp, None, None)
     }
 
     /// Host-only desktop settings, frozen before the atomic task insertion.
@@ -338,6 +344,25 @@ impl JobStore {
             true,
             None,
             Some((active_seconds, request_timeout_ms)),
+            None,
+        )
+    }
+
+    /// Explicit host opt-in; never inferred from current model or settings on reopen.
+    #[cfg(test)]
+    pub(crate) fn start_local_finish_investigation(
+        &mut self,
+        request: &StagedObligationRequest,
+        provider: Option<&InvestigationProvider>,
+        configured: Option<(u64, u64)>,
+    ) -> Result<InvestigationStart, InvestigationStoreError> {
+        self.start_completion_family_configured(
+            request,
+            provider,
+            true,
+            None,
+            configured,
+            Some(GenerationPolicy::LocalFinish4096V1),
         )
     }
 
@@ -348,6 +373,7 @@ impl JobStore {
         next_prompt: bool,
         mcp: Option<&McpRequestIdentity>,
         configured: Option<(u64, u64)>,
+        generation_policy: Option<GenerationPolicy>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         let base = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
@@ -357,6 +383,7 @@ impl JobStore {
         let policy = &effective;
         let request = request.normalized_with_policy(policy)?;
         let mut intent = CompletionIntent::new(&request)?;
+        intent.generation_policy = generation_policy;
         if let Some((active, timeout)) = configured {
             let minimum = llm::bounded::CompletionLimits::default()
                 .values()
@@ -429,14 +456,26 @@ impl JobStore {
             },
             |identity| match identity {
                 Some(identity) => mcp_start::existing(self, &request.request_nonce, identity),
-                None => self.existing_app_investigation_completion(request),
+                None => self.existing_app_investigation_completion(request, None),
             },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn existing_local_finish_investigation(
+        &self,
+        request: &StagedObligationRequest,
+    ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
+        self.existing_app_investigation_completion(
+            request,
+            Some(GenerationPolicy::LocalFinish4096V1),
         )
     }
 
     fn existing_app_investigation_completion(
         &self,
         request: &StagedObligationRequest,
+        generation_policy: Option<GenerationPolicy>,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
         let policy = InvestigationPolicy::for_profile(&request.limit_profile)
             .ok_or(InvestigationStoreError::Invalid)?;
@@ -453,6 +492,7 @@ impl JobStore {
         let detail = if let Some(id) = id {
             let task = load_execution_task(&tx, &id)?;
             let mut expected = CompletionIntent::new(request)?;
+            expected.generation_policy = generation_policy;
             // A nonce retry observes its original frozen configuration. New
             // application settings cannot rewrite an existing task.
             if let Some(saved) = &task.completion_intent {

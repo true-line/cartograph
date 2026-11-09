@@ -229,7 +229,7 @@ pub(super) fn prepare_saved_call(
         .as_ref()
         .ok_or(InvestigationStoreError::Invalid)?
         .effective_request_timeout_ms();
-    expected_limits.max_output_tokens = policy.limits().generated_tokens_per_invocation;
+    expected_limits.max_output_tokens = input.input.invocation_output_tokens(policy)?;
     expected_limits.max_spans = u32::try_from(policy.limits().evidence_items)
         .map_err(|_| InvestigationStoreError::Invalid)?;
     if input.prepared.limits().values() != expected_limits {

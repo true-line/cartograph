@@ -34,6 +34,8 @@ pub(in super::super) struct Definition {
     pub specialist_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_limits: Option<RunLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_policy: Option<GenerationPolicy>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -195,6 +197,12 @@ fn validate_bound<'a>(
             | "domain-analyst@26"
     ) {
         return Err("unsupported captured analyst specialist".into());
+    }
+    if expected.generation_policy.is_some()
+        && (specialist != "domain-analyst@26"
+            || expected.provider.mode != InvestigationProviderMode::Local)
+    {
+        return Err("invalid local finish policy lane".into());
     }
     if let Some(limits) = expected.run_limits {
         let minimum = llm::bounded::CompletionLimits::default()
@@ -428,15 +436,25 @@ fn bound_with_scope<T>(
             }
             let (task, elapsed) = if fresh {
                 let clock = std::time::Instant::now();
-                let started = match expected.run_limits {
-                    Some(limits) => jobs.start_configured_next_prompt_investigation(
+                let started = if expected.generation_policy.is_some() {
+                    jobs.start_local_finish_investigation(
                         &request,
                         Some(&expected.provider),
-                        limits.active_seconds,
-                        limits.request_timeout_ms,
-                    ),
-                    None => {
-                        jobs.start_next_prompt_investigation(&request, Some(&expected.provider))
+                        expected
+                            .run_limits
+                            .map(|v| (v.active_seconds, v.request_timeout_ms)),
+                    )
+                } else {
+                    match expected.run_limits {
+                        Some(limits) => jobs.start_configured_next_prompt_investigation(
+                            &request,
+                            Some(&expected.provider),
+                            limits.active_seconds,
+                            limits.request_timeout_ms,
+                        ),
+                        None => {
+                            jobs.start_next_prompt_investigation(&request, Some(&expected.provider))
+                        }
                     }
                 }
                 .map_err(|e| e.to_string())?;
@@ -447,15 +465,22 @@ fn bound_with_scope<T>(
                 (started.detail, Some(elapsed))
             } else {
                 (
-                    jobs.existing_investigation_completion(&request)
-                        .map_err(|e| e.to_string())?
-                        .ok_or("frozen start absent; explicit recovery required")?,
+                    (if expected.generation_policy.is_some() {
+                        jobs.existing_local_finish_investigation(&request)
+                    } else {
+                        jobs.existing_investigation_completion(&request)
+                    })
+                    .map_err(|e| e.to_string())?
+                    .ok_or("frozen start absent; explicit recovery required")?,
                     None,
                 )
             };
             let saved_limits = jobs
                 .captured_run_limits(&task.summary.investigation_id)
                 .map_err(|e| e.to_string())?;
+            if task.limits.generation_policy != expected.generation_policy {
+                return Err("frozen generation policy differs".into());
+            }
             if saved_limits
                 != expected
                     .run_limits

@@ -848,6 +848,14 @@ pub(crate) fn policy_for_detail(
     {
         return Err(InvestigationStoreError::Invalid);
     }
+    if policy.local_finish_generation()
+        && !(detail.origin == InvestigationOrigin::App
+            && detail.summary.specialist_id == SpecialistId::DomainAnalystV26
+            && detail.summary.provider_mode == InvestigationProviderMode::Local
+            && detail.provider.mode == InvestigationProviderMode::Local)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
     Ok(policy)
 }
 
@@ -928,6 +936,22 @@ impl JobStore {
         {
             effective_policy = hosted;
         }
+        if completion_intent
+            .as_ref()
+            .is_some_and(|intent| intent.generation_policy.is_some())
+        {
+            if !next_prompt
+                || mcp.is_some()
+                || request.specialist_id != SpecialistId::DomainAnalystV26
+                || request.provider_mode != InvestigationProviderMode::Local
+                || provider.is_none_or(|p| p.mode != InvestigationProviderMode::Local)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            effective_policy = effective_policy
+                .with_local_finish_generation()
+                .ok_or(InvestigationStoreError::Invalid)?;
+        }
         let policy = &effective_policy;
         if request.specialist_id.uses_next_prompt_admission() != next_prompt
             || (next_prompt
@@ -992,7 +1016,12 @@ impl JobStore {
                 };
                 record.intent_hash == intent_hash
             };
-            if !same {
+            if !same
+                || record.detail.limits.generation_policy
+                    != completion_intent
+                        .as_ref()
+                        .and_then(|intent| intent.generation_policy)
+            {
                 return Err(InvestigationStoreError::Conflict);
             }
             #[cfg(test)]

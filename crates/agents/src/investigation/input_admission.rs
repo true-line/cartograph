@@ -857,7 +857,8 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        let mode = if self.capacity_exhausted()
+        let mode = if self.finish_policy_complete(policy)
+            || self.capacity_exhausted()
             || self
                 .action_feedback
                 .as_ref()
@@ -1141,15 +1142,17 @@ impl InvestigationInput {
         prompt["turn_progress"]["action_feedback"] =
             serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
         self.action_feedback = feedback;
-        if (matches!(
-            self.frozen_specialist()?,
-            SpecialistId::DomainAnalystV21
-                | SpecialistId::DomainAnalystV22
-                | SpecialistId::DomainAnalystV23
-                | SpecialistId::DomainAnalystV24
-                | SpecialistId::DomainAnalystV25
-                | SpecialistId::DomainAnalystV26
-        ) && choices.capacity_exhausted())
+        if (self.input_generation_policy()?.local_finish_generation()
+            && choices.attempts_complete())
+            || (matches!(
+                self.frozen_specialist()?,
+                SpecialistId::DomainAnalystV21
+                    | SpecialistId::DomainAnalystV22
+                    | SpecialistId::DomainAnalystV23
+                    | SpecialistId::DomainAnalystV24
+                    | SpecialistId::DomainAnalystV25
+                    | SpecialistId::DomainAnalystV26
+            ) && choices.capacity_exhausted())
             || self
                 .action_feedback
                 .as_ref()
@@ -1186,6 +1189,45 @@ impl InvestigationInput {
         self.validate_acquisition_projection()?;
         Ok(self)
     }
+    /// Read the frozen policy embedded in the protected prompt. Host comparison
+    /// to saved limits remains mandatory before any invocation is published.
+    fn input_generation_policy(&self) -> Result<InvestigationPolicy, InvestigationError> {
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let limits: InvestigationLimits = serde_json::from_value(prompt["limits"].clone())
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        InvestigationPolicy::for_effective_limits(&limits).ok_or(InvestigationError::InvalidInput)
+    }
+
+    pub fn invocation_output_tokens(
+        &self,
+        policy: &InvestigationPolicy,
+    ) -> Result<u32, InvestigationError> {
+        if !policy.local_finish_generation() {
+            return Ok(policy.limits().generated_tokens_per_invocation);
+        }
+        let state = self.disclosed_admission_with_policy(policy)?;
+        Ok(
+            if state
+                .acquisition
+                .as_ref()
+                .is_some_and(|stamp| stamp.finish_policy_complete)
+            {
+                policy.output_tokens_for_mode(state.mode)
+            } else {
+                policy.limits().generated_tokens_per_invocation
+            },
+        )
+    }
+
+    fn finish_policy_complete(&self, policy: &InvestigationPolicy) -> bool {
+        policy.local_finish_generation()
+            && self
+                .acquisition_choices
+                .as_ref()
+                .is_some_and(|c| c.attempts_complete())
+    }
+
     pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {
         !self.uses_acquisition_prompt()
             || (self.acquisition_mode == Some(staged_refusal::CompletionCallMode::Choice)
@@ -1204,6 +1246,7 @@ impl InvestigationInput {
         }
         self.validate_acquisition_projection()?;
         Ok(AcquisitionAdmission {
+            finish_policy_complete: self.finish_policy_complete(&self.input_generation_policy()?),
             capacity_exhausted: self.capacity_exhausted(),
             finish_reason: self
                 .action_feedback
