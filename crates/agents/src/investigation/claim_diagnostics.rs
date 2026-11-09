@@ -24,7 +24,21 @@ pub fn explain_enumeration(
     sentence: &str,
     allocation_cap: usize,
 ) -> Option<EnumerationDiagnostic> {
-    let Err(mut explanation) = enumeration::explain(source, sentence)? else {
+    explain_enumeration_with_grammar(source, sentence, allocation_cap, false)
+}
+
+pub(crate) fn explain_enumeration_with_grammar(
+    source: &str,
+    sentence: &str,
+    allocation_cap: usize,
+    bounded: bool,
+) -> Option<EnumerationDiagnostic> {
+    let result = if bounded {
+        enumeration::explain_bounded(source, sentence)
+    } else {
+        enumeration::explain(source, sentence)
+    }?;
+    let Err(mut explanation) = result else {
         return None;
     };
     let (table_kind, shape) =

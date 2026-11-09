@@ -709,6 +709,10 @@ fn task_phase_workspaces(
             &agents::investigation::INVESTIGATION_V2_POLICY,
         )?,
     )?;
+    // @27's one-turn first finish overlaps correction preparation, patch
+    // decoding and merged admission. Keep its existing-cap-derived ownership
+    // outside phase maxima; this adds no new numeric ceiling or durable text.
+    let context = context.checked_add(agents::investigation::finish_patch::workspace_bytes()?)?;
     // Source leases, acknowledged receipts and the actual read outcome survive
     // nested replay and publication. Their ownership is outside the phase max;
     // source acquisition/publication scratch still needs separate composition.

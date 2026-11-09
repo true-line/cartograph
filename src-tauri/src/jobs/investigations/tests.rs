@@ -217,6 +217,7 @@ fn begin(
 fn response(step_id: &str, active_milliseconds: u64) -> InvestigationResponseMeta {
     InvestigationResponseMeta {
         finish_feedback_witness: None,
+        finish_telemetry: None,
         step_id: step_id.into(),
         response_hash: hash("response"),
         action_hash: hash("action"),

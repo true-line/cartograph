@@ -15,7 +15,9 @@ pub(super) fn validate(
     };
     if !matches!(
         task.detail.summary.specialist_id,
-        SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+        SpecialistId::DomainAnalystV25
+            | SpecialistId::DomainAnalystV26
+            | SpecialistId::DomainAnalystV27
     ) {
         return Err(InvestigationStoreError::Invalid);
     }

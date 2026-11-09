@@ -88,6 +88,7 @@ impl Fixture {
         let action = json!({"type":"read_evidence","fact":target.fact,"role":target.role,"index":target.index});
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: f.step.step_id.clone(),
             response_hash: core_prov::content_hash(b"actual complete source action response"),
             action_hash: core_prov::content_hash(&encode(&action, MAX_ACTION_BYTES).unwrap()),

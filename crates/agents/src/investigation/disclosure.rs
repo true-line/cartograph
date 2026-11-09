@@ -512,18 +512,51 @@ impl acquisition_choices::AcquisitionChoices {
         feedback: Option<&ActionRefusalFeedback>,
         policy: &'a InvestigationPolicy,
     ) -> Result<AcquisitionDisclosureConsistency<'a>, InvestigationError> {
+        self.bind_completion_disclosure_with_patch(
+            task, step, contract, metadata, ledger, disclosure, feedback, policy, None,
+        )
+    }
+    /// Shape consistency only. A patch basis additionally needs saved-refusal
+    /// authentication and an exact live-holder comparison in the host.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_completion_disclosure_with_patch<'a>(
+        &'a self,
+        task: &'a str,
+        step: &'a str,
+        contract: &'a InvestigationCompletionContract,
+        metadata: &'a staged_refusal::ProtectedCompletionMetadata,
+        ledger: &'a InvestigationInputLedger,
+        disclosure: &'a InvestigationDisclosure,
+        feedback: Option<&ActionRefusalFeedback>,
+        policy: &'a InvestigationPolicy,
+        patch: Option<&'a finish_patch::PatchBasis>,
+    ) -> Result<AcquisitionDisclosureConsistency<'a>, InvestigationError> {
         self.validate_basis(contract, metadata, ledger, policy)?;
+        if let Some(patch) = patch {
+            patch
+                .validate()
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            if metadata.refusal_count != 1
+                || metadata.last_refusal_id.as_ref() != Some(&patch.refusal_hash)
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
         disclosure.validate_saved_role_shape(
             ledger,
             policy,
-            if self.capacity_exhausted() {
+            if patch.is_some() {
+                SpecialistId::DomainAnalystV27
+            } else if self.capacity_exhausted() {
                 SpecialistId::DomainAnalystV21
             } else {
                 SpecialistId::DomainAnalystV18
             },
         )?;
         let expected = AcquisitionAdmission {
-            finish_policy_complete: policy.local_finish_generation() && self.attempts_complete(),
+            finish_patch: patch.cloned(),
+            finish_policy_complete: policy.local_finish_generation()
+                && (self.attempts_complete() || patch.is_some()),
             capacity_exhausted: self.capacity_exhausted(),
             finish_reason: feedback
                 .filter(|value| value.reason == ActionRefusalReason::RepeatedRead)

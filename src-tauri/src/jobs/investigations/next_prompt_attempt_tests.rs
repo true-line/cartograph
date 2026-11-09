@@ -54,6 +54,7 @@ fn publication(tx: &Transaction<'_>, f: &InternalFixture) -> Publication {
     };
     let response = InvestigationResponseMeta {
         finish_feedback_witness: None,
+        finish_telemetry: None,
         step_id: f.step.step_id.clone(),
         response_hash: core_prov::content_hash(b"complete inventory action"),
         action_hash: staged::read_action_hash(&read).unwrap(),

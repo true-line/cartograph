@@ -1654,6 +1654,7 @@ fn analyst26_bare_finish_fields_are_versioned_and_position_complete() {
     for role in [
         SpecialistId::DomainAnalystV25,
         SpecialistId::DomainAnalystV26,
+        SpecialistId::DomainAnalystV27,
     ] {
         let (f, raw, _, _) = source_fixture(role, "bounded source");
         let input = source_choices(
@@ -1718,10 +1719,12 @@ fn analyst26_bare_finish_fields_are_versioned_and_position_complete() {
                         matches!(v, ProseCorrection::Combined(c)
                         if c.entries.contains(&CombinedCorrection::RewriteSchemaPlaceholders))
                     });
-                let expected = role == SpecialistId::DomainAnalystV26
-                    && ["title", "statement", "findings", "type", "finish"]
-                        .iter()
-                        .any(|word| text.trim().eq_ignore_ascii_case(word));
+                let expected = matches!(
+                    role,
+                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+                ) && ["title", "statement", "findings", "type", "finish"]
+                    .iter()
+                    .any(|word| text.trim().eq_ignore_ascii_case(word));
                 assert_eq!(has_new, expected, "{role:?} {text} position {position}");
             }
         }
@@ -1845,3 +1848,6 @@ fn local_finish_policy_authenticates_complete_acquisition_and_restricts_schema()
         }
     }
 }
+
+#[path = "input_bounded_tests.rs"]
+mod bounded_tests;

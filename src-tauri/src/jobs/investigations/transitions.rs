@@ -548,6 +548,7 @@ impl JobStore {
                     &finish,
                     response,
                     None,
+                    None,
                 )?;
             }
             InvestigationTransition::ReadUnavailable { read, reason } => {
@@ -873,6 +874,35 @@ impl JobStore {
                 .map(Some);
         }
         let expected = task.detail.summary.revision;
+        if task.pending_patch().is_some() {
+            // The persisted hashes authenticate the pending correction, but
+            // never reconstruct its memory-only candidate. Do not dispatch.
+            super::volatile_patch::authenticate(&tx, &task)?;
+            if task.phase == Phase::Invocation {
+                clear_unmeasured_usage(&mut task);
+            }
+            super::volatile_patch::abandon(&mut task);
+            mark_inspection_not_assessed(&mut task);
+            bump(&tx, &mut task)?;
+            let kind = if task.detail.summary.cancel_requested {
+                InvestigationEventKind::Cancelled
+            } else {
+                InvestigationEventKind::Failed
+            };
+            event(
+                &tx,
+                &mut task,
+                kind,
+                None,
+                None,
+                super::volatile_patch::LOST_CANDIDATE,
+            )?;
+            completion::refresh_observation(&tx, &mut task)?;
+            sync_terminal_job(&tx, &task)?;
+            save_next_prompt_task(&tx, &task, expected, true)?;
+            tx.commit()?;
+            return Ok(Some(task.detail));
+        }
         let unknown = matches!(task.phase, Phase::Invocation | Phase::AuditInvocation);
         if next_family && task.phase == Phase::Consent {
             // An uninvoked consent stamp is not a provider call. Preserve all
@@ -1215,6 +1245,7 @@ pub(super) fn stop(
             InvestigationStopReason::Cancelled | InvestigationStopReason::ConsentDeclined
         );
     let unknown = terminal == InvestigationStopReason::OutcomeUnknown;
+    task.pending_correction = None;
     task.phase = Phase::Terminal;
     mark_inspection_not_assessed(task);
     task.pending = None;
@@ -1404,6 +1435,12 @@ pub(super) fn validate_response(
     task: &StoredTask,
     response: &InvestigationResponseMeta,
 ) -> Result<(PendingInvestigationStep, InvestigationUsage), InvestigationStoreError> {
+    if let Some(telemetry) = &response.finish_telemetry {
+        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27 {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        telemetry.validate()?;
+    }
     let id = &task.detail.summary.investigation_id;
     let pending = task
         .pending

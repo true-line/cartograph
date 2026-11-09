@@ -925,9 +925,28 @@ pub(super) fn append_for_task(
     request: &StagedObligationRequest,
     input: &InvestigationInput,
     finish: &StagedFinish,
+    response: InvestigationResponseMeta,
+    attempts: &[AttemptRecord],
+    basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
+) -> Result<RefusalDisposition, InvestigationStoreError> {
+    append_for_task_with_merge(
+        tx, namespace, execution, task, request, input, finish, response, attempts, basis, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_for_task_with_merge(
+    tx: &Transaction<'_>,
+    namespace: &ExecutionNamespace,
+    execution: &JobExecution,
+    task: &StoredTask,
+    request: &StagedObligationRequest,
+    input: &InvestigationInput,
+    finish: &StagedFinish,
     mut response: InvestigationResponseMeta,
     attempts: &[AttemptRecord],
     basis: Option<&admission_journal::AuthenticatedCompletionBasis>,
+    merged: Option<&super::volatile_patch::MergeAuthority>,
 ) -> Result<RefusalDisposition, InvestigationStoreError> {
     if response.finish_feedback_witness.is_some() {
         return Err(InvestigationStoreError::Invalid);
@@ -1005,7 +1024,11 @@ pub(super) fn append_for_task(
         serde_json::to_value(&finish.action)
     }
     .map_err(|_| InvestigationStoreError::Invalid)?;
-    if response.action_hash != core_prov::content_hash(&encode(&canonical, MAX_ACTION_BYTES)?) {
+    if let Some(merged) = merged {
+        merged.validate(task, finish, &response)?;
+    } else if task.pending_patch().is_some()
+        || response.action_hash != core_prov::content_hash(&encode(&canonical, MAX_ACTION_BYTES)?)
+    {
         return Err(InvestigationStoreError::Invalid);
     }
     if (feedback.citation_correction.is_some() || feedback.prose_correction.is_some())
@@ -1015,7 +1038,7 @@ pub(super) fn append_for_task(
         && request.specialist_id != "domain-analyst@23"
         && !matches!(
             request.specialist_id.as_str(),
-            "domain-analyst@24" | "domain-analyst@25" | "domain-analyst@26"
+            "domain-analyst@24" | "domain-analyst@25" | "domain-analyst@26" | "domain-analyst@27"
         )
     {
         return Err(InvestigationStoreError::Invalid);

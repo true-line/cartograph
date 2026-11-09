@@ -17,6 +17,8 @@ mod disclosure_workspace;
 #[path = "enumeration_claims/guard.rs"]
 mod enumeration_claims;
 mod finding_review;
+#[doc(hidden)]
+pub mod finish_patch;
 mod input;
 mod inspection;
 mod inventory_workspace;

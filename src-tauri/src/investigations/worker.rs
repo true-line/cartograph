@@ -271,6 +271,7 @@ fn run_inner<R: tauri::Runtime>(
             .investigation_owned_runtime(&execution, &id)?;
         clock.set_active_limit(detail.limits.active_seconds);
         let mut worker = Worker {
+            pending_patch: None,
             app: &app,
             state: &state,
             id: &id,
@@ -355,6 +356,7 @@ struct Worker<'a, R: tauri::Runtime> {
     audit_probe: Option<&'a AuditProbe<'a>>,
     clock: &'a mut RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
+    pending_patch: Option<agents::investigation::finish_patch::VolatileFinish>,
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
@@ -476,7 +478,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     self.id,
                     completion_request.ok_or(HostError::InvalidInput)?,
                 )?;
-                if snapshot.ledger() != &context.ledger {
+                if snapshot.ledger() != &context.ledger
+                    || snapshot.patch() != self.pending_patch.as_ref().map(|held| held.basis())
+                {
+                    self.pending_patch = None;
                     return Err(HostError::InputChanged.into());
                 }
                 self.detail = snapshot.detail().clone();
@@ -891,6 +896,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             }
             let response = InvestigationResponseMeta {
                 finish_feedback_witness: None,
+                finish_telemetry: None,
                 step_id: step_id.clone(),
                 response_hash: content_hash(completion.text.as_bytes()),
                 action_hash,
@@ -1591,6 +1597,7 @@ pub(super) fn handle_gated_response(
         .unwrap()
         .mode;
     let mut worker = Worker {
+        pending_patch: None,
         app,
         state: &state,
         id: saved.id(),

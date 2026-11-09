@@ -188,6 +188,7 @@ impl CapturedSourceInvocationFixture {
                 "limitations":["Only selected material was considered."]}});
             let response = InvestigationResponseMeta {
                 finish_feedback_witness: None,
+                finish_telemetry: None,
                 step_id: format!("step-{}", invoked.usage.model_invocations),
                 response_hash: core_prov::content_hash(
                     format!("partial fixture response {turn}").as_bytes(),

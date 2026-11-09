@@ -252,6 +252,7 @@ impl Fixture {
         };
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: self.seed.step.step_id.clone(),
             response_hash: content_hash(b"complete scripted metadata action"),
             action_hash: content_hash(&serde_json::to_vec(&original).unwrap()),

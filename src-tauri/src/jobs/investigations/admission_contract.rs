@@ -215,11 +215,22 @@ impl SavedCallBasis {
         if task.detail.summary.specialist_id.uses_acquisition_choices() {
             let choices = completion::SavedMetadataHistory::load(connection, task)?
                 .current_choices(ledger, metadata)?;
+            let patch = super::volatile_patch::authenticate(connection, task)?;
+            if value
+                .admission
+                .acquisition
+                .as_ref()
+                .and_then(|s| s.finish_patch.as_ref())
+                != patch.as_ref()
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
             if choices
                 .as_ref()
                 .map(|c| {
-                    super::policy_for_detail(&task.detail)
-                        .map(|p| p.local_finish_generation() && c.attempts_complete())
+                    super::policy_for_detail(&task.detail).map(|p| {
+                        p.local_finish_generation() && (c.attempts_complete() || patch.is_some())
+                    })
                 })
                 .transpose()?
                 != value

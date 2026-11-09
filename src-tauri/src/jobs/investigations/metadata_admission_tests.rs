@@ -189,6 +189,7 @@ impl Fixture {
         };
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: saved.step.step_id.clone(),
             response_hash: core_prov::content_hash(b"complete bounded action response"),
             action_hash: core_prov::content_hash(&encode(&original, MAX_ACTION_BYTES).unwrap()),

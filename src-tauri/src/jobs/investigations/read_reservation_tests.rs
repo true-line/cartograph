@@ -679,6 +679,13 @@ fn local_finish_reservation_requires_exact_saved_policy_and_reopens() {
     );
     assert_eq!(serde_json::to_vec(&reopened).unwrap(), bytes);
     reopened.validate_task_policy(&detail).unwrap();
+    // AC-0572: @27 explicitly inherits the same authenticated local policy.
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV27;
+    reopened.validate_task_policy(&detail).unwrap();
+    assert_eq!(
+        super::policy_for_detail(&detail).unwrap().limits(),
+        policy.limits()
+    );
     let mut missing = reopened.clone();
     missing.binding.effective_limits = None;
     assert!(missing.validate_task_policy(&detail).is_err());
@@ -719,6 +726,7 @@ fn local_finish_step_ceiling_distinguishes_mode_and_preserves_v2() {
             .as_mut()
             .unwrap()
             .acquisition = Some(agents::investigation::AcquisitionAdmission {
+            finish_patch: None,
             finish_policy_complete: mode == CompletionCallMode::FinishOnly,
             capacity_exhausted: false,
             finish_reason: None,

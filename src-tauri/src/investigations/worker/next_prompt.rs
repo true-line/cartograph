@@ -20,18 +20,26 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .coverage
             .as_ref()
             .ok_or(HostError::InvalidInput)?;
-        let action = ProgressiveInvestigationAction::decode_resolved_detailed_for_specialist(
-            &completion.text,
-            &context.context_id,
-            &request.intent_hash_with_policy(policy)?,
-            input.ledger(),
-            policy,
-            self.detail.summary.specialist_id,
-        )
-        .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?;
+        let held = self.pending_patch.take();
+        let is_patch = held.is_some();
+        let action = if is_patch {
+            None
+        } else {
+            Some(
+                ProgressiveInvestigationAction::decode_resolved_detailed_for_specialist(
+                    &completion.text,
+                    &context.context_id,
+                    &request.intent_hash_with_policy(policy)?,
+                    input.ledger(),
+                    policy,
+                    self.detail.summary.specialist_id,
+                )
+                .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?,
+            )
+        };
         let original: serde_json::Value = serde_json::from_str(&completion.text)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-        let refusal = if let CompletionInvestigationAction::Read(read) = &action
+        let refusal = if let Some(CompletionInvestigationAction::Read(read)) = &action
             && mode == staged_refusal::CompletionCallMode::Choice
         {
             let reason = if !input.permits_acquisition(read) {
@@ -59,6 +67,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         };
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
             action_hash: content_hash(&bounded_json(&original, 32 * 1024)?),
@@ -98,7 +107,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         // Read the current revision once so a cancellation during the call can
         // retain a valid late finish (AC-0187). The writer authenticates the
         // original saved call/input; this does not rebase an acquisition.
-        let detail = {
+        let (detail, patch) = {
             let mut jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
             let current = jobs.investigation_owned_detail(self.execution, self.id)?;
             if terminal(current.summary.status) {
@@ -120,7 +129,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             }
             // The writer also requires Invocation and authenticates the exact
             // saved step/input, so the cancellation exception cannot rebind it.
-            jobs.admit_next_prompt_finish(
+            let detail = jobs.admit_next_prompt_finish_with_patch(
                 self.execution,
                 current.summary.revision,
                 &crate::jobs::investigations::NextPromptFinish {
@@ -130,8 +139,21 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     current: input,
                     current_prepared: prepared,
                 },
-            )?
+                held,
+                is_patch.then_some(completion.text.as_str()),
+            )?;
+            let patch = jobs.investigation_pending_patch(self.execution, self.id)?;
+            (detail, patch)
         };
+        if let Some(patch) = patch {
+            let Some(CompletionInvestigationAction::Finish(finish)) = action else {
+                return Err(HostError::InvalidInput.into());
+            };
+            self.pending_patch = Some(
+                agents::investigation::finish_patch::VolatileFinish::capture(finish, patch)
+                    .map_err(|_| HostError::InvalidInput)?,
+            );
+        }
         self.detail = detail;
         super::super::emit_changed(self.app, &self.detail);
         Ok(true)

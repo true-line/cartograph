@@ -218,6 +218,7 @@ impl Fixture {
         let canonical = serde_json::to_value(&finish.action).unwrap();
         let response = InvestigationResponseMeta {
             finish_feedback_witness: None,
+            finish_telemetry: None,
             step_id: "finish-step".into(),
             response_hash: core_prov::content_hash(b"observed-complete-response"),
             action_hash: core_prov::content_hash(&serde_json::to_vec(&canonical).unwrap()),

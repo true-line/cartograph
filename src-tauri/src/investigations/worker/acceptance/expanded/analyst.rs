@@ -108,6 +108,15 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
     collect_role(authority, "analyst")
 }
 fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "domain-analyst@27" || saved == SpecialistId::DomainAnalystV27 {
+        if frozen != "domain-analyst@27"
+            || saved != SpecialistId::DomainAnalystV27
+            || role != "analyst"
+        {
+            return Err("Finding withholding receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist27-prompt14-disclosure6-result7");
+    }
     if frozen == "domain-analyst@26" || saved == SpecialistId::DomainAnalystV26 {
         if frozen != "domain-analyst@26"
             || saved != SpecialistId::DomainAnalystV26
@@ -203,11 +212,24 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
         authority.manifest_hash,
         role,
     )?;
-    if let Some(expected) = authority.run_limits {
-        let jobs =
-            JobStore::open(authority.app_data.join("state.db")).map_err(|e| e.to_string())?;
+    bind_run_limits(
+        &mut receipt,
+        authority.app_data,
+        authority.analyst_id,
+        authority.run_limits,
+    )?;
+    Ok(receipt)
+}
+fn bind_run_limits(
+    receipt: &mut Value,
+    app_data: &Path,
+    analyst_id: &str,
+    expected: Option<super::vendure_prepare::RunLimits>,
+) -> Result<(), String> {
+    if let Some(expected) = expected {
+        let jobs = JobStore::open(app_data.join("state.db")).map_err(|e| e.to_string())?;
         if jobs
-            .captured_run_limits(authority.analyst_id)
+            .captured_run_limits(analyst_id)
             .map_err(|e| e.to_string())?
             != Some((expected.active_seconds, expected.request_timeout_ms))
         {
@@ -215,7 +237,7 @@ pub(super) fn collect_role(authority: &Authority<'_>, role: &str) -> Result<Valu
         }
         receipt["run_limits"] = serde_json::to_value(expected).map_err(|e| e.to_string())?;
     }
-    Ok(receipt)
+    Ok(())
 }
 
 fn collect_saved(
@@ -932,7 +954,7 @@ fn copied_historical_analyst_receipt_reopens_byte_identically() {
     );
     drop(source);
     drop(destination);
-    let fresh = collect_saved(
+    let mut fresh = collect_saved(
         copied.path(),
         start["analyst_id"].as_str().unwrap(),
         &request,
@@ -941,7 +963,22 @@ fn copied_historical_analyst_receipt_reopens_byte_identically() {
         "analyst",
     )
     .unwrap();
-    assert!(fresh.get("finish_diagnostics").is_none());
+    // Reuse the production receipt projection, including authenticated frozen
+    // time overrides. Never copy an expected field out of the old receipt.
+    bind_run_limits(
+        &mut fresh,
+        copied.path(),
+        start["analyst_id"].as_str().unwrap(),
+        serde_json::from_value(definition.get("run_limits").cloned().unwrap_or(Value::Null))
+            .unwrap(),
+    )
+    .unwrap();
+    let captured: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(
+        fresh.get("finish_diagnostics"),
+        captured.get("finish_diagnostics"),
+        "historical diagnostic presence or content changed"
+    );
     assert!(
         saved == bytes(&fresh).unwrap(),
         "historical receipt bytes changed"

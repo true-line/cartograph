@@ -307,6 +307,8 @@ impl StoredSemanticAudit {
             step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
+        let basis =
+            admission_journal::AuthenticatedCompletionBasis::load(connection, task, step_id)?;
         if step.step_id != *step_id
             || response.step_id != *step_id
             // Ordinary candidates reproduce the original action. A projected
@@ -314,14 +316,13 @@ impl StoredSemanticAudit {
             // host witness against this independently loaded response and prior
             // correction, including the projected result hash.
             || (candidate.completion.as_ref().and_then(|c| c.withholding.as_ref()).is_none()
+                && basis.as_ref().is_none_or(|b| b.patch().is_none())
                 && response.action_hash != candidate_action_hash(candidate)?)
             || response.observed_model != candidate.observed_response_model
         {
             return Err(InvestigationStoreError::Invalid);
         }
         let ledger = load_ledger(connection, task)?.ok_or(InvestigationStoreError::Invalid)?;
-        let basis =
-            admission_journal::AuthenticatedCompletionBasis::load(connection, task, step_id)?;
         validate_step_basis(connection, task, &step)?;
         validate_result_basis(
             candidate,
@@ -427,7 +428,9 @@ impl StoredSemanticAudit {
                         CompletionOutcome::FindingsWithheldAfterCorrection => {
                             !matches!(
                                 task.detail.summary.specialist_id,
-                                SpecialistId::DomainAnalystV25 | SpecialistId::DomainAnalystV26
+                                SpecialistId::DomainAnalystV25
+                                    | SpecialistId::DomainAnalystV26
+                                    | SpecialistId::DomainAnalystV27
                             ) || c.withholding.is_none()
                         }
                         _ => true,
@@ -655,8 +658,24 @@ pub(super) fn hold_candidate(
         candidate: Some(candidate),
         candidate_hash: Some(candidate_hash),
     });
+    // Admission has resolved the one-turn merge. An audit candidate is not a
+    // pending patch and must never grant patch resumption on reopen.
+    task.pending_correction = None;
     task.phase = Phase::AuditPending;
     task.semantic_audit.as_ref().unwrap().validate(task)
+}
+
+#[cfg(test)]
+pub(super) fn fixture_enabled_account(
+    task: &StoredTask,
+) -> Result<StoredSemanticAudit, InvestigationStoreError> {
+    Ok(StoredSemanticAudit {
+        schema_version: 2,
+        account: SemanticAuditAccount::new(&task.detail.limits)?
+            .analyst_usage(&task.detail.usage, &task.detail.limits)?,
+        candidate: None,
+        candidate_hash: None,
+    })
 }
 
 #[cfg(test)]

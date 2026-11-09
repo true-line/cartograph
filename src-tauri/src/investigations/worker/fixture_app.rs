@@ -136,6 +136,7 @@ impl FixtureApp {
             let detail = read_detail(&state, id, execution).unwrap();
             let request = FrozenContext::completion_acquisition_request(staged).unwrap();
             let mut worker = Worker {
+                pending_patch: None,
                 app,
                 state: &state,
                 id,

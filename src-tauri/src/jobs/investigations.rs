@@ -72,6 +72,8 @@ mod finding_reviews;
 mod refusal_diagnostics;
 #[path = "investigations/staged.rs"]
 mod staged;
+#[path = "investigations/volatile_patch.rs"]
+mod volatile_patch;
 pub(crate) use finding_reviews::FindingReviewError;
 #[path = "investigations/semantic_audit_journal.rs"]
 mod semantic_audit_journal;
@@ -310,6 +312,8 @@ pub(crate) struct InvestigationResponseMeta {
     /// partial-projection digest in its distinct domain. Absent historically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_feedback_witness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_telemetry: Option<volatile_patch::FinishTelemetry>,
     pub step_id: String,
     pub response_hash: String,
     pub action_hash: String,
@@ -804,6 +808,9 @@ struct StoredTask {
     admission_state: Option<admission_contract::StoredAdmissionState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion_intent: Option<completion::CompletionIntent>,
+    /// Text-free authority only; the candidate exists solely in the live worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_correction: Option<volatile_patch::CorrectionMode>,
     nonce: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mcp_intent_hash: Option<String>,
@@ -850,7 +857,10 @@ pub(crate) fn policy_for_detail(
     }
     if policy.local_finish_generation()
         && !(detail.origin == InvestigationOrigin::App
-            && detail.summary.specialist_id == SpecialistId::DomainAnalystV26
+            && matches!(
+                detail.summary.specialist_id,
+                SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+            )
             && detail.summary.provider_mode == InvestigationProviderMode::Local
             && detail.provider.mode == InvestigationProviderMode::Local)
     {
@@ -942,7 +952,10 @@ impl JobStore {
         {
             if !next_prompt
                 || mcp.is_some()
-                || request.specialist_id != SpecialistId::DomainAnalystV26
+                || !matches!(
+                    request.specialist_id,
+                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+                )
                 || request.provider_mode != InvestigationProviderMode::Local
                 || provider.is_none_or(|p| p.mode != InvestigationProviderMode::Local)
             {
@@ -1123,6 +1136,7 @@ impl JobStore {
                 current_call: None,
             }),
             completion_intent: completion_intent.clone(),
+            pending_correction: None,
             nonce: request.request_nonce.clone(),
             mcp_intent_hash: mcp.map(|identity| identity.normalized_intent_hash.clone()),
             intent_hash,
