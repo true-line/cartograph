@@ -86,6 +86,10 @@ pub(in super::super) enum InputPolicy {
     FrozenVendure,
     #[cfg(test)]
     OfflineFixture,
+    /// #1725 side experiment: a pinned OSS estate closure, bound only by its
+    /// own manifest and proof (no frozen Vendure identity).
+    #[cfg(test)]
+    PinnedEstate,
 }
 struct CodeBinding {
     code_revision: String,
