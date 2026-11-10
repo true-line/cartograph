@@ -221,6 +221,9 @@ impl LlmProvider for ObservedProvider {
     fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
         self.inner.bounded_profile()
     }
+    fn supports_bounded_response_schema(&self) -> bool {
+        self.inner.supports_bounded_response_schema()
+    }
     fn complete_bounded(
         &self,
         request: &AuthorizedBoundedCompletion,
@@ -765,8 +768,13 @@ pub(in super::super) fn sealed_checks_with_policy(
         let Some(disclosure) = step.disclosure.as_ref() else {
             return Err("Invocation disclosure missing.".into());
         };
+        // The caller has authenticated the saved request/task binding. Acquisition
+        // disclosures additionally require that exact role, not generic shape validation.
+        let role: SpecialistId =
+            serde_json::from_value(Value::String(request.specialist_id.clone()))
+                .map_err(|_| "Invalid saved specialist identity.".to_owned())?;
         disclosure
-            .validate_with_policy(ledger, policy)
+            .validate_saved_role_shape(ledger, policy, role)
             .map_err(|error| error.to_string())?;
         bound &= disclosure.schema_version == if request.schema_version == 7 { 6 } else { 4 }
             && disclosure.completion_contract_hash.as_ref() == Some(&contract_hash)

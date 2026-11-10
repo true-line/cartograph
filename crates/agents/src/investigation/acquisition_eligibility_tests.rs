@@ -778,6 +778,7 @@ fn dump_analyst_schema_variants() {
     // after the current ledger loses its citations, and (where exploration
     // remains) the unknown-ID recovery chain production uses.
     let unknown = |choices: &AcquisitionChoices| ActionRefusalFeedback {
+        query_budget: None,
         reason: ActionRefusalReason::UnknownAnchor,
         invocation_ordinal: 1,
         action_hash: "a".repeat(64),

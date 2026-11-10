@@ -1255,6 +1255,7 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
         .with_acquisition_admission(
             finish_choices,
             Some(ActionRefusalFeedback {
+                query_budget: None,
                 reason: ActionRefusalReason::ActionNotOffered,
                 invocation_ordinal: 1,
                 action_hash: "a".repeat(64),
@@ -1435,4 +1436,55 @@ fn large_history_admission_schema_and_choices_preserve_effective_policy() {
             serde_json::to_value(policy.limits()).unwrap()
         );
     }
+}
+
+// AC-0585: only the exact host-offered obligation node at MAX_QUERY_BYTES
+// is irreducible; the worker must terminate its budget failure immediately.
+#[test]
+fn auditor12_irreducible_page_requires_exact_maximum_offered_obligation() {
+    let role = SpecialistId::EvidenceAuditorV12;
+    let f = Fixture::new(role, 7);
+    let contract = InvestigationCompletionContract {
+        schema_version: 1,
+        request_hash: f.metadata.request_hash.clone(),
+        obligations_hash: f.metadata.obligations_hash.clone(),
+        obligations: f.request.obligations.clone(),
+    };
+    let choices = acquisition_choices::AcquisitionChoices::derive(
+        &contract,
+        &f.metadata,
+        "task",
+        &f.ledger,
+        &[],
+        &INVESTIGATION_V2_POLICY,
+    )
+    .unwrap();
+    let acquisition_choices::AcquisitionAction::QueryContext { query, .. } =
+        choices.entries()[0].action.clone()
+    else {
+        panic!("expected obligation query")
+    };
+    let input = f
+        .build(
+            role,
+            &usage(CompletionCallMode::Choice),
+            CompletionCallMode::Choice,
+            0,
+            None,
+        )
+        .unwrap();
+    assert!(!input.is_maximum_obligation_query(&query));
+    let input = input
+        .with_acquisition_choices(std::sync::Arc::new(choices))
+        .unwrap();
+    assert_eq!(query.max_bytes, MAX_QUERY_BYTES);
+    assert!(input.is_maximum_obligation_query(&query));
+    let mut smaller = query.clone();
+    smaller.max_bytes -= 1;
+    assert!(!input.is_maximum_obligation_query(&smaller));
+    let mut other = query;
+    other.scope = InvestigationScope::Node {
+        id: "not-offered".into(),
+    };
+    assert!(!input.is_maximum_obligation_query(&other));
 }

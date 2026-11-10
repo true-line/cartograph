@@ -36,6 +36,7 @@ fn available_specialists() -> Vec<SpecialistId> {
             SpecialistId::DomainAnalystV11,
             SpecialistId::DomainAnalystV12,
             SpecialistId::EvidenceAuditorV11,
+            SpecialistId::EvidenceAuditorV12,
             SpecialistId::DomainAnalystV18, // Preserve historical catalog entry.
             SpecialistId::DomainAnalystV19,
             SpecialistId::DomainAnalystV20,
@@ -83,6 +84,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                         SpecialistId::DomainAnalystV11,
                         SpecialistId::DomainAnalystV12,
                         SpecialistId::EvidenceAuditorV11,
+                        SpecialistId::EvidenceAuditorV12,
                         SpecialistId::DomainAnalystV18,
                         SpecialistId::DomainAnalystV19,
                         SpecialistId::DomainAnalystV20,

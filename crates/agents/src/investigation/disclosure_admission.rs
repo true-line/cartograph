@@ -72,9 +72,12 @@ pub enum ActionRefusalReason {
     CursorContext,
     CursorOffset,
     QueryLimit,
+    QueryPageBudget,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActionRefusalFeedback {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_budget: Option<query_refusal::QueryBudgetDiagnostic>,
     pub reason: ActionRefusalReason,
     pub invocation_ordinal: u32,
     pub action_hash: String,
@@ -82,6 +85,12 @@ pub struct ActionRefusalFeedback {
 }
 impl ActionRefusalFeedback {
     pub fn stamp_hash(&self) -> Result<String, InvestigationError> {
+        if (self.reason == ActionRefusalReason::QueryPageBudget) != self.query_budget.is_some() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        if let Some(budget) = self.query_budget {
+            budget.validate()?;
+        }
         if self.invocation_ordinal == 0
             || !crate::source_basis::hash(&self.action_hash)
             || !crate::source_basis::hash(&self.choices_hash)

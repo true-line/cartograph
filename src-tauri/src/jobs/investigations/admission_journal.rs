@@ -179,6 +179,7 @@ impl Entry {
             return None;
         };
         Some(ActionFeedback {
+            query_budget: None,
             reason,
             invocation_ordinal: self.call.invocation_ordinal,
             action_hash: self.response.action_hash.clone(),
@@ -504,6 +505,7 @@ fn timeline(
                     result.query_feedback.insert(
                         ordinal,
                         ActionFeedback {
+                            query_budget: record.budget,
                             reason: record.feedback_reason(),
                             invocation_ordinal: ordinal,
                             action_hash: record.action_hash.clone(),

@@ -129,7 +129,7 @@ fn admission_family_public_decoder_rejects_mixed_tuples_and_unknown_authority() 
             "domain-analyst@7",
             "evidence-auditor@8",
             "domain-analyst@9",
-            "evidence-auditor@12",
+            "evidence-auditor@13",
         ] {
             let mut wrong = value.clone();
             wrong["specialist_id"] = role.into();

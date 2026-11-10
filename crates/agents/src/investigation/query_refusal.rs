@@ -14,9 +14,70 @@ pub enum QueryRejection {
     CursorContextMismatch,
     InvalidCursorOffset,
     InvalidLimit,
+    PageBudget,
+}
+
+/// Text-free measurement of the specific page envelope that could not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryBudgetStage {
+    QualificationEnvelope,
+    CorePage,
+    EvidenceOptionsEnvelope,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredBytesKind {
+    Exact,
+    AtLeast,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryBudgetDiagnostic {
+    pub stage: QueryBudgetStage,
+    pub requested_bytes: usize,
+    pub effective_bytes: usize,
+    pub required_bytes: usize,
+    pub required_bytes_kind: RequiredBytesKind,
+}
+impl QueryBudgetDiagnostic {
+    /// Sizing-only maximum wire fields; never a genuine observation.
+    pub(crate) fn reservation() -> Self {
+        Self {
+            stage: QueryBudgetStage::EvidenceOptionsEnvelope,
+            requested_bytes: usize::MAX,
+            effective_bytes: usize::MAX,
+            required_bytes: usize::MAX,
+            required_bytes_kind: RequiredBytesKind::AtLeast,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), InvestigationError> {
+        if self.requested_bytes == 0
+            || self.requested_bytes > MAX_QUERY_BYTES
+            || self.effective_bytes == 0
+            || self.effective_bytes > self.requested_bytes
+            || self.required_bytes <= self.effective_bytes
+            || (self.stage != QueryBudgetStage::CorePage
+                && self.effective_bytes != self.requested_bytes)
+            || (self.stage == QueryBudgetStage::EvidenceOptionsEnvelope
+                && (self.required_bytes_kind != RequiredBytesKind::AtLeast
+                    || self.effective_bytes.checked_add(1) != Some(self.required_bytes)))
+            || (self.stage == QueryBudgetStage::CorePage
+                && self.required_bytes_kind == RequiredBytesKind::AtLeast
+                && self.effective_bytes.checked_add(1) != Some(self.required_bytes))
+            || (self.stage == QueryBudgetStage::QualificationEnvelope
+                && self.required_bytes_kind != RequiredBytesKind::AtLeast)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
 }
 
 /// A refused selection is not a successful page or an obligation acquisition.
+/// Schema 3 versions this query-refusal wire record only; it is unrelated to
+/// source reservation schema 3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRefusalRecord {
@@ -30,8 +91,21 @@ pub struct QueryRefusalRecord {
     pub context_id: Option<String>,
     pub query: InvestigationQuery,
     pub reason: QueryRejection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<QueryBudgetDiagnostic>,
 }
 impl QueryRefusalRecord {
+    fn valid_budget_shape(&self) -> bool {
+        match (self.schema_version, self.reason, self.budget) {
+            (1 | 2, QueryRejection::PageBudget, _) => false,
+            (1 | 2, _, None) => true,
+            (3, QueryRejection::PageBudget, Some(budget)) => {
+                budget.requested_bytes == self.query.max_bytes && budget.validate().is_ok()
+            }
+            _ => false,
+        }
+    }
+
     /// V1 preserves its historical feedback bytes. V2 discloses the closed
     /// diagnostic already authenticated in the event, without model text or IDs.
     pub fn feedback_reason(&self) -> ActionRefusalReason {
@@ -46,6 +120,7 @@ impl QueryRefusalRecord {
             QueryRejection::CursorContextMismatch => ActionRefusalReason::CursorContext,
             QueryRejection::InvalidCursorOffset => ActionRefusalReason::CursorOffset,
             QueryRejection::InvalidLimit => ActionRefusalReason::QueryLimit,
+            QueryRejection::PageBudget => ActionRefusalReason::QueryPageBudget,
         }
     }
 
@@ -90,7 +165,8 @@ impl QueryRefusalRecord {
             .coverage
             .as_ref()
             .map(|proof| proof.context_id.as_str());
-        if !matches!(self.schema_version, 1 | 2)
+        if !self.valid_budget_shape()
+            || (self.schema_version == 3 && !specialist.uses_query_budget_refusals())
             || !records::opaque_id(task_id)
             || !records::opaque_id(step_id)
             || self.task_id != task_id
@@ -117,7 +193,7 @@ impl InvestigationEvent {
                 if self.investigation_id == record.task_id
                     && self.step_id.as_deref() == Some(record.step_id.as_str())
                     && self.tool == Some(InvestigationTool::QueryContext)
-                    && matches!(record.schema_version, 1 | 2)
+                    && record.valid_budget_shape()
                     && record.record_id == record.content_id()? =>
             {
                 Ok(())
@@ -138,7 +214,7 @@ impl QueryRejection {
             | Self::CursorSelectionMismatch
             | Self::CursorContextMismatch
             | Self::InvalidCursorOffset => query.cursor.is_some(),
-            Self::InvalidLimit => true,
+            Self::InvalidLimit | Self::PageBudget => true,
         }
     }
 }
@@ -149,6 +225,7 @@ mod tests {
     fn fixture() -> (QueryRefusalRecord, InvestigationInputLedger) {
         let ledger = super::super::tests::ledger();
         let mut record = QueryRefusalRecord {
+            budget: None,
             schema_version: 1,
             record_id: String::new(),
             task_id: "task-1".into(),
@@ -188,6 +265,128 @@ mod tests {
             &INVESTIGATION_V1_POLICY,
         )
     }
+    // AC-0585: new numeric feedback cannot enter a historical role/version.
+    #[test]
+    fn auditor12_query_budget_record_is_closed_bound_and_legacy_safe() {
+        let (mut record, ledger) = fixture();
+        let legacy = serde_json::to_value(&record).unwrap();
+        assert!(legacy.get("budget").is_none());
+        record.schema_version = 3;
+        record.reason = QueryRejection::PageBudget;
+        record.budget = Some(QueryBudgetDiagnostic {
+            stage: QueryBudgetStage::CorePage,
+            requested_bytes: record.query.max_bytes,
+            effective_bytes: 5386,
+            required_bytes: 7061,
+            required_bytes_kind: RequiredBytesKind::Exact,
+        });
+        record.record_id = record.content_id().unwrap();
+        let check = |r: &QueryRefusalRecord, role| {
+            r.validate_binding(
+                "task-1",
+                "step-1",
+                &record.action_hash,
+                &ledger,
+                role,
+                &INVESTIGATION_V1_POLICY,
+            )
+        };
+        assert!(check(&record, SpecialistId::EvidenceAuditorV12).is_ok());
+        assert!(check(&record, SpecialistId::EvidenceAuditorV11).is_err());
+        for mutation in [
+            "version",
+            "missing_budget",
+            "over_maximum",
+            "reason",
+            "requested",
+            "effective",
+            "required",
+            "kind",
+        ] {
+            let mut changed = record.clone();
+            match mutation {
+                "version" => changed.schema_version = 2,
+                "missing_budget" => changed.budget = None,
+                "over_maximum" => {
+                    changed.query.max_bytes = MAX_QUERY_BYTES + 1;
+                    changed.budget.as_mut().unwrap().requested_bytes = MAX_QUERY_BYTES + 1;
+                    assert!(changed.budget.unwrap().validate().is_err());
+                }
+                "reason" => changed.reason = QueryRejection::InvalidLimit,
+                "requested" => changed.budget.as_mut().unwrap().requested_bytes -= 1,
+                "effective" => changed.budget.as_mut().unwrap().effective_bytes = usize::MAX,
+                "required" => changed.budget.as_mut().unwrap().required_bytes = 1,
+                "kind" => {
+                    changed.budget.as_mut().unwrap().required_bytes_kind =
+                        RequiredBytesKind::AtLeast
+                }
+                _ => unreachable!(),
+            }
+            changed.record_id = changed.content_id().unwrap();
+            assert!(
+                check(&changed, SpecialistId::EvidenceAuditorV12).is_err(),
+                "{mutation}"
+            );
+        }
+        let wire = serde_json::to_value(record.budget.unwrap()).unwrap();
+        assert_eq!(wire.as_object().unwrap().len(), 5);
+        let mut unknown = wire;
+        unknown["text"] = "forbidden".into();
+        assert!(serde_json::from_value::<QueryBudgetDiagnostic>(unknown).is_err());
+        let feedback = ActionRefusalFeedback {
+            query_budget: record.budget,
+            reason: ActionRefusalReason::QueryPageBudget,
+            invocation_ordinal: 1,
+            action_hash: record.action_hash.clone(),
+            choices_hash: "f".repeat(64),
+        };
+        assert!(feedback.stamp_hash().is_ok());
+        let mut changed = feedback.clone();
+        changed.query_budget.as_mut().unwrap().required_bytes += 1;
+        assert_ne!(
+            feedback.stamp_hash().unwrap(),
+            changed.stamp_hash().unwrap()
+        );
+        assert!(
+            serde_json::to_vec(&feedback.query_budget).unwrap().len()
+                <= serde_json::to_vec(&Some(QueryBudgetDiagnostic::reservation()))
+                    .unwrap()
+                    .len()
+        );
+    }
+
+    #[test]
+    fn auditor12_terminal_query_budget_wire_is_versioned_and_text_free() {
+        let budget = QueryBudgetDiagnostic {
+            stage: QueryBudgetStage::CorePage,
+            requested_bytes: 6000,
+            effective_bytes: 5386,
+            required_bytes: 7061,
+            required_bytes_kind: RequiredBytesKind::Exact,
+        };
+        for termination in [
+            QueryBudgetTermination::PageBudget,
+            QueryBudgetTermination::ToolActions,
+            QueryBudgetTermination::ModelInvocations,
+            QueryBudgetTermination::ActiveTime,
+        ] {
+            let diagnostic = InvestigationTerminalDiagnostic::QueryBudget {
+                termination,
+                budget,
+            };
+            let wire = serde_json::to_value(diagnostic).unwrap();
+            assert_eq!(wire["schema"], "investigation-terminal-diagnostic@2");
+            assert_eq!(wire.as_object().unwrap().len(), 3);
+            assert_eq!(
+                serde_json::from_value::<InvestigationTerminalDiagnostic>(wire.clone()).unwrap(),
+                diagnostic
+            );
+            let mut unknown = wire;
+            unknown["response"] = "forbidden".into();
+            assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(unknown).is_err());
+        }
+    }
+
     #[test]
     fn query_refusal_v2_reason_preserves_v1_projection_and_binds_version() {
         let (mut record, ledger) = fixture();
@@ -298,6 +497,7 @@ mod feedback_budget_tests {
     #[test]
     fn query_refusal_feedback_fits_existing_action_feedback_reservation() {
         let mut reserved = ActionRefusalFeedback {
+            query_budget: None,
             reason: ActionRefusalReason::ActionNotOffered,
             invocation_ordinal: INVESTIGATION_V2_POLICY.limits().model_invocations,
             action_hash: "f".repeat(64),

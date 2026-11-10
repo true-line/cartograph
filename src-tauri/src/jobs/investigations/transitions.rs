@@ -1261,6 +1261,50 @@ pub(super) fn stop(
     } else {
         InvestigationStatus::Failed
     };
+    // A cap is still the terminal cause. Preserve only the last authenticated
+    // refused page's numeric diagnostic, never the query or response text.
+    let query_cap = if terminal == InvestigationStopReason::LimitExceeded
+        && task
+            .detail
+            .summary
+            .specialist_id
+            .uses_query_budget_refusals()
+    {
+        use agents::investigation::{InvestigationTerminalDiagnostic, QueryBudgetTermination};
+        let termination = match reason {
+            InvestigationStopReason::StoreCapacity
+                if task.detail.usage.tool_actions >= task.detail.limits.tool_actions =>
+            {
+                Some(QueryBudgetTermination::ToolActions)
+            }
+            InvestigationStopReason::LimitExceeded
+                if task.detail.usage.model_invocations >= task.detail.limits.model_invocations =>
+            {
+                Some(QueryBudgetTermination::ModelInvocations)
+            }
+            InvestigationStopReason::HostLimit
+            | InvestigationStopReason::HostLimitAt {
+                limit: HostLimitKind::Unspecified,
+                ..
+            } if task.detail.usage.active_milliseconds
+                >= task.detail.limits.active_seconds.saturating_mul(1000) =>
+            {
+                Some(QueryBudgetTermination::ActiveTime)
+            }
+            _ => None,
+        };
+        match termination {
+            Some(termination) => super::query_refusal::latest(connection, task)?
+                .and_then(|record| record.budget)
+                .map(|budget| InvestigationTerminalDiagnostic::QueryBudget {
+                    termination,
+                    budget,
+                }),
+            None => None,
+        }
+    } else {
+        None
+    };
     task.detail.terminal_diagnostic = match reason {
         InvestigationStopReason::OperationalAt { phase, error_class } => Some(
             agents::investigation::InvestigationTerminalDiagnostic::Operational {
@@ -1268,7 +1312,16 @@ pub(super) fn stop(
                 error_class,
             },
         ),
-        _ => None,
+        InvestigationStopReason::HostLimitAt {
+            limit: HostLimitKind::QueryPageBudget(budget),
+            ..
+        } => Some(
+            agents::investigation::InvestigationTerminalDiagnostic::QueryBudget {
+                termination: agents::investigation::QueryBudgetTermination::PageBudget,
+                budget,
+            },
+        ),
+        _ => query_cap,
     };
     task.detail.error = Some(reason.message().into());
     bump(connection, task)?;

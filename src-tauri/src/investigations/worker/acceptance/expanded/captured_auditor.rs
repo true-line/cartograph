@@ -131,7 +131,10 @@ pub(super) fn stage(
     if expected.review_issue == 0
         || expected.binding != *parent.binding
         || wire(&normalized)? != wire(request)?
-        || request.specialist_id != "evidence-auditor@11"
+        || !matches!(
+            request.specialist_id.as_str(),
+            "evidence-auditor@11" | "evidence-auditor@12"
+        )
         || !request
             .obligations
             .obligations
@@ -139,9 +142,13 @@ pub(super) fn stage(
             .any(|o| matches!(o, obligations::Obligation::Inventory { .. }))
         || sources.is_empty()
         || expected.specialist
-            != SpecialistId::EvidenceAuditorV11
-                .definition()
-                .map_err(|e| e.to_string())?
+            != (if request.specialist_id == "evidence-auditor@12" {
+                SpecialistId::EvidenceAuditorV12
+            } else {
+                SpecialistId::EvidenceAuditorV11
+            })
+            .definition()
+            .map_err(|e| e.to_string())?
         || request.parent_id.as_deref() != Some(parent.analyst_id)
         || Some(conversation) != fresh["detail"]["conversation_id"].as_str()
         || request.scope != parent.request.scope
@@ -474,7 +481,14 @@ mod tests {
     fn captured_hosted_auditor_large_history_finishes_and_receipt_reopens() {
         exercise_auditor(Scenario::CloudComplete);
     }
+    #[test]
+    fn captured_auditor12_large_history_finishes_and_receipt_reopens() {
+        exercise_auditor_role(Scenario::CloudComplete, SpecialistId::EvidenceAuditorV12);
+    }
     fn exercise_auditor(scenario: Scenario) {
+        exercise_auditor_role(scenario, SpecialistId::EvidenceAuditorV11);
+    }
+    fn exercise_auditor_role(scenario: Scenario, role: SpecialistId) {
         let directory = tempfile::tempdir().unwrap();
         let provider = if matches!(scenario, Scenario::CloudComplete) {
             crate::investigations::worker::tests::completion_tests::expanded_large_scripted_provider(
@@ -514,7 +528,7 @@ mod tests {
         let result: InvestigationResult =
             serde_json::from_value(receipt["result"].clone()).unwrap();
         let mut request = prepared.auditor_request.clone();
-        request.specialist_id = "evidence-auditor@11".into();
+        request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
         let review_binding = json!({"schema":"cartograph-v7-semantic-review-binding@1",
             "protocol_sha256":parent.binding.protocol_hash,"run_id":parent.binding.run_id,
             "role":"analyst","receipt_sha256":sha(&read(&directory.path().join("analyst-receipt.json")).unwrap()),"rubric_sha256":"d".repeat(64)});
@@ -545,7 +559,7 @@ mod tests {
             rubric_sha256: "d".repeat(64),
             review_sha256: sha(&review),
             request,
-            specialist: SpecialistId::EvidenceAuditorV11.definition().unwrap(),
+            specialist: role.definition().unwrap(),
             provider: descriptor.clone(),
         };
         if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
@@ -660,10 +674,7 @@ mod tests {
         };
         let first = read_task();
         assert_eq!(first.summary.status, InvestigationStatus::Queued);
-        assert_eq!(
-            first.summary.specialist_id,
-            SpecialistId::EvidenceAuditorV11
-        );
+        assert_eq!(first.summary.specialist_id, role);
         assert_eq!(
             first.summary.parent_id.as_deref(),
             Some(prepared.analyst_id.as_str())
@@ -730,7 +741,14 @@ mod tests {
             };
             assert_eq!(actual["role"], "auditor");
             if matches!(scenario, Scenario::CloudComplete) {
-                assert_eq!(actual["detail"]["obligation_status"], "satisfied");
+                assert_eq!(
+                    actual["detail"]["obligation_status"],
+                    "satisfied",
+                    "status={} error={} usage={}",
+                    actual["detail"]["status"],
+                    actual["detail"]["error"],
+                    actual["detail"]["usage"]
+                );
                 assert!(actual["detail"]["terminal_diagnostic"].is_null());
                 let lines = read(&output.join("auditor-consent-log.jsonl")).unwrap();
                 let events: Vec<Value> = std::str::from_utf8(&lines)
@@ -776,7 +794,10 @@ mod tests {
                     assert_eq!(check, true);
                 }
             }
-            assert_eq!(actual["detail"]["specialist_id"], "evidence-auditor@11");
+            assert_eq!(
+                actual["detail"]["specialist_id"],
+                serde_json::to_value(role).unwrap()
+            );
             assert_eq!(actual["detail"]["parent_id"], prepared.analyst_id);
             let observations = provider.observations().unwrap();
             assert_eq!(

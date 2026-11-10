@@ -716,6 +716,7 @@ fn unknown_id_recovery_schema_is_bounded_and_preserves_legacy_feedback() {
         response_schema::select_acquisition(mode, &complete, &ledger, &f.contract.request_hash)
             .unwrap();
     let mut feedback = ActionRefusalFeedback {
+        query_budget: None,
         reason: ActionRefusalReason::QueryRejected,
         invocation_ordinal: 1,
         action_hash: "a".repeat(64),
