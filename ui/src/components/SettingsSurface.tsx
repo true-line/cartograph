@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState } from 'react';
+import { REPOSITORY_URL } from '../helpNotes';
 import { CoverageMatrix } from './CoverageMatrix';
 import type {
   AdapterInventory,
@@ -95,7 +96,7 @@ function ParallelismSetting({
 /** Request-adapter lane (epic #147): a prefilled issue names the adapter. */
 function requestAdapterUrl(language: string): string {
   const title = encodeURIComponent(`Adapter request: ${language}`);
-  return `https://github.com/qwts/cartograph/issues/new?title=${title}&labels=adapter-request`;
+  return `${REPOSITORY_URL}/issues/new?title=${title}&labels=adapter-request`;
 }
 
 /** Copy per configurable tier (handoff §Settings). */

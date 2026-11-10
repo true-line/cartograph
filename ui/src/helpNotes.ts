@@ -5,9 +5,14 @@
  * product's own honesty vocabulary, with a deep link for the full story.
  */
 
+/** Where the repository lives (#1760). Every link the UI builds starts here,
+ * so a move is a one-line change. The Rust shell holds the same value in
+ * `src-tauri/src/main.rs` (`REPOSITORY_URL`). */
+export const REPOSITORY_URL = 'https://github.com/true-line/cartograph';
+
 /** Until the in-app Help surface (#154/#155) ships, deep links land on the
  * published wiki, which is the same single-sourced content. */
-export const HELP_HOME = 'https://github.com/qwts/cartograph/wiki';
+export const HELP_HOME = `${REPOSITORY_URL}/wiki`;
 
 export interface HelpNote {
   /** The load-bearing term, as surfaces display it. */

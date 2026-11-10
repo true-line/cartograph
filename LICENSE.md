@@ -9,7 +9,7 @@ Required Notice: Copyright © 2026 zts1.com
 any *noncommercial* purpose — personal projects, research, education, and use by
 nonprofit or government organizations — at no cost. **Any commercial use
 requires a separate commercial license.** To obtain one, open an issue at
-<https://github.com/qwts/cartograph> or contact the maintainers at zts1.com.
+<https://github.com/true-line/cartograph> or contact the maintainers at zts1.com.
 
 This summary is for convenience only; the license text below controls. The name
 "Cartograph" and associated branding are not licensed by these terms.

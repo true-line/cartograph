@@ -19,6 +19,6 @@ test("question contact link opens a pre-labeled issue", () => {
 
   const issueRoute = new URL(url);
   assert.equal(issueRoute.origin, "https://github.com");
-  assert.equal(issueRoute.pathname, "/qwts/cartograph/issues/new");
+  assert.equal(issueRoute.pathname, "/true-line/cartograph/issues/new");
   assert.deepEqual(issueRoute.searchParams.getAll("labels"), ["question"]);
 });

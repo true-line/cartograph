@@ -2,8 +2,7 @@
 
 The eval set for this repository's agent primitives
 ([ENG-0006](https://github.com/qwts/agent-sop/blob/main/docs/decisions/ENG-0006-agentic-primitives-governance.md)
-item 4). A change to `AGENTS.md`, a vendor adapter (`CLAUDE.md`), a slash
-command, or a skill that claims to improve agent behavior cites evidence from
+item 4). A change to `AGENTS.md`, a slash command, or a skill that claims to improve agent behavior cites evidence from
 these tasks. "It reads better" is not evidence.
 
 ## How this set is used

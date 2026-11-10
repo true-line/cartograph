@@ -1,3 +1,4 @@
+import { REPOSITORY_URL } from '../helpNotes';
 import { CoverageMatrix } from './CoverageMatrix';
 import type {
   AdapterLookup,
@@ -29,7 +30,7 @@ export interface PreflightSurfaceProps {
  *  adapter — the unsupported finding's resolution path, not a dead end. */
 function requestAdapterUrl(language: string): string {
   const title = encodeURIComponent(`Adapter request: ${language}`);
-  return `https://github.com/true-line/cartograph/issues/new?title=${title}&labels=adapter-request`;
+  return `${REPOSITORY_URL}/issues/new?title=${title}&labels=adapter-request`;
 }
 
 function sourceName(source: AdapterSource): string {
