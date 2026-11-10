@@ -509,7 +509,15 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         loop {
             self.check_new_work()?;
             if self.detail.usage.model_invocations >= self.detail.limits.model_invocations {
-                return Err(Failure::Stop(InvestigationStopReason::LimitExceeded));
+                return Err(Failure::Stop(
+                    if request.specialist_id.uses_query_budget_refusals() {
+                        InvestigationStopReason::BudgetCap(
+                            agents::investigation::QueryBudgetTermination::ModelInvocations,
+                        )
+                    } else {
+                        InvestigationStopReason::LimitExceeded
+                    },
+                ));
             }
             if descriptor(provider, request.provider_mode)? != self.detail.provider {
                 return Err(Failure::Stop(InvestigationStopReason::ProviderFailure));
@@ -1168,7 +1176,22 @@ impl<R: tauri::Runtime> Worker<'_, R> {
     }
 
     fn check_new_work(&mut self) -> Result<(), Failure> {
-        self.clock.deadline()?;
+        self.clock.deadline().map_err(|error| {
+            if self
+                .detail
+                .summary
+                .specialist_id
+                .uses_query_budget_refusals()
+                && self.clock.active_milliseconds()
+                    >= self.detail.limits.active_seconds.saturating_mul(1000)
+            {
+                Failure::Stop(InvestigationStopReason::BudgetCap(
+                    agents::investigation::QueryBudgetTermination::ActiveTime,
+                ))
+            } else {
+                Failure::from(error)
+            }
+        })?;
         let jobs = self.state.jobs.lock().map_err(|_| HostError::Operational)?;
         let detail = jobs.investigation_owned_detail(self.execution, self.id)?;
         if detail.summary.job_id != self.execution.id() {

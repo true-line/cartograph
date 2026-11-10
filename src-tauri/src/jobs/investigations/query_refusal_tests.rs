@@ -174,7 +174,7 @@ fn query_refusal_journal_reopens_without_new_evidence_or_refunding_attempt() {
 // terminal projection with no query-refusal event; no numeric witness is invented.
 #[test]
 fn auditor12_caps_without_authenticated_budget_refusal_have_no_budget_diagnostic() {
-    for model_cap in [false, true] {
+    for (model_cap, explicit) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut fixture = Fixture::new();
         let (id, execution) =
             fixture.start("no-budget-refusal-cap", InvestigationProviderMode::Local);
@@ -190,6 +190,15 @@ fn auditor12_caps_without_authenticated_budget_refusal_have_no_budget_diagnostic
         } else {
             task.detail.usage.tool_actions = task.detail.limits.tool_actions;
             InvestigationStopReason::StoreCapacity
+        };
+        let reason = if explicit {
+            InvestigationStopReason::BudgetCap(if model_cap {
+                QueryBudgetTermination::ModelInvocations
+            } else {
+                QueryBudgetTermination::ToolActions
+            })
+        } else {
+            reason
         };
         assert!(super::query_refusal::latest(&tx, &task).unwrap().is_none());
         super::transitions::stop(&tx, &mut task, reason).unwrap();
@@ -239,4 +248,30 @@ fn auditor12_irreducible_page_budget_stops_without_refusal_record() {
         })
     );
     tx.rollback().unwrap();
+}
+
+// AC-0585: an expired clock or full counters cannot turn an unrelated stop
+// into a causal query-budget diagnostic. Only the exact cap boundary opts in.
+#[test]
+fn auditor12_query_budget_caps_require_exact_cause() {
+    use agents::investigation::QueryBudgetTermination as Cap;
+    for generic in [
+        InvestigationStopReason::HostLimit,
+        InvestigationStopReason::HostLimitAt {
+            phase: PreparationPhase::Query,
+            limit: HostLimitKind::Unspecified,
+        },
+        InvestigationStopReason::StoreCapacity,
+        InvestigationStopReason::LimitExceeded,
+    ] {
+        assert_eq!(super::transitions::query_budget_cap(generic), None);
+    }
+    for cap in [Cap::ToolActions, Cap::ModelInvocations, Cap::ActiveTime] {
+        let reason = InvestigationStopReason::BudgetCap(cap);
+        assert_eq!(super::transitions::query_budget_cap(reason), Some(cap));
+        assert_eq!(
+            reason.terminal_class(),
+            InvestigationStopReason::LimitExceeded
+        );
+    }
 }

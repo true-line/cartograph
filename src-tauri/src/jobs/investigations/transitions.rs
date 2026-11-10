@@ -1270,29 +1270,11 @@ pub(super) fn stop(
             .specialist_id
             .uses_query_budget_refusals()
     {
-        use agents::investigation::{InvestigationTerminalDiagnostic, QueryBudgetTermination};
-        let termination = match reason {
-            InvestigationStopReason::StoreCapacity
-                if task.detail.usage.tool_actions >= task.detail.limits.tool_actions =>
-            {
-                Some(QueryBudgetTermination::ToolActions)
-            }
-            InvestigationStopReason::LimitExceeded
-                if task.detail.usage.model_invocations >= task.detail.limits.model_invocations =>
-            {
-                Some(QueryBudgetTermination::ModelInvocations)
-            }
-            InvestigationStopReason::HostLimit
-            | InvestigationStopReason::HostLimitAt {
-                limit: HostLimitKind::Unspecified,
-                ..
-            } if task.detail.usage.active_milliseconds
-                >= task.detail.limits.active_seconds.saturating_mul(1000) =>
-            {
-                Some(QueryBudgetTermination::ActiveTime)
-            }
-            _ => None,
-        };
+        use agents::investigation::InvestigationTerminalDiagnostic;
+        // Generic host/store failures can coincide with exhausted counters.
+        // Only the exact worker cap check supplies this causal witness; never
+        // infer ActiveTime (or a tool/model cap) from an unrelated failure.
+        let termination = query_budget_cap(reason);
         match termination {
             Some(termination) => super::query_refusal::latest(connection, task)?
                 .and_then(|record| record.budget)
@@ -1554,4 +1536,15 @@ pub(super) fn validate_response(
     usage.active_milliseconds = response.active_milliseconds;
     validate_usage(&usage, &task.detail.limits)?;
     Ok((invoked, usage))
+}
+
+// No usage counters enter this projection: a coincident exhausted counter is
+// not evidence that an unrelated host/store error was caused by that cap.
+pub(super) fn query_budget_cap(
+    reason: InvestigationStopReason,
+) -> Option<agents::investigation::QueryBudgetTermination> {
+    match reason {
+        InvestigationStopReason::BudgetCap(cap) => Some(cap),
+        _ => None,
+    }
 }
