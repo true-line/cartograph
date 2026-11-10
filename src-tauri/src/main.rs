@@ -6336,6 +6336,11 @@ fn read_evidence(
     })
 }
 
+/// Where the repository lives (#1760). Every link the shell opens is built
+/// from this, so a move is a one-line change. The UI holds the same value in
+/// `ui/src/helpNotes.ts` (`REPOSITORY_URL`).
+const REPOSITORY_URL: &str = "https://github.com/true-line/cartograph";
+
 /// Open a URL in the system browser — never inside the webview (#154).
 fn open_external(url: &str) {
     let Some((program, args)) = url_launcher(std::env::consts::OS, url) else {
@@ -6492,8 +6497,8 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
         "help:open" => {
             let _ = app.emit("help://open", ());
         }
-        "help:guide" => open_external("https://github.com/qwts/cartograph/wiki"),
-        "help:issue" => open_external("https://github.com/qwts/cartograph/issues/new"),
+        "help:guide" => open_external(&format!("{REPOSITORY_URL}/wiki")),
+        "help:issue" => open_external(&format!("{REPOSITORY_URL}/issues/new")),
         "help:debug" => open_model_debug_log(app),
         "configure:run-limits" => open_configure_window(app),
         _ => {}
@@ -6741,10 +6746,27 @@ mod tests {
     use llm::{Embedding, Locality, ProviderCaps, ProviderError};
 
     #[test]
+    fn shell_and_ui_links_share_one_repository_location() {
+        // #1760: the shell and the UI each hold the repository URL once, and
+        // the two must agree, so a move cannot update one side only.
+        let ui = include_str!("../../ui/src/helpNotes.ts");
+        let declared = format!("export const REPOSITORY_URL = '{}';", super::REPOSITORY_URL);
+        assert!(
+            ui.contains(&declared),
+            "ui/src/helpNotes.ts must declare {declared}"
+        );
+        assert_eq!(
+            super::REPOSITORY_URL,
+            "https://github.com/true-line/cartograph"
+        );
+    }
+
+    #[test]
     fn windows_url_launcher_keeps_every_query_parameter() {
         // AC-0222 (#226): the URL reaches the protocol handler as one
         // argument, `&` and all; `explorer` truncated it at the first `&`.
-        let url = "https://github.com/qwts/cartograph/issues/new?labels=bug&title=a%20b&body=x";
+        let url =
+            "https://github.com/true-line/cartograph/issues/new?labels=bug&title=a%20b&body=x";
         let (program, args) = super::url_launcher("windows", url).unwrap();
         assert_eq!(program, "rundll32");
         assert_eq!(args, ["url.dll,FileProtocolHandler", url]);

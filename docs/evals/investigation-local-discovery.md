@@ -3,7 +3,7 @@
 MT-H4-02 remains **UNEXECUTED as a complete procedure**. One actual-provider
 production-module attempt ran and failed its discovery acceptance checks.
 
-The [CI run](https://github.com/qwts/cartograph/actions/runs/34558474540) tested
+The [CI run](https://github.com/true-line/cartograph/actions/runs/34558474540) tested
 commit `6068399b18813e067c4cfdb9149f03f75ecdddf9` with Ollama 0.34.0 and Qwen3 8B
 Q4_K_M on a four-CPU Linux runner with 16,765,378,560 bytes of RAM. The installed
 manifest digest was `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41`.
@@ -36,7 +36,7 @@ citation review, full H4/H5 interoperability and market gates remain open.
 
 ## Second observation — discovery @2, default local thinking
 
-The [next CI run](https://github.com/qwts/cartograph/actions/runs/34559635946)
+The [next CI run](https://github.com/true-line/cartograph/actions/runs/34559635946)
 tested `18073367b65e6bb854f6ae6ce418a81a17d28284` using the same pinned runtime,
 model and context length. Domain analyst @2, fingerprint
 `9eb83715f67f8b022ec5a144de89c4a4a86e0c3ee86ab71e545677e0fe3e2b37`, reached the
@@ -57,7 +57,7 @@ observations remain part of the record.
 
 ## Third observation — admitted discovery, host page-sizing failure
 
-[Run 34561178582](https://github.com/qwts/cartograph/actions/runs/34561178582)
+[Run 34561178582](https://github.com/true-line/cartograph/actions/runs/34561178582)
 tested `bf5aab1d074e5a261f78eb3c869b2e8f16abc445`, specialist @2 and bounded
 transport @2 with the same verified Ollama/Qwen3 pins. The runner had four Xeon
 8573C CPUs and the same memory size; the CPU model differs from the earlier runs,
@@ -86,7 +86,7 @@ provider run. The failed task is not replayed.
 
 ## Fourth observation — discovery delivered, second call unknown
 
-[Run 34562301078](https://github.com/qwts/cartograph/actions/runs/34562301078)
+[Run 34562301078](https://github.com/true-line/cartograph/actions/runs/34562301078)
 tested `f0a6d5477cf7ce9c4f758f683a1771adf007b1ab` with the same runtime/model
 pins on four AMD EPYC 9V45 CPU cores and 16,766,414,848 bytes of memory.
 Investigation `investigation:5eb33775f867e99ab0ec08984a930638` admitted the same

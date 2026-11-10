@@ -8,7 +8,7 @@
 #
 # Credential: the repository GITHUB_TOKEN cannot push the wiki, so the push
 # uses the HELP_WIKI_TOKEN secret: a fine-grained personal access token scoped
-# to qwts/cartograph only with "Contents: Read and write". The job fails loudly
+# to true-line/cartograph only with "Contents: Read and write". The job fails loudly
 # when it is absent or refused; it never falls back to another credential.
 name: Help wiki sync
 

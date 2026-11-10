@@ -25,26 +25,26 @@ function fakeGitHub({ refExists = true } = {}) {
       status,
       json: async () => payload,
     });
-    if (route === `repos/qwts/cartograph/git/commits/${BASE}`)
+    if (route === `repos/true-line/cartograph/git/commits/${BASE}`)
       return respond(200, { tree: { sha: "basetree" } });
-    if (route === "repos/qwts/cartograph/git/blobs")
+    if (route === "repos/true-line/cartograph/git/blobs")
       return respond(201, { sha: `blob-${calls.length}` });
-    if (route === "repos/qwts/cartograph/git/trees")
+    if (route === "repos/true-line/cartograph/git/trees")
       return respond(201, { sha: "newtree" });
-    if (route === "repos/qwts/cartograph/git/commits") {
+    if (route === "repos/true-line/cartograph/git/commits") {
       return respond(201, {
         sha: "b".repeat(40),
         verification: { verified: true, reason: "valid" },
       });
     }
     if (
-      route === "repos/qwts/cartograph/git/refs/heads/changeset-release/main"
+      route === "repos/true-line/cartograph/git/refs/heads/changeset-release/main"
     ) {
       return refExists
         ? respond(200, {})
         : respond(422, { message: "Reference does not exist" });
     }
-    if (route === "repos/qwts/cartograph/git/refs") return respond(201, {});
+    if (route === "repos/true-line/cartograph/git/refs") return respond(201, {});
     return respond(404, { message: `unexpected ${route}` });
   };
   return { calls, fetchImpl };
@@ -62,7 +62,7 @@ const entries = [
 test("publishes blobs, a tree on the base commit, a single-parent commit, and force-updates the branch", async () => {
   const { calls, fetchImpl } = fakeGitHub();
   const result = await publishSignedCommit({
-    repo: "qwts/cartograph",
+    repo: "true-line/cartograph",
     token: "ghs_test",
     branch: "changeset-release/main",
     base: BASE,
@@ -75,7 +75,7 @@ test("publishes blobs, a tree on the base commit, a single-parent commit, and fo
   assert.ok(calls.every((call) => call.auth === "Bearer ghs_test"));
 
   const blob = calls.find(
-    (call) => call.route === "repos/qwts/cartograph/git/blobs",
+    (call) => call.route === "repos/true-line/cartograph/git/blobs",
   );
   assert.deepEqual(blob.body, {
     content: Buffer.from('{"version":"0.15.0"}\n').toString("base64"),
@@ -83,7 +83,7 @@ test("publishes blobs, a tree on the base commit, a single-parent commit, and fo
   });
 
   const tree = calls.find(
-    (call) => call.route === "repos/qwts/cartograph/git/trees",
+    (call) => call.route === "repos/true-line/cartograph/git/trees",
   );
   assert.equal(tree.body.base_tree, "basetree");
   assert.deepEqual(tree.body.tree, [
@@ -94,7 +94,7 @@ test("publishes blobs, a tree on the base commit, a single-parent commit, and fo
   const commit = calls.find(
     (call) =>
       call.method === "POST" &&
-      call.route === "repos/qwts/cartograph/git/commits",
+      call.route === "repos/true-line/cartograph/git/commits",
   );
   assert.deepEqual(commit.body, {
     message: "Version packages",
@@ -106,7 +106,7 @@ test("publishes blobs, a tree on the base commit, a single-parent commit, and fo
   assert.equal(ref.method, "PATCH");
   assert.equal(
     ref.route,
-    "repos/qwts/cartograph/git/refs/heads/changeset-release/main",
+    "repos/true-line/cartograph/git/refs/heads/changeset-release/main",
   );
   assert.deepEqual(ref.body, { sha: "b".repeat(40), force: true });
 });
@@ -114,7 +114,7 @@ test("publishes blobs, a tree on the base commit, a single-parent commit, and fo
 test("creates the branch when it does not exist yet", async () => {
   const { calls, fetchImpl } = fakeGitHub({ refExists: false });
   await publishSignedCommit({
-    repo: "qwts/cartograph",
+    repo: "true-line/cartograph",
     token: "ghs_test",
     branch: "changeset-release/main",
     base: BASE,
@@ -124,7 +124,7 @@ test("creates the branch when it does not exist yet", async () => {
   });
   const created = calls.at(-1);
   assert.equal(created.method, "POST");
-  assert.equal(created.route, "repos/qwts/cartograph/git/refs");
+  assert.equal(created.route, "repos/true-line/cartograph/git/refs");
   assert.deepEqual(created.body, {
     ref: "refs/heads/changeset-release/main",
     sha: "b".repeat(40),
@@ -135,7 +135,7 @@ test("rejects malformed inputs before touching the API", async () => {
   const { calls, fetchImpl } = fakeGitHub();
   const publish = (overrides) =>
     publishSignedCommit({
-      repo: "qwts/cartograph",
+      repo: "true-line/cartograph",
       token: "ghs_test",
       branch: "changeset-release/main",
       base: BASE,
@@ -159,7 +159,7 @@ test("surfaces API failures with the route and GitHub message", async () => {
   });
   await assert.rejects(
     publishSignedCommit({
-      repo: "qwts/cartograph",
+      repo: "true-line/cartograph",
       token: "ghs_test",
       branch: "changeset-release/main",
       base: BASE,
@@ -167,7 +167,7 @@ test("surfaces API failures with the route and GitHub message", async () => {
       entries,
       fetchImpl,
     }),
-    /GET repos\/qwts\/cartograph\/git\/commits\/a{40} -> 403: Resource not accessible/u,
+    /GET repos\/true-line\/cartograph\/git\/commits\/a{40} -> 403: Resource not accessible/u,
   );
 });
 
