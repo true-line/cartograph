@@ -142,6 +142,40 @@ fn a_failing_provider_is_a_named_omission_and_still_publishes() {
     assert_eq!(recipe_of(&host), Some(recipe(None, false)));
 }
 
+// AC-0583 / #1771: a base larger than the interactive read default is not
+// skipped; the phase reads it and publishes.
+#[test]
+fn a_base_past_the_interactive_default_is_read_and_published() {
+    let host = host();
+    {
+        let mut graph = host.graph.lock().unwrap();
+        for index in 0..=SnapshotReadLimits::DEFAULT_ROWS {
+            graph
+                .put_node(&Node {
+                    id: format!("sym:bulk:{index}"),
+                    label: "Symbol".into(),
+                    props: serde_json::json!({}),
+                })
+                .unwrap();
+        }
+    }
+    // The same base under the interactive default is the named omission.
+    let skipped = run_within(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        None,
+        SnapshotReadLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(skipped.omission, Some(BASE_BOUNDS));
+
+    let report = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert_ne!(report.omission, Some(BASE_BOUNDS));
+    assert!(report.published);
+    assert!(recipe_of(&host).is_some());
+}
+
 #[test]
 fn a_base_past_the_snapshot_bounds_is_a_named_omission() {
     let host = host();

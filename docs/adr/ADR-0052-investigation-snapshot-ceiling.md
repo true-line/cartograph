@@ -43,3 +43,24 @@ analysis machine is expected to supply the memory a large estate needs.
 - MCP-started investigation task acquisition and reservation remain unchanged.
   Separate MCP read-session admission and reservation change only when an
   operator changes the read-session graph limits.
+
+### Amendment — 2026-11-10: the post-ingest knowledge phase takes the same ceiling (#1771)
+
+The decision above said `SnapshotReadLimits::investigation()` is used only by
+desktop-started investigations. The knowledge phase that runs after ingest read
+the base under `default()`, so any repository over 50,000 rows was skipped whole
+with a `knowledge-base-bounds` omission and no knowledge node was produced.
+
+The phase now reads under `investigation()` too. The reasoning is the same one
+that justified the investigation exception: it is a desktop background read on
+the owner's machine, it has no host memory admission and reserves nothing in
+advance, and the analysis machine is expected to supply the memory. Its peak
+memory therefore scales with the graph, as a desktop investigation's does.
+
+The rule after this amendment: `investigation()` is for desktop-side reads with
+no memory reserved in advance (desktop-started investigations and the
+post-ingest knowledge phase). Every read that sizes a reservation from its
+limits keeps `default()` or its operator-configured value: MCP-started
+investigation tasks and MCP read sessions are unchanged. A further caller of
+`investigation()` needs another amendment here.
+
