@@ -107,7 +107,7 @@ pub(in crate::mcp_reads) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits
             read["target"] = target();
             read["max_bytes"] = json!({"type":"integer","minimum":1});
             (
-                "Describe or read an exact retained primary span using a scoped target; no full-input-closure, checkout fallback or omission inference.",
+                "Describe or read an exact retained primary span using a scoped target; read text has secrets redacted (see `redaction`); no full-input-closure, checkout fallback or omission inference.",
                 json!({"oneOf":[object(describe,&["session_id","session_basis_id","mode","kind","fact","ordinal","max_bytes"]),object(read,&["session_id","session_basis_id","mode","kind","target","max_bytes"])]}),
             )
         }

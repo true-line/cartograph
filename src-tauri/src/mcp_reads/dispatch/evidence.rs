@@ -149,7 +149,7 @@ pub(super) fn descriptor() -> (&'static str, Value) {
     read["target"] = target_schema();
     read["max_bytes"] = describe["max_bytes"].clone();
     (
-        "Describe one receipt-bound retained range or read its exact captured text; never reads a current checkout.",
+        "Describe one receipt-bound retained range or read its captured text with secrets redacted (see `redaction`); never reads a current checkout.",
         json!({"type":"object","oneOf":[object_schema(describe,&["mode","kind","session_id","basis_id","fact","ordinal","max_bytes"]),object_schema(read,&["mode","kind","session_id","basis_id","target","max_bytes"])]}),
     )
 }
