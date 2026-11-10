@@ -51,18 +51,6 @@ export const tauriLocalModelApi: LocalModelApi = {
   reset: () => invoke<LocalModelChoice>('reset_local_model'),
 };
 
-/**
- * Specialist versions whose desktop runs use the saved run limits; mirrors
- * `SpecialistId::uses_next_prompt_admission` in crates/agents.
- */
-export function usesConfiguredLimits(specialistId: string): boolean {
-  const match = /^(domain-analyst|evidence-auditor)@(\d+)$/.exec(specialistId);
-  if (!match) return false;
-  const version = Number(match[2]);
-  return match[1] === 'domain-analyst' ? (version >= 10 && version <= 15) || version === 17 || version === 18 || version === 19 || version === 20
-    : version === 10 || version === 11;
-}
-
 /** Whole minutes in the window; seconds/milliseconds on the wire. */
 export const toMinutes = (seconds: number) => seconds / 60;
 
