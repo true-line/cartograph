@@ -17,16 +17,17 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_source(
+            "export function checkout(flag: boolean) { if (flag) return false; return true; }\n",
+        )
+    }
+    fn with_source(source: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let private = temp.path().join("private");
         let root = temp.path().join("project");
         std::fs::create_dir_all(&private).unwrap();
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join("source.ts"),
-            "export function checkout(flag: boolean) { if (flag) return false; return true; }\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("source.ts"), source).unwrap();
         let state = crate::registered_source_tests::app_state(&private);
         let registered = crate::register_local_source(&state, &root).unwrap();
         let layers = vec!["client".to_owned()];
@@ -168,6 +169,46 @@ fn scoped_evidence_real_receipt_survives_checkout_removal_and_cannot_be_full_tar
     assert_eq!(response.scope, "primary_source_only");
     assert_eq!(response.input_closure, "input_closure_not_established");
     assert_eq!(response.target, description.target);
+}
+
+// AC-0581 / #1754: an MCP client receives redacted source text and is told so.
+#[test]
+fn scoped_evidence_text_is_redacted_before_it_leaves_the_host() {
+    let f = Fixture::with_source(
+        "export function connect() { const password = \"hunter2-hunter2\"; return password.length; }\n",
+    );
+    let description = f.describe();
+    let response = read(&f.state, &f.proof(), &description.target, limits(), || {
+        f.check()
+    })
+    .unwrap();
+    assert!(response.text.contains("function connect()"));
+    assert!(!response.text.contains("hunter2"));
+    assert!(response.text.contains("[REDACTED]"));
+    assert_eq!(
+        response.redaction,
+        super::super::evidence::EvidenceRedaction {
+            policy: core_redact::TEXT_POLICY_VERSION,
+            replacements: 1,
+        }
+    );
+    let wire = serde_json::to_value(&response).unwrap();
+    assert_eq!(wire["redaction"]["replacements"], 1);
+    assert_eq!(
+        wire["redaction"]["policy"],
+        core_redact::TEXT_POLICY_VERSION
+    );
+    assert!(!wire.to_string().contains("hunter2"));
+
+    // Text with nothing to redact is returned as captured and says so.
+    let f = Fixture::new();
+    let description = f.describe();
+    let response = read(&f.state, &f.proof(), &description.target, limits(), || {
+        f.check()
+    })
+    .unwrap();
+    assert_eq!(response.redaction.replacements, 0);
+    assert!(!response.text.is_empty() && !response.text.contains("[REDACTED]"));
 }
 
 #[test]

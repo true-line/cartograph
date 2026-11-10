@@ -27,12 +27,43 @@ pub(crate) struct EvidenceLimits {
     pub max_response_bytes: usize,
 }
 
+/// The free-text redaction applied to retained source text before it is
+/// returned to an MCP client (#1754). The client is normally a model-backed
+/// agent outside the app's egress consent, so it never receives the raw span.
+/// `replacements > 0` means `text` is not byte-identical to the captured span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct EvidenceRedaction {
+    pub policy: &'static str,
+    pub replacements: usize,
+}
+
+impl EvidenceRedaction {
+    /// The envelope's shape before any text has been read.
+    pub(crate) const UNREAD: Self = Self {
+        policy: core_redact::TEXT_POLICY_VERSION,
+        replacements: 0,
+    };
+
+    /// Redact `text` and say how much was replaced.
+    pub(crate) fn apply(text: &str) -> (String, Self) {
+        let (text, replacements) = core_redact::redact_text(text);
+        (
+            text,
+            Self {
+                policy: core_redact::TEXT_POLICY_VERSION,
+                replacements,
+            },
+        )
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct EvidenceSpan {
     pub basis_id: String,
     pub target: InvestigationInspectionTarget,
     pub scope: &'static str,
     pub input_closure: &'static str,
+    pub redaction: EvidenceRedaction,
     pub text: String,
 }
 
@@ -147,6 +178,7 @@ impl ReadSession {
             target: target.clone(),
             scope: "primary_source_only",
             input_closure: "input_closure_not_established",
+            redaction: EvidenceRedaction::UNREAD,
             text: String::new(),
         };
         // Admit worst-case JSON escaping before reading/validating captured bytes.
@@ -177,7 +209,7 @@ impl ReadSession {
         if actual != *target {
             return Err(ReadError::StaleBasis);
         }
-        response.text = state
+        let raw = state
             .primary_sources
             .task_text_bounded(
                 &guard,
@@ -187,8 +219,11 @@ impl ReadSession {
                 limits.max_span_bytes,
             )
             .map_err(retained_error)?;
+        (response.text, response.redaction) = EvidenceRedaction::apply(&raw);
+        drop(raw);
         // Guard remains alive through the real read. No lease or provider budget
         // is implied; the service must separately charge cumulative read work.
+        // Redaction can lengthen the text, so the size is checked on what is sent.
         if serde_json::to_vec(&response)
             .map_err(|_| ReadError::Storage)?
             .len()

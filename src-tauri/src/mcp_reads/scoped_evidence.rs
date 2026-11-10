@@ -102,6 +102,8 @@ pub(crate) struct ScopedEvidenceSpan {
     pub target: ScopedEvidenceTarget,
     pub scope: &'static str,
     pub input_closure: &'static str,
+    /// #1754: the text is redacted before it leaves the host.
+    pub redaction: super::evidence::EvidenceRedaction,
     pub text: String,
 }
 
@@ -369,6 +371,7 @@ pub(crate) fn read(
         target: &'a ScopedEvidenceTarget,
         scope: &'static str,
         input_closure: &'static str,
+        redaction: super::evidence::EvidenceRedaction,
         text: &'static str,
     }
     let envelope = admit(
@@ -377,6 +380,7 @@ pub(crate) fn read(
             target,
             scope: "primary_source_only",
             input_closure: "input_closure_not_established",
+            redaction: super::evidence::EvidenceRedaction::UNREAD,
             text: "",
         },
         limits.max_response_bytes,
@@ -401,7 +405,7 @@ pub(crate) fn read(
     if actual != *target {
         return Err(ReadError::StaleBasis);
     }
-    let text = state
+    let raw = state
         .primary_sources
         .task_text_bounded(
             &guard,
@@ -411,11 +415,16 @@ pub(crate) fn read(
             limits.max_span_bytes,
         )
         .map_err(retained)?;
+    // #1754: an MCP client never receives the raw span. Redaction can
+    // lengthen the text, so the size is admitted on what is sent.
+    let (text, redaction) = super::evidence::EvidenceRedaction::apply(&raw);
+    drop(raw);
     let response = ScopedEvidenceSpan {
         basis_id: proof.basis_id().into(),
         target: actual,
         scope: "primary_source_only",
         input_closure: "input_closure_not_established",
+        redaction,
         text,
     };
     admit(&response, limits.max_response_bytes)?;
