@@ -20,6 +20,7 @@ use serde::Serialize;
 use std::sync::{Mutex, OnceLock};
 
 /// Service name of every entry this app writes to the credential store.
+#[cfg(any(target_os = "macos", windows))]
 const SERVICE: &str = "ai.true-line.cartograph.provider-key";
 /// Longest key accepted. Real keys are far shorter; the bound keeps a pasted
 /// document out of the credential store.
