@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.67.3
+
+### Patch Changes
+
+- f562ec2: Allow newly created desktop investigation-v2 child tasks to admit up to 32,768 bytes of authenticated saved-parent history, preserving historical bounds and all generation limits.
+
 ## 0.67.2
 
 ### Patch Changes
