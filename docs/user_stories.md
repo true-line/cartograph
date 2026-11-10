@@ -935,6 +935,11 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Parent:** a completed, obligation-satisfied parent may be supported or findings_withheld_after_correction. A withheld parent requires an explicit matching parent_completion_outcome in the frozen definition; its saved result, withholding disposition, revision, receipt and independently authenticated PASS review remain bound. The status is disclosed unchanged in history and receipt, never relabelled supported. Failed, insufficient, mismatched or changed parents fail closed. Omitted status retains historical supported-parent definition/receipt compatibility.
 - **Trace:** H4 · `app` · — · T-0577
 
+- **AC-0578** Given a newly created App investigation-v2 next-prompt child with a saved parent, when the host freezes its effective limits, then it selects authenticated parent-history-32768-v1. Parent envelope and escaped supplied-history array each fit at most 32,768 bytes, inside the unchanged 65,536-byte request bound; no truncation, relabelling or source privilege is introduced.
+  - **Authentication and replay:** the closed history-policy marker is persisted in effective limits and the read binding; admission, worker preparation and saved-history reads recover it from the child, never the parent's version or mutable settings. Missing markers retain the historical 16,384-byte bound and exact historical serialized bytes. Unknown markers and mismatched origin, family, parent or frozen binding fail closed. All other numeric limits remain unchanged.
+  - **Capacity:** request parsing, history decode, re-encoding and workspace proofs account for the selected allowance. Tests accept a 23,240-byte history only in the new lane, exercise exact-bound and over-bound cases, reject tampering and preserve historical replay.
+- **Trace:** H4 · `agents`, `app` · — · T-0578
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

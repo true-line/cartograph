@@ -751,3 +751,29 @@ fn local_finish_step_ceiling_distinguishes_mode_and_preserves_v2() {
         }
     }
 }
+
+#[test]
+fn versioned_history_reservation_authenticates_saved_child_policy() {
+    // AC-0578: shared reservation/settlement check cannot lose or replace the marker.
+    let f = completion::internal_next_prompt_fixture();
+    let mut detail = f.task.detail.clone();
+    detail.summary.parent_id = Some("parent:1".into());
+    detail.origin = InvestigationOrigin::App;
+    detail.limits = INVESTIGATION_V2_POLICY
+        .with_parent_history_32768()
+        .unwrap()
+        .limits();
+    let mut r = reservation("task:1", "step-1");
+    r.binding.effective_limits = Some(detail.limits.clone());
+    r.validate_task_policy(&detail).unwrap();
+    let wire = serde_json::to_vec(&r).unwrap();
+    let reopened: Reservation = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), wire);
+    reopened.validate_task_policy(&detail).unwrap();
+    r.binding.effective_limits = None;
+    assert!(r.validate_task_policy(&detail).is_err());
+    r.binding.effective_limits = Some(INVESTIGATION_V2_POLICY.limits());
+    assert!(r.validate_task_policy(&detail).is_err());
+    detail.summary.parent_id = None;
+    assert!(super::policy_for_detail(&detail).is_err());
+}

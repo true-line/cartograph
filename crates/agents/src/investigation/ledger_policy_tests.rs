@@ -374,3 +374,29 @@ fn result_policy_reaches_extended_inspection_assessment() {
             .is_err()
     );
 }
+
+#[test]
+fn versioned_history_ledger_admission_bounds() {
+    // AC-0578: unchanged historical ledger encoding, separately authenticated allowance.
+    let expanded = INVESTIGATION_V2_POLICY.with_parent_history_32768().unwrap();
+    let mut value = ledger();
+    value.supplied_history_hash = Some("a".repeat(64));
+    for bytes in [16384, 16385, 23240, 32768, 32769] {
+        value.supplied_history_bytes = bytes;
+        assert_eq!(
+            value.validate_with_policy(&INVESTIGATION_V2_POLICY).is_ok(),
+            bytes <= 16384
+        );
+        assert_eq!(
+            value.validate_with_policy(&expanded).is_ok(),
+            bytes <= 32768
+        );
+    }
+    value.supplied_history_bytes = 16384;
+    assert_eq!(
+        value.fingerprint_with_policy(&expanded).unwrap(),
+        value
+            .fingerprint_with_policy(&INVESTIGATION_V2_POLICY)
+            .unwrap()
+    );
+}

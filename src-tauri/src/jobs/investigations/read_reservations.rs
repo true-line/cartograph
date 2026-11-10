@@ -114,7 +114,8 @@ impl Reservation {
             .effective_limits
             .as_ref()
             .is_some_and(|limits| *limits != policy.limits())
-            || (policy.local_finish_generation() && self.binding.effective_limits.is_none())
+            || ((policy.local_finish_generation() || policy.limits().history_policy.is_some())
+                && self.binding.effective_limits.is_none())
         {
             return Err(InvestigationStoreError::Invalid);
         }

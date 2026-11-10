@@ -111,7 +111,8 @@ fn hosted_ninth_source_call_settles_finishes_and_reopens() {
         let live = f.live.clone();
         let done = &done;
         scope.spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(45);
+            // Bound a stalled approval step, not all ten calls under concurrent CI load.
+            let mut deadline = Instant::now() + Duration::from_secs(45);
             let mut approved = String::new();
             while !done.load(Ordering::SeqCst) {
                 if Instant::now() >= deadline {
@@ -120,7 +121,7 @@ fn hosted_ninth_source_call_settles_finishes_and_reopens() {
                         .jobs
                         .lock()
                         .unwrap()
-                        .cancel_investigation(&id)
+                        .cancel_next_prompt_investigation(&id)
                         .unwrap();
                     state.investigations.wake(&id);
                     break;
@@ -142,6 +143,7 @@ fn hosted_ninth_source_call_settles_finishes_and_reopens() {
                         )
                         .unwrap();
                     approved = preview.step_id;
+                    deadline = Instant::now() + Duration::from_secs(45);
                     state.investigations.wake(&id);
                 }
                 std::thread::sleep(Duration::from_millis(5));

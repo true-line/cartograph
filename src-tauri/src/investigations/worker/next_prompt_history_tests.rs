@@ -46,7 +46,8 @@ fn request(parent: &NextFixture) -> StagedObligationRequest {
 
 #[test]
 fn next_prompt_worker_parent_child_preserves_exact_saved_result_and_mandatory_history_hash() {
-    let (parent, _) = parent(false);
+    // AC-0578: replay the whole genuine >16KiB result under the new child policy.
+    let (parent, _) = parent(true);
     let request = request(&parent);
     let expected_context_id = request.expected_context_id.clone();
     let mut scripted = NextProvider::new(false);
@@ -55,7 +56,11 @@ fn next_prompt_worker_parent_child_preserves_exact_saved_result_and_mandatory_hi
     let state = parent.base.base.app.state::<AppState>();
     let mut jobs = state.jobs.lock().unwrap();
     let expected = jobs
-        .investigation_next_parent_history(&parent.id, request.conversation_id.as_deref().unwrap())
+        .investigation_next_parent_history_with_policy(
+            &parent.id,
+            request.conversation_id.as_deref().unwrap(),
+            &INVESTIGATION_V2_POLICY.with_parent_history_32768().unwrap(),
+        )
         .unwrap();
     let expected_history = expected.history().to_vec();
     let expected_parent = jobs
@@ -176,7 +181,7 @@ fn next_prompt_worker_parent_child_preserves_exact_saved_result_and_mandatory_hi
 }
 
 #[test]
-fn next_prompt_worker_parent_history_overflow_refuses_whole_result_before_child_dispatch() {
+fn next_prompt_worker_versioned_history_admits_large_saved_parent() {
     let (parent, _) = parent(true);
     let request = request(&parent);
     let provider = Arc::new(NextProvider::new(false));
@@ -211,14 +216,18 @@ fn next_prompt_worker_parent_history_overflow_refuses_whole_result_before_child_
         ),
         Err(InvestigationStoreError::Capacity)
     ));
-    assert!(matches!(
-        jobs.start_next_prompt_investigation(
+    // AC-0578: the historical reader refuses, but a fresh versioned child admits it.
+    let started = jobs
+        .start_next_prompt_investigation(
             &request,
-            Some(&descriptor(provider.as_ref(), InvestigationProviderMode::Local).unwrap())
-        ),
-        Err(InvestigationStoreError::Capacity)
-    ));
-    assert_eq!(counts(), before);
+            Some(&descriptor(provider.as_ref(), InvestigationProviderMode::Local).unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        started.detail.limits.history_policy,
+        Some(agents::investigation::HistoryPolicy::ParentHistory32768V1)
+    );
+    assert_eq!(counts(), (before.0 + 1, before.1 + 1));
     assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 0);
     let unchanged: Vec<u8> = connection
         .query_row(

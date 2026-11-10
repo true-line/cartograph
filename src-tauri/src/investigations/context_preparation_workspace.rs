@@ -78,7 +78,7 @@ pub(crate) fn workspace_bytes(
         snapshot.retained,
         snapshot.identity_peak,
         logical::reference_selection_workspace(graph_limits)?.peak_bytes,
-        16 * 1024,
+        agents::investigation::PARENT_HISTORY_32768_V1_BYTES,
         slots::<Vec<u8>>(1)?, // bounded supplied-history encoding
     ])?;
     let archive_validation = agents::investigation::coverage_archive_validation_workspace()?;
@@ -94,7 +94,7 @@ pub(crate) fn workspace_bytes(
         citations: vec![],
         queries: vec![],
         supplied_history_hash: Some("0".repeat(64)),
-        supplied_history_bytes: 16 * 1024,
+        supplied_history_bytes: agents::investigation::PARENT_HISTORY_32768_V1_BYTES,
     };
     // None omits the coverage field; include its key/separator when inserting
     // the separately byte-admitted proof into the initial typed ledger.

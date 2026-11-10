@@ -69,7 +69,7 @@ pub use mcp_grant::{McpGrantSnapshot, McpGrantUnavailable, McpTaskActivation, Mc
 pub use obligations::*;
 pub use policy::{
     INVESTIGATION_V1_POLICY, INVESTIGATION_V2_POLICY, InvestigationPolicy,
-    MAX_STORED_COMPLETION_ATTEMPTS,
+    LEGACY_SUPPLIED_HISTORY_BYTES, MAX_STORED_COMPLETION_ATTEMPTS, PARENT_HISTORY_32768_V1_BYTES,
 };
 pub use privacy::{redacted_history_text, reject_prose_replay};
 pub use projection::*;

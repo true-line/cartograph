@@ -70,7 +70,7 @@ impl InvestigationInputLedger {
             || self.receipt_references.len() > limits.selected_facts
             || self.queries.len() > limits.tool_actions as usize
             || self.citations.len() > max_citations
-            || self.supplied_history_bytes > 16 * 1024
+            || self.supplied_history_bytes > policy.supplied_history_bytes()
             || (self.supplied_history_bytes == 0) != self.supplied_history_hash.is_none()
             || self
                 .supplied_history_hash

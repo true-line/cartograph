@@ -98,6 +98,17 @@ fn next_parent_history_completed_parent_starts_internal_child_with_exact_saved_c
         .start_next_prompt_investigation(&child, Some(&parent.detail.provider))
         .unwrap();
     assert_eq!(started.detail.summary.parent_id, child.parent_id);
+    // AC-0578: actual fresh child start persists the version, reopen recovers it.
+    assert_eq!(
+        started.detail.limits.history_policy,
+        Some(agents::investigation::HistoryPolicy::ParentHistory32768V1)
+    );
+    assert_eq!(
+        policy_for_detail(&started.detail)
+            .unwrap()
+            .supplied_history_bytes(),
+        32768
+    );
     assert_eq!(
         started.detail.summary.conversation_id,
         parent.detail.summary.conversation_id
@@ -111,6 +122,13 @@ fn next_parent_history_completed_parent_starts_internal_child_with_exact_saved_c
         value["saved_result"]
     );
     let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation(&started.detail.summary.investigation_id)
+            .unwrap()
+            .limits,
+        started.detail.limits
+    );
     assert_eq!(
         reopened
             .investigation_next_parent_history(f.base.id(), &parent.detail.summary.conversation_id)
@@ -370,4 +388,46 @@ fn parent_history_legacy_pending_accounts_for_overlapping_owners() {
             >= next_prompt_contract_workspace().unwrap()
                 + context_hub::logical::json_bytes(MAX_RECORD_BYTES).unwrap() * 3
     );
+}
+
+#[test]
+fn versioned_parent_history_bound_and_canonical_replay() {
+    // AC-0578: envelope and escaped-array bounds both apply; old canonical bytes survive.
+    let f = completed();
+    let parent = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let result = load_result(&tx, &parent).unwrap();
+    let old = encode_parent_history(f.base.id(), &parent.detail.summary, &result).unwrap();
+    let cap = agents::investigation::PARENT_HISTORY_32768_V1_BYTES;
+    assert_eq!(
+        old,
+        encode_parent_history_with_limit(f.base.id(), &parent.detail.summary, &result, cap)
+            .unwrap()
+    );
+    let mut summary = parent.detail.summary.clone();
+    summary.graph_snapshot_id = Some("x".repeat(20000));
+    assert!(encode_parent_history(f.base.id(), &summary, &result).is_err());
+    let raw = encode_parent_history_with_limit(f.base.id(), &summary, &result, cap).unwrap();
+    let extra = cap - raw.len();
+    summary
+        .graph_snapshot_id
+        .as_mut()
+        .unwrap()
+        .push_str(&"x".repeat(extra));
+    let raw = encode_parent_history_with_limit(f.base.id(), &summary, &result, cap).unwrap();
+    assert_eq!(raw.len(), cap);
+    assert!(encode(&vec![String::from_utf8(raw).unwrap()], cap).is_err());
+    summary.graph_snapshot_id.as_mut().unwrap().push('x');
+    assert!(encode_parent_history_with_limit(f.base.id(), &summary, &result, cap).is_err());
+    for bytes in [23240, cap, cap + 1] {
+        let history = vec!["x".repeat(bytes - 4)];
+        assert_eq!(encode(&history, cap).is_ok(), bytes <= cap);
+        assert!(
+            encode(
+                &history,
+                agents::investigation::LEGACY_SUPPLIED_HISTORY_BYTES
+            )
+            .is_err()
+        );
+    }
 }

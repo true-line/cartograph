@@ -1165,7 +1165,11 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .as_deref()
                 .ok_or(HostError::InvalidInput)?;
             return Ok(jobs
-                .investigation_next_parent_history(parent_id, conversation)?
+                .investigation_next_parent_history_with_policy(
+                    parent_id,
+                    conversation,
+                    &request.policy,
+                )?
                 .into_history());
         }
         let parent = jobs.investigation(parent_id)?;
