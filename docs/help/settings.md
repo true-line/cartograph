@@ -9,6 +9,25 @@ Recovery tiers, providers, consent, and adapters.
 - **Adapters** lists every installed extractor (and what it covers) from the
   same registry Preflight consults, plus known adapter types you can request.
 
+## Provider keys
+
+A cloud provider needs an API key. In **Provider keys**, type the key and choose
+**Save key**. Cartograph stores it in the system credential store (the login
+Keychain on macOS, the Credential Manager on Windows) and nowhere else: it is
+not written to the settings file, a log or an export, and the app never shows
+it again. macOS may ask you to allow Cartograph to use the Keychain.
+
+The section shows whether a key is saved. **Replace key** overwrites it and
+**Remove key** deletes it. With no key the cloud lane stays closed.
+
+If the `ANTHROPIC_API_KEY` environment variable is set when Cartograph starts,
+it is used instead of the saved key, and the section says so. An app opened from
+Finder or the Dock does not see variables set in a terminal, so use the saved
+key there.
+
+Saving a key sends nothing and grants nothing. Each cloud step still shows the
+exact payload and asks for your consent.
+
 ## Read-only MCP
 
 The local MCP service starts disabled. In **Read-only MCP**, expand the advanced

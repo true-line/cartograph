@@ -33,6 +33,7 @@ mod primary_source;
 #[cfg(test)]
 mod primary_source_tests;
 mod proposals;
+mod provider_credentials;
 #[cfg(test)]
 mod registered_source_tests;
 #[cfg(test)]
@@ -3869,6 +3870,49 @@ fn reset_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelC
     store.reset_local_model().map_err(|e| e.to_string())
 }
 
+/// Which provider keys are configured and where each comes from (#1763).
+/// Never returns a key.
+#[tauri::command]
+async fn provider_key_status() -> Result<Vec<provider_credentials::KeyStatus>, String> {
+    off_ui_thread(|| Ok(provider_credentials::system().statuses())).await
+}
+
+/// Save or replace a provider key in the OS credential store (#1763). The
+/// key is not written anywhere else, and saving it grants no egress.
+#[tauri::command]
+async fn set_provider_key(
+    provider: String,
+    key: String,
+    app: tauri::AppHandle,
+) -> Result<provider_credentials::KeyStatus, String> {
+    off_ui_thread(move || {
+        let provider = provider_credentials::ProviderId::parse(&provider)?;
+        let status = provider_credentials::system().save(provider, &key)?;
+        app.state::<AppState>()
+            .investigations
+            .forget_cloud_provider();
+        Ok(status)
+    })
+    .await
+}
+
+/// Remove a provider key from the OS credential store (#1763).
+#[tauri::command]
+async fn remove_provider_key(
+    provider: String,
+    app: tauri::AppHandle,
+) -> Result<provider_credentials::KeyStatus, String> {
+    off_ui_thread(move || {
+        let provider = provider_credentials::ProviderId::parse(&provider)?;
+        let status = provider_credentials::system().remove(provider)?;
+        app.state::<AppState>()
+            .investigations
+            .forget_cloud_provider();
+        Ok(status)
+    })
+    .await
+}
+
 /// Live egress summary for the status bar (#103's seam, now real).
 #[tauri::command]
 fn egress_summary(state: State<'_, AppState>) -> Result<settings::EgressSummary, String> {
@@ -6671,6 +6715,9 @@ fn main() {
             get_local_model,
             set_local_model,
             reset_local_model,
+            provider_key_status,
+            set_provider_key,
+            remove_provider_key,
             cloud_disclosure,
             ingest_history,
             extractor_coverage,

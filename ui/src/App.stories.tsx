@@ -989,6 +989,8 @@ function installFakeCore(options: {
         jobs = jobs.filter((job) => !['done', 'failed', 'cancelled'].includes(job.status));
         return before - jobs.length;
       }
+      case 'provider_key_status':
+        return [];
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }
