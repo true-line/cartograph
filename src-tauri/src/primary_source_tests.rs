@@ -2138,10 +2138,16 @@ fn mcp_retained_span_uses_session_receipt_and_refuses_changed_or_over_budget_evi
     let response = session
         .read_evidence(&state, &basis, &target, limits())
         .unwrap();
-    assert_eq!(
-        response.text,
-        ORIGINAL[target.captured.byte_start as usize..target.captured.byte_end as usize]
-    );
+    // AC-0581 / #1754: the retained span is returned redacted, with the count.
+    let captured =
+        &ORIGINAL[target.captured.byte_start as usize..target.captured.byte_end as usize];
+    let (redacted, replacements) = core_redact::redact_text(captured);
+    assert!(replacements > 0, "the fixture span carries a credential");
+    assert_ne!(response.text, captured);
+    assert_eq!(response.text, redacted);
+    assert_eq!(response.redaction.replacements, replacements);
+    assert_eq!(response.redaction.policy, core_redact::TEXT_POLICY_VERSION);
+    assert!(!response.text.contains("primary-password-canary"));
     assert_eq!(response.scope, "primary_source_only");
     assert_eq!(response.input_closure, "input_closure_not_established");
     assert!(!response.text.contains("live-replacement-canary"));

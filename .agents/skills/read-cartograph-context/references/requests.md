@@ -85,7 +85,10 @@ const span = (await call("cartograph_evidence", {
 Copy the complete returned target unchanged, including nested source and captured
 identities. Do not widen the span or construct a target from a filesystem path.
 `description.next_ordinal` can select another range if relevant; do not enumerate
-all ranges automatically. Preserve `scope` and `input_closure`. If the advertised
+all ranges automatically. Preserve `scope`, `input_closure` and `redaction`. Read text
+has passed the host's secret redaction: when `redaction.replacements` is above zero,
+`[REDACTED]` marks a removed value, the text is not byte-identical to the captured
+span, and the marker must never be reported as source content. If the advertised
 file-validation or span limit prevents a read, a smaller response allowance does
 not bypass that work limit. Evidence errors are not permission to run a provider.
 
