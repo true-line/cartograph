@@ -1,9 +1,15 @@
 # Cartograph
 
-**A domain context hub built on cross-layer spec recovery.** Cartograph ingests
-repositories into a provenance-tagged graph across infrastructure, cloud, server,
-events, and client. Its product direction connects business rules, features,
-designs, decisions, and gaps for humans and agents using the same context.
+**Reconstructs the documentation an application should have had from day one.**
+Drag in an app, or as much of its code as can be gathered. Cartograph traces the
+infrastructure, code, UI and existing documentation into a provenance-tagged
+graph. A team of agents then works backwards from those facts to write the
+ADRs, the product specification and the rest of an enterprise document set,
+and the documents are updated as the code drifts. Engineers use the result to
+maintain, rebuild or port the system. Cartograph itself writes no target code.
+
+A project that is already well documented uses the same graph as a **context
+hub**: engineers and agents ask questions and get cited answers.
 
 The core thesis is a **four-tier escalation ladder**: every fact is produced by
 the lowest tier that can establish it, and carries provenance + a confidence
@@ -22,12 +28,17 @@ still need validation; the presence of an artifact is not proof of completeness.
 
 ## Status
 
-The 0.10.3 baseline has a working desktop recovery engine, language/infrastructure
-adapters, graph and flow views, provenance, bounded agent proposals, and exports.
-The next stage is the [domain context hub](docs/SPEC-01_context-hub.md): shared
-reads first, then validated business-domain recovery, consistent curation,
-specialist tasks, MCP/ACP interoperability, and feature architecture evaluation.
-Those stages have separate delivery gates and are not all shipped capabilities.
+As of 0.67 the deterministic foundation is built: the desktop recovery engine,
+language and infrastructure adapters, graph and flow views, provenance, the
+specification compiler and its exports, a read-only MCP surface, and bounded
+specialist investigations that answer cited questions.
+
+Not built yet: agents do not write document sections, accepted proposals do not
+reach the exports, and documents are not updated when the code drifts. The plan
+for those stages is [ROADMAP §10](docs/ROADMAP.md#10-realignment-2026-11-09);
+the direction is [ADR-0056](docs/adr/ADR-0056-documentation-reconstruction-pipeline.md).
+Planned capabilities have separate delivery gates and are not shipped until
+those pass.
 
 ```sh
 # prerequisites: Node (see .nvmrc) and Rust via rustup — https://rustup.rs
@@ -40,7 +51,7 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 
 | Document | Purpose |
 |---|---|
-| [docs/VISION.md](docs/VISION.md) | Product vision: the end state and its elements V1–V9 |
+| [docs/VISION.md](docs/VISION.md) | Product vision: the end state and its elements V1–V13 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap: workstreams, phases with demos, first issues |
 | [docs/SPEC-00_master.md](docs/SPEC-00_master.md) | Master specification — single source of truth |
 | [docs/SPEC-01_context-hub.md](docs/SPEC-01_context-hub.md) | Domain context, MCP/ACP architecture, and delivery gates |
@@ -52,7 +63,7 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 | [docs/design/production-ui/](docs/design/production-ui/) | Production UI design handoff (authoritative tokens + screenshots) |
 | [docs/design/](docs/design/) | Earlier design tokens + Stitch UI mockups |
 
-Work is tracked in [GitHub Issues + Project](https://github.com/qwts/cartograph/issues);
+Work is tracked in [GitHub Issues + Project](https://github.com/true-line/cartograph/issues);
 `docs/archive/tracker.csv` is the pre-import snapshot and is not maintained.
 
 ## Stack (decided — see ADRs)
