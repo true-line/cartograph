@@ -297,6 +297,8 @@
 - **Security:** —
 - **Performance:** —
 - **Trace:** M9–M10, #993, #994 · `spec`, `app`, UI · — · T-0032..0035,T-0057..0058,T-0067,T-0210,T-0218,T-0221,T-0258,T-0297,T-0358,T-0359
+- **AC-0587** Given the topology map, when it is drawn in `topology.md` or returned by the standalone topology export, then every node and edge prints its tier and confidence (`T0 Confirmed`, `T1 Confirmed`, `T2 InferredStrong`, `T3 InferredWeak`), so a static, an observed and an inferred edge never read the same (R-INT-2). A fact with no valid provenance is never drawn as confirmed: the standalone export prints it as `Gap`, and the bundle leaves it out of the map, as it leaves Gap-tier facts out of every artifact body. The standalone topology and flow exports take the export mode: `verified-only` leaves InferredWeak nodes and edges off the map and turns a weak flow hop into an explicit Gap, `best-effort` keeps them labelled, and an inference rejected in the Workbench is withheld in both, as in the bundle (R-INT-5, #1755).
+- **Trace:** M9 · `spec`, `app` · — · T-0587
 
 ### US-0013 — ADR recovery and drift detection
 - **Actor:** Engine

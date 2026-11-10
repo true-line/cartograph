@@ -142,6 +142,37 @@ pub fn topology_mermaid(nodes: &[Node], edges: &[Edge]) -> String {
     out
 }
 
+/// The topology map under one export mode (R-INT-5, #1755): facts the mode
+/// withholds, and inferences the Workbench rejected, are left out before the
+/// diagram is drawn, exactly as in the bundle's `topology.md`.
+pub fn topology_mermaid_in(
+    nodes: &[Node],
+    edges: &[Edge],
+    mode: ExportMode,
+    rejected_hashes: &std::collections::BTreeSet<String>,
+) -> String {
+    let nodes: Vec<Node> = workbench::filter_nodes(nodes, mode, rejected_hashes)
+        .into_iter()
+        .cloned()
+        .collect();
+    let edges: Vec<Edge> = workbench::filter_edges(edges, mode, rejected_hashes)
+        .into_iter()
+        .cloned()
+        .collect();
+    topology_mermaid(&nodes, &edges)
+}
+
+/// The flow dossier under one export mode (R-INT-5, #1755): a withheld hop
+/// becomes an explicit Gap and the flow turns partial, exactly as in the
+/// bundle's `flow_dossiers.md`.
+pub fn flow_dossier_in(
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &std::collections::BTreeSet<String>,
+) -> String {
+    flow_dossier(&workbench::project_flows(flows, mode, rejected_hashes))
+}
+
 /// Compile the flow-dossier artifact (SPEC-00 §7: Markdown + Mermaid
 /// sequence + provenance table per flow). Deterministic for a given trace
 /// (US-0014); statuses and tiers are always visible (R-INT-2), Gap hops
@@ -204,9 +235,10 @@ mod tests {
         assert!(mmd.starts_with("flowchart LR\n"));
         let q = mermaid_id("res:aws_sqs_queue.orders");
         let f = mermaid_id("res:aws_lambda_function.fulfill");
-        assert!(mmd.contains(&format!(r#"{q}["aws_sqs_queue.orders"]"#)));
-        assert!(mmd.contains(&format!("{q} -->|TRIGGERS| {f}")));
-        assert!(mmd.contains("-.->|REFERENCES|"));
+        // Facts with no valid provenance print as the explicit Gap fallback.
+        assert!(mmd.contains(&format!(r#"{q}["aws_sqs_queue.orders · T0 Gap"]"#)));
+        assert!(mmd.contains(&format!("{q} -->|TRIGGERS · T0 Gap| {f}")));
+        assert!(mmd.contains("-.->|REFERENCES · T0 Gap|"));
         assert!(!mmd.contains("CALLS"));
     }
 
@@ -217,7 +249,7 @@ mod tests {
         unresolved.props = serde_json::json!({ "placeholder": true });
         let mmd = topology_mermaid(&[unresolved], &[]);
         assert!(mmd.contains(&format!(
-            r#"{}(["module.vpc ?"])"#,
+            r#"{}(["module.vpc ? · T0 Gap"])"#,
             mermaid_id("res:module.vpc")
         )));
     }
@@ -334,8 +366,12 @@ mod tests {
             "BACKS",
         );
         let mmd = topology_mermaid(&[queue, chan, orphan_chan], &[backs]);
-        assert!(mmd.contains(r#"[("sqs-queue:https://sqs.us-east-1.amazonaws.com/1/orders")]"#));
-        assert!(mmd.contains("-->|BACKS|"));
+        assert!(
+            mmd.contains(
+                r#"[("sqs-queue:https://sqs.us-east-1.amazonaws.com/1/orders · T0 Gap")]"#
+            )
+        );
+        assert!(mmd.contains("-->|BACKS · T0 Gap|"));
         // No BACKS edge, no cylinder: channels are not infra topology on
         // their own.
         assert!(!mmd.contains("1/other"));
@@ -363,8 +399,8 @@ mod tests {
             &[db, file("tests/test.env"), file("example.env")],
             &[configured],
         );
-        assert!(mmd.contains(r#"[/"tests/test.env"/]"#));
-        assert!(mmd.contains("-.->|CONFIGURED_IN|"));
+        assert!(mmd.contains(r#"[/"tests/test.env · T0 Gap"/]"#));
+        assert!(mmd.contains("-.->|CONFIGURED_IN · T0 Gap|"));
         assert!(!mmd.contains("example.env"));
         // A quote or line break in a legal filename cannot close the label
         // or start a new diagram line.
@@ -383,7 +419,7 @@ mod tests {
                 "CONFIGURED_IN",
             )],
         );
-        assert!(mmd_odd.contains(r#"[/"cfg/a#quot;] X-->Y.env"/]"#));
+        assert!(mmd_odd.contains(r#"[/"cfg/a#quot;] X-->Y.env · T0 Gap"/]"#));
         assert!(!mmd_odd.lines().any(|line| line.starts_with("X-->")));
         assert_eq!(
             mmd,
@@ -403,6 +439,122 @@ mod tests {
                 )],
             )
         );
+    }
+
+    fn prov(
+        tier: core_prov::Tier,
+        confidence: core_prov::ConfidenceTier,
+        identity: &str,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            core_prov::Provenance::new(
+                tier,
+                confidence,
+                vec![core_prov::EvidenceRef {
+                    repo: "local/infra".into(),
+                    path: "main.tf".into(),
+                    byte_start: 1,
+                    byte_end: 9,
+                    commit_sha: "abc123".into(),
+                }],
+                "spec.test",
+                identity.as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    // AC-0587 (#1755): R-INT-2 and R-INT-5 on the topology map.
+    #[test]
+    fn topology_shows_tier_and_confidence_and_honours_the_export_mode() {
+        use core_prov::{ConfidenceTier as C, Tier as T};
+        let mut queue = resource("res:q", "aws_sqs_queue.orders");
+        queue.props["prov"] = prov(T::Deterministic, C::Confirmed, "res:q");
+        let mut lambda = resource("res:f", "aws_lambda_function.fulfill");
+        lambda.props["prov"] = prov(T::Deterministic, C::Confirmed, "res:f");
+        let mut guessed = resource("res:g", "guessed.bucket");
+        guessed.props["prov"] = prov(T::Agentic, C::InferredWeak, "res:g");
+        let chan = Node {
+            id: "chan:orders".into(),
+            label: "Channel".into(),
+            props: serde_json::json!({ "prov": prov(T::Deterministic, C::Confirmed, "chan:orders") }),
+        };
+        let with = |mut e: Edge, tier, confidence| {
+            let identity = format!("{} {} {}", e.src, e.label, e.dst);
+            e.props["prov"] = prov(tier, confidence, &identity);
+            e
+        };
+        let nodes = [queue, lambda, guessed, chan];
+        let edges = [
+            with(
+                edge("res:q", "res:f", "TRIGGERS"),
+                T::Deterministic,
+                C::Confirmed,
+            ),
+            with(
+                edge("res:q", "chan:orders", "BACKS"),
+                T::Dynamic,
+                C::Confirmed,
+            ),
+            with(
+                edge("res:f", "res:q", "DEPENDS_ON"),
+                T::Semantic,
+                C::InferredStrong,
+            ),
+            with(
+                edge("res:f", "res:g", "REFERENCES"),
+                T::Agentic,
+                C::InferredWeak,
+            ),
+        ];
+        let none = std::collections::BTreeSet::new();
+
+        let best = topology_mermaid_in(&nodes, &edges, ExportMode::BestEffort, &none);
+        // A static edge, an observed edge and two inferred edges read differently.
+        assert!(best.contains(r#"["aws_sqs_queue.orders · T0 Confirmed"]"#));
+        assert!(best.contains(r#"[("orders · T0 Confirmed")]"#));
+        assert!(best.contains("-->|TRIGGERS · T0 Confirmed|"));
+        assert!(best.contains("-->|BACKS · T1 Confirmed|"));
+        assert!(best.contains("-.->|DEPENDS_ON · T2 InferredStrong|"));
+        assert!(best.contains(r#"["guessed.bucket · T3 InferredWeak"]"#));
+        assert!(best.contains("-.->|REFERENCES · T3 InferredWeak|"));
+
+        // Verified-only withholds the weak node and the weak edge, and only those.
+        let verified = topology_mermaid_in(&nodes, &edges, ExportMode::VerifiedOnly, &none);
+        assert!(!verified.contains("InferredWeak"));
+        assert!(!verified.contains("guessed.bucket"));
+        assert!(verified.contains("-->|BACKS · T1 Confirmed|"));
+        assert!(verified.contains("-.->|DEPENDS_ON · T2 InferredStrong|"));
+
+        // A rejected inference is withheld in either mode.
+        let strong = crate::provenance(&edges[2].props, "res:f DEPENDS_ON res:q").content_hash;
+        let rejected = std::collections::BTreeSet::from([strong]);
+        let curated = topology_mermaid_in(&nodes, &edges, ExportMode::BestEffort, &rejected);
+        assert!(!curated.contains("DEPENDS_ON"));
+    }
+
+    // AC-0587 (#1755): the standalone flow dossier honours the export mode.
+    #[test]
+    fn flow_dossier_withholds_weak_hops_in_verified_only() {
+        let flows = [Flow {
+            trigger: "ep:orders".into(),
+            trigger_kind: "Endpoint".into(),
+            trigger_name: "POST /orders".into(),
+            hops: vec![
+                hop("HANDLES", "ep:orders", "sym:handler", "Confirmed"),
+                hop("CALLS", "sym:handler", "sym:guess", "InferredWeak"),
+            ],
+            status: flowtracer::FlowStatus::Inferred,
+            score: 0.5,
+            depth_limited: false,
+        }];
+        let none = std::collections::BTreeSet::new();
+        let best = flow_dossier_in(&flows, ExportMode::BestEffort, &none);
+        assert!(best.contains("InferredWeak"));
+        let verified = flow_dossier_in(&flows, ExportMode::VerifiedOnly, &none);
+        assert!(!verified.contains("InferredWeak"));
+        assert!(verified.contains("weak inference excluded by verified-only export"));
     }
 
     #[test]

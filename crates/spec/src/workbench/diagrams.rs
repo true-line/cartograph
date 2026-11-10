@@ -10,20 +10,52 @@ use std::{
 struct Line<'a> {
     src: &'a str,
     arrow: &'a str,
-    label: &'a str,
+    label: String,
     dst: &'a str,
 }
 impl Line<'_> {
     fn chars(&self) -> impl Iterator<Item = char> {
         [
-            "    ", self.src, " ", self.arrow, "|", self.label, "| ", self.dst,
+            "    ",
+            self.src,
+            " ",
+            self.arrow,
+            "|",
+            self.label.as_str(),
+            "| ",
+            self.dst,
         ]
         .into_iter()
         .flat_map(str::chars)
     }
 }
 
+/// The tier and confidence of a fact as the diagram prints them (R-INT-2,
+/// #1755): `T1 Confirmed`, `T2 InferredStrong`. A fact with no valid
+/// provenance prints as the explicit `Gap` fallback, never as confirmed.
+struct TierTag(core_prov::Provenance);
+impl TierTag {
+    fn of_node(node: &Node) -> Self {
+        Self(super::provenance(&node.props, &node.id))
+    }
+    fn of_edge(edge: &Edge) -> Self {
+        Self(super::provenance(&edge.props, &super::edge_identity(edge)))
+    }
+}
+impl fmt::Display for TierTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tier = match self.0.tier {
+            core_prov::Tier::Deterministic => "T0",
+            core_prov::Tier::Dynamic => "T1",
+            core_prov::Tier::Semantic => "T2",
+            core_prov::Tier::Agentic => "T3",
+        };
+        write!(f, "{tier} {:?}", self.0.confidence_tier)
+    }
+}
+
 pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]) -> fmt::Result {
+    let by_id: BTreeMap<_, _> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let resources: BTreeMap<_, _> = nodes
         .iter()
         .filter(|n| n.label == "Resource")
@@ -66,20 +98,22 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         };
         writeln!(
             out,
-            "    {}{}\"{}{}\"{}",
+            "    {}{}\"{}{} · {}\"{}",
             aliases[id],
             open,
             display,
             if placeholder { " ?" } else { "" },
+            TierTag::of_node(node),
             close
         )?;
     }
     for id in &backed {
         writeln!(
             out,
-            "    {}[(\"{}\")]",
+            "    {}[(\"{} · {}\")]",
             aliases[id],
-            id.strip_prefix("chan:").unwrap_or(id)
+            id.strip_prefix("chan:").unwrap_or(id),
+            TierTag::of_node(channels[id])
         )?;
     }
     // Env files declaring a resource's key: parallelograms, named by path.
@@ -88,9 +122,10 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
     for (id, path) in &configs {
         writeln!(
             out,
-            "    {}[/\"{}\"/]",
+            "    {}[/\"{} · {}\"/]",
             aliases[id],
-            Replace(path, MERMAID_LABEL)
+            Replace(path, MERMAID_LABEL),
+            TierTag::of_node(by_id[id])
         )?;
     }
     let mut lines = Vec::new();
@@ -108,7 +143,7 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         lines.push(Line {
             src: &aliases[edge.src.as_str()],
             arrow,
-            label: &edge.label,
+            label: format!("{} · {}", edge.label, TierTag::of_edge(edge)),
             dst: &aliases[edge.dst.as_str()],
         });
     }
