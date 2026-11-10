@@ -464,6 +464,13 @@ impl AuthorizedBoundedCompletion {
 pub struct CompletionControl<'a> {
     pub deadline: Instant,
     pub check: &'a dyn Fn() -> CallDirective,
+    /// Called once with the exact request-body byte count after the last
+    /// control check, immediately before the request is handed to the
+    /// transport (#1767). A host records egress here, so a call that then
+    /// fails, times out or is refused is still counted. Returning `false`
+    /// stops the call unsent: a host that cannot record an egress does not
+    /// perform it.
+    pub dispatching: Option<&'a dyn Fn(u64) -> bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1061,6 +1068,11 @@ fn acquire_unlogged(
     check_control(control, false)?;
     *built.timeout_mut() =
         Some(timeout.min(control.deadline.saturating_duration_since(Instant::now())));
+    if let Some(dispatching) = control.dispatching
+        && !dispatching(request_bytes)
+    {
+        return Err(not_sent(FailureCode::EgressDenied));
+    }
     let mut response = client.execute(built).map_err(|error| {
         unknown(if error.is_timeout() {
             FailureCode::DeadlineExceeded

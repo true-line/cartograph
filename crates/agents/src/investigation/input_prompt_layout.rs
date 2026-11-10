@@ -156,6 +156,7 @@ mod tests {
                     &CompletionControl {
                         deadline: Instant::now() + Duration::from_secs(5),
                         check: &|| CallDirective::Continue,
+                        dispatching: None,
                     },
                 )
                 .unwrap();

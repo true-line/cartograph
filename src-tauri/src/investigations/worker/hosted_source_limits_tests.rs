@@ -77,20 +77,8 @@ impl LlmProvider for HostedSource {
     }
 }
 
-#[test]
-fn hosted_ninth_source_call_settles_finishes_and_reopens() {
-    let local = NextProvider::new(false);
-    let base = CompletionFixture::new(&local, SpecialistId::DomainAnalystV9, true, false, false);
-    let request = base.request.clone();
-    let provider = Arc::new(HostedSource {
-        calls: AtomicUsize::new(0),
-    });
-    let f = NextFixture::from_completion_base(
-        provider.as_ref(),
-        SpecialistId::DomainAnalystV10,
-        base,
-        request,
-    );
+/// Run `f` on a scripted Cloud provider, approving every step it asks for.
+fn run_with_approvals(f: &NextFixture, provider: Arc<dyn LlmProvider>) {
     // Standing consent is confined to this temporary scripted fixture.
     {
         let state = f.base.base.app.state::<AppState>();
@@ -149,9 +137,26 @@ fn hosted_ninth_source_call_settles_finishes_and_reopens() {
                 std::thread::sleep(Duration::from_millis(5));
             }
         });
-        f.run(provider.clone());
+        f.run(provider);
         done.store(true, Ordering::SeqCst);
     });
+}
+
+#[test]
+fn hosted_ninth_source_call_settles_finishes_and_reopens() {
+    let local = NextProvider::new(false);
+    let base = CompletionFixture::new(&local, SpecialistId::DomainAnalystV9, true, false, false);
+    let request = base.request.clone();
+    let provider = Arc::new(HostedSource {
+        calls: AtomicUsize::new(0),
+    });
+    let f = NextFixture::from_completion_base(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV10,
+        base,
+        request,
+    );
+    run_with_approvals(&f, provider.clone());
     let state = f.base.base.app.state::<AppState>();
     let detail = state
         .jobs
@@ -192,6 +197,83 @@ fn hosted_ninth_source_call_settles_finishes_and_reopens() {
         detail
     );
     assert_eq!(bytes(&db), before);
+}
+
+/// A hosted provider whose transport takes the request and then fails.
+struct HostedFailure {
+    calls: AtomicUsize,
+}
+impl LlmProvider for HostedFailure {
+    fn id(&self) -> &str {
+        "anthropic:claude-opus-5-5"
+    }
+    fn locality(&self) -> Locality {
+        Locality::Cloud
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        NextProvider::new(false).capabilities()
+    }
+    fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        panic!("offline fixture must never embed")
+    }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
+    fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
+        llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, "unused")
+            .unwrap()
+            .bounded_profile()
+    }
+    fn complete_bounded(
+        &self,
+        _: &AuthorizedBoundedCompletion,
+        control: &CompletionControl<'_>,
+    ) -> Result<BoundedCompletion, BoundedCallError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        // What the real transport does: report the body it is about to send,
+        // then fail after sending it.
+        let dispatching = control.dispatching.expect("a cloud call is recorded");
+        assert!(dispatching(FAILED_CALL_BYTES));
+        Err(BoundedCallError {
+            code: llm::bounded::FailureCode::HttpStatus,
+            outcome: llm::bounded::InvocationOutcome::ResponseReceived,
+        })
+    }
+}
+const FAILED_CALL_BYTES: u64 = 4_321;
+
+// AC-0580 / #1767: a cloud request that was sent and then failed is in the
+// egress record.
+#[test]
+fn hosted_call_that_fails_after_dispatch_is_in_the_egress_record() {
+    let local = NextProvider::new(false);
+    let base = CompletionFixture::new(&local, SpecialistId::DomainAnalystV9, true, false, false);
+    let request = base.request.clone();
+    let provider = Arc::new(HostedFailure {
+        calls: AtomicUsize::new(0),
+    });
+    let f = NextFixture::from_completion_base(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV10,
+        base,
+        request,
+    );
+    let state = f.base.base.app.state::<AppState>();
+    let sent = || {
+        let settings = state.settings.lock().unwrap();
+        settings.egress_summary().unwrap().bytes_sent
+    };
+    assert_eq!(sent(), 0);
+    run_with_approvals(&f, provider.clone());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let detail = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_owned_detail(&f.execution, &f.id)
+        .unwrap();
+    assert_ne!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(sent(), FAILED_CALL_BYTES);
 }
 
 // Manual, provider-free compatibility probe against isolated database copies.

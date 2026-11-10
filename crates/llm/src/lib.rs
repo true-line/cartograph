@@ -263,6 +263,12 @@ pub enum ProviderError {
         /// Policy category when the provider reported one.
         category: Option<String>,
     },
+    /// The host could not record a cloud egress, so the call was not made.
+    #[error("cloud egress to {provider} could not be recorded; nothing was sent")]
+    EgressUnrecorded {
+        /// Provider that was not invoked.
+        provider: String,
+    },
 }
 
 /// Observed local embedding artifact identity; not execution attestation.
@@ -326,15 +332,37 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
+/// Records one cloud egress before it happens: the provider id and the byte
+/// length of the exact redacted payload. `false` means the record could not
+/// be written.
+pub type EgressRecorder = dyn Fn(&str, u64) -> bool + Send + Sync;
+
 /// Default-deny completion firewall shared by semantic and agentic callers.
 pub struct EgressFirewall {
     policy: EgressPolicy,
+    recorder: Option<Box<EgressRecorder>>,
 }
 
 impl EgressFirewall {
     /// Construct a firewall from persisted/configured policy.
     pub fn new(policy: EgressPolicy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            recorder: None,
+        }
+    }
+
+    /// Record every cloud payload `complete` hands to a provider (#1767).
+    /// The recorder runs after consent has matched and before the provider
+    /// is invoked, so a call that then fails or times out is still counted.
+    /// A recorder that returns `false` stops the call unsent.
+    #[must_use]
+    pub fn with_egress_recorder(
+        mut self,
+        recorder: impl Fn(&str, u64) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.recorder = Some(Box::new(recorder));
+        self
     }
 
     /// Build the exact redacted preview without invoking the provider.
@@ -390,6 +418,14 @@ impl EgressFirewall {
             };
             if !grant.matches(&preview) {
                 return Err(ProviderError::ConsentMismatch);
+            }
+            if let Some(recorder) = &self.recorder {
+                let bytes = serde_json::to_vec(&preview.payload)?.len() as u64;
+                if !recorder(&preview.provider_id, bytes) {
+                    return Err(ProviderError::EgressUnrecorded {
+                        provider: preview.provider_id,
+                    });
+                }
             }
         }
         let request = ProviderCompletionRequest {
@@ -944,6 +980,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     fn action(text: &str) -> CompletionAction {
@@ -1250,6 +1287,58 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ProviderError::ConsentMismatch));
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cloud_egress_is_recorded_before_a_call_that_fails() {
+        // AC-0580 / #1767: the record is written when the payload is handed
+        // to the provider, so a failed call is counted like a successful one.
+        let provider = FakeCloud {
+            calls: AtomicUsize::new(0),
+        };
+        let recorded = Arc::new(Mutex::new(Vec::<(String, u64)>::new()));
+        let sink = Arc::clone(&recorded);
+        let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]))
+            .with_egress_recorder(move |provider, bytes| {
+                sink.lock().unwrap().push((provider.to_owned(), bytes));
+                true
+            });
+
+        // No consent: nothing is sent and nothing is recorded.
+        let failing = action("debug-1624-empty");
+        let preview = firewall.preview(&provider, &failing).unwrap();
+        assert!(firewall.complete(&provider, &failing, None).is_err());
+        assert!(recorded.lock().unwrap().is_empty());
+
+        // The provider is invoked and its answer is refused as empty.
+        let grant = ConsentGrant::from_preview(&preview);
+        let error = firewall
+            .complete(&provider, &failing, Some(&grant))
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::EmptyCompletion));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let expected = serde_json::to_vec(&preview.payload).unwrap().len() as u64;
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            [("cloud:test".to_owned(), expected)]
+        );
+    }
+
+    #[test]
+    fn cloud_call_is_not_made_when_its_egress_cannot_be_recorded() {
+        // AC-0580 / #1767: fail closed, as for consent.
+        let provider = FakeCloud {
+            calls: AtomicUsize::new(0),
+        };
+        let firewall = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Agentic]))
+            .with_egress_recorder(|_, _| false);
+        let request = action("safe");
+        let grant = ConsentGrant::from_preview(&firewall.preview(&provider, &request).unwrap());
+        let error = firewall
+            .complete(&provider, &request, Some(&grant))
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::EgressUnrecorded { .. }));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
