@@ -251,20 +251,20 @@ target document exists, so nothing a current consumer reads disappears.
 ## 4. Sections with no source today
 
 These need new deterministic work before the section can be produced. Each
-becomes its own issue once this catalogue is approved.
+row names the issue that tracks it.
 
 | Section | What is missing |
 |---------|-----------------|
 | D1 §1.1, D3 §3.4, D7 §7.5, D10 §10.2 | Target documentation as evidence (#1750) |
-| D1 §1.2, §1.3, D5 §5.3, D10 §10.3 on a real repository | The knowledge phase produces nothing above 50,000 rows (#1771) |
+| D1 §1.2, §1.3, D5 §5.3, D10 §10.3 on a real repository | The knowledge phase now reads a base past 50,000 rows, up to the ADR-0052 ceiling (#1771, fixed). A skip past the ceiling is still not shown in the app (#1782) |
 | D4 §4.1 | Endpoint inventory in the export (#1658) |
-| D6 §6.3 | A projection of endpoints against permission sites |
-| D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary |
-| D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied |
-| D7 §7.3, D6 §6.4 | Keys read only in source are recovered for Python alone. The other five language adapters emit no configuration-read fact, so a key with no environment file entry is missing. Until then the section states which languages it covers |
-| D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps |
-| D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is not an exported artifact |
-| D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement |
+| D6 §6.3 | A projection of endpoints against permission sites (#1787) |
+| D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary (#1788) |
+| D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied (#1791) |
+| D7 §7.3, D6 §6.4 | Keys read only in source are recovered for Python alone. The other five language adapters emit no configuration-read fact, so a key with no environment file entry is missing. Until then the section states which languages it covers (#1789) |
+| D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps (#1790) |
+| D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is not an exported artifact (#1786) |
+| D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement (#1785) |
 | Every header | The graph content hash is not available outside tests (#1765) |
 | Every A and P+A section | Section drafting (#1748) on the curated projection (#1746) |
 
