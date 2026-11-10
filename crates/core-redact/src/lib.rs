@@ -12,7 +12,14 @@
 //! of the source-expression storage boundary.
 
 /// Version of deterministic substitutions used for persistent embedding recipes.
-pub const TEXT_POLICY_VERSION: &str = "redact-text@1";
+///
+/// `redact-text@2` (#1753) widens credential assignment over `redact-text@1`:
+/// a name only has to *end* in a credential word (`DB_PASSWORD`, `clientSecret`,
+/// `AWS_SECRET_ACCESS_KEY`), the key may be quoted (`"password": "…"`), `=>` is
+/// a separator, and `access_key`, `secret_key`, `private_key` and `passwd` join
+/// the credential words. Everything bound to the previous version (embedding
+/// cache keys, receipt source sizes, consent fingerprints) is recomputed.
+pub const TEXT_POLICY_VERSION: &str = "redact-text@2";
 
 mod source_size;
 pub use source_size::{DirectSourceJsonContentSizes, measure_direct_source_json_content};
@@ -20,7 +27,11 @@ pub use source_size::{DirectSourceJsonContentSizes, measure_direct_source_json_c
 use regex::Regex;
 use std::sync::OnceLock;
 
-const SENSITIVE_NAME_PATTERN: &str = r"api[_-]?key|access[_-]?token|auth[_-]?token|password|secret";
+/// Credential words. A free-text assignment name must end in one of them; a
+/// source binding name must equal one of them ([`is_sensitive_name`]). Generic
+/// `token` and `key` suffixes are deliberately absent: they are ordinary
+/// vocabulary in source code and in protocol JSON.
+const SENSITIVE_NAME_PATTERN: &str = r"api[_-]?key|access[_-]?token|auth[_-]?token|access[_-]?key|secret[_-]?key|private[_-]?key|password|passwd|secret";
 
 /// Category recognized by the shared deterministic secret patterns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,9 +76,12 @@ fn patterns() -> &'static [(Regex, &'static str, SecretKind)] {
                 SecretKind::AwsAccessKey,
             ),
             (
+                // No leading boundary: the credential word may end a longer
+                // identifier. The separator may follow the closing quote of a
+                // quoted key. Both captures are preserved byte for byte.
                 Regex::new(&format!(
-                    r"(?i)\b({SENSITIVE_NAME_PATTERN})\b{}",
-                    r#"(\s*[:=]\s*[\"']?)([^\s\"',;}\]\[]{4,})"#,
+                    r"(?i)({SENSITIVE_NAME_PATTERN}){}",
+                    r#"([\"']?\s*(?::|=>?)\s*[\"']?)([^\s\"',;}\]\[]{4,})"#,
                 ))
                 .unwrap(),
                 "$1$2[REDACTED]",
@@ -92,9 +106,11 @@ pub fn recognized_secrets(input: &str) -> Vec<SecretKind> {
 
 /// Whether an entire source binding/property name is a recognized credential key.
 ///
-/// Uses the same name alternatives as free-text credential assignment, anchored
-/// to the whole name. Callers must establish the AST relationship to a value;
-/// the function makes no inference about similarly named functions or variables.
+/// Uses the same credential words as free-text credential assignment, anchored
+/// to the whole name: free text accepts any name that ends in a credential
+/// word, while a source binding must be exactly one. Callers must establish the
+/// AST relationship to a value; the function makes no inference about similarly
+/// named functions or variables.
 pub fn is_sensitive_name(name: &str) -> bool {
     static NAME: OnceLock<Regex> = OnceLock::new();
     NAME.get_or_init(|| Regex::new(&format!(r"(?i)^(?:{SENSITIVE_NAME_PATTERN})$")).unwrap())
@@ -120,7 +136,7 @@ pub fn redact_text(input: &str) -> (String, usize) {
 }
 
 /// Bound the serialized content of one direct UTF-8 source string, before and
-/// after [`redact_text`], under [`TEXT_POLICY_VERSION`] `redact-text@1`.
+/// after [`redact_text`], under [`TEXT_POLICY_VERSION`] `redact-text@2`.
 ///
 /// Returns checked `6 * utf8_bytes`, excluding the two JSON string quotes. If a
 /// serialized payload skeleton already contains an empty text string, add only
@@ -132,7 +148,7 @@ pub fn redact_text(input: &str) -> (String, usize) {
 /// `CompletionPayload.spans[i].text`. Source metadata, nested JSON strings,
 /// prompts, provider transport encoding and whole-payload admission are excluded.
 ///
-/// # Provenance argument for redact-text@1
+/// # Provenance argument for redact-text@2
 ///
 /// Give each original UTF-8 byte six credits: JSON escaping costs at most six
 /// bytes per original byte, including controls, quotes and backslashes. Each
@@ -141,7 +157,11 @@ pub fn redact_text(input: &str) -> (String, usize) {
 /// 25 for 20. Assignment replacement preserves captures `$1` and `$2` exactly
 /// and spends at least four value characters (at least four original bytes) on
 /// the ten-byte `[REDACTED]` marker. Preserved Unicode whitespace and captures
-/// keep their original byte credits.
+/// keep their original byte credits. The `redact-text@2` widening changes only
+/// where a match may start and what `$1` and `$2` contain (a credential word
+/// that ends a longer name, an optional closing key quote, `=>`); it still
+/// preserves both captures and still spends at least four value bytes, so the
+/// same accounting holds.
 ///
 /// Bearer replacement retains provenance for its six canonical ASCII keyword
 /// bytes, and spends the whitespace/token bytes (at least nine) on the eleven
@@ -152,14 +172,16 @@ pub fn redact_text(input: &str) -> (String, usize) {
 ///
 /// Only the bracketed marker blocks are inert under later patterns: their
 /// interiors contain no later token prefix or sensitive assignment name or
-/// separator, and brackets stop token/value matches from traversing a block.
+/// separator (`PRIVATE KEY` and `ACCESS KEY` are space-separated, which no
+/// credential word allows), and brackets stop token/value matches from
+/// traversing a block.
 /// Newly exposed word boundaries can match remaining original bytes, but do
 /// not reuse spent provenance. Thus surviving text, canonical keyword bytes
 /// and inserted markers are paid for by disjoint original byte credits. No
 /// assumption that redaction shrinks text, or that every replacement is inert,
 /// is needed. The sixfold bound is sharp for a run of NUL characters.
 pub fn direct_source_json_content_bound(utf8_bytes: usize) -> Option<usize> {
-    if TEXT_POLICY_VERSION != "redact-text@1" {
+    if TEXT_POLICY_VERSION != "redact-text@2" {
         return None;
     }
     utf8_bytes.checked_mul(6)
@@ -217,6 +239,10 @@ mod tests {
             "apiKey",
             "accessToken",
             "auth_token",
+            "accessKey",
+            "SECRET_KEY",
+            "private-key",
+            "passwd",
         ] {
             assert!(is_sensitive_name(name));
             assert_eq!(redact_text(&format!("{name}=synthetic-value")).1, 1);
@@ -227,8 +253,76 @@ mod tests {
             "secrets",
             "password ",
             "not-secret",
+            "dbPassword",
+            "client_secret",
         ] {
             assert!(!is_sensitive_name(name));
+        }
+    }
+
+    #[test]
+    fn free_text_redaction_covers_compound_names_and_quoted_keys() {
+        // AC-0579 / #1753 (redact-text@2): a credential word may end a longer name, and
+        // the key may be quoted. Each of these was left untouched by @1.
+        let cases = [
+            ("DB_PASSWORD=hunter2hunter2", "DB_PASSWORD=[REDACTED]"),
+            (
+                "AWS_SECRET_ACCESS_KEY=abcdEFGHijklMNOPqrstUVWXyz0123456789abcd",
+                "AWS_SECRET_ACCESS_KEY=[REDACTED]",
+            ),
+            ("client_secret: s3cr3tvalue99", "client_secret: [REDACTED]"),
+            (
+                "dbPassword = 'synthetic-value'",
+                "dbPassword = '[REDACTED]'",
+            ),
+            (
+                "SECRET_KEY = \"synthetic-value\"",
+                "SECRET_KEY = \"[REDACTED]\"",
+            ),
+            ("PGPASSWORD=synthetic-value", "PGPASSWORD=[REDACTED]"),
+            (
+                "export MYSQL_PASSWD=synthetic",
+                "export MYSQL_PASSWD=[REDACTED]",
+            ),
+            ("private_key: synthetic-value", "private_key: [REDACTED]"),
+            (
+                "{\"password\": \"hunter2hunter2\"}",
+                "{\"password\": \"[REDACTED]\"}",
+            ),
+            ("{'api_key':'synthetic-value'}", "{'api_key':'[REDACTED]'}"),
+            (
+                "'db_password' => 'synthetic-value'",
+                "'db_password' => '[REDACTED]'",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_text(input), (expected.into(), 1), "{input}");
+            assert_eq!(
+                recognized_secrets(input),
+                vec![SecretKind::CredentialAssignment],
+                "{input}"
+            );
+            // Idempotent: a marker is never counted or rewritten again.
+            assert_eq!(redact_text(expected), (expected.into(), 0), "{expected}");
+            assert_direct_source_content_bound(input);
+        }
+    }
+
+    #[test]
+    fn free_text_redaction_still_requires_a_credential_word_at_the_end_of_the_name() {
+        // AC-0579 / #1753: the widening is a suffix rule. A name that merely contains a
+        // credential word, a comparison, and ordinary `token`/`key` vocabulary
+        // stay as written, so recovered source keeps its evidence.
+        for safe in [
+            "passwordRequired: true",
+            "password_hash = bcrypt(value)",
+            "secrets = load_all()",
+            "if (password == confirmation) return ok;",
+            "next_token = tokens.advance()",
+            "idempotency_key: 1234567890",
+            "{\"completed_attempt_ids\":[\"ffff\"],\"refusal_count\":3}",
+        ] {
+            assert_eq!(redact_text(safe), (safe.into(), 0), "{safe}");
         }
     }
 
@@ -317,7 +411,7 @@ mod tests {
     #[test]
     fn direct_source_bound_covers_controls_unicode_and_json_escaping() {
         // #708: count UTF-8 bytes and one actual JSON encoding, not characters.
-        assert_eq!(TEXT_POLICY_VERSION, "redact-text@1");
+        assert_eq!(TEXT_POLICY_VERSION, "redact-text@2");
         let controls = (0_u8..=31).map(char::from).collect::<String>();
         assert_direct_source_content_bound(&controls);
         for text in [
@@ -391,7 +485,7 @@ mod tests {
     fn direct_source_bound_pins_exact_redaction_policy_definition() {
         // #708: changing patterns, replacements, categories or their order requires
         // an explicit reproof/repin of the direct-source bound, not just safe examples.
-        assert_eq!(TEXT_POLICY_VERSION, "redact-text@1");
+        assert_eq!(TEXT_POLICY_VERSION, "redact-text@2");
         let definition = patterns()
             .iter()
             .map(|(pattern, replacement, kind)| {
@@ -414,7 +508,7 @@ mod tests {
         digest.update(&bytes);
         assert_eq!(
             digest.finalize().to_hex().as_str(),
-            "c604786b5ee1cfd308845302ce70eff5f6e56612e9b5ba4c91fb554eb561bd06"
+            "2c25382f34315654ff3f8b0819f1cae09fae89f0a0347887c8d085f066541bed"
         );
     }
 
@@ -435,6 +529,13 @@ mod tests {
             "ACCESS_TOKEN",
             "auth-token",
             "ſecret",
+            // AC-0579 / #1753: redact-text@2 name prefixes, added words and separators.
+            "DB_",
+            "client",
+            "access_key",
+            "SECRET_KEY",
+            "passwd",
+            "=>",
             "=",
             ":",
             "'",

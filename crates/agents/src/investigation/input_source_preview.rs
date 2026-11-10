@@ -93,7 +93,7 @@ impl InvestigationInput {
     /// Prove wire/protected-field/disclosure closure for both continuation
     /// modes after this one pinned source append. The current preparation must
     /// be real and sealable. Future completion/capacity feedback uses controlled
-    /// decimal/lowerhex/finite-code replacements under pinned redact-text@1.
+    /// decimal/lowerhex/finite-code replacements under pinned redact-text@2.
     /// Source text is redacted as a separate string and cannot alter prompt
     /// matching regions; its direct-string bound is 6N, including escaping.
     /// No synthetic envelope is returned or accepted by a sealing API.

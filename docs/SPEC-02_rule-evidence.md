@@ -90,6 +90,17 @@ current substitution/omission behavior, consent payloads and idempotence. The
 crate has no provider, network, filesystem, environment or model dependencies.
 T0 source recovery must not depend on the `llm` or `ingest` crate.
 
+The free-text policy is versioned (`TEXT_POLICY_VERSION`). `redact-text@2`
+(#1753, AC-0579) widens credential assignment: the name only has to end in a
+credential word (`DB_PASSWORD`, `clientSecret`), the key may be quoted
+(`"password": "…"`), `=>` is a separator, and `access_key`, `secret_key`,
+`private_key` and `passwd` are credential words. Generic `token` and `key`
+suffixes stay out of the policy because they are ordinary vocabulary in source
+and in protocol JSON. A source binding name is still sensitive only when it
+equals a credential word. A policy version change invalidates everything bound
+to the previous one: embedding cache keys, receipt source sizes and preview
+fingerprints are recomputed, never reused.
+
 Recognizers are shared; policies are distinct. Free-text replacement is not a
 source parser: `password=false` must remain a typed boolean in source evidence.
 The dependent source-expression sanitizer inspects decoded literal values and

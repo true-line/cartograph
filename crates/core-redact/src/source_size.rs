@@ -18,7 +18,7 @@ pub struct DirectSourceJsonContentSizes {
 /// No serialized source copy is retained. Overflow/serialization failure is not
 /// a zero-length measurement and must not select a smaller reservation.
 pub fn measure_direct_source_json_content(input: &str) -> Option<DirectSourceJsonContentSizes> {
-    if crate::TEXT_POLICY_VERSION != "redact-text@1" {
+    if crate::TEXT_POLICY_VERSION != "redact-text@2" {
         return None;
     }
     let original = content_size(input)?;
