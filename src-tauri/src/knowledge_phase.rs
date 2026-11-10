@@ -93,7 +93,7 @@ pub(crate) fn run(
 /// The base this phase reads (#1771). It is a desktop background phase on
 /// the owner's machine with no memory reserved in advance, the same class
 /// of read as a desktop-started investigation (#1602), so it takes that
-/// ceiling. Under the interactive default of 50,000 rows a real repository
+/// ceiling (ADR-0052, amended). Under the interactive default of 50,000 rows a real repository
 /// was skipped whole and no knowledge node was produced for it.
 pub(crate) const PHASE_LIMITS: SnapshotReadLimits = SnapshotReadLimits::investigation();
 
