@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.68.1
+
+### Patch Changes
+
+- e6fee0d: evidence-auditor@12 names a tool, model-call or active-time cap in its terminal diagnostic only when that cap actually stopped the run. An unrelated host or store failure that happens while a counter is exhausted is no longer labelled as a cap.
+- 4b92c25: The topology map in `topology.md` now prints the tier and confidence of every node and edge, so a static, an observed and an inferred connection no longer look the same. The standalone topology and flow exports take the export mode and withhold weak inferences in verified-only.
+
 ## 0.68.0
 
 ### Minor Changes
