@@ -1261,9 +1261,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Security:** Assumed caller sets stay Semantic/InferredWeak conventions; no provider call, graph write or new route is added.
 - **Performance:** The existing capture and compile reservations are extended by the retained Actor slots and the logical Actor workspace bound; no new numeric policy or RSS guarantee.
 - **Trace:** P1 (#1443, #1539) · `app`, `core-graph`, `spec` · ADR-0051, ADR-0037 · T-0535
-- **AC-0582** Given a recovered base larger than the interactive read default (50,000 rows or 32 MiB), when the knowledge phase runs after ingest, then it reads the base under the desktop investigation ceiling (10,000,000 rows, 4 GiB) and publishes its overlay, so the deterministic knowledge nodes exist for a repository of real size; a base past that ceiling is still the named `knowledge-base-bounds` omission. Reads that reserve memory in advance (MCP sessions and MCP-started tasks) keep the interactive default (ADR-0052 amendment, #1771, #1602).
+- **AC-0583** Given a recovered base larger than the interactive read default (50,000 rows or 32 MiB), when the knowledge phase runs after ingest, then it reads the base under the desktop investigation ceiling (10,000,000 rows, 4 GiB) and publishes its overlay, so the deterministic knowledge nodes exist for a repository of real size; a base past that ceiling is still the named `knowledge-base-bounds` omission. Reads that reserve memory in advance (MCP sessions and MCP-started tasks) keep the interactive default (ADR-0052 amendment, #1771, #1602).
 - **Security:** Local read only; no provider call is added and the overlay caps are unchanged.
-- **Trace:** P1 (#1771) · `app` · ADR-0051, ADR-0052 · T-0582
+- **Trace:** P1 (#1771) · `app` · ADR-0051, ADR-0052 · T-0583
 
 ### Decision #1692 — authenticated analyst diagnostics (US-0032 / AC-0287)
 

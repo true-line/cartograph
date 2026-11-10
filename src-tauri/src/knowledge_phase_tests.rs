@@ -142,7 +142,7 @@ fn a_failing_provider_is_a_named_omission_and_still_publishes() {
     assert_eq!(recipe_of(&host), Some(recipe(None, false)));
 }
 
-// AC-0582 / #1771: a base larger than the interactive read default is not
+// AC-0583 / #1771: a base larger than the interactive read default is not
 // skipped; the phase reads it and publishes.
 #[test]
 fn a_base_past_the_interactive_default_is_read_and_published() {
