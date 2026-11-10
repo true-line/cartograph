@@ -4108,7 +4108,17 @@ async fn run_escalation(
     })()
     .map_err(&fail)?;
     let provider = egress::escalation_provider(&mode).map_err(&fail)?;
-    let firewall = llm::EgressFirewall::new(policy);
+    // #1767: a cloud payload is recorded when it is handed to the provider,
+    // so a call that then fails or times out is counted. If the record
+    // cannot be written the call is not made.
+    let recording_app = app.clone();
+    let firewall = llm::EgressFirewall::new(policy).with_egress_recorder(move |provider, bytes| {
+        let state = recording_app.state::<AppState>();
+        let Ok(mut settings) = state.settings.lock() else {
+            return false;
+        };
+        settings.record_egress(provider, bytes).is_ok()
+    });
     let broker = agents::AgentBroker::bounded_default();
     // A cloud run re-derives the preview and only proceeds when the user's
     // approved hash matches this exact payload (one-action consent).
@@ -4122,16 +4132,6 @@ async fn run_escalation(
         )
     } else {
         None
-    };
-    let payload_bytes = if consent.is_some() {
-        let preview = broker
-            .preview_prepared(provider.as_ref(), &firewall, &task)
-            .map_err(|e| fail(e.to_string()))?;
-        serde_json::to_vec(&preview.payload)
-            .map_err(|e| fail(e.to_string()))?
-            .len() as u64
-    } else {
-        0
     };
 
     // Cooperative cancellation: a cancel that landed after context assembly
@@ -4157,15 +4157,6 @@ async fn run_escalation(
     .map_err(&fail)?;
 
     report_progress(&app, &state, &execution, "validate", 90.0).map_err(&fail)?;
-    if payload_bytes > 0 {
-        (|| {
-            let mut settings_store = state.settings.lock().map_err(|e| e.to_string())?;
-            settings_store
-                .record_egress(&proposal.proposal.provenance.extractor_id, payload_bytes)
-                .map_err(|e| e.to_string())
-        })()
-        .map_err(&fail)?;
-    }
     let job = (|| {
         let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
         jobs.finish_execution(&execution, std::slice::from_ref(&proposal.proposal_id))

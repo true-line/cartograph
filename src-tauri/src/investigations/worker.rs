@@ -690,32 +690,51 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 }))
             })?;
             let directive = || execution_directive(self.state, self.execution, self.id);
-            let completion = provider
-                .complete_bounded(
-                    &authorized,
-                    &CompletionControl {
-                        deadline,
-                        check: &directive,
-                    },
-                )
-                .map_err(provider_failure)?;
+            // #1767: the egress is recorded when the request is handed to the
+            // transport, with the transport's exact body count, so a call
+            // that then fails or times out is counted like one that returns.
+            let cloud = provider.locality() == Locality::Cloud;
+            let provider_label = format!(
+                "{}:{}",
+                self.detail.provider.provider_id, self.detail.provider.model
+            );
+            let settings = &self.state.settings;
+            let record_egress = |bytes: u64| {
+                settings.lock().is_ok_and(|mut settings| {
+                    settings.record_egress(&provider_label, bytes).is_ok()
+                })
+            };
+            let recorded = std::cell::Cell::new(None);
+            let dispatching = |bytes: u64| {
+                let written = record_egress(bytes);
+                recorded.set(Some(written));
+                written
+            };
+            let completion = provider.complete_bounded(
+                &authorized,
+                &CompletionControl {
+                    deadline,
+                    check: &directive,
+                    dispatching: cloud.then_some(&dispatching),
+                },
+            );
+            if recorded.get() == Some(false) {
+                // Nothing was sent: the record could not be written.
+                return Err(HostError::Operational.into());
+            }
+            let completion = completion.map_err(provider_failure)?;
+            if cloud && recorded.get().is_none() && !record_egress(completion.request_bytes) {
+                // A provider with its own transport did not use the dispatch
+                // hook and reports its request size only on a completion. It
+                // is recorded before the response is validated, so a response
+                // the host then rejects is still counted. Every provider this
+                // app constructs sends through the bounded transport and is
+                // recorded before dispatch above.
+                return Err(HostError::Operational.into());
+            }
             // Complete response bytes are still untrusted. A custom bounded
             // provider does not bypass output or immutable model identity checks.
             validate_completion(&completion, &prepared)?;
-            if provider.locality() == Locality::Cloud {
-                // This is the bounded provider's observed request-body count,
-                // not an invented byte estimate for failed or unknown calls.
-                let provider_label = format!(
-                    "{}:{}",
-                    self.detail.provider.provider_id, self.detail.provider.model
-                );
-                self.state
-                    .settings
-                    .lock()
-                    .map_err(|_| HostError::Operational)?
-                    .record_egress(&provider_label, completion.request_bytes)
-                    .map_err(|_| HostError::Operational)?;
-            }
             input
                 .validate_response_metadata(completion.response_model.as_deref())
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponseMetadata))?;

@@ -109,6 +109,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             &CompletionControl {
                 deadline,
                 check: &directive,
+                dispatching: None,
             },
         );
         let completion = match &completion {

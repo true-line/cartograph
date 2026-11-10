@@ -773,6 +773,7 @@ fn acceptance_observer_inventory_count_matches_tool_action_bounds() {
                 let control = CompletionControl {
                     deadline: Instant::now() + std::time::Duration::from_secs(10),
                     check: &|| CallDirective::Continue,
+                    dispatching: None,
                 };
                 let error = observed
                     .complete_bounded(&authorized, &control)

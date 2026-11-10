@@ -383,6 +383,7 @@ fn assert_ollama_wire(input: &InvestigationInput, expected_prompt: &str) {
             &llm::bounded::CompletionControl {
                 deadline: Instant::now() + Duration::from_secs(10),
                 check: &|| llm::bounded::CallDirective::Continue,
+                dispatching: None,
             },
         )
         .unwrap();

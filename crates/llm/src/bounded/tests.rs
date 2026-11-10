@@ -166,6 +166,7 @@ fn control() -> CompletionControl<'static> {
     CompletionControl {
         deadline: Instant::now() + Duration::from_secs(10),
         check: &proceed,
+        dispatching: None,
     }
 }
 
@@ -509,6 +510,7 @@ fn bounded_completion_deadline_covers_headers_and_body() {
                 &CompletionControl {
                     deadline: before + Duration::from_millis(300),
                     check: &proceed,
+                    dispatching: None,
                 },
             )
             .unwrap_err();
@@ -518,6 +520,79 @@ fn bounded_completion_deadline_covers_headers_and_body() {
         let _ = release.send(());
         server.join().unwrap();
     }
+}
+
+// AC-0580 / #1767: the host learns the exact request-body size before the
+// transport is used, so an egress is counted even when the call then fails.
+#[test]
+fn bounded_dispatch_hook_reports_request_bytes_before_a_failed_call() {
+    let (endpoint, server) = http(
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec(),
+    );
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let request = authorize(&local, CompletionLimits::default());
+    let reported = std::cell::Cell::new(None);
+    let dispatching = |bytes: u64| {
+        assert_eq!(reported.replace(Some(bytes)), None, "reported once");
+        true
+    };
+    let error = local
+        .complete_bounded(
+            &request,
+            &CompletionControl {
+                deadline: Instant::now() + Duration::from_secs(5),
+                check: &proceed,
+                dispatching: Some(&dispatching),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error, rejected(FailureCode::HttpStatus));
+    let sent = server.join().unwrap();
+    assert_eq!(reported.get(), Some(sent.body.len() as u64));
+
+    // A successful call reports the same count its completion carries.
+    let (endpoint, server) = http(framed(&ollama_body("{}")));
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    let request = authorize(&local, CompletionLimits::default());
+    reported.set(None);
+    let completion = local
+        .complete_bounded(
+            &request,
+            &CompletionControl {
+                deadline: Instant::now() + Duration::from_secs(5),
+                check: &proceed,
+                dispatching: Some(&dispatching),
+            },
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(reported.get(), Some(completion.request_bytes));
+}
+
+// AC-0580 / #1767: a host that cannot record the egress does not perform it.
+#[test]
+fn bounded_dispatch_hook_refusal_sends_nothing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let local = OllamaProvider::new(
+        &format!("http://{}/", listener.local_addr().unwrap()),
+        "test-model",
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let request = authorize(&local, CompletionLimits::default());
+    let error = local
+        .complete_bounded(
+            &request,
+            &CompletionControl {
+                deadline: Instant::now() + Duration::from_secs(5),
+                check: &proceed,
+                dispatching: Some(&|_| false),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error, not_sent(FailureCode::EgressDenied));
+    assert_no_request(&listener);
 }
 
 // AC-0186/0187: pre-dispatch cancellation has no request. After dispatch the real
@@ -544,6 +619,7 @@ fn bounded_completion_cancellation_preserves_complete_late_response() {
                 &CompletionControl {
                     deadline: Instant::now() + Duration::from_secs(5),
                     check: &|| directive,
+                    dispatching: None,
                 },
             )
             .unwrap_err();
@@ -576,6 +652,7 @@ fn bounded_completion_cancellation_preserves_complete_late_response() {
     let control = CompletionControl {
         deadline: Instant::now() + Duration::from_secs(5),
         check: &check,
+        dispatching: None,
     };
     let result = local.complete_bounded(&request, &control).unwrap();
     assert_eq!(result.text, r#"{"action":"finish"}"#);
@@ -1849,6 +1926,7 @@ fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
     let control = CompletionControl {
         deadline: Instant::now() + Duration::from_secs(5),
         check: &check,
+        dispatching: None,
     };
     assert_eq!(
         local.complete_bounded(&request, &control).unwrap_err(),
@@ -1870,6 +1948,7 @@ fn debug_logging_precedes_the_final_control_check_and_never_blocks_the_call() {
         &CompletionControl {
             deadline: Instant::now() + Duration::from_secs(2),
             check: &proceed,
+            dispatching: None,
         },
     );
     let elapsed = started.elapsed();
