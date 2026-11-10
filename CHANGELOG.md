@@ -1,5 +1,18 @@
 # cartograph
 
+## 0.68.0
+
+### Minor Changes
+
+- 69424a7: Add an immutable evidence-auditor@12 with obligation-bound acquisition and bounded, text-free query-budget feedback while preserving auditor@11 replay and existing limits.
+- eefcc3e: Settings has a new Provider keys section. Enter, replace or remove a provider API key in the app; it is stored in the system credential store (Keychain on macOS, Credential Manager on Windows) and never shown again. The `ANTHROPIC_API_KEY` environment variable still works and takes precedence. A release build opened from Finder can now use the cloud lane. Consent is unchanged: each cloud step still asks.
+
+### Patch Changes
+
+- eb2e7dc: The knowledge phase no longer skips repositories whose graph is larger than 50,000 rows. It now reads graphs up to 10,000,000 rows, so capabilities, domain entities, actors and business flows are produced for systems of real size.
+- bd01a90: Help → Guide, Help → Report an issue, the Help links and the adapter-request links now open the repository at its current location, `true-line/cartograph`.
+- 4607683: The investigation composer's limit line now shows the saved run limit for every specialist that uses it, including domain-analyst@21 to @27. The app decides this in one place instead of keeping a second list in the UI.
+
 ## 0.67.4
 
 ### Patch Changes
