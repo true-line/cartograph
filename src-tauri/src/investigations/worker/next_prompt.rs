@@ -37,6 +37,26 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?,
             )
         };
+        // This is a decoded acquisition that would consume a tool action.
+        // Finish remains admissible at the tool cap; unrelated store failures
+        // are never relabelled as this explicit exhausted-tool boundary.
+        // An unoffered read is refused below without charging a tool action,
+        // so the tool cap is not its cause.
+        if self
+            .detail
+            .summary
+            .specialist_id
+            .uses_query_budget_refusals()
+            && mode == staged_refusal::CompletionCallMode::Choice
+            && let Some(CompletionInvestigationAction::Read(read)) = &action
+            && input.permits_acquisition(read)
+            && self.detail.usage.tool_actions >= self.detail.limits.tool_actions
+        {
+            self.check_new_work()?;
+            return Err(Failure::Stop(InvestigationStopReason::BudgetCap(
+                agents::investigation::QueryBudgetTermination::ToolActions,
+            )));
+        }
         let original: serde_json::Value = serde_json::from_str(&completion.text)
             .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
         let refusal = if let Some(CompletionInvestigationAction::Read(read)) = &action

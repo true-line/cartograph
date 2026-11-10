@@ -1351,6 +1351,7 @@ impl InvestigationInput {
     /// cannot recover by increasing its budget or shrinking its selection.
     pub fn is_maximum_obligation_query(&self, query: &InvestigationQuery) -> bool {
         query.max_bytes == MAX_QUERY_BYTES
+            && query.max_facts == 1
             && matches!(query.scope, InvestigationScope::Node { .. })
             && self.validate_acquisition_projection().is_ok()
             && self.acquisition_choices.as_ref().is_some_and(|choices| {

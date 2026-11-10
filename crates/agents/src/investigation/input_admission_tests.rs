@@ -1478,7 +1478,11 @@ fn auditor12_irreducible_page_requires_exact_maximum_offered_obligation() {
         .with_acquisition_choices(std::sync::Arc::new(choices))
         .unwrap();
     assert_eq!(query.max_bytes, MAX_QUERY_BYTES);
+    assert_eq!(query.max_facts, 1);
     assert!(input.is_maximum_obligation_query(&query));
+    let mut wider = query.clone();
+    wider.max_facts = 2;
+    assert!(!input.is_maximum_obligation_query(&wider));
     let mut smaller = query.clone();
     smaller.max_bytes -= 1;
     assert!(!input.is_maximum_obligation_query(&smaller));

@@ -419,6 +419,7 @@ pub(crate) enum InvestigationStopReason {
     UnadmittedRead,
     FinishOnlyToolProposal,
     LimitExceeded,
+    BudgetCap(agents::investigation::QueryBudgetTermination),
     ProviderFailure,
     BoundedProvider(llm::bounded::BoundedCallError),
     HostLimit,
@@ -458,7 +459,10 @@ impl InvestigationStopReason {
             },
             Self::OperationalAt { .. } => Self::Operational,
             Self::PreparationAt(_) => Self::PreparationFailed,
-            Self::HostLimit | Self::HostLimitAt { .. } | Self::StoreCapacity => Self::LimitExceeded,
+            Self::HostLimit
+            | Self::HostLimitAt { .. }
+            | Self::StoreCapacity
+            | Self::BudgetCap(_) => Self::LimitExceeded,
             Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
             other => other,
         }
@@ -650,6 +654,15 @@ impl InvestigationStopReason {
             Self::FinishOnlyToolProposal => {
                 "The provider proposed a tool when only a finishing response was permitted."
             }
+            Self::BudgetCap(cap) => match cap {
+                agents::investigation::QueryBudgetTermination::ToolActions => {
+                    Self::StoreCapacity.message()
+                }
+                agents::investigation::QueryBudgetTermination::ActiveTime => {
+                    Self::HostLimit.message()
+                }
+                _ => Self::LimitExceeded.message(),
+            },
             Self::LimitExceeded => "An investigation work or storage limit was reached.",
             Self::HostLimit => "Investigation limit reached: host_limit.",
             Self::HostLimitAt { phase, limit } => match (phase, limit) {
