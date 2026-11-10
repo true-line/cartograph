@@ -1,5 +1,14 @@
 # cartograph
 
+## 0.67.4
+
+### Patch Changes
+
+- edb064b: Preserve versioned parent-history policy through source reservation, response schemas and acquisition validation, and retain optional closed, text-free host/store failure diagnostics. New source reservation records require exact effective-policy bindings while historical hosted records remain readable.
+- b514d82: The egress total now counts every cloud payload that was sent, including calls that then failed or timed out. Previously only calls that returned a usable answer were counted. A cloud call is not made if its egress cannot be recorded.
+- 86a7032: Source text returned to an MCP client is now redacted before it leaves the app, the same way model prompts are. The evidence response states the redaction policy and how many values were replaced.
+- 3340661: Redact credentials assigned to compound names (`DB_PASSWORD`, `clientSecret`, `AWS_SECRET_ACCESS_KEY`, `SECRET_KEY`) and to quoted keys (`"password": "…"`) before text is sent to a model, embedded or recorded. Previously only a bare `password`, `secret`, `api_key`, `access_token` or `auth_token` name was recognised. The redaction policy is now `redact-text@2`; cached embeddings and stored source-size measurements made under the previous policy are recomputed.
+
 ## 0.67.3
 
 ### Patch Changes
