@@ -16,8 +16,9 @@
 /// `redact-text@2` (#1753) widens credential assignment over `redact-text@1`:
 /// a name only has to *end* in a credential word (`DB_PASSWORD`, `clientSecret`,
 /// `AWS_SECRET_ACCESS_KEY`), the key may be quoted (`"password": "…"`), `=>` is
-/// a separator, and `access_key`, `secret_key`, `private_key` and `passwd` join
-/// the credential words. Everything bound to the previous version (embedding
+/// a separator, a quoted value is replaced through its closing quote, and
+/// `access_key`, `secret_key`, `private_key` and `passwd` join the credential
+/// words. Everything bound to the previous version (embedding
 /// cache keys, receipt source sizes, consent fingerprints) is recomputed.
 pub const TEXT_POLICY_VERSION: &str = "redact-text@2";
 
@@ -78,13 +79,22 @@ fn patterns() -> &'static [(Regex, &'static str, SecretKind)] {
             (
                 // No leading boundary: the credential word may end a longer
                 // identifier. The separator may follow the closing quote of a
-                // quoted key. Both captures are preserved byte for byte.
+                // quoted key. A quoted value is replaced whole, through its
+                // closing quote on the same line, so a passphrase with spaces
+                // or punctuation does not leave a tail behind; escapes are
+                // stepped over. An unterminated quote, or a quoted value that
+                // contains a bracket, falls back to the bare token. Brackets
+                // stay excluded so an existing marker is never matched again.
+                // The name, separator and quotes are preserved byte for byte.
                 Regex::new(&format!(
-                    r"(?i)({SENSITIVE_NAME_PATTERN}){}",
-                    r#"([\"']?\s*(?::|=>?)\s*[\"']?)([^\s\"',;}\]\[]{4,})"#,
+                    r"(?i)({SENSITIVE_NAME_PATTERN}){}(?:{}|{}|{})",
+                    r#"([\"']?\s*(?::|=>?)\s*)"#,
+                    r#"(")(?:[^"\\\n\[\]]|\\[^\n\[\]]){4,}(")"#,
+                    r#"(')(?:[^'\\\n\[\]]|\\[^\n\[\]]){4,}(')"#,
+                    r#"([\"']?)[^\s\"',;}\]\[]{4,}"#,
                 ))
                 .unwrap(),
-                "$1$2[REDACTED]",
+                "$1$2$3$5$7[REDACTED]$4$6",
                 SecretKind::CredentialAssignment,
             ),
         ]
@@ -293,6 +303,24 @@ mod tests {
             (
                 "'db_password' => 'synthetic-value'",
                 "'db_password' => '[REDACTED]'",
+            ),
+            // A quoted value is replaced through its closing quote: no tail
+            // of a passphrase with spaces, punctuation or escapes survives.
+            (
+                "{\"password\": \"correct horse battery staple\"}",
+                "{\"password\": \"[REDACTED]\"}",
+            ),
+            (
+                "db_password = 'two words; and, more'",
+                "db_password = '[REDACTED]'",
+            ),
+            (
+                r#"secret: "say \"hi\" twice", next: 1"#,
+                r#"secret: "[REDACTED]", next: 1"#,
+            ),
+            (
+                "password=\"a b\\\\\" + suffix",
+                "password=\"[REDACTED]\" + suffix",
             ),
         ];
         for (input, expected) in cases {
@@ -508,7 +536,7 @@ mod tests {
         digest.update(&bytes);
         assert_eq!(
             digest.finalize().to_hex().as_str(),
-            "2c25382f34315654ff3f8b0819f1cae09fae89f0a0347887c8d085f066541bed"
+            "622967b07389bcfbe23ac06a0e2593277747cec06c2e677d88fb05b3654df0ae"
         );
     }
 
