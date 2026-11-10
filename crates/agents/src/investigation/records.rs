@@ -635,11 +635,24 @@ impl InvestigationInputLedger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "schema", deny_unknown_fields)]
 pub enum InvestigationTerminalDiagnostic {
+    #[serde(rename = "investigation-terminal-diagnostic@2")]
+    QueryBudget {
+        termination: QueryBudgetTermination,
+        budget: query_refusal::QueryBudgetDiagnostic,
+    },
     #[serde(rename = "investigation-terminal-diagnostic@1")]
     Operational {
         phase: InvestigationFailurePhase,
         error_class: InvestigationOperationalClass,
     },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryBudgetTermination {
+    PageBudget,
+    ToolActions,
+    ModelInvocations,
+    ActiveTime,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -11,7 +11,8 @@ pub fn next_prompt_validation_workspace() -> Option<usize> {
     let definition = definition_workspace(SpecialistId::DomainAnalystV24)?
         .max(definition_workspace(SpecialistId::DomainAnalystV23)?)
         .max(definition_workspace(SpecialistId::DomainAnalystV22)?)
-        .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?);
+        .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?)
+        .max(definition_workspace(SpecialistId::EvidenceAuditorV12)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
     let redaction = sum(&[text, text, slots::<String>(2)?])?;

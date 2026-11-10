@@ -1739,6 +1739,7 @@ mod source_replay_feedback_tests {
                 <= MAX_INPUT_BYTES
         );
         let mut refusal = query_refusal::QueryRefusalRecord {
+            budget: None,
             schema_version: 1,
             record_id: String::new(),
             task_id: "task-1".into(),

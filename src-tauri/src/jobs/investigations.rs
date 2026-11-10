@@ -400,6 +400,7 @@ pub(crate) enum PreparationPhase {
 pub(crate) enum HostLimitKind {
     Unspecified,
     CumulativeQueryAndInventoryBytes,
+    QueryPageBudget(agents::investigation::query_refusal::QueryBudgetDiagnostic),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,6 +653,9 @@ impl InvestigationStopReason {
             Self::LimitExceeded => "An investigation work or storage limit was reached.",
             Self::HostLimit => "Investigation limit reached: host_limit.",
             Self::HostLimitAt { phase, limit } => match (phase, limit) {
+                (_, HostLimitKind::QueryPageBudget(_)) => {
+                    "Investigation limit reached: host_limit; phase=metadata_query; limit=query_page_budget."
+                }
                 (PreparationPhase::Query, HostLimitKind::CumulativeQueryAndInventoryBytes) => {
                     "Investigation limit reached: host_limit; phase=metadata_query; limit=cumulative_query_and_inventory_bytes."
                 }

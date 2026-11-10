@@ -81,6 +81,8 @@ pub enum SpecialistId {
     DomainAnalystV27,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
+    #[serde(rename = "evidence-auditor@12")]
+    EvidenceAuditorV12,
     #[serde(rename = "spec-writer@1")]
     SpecWriterV1,
     #[serde(rename = "spec-writer@2")]
@@ -256,6 +258,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -297,6 +300,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -339,6 +343,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -374,6 +379,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -403,6 +409,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -432,6 +439,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -458,6 +466,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -485,7 +494,7 @@ impl SpecialistId {
             Self::DomainAnalystV9 | Self::EvidenceAuditorV9 => 9,
             Self::DomainAnalystV10 | Self::EvidenceAuditorV10 => 10,
             Self::DomainAnalystV11 | Self::EvidenceAuditorV11 => 11,
-            Self::DomainAnalystV12 => 12,
+            Self::DomainAnalystV12 | Self::EvidenceAuditorV12 => 12,
             Self::DomainAnalystV13 => 13,
             Self::DomainAnalystV14 => 14,
             Self::DomainAnalystV15 => 15,
@@ -528,6 +537,7 @@ impl SpecialistId {
             self,
             Self::DomainAnalystV11
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
@@ -578,6 +588,10 @@ impl SpecialistId {
         )
     }
 
+    pub fn uses_query_budget_refusals(self) -> bool {
+        self == Self::EvidenceAuditorV12
+    }
+
     pub fn uses_acquisition_choices(self) -> bool {
         matches!(
             self,
@@ -591,6 +605,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -608,6 +623,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::EvidenceAuditorV12
         )
     }
 
@@ -789,7 +805,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV8
             | Self::EvidenceAuditorV9
             | Self::EvidenceAuditorV10
-            | Self::EvidenceAuditorV11 => {
+            | Self::EvidenceAuditorV11
+            | Self::EvidenceAuditorV12 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
@@ -884,6 +901,7 @@ impl SpecialistId {
             self,
             Self::DomainAnalystV11
                 | Self::EvidenceAuditorV11
+                | Self::EvidenceAuditorV12
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
@@ -904,7 +922,18 @@ impl SpecialistId {
         } else {
             prompt
         };
-        if self == Self::DomainAnalystV12 {
+        if self == Self::EvidenceAuditorV12 {
+            let prompt = format!(
+                "{}\nCompiled auditor response schema templates: choice={} finish_only={}. Host admission remains authoritative.",
+                prompt,
+                core_prov::content_hash(super::response_schema::CHOICE.as_bytes()),
+                core_prov::content_hash(super::response_schema::FINISH.as_bytes())
+            );
+            prompt.replace(
+                "Completion obligations are mandatory. Return only the versioned finish wrapper",
+                "Completion obligations are mandatory. When finishing, return only the versioned finish wrapper",
+            ) + "\nObligation acquisition choices@1: while choices are incomplete, choose an acquisition exactly from the host-supplied entries. Exact-node query scope {\"type\":\"node\",\"id\":\"exact node ID\"} admits metadata only; the following source read still requires its frozen fact/role/index and receipt guards. Blocked and deferred obligations remain unattempted. Ordinary exploration resumes only after required reads have applicable attempts. Query-budget feedback contains closed stage codes and byte counts: required_bytes_kind distinguishes exact size from a lower bound. Refusal consumes an attempt but advances no cursor, fact or obligation and is not evidence. Choose an admissible narrower selector or a page budget within the unchanged limits; do not repeat an unchanged refused query. A larger budget is not a promise of fit. Finish honestly within the remaining budgets. The host never chooses or retries an action for you."
+        } else if self == Self::DomainAnalystV12 {
             prompt + FINISH_EXAMPLES_V12
         } else {
             prompt
@@ -969,7 +998,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV8
             | Self::EvidenceAuditorV9
             | Self::EvidenceAuditorV10
-            | Self::EvidenceAuditorV11 => (
+            | Self::EvidenceAuditorV11
+            | Self::EvidenceAuditorV12 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),
@@ -1549,5 +1579,35 @@ mod capacity_exclusion_identity_tests {
             16_354
         );
         assert!(role.definition().is_ok()); // existing 16KiB bound, unchanged
+    }
+}
+
+#[cfg(test)]
+mod auditor12_tests {
+    use super::*;
+    // AC-0585: new identity adds bounded acquisition only; legacy stays pinned.
+    #[test]
+    fn auditor12_capabilities_preserve_auditor11_contract() {
+        let old = SpecialistId::EvidenceAuditorV11;
+        let new = SpecialistId::EvidenceAuditorV12;
+        assert!(!old.uses_acquisition_choices());
+        assert!(!old.uses_exact_node_queries());
+        assert!(!old.uses_query_budget_refusals());
+        assert!(new.uses_acquisition_choices());
+        assert!(new.uses_exact_node_queries());
+        assert!(new.uses_query_budget_refusals());
+        assert!(!new.uses_capacity_exclusions());
+        assert!(!new.uses_exact_source_reservation());
+        assert!(!new.uses_combined_finish_feedback());
+        assert_eq!(new.version(), 12);
+        assert_eq!(new.prompt_generation(), old.prompt_generation());
+        assert_ne!(
+            new.definition().unwrap().prompt_fingerprint,
+            old.definition().unwrap().prompt_fingerprint
+        );
+        assert_eq!(
+            serde_json::to_string(&new).unwrap(),
+            "\"evidence-auditor@12\""
+        );
     }
 }

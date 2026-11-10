@@ -34,7 +34,17 @@ impl LlmProvider for HostedHistory {
         assert_eq!((control.check)(), CallDirective::Continue);
         assert_eq!(request.limits().values().max_output_tokens, 16384);
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call >= if self.third == 3 { 4 } else { 3 } {
+        let p: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        let acquisition = p["turn_progress"]["acquisition_choices"].is_object();
+        if call
+            >= if acquisition {
+                32
+            } else if self.third == 3 {
+                4
+            } else {
+                3
+            }
+        {
             return Err(BoundedCallError {
                 code: llm::bounded::FailureCode::Cancelled,
                 outcome: llm::bounded::InvocationOutcome::NotDispatched,
@@ -43,10 +53,14 @@ impl LlmProvider for HostedHistory {
         // Exercise main's pre-dispatch accounting hook, even though this fixture
         // never opens a socket. Failed scripted stops above are not dispatched.
         assert!(control.dispatching.expect("Cloud dispatch hook")(100));
-        let p: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         let history = serde_json::to_vec(&p["prior_findings_as_t3_history"]).unwrap();
         assert!(history.len() > 16384 && history.len() <= 32768);
-        let action = if call == 0 {
+        let offered = p["turn_progress"]["acquisition_choices"]["entries"]
+            .as_array()
+            .and_then(|entries| entries.first());
+        let action = if let Some(entry) = offered {
+            entry["action"].clone()
+        } else if call == 0 {
             let target = &p["completion_contract"]["obligations"]["obligations"]
                 .as_array()
                 .unwrap()
@@ -86,6 +100,16 @@ impl LlmProvider for HostedHistory {
         } else {
             json!({"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Source evidence has not been independently acquired."]}})
         };
+        if acquisition {
+            println!(
+                "auditor12_fixture_call={} action={} menu_entries={}",
+                call + 1,
+                action["type"].as_str().unwrap_or("finish"),
+                p["turn_progress"]["acquisition_choices"]["entries"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            );
+        }
         Ok(BoundedCompletion {
             text: action.to_string(),
             requested_model: "gpt-6.1-sol".into(),

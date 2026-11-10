@@ -230,3 +230,19 @@ it('recognizes saved @18 and refuses a mismatched summary schema family (AC-0553
   expect(useInvestigationStore.getState().error).toContain('consistently');
   expect(useInvestigationStore.getState().detail?.specialist.version).toBe(18);
 });
+
+// AC-0585: the new auditor is explicitly advertised; saved @11 remains distinct.
+it('recognizes auditor12 only in the advertised generation7 family', async () => {
+  const { completionFamily, isCompletionSpecialist, isExpandedSpecialist } = await import('./investigationFamilies');
+  expect(isCompletionSpecialist('evidence-auditor@12')).toBe(true);
+  expect(isExpandedSpecialist('evidence-auditor@12')).toBe(true);
+  expect(completionFamily(7)?.specialistIds).toContain('evidence-auditor@12');
+  expect(completionFamily(7)?.specialistIds).toContain('evidence-auditor@11');
+  expect(completionFamily(6)?.specialistIds).not.toContain('evidence-auditor@12');
+  expect(investigationPolicy(null, 'investigation-v1', 'evidence-auditor@12')).toBeUndefined();
+  const catalog = structuredClone(queryHistoryCatalog);
+  const policy = catalog.policies![0];
+  policy.specialist_ids = ['evidence-auditor@12'];
+  policy.request_schema_version = 7;
+  expect(investigationPolicy(catalog, 'investigation-v2', 'evidence-auditor@12')).toBe(policy);
+});

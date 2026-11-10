@@ -15,6 +15,7 @@ fn query_refusal_journal_reopens_without_new_evidence_or_refunding_attempt() {
     let pending = step(&ledger, 1);
     let started = begin(&mut fixture, &id, &execution, pending.clone());
     let mut record = QueryRefusalRecord {
+        budget: None,
         schema_version: 1,
         record_id: String::new(),
         task_id: id.clone(),
@@ -167,4 +168,75 @@ fn query_refusal_journal_reopens_without_new_evidence_or_refunding_attempt() {
         Err(InvestigationStoreError::Cancelled)
     );
     tx.commit().unwrap();
+}
+
+// AC-0585: reaching a cap is not evidence that any page was refused. Test the
+// terminal projection with no query-refusal event; no numeric witness is invented.
+#[test]
+fn auditor12_caps_without_authenticated_budget_refusal_have_no_budget_diagnostic() {
+    for model_cap in [false, true] {
+        let mut fixture = Fixture::new();
+        let (id, execution) =
+            fixture.start("no-budget-refusal-cap", InvestigationProviderMode::Local);
+        fixture.prepare(&id, &execution, false);
+        let tx = fixture.store.conn.unchecked_transaction().unwrap();
+        let mut task = load_task(&tx, &id).unwrap();
+        // Unit-test the stop projection, not admission; do not publish this
+        // synthetic cap state or alter the authenticated historical request.
+        task.detail.summary.specialist_id = SpecialistId::EvidenceAuditorV12;
+        let reason = if model_cap {
+            task.detail.usage.model_invocations = task.detail.limits.model_invocations;
+            InvestigationStopReason::LimitExceeded
+        } else {
+            task.detail.usage.tool_actions = task.detail.limits.tool_actions;
+            InvestigationStopReason::StoreCapacity
+        };
+        assert!(super::query_refusal::latest(&tx, &task).unwrap().is_none());
+        super::transitions::stop(&tx, &mut task, reason).unwrap();
+        assert!(task.detail.terminal_diagnostic.is_none());
+        tx.rollback().unwrap();
+    }
+}
+
+// AC-0585: the host's irreducible maximum-page failure is itself terminal;
+// it requires neither a persisted recoverable refusal nor reaching any cap.
+#[test]
+fn auditor12_irreducible_page_budget_stops_without_refusal_record() {
+    use agents::investigation::query_refusal::{
+        QueryBudgetDiagnostic, QueryBudgetStage, RequiredBytesKind,
+    };
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start("irreducible-budget", InvestigationProviderMode::Local);
+    fixture.prepare(&id, &execution, false);
+    let tx = fixture.store.conn.unchecked_transaction().unwrap();
+    let mut task = load_task(&tx, &id).unwrap();
+    task.detail.summary.specialist_id = SpecialistId::EvidenceAuditorV12;
+    let budget = QueryBudgetDiagnostic {
+        stage: QueryBudgetStage::CorePage,
+        requested_bytes: MAX_QUERY_BYTES,
+        effective_bytes: MAX_QUERY_BYTES,
+        required_bytes: MAX_QUERY_BYTES + 1,
+        required_bytes_kind: RequiredBytesKind::AtLeast,
+    };
+    let before = task.detail.usage.clone();
+    super::transitions::stop(
+        &tx,
+        &mut task,
+        InvestigationStopReason::HostLimitAt {
+            phase: PreparationPhase::Query,
+            limit: HostLimitKind::QueryPageBudget(budget),
+        },
+    )
+    .unwrap();
+    assert_eq!(task.detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(task.detail.usage, before);
+    assert!(super::query_refusal::latest(&tx, &task).unwrap().is_none());
+    assert_eq!(
+        task.detail.terminal_diagnostic,
+        Some(InvestigationTerminalDiagnostic::QueryBudget {
+            termination: QueryBudgetTermination::PageBudget,
+            budget,
+        })
+    );
+    tx.rollback().unwrap();
 }

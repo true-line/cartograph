@@ -134,6 +134,7 @@ pub(super) enum PreparedContextReadKind {
 pub(super) enum ContextReadPreparationError {
     Host(HostError),
     QueryRejected(QueryRejection),
+    QueryBudget(agents::investigation::query_refusal::QueryBudgetDiagnostic),
     CumulativeQueryAndInventoryBytes,
 }
 pub(super) use agents::investigation::query_refusal::QueryRejection;
@@ -160,7 +161,9 @@ impl ContextReadPreparationError {
             Self::Host(error) => error,
             // Legacy callers remain terminal until a durable refusal is published.
             Self::QueryRejected(_) => HostError::InvalidInput,
-            Self::CumulativeQueryAndInventoryBytes => HostError::LimitExceeded,
+            Self::CumulativeQueryAndInventoryBytes | Self::QueryBudget(_) => {
+                HostError::LimitExceeded
+            }
         }
     }
 }
@@ -792,7 +795,32 @@ impl FrozenContext {
                     .query(request)
                     .map(InvestigationPageContext::Legacy),
             }
-            .map_err(query_preparation_error)
+            .map_err(|error| {
+                if self.specialist.uses_query_budget_refusals()
+                    && let context_hub::ContextError::ResponseBudgetExceeded {
+                        max_bytes,
+                        required_bytes: _,
+                    } = error
+                {
+                    use agents::investigation::query_refusal::{
+                        QueryBudgetDiagnostic, QueryBudgetStage, RequiredBytesKind,
+                    };
+                    return ContextReadPreparationError::QueryBudget(QueryBudgetDiagnostic {
+                        stage: if self.qualified.is_some() && max_bytes == query.max_bytes {
+                            QueryBudgetStage::QualificationEnvelope
+                        } else {
+                            QueryBudgetStage::CorePage
+                        },
+                        requested_bytes: query.max_bytes,
+                        effective_bytes: max_bytes,
+                        // Core sizes precede egress privacy filtering. Never expose
+                        // a fact's raw serialized size, even within frozen scope.
+                        required_bytes: max_bytes.saturating_add(1),
+                        required_bytes_kind: RequiredBytesKind::AtLeast,
+                    });
+                }
+                query_preparation_error(error)
+            })
         };
         let prior_keys = self
             .ledger
@@ -851,6 +879,23 @@ impl FrozenContext {
                         context,
                         evidence_options,
                     };
+                }
+                Err(HostError::LimitExceeded) if self.specialist.uses_query_budget_refusals() => {
+                    use agents::investigation::query_refusal::{
+                        QueryBudgetDiagnostic, QueryBudgetStage, RequiredBytesKind,
+                    };
+                    return Err(ContextReadPreparationError::QueryBudget(
+                        QueryBudgetDiagnostic {
+                            stage: QueryBudgetStage::EvidenceOptionsEnvelope,
+                            requested_bytes: query.max_bytes,
+                            effective_bytes: query.max_bytes,
+                            required_bytes: query
+                                .max_bytes
+                                .checked_add(1)
+                                .ok_or(HostError::LimitExceeded)?,
+                            required_bytes_kind: RequiredBytesKind::AtLeast,
+                        },
+                    ));
                 }
                 Err(error) => return Err(error.into()),
             }

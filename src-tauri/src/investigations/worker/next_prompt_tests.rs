@@ -2721,3 +2721,6 @@ pub(in crate::investigations) fn expanded_large_scripted_provider() -> Arc<dyn L
     provider.large_finish = true;
     Arc::new(provider)
 }
+
+#[path = "auditor12_budget_tests.rs"]
+mod auditor12_budget_tests;

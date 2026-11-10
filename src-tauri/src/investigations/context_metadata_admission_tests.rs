@@ -207,3 +207,147 @@ fn query_rejection_keeps_host_corruption_and_budget_terminal() {
         );
     }
 }
+
+// AC-0585: @11 budget behavior above remains unchanged; only @12 recovers.
+#[test]
+fn auditor12_query_budget_refusal_keeps_ledger_and_corruption_terminal() {
+    let mut f = Fixture::new();
+    f.context.specialist = SpecialistId::EvidenceAuditorV12;
+    let before = f.context.ledger.clone();
+    let query = InvestigationQuery {
+        scope: InvestigationScope::All,
+        kind: None,
+        labels: vec![],
+        max_facts: 1,
+        max_bytes: 1,
+        cursor: None,
+    };
+    let error = f
+        .context
+        .prepare_query_with_diagnostic(&f.state, query.clone())
+        .err()
+        .unwrap();
+    assert!(matches!(error, ContextReadPreparationError::QueryBudget(_)));
+    if let ContextReadPreparationError::QueryBudget(budget) = error {
+        budget.validate().unwrap();
+        assert_eq!(budget.requested_bytes, 1);
+    }
+    assert_eq!(f.context.ledger, before);
+    assert!(f.context.query_pages.is_empty());
+    f.context.coverage_archive = None;
+    assert!(matches!(
+        f.context.prepare_query_with_diagnostic(&f.state, query),
+        Err(ContextReadPreparationError::Host(HostError::InvalidInput))
+    ));
+}
+
+// AC-0585: core fit alone does not promise the host evidence-options envelope fits.
+#[test]
+fn auditor12_evidence_options_budget_refusal_is_a_lower_bound() {
+    use agents::investigation::query_refusal::{QueryBudgetStage, RequiredBytesKind};
+    let mut f = Fixture::new();
+    f.context.specialist = SpecialistId::EvidenceAuditorV12;
+    let before = f.context.ledger.clone();
+    let mut query = InvestigationQuery {
+        scope: InvestigationScope::All,
+        kind: None,
+        labels: vec![],
+        max_facts: 1,
+        max_bytes: MAX_QUERY_BYTES,
+        cursor: None,
+    };
+    let page = f
+        .context
+        .prepare_query_with_diagnostic(&f.state, query.clone())
+        .unwrap();
+    let value: Value = serde_json::from_str(page.raw()).unwrap();
+    query.max_bytes = serde_json::to_vec(&value["context"]).unwrap().len();
+    assert!(query.max_bytes < page.raw().len());
+    drop(page);
+    let error = f
+        .context
+        .prepare_query_with_diagnostic(&f.state, query.clone())
+        .err()
+        .unwrap();
+    let ContextReadPreparationError::QueryBudget(budget) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(budget.stage, QueryBudgetStage::EvidenceOptionsEnvelope);
+    assert_eq!(budget.required_bytes_kind, RequiredBytesKind::AtLeast);
+    assert_eq!(budget.effective_bytes, query.max_bytes);
+    assert_eq!(budget.required_bytes, query.max_bytes + 1);
+    assert_eq!(f.context.ledger, before);
+    assert!(f.context.query_pages.is_empty());
+}
+
+// AC-0585: a graph budget miss precedes egress redaction, so it must not
+// reveal a privacy-sensitive property's serialized size. Out-of-scope facts
+// must not reach even that measurement path.
+#[test]
+fn auditor12_budget_does_not_disclose_private_or_out_of_scope_fact_sizes() {
+    use agents::investigation::query_refusal::RequiredBytesKind;
+    let f = Fixture::new();
+    let mut observations = Vec::new();
+    for private_bytes in [40000, 80000] {
+        let graph = (
+            vec![
+                Node {
+                    id: "visible".into(),
+                    label: "Module".into(),
+                    props: json!({"password":"s".repeat(private_bytes)}),
+                },
+                Node {
+                    id: "outside".into(),
+                    label: "Module".into(),
+                    props: json!({"password":"t".repeat(private_bytes)}),
+                },
+            ],
+            vec![],
+        );
+        let request = AcquisitionRequest {
+            specialist_id: SpecialistId::EvidenceAuditorV12,
+            inspection_requirements: None,
+            question: "Inspect the scoped module.".into(),
+            scope: InvestigationScope::Neighborhood {
+                anchor: "visible".into(),
+                hops: 1,
+            },
+            provider_mode: InvestigationProviderMode::Local,
+            expected_graph_revision: None,
+            expected_context_id: None,
+            conversation_id: None,
+            parent_id: None,
+            policy: Arc::new(INVESTIGATION_V2_POLICY.clone()),
+        };
+        let context = FrozenContext::from_graph(graph, &request, &[]).unwrap();
+        let mut query = InvestigationQuery {
+            scope: InvestigationScope::Node {
+                id: "visible".into(),
+            },
+            kind: None,
+            labels: vec![],
+            max_facts: 1,
+            max_bytes: MAX_QUERY_BYTES,
+            cursor: None,
+        };
+        let Err(ContextReadPreparationError::QueryBudget(budget)) =
+            context.prepare_query_with_diagnostic(&f.state, query.clone())
+        else {
+            panic!("expected bounded diagnostic")
+        };
+        assert_eq!(budget.required_bytes_kind, RequiredBytesKind::AtLeast);
+        assert_eq!(budget.required_bytes, budget.effective_bytes + 1);
+        budget.validate().unwrap();
+        observations.push(budget);
+        query.scope = InvestigationScope::Node {
+            id: "outside".into(),
+        };
+        assert!(matches!(
+            context.prepare_query_with_diagnostic(&f.state, query),
+            Err(ContextReadPreparationError::QueryRejected(
+                agents::investigation::query_refusal::QueryRejection::UnknownNode
+            ))
+        ));
+    }
+    assert_eq!(observations[0], observations[1]);
+}

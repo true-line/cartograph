@@ -913,6 +913,7 @@ fn next_prompt_query_refusal_replay_consumes_attempt_without_publication() {
     value["query"]["scope"] = json!({"type":"neighborhood","anchor":"absent","hops":1});
     let response = response(&f, &value);
     let mut record = QueryRefusalRecord {
+        budget: None,
         schema_version: 1,
         record_id: String::new(),
         task_id: f.basis.task_id.clone(),

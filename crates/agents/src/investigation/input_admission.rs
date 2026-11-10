@@ -338,7 +338,15 @@ impl InvestigationInput {
             )?;
             if self.acquisition_choices.is_some() {
                 let feedback = ActionRefusalFeedback {
-                    reason: ActionRefusalReason::ActionNotOffered,
+                    query_budget: self
+                        .frozen_specialist()?
+                        .uses_query_budget_refusals()
+                        .then_some(query_refusal::QueryBudgetDiagnostic::reservation()),
+                    reason: if self.frozen_specialist()?.uses_query_budget_refusals() {
+                        ActionRefusalReason::QueryPageBudget
+                    } else {
+                        ActionRefusalReason::ActionNotOffered
+                    },
                     invocation_ordinal: policy.limits().model_invocations,
                     action_hash: "f".repeat(64),
                     choices_hash: "f".repeat(64),
@@ -788,6 +796,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV26,
             SpecialistId::DomainAnalystV27,
             SpecialistId::EvidenceAuditorV11,
+            SpecialistId::EvidenceAuditorV12,
         ]
         .contains(&role)
         {
@@ -948,7 +957,8 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
         });
         apply_admission_progress(&mut progress, mode, u32::MAX, &Some(&feedback)).ok()?;
         progress["action_feedback"] = serde_json::to_value(ActionRefusalFeedback {
-            reason: ActionRefusalReason::ActionNotOffered,
+            query_budget: Some(query_refusal::QueryBudgetDiagnostic::reservation()),
+            reason: ActionRefusalReason::QueryPageBudget,
             invocation_ordinal: u32::MAX,
             action_hash: "f".repeat(64),
             choices_hash: "f".repeat(64),
@@ -1163,6 +1173,13 @@ impl InvestigationInput {
         }
         prompt["turn_progress"]["acquisition_choices"] =
             serde_json::to_value(&*choices).map_err(|_| InvestigationError::InvalidInput)?;
+        if feedback
+            .as_ref()
+            .is_some_and(|value| value.query_budget.is_some())
+            && !self.frozen_specialist()?.uses_query_budget_refusals()
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         prompt["turn_progress"]["action_feedback"] =
             serde_json::to_value(&feedback).map_err(|_| InvestigationError::InvalidInput)?;
         self.action_feedback = feedback;
@@ -1328,6 +1345,23 @@ impl InvestigationInput {
                     .acquisition_choices
                     .as_ref()
                     .is_some_and(|c| c.attempts_complete()))
+    }
+
+    /// An exact host-offered obligation query already at the page ceiling
+    /// cannot recover by increasing its budget or shrinking its selection.
+    pub fn is_maximum_obligation_query(&self, query: &InvestigationQuery) -> bool {
+        query.max_bytes == MAX_QUERY_BYTES
+            && matches!(query.scope, InvestigationScope::Node { .. })
+            && self.validate_acquisition_projection().is_ok()
+            && self.acquisition_choices.as_ref().is_some_and(|choices| {
+                choices.entries().iter().any(|entry| {
+                    matches!(
+                        &entry.action,
+                        acquisition_choices::AcquisitionAction::QueryContext { query: offered, .. }
+                            if offered == query
+                    )
+                })
+            })
     }
 
     pub fn permits_acquisition(&self, action: &QualifiedInvestigationAction) -> bool {

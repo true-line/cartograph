@@ -66,12 +66,32 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             }) => {
                 let read = match context.prepare_query_with_diagnostic(self.state, query.clone()) {
                     Ok(read) => read,
-                    Err(ContextReadPreparationError::QueryRejected(reason))
-                        if self.detail.summary.specialist_id.uses_acquisition_choices() =>
+                    Err(ContextReadPreparationError::QueryBudget(budget))
+                        if current.is_maximum_obligation_query(&query) =>
                     {
+                        // The offered exact node already uses MAX_QUERY_BYTES.
+                        // No model action can make this obligation page fit.
+                        return Err(Failure::Stop(InvestigationStopReason::HostLimitAt {
+                            phase: PreparationPhase::Query,
+                            limit: HostLimitKind::QueryPageBudget(budget),
+                        }));
+                    }
+                    Err(
+                        error @ (ContextReadPreparationError::QueryRejected(_)
+                        | ContextReadPreparationError::QueryBudget(_)),
+                    ) if self.detail.summary.specialist_id.uses_acquisition_choices() => {
                         use agents::investigation::query_refusal::QueryRefusalRecord;
+                        let (reason, budget) = match error {
+                            ContextReadPreparationError::QueryRejected(reason) => (reason, None),
+                            ContextReadPreparationError::QueryBudget(budget) => (
+                                agents::investigation::query_refusal::QueryRejection::PageBudget,
+                                Some(budget),
+                            ),
+                            _ => unreachable!(),
+                        };
                         let mut record = QueryRefusalRecord {
-                            schema_version: 2,
+                            budget,
+                            schema_version: if budget.is_some() { 3 } else { 2 },
                             record_id: String::new(),
                             task_id: self.id.into(),
                             step_id: step_id.into(),
@@ -104,6 +124,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                         super::super::emit_changed(self.app, &self.detail);
                         return Ok(true);
                     }
+                    Err(ContextReadPreparationError::QueryBudget(budget)) => {
+                        return Err(Failure::Stop(InvestigationStopReason::HostLimitAt {
+                            phase: PreparationPhase::Query,
+                            limit: HostLimitKind::QueryPageBudget(budget),
+                        }));
+                    }
                     Err(ContextReadPreparationError::CumulativeQueryAndInventoryBytes) => {
                         return Err(Failure::Stop(InvestigationStopReason::HostLimitAt {
                             phase: PreparationPhase::Query,
@@ -129,7 +155,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                                 limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
                             })
                         }
-                        ContextReadPreparationError::QueryRejected(_) => {
+                        ContextReadPreparationError::QueryRejected(_)
+                        | ContextReadPreparationError::QueryBudget(_) => {
                             Failure::from(HostError::InvalidInput)
                                 .preparation_at(PreparationPhase::Inventory)
                         }

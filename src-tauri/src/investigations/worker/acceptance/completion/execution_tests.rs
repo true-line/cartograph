@@ -786,3 +786,18 @@ fn acceptance_observer_inventory_count_matches_tool_action_bounds() {
         }
     }
 }
+
+// AC-0585: observation adds no provider capability and must not hide one either.
+#[test]
+fn observed_provider_preserves_bounded_schema_capability() {
+    let unsupported: Arc<dyn LlmProvider> = Arc::new(Scripted::new(Mode::CompletionNoAttempt));
+    assert!(!unsupported.supports_bounded_response_schema());
+    let wrapped = ObservedProvider::next(unsupported, "fixture-context".into());
+    assert!(!wrapped.supports_bounded_response_schema());
+    let supported =
+        crate::investigations::worker::tests::completion_tests::full_hosted_auditor_provider();
+    assert!(supported.supports_bounded_response_schema());
+    let wrapped = ObservedProvider::next(supported, "fixture-context".into());
+    assert!(wrapped.supports_bounded_response_schema());
+    assert!(wrapped.observations().unwrap().is_empty());
+}
