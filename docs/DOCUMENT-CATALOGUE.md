@@ -1,6 +1,6 @@
 # Document catalogue
 
-- **Status:** Draft 0.1 for owner mark-up (#1747). Not yet approved.
+- **Status:** Draft 0.2 for owner mark-up (#1747). Not yet approved.
 - **Date:** 2026-11-09
 - **Direction:** [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md) decision 3, [VISION](VISION.md) V10, [ROADMAP](ROADMAP.md) §10 (W14)
 
@@ -35,9 +35,12 @@ kind:
    to that document's subject.
 4. A list of its stale sections, once #1749 exists.
 
-**Export modes.** `verified-only` omits A sections and the prose of P+A
-sections, and states how many were omitted. `best-effort` includes them,
-annotated (R-INT-5).
+**Export modes.** The confidence filter applies to every statement, whatever
+kind of section it is in. `verified-only` omits every InferredWeak statement:
+all A sections, the prose of P+A sections, and any InferredWeak statement
+inside a P section (a T2 journey candidate in D9 §9.1, for example). It
+states how many statements were omitted, per section. `best-effort` includes
+them, annotated (R-INT-5).
 
 **Acceptance.** A P section is accepted by a deterministic check against a
 fixture. An A or P+A section is accepted by content acceptance: an expected
@@ -91,7 +94,7 @@ requirement 8); P sections by fixture.
 | 3.1 | ADRs found in the target, as written | P | `adrs.md` (origin: found) |
 | 3.2 | Recovered decisions: what the code shows was decided | P | `adrs.md` (origin: recovered), `DECIDES` edges |
 | 3.3 | Context and consequences for each recovered decision | A | The decision's cited facts and its drift findings |
-| 3.4 | Rationale: why it was decided | H, or A where a target document or commit message states it | Target documentation (#1750) |
+| 3.4 | Rationale: why it was decided | H, or A where a target document states it | Target documentation (#1750) |
 | 3.5 | Decisions the code violates | P | Drift register (ADR findings) |
 
 A recovered decision states what the code does. Its rationale is written
@@ -153,7 +156,7 @@ always shown as unconfirmed until a human confirms each row.
 |---|---------|------|--------------|
 | 7.1 | Build and toolchain | P | `toolchain.md` |
 | 7.2 | Environments and deployed resources | P | Infrastructure facts, observed state where supplied |
-| 7.3 | Configuration: every key the system reads | P | Toolchain and environment facts |
+| 7.3 | Configuration: every key the system declares or reads | P | Key names from environment files (`Tool` facts, category `environment`) and from Python `os.environ` / `os.getenv` reads; never values |
 | 7.4 | Scheduled jobs | P | `Schedule` flow triggers (yacron, crontab, Kubernetes `CronJob`) |
 | 7.5 | How to deploy | A | `Tool` facts from CI workflows and Dockerfiles, target documentation |
 | 7.6 | Dependencies on external services | P | External endpoints and channels |
@@ -215,8 +218,14 @@ written from its public documentation (ROADMAP W11).
 | 11.4 | Rule evidence | P | `rule-evidence.md`, `rule-evidence.json` |
 | 11.5 | Flow dossiers, complete | P | `flow_dossiers.md` |
 | 11.6 | Coverage: what was read, skipped and why | P | Coverage inventory |
+| 11.7 | Fact and evidence index: every fact a document cites, with its tier, confidence, method and source span | P | Not produced today (section 4) |
 
-No authored content. Every statement in D1 to D10 resolves to a row here.
+No authored content. Every statement in D1 to D10 must resolve to a row in
+§11.7. Today's traceability matrix cannot carry that: it indexes only the
+seven trace relations (`REALIZES`, `STEP_OF`, `GOVERNS`, `MAPS_TO`,
+`DECIDES`, `TRIGGERED_BY`, `PERFORMED_BY`), so an endpoint's method or a
+field's type has no row. Until §11.7 exists, a document may only make
+statements whose evidence one of §11.1 to §11.5 already holds.
 
 ## 3. Where today's sixteen artifacts go
 
@@ -252,8 +261,10 @@ becomes its own issue once this catalogue is approved.
 | D6 §6.3 | A projection of endpoints against permission sites |
 | D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary |
 | D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied |
+| D7 §7.3, D6 §6.4 | Keys read only in source are recovered for Python alone. The other five language adapters emit no configuration-read fact, so a key with no environment file entry is missing. Until then the section states which languages it covers |
 | D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps |
 | D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is not an exported artifact |
+| D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement |
 | Every header | The graph content hash is not available outside tests (#1765) |
 | Every A and P+A section | Section drafting (#1748) on the curated projection (#1746) |
 
@@ -268,7 +279,9 @@ of them.
    guide (the rebuild handoff, #1752, covers the last).
 2. **Rationale is never invented.** A recovered ADR states what was decided
    and what follows from it. The "why" is written only where a target
-   document or commit message states it (D3 §3.4).
+   document states it (D3 §3.4). Commit messages are not a source: Git
+   history is not read, and managed sources are shallow clones. Reading it
+   would be a new fact source and is not proposed here.
 3. **Human sections are emitted as labelled blanks**, so the document shows
    what the team still owes, and are never filled by a model.
 4. **Sensitive-data classification (D5 §5.6) is proposed, never asserted.**
