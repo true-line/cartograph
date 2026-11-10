@@ -20,6 +20,7 @@ import { PreflightSurface } from './components/PreflightSurface';
 import { RecoverSurface } from './components/RecoverSurface';
 import { SettingsSurface } from './components/SettingsSurface';
 import { McpSettings } from './components/McpSettings';
+import { ProviderKeys } from './components/ProviderKeys';
 import { WorkspaceSurface } from './components/WorkspaceSurface';
 import { GapsDriftSurface } from './components/GapsDriftSurface';
 import { ProvenanceSurface } from './components/ProvenanceSurface';
@@ -891,6 +892,7 @@ export default function App() {
             onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
             onOpenQuickDispatch={openStandaloneQuickDispatch}
           />
+          <ProviderKeys available={backend === 'up'} />
           <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
             busy={primarySource.retentionBusy} error={primarySource.retentionError}

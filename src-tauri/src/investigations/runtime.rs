@@ -25,6 +25,14 @@ impl InvestigationRuntime {
         self.providers.lock().unwrap().insert(mode, provider);
     }
 
+    /// Drop the cached cloud client so the next start builds one with the
+    /// key that is current now (#1763). Running tasks keep the client they hold.
+    pub(crate) fn forget_cloud_provider(&self) {
+        if let Ok(mut providers) = self.providers.lock() {
+            providers.remove(&InvestigationProviderMode::Cloud);
+        }
+    }
+
     pub(super) fn provider(
         &self,
         mode: InvestigationProviderMode,

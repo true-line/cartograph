@@ -10,16 +10,32 @@ use llm::{ConsentGrant, EgressPreview, LlmProvider};
 /// cloud is the Opus reasoning lane and needs an API key — its absence is
 /// an explicit error, never a silent local fallback.
 pub fn escalation_provider(mode: &str) -> Result<Box<dyn LlmProvider>, String> {
+    escalation_provider_with(mode, crate::provider_credentials::system())
+}
+
+/// [`escalation_provider`] over explicit credentials. The key comes from the
+/// environment variable or the OS credential store (#1763, ADR-0057); this is
+/// the only place it is read for a provider, and holding one grants nothing:
+/// every cloud step still passes the firewall and its consent.
+fn escalation_provider_with(
+    mode: &str,
+    credentials: &crate::provider_credentials::ProviderCredentials,
+) -> Result<Box<dyn LlmProvider>, String> {
     match mode {
         "local" => Ok(Box::new(
             llm::OllamaProvider::local_default().map_err(|e| e.to_string())?,
         )),
         "cloud" => {
-            let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-                "no Anthropic API key configured (set ANTHROPIC_API_KEY) — cloud escalation \
-                 stays closed"
-                    .to_string()
-            })?;
+            let key = credentials
+                .resolve(crate::provider_credentials::ProviderId::Anthropic)
+                .map_err(|error| {
+                    format!("the Anthropic API key could not be read ({error}) — cloud escalation stays closed")
+                })?
+                .ok_or_else(|| {
+                    "no Anthropic API key configured (add one in Settings → Provider keys, or \
+                     set ANTHROPIC_API_KEY) — cloud escalation stays closed"
+                        .to_string()
+                })?;
             Ok(Box::new(
                 llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, key)
                     .map_err(|e| e.to_string())?,
@@ -67,15 +83,30 @@ mod tests {
 
     #[test]
     fn cloud_without_api_key_fails_closed() {
-        // SAFETY (test-only): scoped to this process's env for the duration
-        // of the assertion; no other test in this binary reads this var.
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
-        }
-        let err = escalation_provider("cloud")
+        let none = crate::provider_credentials::for_test(None);
+        let err = escalation_provider_with("cloud", &none)
             .err()
             .expect("missing key rejected");
         assert!(err.contains("ANTHROPIC_API_KEY"));
+        assert!(err.contains("Settings"));
+        assert!(err.contains("stays closed"));
+    }
+
+    // AC-0586: a key saved in the app opens the cloud lane's constructor with
+    // no environment variable, and removing it closes the lane again.
+    #[test]
+    fn a_stored_key_constructs_the_cloud_provider_and_removal_closes_it() {
+        use crate::provider_credentials::ProviderId;
+        let credentials = crate::provider_credentials::for_test(None);
+        credentials
+            .save(ProviderId::Anthropic, "sk-ant-test-0123456789")
+            .unwrap();
+        let provider = escalation_provider_with("cloud", &credentials).expect("constructed");
+        assert!(provider.id().starts_with("anthropic"), "{}", provider.id());
+        // The constructor makes no request; consent is still required to send.
+        assert_eq!(provider.locality(), llm::Locality::Cloud);
+        credentials.remove(ProviderId::Anthropic).unwrap();
+        assert!(escalation_provider_with("cloud", &credentials).is_err());
     }
 
     #[test]
