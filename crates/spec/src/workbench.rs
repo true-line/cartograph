@@ -375,7 +375,7 @@ fn matrix_class_id(index: usize) -> String {
 const PROJECTION_GAP_REJECTED: &str = "inference rejected by Workbench curation";
 const PROJECTION_GAP_VERIFIED_ONLY: &str = "weak inference excluded by verified-only export";
 
-fn project_flows(
+pub(crate) fn project_flows(
     flows: &[Flow],
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
@@ -674,6 +674,68 @@ mod tests {
                 src: src.into(), dst: dst.into(), label: label.into(), props: serde_json::json!({})
             }))}),
         }
+    }
+
+    // AC-0587 (#1755): the official `topology.md` path, not only the renderer.
+    #[test]
+    fn topology_artifact_prints_tiers_and_follows_the_export_mode() {
+        use ConfidenceTier as C;
+        let nodes = [
+            node("res:queue", "Resource", Tier::Deterministic, C::Confirmed),
+            node("res:worker", "Resource", Tier::Deterministic, C::Confirmed),
+            node("res:guess", "Resource", Tier::Agentic, C::InferredWeak),
+            // No valid provenance: the bundle's producers leave Gap-tier
+            // facts out of every artifact body, as before this change.
+            Node {
+                id: "res:unproven".into(),
+                label: "Resource".into(),
+                props: serde_json::json!({}),
+            },
+        ];
+        let edges = [
+            edge(
+                "res:queue",
+                "res:worker",
+                "TRIGGERS",
+                Tier::Dynamic,
+                C::Confirmed,
+            ),
+            edge(
+                "res:worker",
+                "res:queue",
+                "DEPENDS_ON",
+                Tier::Semantic,
+                C::InferredStrong,
+            ),
+            edge(
+                "res:worker",
+                "res:guess",
+                "REFERENCES",
+                Tier::Agentic,
+                C::InferredWeak,
+            ),
+        ];
+        let topology = |mode| {
+            compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new())
+                .artifacts
+                .into_iter()
+                .find(|artifact| artifact.file_name == "topology.md")
+                .unwrap()
+                .content
+        };
+        let best = topology(ExportMode::BestEffort);
+        assert!(best.contains(r#"["queue · T0 Confirmed"]"#), "{best}");
+        assert!(best.contains("-->|TRIGGERS · T1 Confirmed|"));
+        assert!(best.contains("-.->|DEPENDS_ON · T2 InferredStrong|"));
+        assert!(best.contains(r#"["guess · T3 InferredWeak"]"#));
+        assert!(best.contains("-.->|REFERENCES · T3 InferredWeak|"));
+        assert!(!best.contains("unproven"));
+
+        let verified = topology(ExportMode::VerifiedOnly);
+        assert!(verified.contains("-->|TRIGGERS · T1 Confirmed|"));
+        assert!(verified.contains("-.->|DEPENDS_ON · T2 InferredStrong|"));
+        assert!(!verified.contains("InferredWeak"));
+        assert!(!verified.contains("res_guess"));
     }
 
     #[test]

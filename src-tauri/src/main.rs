@@ -5626,7 +5626,7 @@ fn add_system_blocking<R: tauri::Runtime>(
 /// gate; channels join via observed BACKS edges at M6). Deterministic for
 /// a given graph.
 #[tauri::command]
-fn export_topology(state: State<'_, AppState>) -> Result<String, String> {
+fn export_topology(mode: spec::ExportMode, state: State<'_, AppState>) -> Result<String, String> {
     let (nodes, edges) = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
         read_filtered_graph(
@@ -5635,16 +5635,33 @@ fn export_topology(state: State<'_, AppState>) -> Result<String, String> {
             spec::TOPOLOGY_EDGE_LABELS,
         )?
     };
-    Ok(spec::topology_mermaid(&nodes, &edges))
+    let rejected = rejected_hashes(&state)?;
+    Ok(spec::topology_mermaid_in(&nodes, &edges, mode, &rejected))
+}
+
+/// Content hashes of the inferences the Workbench rejected: the same set
+/// `export_spec` withholds, for the standalone exports (#1755).
+fn rejected_hashes(
+    state: &State<'_, AppState>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    Ok(decisions
+        .list_assertions()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+        .map(|record| record.assertion.provenance.content_hash)
+        .collect())
 }
 
 /// The flow-dossier artifact as Markdown (SPEC-00 §7, M3 exit gate):
 /// every T0-traceable flow with per-hop tiers, Gap truncation, and score.
 #[tauri::command]
-fn export_flows(state: State<'_, AppState>) -> Result<String, String> {
+fn export_flows(mode: spec::ExportMode, state: State<'_, AppState>) -> Result<String, String> {
     let (nodes, edges) = read_flow_graph(&state.graph)?;
     let flows = flowtracer::trace(&nodes, &edges);
-    Ok(spec::flow_dossier(&flows))
+    let rejected = rejected_hashes(&state)?;
+    Ok(spec::flow_dossier_in(&flows, mode, &rejected))
 }
 
 /// The traced flows as data (same graph slice as `export_flows`) — the UI
@@ -10768,8 +10785,9 @@ state_json = "shop.state.json"
         nodes.extend(store.nodes_with_label("Channel").unwrap());
         let edges = store.edges_with_labels(spec::TOPOLOGY_EDGE_LABELS).unwrap();
         let mmd = spec::topology_mermaid(&nodes, &edges);
-        assert!(mmd.contains(r#"[("sqs-queue:https://sqs.us-east-1.amazonaws.com/9/orders")]"#));
-        assert!(mmd.contains("-->|BACKS|"));
+        assert!(mmd.contains(r#"[("sqs-queue:https://sqs.us-east-1.amazonaws.com/9/orders · "#));
+        // The observed join prints as T1, apart from the static edges (AC-0587).
+        assert!(mmd.contains("-->|BACKS · T1 Confirmed|"));
         // Re-running the join is idempotent (US-0014 re-ingest).
         assert_eq!(
             crate::stitch_backings(
@@ -10915,7 +10933,8 @@ export function App() {
         let nodes = store.nodes_with_label("Resource").unwrap();
         let edges = store.edges_with_labels(spec::TOPOLOGY_EDGE_LABELS).unwrap();
         let mmd = spec::topology_mermaid(&nodes, &edges);
-        assert!(mmd.contains("|TRIGGERS|"));
+        // A real ingest carries provenance, so the edge prints as T0 Confirmed (AC-0587).
+        assert!(mmd.contains("|TRIGGERS · T0 Confirmed|"));
         // The TS layer coexists without leaking onto the infra artifact.
         assert!(!mmd.contains("app_ts"));
 
