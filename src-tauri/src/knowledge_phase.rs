@@ -87,14 +87,15 @@ pub(crate) fn run(
     overlay: &Arc<Mutex<OverlayStore>>,
     provider: Option<&dyn LlmProvider>,
 ) -> Result<KnowledgeReport, String> {
-    run_within(
-        graph,
-        cache,
-        overlay,
-        provider,
-        SnapshotReadLimits::default(),
-    )
+    run_within(graph, cache, overlay, provider, PHASE_LIMITS)
 }
+
+/// The base this phase reads (#1771). It is a desktop background phase on
+/// the owner's machine with no memory reserved in advance, the same class
+/// of read as a desktop-started investigation (#1602), so it takes that
+/// ceiling. Under the interactive default of 50,000 rows a real repository
+/// was skipped whole and no knowledge node was produced for it.
+pub(crate) const PHASE_LIMITS: SnapshotReadLimits = SnapshotReadLimits::investigation();
 
 fn run_within(
     graph: &Mutex<SqliteGraphStore>,
