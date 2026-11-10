@@ -241,3 +241,8 @@ fn next_prompt_worker_versioned_history_admits_large_saved_parent() {
         "overflow neither truncates nor replaces saved parent history"
     );
 }
+
+#[path = "hosted_history_tests.rs"]
+mod hosted_history_tests;
+
+pub(in crate::investigations) use hosted_history_tests::full_hosted_auditor_provider;

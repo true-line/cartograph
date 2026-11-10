@@ -1261,6 +1261,15 @@ pub(super) fn stop(
     } else {
         InvestigationStatus::Failed
     };
+    task.detail.terminal_diagnostic = match reason {
+        InvestigationStopReason::OperationalAt { phase, error_class } => Some(
+            agents::investigation::InvestigationTerminalDiagnostic::Operational {
+                phase,
+                error_class,
+            },
+        ),
+        _ => None,
+    };
     task.detail.error = Some(reason.message().into());
     bump(connection, task)?;
     event(

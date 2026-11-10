@@ -1275,3 +1275,66 @@ pub(in crate::investigations) fn with_response_app(
     let app = FixtureApp::new(state);
     test(app.handle());
 }
+
+// AC-0582: closed subcodes retain their first annotated boundary and terminal semantics.
+// AC-0582: authenticated policy and optional text-free diagnostic regression.
+#[test]
+fn terminal_diagnostic_closed_phase_and_class() {
+    use agents::investigation::{
+        InvestigationFailurePhase as Phase, InvestigationOperationalClass as Class,
+    };
+    for (error, class) in [
+        (InvestigationStoreError::Invalid, Class::StoreInvalid),
+        (InvestigationStoreError::Missing, Class::StoreMissing),
+        (InvestigationStoreError::Conflict, Class::StoreConflict),
+        (InvestigationStoreError::Stale, Class::StoreStale),
+        (
+            InvestigationStoreError::Unavailable,
+            Class::StoreUnavailable,
+        ),
+        (InvestigationStoreError::Ownership, Class::StoreOwnership),
+        (InvestigationStoreError::Storage, Class::StoreStorage),
+    ] {
+        let reason = Failure::Store(error)
+            .preparation_at(PreparationPhase::SourceReservation)
+            .preparation_at(PreparationPhase::Continuation)
+            .reason()
+            .unwrap();
+        assert_eq!(
+            reason,
+            InvestigationStopReason::OperationalAt {
+                phase: Phase::SourceReservation,
+                error_class: class
+            }
+        );
+        assert_eq!(
+            reason.terminal_class(),
+            InvestigationStopReason::Operational
+        );
+        assert_eq!(
+            reason.test_message(),
+            InvestigationStopReason::Operational.test_message()
+        );
+    }
+    assert_eq!(
+        Failure::Host(HostError::Operational)
+            .preparation_at(PreparationPhase::Candidate)
+            .reason(),
+        Some(InvestigationStopReason::OperationalAt {
+            phase: Phase::Candidate,
+            error_class: Class::HostOperational
+        })
+    );
+    assert_eq!(
+        Failure::Store(InvestigationStoreError::Cancelled)
+            .preparation_at(PreparationPhase::Candidate)
+            .reason(),
+        Some(InvestigationStopReason::Cancelled)
+    );
+    assert_eq!(
+        Failure::Store(InvestigationStoreError::Capacity)
+            .preparation_at(PreparationPhase::Candidate)
+            .reason(),
+        Some(InvestigationStopReason::StoreCapacity)
+    );
+}

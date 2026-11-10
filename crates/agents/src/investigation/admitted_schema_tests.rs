@@ -114,8 +114,24 @@ fn check_admitted_source_schema(role: SpecialistId) {
         response_schema::select_admitted(role, mode, &changed_keys).unwrap(),
         input.payload.response_schema
     );
-    assert!(response_schema::validate(&changed_keys, &input.payload, &prompt(&input)).is_err());
-    assert!(response_schema::validate(&unbound.ledger, &input.payload, &prompt(&input)).is_err());
+    assert!(
+        response_schema::validate(
+            &changed_keys,
+            &input.payload,
+            &prompt(&input),
+            &INVESTIGATION_V2_POLICY
+        )
+        .is_err()
+    );
+    assert!(
+        response_schema::validate(
+            &unbound.ledger,
+            &input.payload,
+            &prompt(&input),
+            &INVESTIGATION_V2_POLICY
+        )
+        .is_err()
+    );
     // The selector has its own bounded encoding even if internal growth is invalid.
     let mut excessive = input.ledger.clone();
     excessive.selected_facts[0].fact = crate::TaskFactKey::Node {

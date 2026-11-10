@@ -353,11 +353,12 @@ impl InvestigationInput {
                     prompt["turn_progress"]["acquisition_choices"] = future;
                     schema
                 } else {
-                    response_schema::select_acquisition(
+                    response_schema::select_acquisition_with_policy(
                         mode,
                         choices,
                         &self.ledger,
                         &contract.request_hash,
+                        policy,
                     )?
                 }
             } else if let Some(role) = schema_role {
@@ -387,7 +388,7 @@ impl InvestigationInput {
                             InvestigationError::InvalidInput
                         }
                     })?;
-                super::source_preview::protected_representation(
+                super::source_preview::protected_representation_with_policy(
                     &self.ledger,
                     &action.payload,
                     inspected.payload(),
@@ -396,6 +397,7 @@ impl InvestigationInput {
                     } else {
                         None
                     },
+                    policy,
                 )?;
             }
             let measurements = match unread_source {
@@ -797,7 +799,7 @@ impl InvestigationInput {
         if role.uses_acquisition_choices() {
             self.validate_acquisition_projection()?;
         } else {
-            response_schema::validate(&self.ledger, &self.payload, &prompt)?;
+            response_schema::validate(&self.ledger, &self.payload, &prompt, policy)?;
         }
         let proof = self
             .ledger
@@ -1148,7 +1150,7 @@ impl InvestigationInput {
                     &contract,
                     &metadata,
                     &self.ledger,
-                    &INVESTIGATION_V2_POLICY,
+                    &Self::policy_from_protected_prompt(&prompt)?,
                 )?
             }
             (None, None) => None,
@@ -1189,7 +1191,7 @@ impl InvestigationInput {
         }
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
-        self.payload.response_schema = response_schema::select_acquisition_recovery(
+        self.payload.response_schema = response_schema::select_acquisition_recovery_with_policy(
             mode,
             &choices,
             &self.ledger,
@@ -1197,6 +1199,7 @@ impl InvestigationInput {
                 .as_str()
                 .ok_or(InvestigationError::InvalidInput)?,
             self.action_feedback.as_ref(),
+            &Self::policy_from_protected_prompt(&prompt)?,
         )?;
         if typed_role {
             self.payload.response_schema = response_schema::select_eligible_acquisition(
@@ -1286,6 +1289,12 @@ impl InvestigationInput {
     fn input_generation_policy(&self) -> Result<InvestigationPolicy, InvestigationError> {
         let prompt: Value = serde_json::from_str(&self.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;
+        Self::policy_from_protected_prompt(&prompt)
+    }
+
+    fn policy_from_protected_prompt(
+        prompt: &Value,
+    ) -> Result<InvestigationPolicy, InvestigationError> {
         let limits: InvestigationLimits = serde_json::from_value(prompt["limits"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
         InvestigationPolicy::for_effective_limits(&limits).ok_or(InvestigationError::InvalidInput)
@@ -1383,7 +1392,12 @@ impl InvestigationInput {
         let metadata: ProtectedCompletionMetadata =
             serde_json::from_value(prompt["completion_metadata"].clone())
                 .map_err(|_| InvestigationError::InvalidInput)?;
-        choices.validate_basis(&contract, &metadata, &self.ledger, &INVESTIGATION_V2_POLICY)?;
+        choices.validate_basis(
+            &contract,
+            &metadata,
+            &self.ledger,
+            &Self::policy_from_protected_prompt(&prompt)?,
+        )?;
         let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
             .map_err(|_| InvestigationError::InvalidInput)?;
         if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
@@ -1407,12 +1421,13 @@ impl InvestigationInput {
         if self.finish_patch.is_none() && prompt["turn_progress"].get("finish_patch").is_some() {
             return Err(InvestigationError::InvalidInput);
         }
-        let ordinary_schema = response_schema::select_acquisition_recovery(
+        let ordinary_schema = response_schema::select_acquisition_recovery_with_policy(
             mode,
             choices,
             &self.ledger,
             &contract.request_hash,
             self.action_feedback.as_ref(),
+            &Self::policy_from_protected_prompt(&prompt)?,
         )?;
         let expected_schema = if let Some(patch) = &self.finish_patch {
             self.validate_finish_patch_projection(&prompt, &metadata)?;

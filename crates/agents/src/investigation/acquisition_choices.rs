@@ -760,8 +760,13 @@ impl AcquisitionChoices {
         )?;
         projected.input_ledger_hash = "f".repeat(64);
         projected.completion_metadata_hash = "f".repeat(64);
-        let schema =
-            response_schema::select_acquisition(mode, &projected, ledger, &contract.request_hash)?;
+        let schema = response_schema::select_acquisition_with_policy(
+            mode,
+            &projected,
+            ledger,
+            &contract.request_hash,
+            policy,
+        )?;
         let value =
             serde_json::to_value(projected).map_err(|_| InvestigationError::InvalidInput)?;
         Ok((value, schema))

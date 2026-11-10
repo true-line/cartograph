@@ -1387,3 +1387,46 @@ fn frozen_run_combined_feedback_and_measured_source_components() {
         prompt_wire(SpecialistId::DomainAnalystV24)
     );
 }
+
+// AC-0582: schema projection of replay IDs retains the authenticated history policy.
+#[test]
+fn completed_acquisition_replay_schema_uses_versioned_history_policy() {
+    let mut f = Fixture::new();
+    let mut complete = f.derive(&f.ledger, &[]).unwrap();
+    complete.entries.clear();
+    complete.blocked.clear();
+    complete.deferred = 0;
+    f.ledger.supplied_history_hash = Some("a".repeat(64));
+    f.ledger.supplied_history_bytes = 23240;
+    let policy = POLICY
+        .with_hosted_generation()
+        .unwrap()
+        .with_parent_history_32768()
+        .unwrap();
+    assert!(
+        super::super::response_schema::select_acquisition(
+            staged_refusal::CompletionCallMode::Choice,
+            &complete,
+            &f.ledger,
+            &f.contract.request_hash
+        )
+        .is_err()
+    );
+    let schema = super::super::response_schema::select_acquisition_with_policy(
+        staged_refusal::CompletionCallMode::Choice,
+        &complete,
+        &f.ledger,
+        &f.contract.request_hash,
+        &policy,
+    )
+    .unwrap()
+    .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&schema).unwrap();
+    assert!(
+        schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["properties"]["type"]["const"] == "replay_query")
+    );
+}

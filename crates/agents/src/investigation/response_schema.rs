@@ -117,6 +117,7 @@ pub(super) fn validate(
     ledger: &InvestigationInputLedger,
     payload: &CompletionPayload,
     prompt: &Value,
+    policy: &InvestigationPolicy,
 ) -> Result<(), InvestigationError> {
     let Some(role) = schema_role(&payload.system) else {
         // Historical non-admission prompts need no mode and never gain a schema.
@@ -126,7 +127,7 @@ pub(super) fn validate(
             Err(InvestigationError::InvalidInput)
         };
     };
-    ledger.validate_for_specialist(role, &INVESTIGATION_V2_POLICY)?;
+    ledger.validate_for_specialist(role, policy)?;
     let mode = serde_json::from_value(prompt["turn_progress"]["admission_mode"].clone())
         .map_err(|_| InvestigationError::InvalidInput)?;
     if payload.response_schema != select_admitted(role, mode, ledger)? {
@@ -136,11 +137,12 @@ pub(super) fn validate(
 }
 
 /// The typed authority supplies both compact choices and exact action objects.
-pub(super) fn select_acquisition(
+pub(super) fn select_acquisition_with_policy(
     mode: CompletionCallMode,
     choices: &acquisition_choices::AcquisitionChoices,
     ledger: &InvestigationInputLedger,
     request_hash: &str,
+    policy: &InvestigationPolicy,
 ) -> Result<Option<String>, InvestigationError> {
     if mode == CompletionCallMode::FinishOnly {
         return Ok(Some(FINISH.into()));
@@ -171,12 +173,8 @@ pub(super) fn select_acquisition(
                 .ok_or(InvestigationError::InvalidInput)?
                 .context_id;
             for index in 0..ledger.queries.len() {
-                let reference = QueryHistoryReference::from_ledger(
-                    request_hash,
-                    ledger,
-                    index,
-                    &INVESTIGATION_V2_POLICY,
-                )?;
+                let reference =
+                    QueryHistoryReference::from_ledger(request_hash, ledger, index, policy)?;
                 // Ollama converts anyOf before sibling properties: each
                 // alternative must carry the complete required action shape.
                 let branch = serde_json::json!({
@@ -221,14 +219,15 @@ pub(super) fn select_acquisition(
 /// This is a strict subset of the ordinary schema, so its existing reservation
 /// covers it. A fresh all-scope query can discover actual IDs in the admitted
 /// context. Historical generic feedback keeps its exact original schema.
-pub(super) fn select_acquisition_recovery(
+pub(super) fn select_acquisition_recovery_with_policy(
     mode: CompletionCallMode,
     choices: &acquisition_choices::AcquisitionChoices,
     ledger: &InvestigationInputLedger,
     request_hash: &str,
     feedback: Option<&ActionRefusalFeedback>,
+    policy: &InvestigationPolicy,
 ) -> Result<Option<String>, InvestigationError> {
-    let ordinary = select_acquisition(mode, choices, ledger, request_hash)?;
+    let ordinary = select_acquisition_with_policy(mode, choices, ledger, request_hash, policy)?;
     if mode == CompletionCallMode::FinishOnly
         || !choices.attempts_complete()
         || !feedback.is_some_and(|feedback| {
@@ -263,4 +262,38 @@ pub(super) fn select_acquisition_recovery(
     String::from_utf8(narrowed)
         .map(Some)
         .map_err(|_| InvestigationError::InvalidInput)
+}
+
+// Historical test fixtures explicitly retain their original policy.
+#[cfg(test)]
+pub(super) fn select_acquisition(
+    mode: CompletionCallMode,
+    choices: &acquisition_choices::AcquisitionChoices,
+    ledger: &InvestigationInputLedger,
+    request_hash: &str,
+) -> Result<Option<String>, InvestigationError> {
+    select_acquisition_with_policy(
+        mode,
+        choices,
+        ledger,
+        request_hash,
+        &INVESTIGATION_V2_POLICY,
+    )
+}
+#[cfg(test)]
+pub(super) fn select_acquisition_recovery(
+    mode: CompletionCallMode,
+    choices: &acquisition_choices::AcquisitionChoices,
+    ledger: &InvestigationInputLedger,
+    request_hash: &str,
+    feedback: Option<&ActionRefusalFeedback>,
+) -> Result<Option<String>, InvestigationError> {
+    select_acquisition_recovery_with_policy(
+        mode,
+        choices,
+        ledger,
+        request_hash,
+        feedback,
+        &INVESTIGATION_V2_POLICY,
+    )
 }

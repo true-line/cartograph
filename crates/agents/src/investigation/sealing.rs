@@ -67,7 +67,7 @@ pub(super) fn seal_admission_inner(
                 return Err(InvestigationError::InvalidInput);
             }
         } else {
-            response_schema::validate(ledger, original, &before)?;
+            response_schema::validate(ledger, original, &before, policy)?;
         }
         if original.response_schema != egress.payload.response_schema {
             return Err(InvestigationError::InvalidInput);

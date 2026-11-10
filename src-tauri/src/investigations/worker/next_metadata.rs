@@ -166,7 +166,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     kind,
                     active_milliseconds,
                 },
-            )?;
+            )
+            .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::Candidate))?;
         let view = context
             .prospective_context(&read)
             .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::Candidate))?;

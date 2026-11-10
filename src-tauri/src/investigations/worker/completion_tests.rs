@@ -1278,9 +1278,10 @@ fn completion_v2_worker_accepts_selected_policy_and_reopens_exactly() {
 }
 
 pub(in crate::investigations) use next_prompt_tests::{
-    expanded_auditor_scripted_provider, expanded_capacity_provider, expanded_query_repro_provider,
-    expanded_scripted_provider, expanded_scripted_provider_with_timeout,
-    expanded_withheld_scripted_provider, with_public_start_fixture, with_public_start_fixture_then,
+    expanded_auditor_scripted_provider, expanded_capacity_provider,
+    expanded_large_scripted_provider, expanded_query_repro_provider, expanded_scripted_provider,
+    expanded_scripted_provider_with_timeout, expanded_withheld_scripted_provider,
+    full_hosted_auditor_provider, with_public_start_fixture, with_public_start_fixture_then,
 };
 
 // AC-0327: detached preparation retains admitted source-discovery limits.

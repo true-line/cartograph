@@ -109,11 +109,16 @@ impl Reservation {
         detail: &InvestigationDetail,
     ) -> Result<(), InvestigationStoreError> {
         let policy = super::policy_for_detail(detail)?;
-        if self
-            .binding
-            .effective_limits
-            .as_ref()
-            .is_some_and(|limits| *limits != policy.limits())
+        let expected =
+            (policy.limits() != INVESTIGATION_V2_POLICY.limits()).then(|| policy.limits());
+        // V2 predates effective_limits and hosted tasks could write absent fields.
+        // V3 writers bind every non-static policy; absence is not a legacy escape.
+        if (self.schema_version == 3 && self.binding.effective_limits != expected)
+            || self
+                .binding
+                .effective_limits
+                .as_ref()
+                .is_some_and(|limits| *limits != policy.limits())
             || ((policy.local_finish_generation() || policy.limits().history_policy.is_some())
                 && self.binding.effective_limits.is_none())
         {
@@ -139,7 +144,7 @@ impl Reservation {
         let read_matches = matches!(&b.original_read,
             ReadIntent::Source { fact, role, index }
             if fact == &self.source.fact && role == &self.source.role && index == &self.source.index);
-        if self.schema_version != 2
+        if !matches!(self.schema_version, 2 | 3)
             || !b.specialist_id.uses_next_prompt_admission()
             || policy.profile() != INVESTIGATION_V2_POLICY.profile()
             || b.policy_profile != policy.profile()

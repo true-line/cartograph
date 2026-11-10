@@ -777,3 +777,55 @@ fn versioned_history_reservation_authenticates_saved_child_policy() {
     detail.summary.parent_id = None;
     assert!(super::policy_for_detail(&detail).is_err());
 }
+
+// AC-0582: new rows fail closed; pre-effective_limits hosted V2 rows retain replay.
+#[test]
+fn versioned_reservation_requires_exact_policy_and_preserves_legacy_hosted() {
+    let fixture = completion::internal_next_prompt_fixture();
+    let mut detail = fixture.task.detail.clone();
+    let mut r = reservation("task:1", "step-1");
+    r.schema_version = 3;
+    r.validate_task_policy(&detail).unwrap();
+    r.binding.effective_limits = Some(INVESTIGATION_V2_POLICY.limits());
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
+    let hosted = INVESTIGATION_V2_POLICY.with_hosted_generation().unwrap();
+    detail.limits = hosted.limits();
+    detail.origin = InvestigationOrigin::App;
+    detail.summary.specialist_id = SpecialistId::DomainAnalystV25;
+    detail.provider.mode = InvestigationProviderMode::Cloud;
+    detail.summary.provider_mode = InvestigationProviderMode::Cloud;
+    detail.provider.provider_id = "anthropic:claude-opus-5-5".into();
+    r.binding.effective_limits = None;
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
+    r.binding.effective_limits = Some(INVESTIGATION_V2_POLICY.limits());
+    assert_eq!(
+        r.validate_task_policy(&detail),
+        Err(InvestigationStoreError::Invalid)
+    );
+    r.binding.effective_limits = Some(hosted.limits());
+    r.validate_task_policy(&detail).unwrap();
+    let bytes = serde_json::to_vec(&r).unwrap();
+    let reopened: Reservation = serde_json::from_slice(&bytes).unwrap();
+    reopened.validate_task_policy(&detail).unwrap();
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), bytes);
+    r.schema_version = 2;
+    assert_ne!(r.fingerprint().unwrap(), reopened.fingerprint().unwrap());
+    r.binding.effective_limits = None;
+    let historical = serde_json::to_vec(&r).unwrap();
+    let reopened: Reservation = serde_json::from_slice(&historical).unwrap();
+    reopened.validate_task_policy(&detail).unwrap();
+    assert_eq!(
+        reopened.policy().unwrap().limits(),
+        INVESTIGATION_V2_POLICY.limits()
+    );
+    assert_eq!(serde_json::to_vec(&reopened).unwrap(), historical);
+    assert_eq!(reopened.fingerprint().unwrap(), r.fingerprint().unwrap());
+    r.schema_version = 4;
+    assert_eq!(r.validate(), Err(InvestigationStoreError::Invalid));
+}

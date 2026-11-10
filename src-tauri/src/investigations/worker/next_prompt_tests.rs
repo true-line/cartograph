@@ -593,8 +593,12 @@ impl LlmProvider for NextProvider {
                     .unwrap();
                 json!({"type":"read_evidence","fact":option["fact"],"role":range["role"],"index":range["index"]}).to_string()
             } else if call == 2 && self.extra_inventory {
-                let target =
-                    &prompt["completion_contract"]["obligations"]["obligations"][0]["target"];
+                let target = &prompt["completion_contract"]["obligations"]["obligations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|o| o["kind"] == "inventory")
+                    .unwrap()["target"];
                 json!({"type":"read_coverage_inventory","context_id":target["context_id"],
                     "repo":target["repo"],"inventory_hash":target["inventory_hash"],"max_bytes":32768}).to_string()
             } else if matches!(scenario, SourceScenario::Unavailable) {
@@ -1957,10 +1961,8 @@ fn next_prompt_preparation_phases_preserve_failures() {
     for original in [
         Failure::AlreadyTerminal,
         Failure::Host(HostError::StoreCapacity),
-        Failure::Host(HostError::Operational),
         Failure::Host(HostError::InputChanged),
         Failure::Host(HostError::SourceUnavailable),
-        Failure::Store(InvestigationStoreError::Invalid),
         Failure::Store(InvestigationStoreError::Capacity),
         Failure::Store(InvestigationStoreError::Cancelled),
         Failure::Stop(InvestigationStopReason::Cancelled),
@@ -1982,6 +1984,31 @@ fn next_prompt_preparation_phases_preserve_failures() {
                     .preparation_after_call(SpecialistId::DomainAnalystV12, 1)
             ),
             before
+        );
+    }
+    // AC-0582: operational host/store failures keep their class and gain the phase.
+    for (original, error_class) in [
+        (
+            Failure::Host(HostError::Operational),
+            agents::investigation::InvestigationOperationalClass::HostOperational,
+        ),
+        (
+            Failure::Store(InvestigationStoreError::Invalid),
+            agents::investigation::InvestigationOperationalClass::StoreInvalid,
+        ),
+    ] {
+        let annotated = original
+            .preparation_at(Query)
+            .preparation_after_call(SpecialistId::DomainAnalystV12, 1);
+        assert_eq!(
+            format!("{annotated:?}"),
+            format!(
+                "{:?}",
+                Failure::Stop(InvestigationStopReason::OperationalAt {
+                    phase: agents::investigation::InvestigationFailurePhase::Query,
+                    error_class,
+                })
+            )
         );
     }
     for (role, calls, expected) in [
@@ -2685,3 +2712,12 @@ fn inline_completion_fixture_releases_stores_and_preserves_handle_escape() {
 
 #[path = "hosted_source_limits_tests.rs"]
 mod hosted_source_limits_tests;
+
+pub(in crate::investigations) use history_tests::full_hosted_auditor_provider;
+pub(in crate::investigations) fn expanded_large_scripted_provider() -> Arc<dyn LlmProvider> {
+    let mut provider = NextProvider::new(false);
+    provider.source_scenario = Some(SourceScenario::Acquired);
+    provider.extra_inventory = true;
+    provider.large_finish = true;
+    Arc::new(provider)
+}

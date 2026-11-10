@@ -224,7 +224,7 @@ impl JobStore {
             .as_ref()
             .ok_or(InvestigationStoreError::Ownership)?;
         let mut reservation = Reservation {
-            schema_version: 2,
+            schema_version: 3,
             source: input.target.clone(),
             // Private structurally valid seed, not an admitted claim/estimate.
             // Only exact production projections below determine stored values.

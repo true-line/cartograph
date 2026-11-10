@@ -269,6 +269,21 @@ pub(super) fn execute(
     artifacts: &Artifacts<'_>,
     provider: Arc<dyn LlmProvider>,
 ) -> Result<Value, String> {
+    execute_with_runner(
+        parent,
+        expected,
+        artifacts,
+        provider,
+        |output, authority, observed| analyst::execute_role(output, authority, observed, "auditor"),
+    )
+}
+fn execute_with_runner(
+    parent: &analyst::Authority<'_>,
+    expected: &Definition,
+    artifacts: &Artifacts<'_>,
+    provider: Arc<dyn LlmProvider>,
+    run: impl FnOnce(&Path, &analyst::Authority<'_>, Arc<dyn LlmProvider>) -> Result<(), String>,
+) -> Result<Value, String> {
     let id = stage(parent, artifacts, expected, false)?;
     let output = artifacts.output;
     let observed = Arc::new(execution::ObservedProvider::next(
@@ -276,11 +291,10 @@ pub(super) fn execute(
         expected.request.expected_context_id.clone(),
     ));
     let hash = content_hash(&wire(expected)?);
-    analyst::execute_role(
+    run(
         output,
         &authority(parent, expected, &id, &hash),
         observed.clone(),
-        "auditor",
     )?;
     analyst::exclusive(
         &output.join("auditor-observations.json"),
@@ -398,6 +412,7 @@ mod tests {
     enum Scenario {
         Stage,
         CloudStage,
+        CloudComplete,
         Withheld,
         Supported,
         Unknown,
@@ -454,9 +469,17 @@ mod tests {
     fn captured_auditor_withheld_parent_history_and_receipt_reopen_without_relabelling() {
         exercise_auditor(Scenario::Withheld);
     }
+    // AC-0582: finish/publication and captured receipt replay on both effective policies.
+    #[test]
+    fn captured_hosted_auditor_large_history_finishes_and_receipt_reopens() {
+        exercise_auditor(Scenario::CloudComplete);
+    }
     fn exercise_auditor(scenario: Scenario) {
         let directory = tempfile::tempdir().unwrap();
-        let provider = if matches!(scenario, Scenario::Withheld) {
+        let provider = if matches!(scenario, Scenario::CloudComplete) {
+            crate::investigations::worker::tests::completion_tests::expanded_large_scripted_provider(
+            )
+        } else if matches!(scenario, Scenario::Withheld) {
             crate::investigations::worker::tests::completion_tests::expanded_withheld_scripted_provider()
         } else {
             expanded_scripted_provider(true)
@@ -525,7 +548,7 @@ mod tests {
             specialist: SpecialistId::EvidenceAuditorV11.definition().unwrap(),
             provider: descriptor.clone(),
         };
-        if matches!(scenario, Scenario::CloudStage) {
+        if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
             expected.provider = InvestigationProvider {
                 mode: InvestigationProviderMode::Cloud,
                 provider_id: "openai:gpt-6.1-sol".into(),
@@ -579,7 +602,7 @@ mod tests {
         };
         assert!(stage(&parent, &failed_artifacts, &failed, true).is_err());
         assert!(!output.exists());
-        if matches!(scenario, Scenario::CloudStage) {
+        if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
             for mode_mismatch in [false, true] {
                 let mut changed = expected.clone();
                 if mode_mismatch {
@@ -647,7 +670,7 @@ mod tests {
         );
         assert_eq!(first.usage, InvestigationUsage::default());
         assert_eq!(read_task(), first);
-        if matches!(scenario, Scenario::CloudStage) {
+        if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
             let policy = crate::jobs::investigations::policy_for_detail(&first).unwrap();
             assert_eq!(policy.limits().generated_tokens_per_invocation, 16384);
             assert_eq!(policy.limits().generated_token_reservations, 1048576);
@@ -658,7 +681,10 @@ mod tests {
         if !matches!(scenario, Scenario::Stage | Scenario::CloudStage) {
             let unknown = matches!(scenario, Scenario::Unknown);
             let refused = matches!(scenario, Scenario::Refused);
-            let raw: Arc<dyn LlmProvider> = if unknown {
+            let raw: Arc<dyn LlmProvider> = if matches!(scenario, Scenario::CloudComplete) {
+                crate::investigations::worker::tests::completion_tests::full_hosted_auditor_provider(
+                )
+            } else if unknown {
                 Arc::new(Scripted::new(Mode::Unknown))
             } else if refused {
                 expanded_scripted_provider(false)
@@ -669,8 +695,52 @@ mod tests {
                 raw,
                 expected.request.expected_context_id.clone(),
             ));
-            let actual = execute(&parent, &expected, &artifacts, provider.clone()).unwrap();
+            let actual = if matches!(scenario, Scenario::CloudComplete) {
+                assert!(first.limits.history_policy.is_some());
+                execute_with_runner(
+                    &parent,
+                    &expected,
+                    &artifacts,
+                    provider.clone(),
+                    |output, authority, observed| {
+                        let authorization = super::super::cloud_run::authorization(
+                            authority.provider,
+                            Some(authority.provider.provider_id.as_str()),
+                            Some("32"),
+                        )?;
+                        let consent = super::super::cloud_run::Consent::grant(
+                            authority.app.handle(),
+                            authority.provider,
+                            &authorization,
+                            &output.join("auditor-consent-log.jsonl"),
+                        )?;
+                        analyst::execute_role_with_granted_consent(
+                            output,
+                            authority,
+                            observed,
+                            "auditor",
+                            analyst::BoundaryClock::Real,
+                            Some(consent),
+                        )
+                    },
+                )
+                .unwrap()
+            } else {
+                execute(&parent, &expected, &artifacts, provider.clone()).unwrap()
+            };
             assert_eq!(actual["role"], "auditor");
+            if matches!(scenario, Scenario::CloudComplete) {
+                assert_eq!(actual["detail"]["obligation_status"], "satisfied");
+                assert!(actual["detail"]["terminal_diagnostic"].is_null());
+                let lines = read(&output.join("auditor-consent-log.jsonl")).unwrap();
+                let events: Vec<Value> = std::str::from_utf8(&lines)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert!(events.iter().any(|e| e["event"] == "tier_consent_granted"));
+                assert!(events.iter().any(|e| e["event"] == "tier_reverted_local"));
+            }
             if matches!(scenario, Scenario::Withheld) {
                 assert_eq!(
                     actual["parent_completion_outcome"],
