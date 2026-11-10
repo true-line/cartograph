@@ -199,6 +199,8 @@ fn source_admission_atomic_commit_binds_exact_response_proof_claims_and_no_read_
     assert_eq!(saved.phase, Phase::Reservation);
     assert!(saved.pending.is_none());
     let reservation = source_validation::validate_saved_pending(&tx, &saved).unwrap();
+    // AC-0582: the production writer selects the strict effective-policy format.
+    assert_eq!(reservation.reservation.schema_version, 3);
     assert!(reservation.charge.is_none());
     assert!(reservation.disposition.is_none());
     assert_eq!(

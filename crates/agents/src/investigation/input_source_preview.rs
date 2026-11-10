@@ -255,17 +255,18 @@ impl InvestigationInput {
 
 /// All source metadata survives redaction; only each independently redacted
 /// source text may change. This includes both existing and appended spans.
-pub(super) fn protected_representation(
+pub(super) fn protected_representation_with_policy(
     ledger: &InvestigationInputLedger,
     before: &CompletionPayload,
     after: &CompletionPayload,
     selected_schema: Option<&str>,
+    policy: &InvestigationPolicy,
 ) -> Result<(), InvestigationError> {
     match selected_schema {
         Some(schema) => {
             super::super::sealing::selected_schema_protected_fields(before, after, schema)?
         }
-        None => super::super::sealing::admission_protected_fields(ledger, before, after)?,
+        None => super::super::sealing::admission_protected_fields(ledger, before, after, policy)?,
     }
     if before.spans.len() != after.spans.len()
         || before.spans.iter().zip(&after.spans).any(|(a, b)| {
@@ -348,4 +349,20 @@ fn maximum(
         original_action_bytes: a.original_action_bytes.max(b.original_action_bytes),
         egress_fingerprint_bytes: a.egress_fingerprint_bytes.max(b.egress_fingerprint_bytes),
     }
+}
+
+#[cfg(test)]
+pub(super) fn protected_representation(
+    ledger: &InvestigationInputLedger,
+    before: &CompletionPayload,
+    after: &CompletionPayload,
+    selected_schema: Option<&str>,
+) -> Result<(), InvestigationError> {
+    protected_representation_with_policy(
+        ledger,
+        before,
+        after,
+        selected_schema,
+        &INVESTIGATION_V2_POLICY,
+    )
 }

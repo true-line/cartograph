@@ -56,9 +56,48 @@ impl From<InvestigationError> for Failure {
 }
 
 impl Failure {
+    fn operational_class(&self) -> Option<agents::investigation::InvestigationOperationalClass> {
+        use agents::investigation::InvestigationOperationalClass as Class;
+        Some(match self {
+            Self::Host(HostError::Operational) => Class::HostOperational,
+            Self::Store(InvestigationStoreError::Invalid) => Class::StoreInvalid,
+            Self::Store(InvestigationStoreError::Missing) => Class::StoreMissing,
+            Self::Store(InvestigationStoreError::Conflict) => Class::StoreConflict,
+            Self::Store(InvestigationStoreError::Stale) => Class::StoreStale,
+            Self::Store(InvestigationStoreError::Unavailable) => Class::StoreUnavailable,
+            Self::Store(InvestigationStoreError::Ownership) => Class::StoreOwnership,
+            Self::Store(InvestigationStoreError::Storage) => Class::StoreStorage,
+            _ => return None,
+        })
+    }
+    fn operational_at(self, phase: agents::investigation::InvestigationFailurePhase) -> Self {
+        match self.operational_class() {
+            Some(error_class) => {
+                Self::Stop(InvestigationStopReason::OperationalAt { phase, error_class })
+            }
+            None => self,
+        }
+    }
+
     // Host InvalidInput and limit failures get a fixed phase; the first phase wins.
     fn preparation_at(self, phase: PreparationPhase) -> Self {
-        match self {
+        use agents::investigation::InvestigationFailurePhase as Phase;
+        let diagnostic_phase = match phase {
+            PreparationPhase::Continuation => Phase::Continuation,
+            PreparationPhase::Finish => Phase::Finish,
+            PreparationPhase::Metadata => Phase::Metadata,
+            PreparationPhase::Query => Phase::Query,
+            PreparationPhase::Inventory => Phase::Inventory,
+            PreparationPhase::Candidate => Phase::Candidate,
+            PreparationPhase::Certification => Phase::Certification,
+            PreparationPhase::Seal => Phase::Seal,
+            PreparationPhase::Publication => Phase::Publication,
+            PreparationPhase::Source => Phase::Source,
+            PreparationPhase::SourcePrepare => Phase::SourcePrepare,
+            PreparationPhase::SourceCertification => Phase::SourceCertification,
+            PreparationPhase::SourceReservation => Phase::SourceReservation,
+        };
+        match self.operational_at(diagnostic_phase) {
             Self::Host(HostError::InvalidInput) => {
                 Self::Stop(InvestigationStopReason::PreparationAt(phase))
             }
@@ -91,7 +130,10 @@ impl Failure {
             | Self::Store(InvestigationStoreError::Capacity) => Stop::StoreCapacity,
             Self::Store(InvestigationStoreError::Cancelled) => Stop::Cancelled,
             Self::Host(HostError::InvalidInput) => Stop::PreparationFailed,
-            Self::Host(HostError::Operational) | Self::Store(_) => Stop::Operational,
+            Self::Host(HostError::Operational) | Self::Store(_) => Stop::OperationalAt {
+                phase: agents::investigation::InvestigationFailurePhase::Unspecified,
+                error_class: self.operational_class().expect("operational class matched"),
+            },
         })
     }
 }
@@ -720,7 +762,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             );
             if recorded.get() == Some(false) {
                 // Nothing was sent: the record could not be written.
-                return Err(HostError::Operational.into());
+                return Err(Failure::Host(HostError::Operational).operational_at(
+                    agents::investigation::InvestigationFailurePhase::EgressRecording,
+                ));
             }
             let completion = completion.map_err(provider_failure)?;
             if cloud && recorded.get().is_none() && !record_egress(completion.request_bytes) {
@@ -730,7 +774,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 // the host then rejects is still counted. Every provider this
                 // app constructs sends through the bounded transport and is
                 // recorded before dispatch above.
-                return Err(HostError::Operational.into());
+                return Err(Failure::Host(HostError::Operational).operational_at(
+                    agents::investigation::InvestigationFailurePhase::EgressRecording,
+                ));
             }
             // Complete response bytes are still untrusted. A custom bounded
             // provider does not bypass output or immutable model identity checks.

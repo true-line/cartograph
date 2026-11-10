@@ -511,6 +511,16 @@ mod tests {
             request_wire: 1024,
             app_path_bytes: 4096,
         };
+        // AC-0582: ledger/query metadata owners are invariant to hosted/history allowances.
+        let base = &agents::investigation::INVESTIGATION_V2_POLICY;
+        let combined = base
+            .with_hosted_generation()
+            .unwrap()
+            .with_parent_history_32768()
+            .unwrap();
+        let a = workspace(base, input).unwrap();
+        let b = workspace(&combined, input).unwrap();
+        assert_eq!((a.retained, a.peak), (b.retained, b.peak));
         let policy = &agents::investigation::INVESTIGATION_V1_POLICY;
         assert!(workspace(policy, input).is_some());
         let corrupt: &[fn(&mut QueryInputs)] = &[

@@ -428,6 +428,7 @@ fn investigation_short_graph_names_remain_usable_but_raw_excerpts_do_not() {
 fn investigation_detail_roundtrip_closes_flattened_and_nested_unknown_fields() {
     // AC-0188: reusable public DTOs have a strict new storage contract.
     let detail = InvestigationDetail {
+        terminal_diagnostic: None,
         advisory_audit: None,
         completion: None,
         inspection_requirements: None,
@@ -481,6 +482,11 @@ fn investigation_detail_roundtrip_closes_flattened_and_nested_unknown_fields() {
         error: None,
     };
     let raw = serde_json::to_string(&detail).unwrap();
+    assert!(!raw.contains("terminal_diagnostic"));
+    assert_eq!(
+        serde_json::to_string(&decode_record::<InvestigationDetail>(&raw).unwrap()).unwrap(),
+        raw
+    );
     assert!(
         serde_json::to_value(&detail)
             .unwrap()
@@ -734,4 +740,32 @@ fn correction_specialist_has_separate_identity_and_retains_acquisition_guards() 
         old.definition().unwrap().operations,
         current.definition().unwrap().operations
     );
+}
+
+// AC-0582: authenticated policy and optional text-free diagnostic regression.
+#[test]
+fn terminal_diagnostic_wire_is_closed_and_optional() {
+    let diagnostic = InvestigationTerminalDiagnostic::Operational {
+        phase: InvestigationFailurePhase::SourceReservation,
+        error_class: InvestigationOperationalClass::StoreInvalid,
+    };
+    let value = serde_json::to_value(diagnostic).unwrap();
+    assert_eq!(
+        value,
+        json!({"schema":"investigation-terminal-diagnostic@1", "phase":"source_reservation", "error_class":"store_invalid"})
+    );
+    assert_eq!(
+        serde_json::from_value::<InvestigationTerminalDiagnostic>(value.clone()).unwrap(),
+        diagnostic
+    );
+    for (key, invalid) in [
+        ("schema", "unknown@2"),
+        ("phase", "provider prose"),
+        ("error_class", "sql message"),
+        ("response_text", "private canary"),
+    ] {
+        let mut changed = value.clone();
+        changed[key] = json!(invalid);
+        assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
+    }
 }

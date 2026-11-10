@@ -1351,3 +1351,83 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
         );
     }
 }
+
+// AC-0582: protected schemas/choices use the exact versioned policy, not V2 defaults.
+#[test]
+fn large_history_admission_schema_and_choices_preserve_effective_policy() {
+    let policy = INVESTIGATION_V2_POLICY
+        .with_hosted_generation()
+        .unwrap()
+        .with_parent_history_32768()
+        .unwrap();
+    let raw = json!({"parent_investigation_id":"parent","original_graph_snapshot_id":null,
+        "original_scope":{"type":"all"},"saved_execution_status":"completed",
+        "cancellation_requested":false,"invocation_outcome_pending":false,
+        "authority":"Prior findings remain T3/InferredWeak. ".repeat(50),"saved_result":null})
+    .to_string();
+    let history = vec![raw; 10];
+    let bytes = serde_json::to_vec(&history).unwrap();
+    assert!(bytes.len() > 16384 && bytes.len() <= 32768);
+    for role in [
+        SpecialistId::DomainAnalystV13,
+        SpecialistId::DomainAnalystV18,
+        SpecialistId::DomainAnalystV27,
+    ] {
+        let mut f = Fixture::new(role, 7);
+        f.ledger.supplied_history_hash = Some(core_prov::content_hash(&bytes));
+        f.ledger.supplied_history_bytes = bytes.len();
+        f.basis.input_ledger_hash = f.ledger.fingerprint_with_policy(&policy).unwrap();
+        let input = InvestigationInput::prepare_v9_with_policy(
+            &f.request.question,
+            role,
+            f.ledger.clone(),
+            &[],
+            &[],
+            &history,
+            &usage(CompletionCallMode::Choice),
+            &f.basis,
+            &f.request,
+            &f.metadata,
+            &[],
+            CompletionCallMode::Choice,
+            0,
+            None,
+            &policy,
+        )
+        .unwrap();
+        let input = if role.uses_acquisition_choices() {
+            let contract = InvestigationCompletionContract {
+                schema_version: 1,
+                request_hash: f.metadata.request_hash.clone(),
+                obligations_hash: f.metadata.obligations_hash.clone(),
+                obligations: f.request.obligations.clone(),
+            };
+            let choices = acquisition_choices::AcquisitionChoices::derive(
+                &contract,
+                &f.metadata,
+                "task",
+                &f.ledger,
+                &[],
+                &policy,
+            )
+            .unwrap();
+            input
+                .with_acquisition_choices(std::sync::Arc::new(choices))
+                .unwrap()
+        } else {
+            input
+        };
+        assert!(input.admission_reserve_basis(&policy).is_ok());
+        assert!(
+            input
+                .admission_reserve_basis(&INVESTIGATION_V2_POLICY)
+                .is_err()
+        );
+        assert!(input.action("step".into()).is_ok());
+        let prompt = prompt(&input);
+        assert_eq!(
+            prompt["limits"],
+            serde_json::to_value(policy.limits()).unwrap()
+        );
+    }
+}

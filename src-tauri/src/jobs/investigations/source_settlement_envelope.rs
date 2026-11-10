@@ -23,7 +23,7 @@ pub(in crate::jobs::investigations) fn envelope(
     reservation: &read_reservations::Reservation,
     response: &InvestigationResponseMeta,
 ) -> Result<SettlementEnvelope, InvestigationStoreError> {
-    reservation.validate()?;
+    reservation.validate_task_policy(&reservation_task.detail)?;
     let pending = reservation_task
         .pending_source_read
         .as_ref()
@@ -57,7 +57,7 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
     if connection.is_autocommit() {
         return Err(InvestigationStoreError::Invalid);
     }
-    reservation.validate()?;
+    reservation.validate_task_policy(&reservation_task.detail)?;
     let pending = reservation_task
         .pending_source_read
         .as_ref()
@@ -80,7 +80,10 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
         return Err(InvestigationStoreError::Invalid);
     }
     let charged = source_validation::project_validation(connection, reservation_task, reservation)?;
-    let acquired = sizing_acquired_ledger(&core.ledger, &reservation.source)?;
+    // The sizing ledger retains the child history; use the authenticated frozen
+    // policy rather than silently reverting a versioned child to legacy V2.
+    let policy = reservation.policy()?;
+    let acquired = sizing_acquired_ledger(&core.ledger, &reservation.source, &policy)?;
     let mut envelope = SettlementEnvelope {
         bytes: 0,
         events: 0,
@@ -213,6 +216,7 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
 pub(super) fn sizing_acquired_ledger(
     base: &InvestigationInputLedger,
     source: &InvestigationInspectionTarget,
+    policy: &InvestigationPolicy,
 ) -> Result<InvestigationInputLedger, InvestigationStoreError> {
     let mut acquired = base.clone();
     let source_count = acquired
@@ -246,7 +250,7 @@ pub(super) fn sizing_acquired_ledger(
             input_closure: agents::InputClosureStatus::InputClosureNotEstablished,
         },
     });
-    acquired.validate_with_policy(&INVESTIGATION_V2_POLICY)?;
+    acquired.validate_with_policy(policy)?;
     Ok(acquired)
 }
 

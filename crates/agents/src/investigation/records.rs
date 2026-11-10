@@ -338,6 +338,8 @@ pub struct InvestigationUsage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvestigationDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_diagnostic: Option<InvestigationTerminalDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisory_audit: Option<super::semantic_audit::AdvisoryAudit>,
     #[serde(flatten)]
     pub summary: InvestigationSummary,
@@ -622,4 +624,46 @@ impl InvestigationInputLedger {
             &bounded_bytes(self, MAX_MANIFEST_BYTES)?,
         ))
     }
+}
+
+/// Content-free failure provenance. Unknown versions, fields and enum values fail closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "schema", deny_unknown_fields)]
+pub enum InvestigationTerminalDiagnostic {
+    #[serde(rename = "investigation-terminal-diagnostic@1")]
+    Operational {
+        phase: InvestigationFailurePhase,
+        error_class: InvestigationOperationalClass,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationFailurePhase {
+    Unspecified,
+    Continuation,
+    EgressRecording,
+    Finish,
+    Metadata,
+    Query,
+    Inventory,
+    Candidate,
+    Certification,
+    Seal,
+    Publication,
+    Source,
+    SourcePrepare,
+    SourceCertification,
+    SourceReservation,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationOperationalClass {
+    HostOperational,
+    StoreInvalid,
+    StoreMissing,
+    StoreConflict,
+    StoreStale,
+    StoreUnavailable,
+    StoreOwnership,
+    StoreStorage,
 }

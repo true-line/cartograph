@@ -430,6 +430,10 @@ pub(crate) enum InvestigationStopReason {
     ConsentExpired,
     ConsentDeclined,
     Operational,
+    OperationalAt {
+        phase: agents::investigation::InvestigationFailurePhase,
+        error_class: agents::investigation::InvestigationOperationalClass,
+    },
 }
 
 impl InvestigationStopReason {
@@ -451,6 +455,7 @@ impl InvestigationStopReason {
                 | Code::OutputTooLarge => Self::LimitExceeded,
                 _ => Self::ProviderFailure,
             },
+            Self::OperationalAt { .. } => Self::Operational,
             Self::PreparationAt(_) => Self::PreparationFailed,
             Self::HostLimit | Self::HostLimitAt { .. } | Self::StoreCapacity => Self::LimitExceeded,
             Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
@@ -741,7 +746,7 @@ impl InvestigationStopReason {
             Self::ConsentDeclined => {
                 "The exact cloud step was declined; no fallback was authorized."
             }
-            Self::Operational => {
+            Self::Operational | Self::OperationalAt { .. } => {
                 "An investigation operation failed; no additional work was started."
             }
         }
@@ -1161,6 +1166,7 @@ impl JobStore {
             intent_hash,
             expected_graph_revision: request.expected_graph_revision.clone(),
             detail: InvestigationDetail {
+                terminal_diagnostic: None,
                 advisory_audit: None,
                 inspection_requirements: if completion_intent.is_some() {
                     None

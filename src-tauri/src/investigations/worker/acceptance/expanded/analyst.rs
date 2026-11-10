@@ -347,7 +347,7 @@ fn run_analyst(
     run_control(directory, expected, provider, CaptureFixture::Baseline)
 }
 #[derive(Clone, Copy)]
-enum BoundaryClock {
+pub(super) enum BoundaryClock {
     Real,
     FrozenActive,
 }
@@ -438,6 +438,25 @@ fn execute_role_with_clock(
         )?),
         InvestigationProviderMode::Local => None,
     };
+    execute_role_with_granted_consent(directory, authority, provider, role, clock, hosted)
+}
+
+// A synthetic test can grant the same scoped consent with explicit identity and
+// cap, without environment mutation or constructing a network provider.
+pub(super) fn execute_role_with_granted_consent(
+    directory: &Path,
+    authority: &Authority<'_>,
+    provider: Arc<dyn LlmProvider>,
+    role: &str,
+    clock: BoundaryClock,
+    hosted: Option<super::cloud_run::Consent>,
+) -> Result<(), String> {
+    if descriptor(provider.as_ref(), authority.provider.mode).map_err(|e| e.to_string())?
+        != *authority.provider
+        || hosted.is_some() != (authority.provider.mode == InvestigationProviderMode::Cloud)
+    {
+        return Err("Provider or scoped consent differs from frozen identity.".into());
+    }
     // Durable exclusive marker precedes every dispatch capability. Any later
     // error, unknown acknowledgement or receipt failure keeps it consumed.
     exclusive(

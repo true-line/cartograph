@@ -137,3 +137,33 @@ mod tests {
         ));
     }
 }
+
+// AC-0582: these metadata-only ceilings do not scale with raw supplied history.
+#[test]
+fn versioned_history_metadata_workspace_bounds_are_policy_invariant() {
+    use super::{INVESTIGATION_V2_POLICY, InvestigationInput, disclosure_validation_workspace};
+    let base = &INVESTIGATION_V2_POLICY;
+    let combined = base
+        .with_hosted_generation()
+        .unwrap()
+        .with_parent_history_32768()
+        .unwrap();
+    let row = super::MAX_RECORD_BYTES;
+    assert_eq!(
+        ledger_validation_workspace(base, row),
+        ledger_validation_workspace(&combined, row)
+    );
+    assert_eq!(
+        disclosure_validation_workspace(base, row),
+        disclosure_validation_workspace(&combined, row)
+    );
+    let limits = llm::bounded::CompletionLimits::default();
+    assert_eq!(
+        InvestigationInput::sealing_workspace_bytes(base, &limits),
+        InvestigationInput::sealing_workspace_bytes(&combined, &limits)
+    );
+    assert!(
+        InvestigationInput::construction_workspace_bytes(&combined).unwrap()
+            > InvestigationInput::construction_workspace_bytes(base).unwrap()
+    );
+}

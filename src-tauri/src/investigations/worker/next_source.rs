@@ -170,7 +170,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 SourceReservationError::Host(error) => {
                     Failure::Host(error).preparation_at(PreparationPhase::SourceReservation)
                 }
-                SourceReservationError::Store(error) => Failure::Store(error),
+                SourceReservationError::Store(error) => {
+                    Failure::Store(error).preparation_at(PreparationPhase::SourceReservation)
+                }
             })?;
         self.detail = reservation.detail().clone();
         let publication = SourcePublicationInput {

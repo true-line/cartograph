@@ -45,6 +45,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                     envelope_projection::sizing_acquired_ledger(
                         &fixture.f.ledger,
                         &fixture.r.source,
+                        &INVESTIGATION_V2_POLICY,
                     )
                     .unwrap(),
                 )
@@ -406,5 +407,41 @@ fn source_settlement_cancelled_terminal_projections_match_reread_control() {
         let actual = project().unwrap();
         let legacy = completion::with_observation_prefix_reread(project).unwrap();
         assert_eq!(projection_contents(&actual), projection_contents(&legacy));
+    }
+}
+
+// AC-0582: authenticated policy and optional text-free diagnostic regression.
+#[test]
+fn source_sizing_uses_combined_hosted_history_policy_without_widening_legacy() {
+    let fixture = Fixture::new();
+    let combined = INVESTIGATION_V2_POLICY
+        .with_hosted_generation()
+        .unwrap()
+        .with_parent_history_32768()
+        .unwrap();
+    assert_eq!(
+        InvestigationPolicy::for_effective_limits(&combined.limits())
+            .unwrap()
+            .limits(),
+        combined.limits()
+    );
+    let mut ledger = fixture.f.ledger.clone();
+    ledger.supplied_history_hash = Some("a".repeat(64));
+    for bytes in [16384, 16385, 23240, 32768, 32769] {
+        ledger.supplied_history_bytes = bytes;
+        assert_eq!(
+            envelope_projection::sizing_acquired_ledger(
+                &ledger,
+                &fixture.r.source,
+                &INVESTIGATION_V2_POLICY
+            )
+            .is_ok(),
+            bytes <= 16384
+        );
+        assert_eq!(
+            envelope_projection::sizing_acquired_ledger(&ledger, &fixture.r.source, &combined)
+                .is_ok(),
+            bytes <= 32768
+        );
     }
 }
