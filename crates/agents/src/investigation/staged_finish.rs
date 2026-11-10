@@ -293,7 +293,7 @@ impl RefusalFeedback {
     /// domination at every embedding layer, not merely in the direct mapping.
     ///
     /// Combined feedback has only fixed codes, integer positions and validated
-    /// evidence/obligation IDs, so redact-text@1 cannot expand its strings.
+    /// evidence/obligation IDs, so redact-text@2 cannot expand its strings.
     /// Citation guidance may contain arbitrary identities: retain its existing
     /// conservative envelope rather than assuming those strings are inert.
     /// This is sizing-only and does not activate the new finish family.

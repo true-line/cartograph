@@ -902,7 +902,9 @@ fn admission_unread_source_refuses_rebound_or_unproven_descriptors_and_shapes() 
 
 #[test]
 fn admission_reserve_redaction_boundary_witnesses_preserve_the_wire_bound() {
-    // AC-0287: redact-text@1 quote barriers and private-key cross-field spans.
+    // AC-0287: redact-text@2 quote barriers and private-key cross-field spans.
+    // AC-0579 / #1753: an authored string that ends in a compound credential name, with
+    // or without a separator, must not reach into the next protocol field.
     // These are byte-capacity witnesses, not proof protected fields still seal.
     use llm::{LlmProvider, OllamaProvider};
     let provider = OllamaProvider::new(
@@ -917,6 +919,9 @@ fn admission_reserve_redaction_boundary_witnesses_preserve_the_wire_bound() {
     for (question, cross_fields) in [
         ("secret=", false),
         ("password:", false),
+        ("DB_PASSWORD=", false),
+        ("client_secret", false),
+        ("secret_key =>", false),
         ("Bearer ", false),
         ("sk-", false),
         ("AKIA", false),

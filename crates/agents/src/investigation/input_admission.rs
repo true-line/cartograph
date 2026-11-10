@@ -197,7 +197,7 @@ impl InvestigationInput {
         source_target: Option<&InvestigationInspectionTarget>,
         protect: bool,
     ) -> Result<AdmissionReserveMeasurements, InvestigationError> {
-        if core_redact::TEXT_POLICY_VERSION != "redact-text@1" {
+        if core_redact::TEXT_POLICY_VERSION != "redact-text@2" {
             return Err(InvestigationError::InvalidInput);
         }
         let metadata: ProtectedCompletionMetadata =
@@ -212,13 +212,21 @@ impl InvestigationInput {
             .checked_add(metadata.refusal_count)
             .and_then(|calls| calls.checked_sub(1))
             .ok_or(InvestigationError::LimitExceeded)?;
-        // redact-text@1 proof for controlled replacements: decimal/lowerhex
+        // redact-text@2 proof for controlled replacements: decimal/lowerhex
         // fields and finite underscore-separated codes contain no recognizer
         // prefix, whitespace or quote. Every replacement is in its own JSON
-        // value; token/assignment recognizers stop at quotes/separators. Only
-        // private-key matching spans fields; its delimiters occur solely in
-        // unchanged authored strings, so the same regions collapse to the same
-        // marker. No controlled replacement can introduce another delimiter.
+        // value; token recognizers stop at quotes/separators. An assignment
+        // match may now cross one closing key quote (#1753), so it can reach
+        // a value only from a key that ends in a credential word. The keys
+        // that hold controlled replacements (completed_attempt_ids,
+        // refusal_count, last_refusal_id, feedback and the feedback
+        // envelope's own fields) are fixed protocol names, none of which ends
+        // in one, and no finite code does either. A value is followed by a
+        // comma or a closing bracket, never by a colon, so a controlled value
+        // cannot become an assignment name. Only private-key matching spans
+        // fields; its delimiters occur solely in unchanged authored strings,
+        // so the same regions collapse to the same marker. No controlled
+        // replacement can introduce another delimiter.
         // Re-prove this if the redactor or these field classes change.
         let mut reserved = prompt;
         let completion = reserved["completion_metadata"]
