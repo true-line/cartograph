@@ -1961,10 +1961,8 @@ fn next_prompt_preparation_phases_preserve_failures() {
     for original in [
         Failure::AlreadyTerminal,
         Failure::Host(HostError::StoreCapacity),
-        Failure::Host(HostError::Operational),
         Failure::Host(HostError::InputChanged),
         Failure::Host(HostError::SourceUnavailable),
-        Failure::Store(InvestigationStoreError::Invalid),
         Failure::Store(InvestigationStoreError::Capacity),
         Failure::Store(InvestigationStoreError::Cancelled),
         Failure::Stop(InvestigationStopReason::Cancelled),
@@ -1986,6 +1984,31 @@ fn next_prompt_preparation_phases_preserve_failures() {
                     .preparation_after_call(SpecialistId::DomainAnalystV12, 1)
             ),
             before
+        );
+    }
+    // AC-0582: operational host/store failures keep their class and gain the phase.
+    for (original, error_class) in [
+        (
+            Failure::Host(HostError::Operational),
+            agents::investigation::InvestigationOperationalClass::HostOperational,
+        ),
+        (
+            Failure::Store(InvestigationStoreError::Invalid),
+            agents::investigation::InvestigationOperationalClass::StoreInvalid,
+        ),
+    ] {
+        let annotated = original
+            .preparation_at(Query)
+            .preparation_after_call(SpecialistId::DomainAnalystV12, 1);
+        assert_eq!(
+            format!("{annotated:?}"),
+            format!(
+                "{:?}",
+                Failure::Stop(InvestigationStopReason::OperationalAt {
+                    phase: agents::investigation::InvestigationFailurePhase::Query,
+                    error_class,
+                })
+            )
         );
     }
     for (role, calls, expected) in [
