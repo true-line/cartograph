@@ -48,6 +48,15 @@ fn available_specialists() -> Vec<SpecialistId> {
     specialists
 }
 
+/// The offered specialists whose desktop runs use the saved run limits
+/// (#1757): exactly those the worker starts through next-prompt admission.
+fn configured_limit_specialists() -> Vec<SpecialistId> {
+    available_specialists()
+        .into_iter()
+        .filter(|id| id.uses_next_prompt_admission())
+        .collect()
+}
+
 fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
     ["investigation-v1", "investigation-v2"]
         .into_iter()
@@ -131,6 +140,7 @@ pub(crate) async fn investigation_specialists(
             .collect(),
             limits: InvestigationLimits::default(),
             policies: policy_catalog(),
+            configured_limit_specialists: configured_limit_specialists(),
         })
     })
     .await
@@ -834,6 +844,42 @@ mod staged_tests {
 #[cfg(test)]
 mod policy_catalog_tests {
     use super::*;
+
+    // AC-0584 (#1757): the catalog, not the client, says which offered
+    // specialists use the saved run limits, and it says exactly what the
+    // worker's admission predicate says.
+    #[test]
+    fn desktop_catalog_names_the_specialists_that_use_saved_run_limits() {
+        let named = configured_limit_specialists();
+        for id in available_specialists() {
+            assert_eq!(
+                named.contains(&id),
+                id.uses_next_prompt_admission(),
+                "{id:?}"
+            );
+        }
+        if InvestigationPolicy::for_profile("investigation-v2").is_some() {
+            // The versions the client's own list had stopped short of.
+            for id in [
+                SpecialistId::DomainAnalystV21,
+                SpecialistId::DomainAnalystV22,
+                SpecialistId::DomainAnalystV23,
+                SpecialistId::DomainAnalystV27,
+            ] {
+                assert!(named.contains(&id), "{id:?}");
+            }
+        }
+        assert!(!named.contains(&SpecialistId::DomainAnalystV7));
+        assert!(!named.contains(&SpecialistId::SpecWriterV2));
+
+        // An older catalog without the field still reads, as naming none.
+        let old: InvestigationCatalog = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "specialists": [], "providers": [],
+            "limits": InvestigationLimits::default(),
+        }))
+        .unwrap();
+        assert!(old.configured_limit_specialists.is_empty());
+    }
 
     // AC-0574: rollout changes creation, never saved identity validation.
     #[test]

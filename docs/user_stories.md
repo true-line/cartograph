@@ -949,6 +949,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Source reservation:** sizing the acquired ledger uses the reservation’s authenticated effective policy, including both hosted generation and versioned history; legacy sizing remains limited to 16,384 bytes and versioned history remains limited to 32,768 bytes. Missing or changed reservation policy still fails closed.
   - **Verification:** offline Cloud-mode evidence-auditor@11 children with genuinely saved history above 16,384 bytes exercise combined hosted generation and parent-history-32768-v1 policy through inventory, query and third-action admission, then a complete source/inventory acquisition, admitted finish, result publication, captured-auditor receipt generation and byte-identical terminal reopen. The full scripted Cloud path exercises pre-dispatch accounting and scoped consent restoration. Closed-enum persistence, phase discrimination, historical serialization and text-free failure regressions cover the diagnostic.
 - **Trace:** H4 · `agents`, `app` · — · T-0582
+- **AC-0584** Given the investigation composer, when it shows the limit line for the selected specialist, then whether the saved run limits apply is taken from the host's catalog (`configured_limit_specialists`), which lists exactly the offered specialists the worker starts through next-prompt admission. The UI keeps no list of its own, so a new specialist version cannot leave the two out of step; a specialist the catalog does not list shows its policy limit (#1757).
+- **Trace:** H4 · `agents`, `app`, `ui` · — · T-0584
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer

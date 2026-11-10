@@ -255,7 +255,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       {requestBytes > requestLimit && <p role="alert" className="error-text">This request exceeds the {requestLimit.toLocaleString()}-byte limit. Shorten the question or remove required sources.</p>}
       {parent && <p className="muted">New task following <code>{parent.parent_id}</code>; earlier findings remain T3 history.
         <button type="button" className="secondary-button" disabled={locked} onClick={() => setParent(null)}>Start a separate conversation</button></p>}
-      {limits && <RunLimitFooter specialistId={specialistId} limits={limits} />}
+      {limits && <RunLimitFooter limits={limits}
+        usesSavedLimits={state.catalog?.configured_limit_specialists?.includes(specialistId) ?? false} />}
       <button type="submit" disabled={!startEnabled}>{state.starting ? 'Saving investigation…' : parent ? 'Start follow-up' : 'Start investigation'}</button>
       {state.startError && <div role="alert" className="error-text"><p>{state.startError}</p>
         {state.pendingStart && <button type="button" className="secondary-button" disabled={state.starting} onClick={() => void state.retryStart()}>Retry same start request</button>}</div>}

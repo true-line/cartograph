@@ -80,6 +80,8 @@ export interface InvestigationCatalog {
   providers: InvestigationProvider[];
   limits: InvestigationLimits;
   policies?: InvestigationPolicy[];
+  /** Offered specialists whose desktop runs use the saved run limits (#1757). */
+  configured_limit_specialists?: SpecialistId[];
 }
 
 export type InvestigationRangeRole = 'provenance' | 'rule_exit' | 'condition_branch' | 'condition_expression' |

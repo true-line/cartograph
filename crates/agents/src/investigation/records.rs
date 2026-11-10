@@ -82,6 +82,11 @@ pub struct InvestigationCatalog {
     pub limits: InvestigationLimits,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<InvestigationPolicyCatalogEntry>,
+    /// The offered specialists whose desktop runs use the saved run limits
+    /// (#1757). The host decides this; a client shows it and keeps no list
+    /// of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configured_limit_specialists: Vec<SpecialistId>,
 }
 
 /// Host-owned closed choices; numeric fields describe the immutable policy,

@@ -13,7 +13,7 @@ let stored = shipped;
 
 const meta = {
   title: 'Surfaces/RunLimitFooter', component: RunLimitFooter,
-  args: { specialistId: 'domain-analyst@18', limits: { model_invocations: 64, tool_actions: 56, active_seconds: 600 } },
+  args: { usesSavedLimits: true, limits: { model_invocations: 64, tool_actions: 56, active_seconds: 600 } },
   beforeEach: () => {
     stored = shipped;
     mockIPC((command) => {
@@ -37,9 +37,9 @@ export const ReloadsSavedLimitOnFocus: Story = {
   },
 };
 
-// Older specialist versions keep the policy value even when a limit is saved.
+// AC-0584 (#1757): a specialist the catalog does not list keeps the policy value even when a limit is saved.
 export const OlderSpecialistKeepsPolicyLimit: Story = {
-  args: { specialistId: 'domain-analyst@3' },
+  args: { usesSavedLimits: false },
   beforeEach: () => { stored = { ...shipped, active_seconds: 3_600, customized: true }; },
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
@@ -47,16 +47,4 @@ export const OlderSpecialistKeepsPolicyLimit: Story = {
     window.dispatchEvent(new Event('focus'));
     await expect(c.queryByText(/3600s/)).toBeNull();
   },
-};
-
-// AC-0565: the new desktop default retains configured limits after focus refresh.
-export const Analyst19ReloadsSavedLimitOnFocus: Story = {
-  ...ReloadsSavedLimitOnFocus,
-  args: { specialistId: 'domain-analyst@19' },
-};
-
-// AC-0566: analyst20 retains configured limits after focus refresh.
-export const Analyst20ReloadsSavedLimitOnFocus: Story = {
-  ...ReloadsSavedLimitOnFocus,
-  args: { specialistId: 'domain-analyst@20' },
 };
