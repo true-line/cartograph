@@ -15,7 +15,6 @@ const meta = {
   title: 'Surfaces/KnowledgePhaseNotice', component: KnowledgePhaseNotice, args: { available: true },
   beforeEach: () => {
     last = null;
-    window.localStorage.removeItem('cartograph.knowledgePhase.dismissed');
     mockIPC((command) => {
       if (command === 'knowledge_phase_status') return last;
       throw new Error(`unexpected command ${command}`);
@@ -47,7 +46,7 @@ export const BaseTooLarge: Story = {
   },
 };
 
-/** A live event replaces the notice; every named reason is listed; dismissal holds until the outcome changes. */
+/** A live event replaces the notice; every named reason is listed; dismissal holds only until the outcome changes. */
 export const ReasonsArriveAndDismiss: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -68,6 +67,19 @@ export const ReasonsArriveAndDismiss: Story = {
     await expect(notice).toHaveTextContent('1 candidate node was too large');
     await userEvent.click(within(notice).getByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(canvas.queryByRole('status')).toBeNull());
+    // A clean phase ends the dismissal: the same reasons reported again are shown again.
+    const skipped = {
+      report: { ...ran, embedded: 0, omission: 'semantic-tier-disabled' }, error: null,
+    } satisfies KnowledgeStatus;
+    await emit('knowledge-phase', skipped);
+    await userEvent.click(within(await canvas.findByRole('status', { name: 'Knowledge phase' })).getByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(canvas.queryByRole('status')).toBeNull());
+    await emit('knowledge-phase', skipped);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(canvas.queryByRole('status')).toBeNull();
+    await emit('knowledge-phase', { report: ran, error: null } satisfies KnowledgeStatus);
+    await emit('knowledge-phase', skipped);
+    await expect(await canvas.findByRole('status', { name: 'Knowledge phase' })).toHaveTextContent('Semantic tier (T2) is off');
     await emit('knowledge-phase', { report: null, error: 'store closed' } satisfies KnowledgeStatus);
     await expect(await canvas.findByRole('status', { name: 'Knowledge phase' })).toHaveTextContent('The knowledge phase failed: store closed');
   },

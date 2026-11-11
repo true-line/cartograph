@@ -95,48 +95,49 @@ function signature(status: KnowledgeStatus | null): string {
   return knowledgePhaseLines(status).map((line) => line.text).join('|');
 }
 
-const DISMISSED_KEY = 'cartograph.knowledgePhase.dismissed';
-
-function readDismissed(): string {
-  try { return window.localStorage.getItem(DISMISSED_KEY) ?? ''; } catch { return ''; }
-}
-
-function writeDismissed(value: string) {
-  try { window.localStorage.setItem(DISMISSED_KEY, value); } catch { /* remembered for this window only */ }
-}
-
 /**
- * The notice bound to the core: reads the last outcome on mount, then follows
- * the `knowledge-phase` event. A dismissal holds until the outcome changes.
+ * The notice bound to the core: follows the `knowledge-phase` event and reads
+ * the last outcome once the listener is in place, so an outcome that arrives
+ * while the window opens is not lost. A dismissal is held in this window only
+ * and ends as soon as an outcome with different lines arrives, so the same
+ * reason reported again after a clean phase is shown again.
  */
 export function KnowledgePhaseNotice({ available }: { available: boolean }) {
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
-  const [dismissed, setDismissed] = useState<string>(readDismissed);
+  const [dismissed, setDismissed] = useState<string | null>(null);
   useEffect(() => {
     if (!available) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     let heardEvent = false;
-    invoke<KnowledgeStatus | null>('knowledge_phase_status').then(
-      (next) => { if (!disposed && !heardEvent) setStatus(next); },
-      () => { /* an older core has no such command; the event still arrives */ },
-    );
+    const receive = (next: KnowledgeStatus | null) => {
+      setStatus(next);
+      setDismissed((held) => (held !== null && held !== signature(next) ? null : held));
+    };
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
         const stop = await listen<KnowledgeStatus>('knowledge-phase', (event) => {
           heardEvent = true;
-          setStatus(event.payload);
+          receive(event.payload);
         });
         if (disposed) stop();
         else unlisten = stop;
       } catch {
-        // No event bridge available.
+        // No event bridge available; the retained outcome is still read below.
+      }
+      if (disposed) return;
+      try {
+        const last = await invoke<KnowledgeStatus | null>('knowledge_phase_status');
+        // An event heard since subscribing is newer than this read.
+        if (!disposed && !heardEvent) receive(last);
+      } catch {
+        // An older core has no such command; the event still arrives.
       }
     })();
     return () => { disposed = true; unlisten?.(); };
   }, [available]);
   const current = signature(status);
   if (!available || current === dismissed) return null;
-  return <KnowledgePhaseNoticePanel status={status} onDismiss={() => { setDismissed(current); writeDismissed(current); }} />;
+  return <KnowledgePhaseNoticePanel status={status} onDismiss={() => setDismissed(current)} />;
 }
