@@ -962,6 +962,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
   - **Verification:** offline saved large-parent coverage exercises all seven sources through finish, publication and reopen, an undersized page refusal with unchanged acquisition credit, repeated refusals at existing caps, and measured prompt/schema capacity. Captured-auditor staging authenticates either exact immutable @11 or @12 definitions.
 - **Trace:** H4 · `agents`, `app` · — · T-0585
 
+- **AC-0589** Given the five synthetic #598 negative cases, the test-only captured coordinator accepts only manifest `cb54f13d` with exact per-case source and question bindings, domain-analyst@27, Cloud openai:gpt-6.1-sol and unchanged limits. Separate fixture identity leaves FrozenVendure closed. Production capture, admission, scoped consent, exclusive per-case attempt consumption and durable receipt reopen apply; no parent or evaluator ingestion is admitted. Scripted tests are transport mechanics only, not semantic acceptance evidence; manual execution remains owner-authorized.
+- **Trace:** H4 · `app` · — · T-0589
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

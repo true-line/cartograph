@@ -337,6 +337,9 @@ fn bound_with_scope<T>(
             if sha(receipt) != expected.preparation_sha256 {
                 return Err("independent preparation digest mismatch".into());
             }
+            if let vendure::InputPolicy::NegativeCases598(case) = policy {
+                super::negative_cases::validate_graph(case, expected, graph)?;
+            }
             let state = app.state::<crate::AppState>();
             let inventory = crate::investigations::completion_choices::control_inventory(
                 app.handle(),
