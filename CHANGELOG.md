@@ -1,5 +1,17 @@
 # cartograph
 
+## 0.69.0
+
+### Minor Changes
+
+- 6f6a6bb: Add evidence-auditor@13 with one bounded replay/citation correction turn and parent-finding reference guidance. Preserve text-free finish rejection reasons and final-response usage instead of reporting content rejections as generic store failures.
+- 9515b35: Settings can now check a provider key and the local lane. **Check connection** asks the provider whether it accepts your key with one request that carries no source text, prompt or graph content; it needs no consent and its size is added to the egress record. A new **Local lane** section shows whether the Ollama server is running, which models are missing, and the exact `ollama pull` command for each.
+
+### Patch Changes
+
+- 73d1d45: Help has a new **First run** topic: installing and opening the build (including an `unsigned-dev` build), what works with no provider, the first ingest and where to look afterwards, setting up the local lane, and adding a cloud provider key with what consent means.
+- 0d240dd: When the knowledge phase that runs after an ingest skips or leaves out work, the app now shows a notice naming each reason; before, a skipped phase looked the same as one that ran. Capabilities, domain entities, actors and business flows are now derived when the Semantic tier (T2) is off; only embedding is skipped. A desktop context query now answers on a graph over 50,000 rows instead of returning an error.
+
 ## 0.68.1
 
 ### Patch Changes
