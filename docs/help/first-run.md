@@ -3,9 +3,9 @@
 This page takes you from a downloaded build to a first recovered system. It
 describes version 0.68 on macOS.
 
-You need no provider and no account to recover a system. The deterministic
-tier (T0) reads the code on this machine and calls no model. The local lane
-and a cloud provider are optional and are set up afterwards.
+You need no model provider to recover a system. The deterministic tier (T0)
+reads the code on this machine and calls no model. The local lane and a cloud
+provider are optional and are set up afterwards.
 
 ## 1. Install and open
 
@@ -30,9 +30,14 @@ Everything in the recovery path:
   was recovered, and the exports.
 - Capabilities, domain entities, actors and business flows derived by rule.
 
-The status bar reads `Local-only · 0 bytes egress`. Nothing has left this
-machine, and nothing will until you turn on a cloud provider and consent to a
-specific step.
+The status bar reads `Local-only · 0 bytes egress`. That figure counts what is
+sent to a model provider: none of your source content goes to one until you
+turn on a cloud provider and consent to a specific step.
+
+Fetching a repository is separate. If you connect a GitHub repository,
+Cartograph clones it from GitHub when recovery starts, using your GitHub
+access for a private one. That request is not part of the egress figure. A
+local folder is read in place and makes no network request.
 
 What a provider adds: similarity search and embeddings (T2), and proposals and
 specialist investigations that reason over the recovered facts (T3). Those
@@ -42,8 +47,12 @@ results are always marked as inferred.
 
 1. Open **Connect** and point at a repository or folder, or drop a folder on
    the window.
-2. **Preflight** scans the files and shows which languages and frameworks it
-   can read, and which constructs it cannot. Nothing is recovered yet.
+2. **Preflight** depends on what you connected. For a local folder it scans
+   the files and shows which languages and frameworks it can read, and which
+   constructs it cannot. For a GitHub repository or a system manifest it
+   shows **Detection deferred**: the files are not on this machine yet, so
+   detection happens when recovery starts. That screen is expected. Nothing
+   is recovered at this step either way.
 3. **Recover** runs the extraction as a job you can cancel. The summary lists
    files, nodes and edges per language, including zeros.
 
