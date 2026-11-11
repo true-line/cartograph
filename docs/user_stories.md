@@ -392,9 +392,10 @@
 - **AC-0069** Given facts emitted by a plugin adapter, when inspected, then their provenance carries `extractor_id@version` plus the plugin artifact's content hash, and re-ingesting the same commit with the same adapter set yields an identical whole-graph content hash (the US-0014 determinism invariant extends to plugin facts).
 - **AC-0070** Given a plugin at extraction time, when it attempts network access, a filesystem write, or exceeds its fuel/memory bounds, then the run fails closed with an explicit finding and no partial facts join the graph; source access is read-only and host-mediated, and no LLM is ever invoked inside a T0 plugin.
 - **AC-0093** Given a Preflight unsupported finding for an uncovered language, when the engineer follows its request-adapter action and a generated artifact lands in a discovery directory, passes the conformance gate, and is enabled for the project, then the next scan reports the language covered by the plugin (the originating unsupported finding closes), extraction routes the files the plugin's golden corpus claims through the plugin with host-pinned facts, and compiled-in adapters always win a contested extension.
+- **AC-0594** Given a plugin adapter returns facts, then the host builds every fact's provenance itself: T0 Deterministic and Confirmed, the pinned extractor id, and a content hash computed by the host. A fact's own `prov` contributes evidence spans only, and only when it states Deterministic and Confirmed, writes no other provenance field, and every span names the mediated repository, commit and file with a byte range inside that file. Any other fact fails the file's extraction with a malformed-fact error naming it, and no fact from that file joins the graph (R-INT-2).
 - **Security:** AI-authored code runs sandboxed (no network, no writes, bounded resources) per ADR-0017; fail closed.
 - **Performance:** Plugin extraction may trail native adapters; first-class languages stay compiled in.
-- **Trace:** post-M10 · `adapters-*`, `ingest`, `app`, UI · — · T-0068..0070, T-0093
+- **Trace:** post-M10 · `adapters-*`, `ingest`, `app`, UI · — · T-0068..0070, T-0093, T-0594
 
 ### US-0018 — In-app Help, single-sourced with the wiki
 - **Actor:** Engineer
