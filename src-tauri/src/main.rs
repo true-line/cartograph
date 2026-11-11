@@ -33,6 +33,7 @@ mod primary_source;
 #[cfg(test)]
 mod primary_source_tests;
 mod proposals;
+mod provider_checks;
 mod provider_credentials;
 #[cfg(test)]
 mod registered_source_tests;
@@ -3913,6 +3914,41 @@ async fn remove_provider_key(
     .await
 }
 
+/// Ask a provider whether it accepts the configured key (#1795). One bodiless
+/// metadata request: no source text, prompt or graph content is sent, so no
+/// tier consent is involved. The request is written to the egress record
+/// before it is sent. The result never carries the key or a response body.
+#[tauri::command]
+async fn check_provider_connection(
+    provider: String,
+    app: tauri::AppHandle,
+) -> Result<provider_checks::ConnectionCheck, String> {
+    off_ui_thread(move || {
+        let provider = provider_credentials::ProviderId::parse(&provider)?;
+        let state = app.state::<AppState>();
+        provider_checks::check_connection_with(
+            provider_credentials::system(),
+            provider,
+            llm::anthropic::CONNECTION_CHECK_URL,
+            provider_checks::CHECK_TIMEOUT,
+            |label, bytes| {
+                state
+                    .settings
+                    .lock()
+                    .is_ok_and(|mut settings| settings.record_egress(label, bytes).is_ok())
+            },
+        )
+    })
+    .await
+}
+
+/// Whether the local model server answers and which catalog models are
+/// installed, with the command for each missing one (#1795). Loopback only.
+#[tauri::command]
+async fn local_lane_status() -> Result<provider_checks::LocalLaneStatus, String> {
+    off_ui_thread(|| Ok(provider_checks::probe_local_lane())).await
+}
+
 /// Live egress summary for the status bar (#103's seam, now real).
 #[tauri::command]
 fn egress_summary(state: State<'_, AppState>) -> Result<settings::EgressSummary, String> {
@@ -6735,6 +6771,8 @@ fn main() {
             provider_key_status,
             knowledge_phase::knowledge_phase_status,
             set_provider_key,
+            check_provider_connection,
+            local_lane_status,
             remove_provider_key,
             cloud_disclosure,
             ingest_history,

@@ -34,6 +34,23 @@ key there.
 Saving a key sends nothing and grants nothing. Each cloud step still shows the
 exact payload and asks for your consent.
 
+**Check connection** tells you whether the provider accepts the key. It sends
+one request for the provider's model list, with your key and nothing else: no
+source text, no prompt and no graph content. Because nothing of yours is sent it
+asks for no consent, and its size is added to the egress record like any other
+request. The answer is one of: key accepted, key refused, or provider
+unreachable. It stops after 10 seconds.
+
+## Local lane
+
+The local lane runs models through Ollama on this machine. **Local lane** shows
+whether the Ollama server is running and which of the models Cartograph uses
+are installed. If the server is not running, it shows the command that starts
+it (`ollama serve`). For each missing model it shows the exact command to fetch
+it, for example `ollama pull qwen3:8b`. Run the command in a terminal, then
+choose **Check local lane** again. Cartograph never downloads a model itself,
+and this check sends nothing off this machine.
+
 ## Read-only MCP
 
 The local MCP service starts disabled. In **Read-only MCP**, expand the advanced

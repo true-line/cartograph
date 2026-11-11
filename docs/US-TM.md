@@ -12,7 +12,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0006 | AC-0015..0017,AC-0083,AC-0219,AC-0257,AC-0330,AC-0332,AC-0333,AC-0334,AC-0335,AC-0336 | flowtracer, ingest | M3–M5 | F-* | ADR-0002, ADR-0032 | T-0015..0017,T-0083,T-0219,T-0257,T-0330,T-0332,T-0333,T-0334,T-0335,T-0336 |
 | US-0007 | AC-0018..0020,AC-0061 | core-prov, agents, ui | M0, M8 | — | ADR-0002, ADR-0006 | T-0018..0020,T-0061 |
 | US-0008 | AC-0021..0022, AC-0269, AC-0285 | adapters-lang-ts, iac, core-graph, semantic, llm, app | M7 | F-* | ADR-0002, ADR-0004, ADR-0010, ADR-0037 | T-0021..0022, T-0269, T-0285 |
-| US-0009 | AC-0023..0025,AC-0055..0056,AC-0063,AC-0087,AC-0089,AC-0231,AC-0579,AC-0580,AC-0586 | agents, llm, ingest, core-redact, app, ui | M8 | — | ADR-0004, ADR-0057 | T-0023..0025,T-0055..0056,T-0063,T-0087,T-0089,T-0231,T-0579,T-0580,T-0586 |
+| US-0009 | AC-0023..0025,AC-0055..0056,AC-0063,AC-0087,AC-0089,AC-0231,AC-0579,AC-0580,AC-0586,AC-0590 | agents, llm, ingest, core-redact, app, ui | M8 | — | ADR-0004, ADR-0057 | T-0023..0025,T-0055..0056,T-0063,T-0087,T-0089,T-0231,T-0579,T-0580,T-0586,T-0590 |
 | US-0010 | AC-0026..0028,AC-0062,AC-0064,AC-0081,AC-0086,AC-0366, AC-0558 | core-graph, app, ui | M9, #1667 | — | ADR-0001 | T-0026..0028,T-0062,T-0064,T-0081,T-0086,T-0366, T-0558 |
 | US-0011 | AC-0029..0031, AC-0065..0066, AC-0084 | app, flowtracer, ui | M9, #1665 | F-* | ADR-0002 | T-0029..0031, T-0065..0066, T-0084 |
 | US-0012 | AC-0032..0035,AC-0057..0058,AC-0067,AC-0210,AC-0218,AC-0221,AC-0258,AC-0297,AC-0358,AC-0359,AC-0551,AC-0587 | core-prov, spec, agents, app, flowtracer, ui | M9–M10, #993, #994, #1660, #1663, #1755 | — | ADR-0002, ADR-0011 | T-0032..0035,T-0057..0058,T-0067,T-0210,T-0218,T-0221,T-0258,T-0297,T-0358,T-0359,T-0551,T-0587 |
@@ -135,7 +135,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (accepted 2026-11-06, #1678) |
 | ADR-0055 | Bounded, independently bound refusal diagnostic sidecars outside workspace capacity accounting (#1707) |
 | ADR-0056 | Documentation reconstruction pipeline, two modes and the rebuild boundary (proposed; #1745, owner review) |
-| ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review) |
+| ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review); amended 2026-11-10 for the consent-free, recorded connection check (#1795) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression

@@ -42,6 +42,32 @@ exports, handed to other people.
 6. **Validation.** A key is trimmed and must be one line of printable ASCII
    with no spaces, at most 512 bytes. A refusal never repeats what was typed.
 
+### Amendment — 2026-11-10: a connection check (#1795)
+
+Settings can ask a provider whether it accepts the configured key. This adds
+one exception to decisions 4 and 5, and nothing else changes.
+
+- **What is sent.** One `GET` for the provider's model list
+  (`/v1/models?limit=1`) with the key and the API version header. There is no
+  body. No source text, prompt, span or graph content is part of the request,
+  and nothing in the code path can add one: the check takes the key and an
+  endpoint and no other input.
+- **No tier consent.** Consent (ADR-0004) exists to control what of the user's
+  sources leaves the machine. The check sends none of it, so it does not pass
+  the egress firewall and asks for no consent. The Settings section states
+  exactly what is sent before the user chooses to run it; the check never runs
+  on its own.
+- **Recorded.** The request does leave the machine, so its size (the request
+  line and the headers Cartograph sets, the key included) is written to the
+  egress record under `<provider>:connection-check` before it is sent. If the
+  record cannot be written, nothing is sent.
+- **Second resolver.** `provider_checks.rs` resolves the key through
+  `provider_credentials.rs` for this request. It is the only caller besides
+  `egress.rs`.
+- **Result.** `accepted`, `refused` (HTTP 401 or 403), `unreachable` (anything
+  else, including a timeout after 10 seconds) or `no-key`. The response body is
+  never read and the result never carries the key. Redirects are not followed.
+
 ## Consequences
 
 - A release build launched from Finder can use the cloud lane after the user

@@ -288,6 +288,63 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+/// The metadata request a connection check makes: the first entry of the
+/// provider's model list. It has no body.
+pub const CONNECTION_CHECK_URL: &str = "https://api.anthropic.com/v1/models?limit=1";
+
+/// What a connection check learned (#1795). Never carries the key or any
+/// part of the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectionOutcome {
+    /// The provider answered and accepted the key.
+    Accepted,
+    /// The provider answered and refused the key (HTTP 401 or 403).
+    Refused,
+    /// No usable answer: no connection, a timeout, or any other status.
+    Unreachable,
+}
+
+/// Bytes of the connection-check request that Cartograph itself composes:
+/// the request line and the two headers it sets, the key included. The check
+/// has no body, so this is everything of the user's that leaves.
+pub fn connection_check_bytes(endpoint: &str, api_key: &str) -> u64 {
+    let target = reqwest::Url::parse(endpoint)
+        .map(|url| match url.query() {
+            Some(query) => format!("{}?{query}", url.path()),
+            None => url.path().to_owned(),
+        })
+        .unwrap_or_else(|_| endpoint.to_owned());
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nx-api-key: {api_key}\r\nanthropic-version: {API_VERSION}\r\n\r\n"
+    );
+    request.len() as u64
+}
+
+/// Ask the provider whether it accepts `api_key`, with one bodiless metadata
+/// request. No prompt, source text or graph content is sent, redirects are
+/// not followed and the response body is never read. Fails closed: anything
+/// but a success status is not an acceptance.
+pub fn check_connection(endpoint: &str, api_key: &str, timeout: Duration) -> ConnectionOutcome {
+    let Ok(client) = Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return ConnectionOutcome::Unreachable;
+    };
+    let response = client
+        .get(endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", API_VERSION)
+        .send();
+    match response.map(|response| response.status()) {
+        Ok(status) if status.is_success() => ConnectionOutcome::Accepted,
+        Ok(status) if matches!(status.as_u16(), 401 | 403) => ConnectionOutcome::Refused,
+        _ => ConnectionOutcome::Unreachable,
+    }
+}
+
 use crate::Embedding;
 
 #[cfg(test)]
@@ -431,5 +488,81 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("30-day data retention"))
         );
+    }
+
+    /// One-shot mock that answers any request with `status` and returns the
+    /// raw request it received.
+    fn mock_status(status: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!(
+            "http://{}/v1/models?limit=1",
+            listener.local_addr().unwrap()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 65536];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let body = r#"{"data":[{"id":"secret-model-name"}]}"#;
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+            request
+        });
+        (endpoint, handle)
+    }
+
+    // AC-0590 (#1795): the check is one bodiless GET carrying the key and
+    // nothing of the user's sources, and it tells three outcomes apart.
+    #[test]
+    fn connection_check_sends_a_bodiless_metadata_request_and_classifies_the_answer() {
+        let timeout = Duration::from_secs(5);
+        let (endpoint, server) = mock_status("200 OK");
+        assert_eq!(
+            check_connection(&endpoint, "sk-test-key", timeout),
+            ConnectionOutcome::Accepted
+        );
+        let request = server.join().unwrap();
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("GET /v1/models?limit=1 HTTP/1.1"));
+        assert!(head.to_ascii_lowercase().contains("x-api-key: sk-test-key"));
+        assert!(body.is_empty(), "the check has no body");
+        for field in ["messages", "prompt", "system", "span", "content-length: "] {
+            assert!(!request.to_ascii_lowercase().contains(field), "{field}");
+        }
+
+        for (status, expected) in [
+            ("401 Unauthorized", ConnectionOutcome::Refused),
+            ("403 Forbidden", ConnectionOutcome::Refused),
+            ("500 Internal Server Error", ConnectionOutcome::Unreachable),
+            ("429 Too Many Requests", ConnectionOutcome::Unreachable),
+            ("302 Found", ConnectionOutcome::Unreachable),
+        ] {
+            let (endpoint, server) = mock_status(status);
+            assert_eq!(
+                check_connection(&endpoint, "sk-test-key", timeout),
+                expected
+            );
+            server.join().unwrap();
+        }
+
+        // Nothing listening: unreachable, never a pass.
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1/models?limit=1", closed.local_addr().unwrap());
+        drop(closed);
+        assert_eq!(
+            check_connection(&endpoint, "sk-test-key", timeout),
+            ConnectionOutcome::Unreachable
+        );
+    }
+
+    #[test]
+    fn connection_check_bytes_count_the_request_line_and_the_key() {
+        let short = connection_check_bytes(CONNECTION_CHECK_URL, "k");
+        let long = connection_check_bytes(CONNECTION_CHECK_URL, "k".repeat(101).as_str());
+        assert_eq!(long - short, 100);
+        assert!(short > "GET /v1/models?limit=1 HTTP/1.1".len() as u64);
     }
 }
