@@ -51,6 +51,7 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 
 | Document | Purpose |
 |---|---|
+| [docs/help/first-run.md](docs/help/first-run.md) | First run: install the build, set up a provider, first ingest (also in the app under Help) |
 | [docs/VISION.md](docs/VISION.md) | Product vision: the end state and its elements V1–V13 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap: workstreams, phases with demos, first issues |
 | [docs/SPEC-00_master.md](docs/SPEC-00_master.md) | Master specification — single source of truth |

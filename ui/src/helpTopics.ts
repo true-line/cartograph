@@ -15,9 +15,11 @@ export interface HelpTopic {
   markdown: string;
 }
 
-/** TOC order: concepts first, then the surfaces in shell order. */
+/** TOC order: concepts first (it is also the fallback topic), then the
+ * first-run guide, then the surfaces in shell order. */
 const ORDER = [
   'concepts',
+  'first-run',
   'workspace',
   'ingest',
   'atlas',
