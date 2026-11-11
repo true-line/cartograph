@@ -89,6 +89,7 @@ fn citation_correction_is_once_only_after_reopen_and_duplicate_publication() {
         "domain-analyst@20",
         "domain-analyst@22",
         "domain-analyst@23",
+        "evidence-auditor@13",
     ] {
         assert_citation_correction_is_once_only_after_reopen_and_duplicate_publication(role);
     }

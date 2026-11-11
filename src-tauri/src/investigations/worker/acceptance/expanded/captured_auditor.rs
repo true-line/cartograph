@@ -133,7 +133,7 @@ pub(super) fn stage(
         || wire(&normalized)? != wire(request)?
         || !matches!(
             request.specialist_id.as_str(),
-            "evidence-auditor@11" | "evidence-auditor@12"
+            "evidence-auditor@11" | "evidence-auditor@12" | "evidence-auditor@13"
         )
         || !request
             .obligations
@@ -142,7 +142,9 @@ pub(super) fn stage(
             .any(|o| matches!(o, obligations::Obligation::Inventory { .. }))
         || sources.is_empty()
         || expected.specialist
-            != (if request.specialist_id == "evidence-auditor@12" {
+            != (if request.specialist_id == "evidence-auditor@13" {
+                SpecialistId::EvidenceAuditorV13
+            } else if request.specialist_id == "evidence-auditor@12" {
                 SpecialistId::EvidenceAuditorV12
             } else {
                 SpecialistId::EvidenceAuditorV11
@@ -420,6 +422,7 @@ mod tests {
         Stage,
         CloudStage,
         CloudComplete,
+        WithheldCloud,
         Withheld,
         Supported,
         Unknown,
@@ -488,12 +491,21 @@ mod tests {
     fn exercise_auditor(scenario: Scenario) {
         exercise_auditor_role(scenario, SpecialistId::EvidenceAuditorV11);
     }
+    #[path = "auditor13_tests.rs"]
+    mod auditor13;
     fn exercise_auditor_role(scenario: Scenario, role: SpecialistId) {
+        exercise_auditor_configured(scenario, role, None);
+    }
+    fn exercise_auditor_configured(
+        scenario: Scenario,
+        role: SpecialistId,
+        rejection: Option<auditor13::Rejection>,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let provider = if matches!(scenario, Scenario::CloudComplete) {
             crate::investigations::worker::tests::completion_tests::expanded_large_scripted_provider(
             )
-        } else if matches!(scenario, Scenario::Withheld) {
+        } else if matches!(scenario, Scenario::Withheld | Scenario::WithheldCloud) {
             crate::investigations::worker::tests::completion_tests::expanded_withheld_scripted_provider()
         } else {
             expanded_scripted_provider(true)
@@ -509,7 +521,7 @@ mod tests {
             super::super::tests::binding(),
         )
         .unwrap();
-        if matches!(scenario, Scenario::Withheld) {
+        if matches!(scenario, Scenario::Withheld | Scenario::WithheldCloud) {
             prepared.analyst_request.specialist_id = "domain-analyst@25".into();
             prepared.analyst_request.request_nonce = "withheld-parent".into();
             prepared.analyst_request.conversation_id = Some(prepared.conversation_id.clone());
@@ -542,7 +554,10 @@ mod tests {
         let mut expected = Definition {
             start_sha256: None,
             binding: parent.binding.clone(),
-            parent_completion_outcome: if matches!(scenario, Scenario::Withheld) {
+            parent_completion_outcome: if matches!(
+                scenario,
+                Scenario::Withheld | Scenario::WithheldCloud
+            ) {
                 assert_eq!(
                     receipt["detail"]["completion_outcome"],
                     "findings_withheld_after_correction"
@@ -562,7 +577,10 @@ mod tests {
             specialist: role.definition().unwrap(),
             provider: descriptor.clone(),
         };
-        if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
+        if matches!(
+            scenario,
+            Scenario::CloudStage | Scenario::CloudComplete | Scenario::WithheldCloud
+        ) {
             expected.provider = InvestigationProvider {
                 mode: InvestigationProviderMode::Cloud,
                 provider_id: "openai:gpt-6.1-sol".into(),
@@ -616,7 +634,10 @@ mod tests {
         };
         assert!(stage(&parent, &failed_artifacts, &failed, true).is_err());
         assert!(!output.exists());
-        if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
+        if matches!(
+            scenario,
+            Scenario::CloudStage | Scenario::CloudComplete | Scenario::WithheldCloud
+        ) {
             for mode_mismatch in [false, true] {
                 let mut changed = expected.clone();
                 if mode_mismatch {
@@ -632,7 +653,7 @@ mod tests {
         }
         std::fs::write(&definition_path, wire(&expected).unwrap()).unwrap();
         let id = stage(&parent, &artifacts, &expected, true).unwrap();
-        if matches!(scenario, Scenario::Withheld) {
+        if matches!(scenario, Scenario::Withheld | Scenario::WithheldCloud) {
             let state = parent.app.state::<crate::AppState>();
             let history = state
                 .jobs
@@ -681,7 +702,10 @@ mod tests {
         );
         assert_eq!(first.usage, InvestigationUsage::default());
         assert_eq!(read_task(), first);
-        if matches!(scenario, Scenario::CloudStage | Scenario::CloudComplete) {
+        if matches!(
+            scenario,
+            Scenario::CloudStage | Scenario::CloudComplete | Scenario::WithheldCloud
+        ) {
             let policy = crate::jobs::investigations::policy_for_detail(&first).unwrap();
             assert_eq!(policy.limits().generated_tokens_per_invocation, 16384);
             assert_eq!(policy.limits().generated_token_reservations, 1048576);
@@ -692,8 +716,12 @@ mod tests {
         if !matches!(scenario, Scenario::Stage | Scenario::CloudStage) {
             let unknown = matches!(scenario, Scenario::Unknown);
             let refused = matches!(scenario, Scenario::Refused);
-            let raw: Arc<dyn LlmProvider> = if matches!(scenario, Scenario::CloudComplete) {
+            let raw: Arc<dyn LlmProvider> = if matches!(
+                scenario,
+                Scenario::CloudComplete | Scenario::WithheldCloud
+            ) {
                 crate::investigations::worker::tests::completion_tests::full_hosted_auditor_provider(
+                    matches!(scenario, Scenario::CloudComplete),
                 )
             } else if unknown {
                 Arc::new(Scripted::new(Mode::Unknown))
@@ -702,12 +730,19 @@ mod tests {
             } else {
                 expanded_auditor_scripted_provider()
             };
+            let raw = if let Some(rejection) = rejection {
+                auditor13::provider(raw, &result, rejection)
+            } else {
+                raw
+            };
             let provider = Arc::new(execution::ObservedProvider::next(
                 raw,
                 expected.request.expected_context_id.clone(),
             ));
-            let actual = if matches!(scenario, Scenario::CloudComplete) {
-                assert!(first.limits.history_policy.is_some());
+            let actual = if matches!(scenario, Scenario::CloudComplete | Scenario::WithheldCloud) {
+                if matches!(scenario, Scenario::CloudComplete) {
+                    assert!(first.limits.history_policy.is_some());
+                }
                 execute_with_runner(
                     &parent,
                     &expected,
@@ -739,8 +774,25 @@ mod tests {
             } else {
                 execute(&parent, &expected, &artifacts, provider.clone()).unwrap()
             };
+            if let Some(rejection) = rejection {
+                auditor13::verify(&actual, provider.as_ref(), role, rejection);
+                let responses: Vec<crate::jobs::investigations::InvestigationResponseMeta> =
+                    execution::rows(&db, &id, "investigation_responses", 64, 4096).unwrap();
+                assert_eq!(responses.len(), provider.observations().unwrap().len());
+                let last = responses.last().unwrap();
+                let observed =
+                    serde_json::to_value(provider.observations().unwrap().last().unwrap()).unwrap();
+                assert_eq!(observed["response"]["response_hash"], last.response_hash);
+                assert_eq!(last.reported_output_tokens, Some(3));
+                let safe = serde_json::to_value(last).unwrap();
+                assert!(safe.get("text").is_none() && safe.get("reasoning").is_none());
+                assert_eq!(reopen(&parent, &expected, &artifacts).unwrap(), actual);
+                assert!(execute(&parent, &expected, &artifacts, provider.clone()).is_err());
+                assert_eq!(reopen(&parent, &expected, &artifacts).unwrap(), actual);
+                return;
+            }
             assert_eq!(actual["role"], "auditor");
-            if matches!(scenario, Scenario::CloudComplete) {
+            if matches!(scenario, Scenario::CloudComplete | Scenario::WithheldCloud) {
                 assert_eq!(
                     actual["detail"]["obligation_status"],
                     "satisfied",
@@ -759,7 +811,7 @@ mod tests {
                 assert!(events.iter().any(|e| e["event"] == "tier_consent_granted"));
                 assert!(events.iter().any(|e| e["event"] == "tier_reverted_local"));
             }
-            if matches!(scenario, Scenario::Withheld) {
+            if matches!(scenario, Scenario::Withheld | Scenario::WithheldCloud) {
                 assert_eq!(
                     actual["parent_completion_outcome"],
                     "findings_withheld_after_correction"

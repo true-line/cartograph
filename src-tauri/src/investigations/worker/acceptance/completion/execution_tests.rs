@@ -795,9 +795,69 @@ fn observed_provider_preserves_bounded_schema_capability() {
     let wrapped = ObservedProvider::next(unsupported, "fixture-context".into());
     assert!(!wrapped.supports_bounded_response_schema());
     let supported =
-        crate::investigations::worker::tests::completion_tests::full_hosted_auditor_provider();
+        crate::investigations::worker::tests::completion_tests::full_hosted_auditor_provider(true);
     assert!(supported.supports_bounded_response_schema());
     let wrapped = ObservedProvider::next(supported, "fixture-context".into());
     assert!(wrapped.supports_bounded_response_schema());
     assert!(wrapped.observations().unwrap().is_empty());
+}
+
+// AC-0591: untrusted transport observation is content-free and optional for old receipts.
+#[test]
+fn response_observation_is_text_free_and_historical_wire_stays_readable() {
+    let text = r#"{"schema_version":1,"action":{"type":"finish","limitations":["private response sentinel"]}}"#;
+    let response = BoundedCompletion {
+        text: text.into(),
+        requested_model: "scripted".into(),
+        response_model: None,
+        provider_request_id: None,
+        usage: Some(llm::bounded::ReportedUsage {
+            input_tokens: None,
+            output_tokens: Some(7),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }),
+        request_bytes: 1,
+        response_bytes: text.len() as u64,
+    };
+    let observation = ResponseObservation::from_result(&Ok(response));
+    let raw = serde_json::to_string(&observation).unwrap();
+    assert!(!raw.contains("private response sentinel"));
+    assert_eq!(
+        serde_json::from_str::<ResponseObservation>(&raw).unwrap(),
+        observation
+    );
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["response_class"], "finish");
+    assert_eq!(value["reported_output_tokens"], 7);
+    assert_eq!(value["response_hash"], content_hash(text.as_bytes()));
+    for (key, value) in [
+        ("response_class", "private prose"),
+        ("response_text", "private prose"),
+    ] {
+        let mut changed: Value = serde_json::from_str(&raw).unwrap();
+        changed[key] = serde_json::json!(value);
+        assert!(serde_json::from_value::<ResponseObservation>(changed).is_err());
+    }
+    let old = InvocationObservation {
+        payload_hash: "p".into(),
+        input_ledger_hash: "l".into(),
+        context_id: "c".into(),
+        source_hashes: BTreeMap::new(),
+        inventory_hashes: BTreeMap::new(),
+        history_hash: None,
+        parent_result_hashes: BTreeMap::new(),
+        response: None,
+    };
+    let wire = serde_json::to_string(&old).unwrap();
+    assert!(!wire.contains("response"));
+    assert_eq!(
+        serde_json::from_str::<InvocationObservation>(&wire).unwrap(),
+        old
+    );
+    assert_eq!(
+        serde_json::to_string(&serde_json::from_str::<InvocationObservation>(&wire).unwrap())
+            .unwrap(),
+        wire
+    );
 }

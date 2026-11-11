@@ -454,41 +454,31 @@ impl JobStore {
                     Ok(Err(FinishDecision::Accepted(_))) => {
                         return Err(InvestigationStoreError::Invalid);
                     }
-                    Err(InvestigationError::InvalidCitation) => {
-                        // The saved call and full response were authenticated above.
-                        // Retain the measured response, never the rejected finding.
+                    Err(error) => {
+                        // The response identity was authenticated above. Rejected
+                        // prose is never persisted; hashes and usage are safe to retain.
                         persist_response(
                             &tx,
                             &mut task,
                             input.response,
                             authenticated.admitted_usage,
                         )?;
-                        invalid_citation(&tx, &mut task, &input.response.step_id)?;
+                        task.detail.terminal_diagnostic = Some(
+                            agents::investigation::InvestigationTerminalDiagnostic::RejectedFinish {
+                                reason: error.into(),
+                            },
+                        );
+                        if error == InvestigationError::InvalidCitation {
+                            invalid_citation(&tx, &mut task, &input.response.step_id)?;
+                        } else {
+                            finish_refused(
+                                &tx,
+                                &mut task,
+                                &input.response.step_id,
+                                InvestigationStopReason::InvalidFinish(error).message(),
+                            )?;
+                        }
                     }
-                    Err(InvestigationError::SourceReplay)
-                        if task
-                            .detail
-                            .summary
-                            .specialist_id
-                            .uses_typed_citation_correction() =>
-                    {
-                        persist_response(
-                            &tx,
-                            &mut task,
-                            input.response,
-                            authenticated.admitted_usage,
-                        )?;
-                        finish_refused(
-                            &tx,
-                            &mut task,
-                            &input.response.step_id,
-                            InvestigationStopReason::InvalidFinish(
-                                InvestigationError::SourceReplay,
-                            )
-                            .message(),
-                        )?;
-                    }
-                    Err(error) => return Err(error.into()),
                 }
             }
         }

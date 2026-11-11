@@ -83,6 +83,8 @@ pub enum SpecialistId {
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
     EvidenceAuditorV12,
+    #[serde(rename = "evidence-auditor@13")]
+    EvidenceAuditorV13,
     #[serde(rename = "spec-writer@1")]
     SpecWriterV1,
     #[serde(rename = "spec-writer@2")]
@@ -259,6 +261,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -301,6 +304,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -344,6 +348,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -380,6 +385,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -410,6 +416,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -440,6 +447,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -467,6 +475,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -495,7 +504,7 @@ impl SpecialistId {
             Self::DomainAnalystV10 | Self::EvidenceAuditorV10 => 10,
             Self::DomainAnalystV11 | Self::EvidenceAuditorV11 => 11,
             Self::DomainAnalystV12 | Self::EvidenceAuditorV12 => 12,
-            Self::DomainAnalystV13 => 13,
+            Self::DomainAnalystV13 | Self::EvidenceAuditorV13 => 13,
             Self::DomainAnalystV14 => 14,
             Self::DomainAnalystV15 => 15,
             Self::DomainAnalystV17 => 17,
@@ -527,7 +536,7 @@ impl SpecialistId {
         if self == Self::DomainAnalystV23 {
             return 13;
         }
-        if self == Self::DomainAnalystV22 {
+        if matches!(self, Self::DomainAnalystV22 | Self::EvidenceAuditorV13) {
             return 12;
         }
         if self == Self::DomainAnalystV21 {
@@ -538,6 +547,7 @@ impl SpecialistId {
             Self::DomainAnalystV11
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
@@ -589,7 +599,7 @@ impl SpecialistId {
     }
 
     pub fn uses_query_budget_refusals(self) -> bool {
-        self == Self::EvidenceAuditorV12
+        matches!(self, Self::EvidenceAuditorV12 | Self::EvidenceAuditorV13)
     }
 
     pub fn uses_acquisition_choices(self) -> bool {
@@ -606,6 +616,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -624,6 +635,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
         )
     }
 
@@ -643,7 +655,8 @@ impl SpecialistId {
     pub fn uses_finish_feedback_witness(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV22
+            Self::EvidenceAuditorV13
+                | Self::DomainAnalystV22
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
                 | Self::DomainAnalystV25
@@ -655,7 +668,8 @@ impl SpecialistId {
     pub fn uses_typed_citation_correction(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV20
+            Self::EvidenceAuditorV13
+                | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
                 | Self::DomainAnalystV23
@@ -667,7 +681,8 @@ impl SpecialistId {
     }
 
     pub(super) fn is_typed_citation_prompt(system: &str) -> bool {
-        system == Self::DomainAnalystV20.prompt()
+        system == Self::EvidenceAuditorV13.prompt()
+            || system == Self::DomainAnalystV20.prompt()
             || system == Self::DomainAnalystV21.prompt()
             || system == Self::DomainAnalystV22.prompt()
             || system == Self::DomainAnalystV23.prompt()
@@ -675,6 +690,12 @@ impl SpecialistId {
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::EvidenceAuditorV13 {
+            return format!(
+                "{}\nAuditor reference discipline@1: refer to parent findings by finding ID. Never restate parent finding titles, statements, limitations, or full file paths in authored prose. Assess the claims in your own words using acquired source citations; parent claims are not source evidence. Cite only acquired citation_id handles, never finding IDs or source target IDs.\nFinish correction@1: the single shared correction allowance covers replay and citation feedback. Replay feedback identifies typed fields and one-based sentence ranges; rewrite without quoting supplied text, including complete short titles. Citation feedback identifies source targets to acquire using currently offered choices, not citation IDs. Feedback grants no evidence, scope or budget. Recheck the entire finish; a repeated rejection is terminal.",
+                Self::EvidenceAuditorV12.prompt()
+            );
+        }
         if matches!(
             self,
             Self::DomainAnalystV24
@@ -806,7 +827,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV9
             | Self::EvidenceAuditorV10
             | Self::EvidenceAuditorV11
-            | Self::EvidenceAuditorV12 => {
+            | Self::EvidenceAuditorV12
+            | Self::EvidenceAuditorV13 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
@@ -902,6 +924,7 @@ impl SpecialistId {
             Self::DomainAnalystV11
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
@@ -922,7 +945,7 @@ impl SpecialistId {
         } else {
             prompt
         };
-        if self == Self::EvidenceAuditorV12 {
+        if matches!(self, Self::EvidenceAuditorV12 | Self::EvidenceAuditorV13) {
             let prompt = format!(
                 "{}\nCompiled auditor response schema templates: choice={} finish_only={}. Host admission remains authoritative.",
                 prompt,
@@ -999,7 +1022,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV9
             | Self::EvidenceAuditorV10
             | Self::EvidenceAuditorV11
-            | Self::EvidenceAuditorV12 => (
+            | Self::EvidenceAuditorV12
+            | Self::EvidenceAuditorV13 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),
@@ -1609,5 +1633,42 @@ mod auditor12_tests {
             serde_json::to_string(&new).unwrap(),
             "\"evidence-auditor@12\""
         );
+    }
+}
+
+#[cfg(test)]
+mod auditor13_tests {
+    use super::*;
+    #[test]
+    fn auditor13_shares_only_citation_replay_correction_and_keeps_old_roles() {
+        let new = SpecialistId::EvidenceAuditorV13;
+        for old in [
+            SpecialistId::EvidenceAuditorV11,
+            SpecialistId::EvidenceAuditorV12,
+        ] {
+            assert!(!old.uses_typed_citation_correction());
+            assert_ne!(
+                new.definition().unwrap().prompt_fingerprint,
+                old.definition().unwrap().prompt_fingerprint
+            );
+        }
+        assert!(new.uses_typed_citation_correction());
+        assert!(new.uses_finish_feedback_witness());
+        assert!(new.uses_acquisition_choices());
+        assert!(new.uses_exact_node_queries());
+        assert!(new.uses_query_budget_refusals());
+        assert!(!new.uses_capacity_exclusions());
+        assert!(!new.uses_combined_finish_feedback());
+        assert_eq!(
+            new.prompt_generation(),
+            SpecialistId::DomainAnalystV22.prompt_generation()
+        );
+        assert_eq!(new.version(), 13);
+        assert!(
+            new.prompt()
+                .starts_with(&SpecialistId::EvidenceAuditorV12.prompt())
+        );
+        assert!(new.prompt().contains("complete short titles"));
+        assert!(super::super::task_validation_workspace::definition_workspace(new).is_some());
     }
 }

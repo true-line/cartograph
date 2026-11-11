@@ -3,6 +3,7 @@ use super::*;
 
 struct HostedHistory {
     third: u8,
+    large_parent: bool,
     calls: AtomicUsize,
 }
 impl LlmProvider for HostedHistory {
@@ -54,7 +55,10 @@ impl LlmProvider for HostedHistory {
         // never opens a socket. Failed scripted stops above are not dispatched.
         assert!(control.dispatching.expect("Cloud dispatch hook")(100));
         let history = serde_json::to_vec(&p["prior_findings_as_t3_history"]).unwrap();
-        assert!(history.len() > 16384 && history.len() <= 32768);
+        assert!(history.len() <= 32768);
+        if self.large_parent {
+            assert!(history.len() > 16384);
+        }
         let offered = p["turn_progress"]["acquisition_choices"]["entries"]
             .as_array()
             .and_then(|entries| entries.first());
@@ -166,6 +170,7 @@ fn hosted_auditor_large_parent_third_actions() {
         request.provider_mode = InvestigationProviderMode::Cloud;
         let provider = Arc::new(HostedHistory {
             third,
+            large_parent: true,
             calls: AtomicUsize::new(0),
         });
         let state = parent.base.base.app.state::<AppState>();
@@ -354,9 +359,12 @@ fn terminal_diagnostic_persists_and_historical_stop_remains_omitted() {
     }
 }
 
-pub(in crate::investigations) fn full_hosted_auditor_provider() -> Arc<dyn LlmProvider> {
+pub(in crate::investigations) fn full_hosted_auditor_provider(
+    large_parent: bool,
+) -> Arc<dyn LlmProvider> {
     Arc::new(HostedHistory {
         third: 3,
+        large_parent,
         calls: AtomicUsize::new(0),
     })
 }

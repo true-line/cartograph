@@ -635,6 +635,10 @@ impl InvestigationInputLedger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "schema", deny_unknown_fields)]
 pub enum InvestigationTerminalDiagnostic {
+    #[serde(rename = "investigation-terminal-diagnostic@3")]
+    RejectedFinish {
+        reason: InvestigationFinishRejection,
+    },
     #[serde(rename = "investigation-terminal-diagnostic@2")]
     QueryBudget {
         termination: QueryBudgetTermination,
@@ -684,4 +688,30 @@ pub enum InvestigationOperationalClass {
     StoreUnavailable,
     StoreOwnership,
     StoreStorage,
+}
+
+/// Closed, text-free origin of a rejected authenticated finish (AC-0591).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationFinishRejection {
+    InvalidRequest,
+    InvalidAction,
+    LimitExceeded,
+    InvalidInput,
+    InvalidCitation,
+    SourceReplay,
+    SensitiveOutput,
+}
+impl From<InvestigationError> for InvestigationFinishRejection {
+    fn from(error: InvestigationError) -> Self {
+        match error {
+            InvestigationError::InvalidRequest => Self::InvalidRequest,
+            InvestigationError::InvalidAction => Self::InvalidAction,
+            InvestigationError::LimitExceeded => Self::LimitExceeded,
+            InvestigationError::InvalidInput => Self::InvalidInput,
+            InvestigationError::InvalidCitation => Self::InvalidCitation,
+            InvestigationError::SourceReplay => Self::SourceReplay,
+            InvestigationError::SensitiveOutput => Self::SensitiveOutput,
+        }
+    }
 }

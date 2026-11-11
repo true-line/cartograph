@@ -189,6 +189,16 @@ impl RefusalRecord {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        // @13 borrows replay locations and their witness, not capacity exclusions.
+        if request.specialist_id == "evidence-auditor@13"
+            && self
+                .feedback
+                .unmet
+                .iter()
+                .any(|entry| entry.reason == RefusalReason::ExcludedByCapacity)
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
         if ((matches!(
             self.feedback.prose_correction,
             Some(ProseCorrection::ParaphraseReplayAt(_))
@@ -200,6 +210,7 @@ impl RefusalRecord {
             && !matches!(
                 request.specialist_id.as_str(),
                 "domain-analyst@22"
+                    | "evidence-auditor@13"
                     | "domain-analyst@23"
                     | "domain-analyst@24"
                     | "domain-analyst@25"
@@ -214,6 +225,7 @@ impl RefusalRecord {
                     "domain-analyst@20"
                         | "domain-analyst@21"
                         | "domain-analyst@22"
+                        | "evidence-auditor@13"
                         | "domain-analyst@23"
                         | "domain-analyst@24"
                         | "domain-analyst@25"

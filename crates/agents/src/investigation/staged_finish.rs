@@ -729,6 +729,7 @@ pub(super) fn admit_finish_with_locator(
                 "domain-analyst@20"
                     | "domain-analyst@21"
                     | "domain-analyst@22"
+                    | "evidence-auditor@13"
                     | "domain-analyst@23"
             ) && consistency.is_some() =>
         {
@@ -741,7 +742,7 @@ pub(super) fn admit_finish_with_locator(
             prose_correction = Some(
                 if matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@22" | "domain-analyst@23"
+                    "domain-analyst@22" | "evidence-auditor@13" | "domain-analyst@23"
                 ) {
                     match locator(input, finish, model.as_deref()) {
                         Ok(Some(location))
@@ -788,6 +789,7 @@ pub(super) fn admit_finish_with_locator(
                 "domain-analyst@20"
                     | "domain-analyst@21"
                     | "domain-analyst@22"
+                    | "evidence-auditor@13"
                     | "domain-analyst@23"
                     | "domain-analyst@24"
                     | "domain-analyst@25"

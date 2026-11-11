@@ -262,7 +262,10 @@ impl InvestigationInput {
                         &self.ledger,
                         policy,
                     )?
-                } else if self.frozen_specialist()? == SpecialistId::DomainAnalystV22 {
+                } else if matches!(
+                    self.frozen_specialist()?,
+                    SpecialistId::DomainAnalystV22 | SpecialistId::EvidenceAuditorV13
+                ) {
                     staged_finish::RefusalFeedback::sizing_replay_contract_envelope(
                         &contract,
                         &self.ledger,
@@ -797,6 +800,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV27,
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::EvidenceAuditorV12,
+            SpecialistId::EvidenceAuditorV13,
         ]
         .contains(&role)
         {
