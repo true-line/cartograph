@@ -991,6 +991,8 @@ function installFakeCore(options: {
       }
       case 'provider_key_status':
         return [];
+      case 'knowledge_phase_status':
+        return null;
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }

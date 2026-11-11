@@ -6,6 +6,12 @@ Recovery tiers, providers, consent, and adapters.
 - Cloud fails closed: enabling a cloud provider requires an explicit
   disclosure and revocable consent, and every call still shows its exact
   payload for a per-action grant. The status bar reports live egress.
+- **Semantic (T2) off** means nothing is embedded. Capabilities, domain
+  entities, actors and business flows are still derived, because those rules
+  are deterministic and call no model.
+- After each ingest a background **knowledge phase** derives those nodes. If
+  it skips or leaves out work, a notice at the top of the window names each
+  reason. It stays until you dismiss it or the next ingest changes it.
 - **Adapters** lists every installed extractor (and what it covers) from the
   same registry Preflight consults, plus known adapter types you can request.
 

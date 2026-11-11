@@ -107,7 +107,7 @@ const TIER_COPY: Record<string, { name: string; description: string }> = {
   },
   T2: {
     name: 'Semantic',
-    description: 'Local embeddings + similarity over symbols and channels. Cloud is opt-in per this tier.',
+    description: 'Local embeddings + similarity over symbols and channels. Cloud is opt-in per this tier. Off: nothing is embedded; capabilities, domain entities, actors and business flows are still derived.',
   },
   T3: {
     name: 'Agentic',
