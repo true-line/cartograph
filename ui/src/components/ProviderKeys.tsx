@@ -118,7 +118,11 @@ export function ProviderKeysPanel({ statuses, canEdit, busy, error, onSave, onRe
 }
 
 /** The panel bound to the core's three provider-key commands. */
-export function ProviderKeys({ available }: { available: boolean }) {
+export function ProviderKeys({ available, onEgressRecorded }: {
+  available: boolean;
+  /** Called after a connection check, which adds to the egress record. */
+  onEgressRecorded?: () => void;
+}) {
   const [statuses, setStatuses] = useState<ProviderKeyStatus[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,16 +130,24 @@ export function ProviderKeys({ available }: { available: boolean }) {
   // Leaving the page drops a running check's result; the core stops it at its timeout.
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  // One counter per provider: a check answers only for the key it was started with.
+  const checkGeneration = useRef<Record<string, number>>({});
   const check = (provider: string) => {
-    setChecks((current) => ({ ...current, [provider]: 'checking' }));
+    const ticket = (checkGeneration.current[provider] ?? 0) + 1;
+    checkGeneration.current[provider] = ticket;
+    const current = () => mounted.current && checkGeneration.current[provider] === ticket;
+    setChecks((held) => ({ ...held, [provider]: 'checking' }));
     invoke<ConnectionCheck>('check_provider_connection', { provider }).then(
-      (result) => { if (mounted.current) setChecks((current) => ({ ...current, [provider]: result })); },
-      (failure) => { if (mounted.current) setChecks((current) => ({ ...current, [provider]: { error: String(failure) } })); },
-    );
+      (result) => { if (current()) setChecks((held) => ({ ...held, [provider]: result })); },
+      (failure) => { if (current()) setChecks((held) => ({ ...held, [provider]: { error: String(failure) } })); },
+    // The core records the bytes before it sends, so the total changed even if this result is dropped.
+    ).finally(() => onEgressRecorded?.());
   };
-  // A changed key makes an earlier result stale.
-  const forgetCheck = (provider: string) => setChecks((current) =>
-    Object.fromEntries(Object.entries(current).filter(([id]) => id !== provider)));
+  // A changed key makes an earlier result stale, and drops the answer of a check still running.
+  const forgetCheck = (provider: string) => {
+    checkGeneration.current[provider] = (checkGeneration.current[provider] ?? 0) + 1;
+    setChecks((held) => Object.fromEntries(Object.entries(held).filter(([id]) => id !== provider)));
+  };
   const generation = useRef(0);
   useEffect(() => {
     const ticket = ++generation.current;

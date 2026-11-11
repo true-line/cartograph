@@ -1,7 +1,7 @@
 // AC-0586 (#1763): enter, replace and remove a provider key; the key is never shown.
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { expect, userEvent, waitFor, within } from 'storybook/test';
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { ProviderKeys, type ConnectionCheck, type ProviderKeyStatus } from './ProviderKeys';
 
 const none: ProviderKeyStatus = {
@@ -11,6 +11,8 @@ let current = none;
 let received: string[] = [];
 let checkResult: ConnectionCheck | Error = { provider: 'anthropic', outcome: 'accepted', bytes_sent: 96 };
 let checksMade = 0;
+let releaseCheck: (() => void) | null = null;
+let holdCheck = false;
 
 const meta = {
   title: 'Surfaces/ProviderKeys', component: ProviderKeys, args: { available: true },
@@ -19,6 +21,8 @@ const meta = {
     received = [];
     checkResult = { provider: 'anthropic', outcome: 'accepted', bytes_sent: 96 };
     checksMade = 0;
+    releaseCheck = null;
+    holdCheck = false;
     mockIPC((command, args) => {
       const payload = args as { provider?: string; key?: string };
       if (command === 'provider_key_status') return [current];
@@ -35,7 +39,9 @@ const meta = {
       if (command === 'check_provider_connection') {
         checksMade += 1;
         if (checkResult instanceof Error) throw checkResult;
-        return checkResult;
+        const result = checkResult;
+        if (holdCheck) return new Promise((resolve) => { releaseCheck = () => resolve(result); });
+        return result;
       }
       throw new Error(`unexpected command ${command}`);
     });
@@ -154,5 +160,22 @@ export const CheckConnectionNeedsAKeyAndARecord: Story = {
     await expect(await c.findByTestId('provider-check-anthropic')).toHaveTextContent(
       'The check did not run: Error: the egress record could not be written, so nothing was sent',
     );
+  },
+};
+
+/** A check still running when the key is replaced must not report on the new key; the egress total is refreshed. */
+export const ReplacedKeyDropsARunningCheck: Story = {
+  args: { onEgressRecorded: fn() },
+  beforeEach: () => { current = { ...none, source: 'stored', stored: true }; holdCheck = true; },
+  play: async ({ canvasElement, args }) => {
+    const c = within(canvasElement);
+    await userEvent.click(await c.findByRole('button', { name: 'Check connection' }));
+    await expect(await c.findByTestId('provider-check-anthropic')).toHaveTextContent('Checking…');
+    await userEvent.type(c.getByLabelText('Replace key', { selector: 'input' }), 'sk-ant-second');
+    await userEvent.click(c.getByRole('button', { name: 'Replace key' }));
+    await waitFor(() => expect(c.queryByTestId('provider-check-anthropic')).toBeNull());
+    releaseCheck?.();
+    await waitFor(() => expect(args.onEgressRecorded).toHaveBeenCalledTimes(1));
+    await expect(c.queryByTestId('provider-check-anthropic')).toBeNull();
   },
 };

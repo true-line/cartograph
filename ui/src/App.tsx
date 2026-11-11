@@ -894,7 +894,10 @@ export default function App() {
             onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
             onOpenQuickDispatch={openStandaloneQuickDispatch}
           />
-          <ProviderKeys available={backend === 'up'} />
+          <ProviderKeys available={backend === 'up'} onEgressRecorded={() => {
+            invoke<import('./store').EgressSummary | null>('egress_summary')
+              .then((egress) => useAppStore.setState({ egress }), () => { /* the status bar keeps its last total */ });
+          }} />
           <LocalLane available={backend === 'up'} />
           <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
