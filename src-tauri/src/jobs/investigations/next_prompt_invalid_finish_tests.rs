@@ -41,6 +41,21 @@ fn next_prompt_invalid_finish_is_journaled_with_usage_and_reopens() {
             Some("The model's answer cited evidence it had not acquired. No findings were saved.")
         );
         assert!(!detail.summary.has_result);
+        // AC-0591: this historical role has no typed-correction capability.
+        assert!(
+            !detail
+                .summary
+                .specialist_id
+                .uses_typed_citation_correction()
+        );
+        assert_eq!(
+            detail.terminal_diagnostic,
+            Some(
+                agents::investigation::InvestigationTerminalDiagnostic::RejectedFinish {
+                    reason: agents::investigation::InvestigationFinishRejection::InvalidCitation,
+                }
+            )
+        );
         assert_eq!(detail.usage.model_invocations, charged.model_invocations);
         assert_eq!(detail.usage.tool_actions, charged.tool_actions);
         assert_eq!(
@@ -88,5 +103,20 @@ fn next_prompt_invalid_finish_is_journaled_with_usage_and_reopens() {
         let before = f.rows();
         assert_eq!(f.publish(), Err(InvestigationStoreError::Stale));
         assert_eq!(f.rows(), before);
+
+        // Reproduce the pre-diagnostic terminal wire shape. Only the newly
+        // optional field is omitted; the genuine response, event and admission
+        // journal rows above remain byte-identical and must still authenticate.
+        let mut historical = f.saved();
+        historical.detail.terminal_diagnostic = None;
+        let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+        admission_journal::tests::save_task(&tx, &historical);
+        tx.commit().unwrap();
+        let legacy = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+        let mut legacy_detail = detail.clone();
+        legacy_detail.terminal_diagnostic = None;
+        assert_eq!(legacy.investigation(f.base.id()).unwrap(), legacy_detail);
+        assert_eq!(legacy.investigation_events(f.base.id(), 0).unwrap(), events);
+        assert!(legacy.investigation_result(f.base.id()).unwrap().is_none());
     }
 }

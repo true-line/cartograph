@@ -769,3 +769,37 @@ fn terminal_diagnostic_wire_is_closed_and_optional() {
         assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
     }
 }
+
+// AC-0591: all admission variants have an explicit reason, with no prose field.
+#[test]
+fn rejected_finish_diagnostic_codes_are_closed() {
+    for error in [
+        InvestigationError::InvalidRequest,
+        InvestigationError::InvalidAction,
+        InvestigationError::LimitExceeded,
+        InvestigationError::InvalidInput,
+        InvestigationError::InvalidCitation,
+        InvestigationError::SourceReplay,
+        InvestigationError::SensitiveOutput,
+    ] {
+        let diagnostic = InvestigationTerminalDiagnostic::RejectedFinish {
+            reason: error.into(),
+        };
+        let value = serde_json::to_value(diagnostic).unwrap();
+        assert_eq!(value["schema"], "investigation-terminal-diagnostic@3");
+        assert_eq!(value.as_object().unwrap().len(), 2);
+        assert_eq!(
+            serde_json::from_value::<InvestigationTerminalDiagnostic>(value.clone()).unwrap(),
+            diagnostic
+        );
+        for (field, text) in [
+            ("reason", "provider prose"),
+            ("response_text", "forbidden"),
+            ("schema", "unknown@4"),
+        ] {
+            let mut changed = value.clone();
+            changed[field] = json!(text);
+            assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
+        }
+    }
+}

@@ -424,6 +424,11 @@ fn request_family(
             &["evidence-auditor@12"],
             b"cartograph:investigation-client-intent:v7\0",
         )),
+        ("investigation-v2", 7, "evidence-auditor@13") => Ok((
+            7,
+            &["evidence-auditor@13"],
+            b"cartograph:investigation-client-intent:v7\0",
+        )),
         ("investigation-v2", 7, "domain-analyst@19") => Ok((
             7,
             &["domain-analyst@19"],

@@ -39,6 +39,69 @@ pub(in super::super) struct InvocationObservation {
     pub inventory_hashes: BTreeMap<String, String>,
     pub history_hash: Option<String>,
     pub parent_result_hashes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<ResponseObservation>,
+}
+/// Untrusted transport outcome, not host admission or semantic acceptance.
+/// Old observations omit this field and retain their original wire bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "schema", deny_unknown_fields)]
+pub(in super::super) enum ResponseObservation {
+    #[serde(rename = "cartograph-response-observation@1")]
+    Returned {
+        response_class: ResponseClass,
+        response_hash: String,
+        reported_output_tokens: Option<u64>,
+    },
+    #[serde(rename = "cartograph-response-failure@1")]
+    Failed {
+        code: FailureCode,
+        outcome: InvocationOutcome,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(in super::super) enum ResponseClass {
+    Finish,
+    Read,
+    Other,
+}
+impl ResponseObservation {
+    fn from_result(result: &Result<BoundedCompletion, BoundedCallError>) -> Self {
+        match result {
+            Ok(response) => {
+                let value = serde_json::from_str::<Value>(&response.text).ok();
+                let response_class = match value.as_ref() {
+                    Some(v) if v["action"]["type"] == "finish" || v["type"] == "finish" => {
+                        ResponseClass::Finish
+                    }
+                    Some(v)
+                        if matches!(
+                            v["type"].as_str(),
+                            Some(
+                                "query_context"
+                                    | "read_evidence"
+                                    | "read_coverage_inventory"
+                                    | "replay_query"
+                            )
+                        ) =>
+                    {
+                        ResponseClass::Read
+                    }
+                    _ => ResponseClass::Other,
+                };
+                Self::Returned {
+                    response_class,
+                    response_hash: content_hash(response.text.as_bytes()),
+                    reported_output_tokens: response.usage.as_ref().and_then(|u| u.output_tokens),
+                }
+            }
+            Err(error) => Self::Failed {
+                code: error.code,
+                outcome: error.outcome,
+            },
+        }
+    }
 }
 #[derive(Debug, Serialize)]
 pub(super) struct RoleEvidence {
@@ -196,6 +259,7 @@ fn observation(
         }
     }
     Ok(InvocationObservation {
+        response: None,
         payload_hash: request.payload_hash().into(),
         input_ledger_hash: string("input_ledger_hash")?,
         context_id: string("context_id")?,
@@ -237,7 +301,7 @@ impl LlmProvider for ObservedProvider {
         if observed.context_id != self.context_id {
             return Err(fail());
         }
-        {
+        let ordinal = {
             let mut observations = self.observations.lock().map_err(|_| fail())?;
             if observations.len()
                 >= if self.next {
@@ -248,10 +312,18 @@ impl LlmProvider for ObservedProvider {
             {
                 return Err(fail());
             }
+            let ordinal = observations.len();
             observations.push(observed);
-        }
+            ordinal
+        };
         // Same authorized request and cancellation/control object, exactly once.
-        self.inner.complete_bounded(request, control)
+        let result = self.inner.complete_bounded(request, control);
+        // Retain metadata before host admission can roll back its transaction.
+        // Never dispatch again when observation bookkeeping fails.
+        if let Ok(mut observations) = self.observations.lock() {
+            observations[ordinal].response = Some(ResponseObservation::from_result(&result));
+        }
+        result
     }
 }
 fn check(name: &str, passed: bool) -> MechanicalCheck {
