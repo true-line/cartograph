@@ -73,11 +73,12 @@ pub use contract::{
 pub use views::{
     DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,
     SpecViewBundle, compile_selected_flow_view, compile_spec_views, compile_spec_with_views,
+    compile_spec_with_views_and_coverage,
 };
 pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,
-    CapabilityCompileWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
-    CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS, ExportMode,
+    COVERAGE_DETAIL_REPO_LIMIT, CapabilityCompileWorkspaceBound, CapabilityStory,
+    CapabilityStoryInputError, CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS, ExportMode,
     KnowledgeStoryCompileWorkspaceBound, PartitionAcquisition, PartitionArtifact,
     PartitionArtifactKind, PartitionError, PartitionWorkspaceBound, SelectedArtifactLimit,
     SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle,
@@ -85,7 +86,8 @@ pub use workbench::{
     compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, compile_partition_selected,
-    compile_spec, compile_spec_selected, compile_spec_selected_with_security, count_gap_findings,
+    compile_spec, compile_spec_selected, compile_spec_selected_with_coverage,
+    compile_spec_selected_with_security, compile_spec_with_coverage, count_gap_findings,
     count_interpretation_backlog, is_drift_edge, is_drift_node, is_gap_edge, is_gap_node,
     logical_actor_story_workspace_bound, logical_capability_compile_bound, logical_compile_bound,
     logical_knowledge_story_compile_bound, logical_partition_bound, project_recovered_facts,

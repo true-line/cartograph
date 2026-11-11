@@ -379,6 +379,20 @@ pub fn compile_spec_with_views(
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> (SpecBundle, SpecViewBundle) {
+    compile_spec_with_views_and_coverage(nodes, edges, flows, mode, rejected_hashes, &[])
+}
+
+/// [`compile_spec_with_views`] with the stored coverage inventories the
+/// bundle's `coverage` and `coverage-index` artifacts project (AC-0592). The
+/// views are unchanged by them.
+pub fn compile_spec_with_views_and_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    coverage: &[core_graph::coverage::StoredCoverage],
+) -> (SpecBundle, SpecViewBundle) {
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .expect("unbounded ADR derivation");
     let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
@@ -389,6 +403,7 @@ pub fn compile_spec_with_views(
         &projection.flows,
         mode,
         rejected_hashes,
+        coverage,
     );
 
     let artifact_for = |id: &str| -> &SpecArtifact {

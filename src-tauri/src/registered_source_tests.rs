@@ -1838,6 +1838,108 @@ fn captured_ingest_skips_symlinks_and_names_them_in_coverage() {
     assert!(inventory.limited);
 }
 
+// AC-0592 (#1786): the export of a real ingest carries the coverage
+// artifacts. A tree with one file left unread (a symlink) and one language no
+// producer covers lists both with their recorded reasons, carries the stored
+// inventory hash, is the same in both modes and is byte-identical when
+// exported again.
+#[cfg(unix)]
+#[test]
+fn export_carries_the_stored_coverage_inventory_in_both_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("AGENTS.md"), "notes").unwrap();
+    std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
+    std::fs::write(root.join("report.rb"), "puts 'report'\n").unwrap();
+    std::os::unix::fs::symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let stored = state.graph.lock().unwrap().coverage_records().unwrap();
+    assert_eq!(stored.len(), 1);
+    let stored = &stored[0];
+    let export = |mode| {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::build_spec_bundle(&graph, &decisions, mode).unwrap()
+    };
+    let artifact = |bundle: &spec::SpecBundle, id: &str| {
+        bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == id)
+            .cloned()
+            .unwrap()
+    };
+    let verified = export(spec::ExportMode::VerifiedOnly);
+    let markdown = artifact(&verified, "coverage");
+    let index = artifact(&verified, "coverage-index");
+    assert_eq!(markdown.file_name, "coverage.md");
+    assert_eq!(index.file_name, "coverage.json");
+
+    // Both limits are listed with the reason the inventory recorded.
+    assert!(
+        markdown.content.contains(
+            "| Ruby | 1 | `report.rb:1` | no installed producer covers Ruby: a tool \
+             limitation, not a system gap |"
+        ),
+        "{}",
+        markdown.content
+    );
+    assert!(
+        markdown.content.contains(
+            "| symlink-not-followed | 1 | `CLAUDE.md` | 1 symlink(s) in the selected tree were \
+             not followed or read; sources they point to are not covered unless also present in \
+             the tree |"
+        ),
+        "{}",
+        markdown.content
+    );
+
+    // The hash is the stored inventory's, and the index carries that body.
+    assert_eq!(stored.inventory_hash, stored.record.inventory_hash());
+    assert!(
+        markdown
+            .content
+            .contains(&format!("- Inventory hash: `{}`", stored.inventory_hash))
+    );
+    let read: serde_json::Value = serde_json::from_str(&index.content).unwrap();
+    let listed = &read["repositories"][0];
+    assert_eq!(read["inventories"], 1);
+    assert_eq!(listed["repo"], stored.record.repo_key.as_str());
+    assert_eq!(listed["inventory_hash"], stored.inventory_hash.as_str());
+    assert_eq!(
+        listed["inventory"],
+        serde_json::from_str::<serde_json::Value>(&stored.record.inventory_json).unwrap()
+    );
+    assert!(index.content.contains(&stored.record.inventory_json));
+
+    // A second export is byte-identical, and mode filters nothing.
+    assert_eq!(export(spec::ExportMode::VerifiedOnly), verified);
+    let best = export(spec::ExportMode::BestEffort);
+    assert_eq!(artifact(&best, "coverage"), markdown);
+    assert_eq!(artifact(&best, "coverage-index"), index);
+    // The single-artifact read used for copy and save returns the same bytes.
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    for (id, expected) in [("coverage", &markdown), ("coverage-index", &index)] {
+        assert_eq!(
+            &crate::build_spec_artifact(&graph, &decisions, spec::ExportMode::BestEffort, id)
+                .unwrap(),
+            expected
+        );
+    }
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)

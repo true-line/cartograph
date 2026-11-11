@@ -7,6 +7,8 @@ pub use accounting::{
     logical_capability_compile_bound, logical_compile_bound,
 };
 mod capabilities;
+mod coverage;
+pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
 pub(crate) mod diagrams;
 pub use capabilities::{
     ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
@@ -32,7 +34,8 @@ use flowtracer::{Flow, FlowStatus, Hop};
 pub use selected::{
     ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
     SelectedCompileLimits, artifact_catalog, compile_spec_selected,
-    compile_spec_selected_with_security, project_recovered_facts,
+    compile_spec_selected_with_coverage, compile_spec_selected_with_security,
+    project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::{Borrow, Cow};
@@ -618,6 +621,9 @@ pub fn is_drift_node(node: &Node) -> bool {
 
 /// Compile the complete official artifact set with one R-INT-5 policy.
 /// Rejected inferred content hashes are suppressed without upgrading any fact.
+/// No coverage inventory is supplied here, so the two coverage artifacts say
+/// so and claim nothing; a store-backed export uses
+/// [`compile_spec_with_coverage`].
 pub fn compile_spec(
     nodes: &[Node],
     edges: &[Edge],
@@ -625,7 +631,22 @@ pub fn compile_spec(
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> SpecBundle {
-    selected::all(nodes, edges, flows, mode, rejected_hashes)
+    selected::all(nodes, edges, flows, mode, rejected_hashes, &[])
+}
+
+/// [`compile_spec`] with the coverage inventories stored beside the graph
+/// (AC-0592). The `coverage` and `coverage-index` artifacts project exactly
+/// these records, in both export modes; without them, as in [`compile_spec`],
+/// those two artifacts state that no inventory was supplied.
+pub fn compile_spec_with_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    coverage: &[core_graph::coverage::StoredCoverage],
+) -> SpecBundle {
+    selected::all(nodes, edges, flows, mode, rejected_hashes, coverage)
 }
 
 #[cfg(test)]
@@ -842,22 +863,43 @@ mod tests {
                 "73caed7f670f05bd7059e5a23d9a7e2a472fd875b651569c124b46ab5881f057",
             ),
         ] {
-            let bytes = serde_json::to_vec(&compile_spec(
+            let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
                 &nodes,
                 &edges,
                 &flows,
                 mode,
                 &BTreeSet::new(),
-            ))
+            )))
             .unwrap();
             // Frozen native #603 (03d776d) output, with the already-integrated
             // method column, projection stamping and artifact identity seams,
             // plus the test-arrangements (#946) and journeys artifacts; verified-only
             // journeys state that they withhold InferredWeak candidates. User
             // stories render recovered names, ids and provenance as literal text
-            // (#1453), which intentionally changes those bytes.
+            // (#1453), which intentionally changes those bytes. The coverage
+            // artifacts (#1786) are appended after these and hashed apart, so
+            // the frozen bytes still prove the graph artifacts are unchanged.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
+    }
+
+    /// The bundle without the two coverage artifacts, which project stored
+    /// inventories instead of the graph and close the official order (#1786).
+    fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
+        let coverage = bundle.artifacts.split_off(bundle.artifacts.len() - 2);
+        assert_eq!(
+            coverage
+                .iter()
+                .map(|artifact| artifact.id.as_str())
+                .collect::<Vec<_>>(),
+            ["coverage", "coverage-index"]
+        );
+        assert!(
+            coverage
+                .iter()
+                .all(|artifact| artifact.assertions.is_empty())
+        );
+        bundle
     }
 
     fn fixture() -> (Vec<Node>, Vec<Edge>, Vec<Flow>) {
@@ -985,9 +1027,13 @@ mod tests {
                 "journeys.md",
                 "rule-evidence.md",
                 "rule-evidence.json",
+                "coverage.md",
+                "coverage.json",
             ]
         );
-        for artifact in &bundle.artifacts {
+        // The coverage artifacts state facts about the run, not graph
+        // assertions, so they carry no provenance block (#1786).
+        for artifact in &graph_artifacts(bundle.clone()).artifacts {
             assert_eq!(
                 artifact
                     .content
@@ -2345,7 +2391,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 16);
+                assert_eq!(full.artifacts.len(), 18);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,
@@ -2424,7 +2470,8 @@ mod tests {
                 "75e1dfa7cde4953048cd08555c6efbb136f3a590ef71d489506817287e5c34b1",
             ),
         ] {
-            let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());
+            let full =
+                graph_artifacts(compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new()));
             assert_eq!(
                 blake3::hash(&serde_json::to_vec(&full).unwrap())
                     .to_hex()

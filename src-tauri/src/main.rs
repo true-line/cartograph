@@ -6059,11 +6059,15 @@ fn persist_semantic_preview(
 }
 
 fn build_spec_bundle(
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
-    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
+    // Facts and inventories come from one read transaction, so the coverage
+    // artifacts describe the same revision as every other artifact (AC-0592).
+    let ((nodes, edges), coverage) = graph
+        .read_snapshot_with_coverage()
+        .map_err(|error| error.to_string())?;
     let flows = flowtracer::trace(&nodes, &edges);
     let rejected_hashes = decisions
         .list_assertions()
@@ -6072,25 +6076,30 @@ fn build_spec_bundle(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    Ok(spec::compile_spec(
+    Ok(spec::compile_spec_with_coverage(
         &nodes,
         &edges,
         &flows,
         mode,
         &rejected_hashes,
+        &coverage,
     ))
 }
 
 /// One official artifact compiled alone through the selected compiler, which
 /// produces the same bytes, content id and assertions as that artifact in
-/// `build_spec_bundle` without building the other fifteen (#1582).
+/// `build_spec_bundle` without building the others (#1582).
 fn build_spec_artifact(
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     mode: spec::ExportMode,
     artifact_id: &str,
 ) -> Result<spec::SpecArtifact, String> {
-    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
+    // Facts and inventories come from one read transaction, so the coverage
+    // artifacts describe the same revision as every other artifact (AC-0592).
+    let ((nodes, edges), coverage) = graph
+        .read_snapshot_with_coverage()
+        .map_err(|error| error.to_string())?;
     let flows = flowtracer::trace(&nodes, &edges);
     let rejected_hashes = decisions
         .list_assertions()
@@ -6107,7 +6116,7 @@ fn build_spec_artifact(
         },
     };
     let unknown = || format!("unknown spec artifact id: {artifact_id}");
-    let outcome = spec::compile_spec_selected(
+    let outcome = spec::compile_spec_selected_with_coverage(
         &nodes,
         &edges,
         &flows,
@@ -6115,6 +6124,7 @@ fn build_spec_artifact(
         &rejected_hashes,
         &[artifact_id],
         unbounded,
+        &coverage,
     )
     .map_err(|_| unknown())?
     .pop()
@@ -6128,11 +6138,15 @@ fn build_spec_artifact(
 }
 
 fn build_spec_with_views(
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     mode: spec::ExportMode,
 ) -> Result<(spec::SpecBundle, spec::SpecViewBundle), String> {
-    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
+    // Facts and inventories come from one read transaction, so the coverage
+    // artifacts describe the same revision as every other artifact (AC-0592).
+    let ((nodes, edges), coverage) = graph
+        .read_snapshot_with_coverage()
+        .map_err(|error| error.to_string())?;
     let flows = flowtracer::trace(&nodes, &edges);
     let rejected_hashes = decisions
         .list_assertions()
@@ -6141,17 +6155,18 @@ fn build_spec_with_views(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    Ok(spec::compile_spec_with_views(
+    Ok(spec::compile_spec_with_views_and_coverage(
         &nodes,
         &edges,
         &flows,
         mode,
         &rejected_hashes,
+        &coverage,
     ))
 }
 
 fn build_spec_views(
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecViewBundle, String> {
@@ -6274,7 +6289,7 @@ fn export_spec(
 ) -> Result<SpecBundlePreview, String> {
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let bundle = build_spec_bundle(&*graph, &decisions, mode)?;
+    let bundle = build_spec_bundle(&graph, &decisions, mode)?;
     Ok(preview_spec_bundle(bundle))
 }
 
@@ -6288,7 +6303,7 @@ fn export_spec_views(
 ) -> Result<spec::SpecViewBundle, String> {
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_views(&*graph, &decisions, mode)
+    build_spec_views(&graph, &decisions, mode)
 }
 
 /// Compile the capped official spec bundle and its structured diagram views
@@ -6301,7 +6316,7 @@ fn export_spec_with_views(
 ) -> Result<SpecWithViewsPreview, String> {
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let (bundle, views) = build_spec_with_views(&*graph, &decisions, mode)?;
+    let (bundle, views) = build_spec_with_views(&graph, &decisions, mode)?;
     Ok(SpecWithViewsPreview {
         bundle: preview_spec_bundle(bundle),
         views,
@@ -6340,7 +6355,7 @@ fn read_spec_artifact(
 ) -> Result<SpecArtifactPreview, String> {
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_artifact(&*graph, &decisions, mode, &artifact_id).map(full_artifact_preview)
+    build_spec_artifact(&graph, &decisions, mode, &artifact_id).map(full_artifact_preview)
 }
 
 /// Selected flow diagram, bound to the preview's full dossier identity (#1669).
