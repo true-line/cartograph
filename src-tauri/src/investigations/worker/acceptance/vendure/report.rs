@@ -9,14 +9,14 @@ const MAX_CANDIDATE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Serialize)]
-pub(super) struct Candidate {
-    binding: SourceBinding,
+pub(in super::super) struct Candidate {
+    pub(in super::super) binding: SourceBinding,
     label: String,
     provenance: Option<core_prov::Provenance>,
     provenance_status: &'static str,
     /// Exact receipt ranges supply true role/index and ordered viewer ordinal.
     /// No source text or caller-selected target is included.
-    receipt: Receipt,
+    pub(in super::super) receipt: Receipt,
 }
 
 #[derive(Serialize)]
@@ -27,7 +27,7 @@ pub(in super::super) struct GraphPreparation {
     pub capture_id: String,
     pub capture: source_capture::CaptureManifest,
     pub coverage: core_graph::coverage::StoredCoverage,
-    pub(super) candidates: Vec<Candidate>,
+    pub(in super::super) candidates: Vec<Candidate>,
     pub facts_without_primary_binding: usize,
     input_closure: &'static str,
     selection_status: &'static str,

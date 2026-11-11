@@ -10,6 +10,8 @@ use tauri::Manager;
 mod input;
 #[path = "vendure/measurement.rs"]
 mod measurement;
+#[path = "vendure/negative_cases.rs"]
+pub(super) mod negative_cases;
 #[path = "vendure/preparation_app.rs"]
 mod preparation_app;
 #[path = "vendure/profile.rs"]

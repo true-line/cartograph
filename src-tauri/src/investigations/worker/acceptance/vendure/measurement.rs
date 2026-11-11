@@ -84,6 +84,7 @@ fn hash(bytes: &[u8]) -> String {
 #[derive(Clone, Copy)]
 pub(in super::super) enum InputPolicy {
     FrozenVendure,
+    NegativeCases598(super::negative_cases::NegativeCase598),
     #[cfg(test)]
     OfflineFixture,
 }
@@ -186,8 +187,10 @@ pub(in super::super) fn reopen_basis<'a>(
     }
     let input: input::VerifiedInput = serde_json::from_value(expected["input"].clone())
         .map_err(|_| "invalid preparation input binding")?;
-    if matches!(input_policy, InputPolicy::FrozenVendure) {
-        verify_frozen_input(&input)?;
+    match input_policy {
+        InputPolicy::FrozenVendure => verify_frozen_input(&input)?,
+        InputPolicy::NegativeCases598(case) => case.verify(&input)?,
+        InputPolicy::OfflineFixture => {}
     }
     expected["graph"]["source_id"]
         .as_str()
