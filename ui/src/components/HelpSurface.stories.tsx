@@ -33,7 +33,10 @@ export const TocCoversEverySurfaceOffline: Story = {
     ]) {
       await expect(toc.getByRole('button', { name: title })).toBeInTheDocument();
     }
-    await expect(HELP_TOPICS).toHaveLength(13);
+    await expect(HELP_TOPICS).toHaveLength(14);
+    // #1796: the first-run guide sits right after Concepts, which stays the fallback topic.
+    await expect(HELP_TOPICS.slice(0, 2).map((entry) => entry.slug)).toEqual(['concepts', 'first-run']);
+    await expect(toc.getByRole('button', { name: 'First run: install, set up, first ingest' })).toBeInTheDocument();
 
     // The active topic renders as structured content, not raw markdown.
     await expect(
