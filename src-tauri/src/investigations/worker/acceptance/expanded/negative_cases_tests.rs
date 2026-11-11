@@ -196,6 +196,22 @@ fn negative_route_scripted_cases_prepare_execute_once_and_reopen_non_evidence() 
         )
         .unwrap();
         assert_eq!(receipt, again);
+        // A wrapper lost after the terminal run is sealed again from the durable
+        // task on reopen, byte-identically and without dispatch.
+        let wrapper = paths[3].join("negative-case-receipt.json");
+        let sealed = std::fs::read(&wrapper).unwrap();
+        std::fs::remove_file(&wrapper).unwrap();
+        let resealed = run(
+            case,
+            paths,
+            &expected,
+            false,
+            &|_| panic!("reopen reads no env"),
+            || panic!("reopen dispatch"),
+        )
+        .unwrap();
+        assert_eq!(receipt, resealed);
+        assert_eq!(std::fs::read(&wrapper).unwrap(), sealed);
         assert!(
             run(case, paths, &expected, true, &env, || panic!(
                 "retry provider"

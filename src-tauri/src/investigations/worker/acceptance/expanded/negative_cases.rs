@@ -167,6 +167,21 @@ fn run(
             }
             let fresh = json!({"schema":"cartograph-negative-case-receipt@1",
                 "fixture":case.binding()?,"analyst":analyst::collect_bound(&authority)?});
+            // Reopen only: a consumed case whose wrapper was never written (for
+            // example a filesystem error after the terminal run) is sealed from
+            // the verified durable task. No provider, key or dispatch is involved,
+            // and a task that is not terminal is never sealed.
+            if !execute && !receipt_path.exists() {
+                let marker = data.join(format!("negative-{}-attempt.json", case.id()));
+                let terminal = matches!(
+                    fresh["analyst"]["detail"]["status"].as_str(),
+                    Some("completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown")
+                );
+                if !marker.is_file() || !terminal {
+                    return Err("negative case has no terminal consumed attempt to seal".into());
+                }
+                analyst::exclusive(&receipt_path, &analyst::bytes(&fresh)?)?;
+            }
             if vendure::read_preparation_artifact(&receipt_path, 2 * 1024 * 1024)?
                 != analyst::bytes(&fresh)?
             {
