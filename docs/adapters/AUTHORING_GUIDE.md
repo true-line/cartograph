@@ -41,8 +41,9 @@ extract-source: func(
 You get read-only source bytes and a repo-relative path; you hand back nodes
 and edges. `node`/`edge` records carry `id`/`label`/`props-json` — the same
 shape compiled-in adapters embed in `core_graph::Node`/`Edge.props`, so
-`props-json` should be a serialized JSON object with a `prov` key if you want
-to stamp your own provenance (optional — see step 4).
+`props-json` must be a serialized JSON object. Add a `prov` key only to cite
+a tighter evidence span than the whole file (optional, and checked — see
+step 4).
 
 ### 2. Start from the reference implementation
 
@@ -101,10 +102,26 @@ emits a component the host loads directly. Copy
   call (`pin_extraction`) — a swapped artifact can never claim an old
   identity, and you can't impersonate a compiled-in extractor.
 - **Missing provenance is backfilled, not rejected.** If a fact you return
-  has no `prov` at all, the host fills in T0 Deterministic/Confirmed
-  provenance with a whole-file evidence span (`fill_missing_provenance`).
-  Stamp your own only if you can cite a tighter span (a specific line/byte
-  range) — otherwise leave it out and let the host do it.
+  has no `prov` (absent or `null`), the host builds T0
+  Deterministic/Confirmed provenance with a whole-file evidence span
+  (`enforce_provenance`). Stamp your own only if you can cite a tighter span
+  (a specific line/byte range) — otherwise leave it out and let the host do
+  it.
+- **Provenance you write is checked, and only its evidence spans are kept.**
+  The host rebuilds every `prov` itself. A `prov` object you write must
+  satisfy all of these, or the call fails with `MalformedFact` and no fact
+  from that file is kept:
+  - `tier` is `"Deterministic"` and `confidence_tier` is `"Confirmed"`. A
+    plugin cannot claim an observed (T1), semantic or agentic fact, and no
+    manifest field raises this ceiling.
+  - `evidence` holds at least one reference, and each one has the `repo` and
+    `commit_sha` from the `id` argument, the `path` argument exactly as
+    given, and `byte_start <= byte_end <= source.len()`.
+  - No other key is present except `extractor_id` and `content_hash`, which
+    the host discards and replaces. `method` and `basis` are rejected.
+- **The content hash is not yours to set.** The host computes
+  `prov.content_hash` over the fact's id, label and props (without `prov`),
+  for facts with and without their own provenance alike.
 - **Determinism is enforced, not assumed.** The conformance gate (step 6)
   runs your corpus twice and requires byte-identical canonical output. Don't
   read wall-clock time, random numbers, or ambient state — you don't have
@@ -161,8 +178,11 @@ Next to your compiled artifact, `{your-plugin-id}.golden.json`:
   hands your plugin every file under these extensions (sorted walk, vendored
   dirs skipped) and nothing else.
 - Each case's `nodes`/`edges` are the **exact** expected facts. Don't
-  hand-write `prov`, the pinned `extractor_id`, or `plugin_artifact_hash` —
-  the gate computes those the same way a real call would and diffs against
+  hand-write the pinned `extractor_id`, the content hash,
+  `plugin_artifact_hash`, or a whole-file `prov` — the gate computes those
+  the same way a real call would. If your plugin cites its own spans, the
+  expected fact carries the same `prov` (`tier`, `confidence_tier`,
+  `evidence`), held to the step 4 rules. The gate diffs against
   your `extract-source` output canonically (`node:id:label:props` /
   `edge:src:dst:label:props`, sorted).
 - The gate's fixed source id for expected-fact computation is

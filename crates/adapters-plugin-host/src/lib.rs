@@ -119,7 +119,9 @@ pub enum HostError {
     /// The plugin's `extract-source` export returned `Err`.
     #[error("plugin reported an extraction error: {0}")]
     GuestError(String),
-    /// The plugin emitted a fact whose `props-json` did not parse.
+    /// The plugin emitted a fact the host cannot accept: `props-json` did
+    /// not parse or is not a JSON object, or the fact's own `prov` breaks
+    /// the provenance rules in [`enforce_provenance`].
     #[error("plugin emitted a malformed fact: {0}")]
     MalformedFact(String),
     /// The plugin trapped for a reason not covered by a bound above.
@@ -328,23 +330,20 @@ impl PluginHost {
         match call_result {
             Ok(Ok(extraction)) => {
                 let mut extraction = convert_extraction(extraction)?;
-                // Non-optional pinning (#204 review): every fact leaving the
-                // host carries the pinned extractor identity and artifact
-                // hash — there is no unpinned production path.
-                pin_extraction(&mut extraction, &plugin.plugin_id, &plugin.artifact_hash);
-                // Non-optional attribution (#208 review): a fact without its
-                // own prov gets host-filled T0 provenance citing the mediated
-                // source, so the tier/confidence invariant holds for every
-                // plugin fact and re-ingest can attribute (and clean up)
-                // plugin facts like any other.
-                fill_missing_provenance(
+                // Non-optional, host-authoritative provenance (#204, #208
+                // reviews, #1756): every fact leaving the host is pinned to
+                // the artifact and carries provenance the host built. The
+                // guest contributes evidence spans only, and only spans
+                // inside the mediated source; one fact breaking a rule
+                // fails the whole call closed with no partial facts.
+                enforce_provenance(
                     &mut extraction,
                     &plugin.plugin_id,
                     &plugin.artifact_hash,
                     source,
                     path,
                     id,
-                );
+                )?;
                 Ok(extraction)
             }
             Ok(Err(WitExtractError { message })) => Err(HostError::GuestError(message)),
@@ -490,56 +489,170 @@ pub fn pin_extraction(extraction: &mut PluginExtraction, plugin_id: &str, artifa
     }
 }
 
-/// Host-filled baseline provenance (#208 review). The guest may emit rich
-/// `prov` objects with fine-grained evidence spans; when it doesn't, the
-/// host fills one — T0 Deterministic/Confirmed with the mediated source
-/// file as the whole-file evidence span and the pinned plugin identity as
-/// the extractor. Deterministic per fact (content hash over the fact's
-/// canonical bytes, never timestamps), so double runs stay byte-identical.
-pub fn fill_missing_provenance(
+/// The keys a guest may write in a fact's `prov` object. Anything else
+/// (`method`, `basis`, unknown keys) is a claim the host cannot check.
+const GUEST_PROV_KEYS: [&str; 5] = [
+    "tier",
+    "confidence_tier",
+    "evidence",
+    "extractor_id",
+    "content_hash",
+];
+
+/// Make every fact's provenance host-authoritative (#208 review, #1756,
+/// AC-0594). Pins the extraction ([`pin_extraction`]), then replaces each
+/// fact's `prov` with one the host builds: T0 Deterministic/Confirmed, the
+/// pinned extractor id, and a content hash the host computes over the
+/// fact's canonical bytes (id, label and props without `prov`; never
+/// timestamps, so double runs stay byte-identical).
+///
+/// A fact with no `prov` (absent or `null`) cites the whole mediated file.
+/// A fact with its own `prov` object contributes its evidence spans only,
+/// and only if every rule holds:
+///
+/// - `tier` is `Deterministic` and `confidence_tier` is `Confirmed`. No
+///   manifest field lets a plugin declare a higher tier, so there is no
+///   exception;
+/// - `evidence` has at least one reference, and each one names the
+///   mediated `repo`, `commit_sha` and `path` with
+///   `byte_start <= byte_end <= source.len()`;
+/// - no key outside `tier`, `confidence_tier`, `evidence`, `extractor_id`
+///   and `content_hash` is present. The guest's `extractor_id` and
+///   `content_hash` are discarded, never trusted.
+///
+/// Any violation, a `prov` that is neither an object nor `null`, or props
+/// that are not a JSON object returns [`HostError::MalformedFact`] naming
+/// the fact. The caller must then drop the whole extraction: it may be
+/// partly rewritten.
+pub fn enforce_provenance(
     extraction: &mut PluginExtraction,
     plugin_id: &str,
     artifact_hash: &str,
     source: &[u8],
     path: &str,
     id: &SourceId,
-) {
-    let short = &artifact_hash[..artifact_hash.len().min(12)];
-    let pinned_id = format!("{plugin_id}@{short}");
-    let evidence = core_prov::EvidenceRef {
-        repo: id.repo.clone(),
-        path: path.to_string(),
-        byte_start: 0,
-        byte_end: source.len() as u64,
-        commit_sha: id.commit.clone(),
-    };
-    let filled = |fact_bytes: String| -> serde_json::Value {
+) -> Result<(), HostError> {
+    pin_extraction(extraction, plugin_id, artifact_hash);
+    let pinned_id = pinned_extractor_id(plugin_id, artifact_hash);
+    let source_len = source.len() as u64;
+    let host_prov = |props: &mut serde_json::Value,
+                     fact: &str,
+                     fact_bytes: &dyn Fn(&serde_json::Value) -> String|
+     -> Result<(), HostError> {
+        let malformed = |why: String| HostError::MalformedFact(format!("{fact}: {why}"));
+        let object = props
+            .as_object_mut()
+            .ok_or_else(|| malformed("props is not a JSON object".into()))?;
+        let evidence = match object.remove("prov") {
+            None | Some(serde_json::Value::Null) => vec![core_prov::EvidenceRef {
+                repo: id.repo.clone(),
+                path: path.to_string(),
+                byte_start: 0,
+                byte_end: source_len,
+                commit_sha: id.commit.clone(),
+            }],
+            Some(serde_json::Value::Object(guest)) => {
+                guest_evidence(guest, source_len, path, id).map_err(malformed)?
+            }
+            Some(_) => return Err(malformed("prov is not a JSON object".into())),
+        };
+        let bytes = fact_bytes(props);
         let prov = core_prov::Provenance::new(
             core_prov::Tier::Deterministic,
             core_prov::ConfidenceTier::Confirmed,
-            vec![evidence.clone()],
+            evidence,
             pinned_id.clone(),
-            fact_bytes.as_bytes(),
+            bytes.as_bytes(),
         )
         .expect("T0 may assert Confirmed");
-        serde_json::to_value(prov).expect("provenance serializes")
+        let prov = serde_json::to_value(prov).expect("provenance serializes");
+        if let Some(object) = props.as_object_mut() {
+            object.insert("prov".to_string(), prov);
+        }
+        Ok(())
     };
     for node in &mut extraction.nodes {
-        if node.props.get("prov").is_none_or(|prov| !prov.is_object()) {
-            let bytes = format!("{}:{}:{}", node.id, node.label, node.props);
-            if let Some(object) = node.props.as_object_mut() {
-                object.insert("prov".to_string(), filled(bytes));
-            }
-        }
+        let (node_id, label) = (&node.id, &node.label);
+        host_prov(&mut node.props, &format!("node {node_id}"), &|props| {
+            format!("{node_id}:{label}:{props}")
+        })?;
     }
     for edge in &mut extraction.edges {
-        if edge.props.get("prov").is_none_or(|prov| !prov.is_object()) {
-            let bytes = format!("{}:{}:{}:{}", edge.src, edge.dst, edge.label, edge.props);
-            if let Some(object) = edge.props.as_object_mut() {
-                object.insert("prov".to_string(), filled(bytes));
-            }
+        let (src, dst, label) = (&edge.src, &edge.dst, &edge.label);
+        host_prov(&mut edge.props, &format!("edge {src}->{dst}"), &|props| {
+            format!("{src}:{dst}:{label}:{props}")
+        })?;
+    }
+    Ok(())
+}
+
+/// Check a guest-written `prov` object against the mediated source and
+/// return its evidence references, or why it is rejected.
+fn guest_evidence(
+    mut guest: serde_json::Map<String, serde_json::Value>,
+    source_len: u64,
+    path: &str,
+    id: &SourceId,
+) -> Result<Vec<core_prov::EvidenceRef>, String> {
+    if let Some(key) = guest
+        .keys()
+        .find(|key| !GUEST_PROV_KEYS.contains(&key.as_str()))
+    {
+        return Err(format!("prov.{key} is not a field a plugin may write"));
+    }
+    let mut field = |key: &str| {
+        guest
+            .remove(key)
+            .ok_or_else(|| format!("prov.{key} is missing"))
+    };
+    let tier: core_prov::Tier =
+        serde_json::from_value(field("tier")?).map_err(|e| format!("prov.tier: {e}"))?;
+    if tier != core_prov::Tier::Deterministic {
+        return Err(format!(
+            "prov.tier is {tier:?}; a plugin fact may only be Deterministic"
+        ));
+    }
+    let confidence: core_prov::ConfidenceTier =
+        serde_json::from_value(field("confidence_tier")?)
+            .map_err(|e| format!("prov.confidence_tier: {e}"))?;
+    if confidence != core_prov::ConfidenceTier::Confirmed {
+        return Err(format!(
+            "prov.confidence_tier is {confidence:?}; a plugin fact may only be Confirmed"
+        ));
+    }
+    let evidence: Vec<core_prov::EvidenceRef> =
+        serde_json::from_value(field("evidence")?).map_err(|e| format!("prov.evidence: {e}"))?;
+    if evidence.is_empty() {
+        return Err("prov.evidence is empty".into());
+    }
+    for (index, span) in evidence.iter().enumerate() {
+        let at = format!("prov.evidence[{index}]");
+        if span.repo != id.repo {
+            return Err(format!(
+                "{at} cites repo {:?}, not the mediated source",
+                span.repo
+            ));
+        }
+        if span.commit_sha != id.commit {
+            return Err(format!(
+                "{at} cites commit {:?}, not the mediated source",
+                span.commit_sha
+            ));
+        }
+        if span.path != path {
+            return Err(format!(
+                "{at} cites path {:?}, not the mediated file",
+                span.path
+            ));
+        }
+        if span.byte_start > span.byte_end || span.byte_end > source_len {
+            return Err(format!(
+                "{at} cites bytes {}..{}, outside the {source_len}-byte source",
+                span.byte_start, span.byte_end
+            ));
         }
     }
+    Ok(evidence)
 }
 
 #[cfg(test)]
