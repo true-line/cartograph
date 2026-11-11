@@ -24,6 +24,9 @@ use std::sync::{Arc, Mutex};
 pub(crate) const RECIPE: &str = "knowledge@2";
 /// Omission when the base is past the bounded snapshot read.
 pub(crate) const BASE_BOUNDS: &str = "knowledge-base-bounds";
+/// Omission when the T2 semantic tier is off in Settings: nothing is embedded,
+/// and the deterministic producers still publish (#1782).
+pub(crate) const SEMANTIC_DISABLED: &str = "semantic-tier-disabled";
 /// Omission when the local provider failed during the phase.
 pub(crate) const PROVIDER_FAILED: &str = "embedding-provider-failed";
 /// Omission when the derived facts were refused as one publication; the
@@ -67,6 +70,46 @@ pub(crate) struct KnowledgeReport {
     pub published_producer_nodes: ProducerNodeCounts,
 }
 
+/// The outcome of the most recent phase as the UI receives it: the report, or
+/// the failure that kept the phase from producing one (#1782).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeStatus {
+    pub report: Option<KnowledgeReport>,
+    pub error: Option<String>,
+}
+
+impl From<Result<KnowledgeReport, String>> for KnowledgeStatus {
+    fn from(result: Result<KnowledgeReport, String>) -> Self {
+        match result {
+            Ok(report) => Self {
+                report: Some(report),
+                error: None,
+            },
+            Err(error) => Self {
+                report: None,
+                error: Some(error),
+            },
+        }
+    }
+}
+
+/// The last phase outcome, kept so a window opened after the phase finished
+/// still shows it. Process memory only; a restart starts with none.
+static LAST: Mutex<Option<KnowledgeStatus>> = Mutex::new(None);
+
+fn remember(status: &KnowledgeStatus) {
+    *LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(status.clone());
+}
+
+/// The outcome of the most recent knowledge phase in this process, if one ran.
+#[tauri::command]
+pub(crate) fn knowledge_phase_status() -> Option<KnowledgeStatus> {
+    LAST.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// Serializes phases so an older base can never be published after a newer one.
 static PHASE: Mutex<()> = Mutex::new(());
 
@@ -88,6 +131,27 @@ pub(crate) fn run(
     provider: Option<&dyn LlmProvider>,
 ) -> Result<KnowledgeReport, String> {
     run_within(graph, cache, overlay, provider, PHASE_LIMITS)
+}
+
+/// Run the phase as the T2 setting allows (#1782). With T2 off no provider is
+/// used and nothing is embedded, which the report names; the deterministic
+/// producers need no provider and publish either way.
+pub(crate) fn run_for_setting(
+    graph: &Mutex<SqliteGraphStore>,
+    cache: &Arc<Mutex<EmbeddingCache>>,
+    overlay: &Arc<Mutex<OverlayStore>>,
+    semantic: bool,
+    provider: impl FnOnce() -> Option<Box<dyn LlmProvider>>,
+) -> Result<KnowledgeReport, String> {
+    if semantic {
+        let provider = provider();
+        return run(graph, cache, overlay, provider.as_deref());
+    }
+    let mut report = run(graph, cache, overlay, None)?;
+    if report.omission == Some(knowledge_ingest::NO_PROVIDER) {
+        report.omission = Some(SEMANTIC_DISABLED);
+    }
+    Ok(report)
 }
 
 /// The base this phase reads (#1771). It is a desktop background phase on
@@ -359,12 +423,10 @@ impl Coalescer {
 
 static WORKER: Coalescer = Coalescer::new();
 
-/// The worker's loop: one pass while T2 is enabled, then any owed pass.
-fn drain(coalescer: &Coalescer, enabled: impl Fn() -> bool, mut pass: impl FnMut()) {
+/// The worker's loop: one pass, then any owed pass.
+fn drain(coalescer: &Coalescer, mut pass: impl FnMut()) {
     loop {
-        if enabled() {
-            pass();
-        }
+        pass();
         if !coalescer.next() {
             return;
         }
@@ -381,16 +443,14 @@ fn semantic_enabled(settings: &Mutex<crate::settings::SettingsStore>) -> bool {
 }
 
 /// Run the phase in the background after a committed ingest and emit its
-/// report as `knowledge-phase`. Skipped without a cache or overlay, or while
-/// T2 is disabled; a failed thread start never affects the ingest.
+/// outcome as `knowledge-phase`. Skipped without a cache or overlay. With T2
+/// disabled it still runs for the deterministic producers and embeds nothing
+/// (#1782). A failed thread start never affects the ingest.
 pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::{Emitter, Manager};
     {
         let state = app.state::<crate::AppState>();
-        if state.embedding_cache.is_none()
-            || state.knowledge_overlay.is_none()
-            || !semantic_enabled(&state.settings)
-        {
+        if state.embedding_cache.is_none() || state.knowledge_overlay.is_none() {
             return;
         }
     }
@@ -407,20 +467,17 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                 WORKER.abandon();
                 return;
             };
-            drain(
-                &WORKER,
-                || semantic_enabled(&state.settings),
-                || {
-                    let provider = local_provider();
-                    let result = run(
-                        &state.graph,
-                        cache,
-                        overlay,
-                        provider.as_ref().map(|p| p as &dyn LlmProvider),
-                    );
-                    let _ = app.emit("knowledge-phase", result);
-                },
-            );
+            drain(&WORKER, || {
+                let status = KnowledgeStatus::from(run_for_setting(
+                    &state.graph,
+                    cache,
+                    overlay,
+                    semantic_enabled(&state.settings),
+                    || local_provider().map(|p| Box::new(p) as Box<dyn LlmProvider>),
+                ));
+                remember(&status);
+                let _ = app.emit("knowledge-phase", status);
+            });
         });
     if started.is_err() {
         WORKER.abandon();

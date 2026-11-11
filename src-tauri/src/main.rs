@@ -6733,6 +6733,7 @@ fn main() {
             set_local_model,
             reset_local_model,
             provider_key_status,
+            knowledge_phase::knowledge_phase_status,
             set_provider_key,
             remove_provider_key,
             cloud_disclosure,

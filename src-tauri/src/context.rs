@@ -89,6 +89,13 @@ pub(crate) fn stable_scope(before: &[ScopedRepo], after: Vec<ScopedRepo>) -> Vec
         .collect()
 }
 
+/// The base a desktop context query reads (#1782). It is a desktop read on
+/// the owner's machine with no memory reserved in advance, the same class as
+/// a desktop-started investigation, so it takes that ceiling (ADR-0052,
+/// amended). Under the interactive default a graph over 50,000 rows answered
+/// every query with an error. MCP reads do not come through here.
+pub(crate) const DESKTOP_QUERY_LIMITS: SnapshotReadLimits = SnapshotReadLimits::investigation();
+
 /// Copy one graph revision with the inventories recorded alongside it, both
 /// admitted under the store's read limits before either is materialized, then
 /// serve the page under that qualification. The registrations and plugin basis
@@ -104,7 +111,7 @@ pub(crate) fn qualified_query_graph(
         let graph = graph.lock().map_err(|error| error.to_string())?;
         graph
             .read_snapshot_with_coverage_bounded(
-                SnapshotReadLimits::default(),
+                DESKTOP_QUERY_LIMITS,
                 CoverageReadLimits::default(),
             )
             .map_err(|error| error.to_string())?
@@ -238,6 +245,42 @@ mod tests {
         invalid.max_facts = 0;
         let error = query_graph(&graph, invalid).unwrap_err();
         assert!(error.contains("max_facts"), "{error}");
+    }
+
+    #[test]
+    fn a_desktop_query_reads_a_graph_past_the_interactive_default() {
+        // AC-0588 / #1782: a graph over the 50,000-row interactive default
+        // answers a desktop context query instead of an error. (T-0588)
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        for index in 0..=SnapshotReadLimits::DEFAULT_ROWS {
+            graph
+                .put_node(&Node {
+                    id: format!("sym:bulk:{index}"),
+                    label: "Symbol".into(),
+                    props: serde_json::json!({}),
+                })
+                .unwrap();
+        }
+        // The same graph under the interactive default is refused.
+        assert!(
+            graph
+                .read_snapshot_with_coverage_bounded(
+                    SnapshotReadLimits::default(),
+                    CoverageReadLimits::default(),
+                )
+                .is_err()
+        );
+        let graph = Mutex::new(graph);
+        let page = qualified_query_graph(
+            &graph,
+            || Ok(Vec::new()),
+            QualifiedRequest {
+                request: request(),
+                context_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.response.facts.len(), 1);
     }
 
     #[test]

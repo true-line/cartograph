@@ -21,6 +21,7 @@ import { RecoverSurface } from './components/RecoverSurface';
 import { SettingsSurface } from './components/SettingsSurface';
 import { McpSettings } from './components/McpSettings';
 import { ProviderKeys } from './components/ProviderKeys';
+import { KnowledgePhaseNotice } from './components/KnowledgePhaseNotice';
 import { WorkspaceSurface } from './components/WorkspaceSurface';
 import { GapsDriftSurface } from './components/GapsDriftSurface';
 import { ProvenanceSurface } from './components/ProvenanceSurface';
@@ -926,6 +927,7 @@ export default function App() {
           }}
         />
         <main className="shell-content">
+          <KnowledgePhaseNotice available={backend === 'up'} />
           <WorkPacketTray state={packets} showError={view !== 'packets'} onOpen={() => navigate('packets')} />
           <RouteErrorBoundary view={view}>{surface}</RouteErrorBoundary>
         </main>

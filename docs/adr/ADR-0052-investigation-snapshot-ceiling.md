@@ -64,3 +64,20 @@ limits keeps `default()` or its operator-configured value: MCP-started
 investigation tasks and MCP read sessions are unchanged. A further caller of
 `investigation()` needs another amendment here.
 
+### Amendment — 2026-11-10: the desktop context query takes the same ceiling (#1782)
+
+The desktop context query (`query_qualified_context`) read the base under
+`default()`, so on a graph over 50,000 rows every query returned an error. It is
+the same class of read as the two above: started from the desktop window, on the
+owner's machine, with no host memory admission and nothing reserved in advance.
+It now reads under `investigation()`.
+
+Consequence: each query page copies the whole base, so on a large graph a query
+costs time and memory in proportion to the graph, as it already did below the
+old limit. A base past the ceiling is still refused with the bounds error.
+
+The rule is unchanged. `investigation()` now has three callers, all desktop
+reads with no reservation: desktop-started investigations, the post-ingest
+knowledge phase and the desktop context query. MCP context reads do not use this
+path and keep `default()`.
+

@@ -653,28 +653,68 @@ fn ingests_during_a_running_phase_coalesce_into_one_follow_up_pass() {
 }
 
 #[test]
-fn the_worker_runs_owed_passes_and_none_while_t2_is_disabled() {
+fn the_worker_runs_its_pass_and_every_owed_pass() {
     let worker = Coalescer::new();
     assert!(worker.admit());
     let mut passes = 0;
-    drain(
-        &worker,
-        || true,
-        || {
-            passes += 1;
-            if passes == 1 {
-                assert!(!worker.admit());
-            }
+    drain(&worker, || {
+        passes += 1;
+        if passes == 1 {
+            assert!(!worker.admit());
+        }
+    });
+    assert_eq!(passes, 2);
+    assert!(worker.admit());
+}
+
+// AC-0588 / #1782: with T2 off nothing is embedded and no provider is even
+// asked for, the report names that reason, and the deterministic producers
+// still publish.
+#[test]
+fn with_t2_off_the_producers_publish_and_the_report_names_the_tier() {
+    let host = host();
+    put_resolver(&host.graph);
+    let report = run_for_setting(&host.graph, &host.cache, &host.overlay, false, || {
+        panic!("no provider is probed while T2 is off")
+    })
+    .unwrap();
+    assert_eq!(report.omission, Some(SEMANTIC_DISABLED));
+    assert_eq!(report.embedded, 0);
+    assert!(report.published);
+    assert_eq!(report.derived, 3);
+    assert_eq!(published_facts(&host).len(), 3);
+
+    // With T2 on and no provider installed the reason is the provider's.
+    let enabled = run_for_setting(&host.graph, &host.cache, &host.overlay, true, || None).unwrap();
+    assert_eq!(enabled.omission, Some(knowledge_ingest::NO_PROVIDER));
+}
+
+// AC-0588 / #1782: the outcome the UI receives carries every named reason,
+// and a failed phase is a message rather than silence.
+#[test]
+fn the_status_sent_to_the_ui_carries_the_named_reasons() {
+    let host = host();
+    let report = run_within(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        None,
+        SnapshotReadLimits {
+            max_rows: 1,
+            ..SnapshotReadLimits::default()
         },
     );
-    assert_eq!(passes, 2);
+    let status = serde_json::to_value(KnowledgeStatus::from(report)).unwrap();
+    assert_eq!(status["report"]["omission"], BASE_BOUNDS);
+    assert_eq!(status["report"]["published"], false);
+    assert!(status["report"]["producerOmissions"].is_array());
+    assert!(status["report"]["derivedOmission"].is_null());
+    assert!(status["error"].is_null());
 
-    assert!(worker.admit());
-    assert!(!worker.admit());
-    let mut disabled = 0;
-    drain(&worker, || false, || disabled += 1);
-    assert_eq!(disabled, 0);
-    assert!(worker.admit());
+    let failed =
+        serde_json::to_value(KnowledgeStatus::from(Err("store closed".to_owned()))).unwrap();
+    assert!(failed["report"].is_null());
+    assert_eq!(failed["error"], "store closed");
 }
 
 #[test]
