@@ -21,6 +21,7 @@ import { RecoverSurface } from './components/RecoverSurface';
 import { SettingsSurface } from './components/SettingsSurface';
 import { McpSettings } from './components/McpSettings';
 import { ProviderKeys } from './components/ProviderKeys';
+import { LocalLane } from './components/LocalLane';
 import { KnowledgePhaseNotice } from './components/KnowledgePhaseNotice';
 import { WorkspaceSurface } from './components/WorkspaceSurface';
 import { GapsDriftSurface } from './components/GapsDriftSurface';
@@ -893,7 +894,11 @@ export default function App() {
             onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
             onOpenQuickDispatch={openStandaloneQuickDispatch}
           />
-          <ProviderKeys available={backend === 'up'} />
+          <ProviderKeys available={backend === 'up'} onEgressRecorded={() => {
+            invoke<import('./store').EgressSummary | null>('egress_summary')
+              .then((egress) => useAppStore.setState({ egress }), () => { /* the status bar keeps its last total */ });
+          }} />
+          <LocalLane available={backend === 'up'} />
           <McpSettings available={backend === 'up'} />
           <SourceRetention sources={primarySource.sources} preview={primarySource.preview}
             busy={primarySource.retentionBusy} error={primarySource.retentionError}

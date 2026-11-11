@@ -993,6 +993,8 @@ function installFakeCore(options: {
         return [];
       case 'knowledge_phase_status':
         return null;
+      case 'local_lane_status':
+        return { reachable: false, start_command: 'ollama serve', models: [] };
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }
