@@ -11,6 +11,11 @@
 //! 2. [`project`], under the export's own graph and decision locks: the
 //!    assessments are checked against the store revision the export reads,
 //!    and the pure projection is computed over the export's own snapshot.
+//!
+//! An MCP read session (slice 4, AC-0654) runs the same two steps over the
+//! snapshot it froze, and takes its reviews through [`ReviewSource`]. It
+//! gathers only after its own bounded graph read succeeded, and it never
+//! makes the compile of [`DerivedDecisions::Compile`].
 
 use agents::ProposalDecision;
 use agents::staging::{MAX_STAGED_PAGE_ITEMS, MAX_STAGED_REFERENCE_SCAN};
@@ -158,7 +163,8 @@ fn reviewed_records(
 }
 
 impl CuratedReview {
-    fn failed(failure: CuratedFailure) -> Self {
+    /// A review that read no record, with the reason.
+    pub(crate) fn failed(failure: CuratedFailure) -> Self {
         Self {
             failure: Some(failure),
             ..Self::default()
@@ -177,6 +183,89 @@ pub(crate) fn read_records(store: &agents::ProposalStore) -> CuratedReview {
             ..CuratedReview::default()
         },
         Err(failure) => CuratedReview::failed(failure),
+    }
+}
+
+impl CuratedReview {
+    /// Whether `records`, read later, are the records this review read. A
+    /// review that failed read none, so nothing is compared for it.
+    fn same_records(&self, records: &[ReviewedProposal]) -> bool {
+        self.failure.is_some() || self.proposals == records
+    }
+}
+
+/// Where a read gets its reviews (SPEC-12 slice 4, AC-0654). The export
+/// calls [`gather`] itself; an MCP read session takes its reviews through
+/// this, so the session code names no store it does not already hold.
+pub(crate) trait ReviewSource {
+    /// [`gather`]. Called with no graph or decision lock held.
+    fn gather(&self) -> CuratedReview;
+    /// Whether the reviewed records are still the ones `review` read. Takes
+    /// the staging lock alone; call it with no other lock held. An `Err` is
+    /// a record read that did not finish.
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure>;
+}
+
+impl ReviewSource for AppState {
+    fn gather(&self) -> CuratedReview {
+        gather(self)
+    }
+
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
+        let store = self
+            .proposals
+            .lock()
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        Ok(review.same_records(&reviewed_records(&store)?))
+    }
+}
+
+/// A read with no staging store: no record is reviewed, so the projection is
+/// computed over the graph and the Workbench decisions alone.
+#[cfg(test)]
+pub(crate) struct NoReviews;
+
+#[cfg(test)]
+impl ReviewSource for NoReviews {
+    fn gather(&self) -> CuratedReview {
+        CuratedReview::default()
+    }
+
+    fn unchanged(&self, _: &CuratedReview) -> Result<bool, CuratedFailure> {
+        Ok(true)
+    }
+}
+
+/// A staging store that cannot be read.
+#[cfg(test)]
+pub(crate) struct ReviewsUnreadable;
+
+#[cfg(test)]
+impl ReviewSource for ReviewsUnreadable {
+    fn gather(&self) -> CuratedReview {
+        CuratedReview::failed(CuratedFailure::ReviewsUnavailable)
+    }
+
+    fn unchanged(&self, _: &CuratedReview) -> Result<bool, CuratedFailure> {
+        Err(CuratedFailure::ReviewsUnavailable)
+    }
+}
+
+/// A staging store read with no assessment made.
+#[cfg(test)]
+impl ReviewSource for std::sync::Mutex<agents::ProposalStore> {
+    fn gather(&self) -> CuratedReview {
+        match self.lock() {
+            Ok(store) => read_records(&store),
+            Err(_) => CuratedReview::failed(CuratedFailure::ReviewsUnavailable),
+        }
+    }
+
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
+        let store = self
+            .lock()
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        Ok(review.same_records(&reviewed_records(&store)?))
     }
 }
 
@@ -258,7 +347,9 @@ fn match_stored<'a>(
 /// left over was made on a derived statement (a flow hop, a decision record,
 /// a finding) or matches nothing; those are settled by compiling the
 /// `best-effort` documents once with no rejection and reading their
-/// assertions. That second compile runs only when such a decision exists.
+/// assertions. That second compile runs only when such a decision exists,
+/// and only for a reader that compiles ([`DerivedDecisions::Compile`]). For
+/// any other reader such a decision leaves the projection not computed.
 fn current_assertion_hashes(
     snapshot: &Snapshot<'_>,
     decided: &[core::AssertionDecisionEntry],
@@ -281,10 +372,16 @@ fn current_assertion_hashes(
     if wanted.is_empty() {
         return Ok(current);
     }
+    let flows = match snapshot.derived_decisions {
+        DerivedDecisions::Compile(flows) => flows,
+        DerivedDecisions::NotCompiled => {
+            return Err(CuratedFailure::DerivedDecisionsNeedCompile);
+        }
+    };
     let bundle = spec::try_compile_spec_with_coverage(
         snapshot.nodes,
         snapshot.edges,
-        snapshot.flows,
+        flows,
         spec::ExportMode::BestEffort,
         &BTreeSet::new(),
         snapshot.coverage,
@@ -305,11 +402,24 @@ fn current_assertion_hashes(
     Ok(current)
 }
 
+/// How a Workbench decision that matches no stored fact is settled.
+#[derive(Clone, Copy)]
+pub(crate) enum DerivedDecisions<'a> {
+    /// By compiling every document once from these flows, the
+    /// `flowtracer::trace` of the snapshot. The export does this.
+    Compile(&'a [flowtracer::Flow]),
+    /// Not at all: the reader's work is bounded and that compile is not in
+    /// its bound (an MCP read session). Such a decision leaves the
+    /// projection not computed, with
+    /// [`CuratedFailure::DerivedDecisionsNeedCompile`].
+    NotCompiled,
+}
+
 /// The graph an export read, as the projection needs it.
 pub(crate) struct Snapshot<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [Edge],
-    pub flows: &'a [flowtracer::Flow],
+    pub derived_decisions: DerivedDecisions<'a>,
     pub coverage: &'a [core_graph::coverage::StoredCoverage],
     /// `spec::graph_content_hash` of `nodes` and `edges`.
     pub content_hash: &'a str,

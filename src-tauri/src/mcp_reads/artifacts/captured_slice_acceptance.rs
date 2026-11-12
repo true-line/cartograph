@@ -506,6 +506,7 @@ fn captured_seventeen_file_capability_stories_without_provider() {
         &graph,
         Some(overlay.as_ref()),
         &decisions,
+        &crate::curated::NoReviews,
         || Ok(vec![scope.clone()]),
         policy.worker.graph,
         policy.worker.coverage,

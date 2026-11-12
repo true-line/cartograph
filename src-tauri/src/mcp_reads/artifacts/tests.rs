@@ -101,7 +101,13 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
             .iter()
             .any(|metadata| metadata.id == official.id && metadata.schema == official.schema)
     );
-    for descriptor in catalog {
+    // The curated artifacts read the session's projection, which a bare
+    // compile is not supplied with; `curated_read::tests` compares them
+    // with the host export (AC-0654).
+    for descriptor in catalog
+        .into_iter()
+        .filter(|descriptor| !descriptor.id.starts_with("curated"))
+    {
         let ArtifactCompilation::Produced(actual) = session
             .compile_artifact(descriptor.id, trace_limits(), compile_limits())
             .unwrap()
@@ -159,7 +165,9 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
             Err(ReadError::InvalidRequest)
         ));
     }
-    assert_eq!(advertised.len(), official.len() - 3);
+    // The two fact-index ids are withheld and `curated-json`, which is not
+    // an export artifact, is added (AC-0654).
+    assert_eq!(advertised.len(), official.len() - 2 + 1);
     assert_eq!(selectable.len(), advertised.len());
     for id in advertised {
         assert!(
@@ -172,48 +180,57 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
     }
 }
 
-// AC-0653: an MCP read does not compute the curated projection, so
-// `curated` is hidden from the catalogue and the tool schema and refused
-// before anything is traced or compiled. The capability flag stays false.
+// AC-0654 (SPEC-12 slice 4): the session computes the curated projection,
+// so `curated` and its structured form are in the catalogue and the tool
+// schema and are read like any artifact. The fact index stays unreadable.
+// The structured form is admitted against the output budget whole.
 #[test]
-fn mcp_read_hides_and_refuses_the_curated_document() {
+fn mcp_read_lists_and_reads_the_curated_document_and_its_structured_form() {
     let session = fixture(ExportMode::BestEffort);
-    let no_trace = flowtracer::TraceLimits {
-        max_output_bytes: 0,
-        ..trace_limits()
-    };
+    let catalog = session.artifact_catalog();
+    let ids: Vec<_> = catalog.iter().map(|artifact| artifact.id).collect();
+    let at = ids.iter().position(|id| *id == "curated").expect("curated");
+    assert_eq!(ids[at + 1], "curated-json");
+    assert!(
+        spec::artifact_catalog()
+            .iter()
+            .all(|artifact| artifact.id != "curated-json"),
+        "the structured form is not an export artifact"
+    );
+    assert!(ids.iter().all(|id| !id.starts_with("fact-index")));
+    let schema =
+        crate::mcp_reads::dispatch::tool_descriptor(mcp_wire::admission::ReadTool::ReadArtifact);
+    let readable = schema["inputSchema"]["properties"]["artifact_id"]["enum"]
+        .as_array()
+        .expect("closed artifact id enum");
+    for id in ["curated", "curated-json"] {
+        assert!(readable.iter().any(|value| value == id), "{id}");
+        let ArtifactCompilation::Produced(artifact) = session
+            .compile_artifact(id, trace_limits(), compile_limits())
+            .unwrap()
+        else {
+            panic!("{id} is produced");
+        };
+        assert_eq!(artifact.basis_id(), session.basis_id().unwrap());
+        assert_eq!(
+            artifact.content_id(),
+            artifact.artifact().compute_content_id()
+        );
+    }
+    assert!(session.basis().h3_curated_available);
     let no_output = spec::SelectedCompileLimits {
         max_bytes: 0,
         ..compile_limits()
     };
-    assert!(
-        spec::artifact_catalog()
-            .iter()
-            .any(|artifact| artifact.id == "curated"),
-        "curated is an official artifact"
-    );
-    assert!(
-        session
-            .artifact_catalog()
-            .iter()
-            .all(|artifact| artifact.id != "curated")
-    );
-    let schema =
-        crate::mcp_reads::dispatch::tool_descriptor(mcp_wire::admission::ReadTool::ReadArtifact);
-    assert!(
-        schema["inputSchema"]["properties"]["artifact_id"]["enum"]
-            .as_array()
-            .expect("closed artifact id enum")
-            .iter()
-            .all(|value| value != "curated")
-    );
-    for (trace, compile) in [(no_trace, no_output), (trace_limits(), compile_limits())] {
-        assert!(matches!(
-            session.compile_artifact("curated", trace, compile),
-            Err(ReadError::InvalidRequest)
-        ));
+    for id in ["curated", "curated-json"] {
+        assert!(
+            matches!(
+                session.compile_artifact(id, trace_limits(), no_output),
+                Ok(ArtifactCompilation::Limited { .. })
+            ),
+            "{id}"
+        );
     }
-    assert!(!session.basis().h3_curated_available);
 }
 
 #[test]

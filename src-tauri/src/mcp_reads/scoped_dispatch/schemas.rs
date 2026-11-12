@@ -147,6 +147,12 @@ pub(super) fn catalog() -> Value {
     }).collect();
     json!({"mode":"scoped","complete_system":false,"artifacts":entries})
 }
+/// A scoped session reads bounded windows and never the complete graph, so
+/// it computes no curated projection (SPEC-12 slice 4, AC-0654) and offers
+/// no curated read. The catalogue lists `curated` and `curated-json` as
+/// unavailable for the same reason.
+const H3_CURATED_AVAILABLE: bool = false;
+const H3_CURATED_UNAVAILABLE_REASON: &str = "complete_basis_required";
 pub(super) fn capabilities(
     session_id: &str,
     basis: &str,
@@ -156,5 +162,5 @@ pub(super) fn capabilities(
     limits: DispatchLimits,
     evidence: EvidenceWorkLimits,
 ) -> Value {
-    json!({"mode":"scoped","session_id":session_id,"session_basis_id":basis,"revision":revision,"coverage_id":coverage_id,"matching_policy":context_hub::discovery::DISCOVERY_POLICY,"implemented_tools":TOOLS.iter().map(|t|t.name()).collect::<Vec<_>>(),"structured_content_required":true,"complete_system":false,"global_absence_available":false,"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":true,"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":true,"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"h3_curated_available":false,"artifact_content_available":true,"artifact_availability":"enumerated_by_cartograph_artifacts","unknown_degrees":true,"remaining_row_totals":"unknown","cursor_lower_bound":"caller_selected_exclusive_primary_key","exhaustion":"raw_tail_only_not_global_absence","worker_reservation_model":super::super::worker::SCOPED_WORKER_MODEL,"limits":{"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"window":{"max_rows":graph.max_rows,"hard_max_rows":SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"evidence":{"max_file_validation_bytes":evidence.max_file_validation_bytes.get(),"max_span_bytes":evidence.max_span_bytes.get()}}})
+    json!({"mode":"scoped","session_id":session_id,"session_basis_id":basis,"revision":revision,"coverage_id":coverage_id,"matching_policy":context_hub::discovery::DISCOVERY_POLICY,"implemented_tools":TOOLS.iter().map(|t|t.name()).collect::<Vec<_>>(),"structured_content_required":true,"complete_system":false,"global_absence_available":false,"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":true,"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":true,"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"h3_curated_available":H3_CURATED_AVAILABLE,"h3_curated_unavailable_reason":H3_CURATED_UNAVAILABLE_REASON,"artifact_content_available":true,"artifact_availability":"enumerated_by_cartograph_artifacts","unknown_degrees":true,"remaining_row_totals":"unknown","cursor_lower_bound":"caller_selected_exclusive_primary_key","exhaustion":"raw_tail_only_not_global_absence","worker_reservation_model":super::super::worker::SCOPED_WORKER_MODEL,"limits":{"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"window":{"max_rows":graph.max_rows,"hard_max_rows":SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"evidence":{"max_file_validation_bytes":evidence.max_file_validation_bytes.get(),"max_span_bytes":evidence.max_span_bytes.get()}}})
 }

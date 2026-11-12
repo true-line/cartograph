@@ -25,9 +25,10 @@
 //! facts this compilation was given, is not cited: the row says so and the
 //! document counts them. No citation id is printed for a node without a row.
 //!
-//! **No projection.** A bare compile, the work-packet host and an MCP read
-//! supply none. The document then says that none was supplied and lists
-//! nothing; an empty list would not mean that no proposal was accepted.
+//! **No projection.** A bare compile and the work-packet host supply none.
+//! The document then says that none was supplied and lists nothing; an empty
+//! list would not mean that no proposal was accepted. An MCP read session
+//! supplies the projection it computed (SPEC-12 slice 4, AC-0654).
 //!
 //! **Cost.** One pass over the items and one over the listed records. When
 //! a `best-effort` export has items, one index of the admitted nodes by id;
@@ -117,6 +118,12 @@ pub enum CuratedFailure {
     AssertionsNotCompiled,
     /// The curated revision could not be encoded.
     RevisionNotEncoded,
+    /// The Workbench decisions could not be read.
+    DecisionsUnavailable,
+    /// A Workbench decision matches no stored fact, so it was made on a
+    /// derived statement or matches nothing. Telling which needs a compile
+    /// of every document, which this read does not make. An export makes it.
+    DerivedDecisionsNeedCompile,
 }
 
 impl CuratedFailure {
@@ -162,6 +169,17 @@ impl CuratedFailure {
             Self::RevisionNotEncoded => (
                 "revision_not_encoded",
                 "The curated revision could not be encoded, and none is invented.".into(),
+            ),
+            Self::DecisionsUnavailable => (
+                "decisions_unavailable",
+                "The Workbench decisions could not be read.".into(),
+            ),
+            Self::DerivedDecisionsNeedCompile => (
+                "derived_decisions_need_compile",
+                "A Workbench decision was made on a derived statement, or no longer matches \
+                 any statement. It can only be checked by compiling every document, which an \
+                 agent read does not do. An export does, and shows the curated items."
+                    .into(),
             ),
         }
     }

@@ -569,14 +569,9 @@ fn curated_row<'a>(bundle: &'a spec::SpecBundle, record_id: &str) -> Option<&'a 
         .find(|line| line.starts_with(&format!("| {record_id} |")))
 }
 
-#[test]
-fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_verified_only() {
-    // AC-0653 (SPEC-12 slice 2, ADR-0061 decisions 5 to 7): a version 2
-    // record whose captured evidence is still readable and whose basis is
-    // unchanged is eligible once accepted. A best-effort export shows it as
-    // an item marked InferredWeak and cites its nodes; a verified-only export
-    // shows no item and counts it. The base graph hash is the same in both
-    // and the same as before the review.
+/// A version 2 record staged from captured evidence that is still readable,
+/// not yet reviewed. Once accepted it is eligible.
+fn staged_captured_record() -> (tempfile::TempDir, AppState, Node, agents::StagedProposal) {
     let dir = tempfile::tempdir().unwrap();
     let private = directory(dir.path(), "private");
     let root = directory(dir.path(), "project");
@@ -603,6 +598,18 @@ fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_veri
         .unwrap();
     let staged =
         crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal).unwrap();
+    (dir, state, owner, staged)
+}
+
+#[test]
+fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_verified_only() {
+    // AC-0653 (SPEC-12 slice 2, ADR-0061 decisions 5 to 7): a version 2
+    // record whose captured evidence is still readable and whose basis is
+    // unchanged is eligible once accepted. A best-effort export shows it as
+    // an item marked InferredWeak and cites its nodes; a verified-only export
+    // shows no item and counts it. The base graph hash is the same in both
+    // and the same as before the review.
+    let (_dir, state, owner, staged) = staged_captured_record();
     let id = staged.proposal_id.as_str();
     let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
 
@@ -750,4 +757,163 @@ fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_veri
     let basis = rejected.curated_basis.as_ref().unwrap();
     assert_eq!(basis.counts.accepted, 0);
     assert_ne!(basis.revision, reread.curated_basis.unwrap().revision);
+}
+
+/// An MCP read session over the stores of `state`, acquired the way the
+/// worker acquires it: the reviews are the ones the export gathers.
+fn mcp_session(
+    state: &AppState,
+    mode: spec::ExportMode,
+    scope: impl FnMut() -> Result<Vec<context_hub::coverage::ScopedRepo>, crate::mcp_reads::ReadError>,
+) -> Result<crate::mcp_reads::ReadSession, crate::mcp_reads::ReadError> {
+    crate::mcp_reads::ReadSession::acquire_with_overlay(
+        &state.graph,
+        None,
+        &state.decisions,
+        state,
+        scope,
+        core_graph::SnapshotReadLimits::default(),
+        core_graph::coverage::CoverageReadLimits::default(),
+        mode,
+    )
+}
+
+fn mcp_artifact(session: &crate::mcp_reads::ReadSession, id: &str) -> spec::SpecArtifact {
+    let trace = flowtracer::TraceLimits {
+        max_flows: 4096,
+        max_hops: 65536,
+        max_output_bytes: 64 * 1024 * 1024,
+    };
+    let compile = spec::SelectedCompileLimits {
+        max_bytes: 64 * 1024 * 1024,
+        adr: spec::AdrLimits {
+            max_rows: 65536,
+            max_output_bytes: 64 * 1024 * 1024,
+        },
+    };
+    match session.compile_artifact(id, trace, compile).unwrap() {
+        crate::mcp_reads::artifacts::ArtifactCompilation::Produced(artifact) => {
+            artifact.artifact().clone()
+        }
+        limited => panic!("{id}: {limited:?}"),
+    }
+}
+
+#[test]
+fn mcp_curated_read_serves_the_export_bytes_and_revision_for_an_eligible_record() {
+    // AC-0654 (SPEC-12 slice 4, ADR-0061 decisions 3, 7 and 11): an MCP read
+    // session computes the projection through the functions the export
+    // uses. For the same reviews, graph and export mode its `curated`
+    // artifact is the export's, byte for byte and by content identity, and
+    // its basis carries the export's curated revision. A verified-only
+    // session gets no item, only the count (R-INT-5).
+    use crate::mcp_reads::ReadError;
+    use crate::mcp_reads::curated_read::CuratedBasis;
+    let (_dir, state, _, staged) = staged_captured_record();
+    let id = staged.proposal_id.as_str();
+    let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
+    let pending = mcp_session(&state, spec::ExportMode::BestEffort, || Ok(vec![])).unwrap();
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .review(id, 0, agents::ProposalDecision::Accepted, None)
+        .unwrap();
+
+    for mode in modes {
+        let bundle = curated_export(&state, mode);
+        let exported = artifact(&bundle, "curated");
+        let basis = bundle.curated_basis.as_ref().unwrap();
+        assert_eq!(basis.counts.eligible, 1);
+        let session = mcp_session(&state, mode, || Ok(vec![])).unwrap();
+        // The whole artifact: id, schema, content identity, bytes and the
+        // assertions it cites.
+        assert_eq!(&mcp_artifact(&session, "curated"), exported, "{mode:?}");
+        assert!(session.basis().h3_curated_available);
+        assert_eq!(
+            session.basis().curated,
+            CuratedBasis::Computed {
+                revision: basis.revision.clone()
+            }
+        );
+        // The review entered the basis identity.
+        assert_ne!(session.basis().curated, pending.basis().curated);
+        if mode == spec::ExportMode::BestEffort {
+            assert_ne!(session.basis_id().unwrap(), pending.basis_id().unwrap());
+        }
+
+        // The structured form: the DR-4 fields of the same projection.
+        let json = mcp_artifact(&session, "curated-json");
+        let data: serde_json::Value = serde_json::from_str(&json.content).unwrap();
+        assert_eq!(data["status"], "computed");
+        assert_eq!(data["view"], "curated");
+        assert_eq!(data["revision"], basis.revision.as_str());
+        assert_eq!(
+            data["graph_basis"],
+            bundle.graph_basis.as_ref().unwrap().content_hash.as_str()
+        );
+        assert_eq!(data["counts"]["accepted"], 1);
+        assert_eq!(data["counts"]["eligible"], 1);
+        assert_eq!(data["listed"], serde_json::json!([]));
+        if mode == spec::ExportMode::BestEffort {
+            assert_eq!(data["export_mode"], "best-effort");
+            assert_eq!(data["items_omitted"], 0);
+            let item = &data["items"][0];
+            assert_eq!(item["record_id"], id);
+            assert_eq!(item["gap_id"], GAP);
+            assert_eq!(item["source_id"], staged.proposal.source_id.as_str());
+            assert_eq!(item["target_id"], staged.proposal.target_id.as_str());
+            assert_eq!(item["edge_label"], staged.proposal.edge_label.as_str());
+            // As produced: acceptance upgrades nothing (R-INT-1, R-INT-2).
+            assert_eq!(item["tier"], "Agentic");
+            assert_eq!(item["confidence"], "InferredWeak");
+            assert_eq!(item["review_status"], "accepted");
+            assert_eq!(item["state"], "eligible");
+            assert_eq!(item["reason"], "all_conditions_hold");
+            assert!(item["source_support"]["captured"].as_u64().unwrap() > 0);
+            assert_eq!(item["source_support"]["unverified"], 0);
+        } else {
+            assert_eq!(data["export_mode"], "verified-only");
+            assert_eq!(data["items"], serde_json::json!([]));
+            assert_eq!(data["items_omitted"], 1);
+            assert!(!json.content.contains(id));
+            assert!(!mcp_artifact(&session, "curated").content.contains(id));
+        }
+    }
+
+    // A review made while the session is acquired, after its reviews were
+    // gathered, would give another curated revision: the read is refused.
+    // The scope is read before the graph and again after the reviews.
+    let mut calls = 0;
+    let stale = mcp_session(&state, spec::ExportMode::BestEffort, || {
+        calls += 1;
+        if calls == 2 {
+            state
+                .proposals
+                .lock()
+                .unwrap()
+                .review(id, 1, agents::ProposalDecision::Rejected, None)
+                .unwrap();
+        }
+        Ok(vec![])
+    });
+    assert!(matches!(stale, Err(ReadError::StaleBasis)));
+    // Read again, the withdrawn record is gone and the revision is new.
+    let withdrawn = mcp_session(&state, spec::ExportMode::BestEffort, || Ok(vec![])).unwrap();
+    let bundle = curated_export(&state, spec::ExportMode::BestEffort);
+    assert_eq!(
+        &mcp_artifact(&withdrawn, "curated"),
+        artifact(&bundle, "curated")
+    );
+    assert_eq!(
+        withdrawn.basis().curated,
+        CuratedBasis::Computed {
+            revision: bundle.curated_basis.unwrap().revision
+        }
+    );
+    assert!(
+        !mcp_artifact(&withdrawn, "curated-json")
+            .content
+            .contains(id)
+    );
 }
