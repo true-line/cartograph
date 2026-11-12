@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { EscalationState } from '../store';
+import type { CuratedRecordStatus } from '../curated';
 import type { EgressPreview } from './EgressConsentDialog';
 import { EgressConsentDialog } from './EgressConsentDialog';
 import { TierBadge } from './TierBadge';
@@ -8,6 +9,9 @@ import { TaskEvidence } from './TaskEvidence';
 
 export interface ResolutionStrategyModalProps {
   state: EscalationState;
+  /** The state the host's curated read gave the open proposal, when that
+   *  read returned it (SPEC-12 slice 3, AC-0655). */
+  recordState?: CuratedRecordStatus;
   onRun: (strategyId: 'local-slm' | 'cloud-opus') => void;
   onConsent: (preview: EgressPreview) => void;
   onDismissPreview: () => void;
@@ -19,9 +23,11 @@ export interface ResolutionStrategyModalProps {
 /** Resolution Strategy modal (handoff §Resolution Strategy, screenshot 11):
  *  one component reused for every gap. Shows the escalation ladder, why T0
  *  stopped, and runnable strategy cards; a run yields a staged proposal for
- *  Accept/Reject — accepted reviews still await context reconciliation. */
+ *  Accept/Reject. An accepted record gets its state from the curated
+ *  projection (ADR-0061); the dialog states it when the host has read it. */
 export function ResolutionStrategyModal({
   state,
+  recordState,
   onRun,
   onConsent,
   onDismissPreview,
@@ -157,8 +163,9 @@ export function ResolutionStrategyModal({
             </p>
             <p className="muted">{proposal.annotation}</p>
             <p className="muted">
-              Review preserves T3 / InferredWeak. Accepted proposals await context reconciliation;
-              an export lists them in curated.md with their state, and review never overwrites T0/T1.
+              Review preserves T3 / InferredWeak and never overwrites T0/T1. An accepted proposal
+              gets one state each time it is read: only an eligible one is a curated item, and
+              every other is listed with its reason.
             </p>
             <TaskEvidence basis={proposal.source_basis} />
             <details>
@@ -181,7 +188,9 @@ export function ResolutionStrategyModal({
             {state.decided ? (
               <p className="consent-status" data-testid="decision-recorded">
                 Decision recorded: {state.decided}.
-                {state.decided === 'accepted' && ' Awaiting context reconciliation.'}
+                {state.decided === 'accepted' && (recordState
+                  ? ` State: ${recordState.state}. ${recordState.reason_sentence}`
+                  : ' Its state is listed under Curated items in the Spec Workbench.')}
                 {proposal.source_basis ? ' Saved evidence origins remain unchanged.' : ' Source binding remains unverified.'}
               </p>
             ) : (

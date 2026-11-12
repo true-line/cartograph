@@ -310,7 +310,8 @@ export interface PlannedAdapter {
 }
 
 /** One class-level batch escalation outcome (#167): per-instance staged
- * proposals and failures; review awaits context reconciliation. */
+ * proposals and failures. Each still needs a review; an accepted one gets
+ * its curated state when the projection is read (ADR-0061). */
 export interface ClassEscalationOutcome {
   proposals: StagedProposal[];
   failures: { gap_id: string; error: string }[];
@@ -428,7 +429,90 @@ export interface SpecBundle {
   security_count: number;
   /** Carried into the exported bundle file unchanged. */
   graph_basis?: GraphBasis;
+  /** The curated revision and counts the bundle was compiled with
+   *  (AC-0653). Absent when the projection was not computed. */
+  curated_basis?: CuratedBasis;
 }
+
+/** Record totals of a curated projection; `accepted` is the sum of the rest. */
+export interface CuratedCounts {
+  accepted: number;
+  eligible: number;
+  unverified: number;
+  unresolvable: number;
+  stale: number;
+  already_covered: number;
+  conflicted: number;
+}
+
+export interface CuratedBasis {
+  revision: string;
+  counts: CuratedCounts;
+}
+
+/** The one state the host assigns an accepted record at projection time
+ *  (ADR-0061 decision 4). Never stored, and never assigned by the UI. */
+export type CuratedRecordState =
+  | 'unverified' | 'already-covered' | 'unresolvable' | 'stale' | 'conflicted' | 'eligible';
+
+/** One accepted record with its DR-4 fields (SPEC-12). The sentences come
+ *  from the host: the UI maps no reason code to prose. */
+export interface CuratedRecord {
+  record_id: string;
+  gap_id: string;
+  source_id: string;
+  target_id: string;
+  edge_label: string;
+  /** Producing tier, exactly as produced (`Agentic` for a proposal). */
+  tier: string;
+  /** Producing confidence, exactly as produced. */
+  confidence: Tier;
+  review_status: 'accepted' | 'rejected';
+  source_support: { captured: number; unverified: number };
+  state: CuratedRecordState;
+  reason: string;
+  reason_sentence: string;
+  /** The SPEC-09 dimensions the state was read beside. */
+  basis_summary: string;
+}
+
+/** A Workbench decision whose content hash matches no current statement. */
+export interface StaleAssertionDecision {
+  content_hash: string;
+  decision: AssertionDecision;
+  state: CuratedRecordState;
+}
+
+/** The curated projection as `export_spec_with_views` returns it beside the
+ *  bundle, for that bundle's export mode (SPEC-12 slice 3, AC-0655). */
+export type CuratedRead =
+  | {
+      status: 'computed';
+      export_mode: SpecExportMode;
+      view: 'recovered' | 'curated';
+      revision: string;
+      graph_basis: string;
+      /** The curated items this export mode shows; none in `verified-only`. */
+      items: CuratedRecord[];
+      items_omitted: number;
+      listed: CuratedRecord[];
+      assertion_decisions: {
+        digest: string;
+        rejections_applied: number;
+        stale: StaleAssertionDecision[];
+      };
+      counts: CuratedCounts;
+    }
+  | {
+      status: 'not_computed';
+      export_mode: SpecExportMode;
+      reason: string;
+      limit?: number;
+      sentence: string;
+    };
+
+/** A curated read whose projection was computed. */
+export type ComputedCuratedRead = Extract<CuratedRead, { status: 'computed' }>;
 
 export interface DeploymentRole {
   resource_id: string;
@@ -467,12 +551,24 @@ export interface SpecViewBundle {
 export interface SpecWithViews {
   bundle: SpecBundle;
   views: SpecViewBundle;
+  /** The projection `bundle.curated_basis` was stamped from: the host
+   *  computes it once per compile and returns it here, so the section and
+   *  the bundle cannot show two revisions (AC-0655). */
+  curated?: CuratedRead;
 }
 
-function unpackSpecWithViews(
-  payload: SpecWithViews | null,
-): { specBundle: SpecBundle | null; specViews: SpecViewBundle | null } {
-  return { specBundle: payload?.bundle ?? null, specViews: payload?.views ?? null };
+function unpackSpecWithViews(payload: SpecWithViews | null): {
+  specBundle: SpecBundle | null;
+  specViews: SpecViewBundle | null;
+  specCurated: CuratedRead | null;
+} {
+  const curated = payload?.curated;
+  return {
+    specBundle: payload?.bundle ?? null,
+    specViews: payload?.views ?? null,
+    // Anything that is not one of the two host shapes is not a read.
+    specCurated: curated?.status === 'computed' || curated?.status === 'not_computed' ? curated : null,
+  };
 }
 
 export type AssertionDecision = 'accepted' | 'rejected' | 'annotated';
@@ -920,6 +1016,9 @@ export interface AppStore {
   /** Structured diagram projections under the active R-INT-5 mode (US-0036). */
   specViews: SpecViewBundle | null;
   specMode: SpecExportMode;
+  /** The curated projection `specBundle` was compiled with, from the same
+   *  response (AC-0655); `null` when there is none. */
+  specCurated: CuratedRead | null;
   curation: AssertionDecisionRecord[];
   specBusy: boolean;
   specError: string | null;
@@ -992,6 +1091,9 @@ export interface AppStore {
   ) => Promise<void>;
   clearGraph: () => Promise<void>;
   setSpecMode: (mode: SpecExportMode) => Promise<void>;
+  /** Recompile the bundle, with its views and curated projection, for the
+   *  active mode: after a proposal review, or on request from the Workbench. */
+  reloadSpec: () => Promise<void>;
   /** Full artifact (untruncated content and assertions) for copy/export,
    *  after `export_spec`'s IPC-capped preview (#488). `null` on failure —
    *  callers fall back to the already-fetched preview. */
@@ -1145,6 +1247,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   specBundle: null,
   specViews: null,
   specMode: 'best-effort',
+  specCurated: null,
   curation: [],
   specBusy: false,
   specError: null,
@@ -1195,6 +1298,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         plugins: [],
         specBundle: null,
         specViews: null,
+        specCurated: null,
         curation: [],
         findings: null,
         registerFindings: [],
@@ -1367,6 +1471,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  reloadSpec: () => get().setSpecMode(get().specMode),
+
   readSelectedFlowView: async (trigger, mode, contentId) =>
     invokeOr<SpecDiagramView | null>('read_selected_flow_view', null, { trigger, mode, contentId }),
 
@@ -1402,6 +1508,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // Recompile the currently requested mode after the decision is stored.
       request = ++specRequestVersion;
       const mode = get().specMode;
+      // A Workbench decision enters the curated revision; the recompiled
+      // response carries the new projection with the bundle.
       const [specWithViews, curation] = await Promise.all([
         invokeOr<SpecWithViews | null>('export_spec_with_views', null, { mode }),
         invokeOr<AssertionDecisionRecord[]>('list_assertion_decisions', []),
@@ -1957,7 +2065,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
           result.review_revision !== proposal.review_revision + 1) {
         throw new Error('The core did not confirm this review. Refresh proposal history before retrying.');
       }
-      // Review is durable; context and exports still await reconciliation.
+      // The review is durable and gives a new curated revision (ADR-0061):
+      // the record's state is the host's, returned with the recompiled bundle.
       set((state) => {
         const opened = state.escalation?.proposal;
         const stagedProposals = mergeStagedProposals(state.stagedProposals, [
@@ -1975,6 +2084,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           } : {}),
         };
       });
+      void get().reloadSpec();
       return true;
     } catch (e) {
       const error = String(e);

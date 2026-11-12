@@ -225,9 +225,44 @@ Limits today:
   export. Export again.
 - Investigation findings accepted for follow-up are not listed. A finding
   has no relation to show.
-- The Workbench does not show curated items yet, and a work packet cannot
-  select this document. A complete-session MCP client can read it (see
-  **Read-only MCP** in Settings).
+- A work packet cannot select this document. A complete-session MCP client
+  can read it (see **Read-only MCP** in Settings).
+
+### Curated items in the Workbench
+
+The Workbench shows the same projection above the document list, under
+**Curated items**, without an export. It shows:
+
+- The view, the curated revision, the graph basis and the export mode. The
+  revision and the graph basis are shortened; hover over one, or open
+  **Full identifiers**, for the whole value. The revision is the one the
+  bundle on screen carries as `curated_basis`.
+- The counts of accepted proposals by state.
+- **Records and decisions**, closed until you open it, with the three lists
+  below.
+- The curated items, each with its record id, proposed relation, Gap, tier
+  and confidence as produced, review, source support, basis and state. Each
+  is marked InferredWeak. In `verified-only` mode no item is shown, only how
+  many were left out.
+- The accepted proposals that are not items, grouped by state, each with the
+  reason in a sentence and its code.
+- Your Workbench decisions that no longer match any statement.
+
+When no proposal is accepted, the section says so. When the projection could
+not be computed, it gives the reason and shows no proposal; that does not
+mean there are none.
+
+The section is read again when you record a review, change the export mode,
+record a Workbench decision, or choose **Refresh curated items**. It does
+not update by itself while you look at it. It is computed together with
+the documents on screen, so it always describes the same reviews and graph
+as they do.
+
+**Proposal history** and the review dialog show the state and reason of an
+accepted proposal when this read returned it. An eligible proposal is not
+returned in `verified-only` mode, so its state is not shown there in that
+mode. Accepting a proposal does not make it a curated item: its state is
+worked out from the graph and the evidence each time it is read.
 
 ## Coverage in an export
 

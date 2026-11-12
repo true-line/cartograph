@@ -3,6 +3,7 @@ import { expect, fn, userEvent, within } from 'storybook/test';
 import type { SpecArtifact, SpecAssertion, SpecBundle, SpecViewBundle } from '../store';
 import { STRUCTURED_VIEW_UNAVAILABLE_NOTICE } from './SpecDiagramView';
 import { SpecWorkbench } from './SpecWorkbench';
+import { CURATED_REVISION, curatedReadFixture } from '../curatedFixtures';
 
 const CONFIRMED: SpecAssertion = {
   id: 'node:cap:orders',
@@ -421,6 +422,48 @@ export const ConfirmedBlocksAreLockedNotHidden: Story = {
       canvas.getByText('Gap: runtime-computed channel identity').closest('li') as HTMLElement,
     );
     await expect(gapBlock.queryByRole('button')).not.toBeInTheDocument();
+  },
+};
+
+export const CuratedSectionShowsTheBundleRevision: Story = {
+  // AC-0655 (SPEC-12 slice 3): the Workbench shows the curated projection of
+  // the bundle on screen, between the summary and the artifacts, and offers
+  // a refresh.
+  args: {
+    bundle: {
+      ...BUNDLE,
+      curated_basis: { revision: CURATED_REVISION, counts: curatedReadFixture().counts },
+    },
+    curated: curatedReadFixture(),
+    onRefreshCurated: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement);
+    const section = within(canvas.getByRole('region', { name: 'Curated items' }));
+    await expect(section.getByTestId('curated-revision')).toHaveAttribute(
+      'title',
+      args.bundle?.curated_basis?.revision,
+    );
+    // The records are closed until asked for, so the artifacts stay in view.
+    await expect(section.getByRole('table', { name: 'Curated items (1)' })).not.toBeVisible();
+    await expect(section.getByLabelText('Curated record counts')).toHaveTextContent('Accepted4');
+    await userEvent.click(section.getByText(/^Records and decisions:/));
+    await expect(section.getByRole('table', { name: 'Curated items (1)' })).toBeVisible();
+    await expect(section.getByRole('table', { name: 'State stale (1)' })).toBeVisible();
+    // The artifacts stay reachable below it.
+    const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
+    await expect(within(nav).getAllByRole('button')).toHaveLength(10);
+    await userEvent.click(section.getByRole('button', { name: 'Refresh curated items' }));
+    await expect(args.onRefreshCurated).toHaveBeenCalledOnce();
+  },
+};
+
+export const CuratedSectionUnreadStatesNothing: Story = {
+  // AC-0655: without a curated read the section says so and lists nothing.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('curated-unread')).toHaveTextContent('has not been read');
+    await expect(canvas.queryByTestId('curated-revision')).not.toBeInTheDocument();
   },
 };
 

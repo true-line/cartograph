@@ -127,6 +127,12 @@ pub enum CuratedFailure {
 }
 
 impl CuratedFailure {
+    /// The plain sentence `curated.md` states for this reason. The Workbench
+    /// shows the same sentence (SPEC-12 slice 3, AC-0655).
+    pub fn sentence(self) -> String {
+        self.text().1
+    }
+
     /// The reason code, as serialized, and a plain sentence.
     fn text(self) -> (&'static str, String) {
         match self {
@@ -356,6 +362,19 @@ fn reason_text(reason: StateReason) -> (&'static str, &'static str) {
         ),
         AllConditionsHold => ("all_conditions_hold", "Every condition holds."),
     }
+}
+
+/// The plain sentence `curated.md` prints for a record's reason code. The
+/// Workbench shows the same sentence, so no surface writes a second set
+/// (SPEC-12 slice 3, AC-0655).
+pub fn curated_reason_sentence(reason: StateReason) -> &'static str {
+    reason_text(reason).1
+}
+
+/// The SPEC-09 dimensions a record's state was read beside, as `curated.md`
+/// prints them in its Basis column.
+pub fn curated_basis_summary(basis: &BasisReport) -> String {
+    Basis(basis).to_string()
 }
 
 fn review_name(review: ReviewDecision) -> &'static str {

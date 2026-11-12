@@ -917,3 +917,110 @@ fn mcp_curated_read_serves_the_export_bytes_and_revision_for_an_eligible_record(
             .contains(id)
     );
 }
+
+#[test]
+fn workbench_curated_read_reports_the_export_revision_and_counts_in_both_modes() {
+    // AC-0655 (SPEC-12 slice 3, "Surfaces"): the Workbench read is returned
+    // beside the bundle, from the projection that compile computed. Its
+    // revision and counts are that bundle's `curated_basis`, and the basis of
+    // a separate export of the same reviews, graph and mode. An eligible
+    // record is an item in best-effort, with every DR-4 field and the
+    // sentence `curated.md` prints for its reason; a verified-only read
+    // returns no item and the number left out (R-INT-5).
+    let (_dir, state, owner, staged) = staged_captured_record();
+    let id = staged.proposal_id.as_str();
+    let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
+    let read = |mode| {
+        // The order `export_spec_with_views` uses.
+        let review = crate::curated::gather(&state);
+        let (bundle, _, read) = crate::build_spec_with_views_and_curated(
+            &state.graph.lock().unwrap(),
+            &state.decisions.lock().unwrap(),
+            &review,
+            mode,
+        )
+        .unwrap();
+        let read = serde_json::to_value(read).unwrap();
+        // One projection: the read beside the bundle is the bundle's basis.
+        let basis = bundle.curated_basis.as_ref().unwrap();
+        assert_eq!(read["revision"], basis.revision.as_str(), "{mode:?}");
+        assert_eq!(read["counts"], serde_json::to_value(basis.counts).unwrap());
+        read
+    };
+    let same_basis = |read: &serde_json::Value, mode| {
+        let bundle = curated_export(&state, mode);
+        let basis = bundle.curated_basis.as_ref().unwrap();
+        assert_eq!(read["status"], "computed", "{mode:?}");
+        assert_eq!(read["view"], "curated");
+        assert_eq!(read["revision"], basis.revision.as_str(), "{mode:?}");
+        assert_eq!(read["counts"], serde_json::to_value(basis.counts).unwrap());
+        assert_eq!(
+            read["graph_basis"],
+            bundle.graph_basis.as_ref().unwrap().content_hash.as_str()
+        );
+        assert_eq!(read["export_mode"], serde_json::to_value(mode).unwrap());
+        bundle
+    };
+
+    // Staged and not reviewed: computed, and nothing accepted.
+    for mode in modes {
+        let pending = read(mode);
+        same_basis(&pending, mode);
+        assert_eq!(pending["counts"]["accepted"], 0);
+        assert_eq!(pending["items"], serde_json::json!([]));
+        assert_eq!(pending["listed"], serde_json::json!([]));
+        assert_eq!(pending["items_omitted"], 0);
+    }
+
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .review(id, 0, agents::ProposalDecision::Accepted, None)
+        .unwrap();
+    let best = read(spec::ExportMode::BestEffort);
+    let bundle = same_basis(&best, spec::ExportMode::BestEffort);
+    assert_eq!(best["counts"]["eligible"], 1);
+    assert_eq!(best["items_omitted"], 0);
+    assert_eq!(best["listed"], serde_json::json!([]));
+    let item = &best["items"][0];
+    assert_eq!(item["record_id"], id);
+    assert_eq!(item["gap_id"], GAP);
+    assert_eq!(item["source_id"], owner.id.as_str());
+    assert_eq!(item["target_id"], staged.proposal.target_id.as_str());
+    assert_eq!(item["edge_label"], staged.proposal.edge_label.as_str());
+    // R-INT-2: the tier and confidence it was produced with.
+    assert_eq!(item["tier"], "Agentic");
+    assert_eq!(item["confidence"], "InferredWeak");
+    assert_eq!(item["review_status"], "accepted");
+    assert_eq!(item["source_support"]["unverified"], 0);
+    assert!(item["source_support"]["captured"].as_u64().unwrap() > 0);
+    assert_eq!(item["state"], "eligible");
+    assert_eq!(item["reason"], "all_conditions_hold");
+    assert_eq!(item["reason_sentence"], "Every condition holds.");
+    // The basis text is the Basis cell of the record's `curated.md` row.
+    let row = curated_row(&bundle, id).unwrap();
+    assert!(
+        row.contains(&format!("| {} |", item["basis_summary"].as_str().unwrap())),
+        "{row}"
+    );
+
+    let verified = read(spec::ExportMode::VerifiedOnly);
+    same_basis(&verified, spec::ExportMode::VerifiedOnly);
+    assert_eq!(verified["revision"], best["revision"]);
+    assert_eq!(verified["items"], serde_json::json!([]));
+    assert_eq!(verified["items_omitted"], 1);
+    assert!(!verified.to_string().contains(id));
+
+    // Withdrawn by rejection: a new revision, still the export's.
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .review(id, 1, agents::ProposalDecision::Rejected, None)
+        .unwrap();
+    let withdrawn = read(spec::ExportMode::BestEffort);
+    same_basis(&withdrawn, spec::ExportMode::BestEffort);
+    assert_ne!(withdrawn["revision"], best["revision"]);
+    assert_eq!(withdrawn["counts"]["accepted"], 0);
+}

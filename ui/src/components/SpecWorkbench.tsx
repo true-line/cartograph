@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type {
   AssertionDecision,
   AssertionDecisionRecord,
+  CuratedRead,
   GraphEdge,
   GraphNode,
   SpecArtifact,
@@ -19,10 +20,15 @@ import {
 } from './SpecDiagramView';
 import { renderArtifactMarkdown } from '../markdownView';
 import { TierBadge, methodLabel } from './TierBadge';
+import { CuratedSection } from './CuratedSection';
 
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
   views?: SpecViewBundle | null;
+  /** The curated projection `bundle` was compiled with, from the same host
+   *  response (SPEC-12 slice 3, AC-0655); `null` or absent when none. */
+  curated?: CuratedRead | null;
+  onRefreshCurated?: () => void;
   pageSize?: number;
   mode: SpecExportMode;
   decisions: AssertionDecisionRecord[];
@@ -115,6 +121,8 @@ function decisionLabel(decision: AssertionDecision): string {
 export function SpecWorkbench({
   bundle,
   views,
+  curated,
+  onRefreshCurated,
   pageSize,
   mode,
   decisions,
@@ -214,6 +222,8 @@ export function SpecWorkbench({
             <span>{bundle.security_count} security findings</span>
             {busy && <span>Refreshing…</span>}
           </div>
+
+          <CuratedSection read={curated ?? null} busy={busy} onRefresh={onRefreshCurated} />
 
           <div className="spec-workbench-layout">
             <nav className="spec-artifact-nav" aria-label="Official spec artifacts">

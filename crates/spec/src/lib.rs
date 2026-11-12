@@ -96,11 +96,11 @@ pub use workbench::{
     compile_knowledge_user_stories_with_flows_and_security, compile_partition_selected,
     compile_spec, compile_spec_selected, compile_spec_selected_supplied,
     compile_spec_selected_with_coverage, compile_spec_selected_with_security,
-    compile_spec_with_coverage, count_gap_findings, count_interpretation_backlog, is_drift_edge,
-    is_drift_node, is_gap_edge, is_gap_node, logical_actor_story_workspace_bound,
-    logical_capability_compile_bound, logical_compile_bound, logical_knowledge_story_compile_bound,
-    logical_partition_bound, project_recovered_facts, provenance, try_compile_spec_supplied,
-    try_compile_spec_with_coverage,
+    compile_spec_with_coverage, count_gap_findings, count_interpretation_backlog,
+    curated_basis_summary, curated_reason_sentence, is_drift_edge, is_drift_node, is_gap_edge,
+    is_gap_node, logical_actor_story_workspace_bound, logical_capability_compile_bound,
+    logical_compile_bound, logical_knowledge_story_compile_bound, logical_partition_bound,
+    project_recovered_facts, provenance, try_compile_spec_supplied, try_compile_spec_with_coverage,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query

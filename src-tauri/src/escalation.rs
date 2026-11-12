@@ -264,8 +264,8 @@ pub fn strategies(
     payload_bytes: u64,
     edge_label_allowed: bool,
 ) -> GapStrategyReport {
-    let export_impact = "Review decisions are saved with the staged proposal. Accepted proposals \
-                         await shared-context reconciliation; an export lists them in curated.md with their state. \
+    let export_impact = "Review decisions are saved with the staged proposal. An accepted proposal \
+                         gets one state each time it is read: only an eligible one is a curated item, and every other is listed in curated.md with its reason. \
                          Evidence origins are recorded per supplied item; retained parser input still has incomplete input coverage. \
                          Proposals retain T3/InferredWeak and never modify T0/T1 facts."
         .to_string();
