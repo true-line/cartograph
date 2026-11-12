@@ -17,6 +17,7 @@ pub use curated::{
 };
 pub(crate) mod diagrams;
 mod endpoint_permissions;
+mod external;
 pub use endpoint_permissions::{
     ENDPOINT_PATH_MAX_DEPTH, ENDPOINT_PATH_MAX_RELATIONS, ENDPOINT_PATH_MAX_SYMBOLS,
 };
@@ -974,7 +975,8 @@ mod tests {
             // security.md stating "no authentication check recovered" and its
             // coverage limit (#1820). The endpoint
             // permission projection (#1787), the pipeline projection (#1818),
-            // the configuration key projection (#1821), the curated items
+            // the configuration key projection (#1821), the boundary
+            // projection (#1788), the curated items
             // (#1746), the coverage artifacts (#1786) and the fact index
             // (#1785) are appended after these and hashed apart, so the
             // frozen bytes still prove the graph artifacts are unchanged.
@@ -984,15 +986,16 @@ mod tests {
 
     /// The bundle without the endpoint permission projection (#1787), the
     /// pipeline projection (#1818), the configuration key projection
-    /// (#1821), the curated items, which list a projection the host supplies
-    /// (#1746), the two coverage artifacts, which project stored inventories
-    /// instead of the graph (#1786), and the two fact-index artifacts, which
-    /// list what the others cite (#1785). The eight close the official
-    /// order; the fixture has no endpoint, no pipeline, no environment file
-    /// and no configuration read, and a bare compile has no curated
-    /// projection, so none carries an assertion here.
+    /// (#1821), the boundary projection (#1788), the curated items, which
+    /// list a projection the host supplies (#1746), the two coverage
+    /// artifacts, which project stored inventories instead of the graph
+    /// (#1786), and the two fact-index artifacts, which list what the others
+    /// cite (#1785). The nine close the official order; the fixture has no
+    /// endpoint, no pipeline, no environment file, no configuration read, no
+    /// outbound call, no observed client and no channel, and a bare compile
+    /// has no curated projection, so none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 8);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 9);
         assert_eq!(
             appended
                 .iter()
@@ -1002,6 +1005,7 @@ mod tests {
                 "endpoint-permissions",
                 "pipelines",
                 "configuration",
+                "external",
                 "curated",
                 "coverage",
                 "coverage-index",
@@ -1145,6 +1149,7 @@ mod tests {
                 "endpoint-permissions.md",
                 "pipelines.md",
                 "configuration.md",
+                "external.md",
                 "curated.md",
                 "coverage.md",
                 "coverage.json",
@@ -2513,7 +2518,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 24);
+                assert_eq!(full.artifacts.len(), 25);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,

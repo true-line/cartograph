@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, curated items, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, pipelines, configuration keys, external services, curated items, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -154,6 +154,59 @@ Not covered today:
   compose file, a deployment manifest, an infrastructure definition, a
   workflow `env:` map or a shell script is not listed as declared.
 - Languages other than the seven above.
+
+## Calls and publishes that leave the system
+
+Every export includes **external.md**. It lists what the ingested sources
+call or publish to outside themselves, which flows reach each outside
+service, and which data entities those flows read or write. No model is
+involved.
+
+One rule decides every target:
+
+- **Outside** is a web address whose scheme and host are written in the
+  source and that no declared binding covers. Each one is listed once, with
+  every place that calls it, the method and path where they are known, and
+  the source span.
+- **Unclassified** is a target that leaves your code and is not proven
+  inside or outside. Each is listed with its reason: the host is computed
+  when the system runs or read from configuration; the client belongs to an
+  SDK or an identity provider, and nothing records who operates it; or a
+  channel is published to and no subscriber or backing resource was
+  recovered.
+- **Not listed**: a call that reached an endpoint of an ingested repository,
+  a call with no host (it goes to the caller's own origin), an in-process
+  event, browser storage and an imported package. A call that a declared
+  binding places in an ingested repository and that matched no endpoint
+  there is counted, not listed.
+
+The outside list is a lower bound. Read the unclassified count beside it.
+
+A binding is a service base URL or a gateway route in the system manifest.
+Without one, a call to another ingested repository by its full web address
+is listed as outside. The manifest itself is not stored, so a binding is
+known only where it joined a call to an endpoint. When bindings exist, a
+call to a host they do not cover is listed as unclassified, with the
+sentence recorded for it, and not yet as outside.
+
+**External data flows** has one row for each flow and outside service it
+reaches. The entities are those a symbol on the flow reads or writes. The
+row does not say that an entity is sent to the service. A flow that stops at
+an unresolved step before the call is not listed as reaching the service; it
+stays partial in the gap register.
+
+Every row shows the tier, confidence and source span of its fact, and never
+a higher confidence than the fact has. A call that matched no endpoint is a
+gap, and its row says so.
+
+A `verified-only` export leaves out InferredWeak rows and states how many
+boundary facts it left out. A `best-effort` export includes them and marks
+them. The same graph gives the same document every time. The document
+cannot be selected in a work packet.
+
+Not covered today: how sensitive the data is, what a request body contains,
+traffic that arrives from outside, package dependencies, and who operates an
+SDK provider.
 
 ## Curated items
 

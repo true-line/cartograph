@@ -1273,6 +1273,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
     let endpoints = super::endpoint_permissions::logical_index_bytes(rows)?;
     let pipelines = super::pipelines::logical_index_bytes(rows)?;
     let configuration = super::configuration::logical_index_bytes(rows, values)?;
+    let external = super::external::logical_index_bytes(rows, values)?;
     let curated = super::curated::logical_index_bytes(rows)?;
     Some(
         data.max(tools)
@@ -1281,6 +1282,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
             .max(endpoints)
             .max(pipelines)
             .max(configuration)
+            .max(external)
             .max(curated),
     )
 }

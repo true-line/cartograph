@@ -102,6 +102,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) pipelines_withheld: usize,
     /// Configuration facts withheld the same way (`configuration::withheld`).
     pub(crate) configuration_withheld: usize,
+    /// Boundary facts withheld the same way (`external::withheld`).
+    pub(crate) external_withheld: usize,
     /// The curated projection, or why there is none.
     pub(crate) curated: Curated<'a>,
 }
@@ -121,6 +123,7 @@ impl<'a> Beside<'a> {
             stale_coverage: supplied.stale_coverage,
             pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
             configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
+            external_withheld: external::withheld(nodes, edges, mode, rejected),
             curated: supplied.curated,
         }
     }
@@ -248,6 +251,13 @@ const ARTIFACTS: &[Artifact] = &[
         id: "configuration",
         file: "configuration.md",
         title: "Configuration keys",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1788).
+    Artifact {
+        id: "external",
+        file: "external.md",
+        title: "Calls and publishes that leave the system boundary",
         format: "markdown",
     },
     // After it, for the same reason (#1746).
@@ -507,6 +517,10 @@ fn produce(
         "configuration" => {
             configuration::output(nodes, edges, (mode, beside.configuration_withheld), max)?
         }
+        // Outbound-call Gaps, observed clients and channels in the admitted
+        // graph, the admitted flows, and the count the mode and the
+        // rejections withheld. No stored inventory is read (AC-0660).
+        "external" => external::output(nodes, edges, flows, (mode, beside.external_withheld), max)?,
         // The curated projection the host supplied, and the admitted nodes
         // its items cite (AC-0653). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,

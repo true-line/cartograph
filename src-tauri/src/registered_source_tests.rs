@@ -2687,6 +2687,283 @@ fn export_projects_ingested_configuration_keys() {
     }
 }
 
+/// The rows of `external.md` under `## heading`, as cells.
+fn external_rows(content: &str, heading: &str) -> Vec<Vec<String>> {
+    let start = content
+        .find(&format!("\n## {heading}\n"))
+        .unwrap_or_else(|| panic!("no section {heading} in:\n{content}"));
+    content[start..]
+        .lines()
+        .skip(1)
+        .skip_while(|line| !line.starts_with("|---"))
+        .skip(1)
+        .take_while(|line| line.starts_with('|'))
+        .map(|line| {
+            line.trim_matches('|')
+                .split(" | ")
+                .map(|cell| cell.trim().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+const EXTERNAL_CLIENT: &str = "export function Checkout() {\n  \
+    const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  \
+    const charge = () => fetch('https://api.stripe.com/v1/charges', { method: 'POST' });\n  \
+    return <button onClick={submit}>Order</button>;\n}\n";
+const EXTERNAL_WORKER: &str = "import requests\n\n\ndef rates():\n    \
+    return requests.get(\"https://api.tax.example/v2/rates\")\n";
+
+// AC-0660 (#1788): through the real adapters, with no system manifest, a
+// literal third-party `fetch` and a literal third-party `requests` call are
+// listed in `external.md` as outside, each with its site, method, path and
+// span, as Gap facts. The `fetch` call is one site although the observed
+// client pass records it as well. Every assertion has a fact-index row, and
+// a second export and the single-artifact read return the same bytes.
+#[test]
+fn export_lists_ingested_third_party_calls_as_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "web");
+    std::fs::write(root.join("client.tsx"), EXTERNAL_CLIENT).unwrap();
+    std::fs::write(root.join("worker.py"), EXTERNAL_WORKER).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let charge = EXTERNAL_CLIENT
+        .find("fetch('https://api.stripe.com")
+        .unwrap();
+    let rates = EXTERNAL_WORKER.find("requests.get").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "external")
+            .unwrap();
+        assert_eq!(artifact.file_name, "external.md");
+        let content = &artifact.content;
+        // Without a declared binding the sibling service's host is outside
+        // too, and the document says so.
+        let origins: Vec<String> = external_rows(content, "External services")
+            .into_iter()
+            .map(|row| format!("{} {} {}", row[0], row[1], row[2]))
+            .collect();
+        assert_eq!(
+            origins,
+            [
+                "https://api.stripe.com outside 1",
+                "https://api.tax.example outside 1",
+                "https://orders.example.com outside 1",
+            ],
+            "{content}"
+        );
+        assert!(content.contains(
+            "**Without declared bindings, a call to another registered repository by absolute \
+             URL is listed as outside.**"
+        ));
+        let sites = external_rows(content, "Sites of each external service");
+        let site = |origin: &str| {
+            sites
+                .iter()
+                .find(|row| row[0] == origin)
+                .unwrap_or_else(|| panic!("no site of {origin} in:\n{content}"))
+        };
+        let stripe = site("https://api.stripe.com");
+        assert_eq!(stripe[2..5], ["POST", "/v1/charges", "fetch"]);
+        assert_eq!(stripe[5..7], ["Deterministic", "Gap"]);
+        assert!(
+            stripe[7].contains(&format!("client.tsx bytes {charge}..")),
+            "{stripe:?}"
+        );
+        let tax = site("https://api.tax.example");
+        assert_eq!(tax[1..4], ["rates", "GET", "/v2/rates"]);
+        assert_eq!(tax[5..7], ["Deterministic", "Gap"]);
+        assert!(
+            tax[7].contains(&format!("worker.py bytes {rates}..")),
+            "{tax:?}"
+        );
+        assert!(
+            external_rows(content, "Unclassified")[0][1] == "None in this export",
+            "{content}"
+        );
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        assert!(!artifact.assertions.is_empty());
+        for assertion in &artifact.assertions {
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "external")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "external"
+            )
+            .unwrap(),
+            artifact
+        );
+    }
+}
+
+// AC-0660 (#1788): through the production `add_system` path, with a declared
+// service binding, the call the binding pass joins to the other repository's
+// endpoint is not listed in `external.md`, as a call or as an observed
+// client, and is not counted as outside. The third-party calls the binding
+// pass evaluated are listed as unclassified with the sentence it recorded:
+// the kept Gap does not record, other than in that sentence, that no
+// declared binding covers its host.
+#[test]
+fn export_does_not_list_a_call_bound_into_another_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let system = directory(dir.path(), "system");
+    let api = directory(&system, "api");
+    let web = directory(&system, "web");
+    std::fs::write(
+        api.join("server.ts"),
+        "import express from 'express';\nconst app = express();\n\
+         app.post('/v1/orders', (req, res) => {});\n",
+    )
+    .unwrap();
+    std::fs::write(web.join("client.tsx"), EXTERNAL_CLIENT).unwrap();
+    std::fs::write(web.join("worker.py"), EXTERNAL_WORKER).unwrap();
+    let manifest = system.join(ingest::manifest::MANIFEST_NAME);
+    std::fs::write(
+        &manifest,
+        "[[repos]]\nurl = \"api\"\n[[repos]]\nurl = \"web\"\n[[services]]\nname = \"orders\"\n\
+         repo = \"api\"\nbase_urls = [\"https://orders.example.com\"]\n",
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    crate::add_system_blocking(
+        manifest.to_string_lossy().into_owned(),
+        app.handle().clone(),
+    )
+    .unwrap();
+
+    let state = tauri::Manager::state::<AppState>(&app);
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    // The bound call is a relation into the other repository.
+    let (_, edges) = graph.read_snapshot().unwrap();
+    assert!(
+        edges.iter().any(|edge| edge.label == "FETCHES"
+            && edge.dst.ends_with("@POST:/v1/orders")
+            && edge.props["binding"][0]["service"] == "orders"),
+        "the binding pass joined the call"
+    );
+    let bundle = crate::build_spec_bundle(
+        &graph,
+        &decisions,
+        &crate::curated::CuratedReview::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let content = &bundle
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "external")
+        .unwrap()
+        .content;
+    for heading in [
+        "External services",
+        "Sites of each external service",
+        "External data flows",
+        "Unclassified",
+    ] {
+        for row in external_rows(content, heading) {
+            assert!(
+                row.iter().all(|cell| !cell.contains("orders.example.com")),
+                "{heading}: {row:?}"
+            );
+        }
+    }
+    assert!(
+        content.contains("Outside targets: 0. Unclassified targets: 2."),
+        "{content}"
+    );
+    let unclassified: Vec<(String, String, String)> = external_rows(content, "Unclassified")
+        .into_iter()
+        .map(|row| (row[0].clone(), row[4].clone(), row[5].clone()))
+        .collect();
+    let unrecorded = "binding evidence was evaluated for this call, and the fact does not record \
+                      whether a declared binding covers its host";
+    assert_eq!(
+        unclassified,
+        [
+            (
+                "POST https://api.stripe.com/v1/charges".to_string(),
+                unrecorded.to_string(),
+                "no binding evidence: no declared service or gateway route covers \
+                 https://api.stripe.com/v1/charges"
+                    .to_string()
+            ),
+            (
+                "GET https://api.tax.example/v2/rates".to_string(),
+                unrecorded.to_string(),
+                "no binding evidence: no declared service or gateway route covers \
+                 https://api.tax.example/v2/rates"
+                    .to_string()
+            ),
+        ],
+        "{content}"
+    );
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)
