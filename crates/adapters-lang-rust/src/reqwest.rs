@@ -362,7 +362,7 @@ fn is_shared_pointer(path: &[String]) -> bool {
 
 /// Generic type parameters in scope at `node`: those of every enclosing
 /// function, impl, trait and struct.
-fn generic_names(cx: &FileCx<'_>, node: TsNode<'_>) -> BTreeSet<String> {
+pub(super) fn generic_names(cx: &FileCx<'_>, node: TsNode<'_>) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut current = Some(node);
     while let Some(node) = current {
