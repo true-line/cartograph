@@ -191,6 +191,11 @@ pub fn assemble_task(
         if spec::is_gap_node(node) {
             continue;
         }
+        // A configuration read (ADR-0059) is never the endpoint of the edge
+        // a gap needs, so it is no candidate and takes no slot.
+        if node.label == adapters_fw::config_read::CONFIG_READ {
+            continue;
+        }
         let provenance = spec::provenance(&node.props, &node.id);
         if provenance.confidence_tier == ConfidenceTier::Gap {
             continue;
@@ -419,6 +424,22 @@ mod tests {
                 &task,
             )
             .unwrap();
+    }
+
+    // AC-0597 (#1789, ADR-0059): a `ConfigRead` node in the gap's context
+    // sorts before every real target; it is never a candidate, so the call
+    // neighbour is.
+    #[test]
+    fn config_reads_are_never_escalation_candidates() {
+        let read = "cfgread:local/fixture@src/capture.ts:env:API_URL";
+        let (mut nodes, mut edges) = fixture();
+        nodes.insert(0, node(read, "ConfigRead", "Confirmed", "src/capture.ts"));
+        nodes.push(node("sym:helper", "Symbol", "Confirmed", "src/helper.ts"));
+        edges.push(edge("sym:capture", read, "READS_CONFIG"));
+        edges.push(edge("sym:capture", "sym:helper", "CALLS"));
+        let task = assemble_task(&nodes, &edges, "gap:sync", "escalate:test", &read_span).unwrap();
+        let ids: Vec<&str> = task.candidates.iter().map(|c| c.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["ch:events", "res:queue", "sym:helper"]);
     }
 
     #[test]
