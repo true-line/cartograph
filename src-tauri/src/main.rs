@@ -320,6 +320,8 @@ struct LayerBreakdown {
     webext: LayerSummary,
     tools: LayerSummary,
     schedules: LayerSummary,
+    /// Ordered workflow and Dockerfile steps (#1790).
+    pipelines: LayerSummary,
     /// Channel and client-call stitching over every layer's sites (#874).
     events: LayerSummary,
 }
@@ -336,6 +338,7 @@ impl LayerBreakdown {
         self.webext.add(other.webext);
         self.tools.add(other.tools);
         self.schedules.add(other.schedules);
+        self.pipelines.add(other.pipelines);
         self.events.add(other.events);
     }
 
@@ -1334,6 +1337,10 @@ fn repo_coverage(
                 ingest::schedules::SCHEDULE_EXTRACTOR_ID,
                 count(&layers.schedules),
             ),
+            (
+                ingest::pipelines::PIPELINE_EXTRACTOR_ID,
+                count(&layers.pipelines),
+            ),
             (events::STITCH_EXTRACTOR_ID, count(&layers.events)),
         ],
         plugins: reads.plugins.clone(),
@@ -2087,6 +2094,24 @@ fn extract_tree_packed(
                     .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
                 schedule_facts.edges,
             )
+            .map_err(pack_err)?;
+    }
+    // Build and deployment order (#1790, AC-0598): workflows and Dockerfiles
+    // become ordered Pipeline facts. Runs for every layer selection, as the
+    // toolchain reader does. The reader emits no File node: a file it could
+    // not read exactly yields no facts and is named by Preflight's
+    // `unreadable-pipeline-file` finding, which the coverage inventory lists.
+    {
+        let pipeline_id = ingest::pipelines::SourceId { repo, commit };
+        let pipeline_facts =
+            ingest::pipelines::extract_dir(root, &pipeline_id).map_err(|e| e.to_string())?;
+        layers.pipelines = LayerSummary {
+            files: pipeline_facts.files,
+            nodes: distinct_node_count(&pipeline_facts.nodes),
+            edges: distinct_edge_count(&pipeline_facts.edges),
+        };
+        facts
+            .extend(pipeline_facts.nodes, pipeline_facts.edges)
             .map_err(pack_err)?;
     }
     // Gated plugin adapters (#201): route the files each active plugin
@@ -8771,6 +8796,71 @@ export function queueOrder() {
                 .any(|edge| edge.src == "tool:local/tools@vite.config.ts"
                     && edge.dst == "file:local/tools@vite.config.ts"
                     && edge.label == "DEFINED_IN")
+        );
+    }
+
+    #[test]
+    fn pipeline_facts_land_in_the_graph_in_declared_order() {
+        // AC-0598 (#1790): a normal extraction turns a workflow and a
+        // Dockerfile into ordered Pipeline facts, through the FK-enforcing
+        // graph load, without adding a hop to any flow.
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("ci.yml"),
+            "on:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n  build:\n    steps:\n      - run: make\n  \
+             deploy:\n    needs: build\n    steps:\n      - uses: acme/deploy@v1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Dockerfile"),
+            "FROM node:22 AS build\nRUN make\nFROM scratch\nCOPY --from=build /out /out\n",
+        )
+        .unwrap();
+        let (extraction, summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/ship",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(summary.pipelines.files, 2);
+
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        crate::load_into_graph(&mut graph, &extraction, "local/ship", dir.path(), "workdir")
+            .unwrap();
+        let job = |key: &str| format!("pipeline-job:local/ship@.github/workflows/ci.yml#{key}");
+        let deploy = graph.get_node(&job("deploy")).unwrap().unwrap();
+        assert_eq!(deploy.label, "PipelineJob");
+        assert_eq!(deploy.props["index"], 1);
+        assert_eq!(deploy.props["depth"], 1);
+        assert_eq!(deploy.props["prov"]["extractor_id"], "t0.pipeline");
+        let step = graph
+            .get_node("pipeline-step:local/ship@.github/workflows/ci.yml#deploy/0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(step.props["uses"], "acme/deploy@v1");
+        let edges = graph.all_edges().unwrap();
+        assert!(edges.iter().any(|edge| edge.src == job("deploy")
+            && edge.dst == job("build")
+            && edge.label == "NEEDS"));
+        assert!(edges.iter().any(
+            |edge| edge.src == "pipeline-job:local/ship@Dockerfile#stage-1"
+                && edge.dst == "pipeline-job:local/ship@Dockerfile#stage-0"
+                && edge.label == "NEEDS"
+        ));
+        // No pipeline fact uses a label the flow tracer walks: the scheduled
+        // workflow's flow is the one the schedule reader alone produces.
+        assert!(
+            edges
+                .iter()
+                .filter(|edge| edge.props["prov"]["extractor_id"] == "t0.pipeline")
+                .all(|edge| !flowtracer::FLOW_EDGE_LABELS.contains(&edge.label.as_str()))
         );
     }
 

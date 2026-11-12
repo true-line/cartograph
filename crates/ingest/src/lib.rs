@@ -16,6 +16,7 @@ pub mod managed;
 pub mod manifest;
 pub mod manifest_draft;
 pub mod matrix;
+pub mod pipelines;
 pub mod preflight;
 pub mod schedules;
 pub mod toolchain;
