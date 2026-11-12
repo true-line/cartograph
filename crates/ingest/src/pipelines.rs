@@ -206,7 +206,7 @@ fn format_of(name: &str, rel: &str) -> Option<Format> {
     ((named || suffixed) && !name.ends_with(".dockerignore")).then_some(Format::Dockerfile)
 }
 
-type Span = (u64, u64);
+pub(crate) type Span = (u64, u64);
 type Props = serde_json::Map<String, serde_json::Value>;
 
 /// One pipeline file, parsed and redacted, before graph-fact conversion.
@@ -297,7 +297,7 @@ fn depths(jobs: &mut [JobDecl]) -> Result<(), &'static str> {
 
 /// Stored free text: recognized secrets replaced, token-shaped runs
 /// withheld. Returns the text and how many replacements were made.
-fn sanitize(input: &str) -> (String, u64) {
+pub(crate) fn sanitize(input: &str) -> (String, u64) {
     let (redacted, mut count) = core_redact::redact_text(input);
     let token_char =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '=' | '.');
@@ -351,7 +351,7 @@ impl Draft {
     }
 }
 
-fn span_of(node: TsNode) -> Span {
+pub(crate) fn span_of(node: TsNode) -> Span {
     (node.start_byte() as u64, node.end_byte() as u64)
 }
 
@@ -373,15 +373,17 @@ fn unwrap(node: TsNode) -> Option<TsNode> {
 }
 
 /// One mapping entry: its key, its value when it has one, and its span.
-struct Field<'t> {
-    name: String,
-    value: Option<TsNode<'t>>,
-    span: Span,
+pub(crate) struct Field<'t> {
+    pub(crate) name: String,
+    pub(crate) value: Option<TsNode<'t>>,
+    pub(crate) span: Span,
+    /// The key alone.
+    pub(crate) key_span: Span,
 }
 
 /// The entries of a block or flow mapping in declared order. A computed or
 /// repeated key is not read.
-fn fields<'t>(text: &str, node: TsNode<'t>) -> Result<Vec<Field<'t>>, &'static str> {
+pub(crate) fn fields<'t>(text: &str, node: TsNode<'t>) -> Result<Vec<Field<'t>>, &'static str> {
     let mapping = unwrap(node)
         .filter(|node| matches!(node.kind(), "block_mapping" | "flow_mapping"))
         .ok_or("a mapping was expected")?;
@@ -411,17 +413,18 @@ fn fields<'t>(text: &str, node: TsNode<'t>) -> Result<Vec<Field<'t>>, &'static s
             name,
             value,
             span: span_of(child),
+            key_span: key.map_or_else(|| span_of(child), span_of),
         });
     }
     Ok(out)
 }
 
-fn field<'a, 't>(fields: &'a [Field<'t>], name: &str) -> Option<&'a Field<'t>> {
+pub(crate) fn field<'a, 't>(fields: &'a [Field<'t>], name: &str) -> Option<&'a Field<'t>> {
     fields.iter().find(|field| field.name == name)
 }
 
 /// The items of a block or flow sequence; `None` when `node` is not one.
-fn items(node: TsNode) -> Option<Vec<TsNode>> {
+pub(crate) fn items(node: TsNode) -> Option<Vec<TsNode>> {
     let sequence = unwrap(node)?;
     let mut walk = sequence.walk();
     let children: Vec<TsNode> = sequence

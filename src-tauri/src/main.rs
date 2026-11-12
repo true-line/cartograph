@@ -327,6 +327,8 @@ struct LayerBreakdown {
     schedules: LayerSummary,
     /// Ordered workflow and Dockerfile steps (#1790).
     pipelines: LayerSummary,
+    /// Environments and workloads from Compose files (#1791).
+    environments: LayerSummary,
     /// Channel and client-call stitching over every layer's sites (#874).
     events: LayerSummary,
 }
@@ -344,6 +346,7 @@ impl LayerBreakdown {
         self.tools.add(other.tools);
         self.schedules.add(other.schedules);
         self.pipelines.add(other.pipelines);
+        self.environments.add(other.environments);
         self.events.add(other.events);
     }
 
@@ -1394,6 +1397,10 @@ fn repo_coverage(
                 ingest::pipelines::PIPELINE_EXTRACTOR_ID,
                 count(&layers.pipelines),
             ),
+            (
+                ingest::environments::ENVIRONMENT_EXTRACTOR_ID,
+                count(&layers.environments),
+            ),
             (events::STITCH_EXTRACTOR_ID, count(&layers.events)),
         ],
         plugins: reads.plugins.clone(),
@@ -2167,6 +2174,26 @@ fn extract_tree_packed(
             .extend(pipeline_facts.nodes, pipeline_facts.edges)
             .map_err(pack_err)?;
     }
+    // Environments (#1791, AC-0661, ADR-0070): each Compose file is an
+    // Environment with a Workload per service; an environment file that
+    // names an environment only by its file name is a Gap. Runs for every
+    // layer selection, as the toolchain reader does. The reader emits no
+    // File node and leaves the toolchain reader's Compose `Tool` fact as it
+    // is. Kubernetes manifests, kustomize files and Helm charts are named by
+    // Preflight's findings, which the coverage inventory lists.
+    {
+        let environment_id = ingest::environments::SourceId { repo, commit };
+        let environment_facts =
+            ingest::environments::extract_dir(root, &environment_id).map_err(|e| e.to_string())?;
+        layers.environments = LayerSummary {
+            files: environment_facts.files,
+            nodes: distinct_node_count(&environment_facts.nodes),
+            edges: distinct_edge_count(&environment_facts.edges),
+        };
+        facts
+            .extend(environment_facts.nodes, environment_facts.edges)
+            .map_err(pack_err)?;
+    }
     // Gated plugin adapters (#201): route the files each active plugin
     // claims via its golden-corpus extensions. Every fact arrives pinned to
     // the exact artifact by the host, and a failed call yields zero partial
@@ -2342,6 +2369,9 @@ fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
         || id.starts_with(&format!("gap:call:{repo}@"))
         || id.starts_with(&format!("gap:chan:{repo}@"))
         || id.starts_with(&format!("gap:fetch:{repo}@"))
+        // A name-only environment Gap has no evidence span to own it by
+        // (AC-0097), like the environment-file `Tool` fact (#1791).
+        || id.starts_with(&format!("gap:environment:{repo}@"))
 }
 
 fn edge_key(edge: &Edge) -> (String, String, String) {

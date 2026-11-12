@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, external services, curated items, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, pipelines, configuration keys, external services, environments, curated items, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -207,6 +207,51 @@ cannot be selected in a work packet.
 Not covered today: how sensitive the data is, what a request body contains,
 traffic that arrives from outside, package dependencies, and who operates an
 SDK provider.
+
+## Environments
+
+Every export includes **environments.md**. It lists the environments your
+sources declare and what each one declares to run. No model is involved.
+
+- **An environment** is one file that declares a set of things to run
+  together. Today that is a Compose file with a `services` section: each
+  such file is one environment.
+- **An environment is shown by the path of its file.** It has a name only
+  when the file states one (a top-level `name`). Otherwise the name reads
+  "none stated". Cartograph never turns a file or folder name such as
+  `prod` into an environment name.
+- **A workload** is one Compose service, with its image, build context,
+  ports, the names of its environment keys, its environment files, its
+  dependencies and its profiles, as the file writes them.
+- **Declared in more than one environment** lists a workload name that two
+  or more Compose files of one repository declare, such as `web` in
+  `docker-compose.yml` and `docker-compose.prod.yml`. Each declaration has
+  its own row, with the properties that differ and its source span. The
+  document does not say which one is used where: no file says which files a
+  deployment combines.
+- **Not established** lists what was found and could not be stated: a
+  Compose file that could not be read, `extends`, `include`, a YAML anchor,
+  alias or tag, a dependency on a service the file does not declare, and an
+  environment file such as `staging.env` or `.env.production`, whose name is
+  the only thing that names an environment.
+
+Only the names of environment keys are listed, never a value. A value
+written as `${...}` is shown as written and marked as not resolved. A long
+unbroken run of letters and digits in an image or a port is withheld,
+because it has the shape of a token.
+
+Every row shows the tier, confidence and source span of its fact. An
+environment file has no span, because these files hold secrets.
+
+A `verified-only` export leaves out InferredWeak rows and states how many
+environment facts it left out. A `best-effort` export includes them and
+marks them. The same graph gives the same document every time. The document
+cannot be selected in a work packet.
+
+Not covered today: Kubernetes manifests, kustomize files, Helm charts and
+Helm values files (the coverage document lists each kind it found as present
+and not read); Terraform resources per environment; the combined result of
+several Compose files; which environment is production; and live state.
 
 ## Curated items
 

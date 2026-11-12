@@ -437,6 +437,11 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         "build and deployment pipeline",
         None,
     ),
+    (
+        crate::environments::ENVIRONMENT_EXTRACTOR_ID,
+        "environments and workloads",
+        None,
+    ),
     // Stitching consumes every layer's event and client-call sites.
     ("t0.events", "event and client-call site", None),
 ];
@@ -682,9 +687,12 @@ impl RepoCoverage {
                 continue;
             }
             unsupported.push(UnsupportedCapability {
-                // A pipeline limit says what is present and why it was not
-                // read (#1790); every other kind keeps the general reason.
-                reason: if crate::pipelines::is_limit_kind(&finding.kind) {
+                // A pipeline limit (#1790) and an environment limit (#1791)
+                // say what is present and why it was not read; every other
+                // kind keeps the general reason.
+                reason: if crate::pipelines::is_limit_kind(&finding.kind)
+                    || crate::environments::is_limit_kind(&finding.kind)
+                {
                     format!("{}: a tool limitation, not a system gap", finding.message)
                 } else {
                     format!(

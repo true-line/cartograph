@@ -373,6 +373,7 @@ fn parse_generation(
         "endpoint-permissions",
         "configuration",
         // `external` is refused until a decision says otherwise (SPEC-13).
+        // `environments` is refused until a decision says otherwise (SPEC-14).
     ];
     if selection
         .artifacts

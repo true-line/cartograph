@@ -122,6 +122,8 @@ export interface IngestSummary {
     schedules?: LayerSummary;
     /** Ordered workflow and Dockerfile steps: Pipeline facts (#1790). */
     pipelines?: LayerSummary;
+    /** Environments and workloads from Compose files (#1791). */
+    environments?: LayerSummary;
     /** Channel and client-call stitching over every layer's sites (#874). */
     events?: LayerSummary;
   };
