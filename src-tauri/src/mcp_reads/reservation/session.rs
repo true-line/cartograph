@@ -233,6 +233,9 @@ impl SessionReservation {
             snapshot.visibility,
             rejected,
             coverage.retained,
+            // The stored inventories stay for the coverage artifacts
+            // (AC-0657), beside the qualification's own retained copies.
+            coverage.stored,
             fixed_basis,
             capability_selection_bytes,
             revision_payload, // ReadSession already owns the inline revision header

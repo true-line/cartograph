@@ -1952,6 +1952,146 @@ fn export_carries_the_stored_coverage_inventory_in_both_modes() {
     }
 }
 
+// AC-0657 (#1814): an MCP read of `coverage` and `coverage-index` is
+// supplied with the inventories of the session's own bounded read. On a real
+// ingest with one language no producer covers it returns that language's
+// entry, not the "not supplied" sentence, and is byte-equal to the artifact
+// the desktop export produces from the same store state. An inventory the
+// session's qualification holds as stale is stated to be stale for its
+// repository; it is neither read as current nor left out.
+#[cfg(unix)]
+#[test]
+fn mcp_coverage_read_equals_the_desktop_export_and_states_a_stale_inventory() {
+    use crate::mcp_reads::{ReadSession, artifacts::ArtifactCompilation};
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
+    std::fs::write(root.join("report.rb"), "puts 'report'\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let stored = state.graph.lock().unwrap().coverage_records().unwrap();
+    assert_eq!(stored.len(), 1);
+    let stored = &stored[0];
+    let desktop = |id: &str| {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::build_spec_artifact(&graph, &decisions, None, spec::ExportMode::VerifiedOnly, id)
+            .unwrap()
+    };
+    let read = |session: &ReadSession, id: &str| {
+        let compiled = session
+            .compile_artifact(
+                id,
+                flowtracer::TraceLimits {
+                    max_flows: 64,
+                    max_hops: 512,
+                    max_output_bytes: 1024 * 1024,
+                },
+                spec::SelectedCompileLimits {
+                    max_bytes: 1024 * 1024,
+                    adr: spec::AdrLimits {
+                        max_rows: 1024,
+                        max_output_bytes: 1024 * 1024,
+                    },
+                },
+            )
+            .unwrap();
+        match compiled {
+            ArtifactCompilation::Produced(compiled) => compiled.artifact().clone(),
+            ArtifactCompilation::Limited { .. } => panic!("the fixture fits"),
+        }
+    };
+    let acquire = |scope: &dyn Fn() -> Vec<context_hub::coverage::ScopedRepo>| {
+        ReadSession::acquire(
+            &state.graph,
+            &state.decisions,
+            || Ok(scope()),
+            core_graph::SnapshotReadLimits::default(),
+            core_graph::coverage::CoverageReadLimits::default(),
+            spec::ExportMode::VerifiedOnly,
+        )
+        .unwrap()
+    };
+
+    // The scope the desktop qualifies with: the registered source under its
+    // current plugin basis, so the stored inventory is current.
+    let current = || crate::context::coverage_scope(app.handle(), &state).unwrap();
+    let session = acquire(&current);
+    let markdown = read(&session, "coverage");
+    assert!(
+        markdown.content.contains(
+            "| Ruby | 1 | `report.rb:1` | no installed producer covers Ruby: a tool \
+             limitation, not a system gap |"
+        ),
+        "{}",
+        markdown.content
+    );
+    assert!(!markdown.content.contains("No stored coverage inventory"));
+    assert_eq!(markdown, desktop("coverage"));
+    let index = read(&session, "coverage-index");
+    assert!(index.content.contains(&stored.record.inventory_json));
+    assert_eq!(index, desktop("coverage-index"));
+    // The read's basis already binds the inventories.
+    assert!(
+        session
+            .basis()
+            .coverage_id
+            .starts_with("coverage-context-v1:")
+    );
+
+    // The same store, read by a session whose plugin basis has moved: the
+    // qualification holds the inventory as stale.
+    let moved = || {
+        let mut scope = current();
+        scope[0].config_hash = "another plugin basis".into();
+        scope
+    };
+    let stale = acquire(&moved);
+    assert_ne!(stale.basis().coverage_id, session.basis().coverage_id);
+    assert_ne!(stale.basis_id().unwrap(), session.basis_id().unwrap());
+    let markdown = read(&stale, "coverage");
+    assert!(
+        markdown.content.contains(&format!(
+            "| {} | unknown | `{}` | unknown: the stored inventory is stale (compared: \
+             registration, plugins) |",
+            stored.record.repo_key, stored.inventory_hash
+        )),
+        "{}",
+        markdown.content
+    );
+    assert!(markdown.content.contains("- The stored inventory is stale"));
+    assert!(!markdown.content.contains("No stored coverage inventory"));
+    assert!(!markdown.content.contains("report.rb"));
+    let index: serde_json::Value =
+        serde_json::from_str(&read(&stale, "coverage-index").content).unwrap();
+    assert_eq!(index["stale"], 1);
+    let listed = &index["repositories"][0];
+    assert_eq!(listed["repo"], stored.record.repo_key.as_str());
+    assert_eq!(listed["inventory_hash"], stored.inventory_hash.as_str());
+    assert_eq!(
+        listed["stale"]["compared"],
+        json!(["registration", "plugins"])
+    );
+    assert!(listed["inventory"].is_null());
+    // A repository that is no longer registered is stale the same way.
+    let unregistered = acquire(&Vec::new);
+    assert!(
+        read(&unregistered, "coverage")
+            .content
+            .contains("- The stored inventory is stale")
+    );
+}
+
 // AC-0595 (#1785, ADR-0058): the export of a real ingest carries the fact and
 // evidence index. Every assertion of every exported artifact has a row, a
 // verified-only export holds no InferredWeak row, a second export is

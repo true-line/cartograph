@@ -357,6 +357,39 @@ fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
     }
 }
 
+// AC-0657 (#1814): decision recorded — work packets do not carry coverage artifacts.
+// Both ids are refused before any compilation, with the export's own
+// identities selected.
+#[test]
+fn ac0657_work_packet_refuses_both_coverage_artifacts() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let saved = f.runtime.store.lock().unwrap().list(50).unwrap().len();
+    for id in ["coverage", "coverage-index"] {
+        let artifact = bundle.artifacts.iter().find(|a| a.id == id).unwrap();
+        f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+        assert_eq!(
+            generate(&f.state, &f.runtime, &f.request.to_string())
+                .unwrap_err()
+                .code,
+            "invalid_input",
+            "{id}"
+        );
+    }
+    assert_eq!(
+        f.runtime.store.lock().unwrap().list(50).unwrap().len(),
+        saved
+    );
+}
+
 // AC-0653: the curated document depends on the curated projection, which the
 // packet host does not compute. Its bytes here would say that no projection
 // was supplied, so it is refused like the pipeline and coverage artifacts and

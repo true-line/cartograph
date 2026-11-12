@@ -10,7 +10,7 @@ mod capabilities;
 mod configuration;
 pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
-pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
+pub use coverage::{COVERAGE_DETAIL_REPO_LIMIT, logical_coverage_render_bound};
 mod curated;
 pub use curated::{
     Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_reason_sentence,
@@ -49,7 +49,7 @@ use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
 pub use selected::{
     ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
-    SelectedCompileLimits, Supplied, artifact_catalog, compile_spec_selected,
+    SelectedCompileLimits, StaleCoverage, Supplied, artifact_catalog, compile_spec_selected,
     compile_spec_selected_supplied, compile_spec_selected_with_coverage,
     compile_spec_selected_with_security, project_recovered_facts,
 };
@@ -714,6 +714,7 @@ pub fn try_compile_spec_with_coverage(
         rejected_hashes,
         Supplied {
             coverage,
+            stale_coverage: &[],
             curated: crate::Curated::NotSupplied,
         },
     )

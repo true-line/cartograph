@@ -2,6 +2,7 @@
 //! No cache: the caller owns every produced handle and its retention admission.
 
 use super::{ReadError, ReadSession, curated_read};
+use context_hub::coverage::CoverageStatus;
 use serde::Serialize;
 use std::{
     io::{self, Write},
@@ -55,6 +56,9 @@ pub(crate) struct ArtifactPage<'a> {
 /// and single-artifact read still produce it. A `curated` read therefore
 /// prints citation ids that this surface cannot look up.
 const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
+
+/// The two projections of the stored coverage inventories (AC-0592).
+const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];
 
 /// The artifacts an MCP reader may select: the compiler's catalogue without
 /// the ids in [`NOT_READABLE`], and the structured form of the curated
@@ -160,10 +164,19 @@ impl ReadSession {
                 },
             )
             .map_err(|_| ReadError::Storage)?
-        } else if id == curated_read::ARTIFACT_ID {
+        } else if id == curated_read::ARTIFACT_ID || COVERAGE_IDS.contains(&id) {
             // The selected compiler the desktop single-artifact read uses,
-            // supplied with the projection this session computed. `curated.md`
-            // reads no coverage inventory and no security projection.
+            // supplied as the export supplies it. `curated.md` reads the
+            // projection this session computed and no coverage inventory.
+            // The coverage artifacts (#1814, AC-0657) read the inventories
+            // of this session's own bounded read, borrowed, and no
+            // projection. Neither reads a security projection.
+            let coverage = COVERAGE_IDS.contains(&id);
+            let stale = if coverage {
+                self.stale_coverage()
+            } else {
+                Vec::new()
+            };
             spec::compile_spec_selected_supplied(
                 &self.base.graph.0,
                 &self.base.graph.1,
@@ -173,8 +186,13 @@ impl ReadSession {
                 &[id],
                 compile_limits,
                 spec::Supplied {
-                    coverage: &[],
-                    curated: self.curated.supplied(),
+                    coverage: if coverage { &self.recorded } else { &[] },
+                    stale_coverage: &stale,
+                    curated: if coverage {
+                        spec::Curated::NotSupplied
+                    } else {
+                        self.curated.supplied()
+                    },
                 },
             )
             .map_err(|_| ReadError::InvalidRequest)?
@@ -214,6 +232,26 @@ impl ReadSession {
                 }
             }
         })
+    }
+}
+
+impl ReadSession {
+    /// The repositories whose stored inventory this session's coverage
+    /// qualification does not hold as recorded under the current
+    /// registration and plugin basis, with what it compared. Fail closed:
+    /// every status but `Recorded` is named, so no such inventory is read
+    /// as current. A repository with no stored inventory has no row to mark.
+    fn stale_coverage(&self) -> Vec<spec::StaleCoverage<'_>> {
+        self.qualified
+            .coverage()
+            .repos
+            .iter()
+            .filter(|repo| repo.status != CoverageStatus::Recorded)
+            .map(|repo| spec::StaleCoverage {
+                repo_key: &repo.repo,
+                compared: &repo.compared,
+            })
+            .collect()
     }
 }
 
