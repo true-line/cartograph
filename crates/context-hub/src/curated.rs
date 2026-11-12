@@ -26,13 +26,21 @@
 //!   exists and is a Gap by the Workbench predicate (`spec::is_gap_node`):
 //!   label `Gap`, or provenance that is missing, invalid or Gap confidence.
 //!   A node that kept the id and is no longer a Gap counts as gone.
+//! - **State order.** First match wins: `unverified`, `already-covered`,
+//!   `unresolvable`, `stale`, `conflicted`, `eligible`.
 //! - **Already covered.** A base fact fills the slot when the base graph holds
 //!   the exact edge the record proposes (same source, label and target) with
 //!   valid provenance whose tier is not Agentic and whose confidence is not
-//!   Gap. An Agentic edge is another proposal, not a base fact. An edge from
+//!   Gap. It is checked before `unresolvable` and `stale` and needs neither
+//!   the Gap, the endpoint nodes nor an assessment: when a lower tier fills
+//!   the slot the Gap is usually gone. An Agentic edge is another proposal,
+//!   not a base fact. An edge from
 //!   the same source to a different target is not counted: the graph cannot
 //!   tie it to this Gap while slot cardinality is unproven (SPEC-12 open
 //!   items).
+//! - **Revision.** It covers every reviewed record's identity, decision,
+//!   state and reason, so it identifies everything a read lists. A rejected
+//!   record enters with no state and no reason.
 //! - **Conflict.** Every accepted record counts, whatever its own state. Two
 //!   accepted records for one Gap conflict when they differ in source, label
 //!   or target. Records that propose the same edge assert the same thing and
@@ -224,19 +232,21 @@ pub struct ProjectionInput<'a> {
     pub policy_version: &'a str,
 }
 
-/// The one state of an accepted record (ADR-0061 decision 4).
+/// The one state of an accepted record (ADR-0061 decision 4). The variants
+/// are in first-match order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordState {
     /// Version 1 record, or evidence that is not all captured primary source.
     Unverified,
+    /// A base fact already holds the proposed edge, whether or not the Gap
+    /// and the endpoints are still in the graph.
+    AlreadyCovered,
     /// The Gap, the source or the target is not in the graph.
     Unresolvable,
     /// The basis moved, a captured item is not available, or the assessment
     /// failed.
     Stale,
-    /// A base fact already holds the proposed edge.
-    AlreadyCovered,
     /// Another accepted record proposes a different edge for the same Gap.
     Conflicted,
     /// None of the above.
@@ -256,6 +266,8 @@ pub enum StateReason {
     NoEvidence,
     /// `unverified`: an evidence item is not captured primary source.
     EvidenceNotCaptured,
+    /// `already-covered`: the base graph holds the proposed edge.
+    BaseFactFillsSlot,
     /// `unresolvable`: no node has the Gap's id.
     GapMissing,
     /// `unresolvable`: the node with the Gap's id is no longer a Gap.
@@ -284,8 +296,6 @@ pub enum StateReason {
     EvidenceUnavailable,
     /// `stale`: the assessment counts unverified items the record does not.
     AssessmentMismatch,
-    /// `already-covered`: the base graph holds the proposed edge.
-    BaseFactFillsSlot,
     /// `conflicted`: another accepted record proposes a different edge.
     DifferentTargetAccepted,
     /// `eligible`: every condition holds.
@@ -612,7 +622,8 @@ fn basis_report(assessment: Option<&BasisAssessment>) -> BasisReport {
     }
 }
 
-/// The first state of the SPEC-12 table that applies, with its reason.
+/// The first state that applies, with its reason, in the order `unverified`,
+/// `already-covered`, `unresolvable`, `stale`, `conflicted`, `eligible`.
 fn assign(
     record: &ReviewedProposal,
     assessment: Option<&BasisAssessment>,
@@ -622,14 +633,17 @@ fn assign(
     if let Some(reason) = unverified(record) {
         return (RecordState::Unverified, reason);
     }
+    // Before `unresolvable` and `stale`: once a lower tier resolves the slot
+    // the Gap node is usually gone and the basis has moved, and "covered" is
+    // the true answer. It needs no Gap, no endpoint node and no assessment.
+    if graph.covered.contains(&edge_key(record)) {
+        return (RecordState::AlreadyCovered, StateReason::BaseFactFillsSlot);
+    }
     if let Some(reason) = unresolvable(record, graph) {
         return (RecordState::Unresolvable, reason);
     }
     if let Some(reason) = stale(record, assessment) {
         return (RecordState::Stale, reason);
-    }
-    if graph.covered.contains(&edge_key(record)) {
-        return (RecordState::AlreadyCovered, StateReason::BaseFactFillsSlot);
     }
     if conflicted.contains(record.gap_id.as_str()) {
         return (
@@ -700,6 +714,10 @@ fn count(counts: &mut CuratedCounts, state: RecordState) {
 /// Pending and rejected proposals are neither items nor listed. A rejected
 /// proposal still enters the revision with its decision and no state, so a
 /// review of any kind gives a new revision.
+///
+/// `revision = digest("curated-revision-v1", policy_version,
+/// graph_content_hash, [(record_id, decision, state, reason)…],
+/// assertion_decision_digest)`, records in record-identity order.
 pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, ProjectionError> {
     let mut reviewed: Vec<(&ReviewedProposal, ReviewDecision)> = input
         .proposals
@@ -730,12 +748,17 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
     let mut revision_records = Vec::with_capacity(reviewed.len());
     for (record, decision) in reviewed {
         if decision == ReviewDecision::Rejected {
-            revision_records.push((record.record_id.as_str(), decision, None));
+            revision_records.push((record.record_id.as_str(), decision, None, None));
             continue;
         }
         let assessment = input.assessments.get(&record.record_id);
         let (state, reason) = assign(record, assessment, &graph, &conflicted);
-        revision_records.push((record.record_id.as_str(), decision, Some(state)));
+        revision_records.push((
+            record.record_id.as_str(),
+            decision,
+            Some(state),
+            Some(reason),
+        ));
         count(&mut counts, state);
         let captured = record.evidence.iter().filter(|item| item.captured).count();
         let entry = CuratedRecord {

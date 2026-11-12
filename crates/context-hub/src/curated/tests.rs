@@ -239,8 +239,8 @@ fn unverified_state_and_reasons() {
     );
 }
 
-// AC-0652: first match wins. A record that is unverified, unresolvable, stale,
-// covered and conflicted at once is `unverified`.
+// AC-0652: first match wins. A record that is unverified, covered,
+// unresolvable, stale and conflicted at once is `unverified`.
 #[test]
 fn unverified_precedes_every_other_state() {
     let mut first = record("r1");
@@ -409,23 +409,76 @@ fn stale_state_and_reasons() {
     );
 }
 
-// AC-0652: `stale` precedes `already-covered` and `conflicted`.
-#[test]
-fn stale_precedes_already_covered() {
-    let mut other = record("r2");
-    other.target_id = "sym:c".into();
-    let mut fixture = Fixture::new(vec![record("r1"), other]);
-    fixture.assess("r1", |d| d.association = BasisComparison::Changed);
-    fixture.edges.push(edge(
+fn covering_edge() -> Edge {
+    edge(
         "sym:a",
         "sym:b",
         Tier::Deterministic,
         ConfidenceTier::Confirmed,
-    ));
+    )
+}
+
+// AC-0652: `already-covered` precedes `unresolvable`. When the base graph
+// holds the exact proposed edge, a missing Gap or endpoint node does not
+// matter.
+#[test]
+fn already_covered_precedes_unresolvable() {
+    let mut fixture = Fixture::new(vec![record("r1")]);
+    fixture.edges.push(covering_edge());
+    fixture.nodes.retain(|node| node.id != "gap:1");
     assert_eq!(
         outcome(&fixture.run(), "r1"),
-        (RecordState::Stale, StateReason::AssociationChanged)
+        (RecordState::AlreadyCovered, StateReason::BaseFactFillsSlot)
     );
+    fixture.nodes.clear();
+    assert_eq!(
+        outcome(&fixture.run(), "r1"),
+        (RecordState::AlreadyCovered, StateReason::BaseFactFillsSlot)
+    );
+}
+
+// AC-0652: `already-covered` precedes `stale` and needs no assessment.
+#[test]
+fn already_covered_precedes_stale() {
+    let mut fixture = Fixture::new(vec![record("r1")]);
+    fixture.edges.push(covering_edge());
+    fixture.assess("r1", |d| d.association = BasisComparison::Changed);
+    let covered = (RecordState::AlreadyCovered, StateReason::BaseFactFillsSlot);
+    assert_eq!(outcome(&fixture.run(), "r1"), covered);
+    fixture
+        .assessments
+        .insert("r1".into(), BasisAssessment::Failed);
+    assert_eq!(outcome(&fixture.run(), "r1"), covered);
+    fixture.assessments.clear();
+    assert_eq!(outcome(&fixture.run(), "r1"), covered);
+}
+
+// AC-0652: `unverified` precedes `already-covered`.
+#[test]
+fn unverified_precedes_already_covered() {
+    let mut legacy = record("r1");
+    legacy.schema_version = 1;
+    let mut fixture = Fixture::new(vec![legacy]);
+    fixture.edges.push(covering_edge());
+    assert_eq!(
+        outcome(&fixture.run(), "r1"),
+        (RecordState::Unverified, StateReason::LegacyRecord)
+    );
+}
+
+// AC-0652: `stale` precedes `conflicted`.
+#[test]
+fn stale_precedes_conflicted() {
+    let mut other = record("r2");
+    other.target_id = "sym:c".into();
+    let mut fixture = Fixture::new(vec![record("r1"), other]);
+    fixture.assess("r1", |d| d.graph = BasisComparison::Changed);
+    let projection = fixture.run();
+    assert_eq!(
+        outcome(&projection, "r1"),
+        (RecordState::Stale, StateReason::GraphChanged)
+    );
+    assert_eq!(outcome(&projection, "r2").0, RecordState::Conflicted);
 }
 
 // AC-0652: `already-covered` when the base graph holds the proposed edge as a
@@ -703,7 +756,8 @@ fn projection_is_independent_of_input_order() {
 }
 
 // AC-0652: the revision changes when a decision flips, when a state changes,
-// when the graph hash changes and when the policy version changes.
+// when a reason changes, when the graph hash changes and when the policy
+// version changes.
 #[test]
 fn revision_changes_with_content() {
     let base = every_state().run().revision;
@@ -728,6 +782,17 @@ fn revision_changes_with_content() {
     assert_eq!(outcome(&changed, "g-eligible").0, RecordState::Stale);
     assert_ne!(changed.revision, base, "eligible to stale");
 
+    // The reason is listed, so it is content: a record that stays `stale`
+    // for another reason gives another revision.
+    let mut reason = every_state();
+    reason.assess("c-stale", |d| d.association = BasisComparison::Changed);
+    let changed = reason.run();
+    assert_eq!(
+        outcome(&changed, "c-stale"),
+        (RecordState::Stale, StateReason::AssociationChanged)
+    );
+    assert_ne!(changed.revision, base, "stale for another reason");
+
     let mut graph = every_state();
     graph.graph_hash = "graph-hash-2".into();
     assert_ne!(graph.run().revision, base, "graph hash");
@@ -749,14 +814,18 @@ fn revision_ignores_what_is_not_content() {
     pending.proposals.push(extra);
     assert_eq!(pending.run().revision, base, "a pending record");
 
-    let mut same_state = every_state();
-    same_state.assess("c-stale", |d| d.association = BasisComparison::Changed);
-    let projection = same_state.run();
+    // An assessment detail that changes neither state nor reason.
+    let mut same_reason = every_state();
+    same_reason.assess("c-stale", |d| {
+        d.graph = BasisComparison::Changed;
+        d.association = BasisComparison::Changed;
+    });
+    let projection = same_reason.run();
     assert_eq!(
         outcome(&projection, "c-stale"),
-        (RecordState::Stale, StateReason::AssociationChanged)
+        (RecordState::Stale, StateReason::GraphChanged)
     );
-    assert_eq!(projection.revision, base, "same state, other reason");
+    assert_eq!(projection.revision, base, "same state and reason");
 }
 
 // AC-0652: field boundaries are framed; moving a character from one field to
