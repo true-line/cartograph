@@ -328,7 +328,7 @@ fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
             .code,
         "invalid_input"
     );
-    // AC-TBD-1818: the pipeline projection also lists files from the stored
+    // AC-0650: the pipeline projection also lists files from the stored
     // coverage inventory, which the packet host does not read. Its bytes
     // here would differ from the export's, so it is refused like the
     // coverage artifacts, never bound to bytes the export does not hold.

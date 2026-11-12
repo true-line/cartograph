@@ -737,7 +737,7 @@ fn dockerfile_stage_relations_are_exact_or_left_as_declared() {
     assert_eq!(node(&out, &stage(2)).props["depth"], 2);
 }
 
-// AC-TBD-1818: `Containerfile`, a dotted suffix of it and any `*.dockerfile`
+// AC-0650: `Containerfile`, a dotted suffix of it and any `*.dockerfile`
 // name are read as Dockerfiles; an ignore list and a name that only contains
 // the word are not. One the reader cannot read exactly is still a named
 // limit under its own name.
@@ -813,7 +813,7 @@ fn containerfile_and_dockerfile_suffix_names_are_read() {
     );
 }
 
-// AC-TBD-1818: a `RUN --mount=…,from=` naming an earlier stage, by name or by
+// AC-0650: a `RUN --mount=…,from=` naming an earlier stage, by name or by
 // index, is a stage relation citing the instruction; an external image stays
 // a declared reference, and a quoted option list is not guessed at.
 #[test]

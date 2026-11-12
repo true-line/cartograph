@@ -1,4 +1,4 @@
-//! Build and deployment pipelines (#1818, AC-TBD-1818, catalogue D7 §7.5):
+//! Build and deployment pipelines (#1818, AC-0650, catalogue D7 §7.5):
 //! `pipelines.md`.
 //!
 //! A deterministic (T0) projection of the pipeline facts the ingest reader

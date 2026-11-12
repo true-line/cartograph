@@ -443,7 +443,7 @@ fn produce(
         }
         // Pipeline facts in the admitted graph, the count the mode and the
         // rejections withheld, and the files the inventories record as
-        // present and not read (AC-TBD-1818).
+        // present and not read (AC-0650).
         "pipelines" => pipelines::output(
             nodes,
             edges,

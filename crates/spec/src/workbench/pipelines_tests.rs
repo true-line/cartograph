@@ -1,4 +1,4 @@
-//! `pipelines.md` (#1818, AC-TBD-1818).
+//! `pipelines.md` (#1818, AC-0650).
 use super::super::selected;
 use super::*;
 use crate::{
@@ -304,7 +304,7 @@ fn table<'a>(content: &'a str, pipeline: &str, heading: &str) -> Vec<&'a str> {
 
 const WORKFLOW_SECTION: &str = "acme/shop@.github/workflows/deploy.yml";
 
-// AC-TBD-1818: each pipeline lists its triggers in declared order, its jobs
+// AC-0650: each pipeline lists its triggers in declared order, its jobs
 // in dependency order with the declared position breaking ties, and each
 // job's steps in declared order, with tier, confidence and span on each row.
 #[test]
@@ -381,7 +381,7 @@ fn jobs_are_in_dependency_order_and_steps_in_declared_order() {
     );
 }
 
-// AC-TBD-1818 (R-INT-4): a job with an unresolved need, a job that needs it
+// AC-0650 (R-INT-4): a job with an unresolved need, a job that needs it
 // and jobs on a cycle are never given a place; each is listed with the
 // reason, after the jobs that are ordered.
 #[test]
@@ -472,7 +472,7 @@ fn unresolved_need_and_cycle_are_stated_and_never_ordered() {
     );
 }
 
-// AC-TBD-1818 (R-INT-5): a verified-only export leaves out InferredWeak rows
+// AC-0650 (R-INT-5): a verified-only export leaves out InferredWeak rows
 // and states how many, cites none of them, and says which admitted facts
 // lost their place; a best-effort export lists them marked.
 #[test]
@@ -613,7 +613,7 @@ fn inventory() -> Value {
     })
 }
 
-// AC-TBD-1818: files present and not read are listed with their recorded
+// AC-0650: files present and not read are listed with their recorded
 // reason from the stored coverage inventory, identically in both modes;
 // without an inventory the document says it states nothing about them.
 #[test]
@@ -682,7 +682,7 @@ fn files_present_and_not_read_come_from_the_stored_inventory() {
     assert!(section(&clean.content).contains("| — | None recorded | 0 | — | — | — |"));
 }
 
-// AC-TBD-1818: the reader gaps that remain are stated in every export, and
+// AC-0650: the reader gaps that remain are stated in every export, and
 // an export with no pipeline fact says so instead of rendering nothing.
 #[test]
 fn coverage_note_lists_what_the_reader_does_not_cover() {
@@ -711,7 +711,7 @@ fn coverage_note_lists_what_the_reader_does_not_cover() {
     assert!(empty.assertions.is_empty());
 }
 
-// AC-TBD-1818: the same graph yields the same bytes whatever order the store
+// AC-0650: the same graph yields the same bytes whatever order the store
 // or the caller hands the facts and inventories over in, and the selected
 // compiler agrees.
 #[test]
@@ -761,7 +761,7 @@ fn two_exports_are_byte_identical_whatever_the_input_order() {
     }
 }
 
-// AC-TBD-1818 (ADR-0058): every assertion of the artifact has a row in the
+// AC-0650 (ADR-0058): every assertion of the artifact has a row in the
 // export's fact index that names this artifact, the ids it cites pass the
 // export's citation check, and an id that does not resolve, or two facts
 // sharing one id, fail the export instead of producing a document.

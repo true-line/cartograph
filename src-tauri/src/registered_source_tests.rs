@@ -2190,7 +2190,7 @@ fn export_projects_ingested_endpoints_against_permission_sites() {
     }
 }
 
-// AC-TBD-1818 (#1818): the export of a real ingest carries the pipeline
+// AC-0650 (#1818): the export of a real ingest carries the pipeline
 // projection. A workflow's jobs are listed in dependency order against their
 // declared order, with steps in declared order and spans; a `Containerfile`
 // stage that mounts from an earlier stage is ordered after it; GitLab CI and
