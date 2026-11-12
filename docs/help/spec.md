@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, pipelines, configuration keys, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -98,6 +98,59 @@ Not covered today:
   jobs and steps are not resolved.
 - The values of `with:` inputs, `ENV` and `ARG` are not stored. A secret is
   recorded by name only.
+
+## Configuration keys
+
+Every export includes **configuration.md**. It lists each configuration key
+once, with the environment files that declare it and the source files and
+symbols that read it. No model is involved. Only key names are listed: no
+value, default or fallback is stored or shown.
+
+A key is the name of an environment variable. Names are compared exactly,
+including case. A key is listed once for each repository, because an
+environment file in one repository says nothing about a read in another.
+
+- **Declared** means an environment file among the ingested sources assigns
+  the key: `.env`, `.env.*`, `*.env`, `env.example`, `env.sample` or
+  `env.template`.
+- **Read** means source code reads the key by name through the language's
+  own environment read, such as `process.env.X` or `os.getenv("X")`.
+- **Read, never declared** means that no environment file in the ingested
+  sources declares the key. It does not mean that the key is unset when the
+  system runs. A deployment platform, a pipeline setting, a container
+  definition, a secret store or a shell can set it, and none of those is read.
+- **Declared, never read** means that no recovered read names the key. A
+  read that is not covered can still use it.
+
+**Files with reads that cannot be named** are listed separately. Each reads
+at least one key whose name is not written as a literal in the source, for
+example `process.env[name]`. Those keys exist and the document cannot name
+them.
+
+Every row shows the tier, confidence and source span of its fact. An
+environment file has no span: these files hold secrets, so no part of one is
+stored.
+
+A `verified-only` export leaves out InferredWeak rows and states how many
+configuration facts it left out. A `best-effort` export includes them and
+marks them. The same graph gives the same document every time. The document
+reads graph facts only, so it can be selected in a work packet.
+
+The document states which languages are read: TypeScript, JavaScript, Python,
+Go, Rust, Java and Kotlin, each with what is read and what is not.
+
+Not covered today:
+
+- `import.meta.env` and a destructured `process.env`
+  (`const { X } = process.env`) in TypeScript and JavaScript.
+- A membership test in Python, `"X" in os.environ`.
+- The compile-time `env!` and `option_env!` macros in Rust.
+- Configuration frameworks: Spring `@Value` and `Environment`, NestJS
+  `ConfigService`, Viper, and settings libraries in general.
+- Declarations outside environment files. A key set in a container or
+  compose file, a deployment manifest, an infrastructure definition, a
+  workflow `env:` map or a shell script is not listed as declared.
+- Languages other than the seven above.
 
 ## Coverage in an export
 

@@ -142,7 +142,7 @@ always shown as unconfirmed until a human confirms each row.
 | 6.1 | Authentication and authorization model | P+A | Permission sites, `Actor` caller sets |
 | 6.2 | Permissions granted to infrastructure | P | `security.md` (IAM findings) |
 | 6.3 | Endpoints with no recovered authentication check | P | `endpoint-permissions.md`: endpoints against the permission sites recovered for them (Flask, Flask-Admin and NestJS GraphQL today) |
-| 6.4 | Secrets and configuration handling | P | Toolchain facts (key names only, never values) |
+| 6.4 | Secrets and configuration handling | P | `configuration.md`: key names declared in environment files and read in source (never values), and toolchain facts |
 | 6.5 | External data flows | P | Flows that cross the system boundary |
 | 6.6 | Compliance obligations | H | — |
 
@@ -156,7 +156,7 @@ always shown as unconfirmed until a human confirms each row.
 |---|---------|------|--------------|
 | 7.1 | Build and toolchain | P | `toolchain.md` |
 | 7.2 | Environments and deployed resources | P | Infrastructure facts, observed state where supplied |
-| 7.3 | Configuration: every key the system declares or reads | P | Key names from environment files (`Tool` facts, category `environment`) and from `ConfigRead` facts: standard-library environment reads in TypeScript/JavaScript, Python, Go, Java, Kotlin and Rust (ADR-0059). No projection lists the read keys yet (#1789); never values |
+| 7.3 | Configuration: every key the system declares or reads | P | `configuration.md`: each key once per repository, with the environment files that declare it (`Tool` facts, category `environment`) and the files and symbols that read it (`ConfigRead` facts: standard-library environment reads in TypeScript/JavaScript, Python, Go, Java, Kotlin and Rust; ADR-0059), keys read and never declared, keys declared and never read, and the files with reads it cannot name; never values |
 | 7.4 | Scheduled jobs | P | `Schedule` flow triggers (yacron, crontab, Kubernetes `CronJob`) |
 | 7.5 | How to deploy | A | `pipelines.md`: each pipeline with its triggers, its jobs in dependency order and their steps (GitHub Actions workflows and Dockerfiles; ADR-0060), `Tool` facts, target documentation |
 | 7.6 | Dependencies on external services | P | External endpoints and channels |
@@ -231,7 +231,7 @@ The existing documents do not print the id beside each statement yet; that
 is added one document at a time. Until a document prints its citations, it
 may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's twenty-two artifacts go
+## 3. Where today's twenty-three artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -250,10 +250,11 @@ may only make statements whose evidence one of §11.1 to §11.5 already holds.
 | `rule-evidence.md`, `rule-evidence.json` | D1 §1.5, D11 §11.4 |
 | `endpoint-permissions.md` | D6 §6.3 |
 | `pipelines.md` | D7 §7.5 |
+| `configuration.md` | D7 §7.3, D6 §6.4 |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
 | `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The twenty-two files keep being exported under their current names until each
+The twenty-three files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -269,7 +270,7 @@ row names the issue that tracks it.
 | D6 §6.3 | Endpoints are projected against permission sites as `endpoint-permissions.md` (#1787, fixed). Permission sites are recovered for Flask, Flask-Admin and NestJS GraphQL only, and only on the endpoint's own declaration: an endpoint of any other framework is listed under a coverage note in neither table, and a check made by middleware, a gateway or code inside a handler body is not recovered (#1320 covers Flask in-body checks). "None recovered" therefore never means that no check runs |
 | D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary (#1788) |
 | D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied (#1791) |
-| D7 §7.3, D6 §6.4 | Every compiled-in adapter (TypeScript/JavaScript, Python, Go, Java, Kotlin, Rust) emits a `ConfigRead` fact for a standard-library environment read, named for a literal key and unnamed for a dynamic one (ADR-0059); before that only a key that named a recognised client (`env_key` on an observed `Resource`, TypeScript and Python) was recorded. Still missing: the projection that lists each key with where it is declared and read, and reads through configuration frameworks (Spring `@Value`, NestJS `ConfigService`, Viper). There is no C# adapter (#1789) |
+| D7 §7.3, D6 §6.4 | Every compiled-in adapter (TypeScript/JavaScript, Python, Go, Java, Kotlin, Rust) emits a `ConfigRead` fact for a standard-library environment read, named for a literal key and unnamed for a dynamic one (#1789, ADR-0059), and the keys are projected as `configuration.md` (#1821, fixed): each key once per repository with where it is declared and read, each with tier, confidence and span, and the files with reads it cannot name. Still not covered: `import.meta.env` and destructured `process.env`, `"X" in os.environ`, Rust `env!`, and reads through configuration frameworks (Spring `@Value`, NestJS `ConfigService`, Viper); only environment files count as declarations, so a key set in a compose file, a manifest, a workflow or a shell script is listed as never declared; an environment file has no span. There is no C# adapter. The sections themselves are not drafted yet (#1748) |
 | D7 §7.5 | The ordered build and deployment steps of GitHub Actions workflows and Dockerfiles are recovered as facts (#1790, ADR-0060) and projected as `pipelines.md` (#1818, fixed): triggers, jobs in dependency order and steps in declared order, each with tier, confidence and span. Still not covered: a Dockerfile with a heredoc and a workflow with a YAML alias, anchor or tag are listed as present and not read; GitLab CI, Jenkins, CircleCI and Azure Pipelines are named and not read; nothing is evaluated, so matrices, expressions, reusable workflows and third-party actions stay as declared. The coverage inventory holds a count and the first file for each kind of unread file, not every file. The section itself is authored and is not drafted yet (#1748) |
 | D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is exported as `coverage.md` and `coverage.json` (#1786, fixed). It records each producer's file count, each missing input and each unsupported capability with its first site; it holds no list of every file found, read or skipped, so these sections cannot yet name each file |
 | D11 §11.7 | The fact and evidence index is exported as `fact-index.md` and `fact-index.json` (#1785, fixed; ADR-0058). It has one row for each fact an exported artifact asserts, with its tier, confidence, method, evidence basis, extractor and spans, and the export fails if a cited id has no row. The existing documents do not yet print the citation id beside each statement, so D4 §4.2, D5 §5.2 and D7 become checkable statement by statement only as each document adds its citations |
@@ -296,7 +297,7 @@ of them.
    Each row stays unconfirmed until a person confirms it.
 5. **One file per document**, Markdown, with the appendices as separate
    files. Other formats are a rendering concern.
-6. **The current twenty-two artifacts stay exported** alongside the new
+6. **The current twenty-three artifacts stay exported** alongside the new
    documents until every consumer has moved.
 7. **Order of delivery:** D11 and the P sections of D4 and D5 first (no
    model needed), then D1, then D2 and D3, then the rest.

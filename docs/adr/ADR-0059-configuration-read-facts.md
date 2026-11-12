@@ -78,6 +78,12 @@ shape has to be decided.
 - The nodes are not grouped under a layer in the Atlas yet and show their raw
   id there.
 
+*Amended for #1821 (AC-0651):* `configuration.md` projects these facts, so
+they no longer appear only in the graph. In the Atlas a `ConfigRead` node is
+in the Server code band, in the cluster of the file that reads it, and is
+labelled with its key; a dynamic read is labelled "key not named in source".
+The reads listed above as not read are still not read.
+
 ## Alternatives
 
 1. **Reuse the observed `Resource` with `env_key`.** It needs a provider and
