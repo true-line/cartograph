@@ -70,6 +70,19 @@ start ingestion, change confirmed facts, or execute Cartograph providers.
 Your connected client controls its own model and provider, so consider its data
 handling before connecting it to repository evidence.
 
+A complete-session client can also read **curated** and **curated-json** with
+the artifact tool. `curated` is the same **curated.md** an export holds for the
+same reviews, graph and export mode. `curated-json` gives the same content as
+data: the curated revision, the graph it was computed over, each accepted
+proposal with its proposed relation, tier, confidence, state and reason, and
+the counts. This shows the client which proposals you accepted and why each is
+or is not a curated item; review notes are not shown. A `verified-only`
+service shows no curated item, only how many it left out. The session's basis
+carries the curated revision, and `h3_curated_available` is true only when the
+session computed it; otherwise the basis and both documents give the reason
+and every other read still works. A review made while a session starts makes
+that read fail as stale; read again. A scoped session offers no curated read.
+
 **Disable** revokes the service. Already-running local work may finish before
 its reserved capacity is released; refresh while the status is draining.
 If cleanup fails, Settings reports it and blocks new access; a disabled status is

@@ -225,8 +225,9 @@ Limits today:
   export. Export again.
 - Investigation findings accepted for follow-up are not listed. A finding
   has no relation to show.
-- The Workbench does not show curated items yet, and an MCP reader and a
-  work packet cannot select this document.
+- The Workbench does not show curated items yet, and a work packet cannot
+  select this document. A complete-session MCP client can read it (see
+  **Read-only MCP** in Settings).
 
 ## Coverage in an export
 
