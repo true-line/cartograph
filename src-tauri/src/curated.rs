@@ -13,7 +13,9 @@
 //!    and the pure projection is computed over the export's own snapshot.
 //!
 //! An MCP read session (slice 4, AC-0654) runs the same two steps over the
-//! snapshot it froze, and takes its reviews through [`ReviewSource`].
+//! snapshot it froze, and takes its reviews through [`ReviewSource`]. It
+//! gathers only after its own bounded graph read succeeded, and it never
+//! makes the compile of [`DerivedDecisions::Compile`].
 
 use agents::ProposalDecision;
 use agents::staging::{MAX_STAGED_PAGE_ITEMS, MAX_STAGED_REFERENCE_SCAN};
@@ -345,7 +347,9 @@ fn match_stored<'a>(
 /// left over was made on a derived statement (a flow hop, a decision record,
 /// a finding) or matches nothing; those are settled by compiling the
 /// `best-effort` documents once with no rejection and reading their
-/// assertions. That second compile runs only when such a decision exists.
+/// assertions. That second compile runs only when such a decision exists,
+/// and only for a reader that compiles ([`DerivedDecisions::Compile`]). For
+/// any other reader such a decision leaves the projection not computed.
 fn current_assertion_hashes(
     snapshot: &Snapshot<'_>,
     decided: &[core::AssertionDecisionEntry],
@@ -368,12 +372,10 @@ fn current_assertion_hashes(
     if wanted.is_empty() {
         return Ok(current);
     }
-    let traced;
-    let flows = match snapshot.flows {
-        SnapshotFlows::Traced(flows) => flows,
-        SnapshotFlows::Untraced => {
-            traced = flowtracer::trace(snapshot.nodes, snapshot.edges);
-            &traced
+    let flows = match snapshot.derived_decisions {
+        DerivedDecisions::Compile(flows) => flows,
+        DerivedDecisions::NotCompiled => {
+            return Err(CuratedFailure::DerivedDecisionsNeedCompile);
         }
     };
     let bundle = spec::try_compile_spec_with_coverage(
@@ -400,22 +402,24 @@ fn current_assertion_hashes(
     Ok(current)
 }
 
-/// The flows of a snapshot. They are read only to settle a Workbench decision
-/// that matches no stored fact, so a reader that has not traced them yet
-/// need not trace them for every read.
+/// How a Workbench decision that matches no stored fact is settled.
 #[derive(Clone, Copy)]
-pub(crate) enum SnapshotFlows<'a> {
-    /// `flowtracer::trace` of the snapshot, already made.
-    Traced(&'a [flowtracer::Flow]),
-    /// Not traced. The same trace is made if, and only if, it is read.
-    Untraced,
+pub(crate) enum DerivedDecisions<'a> {
+    /// By compiling every document once from these flows, the
+    /// `flowtracer::trace` of the snapshot. The export does this.
+    Compile(&'a [flowtracer::Flow]),
+    /// Not at all: the reader's work is bounded and that compile is not in
+    /// its bound (an MCP read session). Such a decision leaves the
+    /// projection not computed, with
+    /// [`CuratedFailure::DerivedDecisionsNeedCompile`].
+    NotCompiled,
 }
 
 /// The graph an export read, as the projection needs it.
 pub(crate) struct Snapshot<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [Edge],
-    pub flows: SnapshotFlows<'a>,
+    pub derived_decisions: DerivedDecisions<'a>,
     pub coverage: &'a [core_graph::coverage::StoredCoverage],
     /// `spec::graph_content_hash` of `nodes` and `edges`.
     pub content_hash: &'a str,

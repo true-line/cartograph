@@ -458,10 +458,12 @@ mod tests {
             assert!(!structured.contains("a private note"));
         }
 
-        // A review after the session gathered its reviews: stale.
-        let mut reviewed = false;
+        // A review after the session gathered its reviews: stale. The
+        // scope is read before the graph and again after the reviews.
+        let mut calls = 0;
         let stale = acquire(spec::ExportMode::BestEffort, &mut || {
-            if !std::mem::replace(&mut reviewed, true) {
+            calls += 1;
+            if calls == 2 {
                 store
                     .lock()
                     .unwrap()

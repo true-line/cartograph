@@ -224,6 +224,14 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             "assertions_not_compiled",
         ),
         (CuratedFailure::RevisionNotEncoded, "revision_not_encoded"),
+        (
+            CuratedFailure::DecisionsUnavailable,
+            "decisions_unavailable",
+        ),
+        (
+            CuratedFailure::DerivedDecisionsNeedCompile,
+            "derived_decisions_need_compile",
+        ),
     ];
     let mut sentences = BTreeSet::new();
     for (failure, code) in failures {

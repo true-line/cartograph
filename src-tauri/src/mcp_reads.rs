@@ -8,13 +8,16 @@
 //! bound exact RSS: retained raw facts, projection indexes, temporary identity
 //! construction and future artifact caches need separate service admission.
 //!
-//! The curated projection is outside the worker reservation ledger too. Its
-//! work is bounded by record counts (`crate::curated`), not by the worker's
-//! byte limits: one bounded review read, one graph copy for each accepted
-//! record that could be eligible, the graph content hash and, only when a
-//! Workbench decision matches no stored fact, one compile of the documents.
-//! The projection the session then retains holds at most
-//! `crate::curated::MAX_CURATED_ACCEPTED` records and the stale decisions.
+//! The curated projection is outside the worker reservation ledger. Its
+//! work is bounded by record counts (`crate::curated`): one bounded review
+//! read, then one graph copy at a time for each accepted record that could
+//! be eligible. Those copies are made only after this session's bounded
+//! graph read succeeded, so each is within the session's graph limit. The
+//! graph content hash is one pass over the admitted snapshot. No document is
+//! compiled while a session is acquired: a Workbench decision that matches
+//! no stored fact leaves the projection not computed. The projection the
+//! session retains holds at most `crate::curated::MAX_CURATED_ACCEPTED`
+//! records and the stale decisions.
 
 use crate::curated::{self, ReviewSource};
 use agents::{DecisionLog, DecisionSelectionError};
@@ -263,16 +266,20 @@ impl ReadSession {
         )
     }
     /// The curated projection (SPEC-12 slice 4, AC-0654) is read in the
-    /// export's two steps. `reviews.gather()` runs first, before this call
-    /// takes any lock: its assessments take the staging, registry, lease and
-    /// graph locks themselves. Every lock below is a temporary of one
-    /// statement, so none is held across another store's read. After the
+    /// export's two steps. `reviews.gather()` runs once the bounded graph
+    /// read has succeeded, so no assessment is made for a graph over the
+    /// session's limits. Its assessments take the staging, registry, lease
+    /// and graph locks themselves; every lock here is a temporary of one
+    /// statement, so none is held when it runs or across another store's
+    /// read. After the
     /// existing brackets the Workbench decisions are read once and must give
     /// the rejection set the brackets observed, and the reviewed records must
     /// still be the ones `gather` read; either difference is `StaleBasis`,
     /// as is a graph revision that moved. The projection is then computed
-    /// over this session's own snapshot with no lock held. A projection that
-    /// cannot be computed does not fail the session.
+    /// over this session's own snapshot with no lock held and without
+    /// compiling any document: a Workbench decision that matches no stored
+    /// fact leaves it not computed. A projection that cannot be computed
+    /// does not fail the session.
     #[allow(
         clippy::too_many_arguments,
         reason = "the review source is one more explicit host borrow of the session"
@@ -287,8 +294,6 @@ impl ReadSession {
         coverage_limits: CoverageReadLimits,
         mode: ExportMode,
     ) -> Result<Self, ReadError> {
-        // No lock is held here (`crate::curated::gather`).
-        let review = reviews.gather();
         let rejected_hashes = rejected(decisions)?;
         let before_scope = normalized_scope(scope()?)?;
         let (base, recorded) = graph
@@ -300,6 +305,11 @@ impl ReadSession {
         // This keeps reset's graph -> overlay lock order and the later recheck safe.
         let (knowledge, capabilities, actors) =
             read_knowledge(overlay, &base.revision, graph_limits)?;
+        // Only now: the bounded read above admitted the graph under this
+        // session's limits, so each graph copy an assessment makes is within
+        // them. A graph that does not fit has failed already, with no
+        // assessment made. No lock is held here (`crate::curated::gather`).
+        let review = reviews.gather();
         let after_scope = normalized_scope(scope()?)?;
         let after_rejected = rejected(decisions)?;
         if before_scope != after_scope || rejected_hashes != after_rejected {
@@ -307,8 +317,8 @@ impl ReadSession {
         }
         // The decisions the projection reads. They must reject exactly what
         // the artifacts of this session reject. The rejection set was read
-        // above; if the full records cannot be listed, the review stores are
-        // unavailable to the projection and the session is still acquired.
+        // above; if the full records cannot be listed, the projection is not
+        // computed and the session is still acquired.
         let assertion_decisions = decisions
             .lock()
             .map_err(|_| ReadError::Storage)?
@@ -336,7 +346,7 @@ impl ReadSession {
             (Some(_), Ok(true)) => review,
             (_, Err(failure)) => curated::CuratedReview::failed(failure),
             (None, Ok(true)) => {
-                curated::CuratedReview::failed(spec::CuratedFailure::ReviewsUnavailable)
+                curated::CuratedReview::failed(spec::CuratedFailure::DecisionsUnavailable)
             }
         };
         let assertion_decisions = assertion_decisions.unwrap_or_default();
@@ -361,7 +371,8 @@ impl ReadSession {
                 &curated::Snapshot {
                     nodes: &base.graph.0,
                     edges: &base.graph.1,
-                    flows: curated::SnapshotFlows::Untraced,
+                    // No document is compiled while a session is acquired.
+                    derived_decisions: curated::DerivedDecisions::NotCompiled,
                     coverage: &recorded,
                     content_hash: &content_hash,
                     revision: &base.revision,

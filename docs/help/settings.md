@@ -80,7 +80,10 @@ or is not a curated item; review notes are not shown. A `verified-only`
 service shows no curated item, only how many it left out. The session's basis
 carries the curated revision, and `h3_curated_available` is true only when the
 session computed it; otherwise the basis and both documents give the reason
-and every other read still works. A review made while a session starts makes
+and every other read still works. One such reason is a Workbench decision
+that matches no recovered fact: checking it needs every document compiled,
+which a client session does not do, so read **curated.md** in an export
+instead. A review made while a session starts makes
 that read fail as stale; read again. A scoped session offers no curated read.
 
 **Disable** revokes the service. Already-running local work may finish before

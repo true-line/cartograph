@@ -118,6 +118,12 @@ pub enum CuratedFailure {
     AssertionsNotCompiled,
     /// The curated revision could not be encoded.
     RevisionNotEncoded,
+    /// The Workbench decisions could not be read.
+    DecisionsUnavailable,
+    /// A Workbench decision matches no stored fact, so it was made on a
+    /// derived statement or matches nothing. Telling which needs a compile
+    /// of every document, which this read does not make. An export makes it.
+    DerivedDecisionsNeedCompile,
 }
 
 impl CuratedFailure {
@@ -163,6 +169,17 @@ impl CuratedFailure {
             Self::RevisionNotEncoded => (
                 "revision_not_encoded",
                 "The curated revision could not be encoded, and none is invented.".into(),
+            ),
+            Self::DecisionsUnavailable => (
+                "decisions_unavailable",
+                "The Workbench decisions could not be read.".into(),
+            ),
+            Self::DerivedDecisionsNeedCompile => (
+                "derived_decisions_need_compile",
+                "A Workbench decision was made on a derived statement, or no longer matches \
+                 any statement. It can only be checked by compiling every document, which an \
+                 agent read does not do. An export does, and shows the curated items."
+                    .into(),
             ),
         }
     }

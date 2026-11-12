@@ -6193,7 +6193,7 @@ fn spec_inputs(
                 &curated::Snapshot {
                     nodes: &nodes,
                     edges: &edges,
-                    flows: curated::SnapshotFlows::Traced(&flows),
+                    derived_decisions: curated::DerivedDecisions::Compile(&flows),
                     coverage: &coverage,
                     content_hash: &graph_basis.content_hash,
                     revision: &revision,

@@ -23,8 +23,36 @@ fn evidence() -> Vec<EvidenceRef> {
     }]
 }
 
-/// A graph with one confirmed fact, and two Workbench decisions: a rejection
-/// and an acceptance, both on statements the graph does not hold.
+fn inferred(content: &str) -> Provenance {
+    Provenance::new(
+        Tier::Semantic,
+        ConfidenceTier::InferredStrong,
+        evidence(),
+        "fixture.semantic",
+        content.as_bytes(),
+    )
+    .unwrap()
+}
+
+fn decide(decisions: &Mutex<DecisionLog>, provenance: Provenance, decision: AssertionDecision) {
+    decisions
+        .lock()
+        .unwrap()
+        .record_assertion(
+            &CuratableAssertion {
+                subject_id: "module:fixture".into(),
+                summary: "fixture".into(),
+                provenance,
+            },
+            decision,
+            None,
+        )
+        .unwrap();
+}
+
+/// A graph with one confirmed fact and two stored inferred facts, and two
+/// Workbench decisions, each on one of the stored inferred facts: one
+/// rejected, one accepted.
 fn stores() -> (Mutex<SqliteGraphStore>, Mutex<DecisionLog>) {
     let mut graph = SqliteGraphStore::open_in_memory().unwrap();
     let provenance = Provenance::new(
@@ -42,31 +70,27 @@ fn stores() -> (Mutex<SqliteGraphStore>, Mutex<DecisionLog>) {
             props: json!({"logical_id":"orders","type":"queue","prov":provenance}),
         })
         .unwrap();
-    let mut decisions = DecisionLog::open(":memory:").unwrap();
-    for (content, decision) in [
-        ("earlier rejected", AssertionDecision::Rejected),
-        ("earlier accepted", AssertionDecision::Accepted),
-    ] {
-        decisions
-            .record_assertion(
-                &CuratableAssertion {
-                    subject_id: "resource:orders".into(),
-                    summary: content.into(),
-                    provenance: Provenance::new(
-                        Tier::Agentic,
-                        ConfidenceTier::InferredWeak,
-                        evidence(),
-                        "fixture.model",
-                        content.as_bytes(),
-                    )
-                    .unwrap(),
-                },
-                decision,
-                None,
-            )
+    for id in ["module:rejected", "module:accepted"] {
+        graph
+            .put_node(&Node {
+                id: id.into(),
+                label: "Module".into(),
+                props: json!({"name":id,"prov":inferred(id)}),
+            })
             .unwrap();
     }
-    (Mutex::new(graph), Mutex::new(decisions))
+    let decisions = Mutex::new(DecisionLog::open(":memory:").unwrap());
+    decide(
+        &decisions,
+        inferred("module:rejected"),
+        AssertionDecision::Rejected,
+    );
+    decide(
+        &decisions,
+        inferred("module:accepted"),
+        AssertionDecision::Accepted,
+    );
+    (Mutex::new(graph), decisions)
 }
 
 fn acquire(
@@ -130,7 +154,8 @@ fn curated_of(bundle: &spec::SpecBundle) -> &spec::SpecArtifact {
 #[test]
 fn mcp_curated_read_is_the_export_document_and_revision_in_both_modes() {
     // AC-0654: with no reviewed record the projection is still computed,
-    // over the graph and the Workbench decisions. The `curated` artifact an
+    // over the graph and the Workbench decisions, which here are all on
+    // stored facts, so no document is compiled for it. The `curated` artifact an
     // MCP session serves is the one `build_spec_bundle` holds, and the
     // session's basis carries the bundle's curated revision.
     let stores = stores();
@@ -174,18 +199,11 @@ fn mcp_curated_read_is_the_export_document_and_revision_in_both_modes() {
         assert_eq!(data["items_omitted"], 0);
         assert_eq!(data["listed"], json!([]));
         assert_eq!(data["counts"]["accepted"], 0);
-        // Neither decision matches a current statement: both are listed as
-        // stale, and no rejection is applied.
+        // Both decisions match a stored fact: one rejection applies and
+        // none is stale.
         let decisions = &data["assertion_decisions"];
-        assert_eq!(decisions["rejections_applied"], 0);
-        assert_eq!(decisions["stale"].as_array().unwrap().len(), 2);
-        assert!(
-            decisions["stale"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|entry| entry["state"] == "stale")
-        );
+        assert_eq!(decisions["rejections_applied"], 1);
+        assert_eq!(decisions["stale"], json!([]));
         revisions.push(basis.revision.clone());
     }
     // One revision in both modes: the mode filters the document.
@@ -276,34 +294,117 @@ fn mcp_read_is_stale_when_the_reviews_change_while_it_is_acquired() {
 #[test]
 fn workbench_decision_gives_the_mcp_basis_another_curated_revision() {
     // AC-0654 (ADR-0061 decision 8): the Workbench decisions join the
-    // revision, so a new one gives a later session another curated revision
-    // and another basis identity.
+    // revision, so a new rejection of a stored fact gives a later session
+    // another curated revision and another basis identity.
     let stores = stores();
     let before = acquire(&stores, &NoReviews, ExportMode::BestEffort).unwrap();
-    stores
-        .1
-        .lock()
-        .unwrap()
-        .record_assertion(
-            &CuratableAssertion {
-                subject_id: "resource:orders".into(),
-                summary: "later".into(),
-                provenance: Provenance::new(
-                    Tier::Agentic,
-                    ConfidenceTier::InferredWeak,
-                    evidence(),
-                    "fixture.model",
-                    b"later rejected",
-                )
-                .unwrap(),
-            },
-            AssertionDecision::Rejected,
-            None,
-        )
-        .unwrap();
+    decide(
+        &stores.1,
+        inferred("module:accepted"),
+        AssertionDecision::Rejected,
+    );
     let after = acquire(&stores, &NoReviews, ExportMode::BestEffort).unwrap();
+    assert!(before.basis().h3_curated_available && after.basis().h3_curated_available);
     assert_ne!(before.basis().curated, after.basis().curated);
     assert_ne!(before.basis_id().unwrap(), after.basis_id().unwrap());
+}
+
+#[test]
+fn derived_or_orphaned_workbench_decision_is_not_compiled_for_an_mcp_read() {
+    // AC-0654: a Workbench decision that matches no stored fact was made on
+    // a derived statement or matches nothing, and only a compile of every
+    // document can tell. An MCP acquisition does not make that compile: the
+    // projection is not computed, with that reason, in the basis and in
+    // both documents, and no other read fails. The export for the same
+    // state compiles and computes.
+    let stores = stores();
+    let computed = acquire(&stores, &NoReviews, ExportMode::BestEffort).unwrap();
+    assert!(computed.basis().h3_curated_available);
+    decide(
+        &stores.1,
+        inferred("no such statement"),
+        AssertionDecision::Accepted,
+    );
+    for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+        let session = acquire(&stores, &NoReviews, mode).unwrap();
+        assert!(!session.basis().h3_curated_available);
+        assert_eq!(
+            session.basis().curated,
+            CuratedBasis::NotComputed(CuratedFailure::DerivedDecisionsNeedCompile)
+        );
+        assert_eq!(
+            serde_json::to_value(&session.basis().curated).unwrap(),
+            json!({"status":"not_computed","reason":"derived_decisions_need_compile"})
+        );
+        let document = read(&session, ARTIFACT_ID).content;
+        assert!(
+            document.contains("(`derived_decisions_need_compile`)"),
+            "{document}"
+        );
+        assert!(document.contains("which an agent read does not do"));
+        let data: Value = serde_json::from_str(&read(&session, JSON_ARTIFACT_ID).content).unwrap();
+        assert_eq!(data["status"], "not_computed");
+        assert_eq!(
+            data["failure"],
+            json!({"reason":"derived_decisions_need_compile"})
+        );
+        // Every other artifact reads.
+        for descriptor in crate::mcp_reads::artifacts::readable_catalog() {
+            read(&session, descriptor.id);
+        }
+        // The export compiles, computes and lists the decision as stale.
+        let bundle = export(&stores, &CuratedReview::default(), mode);
+        assert!(bundle.curated_basis.is_some(), "{mode:?}");
+        assert!(
+            curated_of(&bundle)
+                .content
+                .contains("match no current assertion: 1")
+        );
+    }
+    // The accepted decision changed no rejection, so the other artifacts
+    // are the ones the computed session reads.
+    let session = acquire(&stores, &NoReviews, ExportMode::BestEffort).unwrap();
+    assert_eq!(read(&session, "topology"), read(&computed, "topology"));
+}
+
+/// Counts the reviews gathered.
+struct Counting(std::cell::Cell<usize>);
+
+impl ReviewSource for Counting {
+    fn gather(&self) -> CuratedReview {
+        self.0.set(self.0.get() + 1);
+        CuratedReview::default()
+    }
+
+    fn unchanged(&self, _: &CuratedReview) -> Result<bool, CuratedFailure> {
+        Ok(true)
+    }
+}
+
+#[test]
+fn graph_over_the_session_limits_fails_before_any_review_is_gathered() {
+    // AC-0654: the reviews are gathered, and so the assessments are made,
+    // only after the bounded graph read admitted the graph. A graph over
+    // the session's limits fails the acquisition with nothing gathered.
+    let stores = stores();
+    let counting = Counting(std::cell::Cell::new(0));
+    let limited = ReadSession::acquire_with_overlay(
+        &stores.0,
+        None,
+        &stores.1,
+        &counting,
+        || Ok(vec![]),
+        SnapshotReadLimits {
+            max_rows: 1,
+            ..SnapshotReadLimits::default()
+        },
+        CoverageReadLimits::default(),
+        ExportMode::BestEffort,
+    );
+    assert!(matches!(limited, Err(ReadError::Limit)));
+    assert_eq!(counting.0.get(), 0);
+    assert!(acquire(&stores, &counting, ExportMode::BestEffort).is_ok());
+    assert_eq!(counting.0.get(), 1);
 }
 
 #[test]
@@ -318,6 +419,8 @@ fn curated_basis_reservation_fixture_is_the_longest_wire_form() {
         CuratedFailure::DuplicateAssertionDecision,
         CuratedFailure::AssertionsNotCompiled,
         CuratedFailure::RevisionNotEncoded,
+        CuratedFailure::DecisionsUnavailable,
+        CuratedFailure::DerivedDecisionsNeedCompile,
     ] {
         let wire = context_hub::logical::count(&CuratedBasis::NotComputed(failure)).unwrap();
         assert!(longest >= wire, "{failure:?}");

@@ -883,10 +883,11 @@ fn mcp_curated_read_serves_the_export_bytes_and_revision_for_an_eligible_record(
 
     // A review made while the session is acquired, after its reviews were
     // gathered, would give another curated revision: the read is refused.
+    // The scope is read before the graph and again after the reviews.
     let mut calls = 0;
     let stale = mcp_session(&state, spec::ExportMode::BestEffort, || {
         calls += 1;
-        if calls == 1 {
+        if calls == 2 {
             state
                 .proposals
                 .lock()
