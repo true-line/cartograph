@@ -246,3 +246,6 @@ fn next_prompt_worker_versioned_history_admits_large_saved_parent() {
 mod hosted_history_tests;
 
 pub(in crate::investigations) use hosted_history_tests::full_hosted_auditor_provider;
+
+#[path = "auditor14_copied_parent_tests.rs"]
+mod auditor14_copied_parent_tests;

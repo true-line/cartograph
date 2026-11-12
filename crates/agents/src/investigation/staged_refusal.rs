@@ -211,6 +211,7 @@ impl RefusalRecord {
                 request.specialist_id.as_str(),
                 "domain-analyst@22"
                     | "evidence-auditor@13"
+                    | "evidence-auditor@14"
                     | "domain-analyst@23"
                     | "domain-analyst@24"
                     | "domain-analyst@25"
@@ -226,6 +227,7 @@ impl RefusalRecord {
                         | "domain-analyst@21"
                         | "domain-analyst@22"
                         | "evidence-auditor@13"
+                        | "evidence-auditor@14"
                         | "domain-analyst@23"
                         | "domain-analyst@24"
                         | "domain-analyst@25"

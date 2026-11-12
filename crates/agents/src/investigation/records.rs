@@ -635,6 +635,8 @@ impl InvestigationInputLedger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "schema", deny_unknown_fields)]
 pub enum InvestigationTerminalDiagnostic {
+    #[serde(rename = "investigation-terminal-diagnostic@4")]
+    CapacityCompletion { reason: CapacityCompletionReason },
     #[serde(rename = "investigation-terminal-diagnostic@3")]
     RejectedFinish {
         reason: InvestigationFinishRejection,
@@ -649,6 +651,11 @@ pub enum InvestigationTerminalDiagnostic {
         phase: InvestigationFailurePhase,
         error_class: InvestigationOperationalClass,
     },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityCompletionReason {
+    UnmetObligationsAfterCapacityExclusion,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

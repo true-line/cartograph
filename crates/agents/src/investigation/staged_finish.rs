@@ -144,6 +144,8 @@ pub enum ProseCorrection {
     LimitationDeniesAcquiredEvidence(Box<ConflictingEvidence>),
 }
 
+#[path = "closed_feedback_reserve.rs"]
+mod closed_feedback_reserve;
 #[path = "combined_feedback.rs"]
 mod combined_feedback;
 pub use combined_feedback::{CombinedCorrection, CombinedCorrections};
@@ -730,6 +732,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@21"
                     | "domain-analyst@22"
                     | "evidence-auditor@13"
+                    | "evidence-auditor@14"
                     | "domain-analyst@23"
             ) && consistency.is_some() =>
         {
@@ -742,7 +745,10 @@ pub(super) fn admit_finish_with_locator(
             prose_correction = Some(
                 if matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@22" | "evidence-auditor@13" | "domain-analyst@23"
+                    "domain-analyst@22"
+                        | "evidence-auditor@13"
+                        | "evidence-auditor@14"
+                        | "domain-analyst@23"
                 ) {
                     match locator(input, finish, model.as_deref()) {
                         Ok(Some(location))
@@ -790,6 +796,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@21"
                     | "domain-analyst@22"
                     | "evidence-auditor@13"
+                    | "evidence-auditor@14"
                     | "domain-analyst@23"
                     | "domain-analyst@24"
                     | "domain-analyst@25"
@@ -819,7 +826,8 @@ pub(super) fn admit_finish_with_locator(
                 kind: observation.kind.clone(),
                 reason: if matches!(
                     request.specialist_id.as_str(),
-                    "domain-analyst@22"
+                    "evidence-auditor@14"
+                        | "domain-analyst@22"
                         | "domain-analyst@23"
                         | "domain-analyst@24"
                         | "domain-analyst@25"

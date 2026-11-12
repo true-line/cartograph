@@ -82,6 +82,7 @@ fn admission_family_public_raw_and_ipc_accept_exact_request_seven_tuple() {
         "domain-analyst@10",
         "evidence-auditor@10",
         "evidence-auditor@13",
+        "evidence-auditor@14",
     ] {
         let current = request(role);
         let raw = serde_json::to_string(&current).unwrap();
@@ -133,7 +134,7 @@ fn admission_family_public_decoder_rejects_mixed_tuples_and_unknown_authority() 
             "domain-analyst@7",
             "evidence-auditor@8",
             "domain-analyst@9",
-            "evidence-auditor@14",
+            "evidence-auditor@15",
         ] {
             let mut wrong = value.clone();
             wrong["specialist_id"] = role.into();

@@ -250,7 +250,13 @@ impl InvestigationInput {
         );
         if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             let upper = serde_json::to_value(
-                if self.frozen_specialist()?.uses_combined_finish_feedback() {
+                if self.frozen_specialist()? == SpecialistId::EvidenceAuditorV14 {
+                    staged_finish::RefusalFeedback::sizing_closed_contract_envelope(
+                        &contract,
+                        &self.ledger,
+                        policy,
+                    )?
+                } else if self.frozen_specialist()?.uses_combined_finish_feedback() {
                     staged_finish::RefusalFeedback::sizing_combined_contract_envelope(
                         &contract,
                         &self.ledger,
@@ -801,6 +807,7 @@ impl InvestigationInput {
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::EvidenceAuditorV12,
             SpecialistId::EvidenceAuditorV13,
+            SpecialistId::EvidenceAuditorV14,
         ]
         .contains(&role)
         {
@@ -1089,7 +1096,8 @@ impl InvestigationInput {
     fn capacity_exhausted(&self) -> bool {
         matches!(
             self.specialist,
-            SpecialistId::DomainAnalystV21
+            SpecialistId::EvidenceAuditorV14
+                | SpecialistId::DomainAnalystV21
                 | SpecialistId::DomainAnalystV22
                 | SpecialistId::DomainAnalystV23
                 | SpecialistId::DomainAnalystV24
@@ -1191,7 +1199,8 @@ impl InvestigationInput {
             && choices.attempts_complete())
             || (matches!(
                 self.frozen_specialist()?,
-                SpecialistId::DomainAnalystV21
+                SpecialistId::EvidenceAuditorV14
+                    | SpecialistId::DomainAnalystV21
                     | SpecialistId::DomainAnalystV22
                     | SpecialistId::DomainAnalystV23
                     | SpecialistId::DomainAnalystV24

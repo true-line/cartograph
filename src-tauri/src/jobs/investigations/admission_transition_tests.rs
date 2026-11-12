@@ -712,3 +712,90 @@ fn capacity_exclusion_durable_replay_preserves_analyst20_and_excludes_for_21() {
         // Roll back the corruption; missing history must never authenticate.
     }
 }
+
+// AC-0596: authenticated revision-local exclusion, historical @13 unchanged.
+#[test]
+fn auditor14_capacity_exclusion_reopens_without_ledger_credit() {
+    for role in ["evidence-auditor@13", "evidence-auditor@14"] {
+        let (mut f, offered) = action_fixture_for(role);
+        let response = fixture::response(&f, &offered);
+        let original_ledger = f.ledger.clone();
+        let tx = f.store.conn.transaction().unwrap();
+        let next = refuse_capacity(
+            &tx,
+            &f.task,
+            &response,
+            &offered,
+            CapacityRefusalReason::PromptCapacity,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        f.task = next;
+        assert_eq!(fixture::state(&f).count, 1);
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let choices = completion::SavedMetadataHistory::load(&tx, &f.task)
+            .unwrap()
+            .current_choices(&f.ledger, &f.metadata)
+            .unwrap()
+            .unwrap();
+        let still_offered = choices
+            .entries()
+            .iter()
+            .any(|entry| serde_json::to_value(&entry.action).unwrap() == offered);
+        assert_eq!(still_offered, role == "evidence-auditor@13");
+        if role == "evidence-auditor@14" {
+            assert!(choices.entries().is_empty());
+            assert!(choices.capacity_exhausted());
+        }
+        assert_eq!(f.ledger, original_ledger);
+        let cutoff = f.basis.invocation_ordinal;
+        assert!(
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff, &f.ledger)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            admission_journal::capacity_exclusion_candidates(
+                &tx,
+                &f.task,
+                cutoff + 1,
+                &InvestigationInputLedger {
+                    revision: f.ledger.revision + 1,
+                    ..f.ledger.clone()
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let excluded =
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff + 1, &f.ledger)
+                .unwrap();
+        assert_eq!(
+            excluded.contains(&response.action_hash),
+            role == "evidence-auditor@14"
+        );
+        drop(choices);
+        tx.commit().unwrap();
+        // Reconstruct, seal and authenticate the next call from durable state.
+        fixture::start_call(&mut f, &[], None);
+        assert_eq!(fixture::state(&f).count, 1);
+        assert_eq!(
+            f.basis.admission.mode == CompletionCallMode::FinishOnly,
+            role == "evidence-auditor@14"
+        );
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let trigger: String = tx.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='investigation_admission_refusals_no_delete'",
+            [], |row| row.get(0)).unwrap();
+        tx.execute_batch("DROP TRIGGER investigation_admission_refusals_no_delete")
+            .unwrap();
+        tx.execute(
+            "DELETE FROM investigation_admission_refusals WHERE task_id=?1",
+            params![f.basis.task_id],
+        )
+        .unwrap();
+        tx.execute_batch(&trigger).unwrap();
+        assert!(admission_journal::derive_current(&tx, &f.task).is_err());
+        // Roll back the corruption; missing history must never authenticate.
+    }
+}

@@ -142,6 +142,30 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 );
             }
         };
+        // Opt-in test instrumentation: numeric call/byte counts only. No
+        // identifiers, paths, source text, response text or refused prose.
+        #[cfg(test)]
+        if std::env::var_os("CARTOGRAPH_OFFLINE_REPRO").is_some() {
+            let measured = proof.continuation();
+            eprintln!(
+                "auditor14_source_bound call={} choice={:?} finish_only={:?} input_allowed={} headroom={} disclosure_required={}",
+                self.detail.usage.model_invocations,
+                measured.choice,
+                measured.finish_only,
+                current_prepared.limits().values().input_bytes,
+                current_prepared
+                    .limits()
+                    .values()
+                    .input_bytes
+                    .saturating_sub(
+                        measured
+                            .choice
+                            .original_payload_bytes
+                            .max(measured.choice.redacted_payload_bytes)
+                    ),
+                proof.disclosure_upper_bytes()
+            );
+        }
         let firewall = firewall(self.state)?;
         let reservation = source
             .reserve(

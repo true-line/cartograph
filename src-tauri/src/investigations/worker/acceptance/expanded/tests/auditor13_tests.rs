@@ -94,8 +94,10 @@ pub(super) fn verify(
     role: SpecialistId,
     rejection: Rejection,
 ) {
-    let corrected = role == SpecialistId::EvidenceAuditorV13
-        && matches!(rejection, Rejection::Once | Rejection::ShortTitle);
+    let corrected = matches!(
+        role,
+        SpecialistId::EvidenceAuditorV13 | SpecialistId::EvidenceAuditorV14
+    ) && matches!(rejection, Rejection::Once | Rejection::ShortTitle);
     assert_eq!(
         actual["detail"]["status"],
         if corrected { "completed" } else { "failed" },
@@ -106,7 +108,11 @@ pub(super) fn verify(
     let observations = provider.observations().unwrap();
     assert_eq!(
         observations.len(),
-        if role == SpecialistId::EvidenceAuditorV13 && !matches!(rejection, Rejection::Sensitive) {
+        if matches!(
+            role,
+            SpecialistId::EvidenceAuditorV13 | SpecialistId::EvidenceAuditorV14
+        ) && !matches!(rejection, Rejection::Sensitive)
+        {
             5
         } else {
             4
@@ -179,4 +185,16 @@ fn auditor13_replay_correction_succeeds_or_exhausts_and_reopens() {
 #[test]
 fn auditor13_withheld_parent_cloud_shaped_receipt_reopens() {
     exercise_auditor_role(Scenario::WithheldCloud, SpecialistId::EvidenceAuditorV13);
+}
+
+#[test]
+fn auditor14_replay_correction_and_withheld_parent_receipt_reopen() {
+    for rejection in [Rejection::Once, Rejection::Repeated, Rejection::ShortTitle] {
+        exercise_auditor_configured(
+            Scenario::CloudComplete,
+            SpecialistId::EvidenceAuditorV14,
+            Some(rejection),
+        );
+    }
+    exercise_auditor_role(Scenario::WithheldCloud, SpecialistId::EvidenceAuditorV14);
 }
