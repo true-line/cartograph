@@ -95,7 +95,7 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
     assert_eq!(artifact.basis_id(), session.basis_id().unwrap());
     assert_eq!(artifact.content_id(), official.content_id);
     let catalog = session.artifact_catalog();
-    assert_eq!(catalog, spec::artifact_catalog());
+    assert_eq!(catalog, super::readable_catalog());
     assert!(
         catalog
             .iter()
@@ -121,6 +121,55 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
         owned,
         (session.base.graph.0.as_ptr(), session.base.graph.1.as_ptr())
     );
+}
+
+// AC-0595 (ADR-0058): the fact index is not readable over MCP, because the
+// reserved compile workspace does not model it. Both ids are refused like an
+// unknown id before any tracing or compilation, are not advertised, and every
+// advertised artifact still reads.
+#[test]
+fn mcp_read_refuses_the_fact_index_without_compiling() {
+    let session = fixture(ExportMode::BestEffort);
+    // Limits under which any tracing or compilation reports a limit.
+    let no_trace = flowtracer::TraceLimits {
+        max_output_bytes: 0,
+        ..trace_limits()
+    };
+    let no_output = spec::SelectedCompileLimits {
+        max_bytes: 0,
+        ..compile_limits()
+    };
+    let official: Vec<&str> = spec::artifact_catalog().iter().map(|a| a.id).collect();
+    let advertised: Vec<&str> = session.artifact_catalog().iter().map(|a| a.id).collect();
+    let schema =
+        crate::mcp_reads::dispatch::tool_descriptor(mcp_wire::admission::ReadTool::ReadArtifact);
+    let selectable = schema["inputSchema"]["properties"]["artifact_id"]["enum"]
+        .as_array()
+        .expect("closed artifact id enum");
+    for id in ["fact-index", "fact-index-json"] {
+        assert!(official.contains(&id), "{id} is an official artifact");
+        assert!(!advertised.contains(&id), "{id} is not advertised");
+        assert!(!selectable.iter().any(|value| value == id));
+        assert!(matches!(
+            session.compile_artifact(id, no_trace, no_output),
+            Err(ReadError::InvalidRequest)
+        ));
+        assert!(matches!(
+            session.compile_artifact(id, trace_limits(), compile_limits()),
+            Err(ReadError::InvalidRequest)
+        ));
+    }
+    assert_eq!(advertised.len(), official.len() - 2);
+    assert_eq!(selectable.len(), advertised.len());
+    for id in advertised {
+        assert!(
+            matches!(
+                session.compile_artifact(id, trace_limits(), compile_limits()),
+                Ok(ArtifactCompilation::Produced(artifact)) if artifact.artifact.id == id
+            ),
+            "{id} still reads"
+        );
+    }
 }
 
 #[test]

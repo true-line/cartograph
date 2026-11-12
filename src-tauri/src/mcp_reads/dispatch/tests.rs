@@ -211,7 +211,7 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
             .as_array()
             .unwrap()
             .len(),
-        spec::artifact_catalog().len()
+        crate::mcp_reads::artifacts::readable_catalog().len()
     );
     assert!(!catalog.to_string().contains("content_id"));
     let mut args = artifact_args(&dispatch);
@@ -432,6 +432,24 @@ fn security_derivation_limits_preserve_closed_stage_resource_shape() {
                 })
             )),
             json!({"stage":"security_derivation","resource":name,"maximum":7})
+        );
+    }
+}
+
+// AC-0595 (ADR-0058): an index whose citations do not resolve is reported
+// as its own stage, never as a size limit.
+#[test]
+fn fact_index_failures_have_a_closed_stage_resource_shape() {
+    for (failure, name) in [
+        (spec::FactIndexFailure::Unresolved, "unresolved_citation"),
+        (spec::FactIndexFailure::Collision, "citation_id_collision"),
+        (spec::FactIndexFailure::Withheld, "withheld_citation"),
+    ] {
+        assert_eq!(
+            limit_value(ArtifactLimit::Compiler(
+                spec::SelectedArtifactLimit::FactIndex(failure)
+            )),
+            json!({"stage":"fact_index","resource":name})
         );
     }
 }

@@ -44,6 +44,10 @@ pub enum SelectedArtifactLimit {
     AdrDerivation(crate::AdrLimitExceeded),
     /// Complete security projection exceeded its explicit admission.
     SecurityDerivation(crate::SecurityLimitExceeded),
+    /// The fact index could not be built: a citation does not resolve or two
+    /// facts share one citation id (ADR-0058). Not a size limit; no index is
+    /// returned.
+    FactIndex(FactIndexFailure),
 }
 /// A complete artifact or explicit limit outcome, in official artifact order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +178,19 @@ const ARTIFACTS: &[Artifact] = &[
         title: "Coverage index",
         format: "json",
     },
+    // Last: the index lists what the artifacts before it cite (ADR-0058).
+    Artifact {
+        id: fact_index::MARKDOWN_ID,
+        file: "fact-index.md",
+        title: "Fact and evidence index",
+        format: "markdown",
+    },
+    Artifact {
+        id: fact_index::JSON_ID,
+        file: "fact-index.json",
+        title: "Fact and evidence index data",
+        format: "json",
+    },
 ];
 
 /// Metadata for a supported official producer, not a claim that its output
@@ -300,11 +317,12 @@ fn produce(
         &[StoredCoverage],
     ),
     max: Option<usize>,
-) -> Result<SpecArtifact, render::RenderLimit> {
+) -> Result<Cited, render::RenderLimit> {
     use producers::Output;
     let Output {
         content,
         assertions,
+        subjects,
     } = match a.id {
         "user-stories" => match stories {
             Some(stories) => producers::stories_with_support(nodes, Some(stories), max)?,
@@ -333,6 +351,7 @@ fn produce(
                 }
                 .expect("selected register content"),
                 assertions: output.assertions,
+                subjects: output.subjects,
             }
         }
         "gap-register" | "gap-register-index" => {
@@ -348,6 +367,7 @@ fn produce(
                 }
                 .expect("selected register content"),
                 assertions: output.assertions,
+                subjects: output.subjects,
             }
         }
         "rule-evidence" | "rule-evidence-index" => {
@@ -371,14 +391,39 @@ fn produce(
                 }
                 .expect("selected rule content"),
                 assertions: output.assertions,
+                subjects: output.subjects,
             }
         }
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,
+        // The two index artifacts are rendered from the collected citations.
         _ => unreachable!("validated static artifact id"),
     };
+    Ok(Cited {
+        artifact: identified_artifact(a.id, a.file, a.title, a.format, content, assertions),
+        subjects,
+    })
+}
+/// A produced artifact with the fact-key shape of each assertion's subject,
+/// which the artifact itself does not serialize (ADR-0058).
+struct Cited {
+    artifact: SpecArtifact,
+    subjects: Vec<fact_index::Subject>,
+}
+/// One of the two index artifacts over a finished index.
+fn index_artifact(
+    a: &Artifact,
+    index: &FactIndex,
+    max: Option<usize>,
+) -> Result<SpecArtifact, render::RenderLimit> {
+    let content = fact_index::render(index, a.id == fact_index::MARKDOWN_ID, max)?;
     Ok(identified_artifact(
-        a.id, a.file, a.title, a.format, content, assertions,
+        a.id,
+        a.file,
+        a.title,
+        a.format,
+        content,
+        Vec::new(),
     ))
 }
 fn bytes(artifact: &SpecArtifact) -> usize {
@@ -406,6 +451,14 @@ fn bytes(artifact: &SpecArtifact) -> usize {
 /// The caller separately admits graph/flow input and selection cardinality.
 /// Every success exactly matches ordinary compilation; output/derivation limits
 /// return explicit outcomes and never return a truncated artifact.
+///
+/// The two fact-index artifacts list what the whole export cites (ADR-0058),
+/// so selecting either also compiles every artifact that carries assertions,
+/// one at a time, as workspace: an unselected one is read for its citations
+/// and dropped, is not returned and is not charged to `max_bytes`. The index
+/// itself is admitted against the remaining output budget like any other
+/// artifact. Citations that do not resolve are
+/// [`SelectedArtifactLimit::FactIndex`].
 pub fn compile_spec_selected(
     nodes: &[Node],
     edges: &[Edge],
@@ -529,31 +582,118 @@ fn compile_selected(
     let edges = filter_edges(&projection.edges, mode, rejected);
     let gaps = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let mut remaining = limits.max_bytes;
-    Ok(selected
-        .into_iter()
-        .map(|a| {
-            match produce(
+    // The index lists what the whole export cites, whatever else was
+    // selected, so that it equals the bundle's. A citing artifact that was
+    // not selected is compiled, read for its citations and dropped before
+    // the next: it is workspace, never output, so it is not charged to the
+    // output budget and nothing unselected is retained (#1582).
+    let mut citations = if selected.iter().any(|a| fact_index::is_index(a.id)) {
+        Citations::Collecting(fact_index::Collector::new(mode, citation_id))
+    } else {
+        Citations::Unwanted
+    };
+    let mut outcomes = Vec::with_capacity(selected.len());
+    for a in ARTIFACTS {
+        let is_selected = selected.iter().any(|s| s.id == a.id);
+        if fact_index::is_index(a.id) {
+            if !is_selected {
+                continue;
+            }
+            citations = citations.finished();
+            let limit = match &citations {
+                Citations::Finished(index) => match index_artifact(a, index, Some(remaining)) {
+                    Ok(artifact) => {
+                        remaining = remaining
+                            .checked_sub(bytes(&artifact))
+                            .expect("renderer admitted cumulative output");
+                        outcomes.push(SelectedArtifactOutcome::Produced(artifact));
+                        continue;
+                    }
+                    Err(_) => SelectedArtifactLimit::OutputBytes { remaining },
+                },
+                Citations::TooLarge => SelectedArtifactLimit::OutputBytes { remaining },
+                Citations::Failed(failure) => SelectedArtifactLimit::FactIndex(*failure),
+                Citations::Unwanted | Citations::Collecting(_) => {
+                    unreachable!("a selected index finishes its citations")
+                }
+            };
+            outcomes.push(SelectedArtifactOutcome::Limited {
+                artifact_id: a.id.into(),
+                limit,
+            });
+            continue;
+        }
+        let produce = |max| {
+            produce(
                 a,
                 &nodes,
                 &edges,
                 &projection.flows,
                 gaps,
                 (mode, rejected, stories, coverage),
-                Some(remaining),
-            ) {
-                Ok(artifact) => {
-                    remaining = remaining
-                        .checked_sub(bytes(&artifact))
-                        .expect("renderer admitted cumulative output");
-                    SelectedArtifactOutcome::Produced(artifact)
+                max,
+            )
+        };
+        let produced = is_selected.then(|| produce(Some(remaining)));
+        if let Citations::Collecting(collector) = &mut citations
+            && fact_index::cites(a.id)
+        {
+            let cited = match &produced {
+                Some(Ok(cited)) => {
+                    collector.cite(a.id, &cited.artifact.assertions, &cited.subjects)
                 }
-                Err(_) => SelectedArtifactOutcome::Limited {
-                    artifact_id: a.id.into(),
-                    limit: SelectedArtifactLimit::OutputBytes { remaining },
-                },
+                // Not selected, or selected and past the output budget: its
+                // citations still belong to the export.
+                Some(Err(_)) | None => {
+                    let cited = produce(None).expect("unbounded native artifact");
+                    collector.cite(a.id, &cited.artifact.assertions, &cited.subjects)
+                }
+            };
+            match cited {
+                // Already certain not to fit: stop collecting rows.
+                Ok(()) if collector.lower_bound() > remaining => citations = Citations::TooLarge,
+                Ok(()) => {}
+                Err(error) => citations = Citations::Failed(error.failure()),
             }
-        })
-        .collect())
+        }
+        match produced {
+            Some(Ok(cited)) => {
+                remaining = remaining
+                    .checked_sub(bytes(&cited.artifact))
+                    .expect("renderer admitted cumulative output");
+                outcomes.push(SelectedArtifactOutcome::Produced(cited.artifact));
+            }
+            Some(Err(_)) => outcomes.push(SelectedArtifactOutcome::Limited {
+                artifact_id: a.id.into(),
+                limit: SelectedArtifactLimit::OutputBytes { remaining },
+            }),
+            None => {}
+        }
+    }
+    Ok(outcomes)
+}
+/// The citations of a selected compilation, on the way to its index.
+enum Citations {
+    /// No index artifact was selected.
+    Unwanted,
+    Collecting(fact_index::Collector),
+    Finished(FactIndex),
+    /// The rows collected so far already exceed the output budget, which
+    /// only shrinks: the index is refused when its turn comes.
+    TooLarge,
+    /// The citations do not resolve: no index can be returned.
+    Failed(FactIndexFailure),
+}
+impl Citations {
+    fn finished(self) -> Self {
+        match self {
+            Self::Collecting(collector) => match collector.finish() {
+                Ok(index) => Self::Finished(index),
+                Err(error) => Self::Failed(error.failure()),
+            },
+            other => other,
+        }
+    }
 }
 pub(super) fn all(
     nodes: &[Node],
@@ -562,12 +702,12 @@ pub(super) fn all(
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     coverage: &[StoredCoverage],
-) -> SpecBundle {
+) -> Result<SpecBundle, FactIndexError> {
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
-    bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, coverage)
+    try_bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, coverage)
 }
 pub(crate) fn flow_artifact_from_filtered(
     nodes: &[&Node],
@@ -590,16 +730,46 @@ pub(crate) fn flow_artifact_from_filtered(
         None,
     )
     .expect("unbounded flow dossier renderer")
+    .artifact
 }
 
-pub(crate) fn bundle_from_filtered(
+/// The complete bundle, or the reason its citations do not resolve
+/// (ADR-0058 decision 6): nothing is returned for an export whose own
+/// assertions cite an id without a row or share an id between two facts.
+pub(crate) fn try_bundle_from_filtered(
     nodes: &[&Node],
     edges: &[&Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     coverage: &[StoredCoverage],
-) -> SpecBundle {
+) -> Result<SpecBundle, FactIndexError> {
+    bundle_with_citation_ids(nodes, edges, flows, (mode, rejected, coverage), citation_id)
+}
+
+fn cite(
+    citations: &mut Option<fact_index::Collector>,
+    artifact_id: &str,
+    assertions: &[SpecAssertion],
+    subjects: &[fact_index::Subject],
+) -> Result<(), FactIndexError> {
+    citations
+        .as_mut()
+        .expect("every citing artifact precedes the index")
+        .cite(artifact_id, assertions, subjects)
+}
+
+/// [`try_bundle_from_filtered`] with the id function named, so a test can
+/// force two facts onto one id.
+pub(super) fn bundle_with_citation_ids(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    (mode, rejected, coverage): (ExportMode, &BTreeSet<String>, &[StoredCoverage]),
+    id_of: fn(&core_graph::FactKey) -> String,
+) -> Result<SpecBundle, FactIndexError> {
+    let mut citations = Some(fact_index::Collector::new(mode, id_of));
+    let mut finished: Option<FactIndex> = None;
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let drift_count = nodes.iter().filter(|n| is_drift_node(n)).count();
     let security_count = nodes
@@ -611,6 +781,17 @@ pub(crate) fn bundle_from_filtered(
     let mut artifacts = Vec::with_capacity(ARTIFACTS.len());
     let mut pending_index: Option<(&str, String)> = None;
     for a in ARTIFACTS {
+        if fact_index::is_index(a.id) {
+            // Every citing artifact precedes the index in ARTIFACTS.
+            if let Some(collector) = citations.take() {
+                finished = Some(collector.finish()?);
+            }
+            artifacts.push(
+                index_artifact(a, finished.as_ref().expect("finished index"), None)
+                    .expect("unbounded native artifact"),
+            );
+            continue;
+        }
         if let Some((id, content)) = pending_index.take() {
             assert_eq!(a.id, id, "paired index follows its Markdown artifact");
             artifacts.push(identified_artifact(
@@ -627,12 +808,12 @@ pub(crate) fn bundle_from_filtered(
             "us-tm" => Some((
                 "us-tm-index",
                 registers::matrix_selected(edges, mode, true, true, None)
-                    .map(|o| (o.markdown, o.index, o.assertions)),
+                    .map(|o| (o.markdown, o.index, o.assertions, o.subjects)),
             )),
             "gap-register" => Some((
                 "gap-register-index",
                 registers::gap_selected(nodes, edges, flows, gap_count, mode, true, true, None)
-                    .map(|o| (o.markdown, o.index, o.assertions)),
+                    .map(|o| (o.markdown, o.index, o.assertions, o.subjects)),
             )),
             "rule-evidence" => Some((
                 "rule-evidence-index",
@@ -646,13 +827,15 @@ pub(crate) fn bundle_from_filtered(
                     },
                     None,
                 )
-                .map(|o| (o.markdown, o.index, o.assertions))
+                .map(|o| (o.markdown, o.index, o.assertions, o.subjects))
                 .map_err(|_| registers::RegisterLimit),
             )),
             _ => None,
         };
         if let Some((index_id, output)) = pair {
-            let (markdown, index, assertions) = output.expect("unbounded native artifact");
+            let (markdown, index, assertions, subjects) =
+                output.expect("unbounded native artifact");
+            cite(&mut citations, a.id, &assertions, &subjects)?;
             artifacts.push(identified_artifact(
                 a.id,
                 a.file,
@@ -664,22 +847,27 @@ pub(crate) fn bundle_from_filtered(
             pending_index = Some((index_id, index.expect("paired index content")));
             continue;
         }
-        artifacts.push(
-            produce(
-                a,
-                nodes,
-                edges,
-                flows,
-                gap_count,
-                (mode, rejected, None, coverage),
-                None,
-            )
-            .expect("unbounded native artifact"),
-        );
+        let cited = produce(
+            a,
+            nodes,
+            edges,
+            flows,
+            gap_count,
+            (mode, rejected, None, coverage),
+            None,
+        )
+        .expect("unbounded native artifact");
+        cite(
+            &mut citations,
+            a.id,
+            &cited.artifact.assertions,
+            &cited.subjects,
+        )?;
+        artifacts.push(cited.artifact);
     }
     assert!(pending_index.is_none(), "paired index artifact missing");
     let assertion_count = artifacts.iter().map(|a| a.assertions.len()).sum();
-    SpecBundle {
+    Ok(SpecBundle {
         mode,
         artifacts,
         assertion_count,
@@ -687,7 +875,7 @@ pub(crate) fn bundle_from_filtered(
         drift_count,
         security_count,
         graph_basis: None,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -1940,6 +1940,122 @@ fn export_carries_the_stored_coverage_inventory_in_both_modes() {
     }
 }
 
+// AC-0595 (#1785, ADR-0058): the export of a real ingest carries the fact and
+// evidence index. Every assertion of every exported artifact has a row, a
+// verified-only export holds no InferredWeak row, a second export is
+// byte-identical and the single-artifact read returns the same bytes.
+#[test]
+fn export_carries_a_fact_index_resolving_every_assertion() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(
+        root.join("app.ts"),
+        "import express from \"express\";\n\
+         const app = express();\n\
+         function listOrders(req, res) { res.json([]); }\n\
+         app.get(\"/orders\", listOrders);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"shop","dependencies":{"express":"^4.19.0"},"scripts":{"build":"tsc"}}"#,
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let artifact = |id: &str| {
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == id)
+                .unwrap()
+        };
+        let (markdown, json) = (artifact("fact-index"), artifact("fact-index-json"));
+        assert_eq!(markdown.file_name, "fact-index.md");
+        assert_eq!(json.file_name, "fact-index.json");
+        assert!(markdown.assertions.is_empty() && json.assertions.is_empty());
+
+        let index: spec::FactIndex = serde_json::from_str(&json.content).unwrap();
+        assert_eq!(index.mode, mode);
+        assert!(bundle.assertion_count > 0, "the ingest recovered facts");
+        assert!(!index.rows.is_empty());
+        // Every cited fact is a row with its artifact, and nothing else is.
+        let mut cited = std::collections::BTreeSet::new();
+        for row in &index.rows {
+            assert_eq!(row.citation_id, spec::citation_id(&row.fact));
+            let subject = match &row.fact {
+                core_graph::FactKey::Node { id } => id.clone(),
+                core_graph::FactKey::Edge {
+                    source,
+                    label,
+                    destination,
+                } => format!("{source} {label} {destination}"),
+            };
+            for id in &row.cited_by {
+                assert!(
+                    artifact(id)
+                        .assertions
+                        .iter()
+                        .any(|assertion| assertion.subject_id == subject),
+                    "{id} states {subject}"
+                );
+                cited.insert((id.clone(), subject.clone()));
+            }
+            assert!(
+                markdown
+                    .content
+                    .contains(&format!("| {} |", row.citation_id))
+            );
+            if mode == spec::ExportMode::VerifiedOnly {
+                assert!(row.records.iter().all(|record| !record.inferred_weak));
+            }
+        }
+        let stated: std::collections::BTreeSet<_> = bundle
+            .artifacts
+            .iter()
+            .flat_map(|artifact| {
+                artifact
+                    .assertions
+                    .iter()
+                    .map(|assertion| (artifact.id.clone(), assertion.subject_id.clone()))
+            })
+            .collect();
+        assert_eq!(cited, stated);
+        spec::check_citations(
+            &index,
+            index.rows.iter().map(|row| row.citation_id.as_str()),
+        )
+        .unwrap();
+        assert!(spec::check_citations(&index, ["F-0000000000000000"]).is_err());
+
+        // A second export is byte-identical, as is the single-artifact read.
+        assert_eq!(
+            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            bundle
+        );
+        for expected in [markdown, json] {
+            assert_eq!(
+                &crate::build_spec_artifact(&graph, &decisions, mode, &expected.id).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)

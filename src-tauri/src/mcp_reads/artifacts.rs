@@ -49,11 +49,27 @@ pub(crate) struct ArtifactPage<'a> {
     pub content: &'a str,
 }
 
+/// The fact and evidence index (ADR-0058) is not readable over MCP: compiling
+/// it compiles every citing artifact and holds the rows, which the reserved
+/// `spec::logical_compile_bound` workspace does not model. The desktop export
+/// and single-artifact read still produce it.
+const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
+
+/// The official artifacts an MCP reader may select: the compiler's catalogue
+/// without the ids in [`NOT_READABLE`]. The one list behind the advertised
+/// catalogue, the tool's input schema and the read's own admission.
+pub(crate) fn readable_catalog() -> Vec<spec::ArtifactDescriptor> {
+    spec::artifact_catalog()
+        .into_iter()
+        .filter(|artifact| !NOT_READABLE.contains(&artifact.id))
+        .collect()
+}
+
 impl ReadSession {
     /// Authoritative metadata only; availability/content identity requires an
     /// actual selected compilation, rather than an ID inferred from a title.
     pub(crate) fn artifact_catalog(&self) -> Vec<spec::ArtifactDescriptor> {
-        spec::artifact_catalog()
+        readable_catalog()
     }
 
     pub(crate) fn compile_artifact(
@@ -62,10 +78,9 @@ impl ReadSession {
         trace_limits: flowtracer::TraceLimits,
         compile_limits: spec::SelectedCompileLimits,
     ) -> Result<ArtifactCompilation, ReadError> {
-        if !spec::artifact_catalog()
-            .iter()
-            .any(|artifact| artifact.id == id)
-        {
+        // An id that is not readable here is refused like an unknown one,
+        // before any tracing or compilation.
+        if !readable_catalog().iter().any(|artifact| artifact.id == id) {
             return Err(ReadError::InvalidRequest);
         }
         let security = spec::security_projection_bound(

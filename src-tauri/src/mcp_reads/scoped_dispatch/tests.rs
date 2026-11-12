@@ -151,7 +151,10 @@ fn scoped_protocol_advertises_real_routes_and_keeps_discovery_lean() {
         let entries = catalog["result"]["structuredContent"]["catalog"]["artifacts"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), spec::artifact_catalog().len());
+        assert_eq!(
+            entries.len(),
+            crate::mcp_reads::artifacts::readable_catalog().len()
+        );
         assert_eq!(
             entries
                 .iter()

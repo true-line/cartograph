@@ -10,6 +10,7 @@ mod capabilities;
 mod coverage;
 pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
 pub(crate) mod diagrams;
+pub(crate) mod fact_index;
 pub use capabilities::{
     ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
     KnowledgeStoryCompileWorkspaceBound, compile_capability_user_stories,
@@ -17,6 +18,10 @@ pub use capabilities::{
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, logical_actor_story_workspace_bound,
     logical_knowledge_story_compile_bound,
+};
+pub use fact_index::{
+    FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
+    check_citations, citation_id,
 };
 mod partition;
 mod producers;
@@ -629,6 +634,11 @@ pub fn is_drift_node(node: &Node) -> bool {
 /// No coverage inventory is supplied here, so the two coverage artifacts say
 /// so and claim nothing; a store-backed export uses
 /// [`compile_spec_with_coverage`].
+///
+/// # Panics
+///
+/// When the export's citations do not resolve (see
+/// [`try_compile_spec_with_coverage`]).
 pub fn compile_spec(
     nodes: &[Node],
     edges: &[Edge],
@@ -636,13 +646,18 @@ pub fn compile_spec(
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> SpecBundle {
-    selected::all(nodes, edges, flows, mode, rejected_hashes, &[])
+    compile_spec_with_coverage(nodes, edges, flows, mode, rejected_hashes, &[])
 }
 
 /// [`compile_spec`] with the coverage inventories stored beside the graph
 /// (AC-0592). The `coverage` and `coverage-index` artifacts project exactly
 /// these records, in both export modes; without them, as in [`compile_spec`],
 /// those two artifacts state that no inventory was supplied.
+///
+/// # Panics
+///
+/// When the export's citations do not resolve (see
+/// [`try_compile_spec_with_coverage`], which returns that as an error).
 pub fn compile_spec_with_coverage(
     nodes: &[Node],
     edges: &[Edge],
@@ -651,7 +666,37 @@ pub fn compile_spec_with_coverage(
     rejected_hashes: &BTreeSet<String>,
     coverage: &[core_graph::coverage::StoredCoverage],
 ) -> SpecBundle {
+    resolved(try_compile_spec_with_coverage(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        coverage,
+    ))
+}
+
+/// [`compile_spec_with_coverage`], failing closed instead of panicking when
+/// the export's citations do not resolve (ADR-0058 decision 6, AC-0595): an
+/// assertion cites an id with no row in the fact index, two different facts
+/// share one citation id, or a `verified-only` export cites an InferredWeak
+/// fact. No bundle is returned for such an export.
+pub fn try_compile_spec_with_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    coverage: &[core_graph::coverage::StoredCoverage],
+) -> Result<SpecBundle, FactIndexError> {
     selected::all(nodes, edges, flows, mode, rejected_hashes, coverage)
+}
+
+/// The bundle of an export whose citations resolve. The infallible compilers
+/// keep their signatures and stop here instead of returning an export with a
+/// citation that leads nowhere.
+pub(crate) fn resolved<T>(compiled: Result<T, FactIndexError>) -> T {
+    compiled.unwrap_or_else(|error| panic!("spec export refused: {error}"))
 }
 
 #[cfg(test)]
@@ -882,25 +927,33 @@ mod tests {
             // journeys state that they withhold InferredWeak candidates. User
             // stories render recovered names, ids and provenance as literal text
             // (#1453), which intentionally changes those bytes. The coverage
-            // artifacts (#1786) are appended after these and hashed apart, so
-            // the frozen bytes still prove the graph artifacts are unchanged.
+            // artifacts (#1786) and the fact index (#1785) are appended after
+            // these and hashed apart, so the frozen bytes still prove the
+            // graph artifacts are unchanged.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
 
     /// The bundle without the two coverage artifacts, which project stored
-    /// inventories instead of the graph and close the official order (#1786).
+    /// inventories instead of the graph (#1786), and the two fact-index
+    /// artifacts, which list what the others cite (#1785). The four close
+    /// the official order and carry no assertions.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let coverage = bundle.artifacts.split_off(bundle.artifacts.len() - 2);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 4);
         assert_eq!(
-            coverage
+            appended
                 .iter()
                 .map(|artifact| artifact.id.as_str())
                 .collect::<Vec<_>>(),
-            ["coverage", "coverage-index"]
+            [
+                "coverage",
+                "coverage-index",
+                "fact-index",
+                "fact-index-json"
+            ]
         );
         assert!(
-            coverage
+            appended
                 .iter()
                 .all(|artifact| artifact.assertions.is_empty())
         );
@@ -1034,10 +1087,13 @@ mod tests {
                 "rule-evidence.json",
                 "coverage.md",
                 "coverage.json",
+                "fact-index.md",
+                "fact-index.json",
             ]
         );
         // The coverage artifacts state facts about the run, not graph
-        // assertions, so they carry no provenance block (#1786).
+        // assertions, so they carry no provenance block (#1786); the fact
+        // index is that provenance, listed once per fact (#1785).
         for artifact in &graph_artifacts(bundle.clone()).artifacts {
             assert_eq!(
                 artifact
@@ -2396,7 +2452,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 18);
+                assert_eq!(full.artifacts.len(), 20);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,

@@ -218,16 +218,20 @@ written from its public documentation (ROADMAP W11).
 | 11.4 | Rule evidence | P | `rule-evidence.md`, `rule-evidence.json` |
 | 11.5 | Flow dossiers, complete | P | `flow_dossiers.md` |
 | 11.6 | Coverage: what was read, skipped and why | P | Coverage inventory |
-| 11.7 | Fact and evidence index: every fact a document cites, with its tier, confidence, method and source span | P | Not produced today (section 4) |
+| 11.7 | Fact and evidence index: every fact a document cites, with its tier, confidence, method and source span | P | `fact-index.md`, `fact-index.json` (ADR-0058) |
 
 No authored content. Every statement in D1 to D10 must resolve to a row in
-§11.7. Today's traceability matrix cannot carry that: it indexes only the
+§11.7. The traceability matrix cannot carry that: it indexes only the
 seven trace relations (`REALIZES`, `STEP_OF`, `GOVERNS`, `MAPS_TO`,
 `DECIDES`, `TRIGGERED_BY`, `PERFORMED_BY`), so an endpoint's method or a
-field's type has no row. Until §11.7 exists, a document may only make
-statements whose evidence one of §11.1 to §11.5 already holds.
+field's type has no row there. §11.7 lists every fact an exported artifact
+asserts, once, under a citation id that names the fact and not its place in
+a document (ADR-0058). Compiling an export fails if a cited id has no row.
+The existing documents do not print the id beside each statement yet; that
+is added one document at a time. Until a document prints its citations, it
+may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's eighteen artifacts go
+## 3. Where today's twenty artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -245,8 +249,9 @@ statements whose evidence one of §11.1 to §11.5 already holds.
 | `journeys.md` | D9 §9.1 to §9.3 |
 | `rule-evidence.md`, `rule-evidence.json` | D1 §1.5, D11 §11.4 |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
+| `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The eighteen files keep being exported under their current names until each
+The twenty files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -265,7 +270,7 @@ row names the issue that tracks it.
 | D7 §7.3, D6 §6.4 | Every compiled-in adapter (TypeScript/JavaScript, Python, Go, Java, Kotlin, Rust) emits a `ConfigRead` fact for a standard-library environment read, named for a literal key and unnamed for a dynamic one (ADR-0059); before that only a key that named a recognised client (`env_key` on an observed `Resource`, TypeScript and Python) was recorded. Still missing: the projection that lists each key with where it is declared and read, and reads through configuration frameworks (Spring `@Value`, NestJS `ConfigService`, Viper). There is no C# adapter (#1789) |
 | D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps (#1790) |
 | D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is exported as `coverage.md` and `coverage.json` (#1786, fixed). It records each producer's file count, each missing input and each unsupported capability with its first site; it holds no list of every file found, read or skipped, so these sections cannot yet name each file |
-| D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement (#1785) |
+| D11 §11.7 | The fact and evidence index is exported as `fact-index.md` and `fact-index.json` (#1785, fixed; ADR-0058). It has one row for each fact an exported artifact asserts, with its tier, confidence, method, evidence basis, extractor and spans, and the export fails if a cited id has no row. The existing documents do not yet print the citation id beside each statement, so D4 §4.2, D5 §5.2 and D7 become checkable statement by statement only as each document adds its citations |
 | Every header | The graph content hash is not available outside tests (#1765) |
 | Every A and P+A section | Section drafting (#1748) on the curated projection (#1746) |
 
@@ -289,7 +294,7 @@ of them.
    Each row stays unconfirmed until a person confirms it.
 5. **One file per document**, Markdown, with the appendices as separate
    files. Other formats are a rendering concern.
-6. **The current eighteen artifacts stay exported** alongside the new
+6. **The current twenty artifacts stay exported** alongside the new
    documents until every consumer has moved.
 7. **Order of delivery:** D11 and the P sections of D4 and D5 first (no
    model needed), then D1, then D2 and D3, then the rest.

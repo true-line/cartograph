@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, coverage) with T0-locked semantics: deterministic facts cannot
+register, ADRs, coverage, fact index) with T0-locked semantics: deterministic facts cannot
 be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -38,3 +38,39 @@ totals by producer and by reason, and the detail for every repository is in
 
 The inventory counts files per producer. It does not list every file, so the
 documents name the first place a limit was found, not each file.
+
+## The fact and evidence index
+
+Every export includes **fact-index.md** and **fact-index.json**. They list
+each fact the other documents state, once, with where it comes from:
+
+- the citation id, such as `F-3a9c41d07be2f815`
+- the fact itself: a node, or a relation between two nodes
+- its tier, confidence, producing method, evidence basis and extractor
+- every evidence span: repository, path, byte range and commit
+- the documents that state it
+
+A citation id names the fact, not a place in a document. The same fact has
+the same id in every document and in every export of the same graph, so a
+sentence can keep its citation when a document is rewritten or reordered.
+The id changes only when the fact itself becomes a different fact.
+
+The index holds spans, not source text. Use a span to open the source at
+that place.
+
+The index follows the export mode. A `verified-only` export has no row for
+an InferredWeak fact. A `best-effort` export has those rows and marks each
+one. A gap has a row like any other fact and is marked as a gap, so an
+unresolved hop is never read as confirmed.
+
+When two documents state the same fact with different evidence, the row
+lists every evidence record and the documents that carry each one. Nothing
+is chosen for you.
+
+An export is refused when one of its statements cites an id that has no row,
+or when two different facts would share one id. The documents do not print
+the citation id beside each statement yet. That is added one document at a
+time.
+
+The index grows with the number of facts the documents state, not with the
+size of the graph.
