@@ -104,6 +104,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) configuration_withheld: usize,
     /// Boundary facts withheld the same way (`external::withheld`).
     pub(crate) external_withheld: usize,
+    /// Environment facts withheld the same way (`environments::withheld`).
+    pub(crate) environments_withheld: usize,
     /// The curated projection, or why there is none.
     pub(crate) curated: Curated<'a>,
 }
@@ -124,6 +126,7 @@ impl<'a> Beside<'a> {
             pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
             configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
             external_withheld: external::withheld(nodes, edges, mode, rejected),
+            environments_withheld: environments::withheld(nodes, edges, mode, rejected),
             curated: supplied.curated,
         }
     }
@@ -258,6 +261,13 @@ const ARTIFACTS: &[Artifact] = &[
         id: "external",
         file: "external.md",
         title: "Calls and publishes that leave the system boundary",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1791).
+    Artifact {
+        id: "environments",
+        file: "environments.md",
+        title: "Environments and the workloads they declare",
         format: "markdown",
     },
     // After it, for the same reason (#1746).
@@ -521,6 +531,12 @@ fn produce(
         // graph, the admitted flows, and the count the mode and the
         // rejections withheld. No stored inventory is read (AC-0660).
         "external" => external::output(nodes, edges, flows, (mode, beside.external_withheld), max)?,
+        // Environment, Workload and environment-Gap facts in the admitted
+        // graph with their relations, and the count the mode and the
+        // rejections withheld. No stored inventory is read (AC-0661).
+        "environments" => {
+            environments::output(nodes, edges, (mode, beside.environments_withheld), max)?
+        }
         // The curated projection the host supplied, and the admitted nodes
         // its items cite (AC-0653). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,

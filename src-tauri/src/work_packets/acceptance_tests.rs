@@ -452,6 +452,41 @@ fn ac0660_work_packet_refuses_the_external_document() {
     );
 }
 
+// AC-0661 (SPEC-14): work packets refuse the environments projection until a
+// decision says otherwise. The exact identity the export gives it is refused
+// before any compilation, and nothing is stored.
+#[test]
+fn ac0661_work_packet_refuses_the_environments_document() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let saved = f.runtime.store.lock().unwrap().list(50).unwrap().len();
+    let artifact = bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "environments")
+        .unwrap();
+    assert_eq!(artifact.file_name, "environments.md");
+    f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(
+        f.runtime.store.lock().unwrap().list(50).unwrap().len(),
+        saved
+    );
+}
+
 // AC-0249: stored decisions keep their exact earlier content. They neither
 // confer current authority nor disappear when today's provenance is invalid.
 #[test]

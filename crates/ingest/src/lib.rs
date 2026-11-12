@@ -12,6 +12,7 @@ pub mod adapter_lookup;
 pub mod adapter_packet;
 pub mod api_docs;
 pub mod coverage;
+pub mod environments;
 pub mod managed;
 pub mod manifest;
 pub mod manifest_draft;

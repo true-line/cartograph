@@ -167,7 +167,7 @@ fn is_env_file(rel: &str) -> bool {
     is_env_name(base)
 }
 
-fn is_env_name(name: &str) -> bool {
+pub(crate) fn is_env_name(name: &str) -> bool {
     name == ".env"
         || name.starts_with(".env.")
         || (name.len() > ".env".len() && name.ends_with(".env"))

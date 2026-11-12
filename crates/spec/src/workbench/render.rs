@@ -168,6 +168,11 @@ impl fmt::Display for NodeName<'_> {
         {
             return write!(f, "{method} {path}");
         }
+        // An environment is named only by what its file states (ADR-0070):
+        // without a stated name it is shown by its id, never by its path.
+        if n.label == "Environment" {
+            return f.write_str(text_prop(n, &["name"]).unwrap_or(&n.id));
+        }
         f.write_str(
             text_prop(
                 n,

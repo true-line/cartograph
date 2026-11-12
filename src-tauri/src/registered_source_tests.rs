@@ -2542,6 +2542,294 @@ fn export_projects_ingested_pipelines_in_dependency_order() {
     }
 }
 
+// AC-0661 (#1791, ADR-0070, SPEC-14): the export of a real ingest carries
+// the environments projection. Two Compose files are two environments shown
+// by path, neither named from its path; the workload both declare is listed
+// once per declaration with the properties that differ and both spans; an
+// environment file that names an environment only by its file name is a Gap
+// with no span and no value; a Kubernetes manifest is named in the stored
+// coverage inventory as present and not read. The reader's facts add no hop
+// to any flow and nothing to the topology map, and the toolchain reader's
+// Compose fact is still there. Every assertion has a fact-index row, a
+// second export and the single-artifact read return the same bytes, a
+// second ingest of the same tree gives the same graph content hash, and a
+// name-only Gap leaves the graph with its file.
+#[test]
+fn export_projects_ingested_environments() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let base = "services:\n\
+         \x20 web:\n    image: shop/web:1\n    ports:\n      - \"8080:80\"\n    environment:\n      \
+         - SESSION_KEY=hunter2-sentinel\n    depends_on:\n      - db\n\
+         \x20 db:\n    image: postgres:16\n";
+    let prod = "services:\n\
+         \x20 web:\n    image: shop/web:2\n    ports:\n      - \"443:8443\"\n    environment:\n      \
+         SESSION_KEY: hunter2-sentinel\n";
+    std::fs::write(root.join("docker-compose.yml"), base).unwrap();
+    std::fs::write(root.join("docker-compose.prod.yml"), prod).unwrap();
+    std::fs::write(root.join("staging.env"), "SESSION_KEY=hunter2-sentinel\n").unwrap();
+    std::fs::create_dir_all(root.join("k8s")).unwrap();
+    std::fs::write(
+        root.join("k8s/deployment.yaml"),
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let ingest = || {
+        let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+        let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+        run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+    };
+    ingest();
+    let repo = registered.repo_key.as_str();
+    // As the document writes it: literal text, so `_` is escaped.
+    let shown = repo.replace('_', "\\_");
+    let hashes = || {
+        let graph = state.graph.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&*graph).unwrap(),
+        )
+    };
+    let first = hashes();
+
+    {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        let workload = |file: &str, name: &str| format!("workload:{repo}@{file}#{name}");
+        let web = nodes
+            .iter()
+            .find(|node| node.id == workload("docker-compose.yml", "web"))
+            .unwrap();
+        assert_eq!(web.label, "Workload");
+        assert_eq!(web.props["prov"]["extractor_id"], "t0.environments");
+        assert_eq!(
+            web.props["environment_keys"],
+            serde_json::json!(["SESSION_KEY"])
+        );
+        // No value of an environment key is anywhere in the graph.
+        assert!(!serialized(&(&nodes, &edges)).contains("hunter2-sentinel"));
+        assert!(edges.iter().any(|edge| {
+            edge.src == workload("docker-compose.yml", "web")
+                && edge.label == "DEPENDS_ON"
+                && edge.dst == workload("docker-compose.yml", "db")
+        }));
+        // The toolchain reader's Compose fact is still recorded.
+        let tool = nodes
+            .iter()
+            .find(|node| node.id == format!("tool:{repo}@docker-compose.yml"))
+            .unwrap();
+        assert_eq!(tool.props["display"], "Docker Compose");
+        assert_eq!(
+            tool.props["settings"]["services"],
+            serde_json::json!(["web", "db"])
+        );
+        // No flow and no topology line comes from a workload.
+        assert!(flowtracer::trace(&nodes, &edges).is_empty());
+        assert!(!spec::topology_mermaid(&nodes, &edges).contains("workload"));
+
+        let staging = format!("gap:environment:{repo}@staging.env");
+        let web_base = base.find("image: shop/web:1").unwrap();
+        let web_prod = prod.find("image: shop/web:2").unwrap();
+        for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+            let bundle = crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode,
+            )
+            .unwrap();
+            let artifact = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "environments")
+                .unwrap();
+            assert_eq!(artifact.file_name, "environments.md");
+            let content = &artifact.content;
+            let row = |start: &str| {
+                content
+                    .lines()
+                    .find(|line| line.starts_with(start))
+                    .unwrap_or_else(|| panic!("no row starting {start:?} in:\n{content}"))
+            };
+            assert!(content.contains(
+                "Environments: 2. Workloads: 3. Environments named only by a file name: 1. \
+                 Other items not established: 0."
+            ));
+            // Two environments, by path; neither is named.
+            let listed = row(&format!(
+                "| {shown} | docker-compose.prod.yml | none stated | compose | 1 | Deterministic \
+                 | Confirmed |"
+            ));
+            assert!(listed.contains(&format!(
+                "docker-compose.prod.yml bytes {}..{}",
+                0,
+                "services".len()
+            )));
+            row(&format!(
+                "| {shown} | docker-compose.yml | none stated | compose | 2 | Deterministic | \
+                 Confirmed |"
+            ));
+            assert!(!content.contains("| prod |"));
+            assert!(!content.contains("| staging |"));
+            // The workload both declare: each declaration, what differs, and
+            // each span. Environment key names are the same and not listed.
+            let declared = &content[content
+                .find("\n## Declared in more than one environment\n")
+                .unwrap()
+                ..content.find("\n## Not established\n").unwrap()];
+            let both: Vec<&str> = declared
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web |")))
+                .collect();
+            assert_eq!(both.len(), 2, "{declared}");
+            assert!(both[0].contains(
+                "| docker-compose.prod.yml | image: shop/web:2; ports: 443:8443; dependencies: \
+                 not stated |"
+            ));
+            assert!(both[0].contains(&format!("docker-compose.prod.yml bytes {web_prod}..")));
+            assert!(both[1].contains(
+                "| docker-compose.yml | image: shop/web:1; ports: 8080:80; dependencies: db |"
+            ));
+            assert!(both[1].contains(&format!("docker-compose.yml bytes {web_base}..")));
+            assert!(!declared.contains("| db |"));
+            assert!(!content.to_lowercase().contains("overrid"));
+            // The name-only environment file: a Gap, no span, no value.
+            let gap = row(&format!(
+                "| {shown} | staging.env | — | environment named only by a file name |"
+            ));
+            assert!(gap.ends_with("| Deterministic | Gap | none stored for an environment file |"));
+            assert!(!content.contains("hunter2-sentinel"));
+            // Nowhere is an environment labelled with its path.
+            assert!(!content.contains("Environment: docker-compose"));
+            assert!(content.contains(&format!("| Environment: env:{shown}@docker-compose.yml |")));
+
+            let index: spec::FactIndex = serde_json::from_str(
+                &bundle
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.id == "fact-index-json")
+                    .unwrap()
+                    .content,
+            )
+            .unwrap();
+            // 2 environments, 3 workloads, 3 DECLARES, 1 DEPENDS_ON, 1 Gap.
+            assert_eq!(artifact.assertions.len(), 2 + 3 + 3 + 1 + 1);
+            for assertion in &artifact.assertions {
+                assert!(
+                    index.rows.iter().any(|row| {
+                        row.cited_by.iter().any(|by| by == "environments")
+                            && match &row.fact {
+                                core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                                core_graph::FactKey::Edge {
+                                    source,
+                                    label,
+                                    destination,
+                                } => {
+                                    format!("{source} {label} {destination}")
+                                        == assertion.subject_id
+                                }
+                            }
+                    }),
+                    "{} has a fact-index row",
+                    assertion.subject_id
+                );
+            }
+            assert!(
+                artifact
+                    .assertions
+                    .iter()
+                    .any(|assertion| assertion.subject_id == staging
+                        && assertion.provenance.evidence.is_empty())
+            );
+            assert_eq!(
+                crate::build_spec_bundle(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    mode
+                )
+                .unwrap(),
+                bundle
+            );
+            assert_eq!(
+                &crate::build_spec_artifact(
+                    &graph,
+                    &decisions,
+                    Some(&crate::curated::CuratedReview::default()),
+                    mode,
+                    "environments"
+                )
+                .unwrap(),
+                artifact
+            );
+
+            // The Kubernetes manifest is in the stored coverage inventory.
+            let coverage = &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "coverage")
+                .unwrap()
+                .content;
+            assert!(coverage.contains("t0.environments"), "{coverage}");
+            assert!(
+                coverage.contains(
+                    "Kubernetes manifest is present and not read: no installed producer \
+                     recovers environments from it"
+                ),
+                "{coverage}"
+            );
+        }
+    }
+
+    // The same tree again: the same graph.
+    ingest();
+    assert_eq!(hashes(), first);
+    // And in a fresh graph, as the determinism gate ingests it.
+    let fresh = || {
+        let extraction = extract_tree(
+            &root,
+            repo,
+            "workdir",
+            &[],
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        load_into_graph(&mut graph, &extraction, repo, &root, "workdir").unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&graph).unwrap(),
+        )
+    };
+    assert_eq!(fresh(), fresh());
+
+    // The Gap has no evidence span to be owned by; it still leaves the graph
+    // when its file does.
+    std::fs::remove_file(root.join("staging.env")).unwrap();
+    ingest();
+    let (nodes, _) = state.graph.lock().unwrap().read_snapshot().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !node.id.starts_with("gap:environment:"))
+    );
+    assert!(nodes.iter().any(|node| node.label == "Environment"));
+}
+
 // AC-0651 (#1821): the export of a real ingest carries the configuration
 // key projection. A key an environment file declares and source reads is
 // listed once with both; a key read and never declared and a key declared
