@@ -23,6 +23,7 @@ pub use decision_selection::{
     MAX_SELECTED_ASSERTION_BYTES, MAX_SELECTED_ASSERTION_KEYS, MAX_SELECTED_ASSERTION_ROW_BYTES,
     SelectedAssertionDecision,
 };
+pub mod curated;
 pub mod investigation;
 pub mod prepared;
 pub mod source_basis;
