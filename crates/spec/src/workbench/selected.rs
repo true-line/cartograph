@@ -1,5 +1,6 @@
 //! Selected artifact dispatch; projection and native renderers are shared.
 use super::*;
+use context_hub::curated::CuratedProjection;
 use core_graph::coverage::StoredCoverage;
 use std::{fmt, io};
 
@@ -63,6 +64,17 @@ pub enum SelectedArtifactOutcome {
     },
 }
 
+/// What the host supplies beside the graph facts. A bare compile supplies
+/// neither, and the artifacts that read them say so.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Supplied<'a> {
+    /// The coverage inventories stored with the graph (AC-0592).
+    pub coverage: &'a [StoredCoverage],
+    /// The curated projection the host computed for this graph (SPEC-12,
+    /// AC-0653). `None` when the host computed none.
+    pub curated: Option<&'a CuratedProjection>,
+}
+
 /// What an artifact reads beside the admitted graph facts.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Beside<'a> {
@@ -73,6 +85,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) pipelines_withheld: usize,
     /// Configuration facts withheld the same way (`configuration::withheld`).
     pub(crate) configuration_withheld: usize,
+    /// The curated projection, when the host supplied one.
+    pub(crate) curated: Option<&'a CuratedProjection>,
 }
 
 impl<'a> Beside<'a> {
@@ -83,12 +97,13 @@ impl<'a> Beside<'a> {
         edges: &[E],
         mode: ExportMode,
         rejected: &BTreeSet<String>,
-        coverage: &'a [StoredCoverage],
+        supplied: Supplied<'a>,
     ) -> Self {
         Self {
-            coverage,
+            coverage: supplied.coverage,
             pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
             configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
+            curated: supplied.curated,
         }
     }
 }
@@ -215,6 +230,13 @@ const ARTIFACTS: &[Artifact] = &[
         id: "configuration",
         file: "configuration.md",
         title: "Configuration keys",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1746).
+    Artifact {
+        id: curated::ARTIFACT_ID,
+        file: "curated.md",
+        title: "Curated items",
         format: "markdown",
     },
     Artifact {
@@ -467,6 +489,9 @@ fn produce(
         "configuration" => {
             configuration::output(nodes, edges, (mode, beside.configuration_withheld), max)?
         }
+        // The curated projection the host supplied, and the admitted nodes
+        // its items cite (AC-0653). No stored inventory is read.
+        curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,
         // The two index artifacts are rendered from the collected citations.
@@ -547,7 +572,7 @@ pub fn compile_spec_selected(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, None, None, &[]),
+        (requested_ids, limits, None, None, Supplied::default()),
     )
 }
 
@@ -568,13 +593,47 @@ pub fn compile_spec_selected_with_coverage(
     limits: SelectedCompileLimits,
     coverage: &[StoredCoverage],
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_spec_selected_supplied(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        requested_ids,
+        limits,
+        Supplied {
+            coverage,
+            curated: None,
+        },
+    )
+}
+
+/// [`compile_spec_selected`] with everything the host supplies beside the
+/// graph: the stored coverage inventories (AC-0592) and the curated
+/// projection the `curated` artifact lists (AC-0653). Every other artifact is
+/// unchanged by them, except the fact index, which lists what `curated`
+/// cites.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "additive host input preserves the existing selected compiler arguments"
+)]
+pub fn compile_spec_selected_supplied(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    requested_ids: &[&str],
+    limits: SelectedCompileLimits,
+    supplied: Supplied<'_>,
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
     compile_selected(
         nodes,
         edges,
         flows,
         mode,
         rejected,
-        (requested_ids, limits, None, None, coverage),
+        (requested_ids, limits, None, None, supplied),
     )
 }
 
@@ -601,7 +660,13 @@ pub fn compile_spec_selected_with_security(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, Some(security), None, &[]),
+        (
+            requested_ids,
+            limits,
+            Some(security),
+            None,
+            Supplied::default(),
+        ),
     )
 }
 fn compile_selected(
@@ -615,10 +680,10 @@ fn compile_selected(
         SelectedCompileLimits,
         Option<crate::SecurityLimits>,
         Option<&capabilities::Stories<'_>>,
-        &[StoredCoverage],
+        Supplied<'_>,
     ),
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
-    let (requested_ids, limits, security, stories, coverage) = selection;
+    let (requested_ids, limits, security, stories, supplied) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
             return Err(ArtifactSelectionError::UnknownArtifact { index });
@@ -651,7 +716,7 @@ fn compile_selected(
                 .collect());
         }
     };
-    let beside = Beside::new(nodes, edges, mode, rejected, coverage);
+    let beside = Beside::new(nodes, edges, mode, rejected, supplied);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
     let gaps = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
@@ -775,11 +840,11 @@ pub(super) fn all(
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
-    coverage: &[StoredCoverage],
+    supplied: Supplied<'_>,
 ) -> Result<SpecBundle, FactIndexError> {
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
-    let beside = Beside::new(nodes, edges, mode, rejected, coverage);
+    let beside = Beside::new(nodes, edges, mode, rejected, supplied);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
     try_bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, beside)
@@ -950,6 +1015,7 @@ pub(super) fn bundle_with_citation_ids(
         drift_count,
         security_count,
         graph_basis: None,
+        curated_basis: None,
     })
 }
 
@@ -993,7 +1059,13 @@ pub(super) fn compile_stories_with_flows_and_security(
         flows,
         mode,
         rejected,
-        (&["user-stories"], limits, security, Some(stories), &[]),
+        (
+            &["user-stories"],
+            limits,
+            security,
+            Some(stories),
+            Supplied::default(),
+        ),
     )
     .expect("official artifact id")
     .remove(0)

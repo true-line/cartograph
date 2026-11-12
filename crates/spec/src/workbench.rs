@@ -11,6 +11,8 @@ mod configuration;
 pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
 pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
+mod curated;
+pub use curated::CuratedBasis;
 pub(crate) mod diagrams;
 mod endpoint_permissions;
 pub use endpoint_permissions::{
@@ -45,9 +47,9 @@ use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
 pub use selected::{
     ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
-    SelectedCompileLimits, artifact_catalog, compile_spec_selected,
-    compile_spec_selected_with_coverage, compile_spec_selected_with_security,
-    project_recovered_facts,
+    SelectedCompileLimits, Supplied, artifact_catalog, compile_spec_selected,
+    compile_spec_selected_supplied, compile_spec_selected_with_coverage,
+    compile_spec_selected_with_security, project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::{Borrow, Cow};
@@ -198,6 +200,12 @@ pub struct SpecBundle {
     /// bytes are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_basis: Option<crate::GraphBasis>,
+    /// The curated projection this bundle's `curated` artifact lists
+    /// (SPEC-12, AC-0653): its revision and record counts. Stamped by the
+    /// host, which computes the projection; absent from a bare compile, so
+    /// those bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curated_basis: Option<CuratedBasis>,
 }
 
 pub(crate) fn fallback_provenance(identity: &str) -> Provenance {
@@ -696,7 +704,33 @@ pub fn try_compile_spec_with_coverage(
     rejected_hashes: &BTreeSet<String>,
     coverage: &[core_graph::coverage::StoredCoverage],
 ) -> Result<SpecBundle, FactIndexError> {
-    selected::all(nodes, edges, flows, mode, rejected_hashes, coverage)
+    try_compile_spec_supplied(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        Supplied {
+            coverage,
+            curated: None,
+        },
+    )
+}
+
+/// [`try_compile_spec_with_coverage`] with everything the host supplies
+/// beside the graph: the stored coverage inventories and the curated
+/// projection the `curated` artifact lists (SPEC-12, AC-0653). Without a
+/// projection that artifact states that none was supplied. The host stamps
+/// [`SpecBundle::curated_basis`]; this function does not.
+pub fn try_compile_spec_supplied(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    supplied: Supplied<'_>,
+) -> Result<SpecBundle, FactIndexError> {
+    selected::all(nodes, edges, flows, mode, rejected_hashes, supplied)
 }
 
 /// The bundle of an export whose citations resolve. The infallible compilers
@@ -935,23 +969,25 @@ mod tests {
             // stories render recovered names, ids and provenance as literal text
             // (#1453), which intentionally changes those bytes. The endpoint
             // permission projection (#1787), the pipeline projection (#1818),
-            // the configuration key projection (#1821), the coverage
-            // artifacts (#1786) and the fact index (#1785) are
-            // appended after these and hashed apart, so the frozen bytes
-            // still prove the graph artifacts are unchanged.
+            // the configuration key projection (#1821), the curated items
+            // (#1746), the coverage artifacts (#1786) and the fact index
+            // (#1785) are appended after these and hashed apart, so the
+            // frozen bytes still prove the graph artifacts are unchanged.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
 
     /// The bundle without the endpoint permission projection (#1787), the
     /// pipeline projection (#1818), the configuration key projection
-    /// (#1821), the two coverage artifacts, which project stored inventories
+    /// (#1821), the curated items, which list a projection the host supplies
+    /// (#1746), the two coverage artifacts, which project stored inventories
     /// instead of the graph (#1786), and the two fact-index artifacts, which
-    /// list what the others cite (#1785). The seven close the official
+    /// list what the others cite (#1785). The eight close the official
     /// order; the fixture has no endpoint, no pipeline, no environment file
-    /// and no configuration read, so none carries an assertion here.
+    /// and no configuration read, and a bare compile has no curated
+    /// projection, so none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 7);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 8);
         assert_eq!(
             appended
                 .iter()
@@ -961,6 +997,7 @@ mod tests {
                 "endpoint-permissions",
                 "pipelines",
                 "configuration",
+                "curated",
                 "coverage",
                 "coverage-index",
                 "fact-index",
@@ -1103,6 +1140,7 @@ mod tests {
                 "endpoint-permissions.md",
                 "pipelines.md",
                 "configuration.md",
+                "curated.md",
                 "coverage.md",
                 "coverage.json",
                 "fact-index.md",
@@ -2470,7 +2508,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 23);
+                assert_eq!(full.artifacts.len(), 24);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,

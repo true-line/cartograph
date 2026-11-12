@@ -419,9 +419,33 @@ pub fn try_compile_spec_with_views_and_coverage(
     rejected_hashes: &BTreeSet<String>,
     coverage: &[core_graph::coverage::StoredCoverage],
 ) -> Result<(SpecBundle, SpecViewBundle), crate::FactIndexError> {
+    try_compile_spec_with_views_supplied(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        crate::Supplied {
+            coverage,
+            curated: None,
+        },
+    )
+}
+
+/// [`try_compile_spec_with_views_and_coverage`] with everything the host
+/// supplies beside the graph, exactly as [`crate::try_compile_spec_supplied`]
+/// takes it (SPEC-12, AC-0653). The views are unchanged by it.
+pub fn try_compile_spec_with_views_supplied(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    supplied: crate::Supplied<'_>,
+) -> Result<(SpecBundle, SpecViewBundle), crate::FactIndexError> {
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .expect("unbounded ADR derivation");
-    let beside = selected::Beside::new(nodes, edges, mode, rejected_hashes, coverage);
+    let beside = selected::Beside::new(nodes, edges, mode, rejected_hashes, supplied);
     let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
     let filtered_edges = filter_edges(&projection.edges, mode, rejected_hashes);
     let bundle = selected::try_bundle_from_filtered(
