@@ -6138,14 +6138,8 @@ fn build_spec_bundle(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    let mut bundle = spec::compile_spec_with_coverage(
-        &nodes,
-        &edges,
-        &flows,
-        mode,
-        &rejected_hashes,
-        &coverage,
-    );
+    let mut bundle =
+        spec::compile_spec_with_coverage(&nodes, &edges, &flows, mode, &rejected_hashes, &coverage);
     bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
     Ok(bundle)
 }
