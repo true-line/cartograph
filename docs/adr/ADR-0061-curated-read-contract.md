@@ -38,8 +38,9 @@ curation. SPEC-09 says the basis assessment must not be stored as a single
    projection survives a restart by being recomputed from them.
 2. **The curated revision is a content identity.** It is a digest over the
    policy version, the base graph content hash, and the ordered set of
-   reviewed records, each with its identity, decision and assigned state
-   (decision 4). The same inputs give the same revision on any surface. A
+   reviewed records, each with its identity, decision, assigned state and
+   the reason for that state (decision 4). Rejected records enter it with
+   their decision only. The same inputs give the same revision on any surface. A
    review, a re-ingest that changes the graph, or a policy change gives a new
    one. It is not a counter.
 3. **DR-4 is defined here** as the field list of ADR-0036 decision 4. Every
@@ -47,27 +48,32 @@ curation. SPEC-09 says the basis assessment must not be stored as a single
    curated revision, and per item its record identity, producing tier and
    confidence unchanged, review status, source support, and state.
 4. **Every accepted record has exactly one state**, assigned by the host at
-   projection time and never stored:
-   - `eligible`: all the conditions of decision 5 hold.
+   projection time and never stored. The first of these that applies, in
+   this order:
    - `unverified`: its evidence is not all captured primary-source evidence,
-     or it is a version 1 record.
-   - `stale`: its basis no longer matches the current graph or its selected
-     associations, or its captured bytes are unavailable.
-   - `already-covered`: a base fact now fills the slot it proposed.
-   - `conflicted`: another accepted record proposes a different target for
-     the same slot.
+     it has no evidence, or it is not a version 2 record.
+   - `already-covered`: the base graph now holds the exact edge it proposed
+     as a base fact (valid provenance, not Agentic, not Gap confidence). This
+     holds whether or not the Gap node still exists.
    - `unresolvable`: the Gap or an endpoint it names is no longer in the
-     graph.
+     graph, or the node it names is no longer a Gap.
+   - `stale`: its basis no longer matches the current graph or its selected
+     associations, its captured bytes are unavailable, or no assessment
+     could be made.
+   - `conflicted`: another accepted record proposes a different edge for the
+     same Gap, whatever that other record's own state.
+   - `eligible`: none of the above.
    Only `eligible` records enter curated content. Every other accepted record
    is listed with its state and the reason. None is dropped, and none is
    substituted.
 5. **Eligibility is conservative.** An accepted staged proposal is eligible
    only when: it is a version 2 record; every evidence item is captured
    primary-source evidence that is still readable; the graph and association
-   comparisons of SPEC-09 are both unchanged; the Gap and both endpoints
-   exist; no base fact fills the same directed slot; and it is the only
-   accepted record for that Gap. One accepted record per Gap is the
-   cardinality rule until a slot's cardinality can be proven.
+   comparisons of SPEC-09 are both unchanged; the base graph does not hold
+   the proposed edge; the Gap and both endpoints exist; and no other
+   accepted record for that Gap proposes a different edge. One accepted
+   edge per Gap is the cardinality rule until a slot's cardinality can be
+   proven. Two accepted records that propose the same edge do not conflict.
 6. **Curated items never change base facts.** An eligible record appears as a
    curated item beside the recovered facts. It keeps Agentic/InferredWeak. It
    is not written to the graph, does not resolve its Gap in the base graph,
