@@ -4,6 +4,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { ResolutionStrategyModal } from './ResolutionStrategyModal';
 import { useAppStore, type BasisAssessment, type StagedProposal, type EscalationState, type GapStrategyReport } from '../store';
 import { mixedTaskBasis } from '../taskBasisFixtures';
+import { UNVERIFIED_RECORD } from '../curatedFixtures';
 
 const REPORT: GapStrategyReport = {
   gap_id: 'gap:sync',
@@ -23,7 +24,7 @@ const REPORT: GapStrategyReport = {
       latency: 'seconds to a minute on-device',
       privacy: 'payload never leaves the device',
       export_impact:
-        'Accepted proposals await context reconciliation. Source binding is unverified; an export lists accepted proposals in curated.md with their state. T3/InferredWeak is preserved.',
+        'An accepted proposal gets one state each time it is read: only an eligible one is a curated item, and every other is listed in curated.md with its reason. Source binding is unverified. T3/InferredWeak is preserved.',
       available: true,
       unavailable_reason: null,
     },
@@ -37,7 +38,7 @@ const REPORT: GapStrategyReport = {
       latency: 'a few seconds via API',
       privacy: 'redacted payload leaves the device after a per-payload grant',
       export_impact:
-        'Accepted proposals await context reconciliation. Source binding is unverified; an export lists accepted proposals in curated.md with their state. T3/InferredWeak is preserved.',
+        'An accepted proposal gets one state each time it is read: only an eligible one is a curated item, and every other is listed in curated.md with its reason. Source binding is unverified. T3/InferredWeak is preserved.',
       available: false,
       unavailable_reason:
         'T3 is not consented to cloud — enable the provider and grant consent in Settings (cloud fails closed)',
@@ -206,7 +207,7 @@ export const ProposalNeverAutoJoins: Story = {
     await expect(canvas.getByTestId('proposal-card')).toBeInTheDocument();
     await expect(canvas.getByText('Inferred (weak)')).toBeInTheDocument();
     await expect(
-      canvas.getByText(/Accepted proposals await context reconciliation/),
+      canvas.getByText(/An accepted proposal gets one state each time it is read/),
     ).toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'Accept as InferredWeak' }));
     await expect(args.onDecide).toHaveBeenCalledWith('accepted');
@@ -240,15 +241,23 @@ export const RunFailureIsExplicit: Story = {
   },
 };
 
-export const AcceptedReviewAwaitsReconciliation: Story = {
+export const AcceptedReviewStatesTheRecordState: Story = {
   // AC-0129: reviewed history never claims source freshness or export activation.
-  args: { state: state({
-    proposal: { ...PROPOSAL, review_revision: 1, review_decision: 'accepted', reviewed_at: '2026-09-10T13:00:00Z' },
-    decided: 'accepted',
-  }) },
+  // AC-0655: the dialog states the state and reason sentence the host's
+  // curated read gave this record, not a fixed "awaiting" label.
+  args: {
+    state: state({
+      proposal: { ...PROPOSAL, review_revision: 1, review_decision: 'accepted', reviewed_at: '2026-09-10T13:00:00Z' },
+      decided: 'accepted',
+    }),
+    recordState: { state: 'unverified', reason_sentence: UNVERIFIED_RECORD.reason_sentence },
+  },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByTestId('decision-recorded')).toHaveTextContent('Awaiting context reconciliation');
+    await expect(canvas.getByTestId('decision-recorded')).toHaveTextContent(
+      `Decision recorded: accepted. State: unverified. ${UNVERIFIED_RECORD.reason_sentence}`,
+    );
+    await expect(canvas.getByTestId('decision-recorded')).not.toHaveTextContent(/reconciliation/i);
     await expect(canvas.getByText(/Acceptance does not certify evidence freshness/)).toBeInTheDocument();
     await expect(canvas.getByText('Inferred (weak)')).toBeInTheDocument();
     await expect(canvas.queryByRole('button', { name: /Accept as/ })).not.toBeInTheDocument();
@@ -295,7 +304,10 @@ export const AcceptedCapturedProposalKeepsReviewAndAssessmentSeparate: Story = {
     await expect(canvas.getByText('Unchanged at this check')).toBeInTheDocument();
     await expect(canvas.getByText('Changed since preparation')).toBeInTheDocument();
     await expect(canvas.getByText(/Retained bytes unavailable/)).toBeInTheDocument();
-    await expect(canvas.getByTestId('decision-recorded')).toHaveTextContent('Awaiting context reconciliation');
+    // AC-0655: no curated read returned this record, so no state is made up.
+    await expect(canvas.getByTestId('decision-recorded')).toHaveTextContent(
+      'Its state is listed under Curated items in the Spec Workbench.',
+    );
     await expect(canvas.getByTestId('decision-recorded')).toHaveTextContent('Saved evidence origins remain unchanged');
     await expect(canvas.getByText('Inferred (weak)')).toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'Check again' }));

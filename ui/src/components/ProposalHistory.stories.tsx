@@ -3,6 +3,7 @@ import { expect, fn, userEvent, within } from 'storybook/test';
 import { ProposalHistory } from './ProposalHistory';
 import type { StagedProposal } from '../store';
 import { mixedTaskBasis } from '../taskBasisFixtures';
+import { STALE_RECORD } from '../curatedFixtures';
 
 const PENDING: StagedProposal = {
   proposal_id: 'proposal:pending',
@@ -45,7 +46,12 @@ export const PendingAndReviewedHistory: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText('Pending review')).toBeInTheDocument();
-    await expect(canvas.getByText('Accepted · awaiting context reconciliation')).toBeInTheDocument();
+    // AC-0655: without a curated read for the record, no state is made up.
+    await expect(canvas.getByText('Accepted')).toBeInTheDocument();
+    await expect(canvas.getByTestId('proposal-curated-state')).toHaveTextContent(
+      'Its state is listed under Curated items in the Spec Workbench.',
+    );
+    await expect(canvas.queryByText(/reconciliation/i)).not.toBeInTheDocument();
     await expect(canvas.getAllByText('Inferred (weak)')).toHaveLength(2);
     await userEvent.click(canvas.getByRole('button', { name: 'Review proposal' }));
     await expect(args.onOpen).toHaveBeenCalledWith(PENDING);
@@ -78,7 +84,32 @@ export const MixedHistoryPreservesLegacyAndAcceptedOrigins: Story = {
     await expect(canvas.getByText('Source binding unverified · legacy evidence')).toBeInTheDocument();
     await expect(canvas.getByText(/1 retained parser span\(s\) · 1 working-tree span\(s\), unverified/)).toBeInTheDocument();
     await expect(canvas.getByText('Selection limits or omissions apply.')).toBeInTheDocument();
-    await expect(canvas.getByText('Accepted · awaiting context reconciliation')).toBeInTheDocument();
+    await expect(canvas.getByText('Accepted')).toBeInTheDocument();
+    await expect(canvas.getAllByText('Inferred (weak)')).toHaveLength(2);
+  },
+};
+
+export const AcceptedRecordShowsItsCuratedState: Story = {
+  // AC-0655: an accepted record shows the state and reason sentence the
+  // host's curated read gave it; a pending record shows none.
+  args: {
+    proposals: [PENDING, {
+      ...PENDING, proposal_id: STALE_RECORD.record_id, review_revision: 1, review_decision: 'accepted',
+      reviewed_at: '2026-09-10T13:00:00Z',
+    }],
+    recordStates: new Map([[STALE_RECORD.record_id, {
+      state: STALE_RECORD.state, reason_sentence: STALE_RECORD.reason_sentence,
+    }]]),
+    hasMore: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Accepted · stale')).toBeInTheDocument();
+    await expect(canvas.getAllByTestId('proposal-curated-state')).toHaveLength(1);
+    await expect(canvas.getByTestId('proposal-curated-state')).toHaveTextContent(
+      'The graph has changed since the proposal was made.',
+    );
+    // R-INT-2: the record keeps its InferredWeak badge whatever its state.
     await expect(canvas.getAllByText('Inferred (weak)')).toHaveLength(2);
   },
 };

@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isCompletionSpecialist } from './investigationFamilies';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
+import { curatedRecordStatuses } from './curated';
 import { railSurface, SURFACES, surfaceLabel, type SurfaceView } from './views';
 import { NavRail } from './components/NavRail';
 import { ShellHeader, type Scope } from './components/ShellHeader';
@@ -137,6 +138,8 @@ export default function App() {
     runPluginGate,
     specBundle,
     specViews,
+    specCurated,
+    reloadSpec,
     specMode,
     curation,
     specBusy,
@@ -210,6 +213,9 @@ export default function App() {
     openStagedProposal,
     assessStagedBasis,
   } = useAppStore();
+  // The state the host gave each accepted record (AC-0655), for the proposal
+  // history and the open review dialog.
+  const curatedStates = useMemo(() => curatedRecordStatuses(specCurated), [specCurated]);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpTopic, setHelpTopic] = useState('concepts');
@@ -727,6 +733,8 @@ export default function App() {
             <SpecWorkbench
               bundle={specBundle}
               views={specViews}
+              curated={specCurated}
+              onRefreshCurated={() => void reloadSpec()}
               mode={specMode}
               decisions={curation}
               busy={specBusy}
@@ -767,6 +775,7 @@ export default function App() {
             allowedEdgeLabels={escalationEdgeLabels}
             proposalHistory={{
               proposals: stagedProposals,
+              recordStates: curatedStates,
               loading: stagedLoading,
               error: stagedError,
               hasMore: stagedNextCursor !== null,
@@ -1012,6 +1021,7 @@ export default function App() {
       {escalation && (
         <ResolutionStrategyModal
           state={escalation}
+          recordState={escalation.proposal ? curatedStates.get(escalation.proposal.proposal_id) : undefined}
           onRun={(strategyId) => void runStrategy(strategyId)}
           onConsent={(preview) => void consentAndRun(preview)}
           onDismissPreview={dismissPreview}
