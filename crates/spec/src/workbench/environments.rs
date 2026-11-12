@@ -53,10 +53,10 @@ const GAP_ID: &str = "gap:environment:";
 /// `props.kind` of the Gap of a name-only environment file.
 const NAME_ONLY: &str = "name-only-environment";
 
-/// The workload properties compared between declarations, each with the
-/// words a row uses for it.
+/// The workload properties compared between declarations of one kind (all
+/// Compose services, or all Kubernetes workloads), each with the words a row
+/// uses for it. The kind has its own column.
 const COMPARED: &[(&str, &str)] = &[
-    ("kind", "kind"),
     ("namespace", "namespace"),
     ("replicas", "replicas"),
     ("containers", "containers"),
@@ -67,6 +67,14 @@ const COMPARED: &[(&str, &str)] = &[
     ("env_files", "environment files"),
     ("depends_on", "dependencies"),
     ("profiles", "profiles"),
+];
+
+/// What both a Compose service and a Kubernetes workload can state, compared
+/// when the declarations of one name are of both kinds.
+const COMMON: &[(&str, &str)] = &[
+    ("image", "images"),
+    ("ports", "ports"),
+    ("environment_keys", "environment key names"),
 ];
 
 /// What the projection does not cover, stated in every export.
@@ -810,9 +818,10 @@ fn manifest_rows(
     Ok(())
 }
 
-/// The kind of a manifest workload as its file writes it.
+/// The kind of a workload: of a manifest workload as its file writes it.
 fn manifest_kind(node: &Node) -> &'static str {
     match node.props["kind"].as_str() {
+        Some("compose-service") => "Compose service",
         Some("k8s-deployment") => "Deployment",
         Some("k8s-statefulset") => "StatefulSet",
         Some("k8s-daemonset") => "DaemonSet",
@@ -867,15 +876,83 @@ impl fmt::Display for Dependencies<'_, '_> {
     }
 }
 
-/// The properties of `workload` that differ among `declarations`, with this
-/// declaration's value of each.
+/// One of the [`COMMON`] properties as a workload of either kind states it:
+/// its values, and whether any holds an unresolved `${`. A Kubernetes
+/// workload states it once for each container; the values are listed in
+/// container order, and its environment key names sorted, each once.
+fn common(node: &Node, key: &str) -> (Vec<String>, bool) {
+    let mut values = Vec::new();
+    let mut take = |value: &serde_json::Value| match value {
+        serde_json::Value::String(value) => values.push(value.clone()),
+        serde_json::Value::Array(entries) => values.extend(entries.iter().map(|entry| {
+            entry
+                .as_str()
+                .map_or_else(|| entry.to_string(), str::to_owned)
+        })),
+        _ => {}
+    };
+    let marked = if is_manifest(node) {
+        let mut marked = false;
+        for container in node.props["containers"].as_array().into_iter().flatten() {
+            take(&container[key]);
+            marked |= container["interpolated"][key] == true;
+        }
+        marked
+    } else {
+        take(&node.props[key]);
+        interpolated(node, key)
+    };
+    if is_manifest(node) && key == "environment_keys" {
+        values.sort();
+        values.dedup();
+    }
+    (values, marked)
+}
+
+/// The properties of `workload` that differ among `declarations`, the
+/// distinct `Workload` facts of one name, with this declaration's value of
+/// each. `mixed` when they are not all Compose services or all Kubernetes
+/// workloads: then only what both kinds can state is compared.
 struct Differing<'p, 'a> {
     workload: &'a Node,
     declarations: &'p [&'a Node],
+    mixed: bool,
 }
 impl fmt::Display for Differing<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut any = false;
+        if self.mixed {
+            for (key, words) in COMMON {
+                let (values, marked) = common(self.workload, key);
+                let differs = self.declarations.iter().any(|other| {
+                    let (theirs, their_mark) = common(other, key);
+                    theirs != values || their_mark != marked
+                });
+                if !differs {
+                    continue;
+                }
+                f.write_str(if any { "; " } else { "" })?;
+                any = true;
+                write!(f, "{words}: ")?;
+                if values.is_empty() {
+                    f.write_str("not stated")?;
+                }
+                for (index, value) in values.iter().enumerate() {
+                    f.write_str(if index > 0 { ", " } else { "" })?;
+                    write!(f, "{}", Literal(value))?;
+                }
+                if marked {
+                    f.write_str(" (holds `${`; not resolved)")?;
+                }
+            }
+            if !any {
+                f.write_str(
+                    "none: the images, ports and environment key names are the same in each \
+                     declaration",
+                )?;
+            }
+            return Ok(());
+        }
         for (key, words) in COMPARED {
             let own = &self.workload.props[*key];
             let own_mark = interpolated(self.workload, key);
@@ -902,6 +979,31 @@ impl fmt::Display for Differing<'_, '_> {
         }
         if !any {
             f.write_str("none: the recorded properties are the same in each declaration")?;
+        }
+        Ok(())
+    }
+}
+
+/// One `Workload` fact among the declarations of a name.
+struct Declaration<'a> {
+    node: &'a Node,
+    /// The paths of the environments with a `DECLARES` relation to it.
+    reached_by: Vec<&'a str>,
+}
+
+/// The declarations of one workload name, by file and then fact id.
+type Declarations<'a> = BTreeMap<(&'a str, &'a str), Declaration<'a>>;
+
+/// The environments with a `DECLARES` relation to a workload, by path.
+struct ReachedBy<'p, 'a>(&'p [&'a str]);
+impl fmt::Display for ReachedBy<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("no environment");
+        }
+        for (index, path) in self.0.iter().enumerate() {
+            f.write_str(if index > 0 { ", " } else { "" })?;
+            write!(f, "{}", Literal(path))?;
         }
         Ok(())
     }
@@ -946,10 +1048,11 @@ its dependencies and its profiles, as the file writes them. For Kubernetes it is
 and `bases` entries name, and in the kustomization directories they name, followed inside the \
 repository. A kustomization that another one names is an environment too; its row says \
 \"included by\" with the paths that include it.\n\
-- **Declared in more than one environment** lists a workload name that two or more environments \
-of one repository declare, and a Kubernetes workload that two or more kustomizations reach. \
-Each declaration has its own row. The document does not say which declaration is used where: \
-no file says which files a deployment combines.\n\
+- **Declared in more than one environment** lists a workload name that two or more workload \
+facts of one repository share, one row for each declaration (each workload fact) with the \
+environments that reach it; and a Kubernetes workload that two or more kustomizations reach, \
+one row for each of them. The document does not say which declaration is used where: no file \
+says which files a deployment combines.\n\
 - **A patch is shown, not applied.** Where a kustomization names a patch file whose document \
 names a workload it reaches, the row states what that patch writes. The workload's own row \
 keeps what its own file writes. `images` entries are shown the same way, as written.\n\
@@ -1166,51 +1269,69 @@ pub(super) fn output(
 
     content.push_str(
         "\n## Declared in more than one environment\n\n\
-         A workload name that two or more environments of one repository declare, one row for \
-         each declaration. \"Properties that differ\" lists the recorded properties that are \
-         not the same in every declaration of that name, with this declaration's value. This \
-         section does not say which declaration applies where.\n\n\
-         | Repository | Workload | Environment path | Properties that differ | Tier | \
-         Confidence | Span | Note |\n\
-         |---|---|---|---|---|---|---|---|\n",
+         A workload name that two or more workload facts of one repository share, one row for \
+         each declaration (each workload fact). \"Declared in\" is the file that writes it; \
+         \"Reached by\" lists the environments that declare it, or \"no environment\". \
+         \"Properties that differ\" lists the recorded properties that are not the same in every \
+         declaration of that name, with this declaration's value; where a name is declared \
+         both as a Compose service and as a Kubernetes workload, only the images, ports and \
+         environment key names are compared. A workload that several environments reach is one \
+         declaration and has one row. This section does not say which declaration applies \
+         where.\n\n\
+         | Repository | Workload | Kind | Declared in | Reached by | Properties that differ | \
+         Tier | Confidence | Span | Note |\n\
+         |---|---|---|---|---|---|---|---|---|---|\n",
     )?;
-    // By repository, then workload name, then environment path. A manifest
-    // workload several kustomizations reach is one declaration here, under
-    // each of them; the table after this one lists it.
-    let mut by_name: BTreeMap<(&str, &str), Vec<(&str, &Node)>> = BTreeMap::new();
+    // By repository, then workload name, then file, then fact id: each
+    // `Workload` fact once, however many environments reach it.
+    let mut by_name: BTreeMap<(&str, &str), Declarations> = BTreeMap::new();
     for ((repo, path), environment) in &model.environments {
         for workload in &environment.workloads {
-            by_name
-                .entry((repo, workload.name))
-                .or_default()
-                .push((path, workload.node));
+            by_name.entry((repo, workload.name)).or_default().insert(
+                (path, workload.node.id.as_str()),
+                Declaration {
+                    node: workload.node,
+                    reached_by: workload.declared.map(|_| *path).into_iter().collect(),
+                },
+            );
         }
-        for reached in &environment.reached {
-            let manifest = &model.manifests[reached.workload];
-            by_name
-                .entry((repo, manifest.name))
-                .or_default()
-                .push((path, manifest.node));
-        }
+    }
+    for manifest in model.manifests.values() {
+        by_name
+            .entry((manifest.repo, manifest.name))
+            .or_default()
+            .insert(
+                (manifest.path, manifest.node.id.as_str()),
+                Declaration {
+                    node: manifest.node,
+                    reached_by: manifest.reached_by.clone(),
+                },
+            );
     }
     let mut shared = 0usize;
     for ((repo, name), declarations) in &by_name {
-        let all: Vec<&Node> = declarations.iter().map(|(_, node)| *node).collect();
-        if all.iter().any(|node| node.id != all[0].id) {
-            shared += 1;
-        } else {
+        if declarations.len() < 2 {
             continue;
         }
-        for (path, node) in declarations {
+        shared += 1;
+        let all: Vec<&Node> = declarations.values().map(|fact| fact.node).collect();
+        let mixed = all
+            .iter()
+            .any(|node| is_manifest(node) != is_manifest(all[0]));
+        for ((path, _), fact) in declarations {
+            let node = fact.node;
             writeln!(
                 content,
-                "| {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} |",
                 Literal(repo),
                 Literal(name),
+                manifest_kind(node),
                 Literal(path),
+                ReachedBy(&fact.reached_by),
                 Differing {
                     workload: node,
                     declarations: &all,
+                    mixed,
                 },
                 Evidence(node),
                 note(weak(&node.props))
@@ -1218,7 +1339,7 @@ pub(super) fn output(
         }
     }
     if shared == 0 {
-        content.push_str("| — | None in this export | — | — | — | — | — | — |\n")?;
+        content.push_str("| — | None in this export | — | — | — | — | — | — | — | — |\n")?;
     }
 
     content.push_str(

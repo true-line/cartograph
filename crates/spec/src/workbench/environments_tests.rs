@@ -343,9 +343,10 @@ fn environments_and_their_workloads_are_listed_with_spans() {
 }
 
 // AC-0661 (ADR-0070 decision 6): a workload name that two environments of
-// one repository declare has one row per declaration, with the properties
-// that differ and each span; the document never says one overrides another,
-// and never joins repositories.
+// one repository declare has one row per declaration (each workload fact),
+// with its kind, the file that declares it, the environments that reach it,
+// the properties that differ and its span; the document never says one
+// overrides another, and never joins repositories.
 #[test]
 fn a_workload_declared_in_two_environments_shows_both_declarations() {
     let f = shop();
@@ -353,20 +354,23 @@ fn a_workload_declared_in_two_environments_shows_both_declarations() {
     assert_eq!(
         table(&content, "Declared in more than one environment"),
         [
-            "| acme/shop | db | deploy/docker-compose.prod.yml | none: the recorded properties \
-             are the same in each declaration | Deterministic | Confirmed | \
+            "| acme/shop | db | Compose service | deploy/docker-compose.prod.yml | \
+             deploy/docker-compose.prod.yml | none: the recorded properties are the same in \
+             each declaration | Deterministic | Confirmed | \
              acme/shop:deploy/docker-compose.prod.yml bytes 230..260 @ 0123abc | — |",
-            "| acme/shop | db | docker-compose.yml | none: the recorded properties are the same \
-             in each declaration | Deterministic | Confirmed | acme/shop:docker-compose.yml \
-             bytes 300..330 @ 0123abc | — |",
-            "| acme/shop | web | deploy/docker-compose.prod.yml | image: shop/web:2; build \
-             context: not stated; ports: 443:8443; environment files: not stated; \
-             dependencies: not stated; profiles: not stated | Deterministic | Confirmed | \
+            "| acme/shop | db | Compose service | docker-compose.yml | docker-compose.yml | \
+             none: the recorded properties are the same in each declaration | Deterministic | \
+             Confirmed | acme/shop:docker-compose.yml bytes 300..330 @ 0123abc | — |",
+            "| acme/shop | web | Compose service | deploy/docker-compose.prod.yml | \
+             deploy/docker-compose.prod.yml | image: shop/web:2; build context: not stated; \
+             ports: 443:8443; environment files: not stated; dependencies: not stated; \
+             profiles: not stated | Deterministic | Confirmed | \
              acme/shop:deploy/docker-compose.prod.yml bytes 120..220 @ 0123abc | — |",
-            "| acme/shop | web | docker-compose.yml | image: shop/web:1; build context: ./web; \
-             ports: 8080:80, target=443 published=8443; environment files: web.env; \
-             dependencies: api, db; profiles: frontend | Deterministic | Confirmed | \
-             acme/shop:docker-compose.yml bytes 20..140 @ 0123abc | — |",
+            "| acme/shop | web | Compose service | docker-compose.yml | docker-compose.yml | \
+             image: shop/web:1; build context: ./web; ports: 8080:80, target=443 \
+             published=8443; environment files: web.env; dependencies: api, db; profiles: \
+             frontend | Deterministic | Confirmed | acme/shop:docker-compose.yml bytes 20..140 @ \
+             0123abc | — |",
         ]
     );
     // `web` of `acme/other` is another repository's and is not joined.

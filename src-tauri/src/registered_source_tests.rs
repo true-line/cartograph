@@ -3067,6 +3067,32 @@ fn export_projects_ingested_kustomize_environments() {
                 assert!(listed.contains(&document), "{listed}");
             }
 
+            // `web` is declared twice, as a Compose service and as one
+            // Deployment that three kustomizations reach: one row for each
+            // fact, never one for each reaching environment, and only what
+            // both kinds state is compared.
+            let declared = &content[content
+                .find("\n## Declared in more than one environment\n")
+                .unwrap()
+                ..content
+                    .find("\nA Kubernetes workload that two or more kustomizations reach")
+                    .unwrap()];
+            let facts: Vec<&str> = declared
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web |")))
+                .collect();
+            assert_eq!(facts.len(), 2, "{declared}");
+            assert!(facts[0].contains(
+                "| Compose service | docker-compose.yml | docker-compose.yml | ports: not \
+                 stated |"
+            ));
+            assert!(facts[1].contains(
+                "| Deployment | k8s/base/deployment.yaml | k8s/base/kustomization.yaml, \
+                 k8s/overlays/prod/kustomization.yaml, k8s/overlays/staging/kustomization.yaml \
+                 | ports: 8080 |"
+            ));
+            assert!(!declared.contains("replicas"));
+
             // The workload three environments reach: one row for each, with
             // that environment's patch and `images` entries.
             let several = &content[content

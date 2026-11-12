@@ -233,9 +233,13 @@ sources declare and what each one declares to run. No model is involved.
   `resources` and `bases` entries reach inside the repository, through
   other kustomizations where they name one.
 - **Declared in more than one environment** lists a workload name that two
-  or more environments of one repository declare, such as `web` in
+  or more declarations of one repository share, such as `web` in
   `docker-compose.yml` and `docker-compose.prod.yml`. Each declaration has
-  its own row, with the properties that differ and its source span. A
+  one row, with its kind, the file that writes it, the environments that
+  reach it, the properties that differ and its source span. A workload that
+  several kustomizations reach is still one declaration there. Where a name
+  is declared both as a Compose service and as a Kubernetes workload, only
+  the images, ports and environment key names are compared. A
   Kubernetes workload that two or more kustomizations reach has one row for
   each of them, with what that kustomization's patch files and `images`
   entries state for it, or "no patch stated". Nothing is applied: the

@@ -305,6 +305,43 @@ fn a_workload_several_environments_reach_is_listed_once_per_environment_with_its
                 .to_string(),
         ]
     );
+    // Declared once and reached three times, it is one declaration: it is in
+    // the first table only when another fact shares its name, and then once,
+    // with the environments that reach it. The Compose service of that name
+    // is the other declaration; only what both kinds state is compared.
+    let mut f = overlays();
+    f.environment(SHOP, "docker-compose.yml", None, (0, 8));
+    f.workload(
+        SHOP,
+        "docker-compose.yml",
+        "web",
+        (20, 140),
+        json!({
+            "image": "shop/web:1",
+            "ports": ["8080:80"],
+            "environment_keys": ["DATABASE_URL", "SESSION_KEY"],
+            "depends_on": ["db"],
+        }),
+    );
+    let shared = f.artifact(ExportMode::BestEffort).content;
+    assert_eq!(
+        table(&shared, "Declared in more than one environment"),
+        [
+            "| acme/shop | web | Compose service | docker-compose.yml | docker-compose.yml | \
+             images: shop/web:1; ports: 8080:80 | Deterministic | Confirmed | \
+             acme/shop:docker-compose.yml bytes 20..140 @ 0123abc | — |",
+            "| acme/shop | web | Deployment | k8s/base/deployment.yaml | \
+             k8s/base/kustomization.yaml, k8s/overlays/prod/kustomization.yaml, \
+             k8s/overlays/staging/kustomization.yaml | images: shop/migrate:1, \
+             registry.example.com:5000/shop/web:1; ports: 8080 | Deterministic | Confirmed | \
+             acme/shop:k8s/base/deployment.yaml bytes 0..400 @ 0123abc | — |",
+        ]
+    );
+    // The second table is unchanged by the other declaration.
+    assert_eq!(
+        nth_table(&shared, "Declared in more than one environment", 1),
+        nth_table(&content, "Declared in more than one environment", 1)
+    );
     // An `images` entry that names none of its images is not shown for it.
     assert!(!content.contains("shop/unrelated"));
     assert!(!content.contains("shop/other"));
@@ -321,8 +358,10 @@ fn a_workload_several_environments_reach_is_listed_once_per_environment_with_its
     assert!(content.contains("this section does not say which declaration applies where."));
 }
 
-// AC-0662: two kustomizations that each declare their own workload of one
-// name are two declarations, listed with the properties that differ.
+// AC-0662: two manifest workloads of one name are two declarations, each
+// listed once with the file that declares it, the environments that reach
+// it and the properties that differ; one that nothing reaches is a
+// declaration too. The kind has its own column and is not a property.
 #[test]
 fn two_manifest_workloads_of_one_name_are_listed_with_what_differs() {
     let mut f = Fixture::default();
@@ -343,16 +382,24 @@ fn two_manifest_workloads_of_one_name_are_listed_with_what_differs() {
             json!({"via": []}),
         );
     }
+    f.manifest(
+        "c/api.yaml",
+        (1, "StatefulSet", "api"),
+        json!({"replicas": 1, "containers": [{"name": "api", "image": "api:1"}]}),
+    );
     let content = f.artifact(ExportMode::VerifiedOnly).content;
     assert_eq!(
         table(&content, "Declared in more than one environment"),
         [
-            "| acme/shop | api | a/kustomization.yaml | replicas: 1; containers: container api: \
-             image api:1 | Deterministic | Confirmed | acme/shop:a/api.yaml bytes 0..400 @ \
-             0123abc | — |",
-            "| acme/shop | api | b/kustomization.yaml | replicas: 4; containers: container api: \
-             image api:2 | Deterministic | Confirmed | acme/shop:b/api.yaml bytes 0..400 @ \
-             0123abc | — |",
+            "| acme/shop | api | Deployment | a/api.yaml | a/kustomization.yaml | replicas: 1; \
+             containers: container api: image api:1 | Deterministic | Confirmed | \
+             acme/shop:a/api.yaml bytes 0..400 @ 0123abc | — |",
+            "| acme/shop | api | Deployment | b/api.yaml | b/kustomization.yaml | replicas: 4; \
+             containers: container api: image api:2 | Deterministic | Confirmed | \
+             acme/shop:b/api.yaml bytes 0..400 @ 0123abc | — |",
+            "| acme/shop | api | StatefulSet | c/api.yaml | no environment | replicas: 1; \
+             containers: container api: image api:1 | Deterministic | Confirmed | \
+             acme/shop:c/api.yaml bytes 0..400 @ 0123abc | — |",
         ]
     );
     // Neither is reached by two environments.
