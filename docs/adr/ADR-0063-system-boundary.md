@@ -49,6 +49,10 @@ of these is outside, and a wrong boundary would read as a complete list.
 - Without a system manifest, a call to another registered repository by
   absolute URL is listed as outside until a binding declares its host. The
   document names that limit.
+- Declared bindings are not stored in the graph. Where a binding pass ran, the
+  kept Gap does not record whether a binding covers its host, so a literal
+  third-party call there is unclassified until that outcome is a field on the
+  fact (a graph-hash change, decided separately).
 - A channel is never listed as outside: the graph cannot show who owns a
   queue or topic. It is inside or unclassified.
 - Provider operators (which SDK clients are third-party services) are a
