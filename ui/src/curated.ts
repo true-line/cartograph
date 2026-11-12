@@ -1,4 +1,4 @@
-import type { CuratedRecordState, CuratedSectionRead } from './store';
+import type { CuratedRecordState, CuratedRead } from './store';
 
 /** The state the host gave one accepted record, with its reason sentence. */
 export interface CuratedRecordStatus {
@@ -13,7 +13,7 @@ export interface CuratedRecordStatus {
  * entry in that mode, and a read that was not computed has none at all.
  */
 export function curatedRecordStatuses(
-  read: CuratedSectionRead | null,
+  read: CuratedRead | null,
 ): ReadonlyMap<string, CuratedRecordStatus> {
   const statuses = new Map<string, CuratedRecordStatus>();
   if (read?.status !== 'computed') return statuses;

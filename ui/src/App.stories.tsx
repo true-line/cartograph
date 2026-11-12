@@ -718,14 +718,13 @@ function installFakeCore(options: {
         const mode = (args as { mode: SpecBundle['mode'] }).mode;
         const curated = fakeCurated(mode);
         return {
-          // One projection per state of the fake stores: the bundle's
-          // curated basis and the curated read report the same revision.
+          // As the host does: one projection per compile, returned beside
+          // the bundle whose curated basis it gives.
           bundle: { ...FAKE_SPEC, mode, curated_basis: { revision: curated.revision, counts: curated.counts } },
           views: fakeSpecViews(mode),
+          curated,
         };
       }
-      case 'read_curated_projection':
-        return fakeCurated((args as { mode: SpecBundle['mode'] }).mode);
       case 'read_spec_artifact':
         return (
           FAKE_SPEC.artifacts.find(
@@ -1916,9 +1915,11 @@ export const CuratedSectionFollowsReviewsAndExportMode: Story = {
     await expect(section.getByTestId('curated-empty')).toBeVisible();
     const before = await sameRevision();
 
-    // A review is recorded: the bundle and the section are replaced together.
+    // A review is recorded: the views are reloaded, and the section with them.
     const pending = useAppStore.getState().stagedProposals[0];
     await expect(await useAppStore.getState().recordProposalDecision(pending, 'accepted')).toBe(true);
+    await waitFor(() => expect(section.getByLabelText('Curated record counts')).toHaveTextContent('Unverified1'));
+    await userEvent.click(section.getByText(/^Records and decisions: 0 curated items shown, 1 listed/));
     const listed = within(await section.findByRole('table', { name: 'State unverified (1)' }));
     await expect(listed.getByRole('row', { name: /proposal:pending/ })).toHaveTextContent(
       'The record predates captured evidence, so nothing ties its evidence to stored source bytes. (legacy_record)',
