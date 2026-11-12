@@ -15,7 +15,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0009 | AC-0023..0025,AC-0055..0056,AC-0063,AC-0087,AC-0089,AC-0231,AC-0579,AC-0580,AC-0586,AC-0590 | agents, llm, ingest, core-redact, app, ui | M8 | — | ADR-0004, ADR-0057 | T-0023..0025,T-0055..0056,T-0063,T-0087,T-0089,T-0231,T-0579,T-0580,T-0586,T-0590 |
 | US-0010 | AC-0026..0028,AC-0062,AC-0064,AC-0081,AC-0086,AC-0366, AC-0558 | core-graph, app, ui | M9, #1667 | — | ADR-0001 | T-0026..0028,T-0062,T-0064,T-0081,T-0086,T-0366, T-0558 |
 | US-0011 | AC-0029..0031, AC-0065..0066, AC-0084 | app, flowtracer, ui | M9, #1665 | F-* | ADR-0002 | T-0029..0031, T-0065..0066, T-0084 |
-| US-0012 | AC-0032..0035,AC-0057..0058,AC-0067,AC-0210,AC-0218,AC-0221,AC-0258,AC-0297,AC-0358,AC-0359,AC-0551,AC-0587,AC-0592 | core-prov, spec, agents, app, flowtracer, ui | M9–M10, #993, #994, #1660, #1663, #1755, #1786 | — | ADR-0002, ADR-0011 | T-0032..0035,T-0057..0058,T-0067,T-0210,T-0218,T-0221,T-0258,T-0297,T-0358,T-0359,T-0551,T-0587,T-0592 |
+| US-0012 | AC-0032..0035,AC-0057..0058,AC-0067,AC-0210,AC-0218,AC-0221,AC-0258,AC-0297,AC-0358,AC-0359,AC-0551,AC-0587,AC-0592,AC-0595 | core-prov, spec, agents, app, flowtracer, ui | M9–M10, #993, #994, #1660, #1663, #1755, #1786, #1785 | — | ADR-0002, ADR-0011, ADR-0058 | T-0032..0035,T-0057..0058,T-0067,T-0210,T-0218,T-0221,T-0258,T-0297,T-0358,T-0359,T-0551,T-0587,T-0592,T-0595 |
 | US-0013 | AC-0036..0038,AC-0059,AC-0082,AC-0088,AC-0259,AC-0313 | ingest, spec, app, ui | M9 | F-* | ADR-0002, ADR-0012 | T-0036..0038,T-0059,T-0082,T-0088,T-0259,T-0313 |
 | US-0014 | AC-0039..0040,AC-0060,AC-0205,AC-0208,AC-0217,AC-0223,AC-0423,AC-0526..0531,AC-0536..0550,AC-0593 | source-walk, adapters-lang-*, iac, ingest, core-graph, core-prov, app, ui | M10 | — | ADR-0006, ADR-0014, ADR-0018, ADR-0030 | T-0039..0040,T-0060,T-0205,T-0208,T-0217,T-0223,T-0423,T-0526..0531,T-0536..0550,T-0593 |
 | US-0015 | AC-0041..0042, AC-0380, AC-0383, AC-0387, AC-0395, AC-0446, AC-0448 | iac, spec, ui, adapters-lang-python | M9 | — | ADR-0003, ADR-0013 | T-0041..0042, T-0380, T-0383, T-0387, T-0395, T-0446, T-0448 |
@@ -138,6 +138,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review); amended 2026-11-10 for the consent-free, recorded connection check (#1795) |
 | ADR-0060 | Build and deployment pipelines as ordered facts: four node labels, `PART_OF` and `NEEDS`, declared not evaluated (proposed; #1790, owner review) |
 | ADR-0059 | Configuration-read facts: `ConfigRead` per file and key, `READS_CONFIG`, names only, proven standard-library reads (proposed; #1789, owner review) |
+| ADR-0058 | Citation ids derived from fact identity and the fact and evidence index (proposed; #1785, owner review) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression

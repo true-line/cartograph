@@ -36,27 +36,39 @@ that does not change when a document is re-rendered or re-ordered.
    Two different facts with one id in an export fail the export.
 4. **The index lists cited facts only.** It is the union of the subjects of
    every assertion in the export's artifacts, once each, ordered by citation
-   id. Each row carries the fact key, tier, confidence, producing method,
+   id. Each row carries the fact key, the kinds it is cited as, and one
+   record per distinct provenance: tier, confidence, producing method,
    evidence basis, extractor, every evidence span (repository, path, byte
-   range, commit) and the ids of the artifacts that cite it. It is not a dump
-   of the graph, so its size follows the documents.
+   range, commit) and the ids of the artifacts that carry it. Two artifacts
+   can show one fact with different provenance (an edge without valid
+   provenance is a flow hop under one fallback and an edge under another);
+   the row then lists every record and is marked as differing, and none is
+   chosen over another. It is not a dump of the graph, so its size follows
+   the documents.
 5. **The index follows the export mode.** It is built from the assertions the
    mode already admitted, so a `verified-only` index holds no InferredWeak
    row and no statement citing one survives; in `best-effort` such rows are
-   annotated (R-INT-5). A Gap is a row like any other and is labelled as a
-   Gap (R-INT-2, R-INT-4).
+   annotated (R-INT-5). A `verified-only` export that nevertheless cites an
+   InferredWeak fact is refused, not given a row and not silently trimmed. A
+   Gap is a row like any other and is labelled as a Gap (R-INT-2, R-INT-4).
 6. **Resolution is checked, not assumed.** Compiling an export fails if any
    cited id has no index row. The check takes a list of cited ids, so authored
    sections are held to it by the same function when they arrive.
-7. **Two forms, one content.** The export gains `fact-index.json` (every row,
-   every span) and `fact-index.md` (the same rows in a table, without source
-   text). The index stores spans, not the bytes they cover; any text it does
+7. **Two forms, one content.** The export gains `fact-index.json` (artifact
+   id `fact-index-json`; every row, every span) and `fact-index.md` (artifact
+   id `fact-index`; the same rows in a table, without source text). The index stores spans, not the bytes they cover; any text it does
    carry passes the export's existing redaction. The same graph yields the
    same bytes.
 8. **Citations enter the documents one at a time.** This decision adds the id,
    the index and the check. Printing the id beside each statement in an
    existing projected document is done per document in later changes, so no
    document's content identity changes here.
+
+9. **Readers that reserve memory in advance do not serve the index yet.**
+   Building it for one selected read compiles every citing artifact in turn.
+   MCP reads reserve a bound that does not model that work, so they neither
+   advertise nor serve the two index artifacts until the bound does; the
+   desktop export and the desktop single-artifact read produce them.
 
 ## Consequences
 
