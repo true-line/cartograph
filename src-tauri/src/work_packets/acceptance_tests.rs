@@ -321,6 +321,19 @@ fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
             .unwrap(),
         artifact
     );
+    // AC-0651: the configuration key projection reads graph facts only, no
+    // stored coverage inventory, so the packet host compiles the export's
+    // exact bytes and it is selected like the endpoint projection.
+    let (selection, artifact) = select("configuration");
+    f.request["artifacts"] = selection;
+    let generated = generate(&f.state, &f.runtime, &f.request.to_string()).unwrap();
+    assert_eq!(
+        generated.body.evidence.artifacts[0]
+            .artifact
+            .value()
+            .unwrap(),
+        artifact
+    );
     f.request["artifacts"] = select("fact-index").0;
     assert_eq!(
         generate(&f.state, &f.runtime, &f.request.to_string())

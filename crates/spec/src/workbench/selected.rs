@@ -71,6 +71,8 @@ pub(crate) struct Beside<'a> {
     /// Pipeline facts the export mode and the rejections withheld, counted
     /// before the filter (`pipelines::withheld`).
     pub(crate) pipelines_withheld: usize,
+    /// Configuration facts withheld the same way (`configuration::withheld`).
+    pub(crate) configuration_withheld: usize,
 }
 
 impl<'a> Beside<'a> {
@@ -86,6 +88,7 @@ impl<'a> Beside<'a> {
         Self {
             coverage,
             pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
+            configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
         }
     }
 }
@@ -205,6 +208,13 @@ const ARTIFACTS: &[Artifact] = &[
         id: "pipelines",
         file: "pipelines.md",
         title: "Build and deployment pipelines",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1821).
+    Artifact {
+        id: "configuration",
+        file: "configuration.md",
+        title: "Configuration keys",
         format: "markdown",
     },
     Artifact {
@@ -451,6 +461,12 @@ fn produce(
             (mode, beside.pipelines_withheld),
             max,
         )?,
+        // Environment-file and configuration-read facts in the admitted
+        // graph, and the count the mode and the rejections withheld. No
+        // stored inventory is read (AC-0651).
+        "configuration" => {
+            configuration::output(nodes, edges, (mode, beside.configuration_withheld), max)?
+        }
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,
         // The two index artifacts are rendered from the collected citations.

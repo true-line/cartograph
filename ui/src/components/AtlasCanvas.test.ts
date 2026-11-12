@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayName, filterAtlasGraph } from './AtlasCanvas';
+import { baseLayers, displayName, filterAtlasGraph, UNNAMED_CONFIG_KEY } from './AtlasCanvas';
 import type { AtlasSnapshot, GraphNode } from '../store';
 
 function node(id: string, label: string, props: GraphNode['props'] = {}): GraphNode {
@@ -49,6 +49,32 @@ describe('displayName', () => {
   it('falls back to name, then id', () => {
     expect(displayName(node('s', 'Symbol', { name: 'anon@954' }))).toBe('anon@954');
     expect(displayName(node('s', 'Symbol'))).toBe('s');
+  });
+});
+
+// AC-0651 (#1821): a configuration read is filed under Server code with the
+// symbol that reads it, and is labelled with its key, never its raw id. A
+// read whose key the source does not state as a literal says so.
+describe('configuration reads', () => {
+  const named = node('cfgread:r@src/db.ts:env:DATABASE_URL', 'ConfigRead', { source: 'env', key: 'DATABASE_URL' });
+  const unnamed = node('cfgread:r@src/db.ts:env:?', 'ConfigRead', { source: 'env', dynamic: true });
+
+  it('shows the key, not the id', () => {
+    expect(displayName(named)).toBe('DATABASE_URL');
+    expect(displayName(unnamed)).toBe(UNNAMED_CONFIG_KEY);
+    expect(displayName(node('cfgread:r@src/db.ts:env:X', 'ConfigRead', { key: '' }))).toBe(UNNAMED_CONFIG_KEY);
+  });
+
+  it('is on the Server code layer with its reading symbol', () => {
+    const snapshot: AtlasSnapshot = {
+      nodes: [named, unnamed, node('sym:r@src/db.ts#connect', 'Symbol', { name: 'connect' }), node('res:r@db', 'Resource')],
+      edges: [{ src: 'sym:r@src/db.ts#connect', dst: named.id, label: 'READS_CONFIG', props: {} }],
+    };
+    expect(baseLayers(named)).toEqual(['server']);
+    const server = filterAtlasGraph(snapshot, 'server');
+    expect(server.nodes.map((n) => n.id).sort()).toEqual([unnamed.id, named.id, 'sym:r@src/db.ts#connect'].sort());
+    expect(server.edges).toHaveLength(1);
+    expect(filterAtlasGraph(snapshot, 'infra').nodes.map((n) => n.id)).toEqual(['res:r@db']);
   });
 });
 

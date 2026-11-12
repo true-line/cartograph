@@ -62,6 +62,29 @@ describe('assignBands — Tools/Build config File placement', () => {
   });
 });
 
+// AC-0651 (#1821): a configuration read is banded with the code that reads
+// it and clusters with its file's module, not under Unclassified.
+describe('assignBands — configuration reads', () => {
+  it('bands a ConfigRead in Server code, in the cluster of its file', () => {
+    const read = node('cfgread:local/app@src/db.ts:env:DATABASE_URL', 'ConfigRead', { key: 'DATABASE_URL' });
+    const unnamed = node('cfgread:local/app@config.ts:env:?', 'ConfigRead', { dynamic: true });
+    const symbol = node('sym:local/app@src/db.ts#connect', 'Symbol');
+    const snapshot: AtlasSnapshot = {
+      nodes: [read, unnamed, symbol, node('file:local/app@config.ts', 'File', { path: 'config.ts' })],
+      edges: [edge(symbol.id, read.id, 'READS_CONFIG')],
+    };
+    const bands = assignBands(snapshot);
+    expect(bands.get(read.id)).toBe('server');
+    expect(bands.get(unnamed.id)).toBe('server');
+    const scene = buildAtlasScene(snapshot, new Set());
+    expect(scene.bands.map((band) => band.label)).toEqual(['Server code']);
+    const cluster = (id: string) => scene.clusters.find((item) => item.members.includes(id))?.key;
+    expect(cluster(read.id)).toBe('local/app · src');
+    expect(cluster(read.id)).toBe(cluster(symbol.id));
+    expect(cluster(unnamed.id)).toBe(cluster('file:local/app@config.ts'));
+  });
+});
+
 // #1003: Gap banding indexes incident edges instead of scanning every edge per
 // Gap, which froze the Atlas on a self-ingest graph with tens of thousands of Gaps.
 describe('assignBands — Gap neighbors', () => {
