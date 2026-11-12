@@ -146,7 +146,10 @@ describe('selected proposal assessment identity (AC-0179)', () => {
     await useAppStore.getState().decideProposal('accepted');
     reading.resolve(assessment('same', 'changed'));
     await pending;
-    expect(commands).toEqual(['assess_staged_basis', 'record_agent_decision']);
+    // AC-0655: a recorded review re-reads the bundle and its curated projection.
+    expect(commands).toEqual([
+      'assess_staged_basis', 'record_agent_decision', 'export_spec_with_views', 'read_curated_projection',
+    ]);
     expect(useAppStore.getState().escalation?.proposal).toEqual(reviewed);
     expect(useAppStore.getState().escalation?.proposal?.context_status).toBe('awaiting_reconciliation');
     expect(useAppStore.getState().escalation?.basisAssessment?.result?.graph_comparison).toBe('changed');

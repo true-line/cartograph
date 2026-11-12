@@ -1477,6 +1477,140 @@ button.flow-hop-card:hover {
   font: 0.7rem var(--font-mono);
 }
 
+/* Curated items in the Spec Workbench (SPEC-12 slice 3). Tier meaning comes
+   from the shared .tier-badge and the words beside it, never from colour
+   alone (R-INT-2). */
+.curated-section {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.9rem 1.25rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  min-width: 0;
+}
+
+.curated-section-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.curated-section h3,
+.curated-section h4 {
+  margin: 0 0 0.25rem;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.curated-section h4 {
+  margin-top: 0.4rem;
+  font-size: 0.76rem;
+}
+
+.curated-section p {
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.curated-section code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.curated-identity,
+.curated-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+  margin: 0;
+  font-size: 0.72rem;
+}
+
+.curated-identity > div,
+.curated-counts > div {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.curated-identity dt,
+.curated-counts dt {
+  color: var(--text-muted);
+}
+
+.curated-identity dd,
+.curated-counts dd {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.curated-full-identity {
+  font-size: 0.7rem;
+  color: var(--text-body);
+}
+
+.curated-full-identity p {
+  margin: 0.25rem 0 0;
+  font-size: 0.7rem;
+}
+
+.curated-notice {
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-body);
+  font-size: 0.75rem;
+}
+
+.curated-notice p + p {
+  margin-top: 0.35rem;
+}
+
+.curated-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+}
+
+.curated-table caption {
+  padding: 0.3rem 0;
+  color: var(--text-body);
+  font-weight: 600;
+  text-align: left;
+}
+
+.curated-table th,
+.curated-table td {
+  max-width: 44ch;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  color: var(--text-body);
+  text-align: left;
+  vertical-align: top;
+  font-weight: 400;
+}
+
+.curated-table thead th {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.curated-tier {
+  font-family: var(--font-mono);
+}
+
+.curated-record-state {
+  margin: 0.2rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-body);
+}
+
 .spec-workbench-error,
 .spec-workbench-empty {
   margin: 1rem 1.25rem;
