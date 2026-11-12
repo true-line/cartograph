@@ -949,11 +949,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "3887723f58220dd2bf282c5ea97cdcf8155aa5298c12b0d251bb285f20d3e58e",
+                "fbcfe1e3ce4f10b4c67068563724b8afbcc3a2b3494a5edd45cd478b802aac51",
             ),
             (
                 ExportMode::BestEffort,
-                "73caed7f670f05bd7059e5a23d9a7e2a472fd875b651569c124b46ab5881f057",
+                "18647678ef108c4ee9a0eb0110f74eb137d20071f014a6b5c59a1b36ea0b85e6",
             ),
         ] {
             let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
@@ -969,7 +969,9 @@ mod tests {
             // plus the test-arrangements (#946) and journeys artifacts; verified-only
             // journeys state that they withhold InferredWeak candidates. User
             // stories render recovered names, ids and provenance as literal text
-            // (#1453), which intentionally changes those bytes. The endpoint
+            // (#1453), which intentionally changes those bytes, as does
+            // security.md stating "no authentication check recovered" and its
+            // coverage limit (#1820). The endpoint
             // permission projection (#1787), the pipeline projection (#1818),
             // the configuration key projection (#1821), the curated items
             // (#1746), the coverage artifacts (#1786) and the fact index
@@ -1651,7 +1653,7 @@ mod tests {
         assert!(
             security
                 .content
-                .contains("Unauthenticated endpoint: GET /admin")
+                .contains("No authentication check recovered: GET /admin")
         );
         assert!(security.content.contains("arn:aws:s3:::orders/*"));
         assert!(security.content.contains("US-0015 / AC-0041"));
@@ -2579,14 +2581,15 @@ mod tests {
         // projection and identity seams; independently compared before removal.
         // The test-arrangements (#946) and journeys artifacts extend the bundle;
         // verified-only journeys state that they withhold InferredWeak candidates.
+        // security.md states its coverage limit (#1820), which changes its bytes.
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "91a0a3018e0875a671e49e270a881f10050bad35d1d4621c3aa4a051e4bf6045",
+                "b29f43b99f7ba96d3fbf76fbaa78a478c3d21ed393930c905305d991d4026610",
             ),
             (
                 ExportMode::BestEffort,
-                "75e1dfa7cde4953048cd08555c6efbb136f3a590ef71d489506817287e5c34b1",
+                "160c4f667290b2a1429411afea07a38ad2fd6088df3a994cb7e8ed7099269bde",
             ),
         ] {
             let full =

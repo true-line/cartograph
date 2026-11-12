@@ -269,8 +269,8 @@ PR — per-PR verification is CI's job.
    auth state. Include IAM `GRANTS` with both least-privilege actions and a
    wildcard action or literal wildcard resource scope.
 2. Open Workbench **Security findings**. **Pass:** only the explicit negative
-   endpoint appears as unauthenticated; the protected and unknown-auth
-   endpoints do not. The row cites its evidence and maps to US-0015/AC-0041.
+   endpoint appears, titled "No authentication check recovered"; the
+   protected and unknown-auth endpoints do not. The row cites its evidence and maps to US-0015/AC-0041.
 3. **Pass:** the wildcard grant appears with its exact action and resource
    scope, confidence, evidence, and US-0015/AC-0042 mapping. The bounded grant
    does not appear.

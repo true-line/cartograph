@@ -733,6 +733,8 @@ fn list(out: &mut Text, values: &[&str]) -> fmt::Result {
         write!(out, "{}", Safe(Join(values, ", ")))
     }
 }
+/// `security.md`. An endpoint finding states what was recovered, in the words
+/// `endpoint-permissions.md` uses for the same fact (#1820, AC-0656).
 pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let findings: Vec<_> = nodes
@@ -746,7 +748,7 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
     }
     let mut content = Text::new(
         &budget,
-        "# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
+        "# Security findings\n\n\"No authentication check recovered\" means none recovered in the source that was read: a check outside it, such as a gateway or middleware the adapters do not read, is not visible to this finding.\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
     )?;
     for n in &findings {
         write!(
