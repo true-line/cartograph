@@ -1,5 +1,6 @@
 //! Selected artifact dispatch; projection and native renderers are shared.
 use super::*;
+use core_graph::coverage::StoredCoverage;
 use std::{fmt, io};
 
 /// Bounds on selected output and the complete shared ADR derivation.
@@ -161,6 +162,18 @@ const ARTIFACTS: &[Artifact] = &[
         title: "Source rule evidence index",
         format: "json",
     },
+    Artifact {
+        id: "coverage",
+        file: "coverage.md",
+        title: "Coverage",
+        format: "markdown",
+    },
+    Artifact {
+        id: "coverage-index",
+        file: "coverage.json",
+        title: "Coverage index",
+        format: "json",
+    },
 ];
 
 /// Metadata for a supported official producer, not a claim that its output
@@ -280,10 +293,11 @@ fn produce(
     edges: &[&Edge],
     flows: &[Flow],
     gaps: usize,
-    (mode, rejected, stories): (
+    (mode, rejected, stories, coverage): (
         ExportMode,
         &BTreeSet<String>,
         Option<&capabilities::Stories<'_>>,
+        &[StoredCoverage],
     ),
     max: Option<usize>,
 ) -> Result<SpecArtifact, render::RenderLimit> {
@@ -359,6 +373,8 @@ fn produce(
                 assertions: output.assertions,
             }
         }
+        // The stored inventories only: no graph fact, mode or rejection applies.
+        "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,
         _ => unreachable!("validated static artifact id"),
     };
     Ok(identified_artifact(
@@ -405,7 +421,34 @@ pub fn compile_spec_selected(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, None, None),
+        (requested_ids, limits, None, None, &[]),
+    )
+}
+
+/// [`compile_spec_selected`] with the stored coverage inventories the
+/// `coverage` and `coverage-index` artifacts project (AC-0592). Every other
+/// artifact is unchanged by them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "additive coverage input preserves the existing selected compiler arguments"
+)]
+pub fn compile_spec_selected_with_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    requested_ids: &[&str],
+    limits: SelectedCompileLimits,
+    coverage: &[StoredCoverage],
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_selected(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        (requested_ids, limits, None, None, coverage),
     )
 }
 
@@ -432,7 +475,7 @@ pub fn compile_spec_selected_with_security(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, Some(security), None),
+        (requested_ids, limits, Some(security), None, &[]),
     )
 }
 fn compile_selected(
@@ -446,9 +489,10 @@ fn compile_selected(
         SelectedCompileLimits,
         Option<crate::SecurityLimits>,
         Option<&capabilities::Stories<'_>>,
+        &[StoredCoverage],
     ),
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
-    let (requested_ids, limits, security, stories) = selection;
+    let (requested_ids, limits, security, stories, coverage) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
             return Err(ArtifactSelectionError::UnknownArtifact { index });
@@ -494,7 +538,7 @@ fn compile_selected(
                 &edges,
                 &projection.flows,
                 gaps,
-                (mode, rejected, stories),
+                (mode, rejected, stories, coverage),
                 Some(remaining),
             ) {
                 Ok(artifact) => {
@@ -517,12 +561,13 @@ pub(super) fn all(
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
+    coverage: &[StoredCoverage],
 ) -> SpecBundle {
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
-    bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected)
+    bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, coverage)
 }
 pub(crate) fn flow_artifact_from_filtered(
     nodes: &[&Node],
@@ -541,7 +586,7 @@ pub(crate) fn flow_artifact_from_filtered(
         edges,
         flows,
         0,
-        (mode, rejected, None),
+        (mode, rejected, None, &[]),
         None,
     )
     .expect("unbounded flow dossier renderer")
@@ -553,6 +598,7 @@ pub(crate) fn bundle_from_filtered(
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
+    coverage: &[StoredCoverage],
 ) -> SpecBundle {
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let drift_count = nodes.iter().filter(|n| is_drift_node(n)).count();
@@ -625,7 +671,7 @@ pub(crate) fn bundle_from_filtered(
                 edges,
                 flows,
                 gap_count,
-                (mode, rejected, None),
+                (mode, rejected, None, coverage),
                 None,
             )
             .expect("unbounded native artifact"),
@@ -684,7 +730,7 @@ pub(super) fn compile_stories_with_flows_and_security(
         flows,
         mode,
         rejected,
-        (&["user-stories"], limits, security, Some(stories)),
+        (&["user-stories"], limits, security, Some(stories), &[]),
     )
     .expect("official artifact id")
     .remove(0)

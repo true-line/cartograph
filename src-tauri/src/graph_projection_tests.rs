@@ -294,7 +294,7 @@ enum Projection {
 
 fn project(
     projection: Projection,
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
 ) -> Result<Value, String> {
     match projection {
