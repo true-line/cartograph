@@ -1,6 +1,6 @@
 # SPEC-12 — The curated projection
 
-- **Status:** Proposed for [#1746](https://github.com/true-line/cartograph/issues/1746); slice 1 (projection core) is implemented, AC-0652.
+- **Status:** Proposed for [#1746](https://github.com/true-line/cartograph/issues/1746); slices 1 (projection core, AC-0652) and 2 (export, AC-0653) are implemented.
 - **Date:** 2026-11-12
 - **Scope:** US-0021 / AC-0108; SPEC-01 H3; ROADMAP W5.
 - **Decision:** [ADR-0061](adr/ADR-0061-curated-read-contract.md).
@@ -105,7 +105,18 @@ inputs.
   records. Each item cites its Gap and endpoints through the fact index
   (ADR-0058). `verified-only` contains no item and states how many it left
   out; `best-effort` includes them, marked InferredWeak. Existing artifacts
-  are byte-identical when there is no accepted record.
+  are byte-identical when there is no accepted record. An item cites its Gap
+  and endpoints only where the export admits those nodes.
+  The host reads at most 4,096 staged records and 256 accepted ones, and
+  assesses only accepted records that could be eligible. An assessment made
+  against another store revision than the one the export reads counts as
+  failed, so its record is listed as `stale`. When the projection cannot be
+  computed (a bound is exceeded, the review stores are unavailable, or
+  identities are duplicated) the export still succeeds: `curated_basis` is
+  absent, `curated.md` states the reason, nothing from the projection is
+  rendered, and every other artifact is unchanged. A current curatable
+  assertion is a stored or compiled T2/T3 inferred assertion with evidence.
+  Until slice 4, MCP reads and work packets refuse `curated`.
 - **MCP.** A curated read returns the projection. `h3_curated_available` is
   true only in the capabilities and basis of a build where that read exists
   and computed the projection. `ReadBasis` gains the curated revision, and a
@@ -131,8 +142,12 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
 - Findings (#1746 requirement 2) need a fact shape before they can enter.
 - Cardinality is one accepted edge per Gap until slot cardinality can be
   proven from the graph.
-- The Gap predicate is duplicated in `context-hub` and `spec`. Slice 2 adds a
-  parity test or moves it to a shared crate.
+- The Gap predicate is duplicated in `context-hub` and `spec`; a parity test
+  in `spec` keeps them equal.
+- An export assesses each accepted record that could be eligible on the
+  calling thread, and compiles the documents a second time when a Workbench
+  decision matches no stored fact. Both costs are bounded and neither is
+  moved off the calling thread yet.
 - `ContextStatus::AwaitingReconciliation` and the doc comment on
   `ProposalDecision::Accepted` in `agents` still describe the model before
   ADR-0061. They change with the slice that first shows a state to the user.
