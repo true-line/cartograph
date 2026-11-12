@@ -530,6 +530,7 @@ pub(super) fn output(
     Ok(Output {
         content: content.finish(),
         assertions: Vec::new(),
+        subjects: Vec::new(),
     })
 }
 

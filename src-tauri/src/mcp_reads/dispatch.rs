@@ -473,6 +473,10 @@ fn limit_value(limit: ArtifactLimit) -> Value {
         ArtifactLimit::Compiler(spec::SelectedArtifactLimit::SecurityDerivation(limit)) => {
             json!({"stage":"security_derivation","resource":match limit.limit {spec::SecurityLimit::Rows=>"rows",spec::SecurityLimit::OutputBytes=>"output_bytes"},"maximum":limit.maximum})
         }
+        // Not a size limit: the export's citations do not resolve (ADR-0058).
+        ArtifactLimit::Compiler(spec::SelectedArtifactLimit::FactIndex(failure)) => {
+            json!({"stage":"fact_index","resource":match failure {spec::FactIndexFailure::Unresolved=>"unresolved_citation",spec::FactIndexFailure::Collision=>"citation_id_collision",spec::FactIndexFailure::Withheld=>"withheld_citation"}})
+        }
     }
 }
 

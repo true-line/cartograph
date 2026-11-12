@@ -6,12 +6,15 @@ use std::fmt::{self, Write};
 pub(super) struct Output {
     pub content: String,
     pub assertions: Vec<SpecAssertion>,
+    /// The fact-key shape of each assertion's subject (ADR-0058).
+    pub subjects: Vec<fact_index::Subject>,
 }
 fn finish(mut content: Text, assertions: Assertions) -> Result<Output, RenderLimit> {
     render::inline(&mut content, &assertions.values)?;
     Ok(Output {
         content: content.finish(),
         assertions: assertions.values,
+        subjects: assertions.subjects,
     })
 }
 fn nongap(node: &&Node) -> bool {
@@ -139,12 +142,14 @@ pub(super) fn stories_with_support(
         Ok(Output {
             content: content.finish(),
             assertions: assertions.values,
+            subjects: assertions.subjects,
         })
     } else {
         render::inline_literal(&mut content, &assertions.values)?;
         Ok(Output {
             content: content.finish(),
             assertions: assertions.values,
+            subjects: assertions.subjects,
         })
     }
 }

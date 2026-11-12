@@ -436,6 +436,24 @@ fn security_derivation_limits_preserve_closed_stage_resource_shape() {
     }
 }
 
+// AC-0595 (ADR-0058): an index whose citations do not resolve is reported
+// as its own stage, never as a size limit.
+#[test]
+fn fact_index_failures_have_a_closed_stage_resource_shape() {
+    for (failure, name) in [
+        (spec::FactIndexFailure::Unresolved, "unresolved_citation"),
+        (spec::FactIndexFailure::Collision, "citation_id_collision"),
+        (spec::FactIndexFailure::Withheld, "withheld_citation"),
+    ] {
+        assert_eq!(
+            limit_value(ArtifactLimit::Compiler(
+                spec::SelectedArtifactLimit::FactIndex(failure)
+            )),
+            json!({"stage":"fact_index","resource":name})
+        );
+    }
+}
+
 #[test]
 fn omitted_error_preserves_closed_code_and_explicit_kind() {
     for kind in [

@@ -6138,8 +6138,16 @@ fn build_spec_bundle(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    let mut bundle =
-        spec::compile_spec_with_coverage(&nodes, &edges, &flows, mode, &rejected_hashes, &coverage);
+    // An export whose citations do not resolve is refused (ADR-0058).
+    let mut bundle = spec::try_compile_spec_with_coverage(
+        &nodes,
+        &edges,
+        &flows,
+        mode,
+        &rejected_hashes,
+        &coverage,
+    )
+    .map_err(|error| error.to_string())?;
     bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
     Ok(bundle)
 }
@@ -6213,14 +6221,16 @@ fn build_spec_with_views(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    let (mut bundle, views) = spec::compile_spec_with_views_and_coverage(
+    // An export whose citations do not resolve is refused (ADR-0058).
+    let (mut bundle, views) = spec::try_compile_spec_with_views_and_coverage(
         &nodes,
         &edges,
         &flows,
         mode,
         &rejected_hashes,
         &coverage,
-    );
+    )
+    .map_err(|error| error.to_string())?;
     bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
     Ok((bundle, views))
 }
