@@ -87,6 +87,65 @@ found by Preflight are recorded as unsupported capabilities with the reason
 not order semantically (`environment_keys`, `depends_on`) are sorted; the
 same commit gives the same facts.
 
+## Facts (increment 2: Kubernetes manifests and kustomize)
+
+Same extractor and parser. Helm is still not read.
+
+**Manifests.** A YAML document with top-level scalar `apiVersion` and `kind`
+is a manifest document. Of these, the pod-bearing kinds `Deployment`,
+`StatefulSet`, `DaemonSet` and `Job` are read. Every other kind (`Service`,
+`Ingress`, `ConfigMap`, `Secret`, custom resources and the rest) is recorded
+in coverage as present and not read, by kind, and no longer as a whole file.
+`CronJob` stays with the schedule reader.
+
+| Fact | Identity | Properties | Confidence |
+|---|---|---|---|
+| `Workload` | `workload:{repo}@{path}#{document index}:{Kind}/{metadata.name}` | `kind: "k8s-deployment"` (and `-statefulset`, `-daemonset`, `-job`), `name`, `path`, `namespace` only when `metadata.namespace` is stated, `replicas` when a literal integer, `containers`: for each entry of `spec.template.spec.containers` and `initContainers` in file order, `name`, `image`, `ports` (`containerPort` values), `environment_keys` (names from `env[].name`, sorted), `env_from` (the names of referenced ConfigMaps and Secrets, never their content) | Confirmed; span of the document |
+| `Environment` | `env:{repo}@{path}` for each `kustomization.yaml`, `kustomization.yml` or `Kustomization` | `declared_by: "kustomize"`, `path`, `name` and `name_span` only when the file states a scalar `namespace`, `image_overrides` (each `images` entry as written: `name`, `newName`, `newTag`, `digest`), `includes` (the `resources` and `bases` entries that are kustomization directories in the repository, as paths) | Confirmed; span of the `resources` key, or of the file's first key when it has none |
+| `DECLARES` | `Environment` → `Workload` | `via` (the chain of kustomization paths from this environment to the file, empty when direct) | Confirmed; span of the `resources` entry in this environment's own file that leads to the workload |
+| `PATCHES` | `Environment` → `Workload` | `path` (the patch file), and the properties the patch document writes for that workload, in the `Workload` property shape (`replicas`, `containers` with only what the patch states) | Confirmed; span of the patch document |
+
+**Reach.** An environment declares the workloads in the manifest files its
+`resources` (and legacy `bases`) entries name, and in the kustomization
+directories they name, followed recursively inside the repository. A cycle
+ends the walk on that branch with a Gap. Depth is bounded at 16 with a Gap
+beyond it. A workload that several environments reach has one `DECLARES`
+edge from each.
+
+**Patches.** A `patches[].path` or `patchesStrategicMerge` entry naming a
+file in the repository is read as manifest documents. A document whose
+`kind` and `metadata.name` match a workload the environment reaches yields
+`PATCHES`. Nothing is merged: the base workload keeps its properties, and
+the patch states its own.
+
+**Gaps and limits (one Gap per kustomization, reasons joined, one span each).**
+
+- A `resources`, `bases` or patch entry that is a URL, a remote git
+  reference, or a path outside the repository or not found.
+- A patch document that matches no reached workload, an inline patch, a
+  `patches[].target` selector, and `patchesJson6902`.
+- Transformers and generators that are present and not evaluated:
+  `namePrefix`, `nameSuffix`, `commonLabels`, `labels`, `replicas`,
+  `configMapGenerator`, `secretGenerator`, `components`, `helmCharts`,
+  `generators`, `transformers`, `replacements`, `vars`. The Gap names the
+  keys. `namePrefix` and `nameSuffix` mean the deployed name differs from the
+  recorded one; the document says so on that environment's rows.
+- A manifest document of a read kind without a scalar `metadata.name`, or
+  whose `containers` is not a sequence of mappings: a Gap for that document.
+- A file that does not parse (which includes a Helm template) is not a
+  manifest and yields nothing here; if it is named by a kustomization it is
+  a Gap there.
+- Anchors, aliases and tags in a read document: a Gap, and the literal
+  properties are still recorded.
+
+**Values.** No `env[].value`, no `data` or `stringData` of any document, and
+no `valueFrom` content is stored. `image` and port scalars pass through
+redaction. `configMapGenerator` and `secretGenerator` literals are never
+read.
+
+**Workloads no environment declares.** A manifest workload that no
+kustomization reaches is still a `Workload`; it has no `DECLARES` edge.
+
 ## The document
 
 `environments.md`, artifact id `environments`, in both export modes:
@@ -104,6 +163,14 @@ same commit gives the same facts.
    does not say which applies where.
 6. **Not established:** the Gaps, with reason and span.
 
+With increment 2: the workload table shows one row per container for a
+manifest workload; section 5 also lists a workload that two or more
+environments reach, one row per environment, with what that environment's
+`PATCHES` and `image_overrides` state for it, or "no patch stated"; a new
+section **Workloads no environment declares** lists manifest workloads with
+no `DECLARES` edge; an environment that another includes shows "included by"
+with the including paths.
+
 Every row carries tier and confidence and cites its fact through the fact
 index (ADR-0058). `verified-only` omits InferredWeak rows with a count
 (R-INT-5); increment 1 produces none. Work packets refuse the id until a
@@ -112,15 +179,14 @@ decision says otherwise.
 ## Increments
 
 1. **Compose** (this specification).
-2. Kubernetes manifests and kustomize overlays: an overlay is an
-   `Environment`; its `resources` chain gives its workloads; a patch is a
-   second declaration.
+2. Kubernetes manifests and kustomize (specified above; AC-0662).
 3. Helm values files and per-environment settings files, if a file states
    the environment; otherwise they stay Gaps.
 4. Terraform root modules, after #1844.
 
-AC-0661 covers increment 1. The issue's evidence (a Compose file and a
-Kubernetes overlay for two environments) is complete after increment 2.
+AC-0661 covers increment 1 and AC-0662 increment 2. The issue's evidence (a
+Compose file and a Kubernetes overlay for two environments) is complete
+after increment 2.
 
 ## Open items
 

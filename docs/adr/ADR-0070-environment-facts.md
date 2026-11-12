@@ -50,6 +50,13 @@ source does not state.
    interpolation in a service key), is a Gap or a recorded limit. Nothing is
    guessed.
 
+8. **Kustomize (increment 2).** Every kustomization file is an
+   `Environment`; a base that overlays include is one too, shown as included.
+   It declares the pod-bearing manifest workloads its `resources` chain
+   reaches inside the repository. A patch file is a `PATCHES` relation that
+   states what the patch writes; nothing is merged, and transformers are
+   named, not applied.
+
 ## Consequences
 
 - A repository with a Compose file gains `Environment`, `Workload` and
