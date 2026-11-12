@@ -1705,3 +1705,147 @@ mod local {
     );
     assert_eq!(sites, Vec::<(String, String, String)>::new());
 }
+
+fn evidence_spans(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["byte_start"].as_u64().unwrap(),
+                e["byte_end"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn config_read_ids(x: &Extraction) -> Vec<&str> {
+    x.nodes
+        .iter()
+        .filter(|node| node.label == "ConfigRead")
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+// AC-0597 (#1789, ADR-0059): one literal `std::env::var` read, one dynamic
+// read and one shadowed look-alike (a local function named `var`) yield
+// exactly one named ConfigRead, one dynamic ConfigRead and nothing for the
+// look-alike. Only the key name and the span of the call are recorded,
+// never the fallback value.
+#[test]
+fn std_env_var_reads_are_config_reads() {
+    let text = r#"use std::env;
+
+pub fn load(name: &str) -> (String, Option<String>) {
+    let url = env::var("DATABASE_URL").unwrap_or("postgres://user:pw@db/app".into());
+    (url, env::var(name).ok())
+}
+
+mod fake {
+    fn var(key: &str) -> String {
+        key.to_string()
+    }
+    pub fn read() -> String {
+        var("SHADOWED")
+    }
+}
+"#;
+    let x = extract_source(text.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert_eq!(
+        config_read_ids(&x),
+        [
+            "cfgread:local/rust-ws@src/lib.rs:env:DATABASE_URL",
+            "cfgread:local/rust-ws@src/lib.rs:env:?",
+        ]
+    );
+    let named = x
+        .nodes
+        .iter()
+        .find(|n| n.id == "cfgread:local/rust-ws@src/lib.rs:env:DATABASE_URL")
+        .unwrap();
+    assert_eq!(named.props["source"], "env");
+    assert_eq!(named.props["key"], "DATABASE_URL");
+    assert_eq!(named.props["language"], "rust");
+    assert_eq!(named.props["prov"]["tier"], "Deterministic");
+    assert_eq!(named.props["prov"]["confidence_tier"], "Confirmed");
+    let read = r#"env::var("DATABASE_URL")"#;
+    let at = text.find(read).unwrap() as u64;
+    assert_eq!(evidence_spans(&named.props), [(at, at + read.len() as u64)]);
+    let dynamic = x
+        .nodes
+        .iter()
+        .find(|n| n.id == "cfgread:local/rust-ws@src/lib.rs:env:?")
+        .unwrap();
+    assert_eq!(dynamic.props["dynamic"], true);
+    assert!(dynamic.props.get("key").is_none());
+    let at = text.find("env::var(name)").unwrap() as u64;
+    assert_eq!(
+        evidence_spans(&dynamic.props),
+        [(at, at + "env::var(name)".len() as u64)]
+    );
+    let reads: Vec<&Edge> = x
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .collect();
+    assert_eq!(reads.len(), 2);
+    let load = x
+        .nodes
+        .iter()
+        .find(|n| n.label == "Symbol" && n.props["name"] == "load")
+        .expect("the reading function is a symbol");
+    assert!(reads.iter().all(|edge| edge.src == load.id));
+    let all = serde_json::to_string(&(&x.nodes, &x.edges)).unwrap();
+    assert!(!all.contains("postgres://") && !all.contains("SHADOWED"));
+    // Determinism: a second run yields the same facts.
+    let again = extract_source(text.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert_eq!(
+        all,
+        serde_json::to_string(&(&again.nodes, &again.edges)).unwrap()
+    );
+}
+
+// AC-0597 (ADR-0059 decisions 1, 4): the qualified path, an imported
+// function and `var_os` are the same read and share the key's node; a local
+// module named `env`, another crate's `env`, a declared `std` module and a
+// closure bound as `var` name nothing.
+#[test]
+fn std_env_var_needs_the_standard_library_path() {
+    let reads = r#"use std::env::var;
+
+static REGION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| std::env::var("REGION").unwrap());
+
+fn a() -> bool {
+    var("REGION").is_ok() && std::env::var_os("REGION").is_some()
+}
+"#;
+    let x = extract_source(reads.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert_eq!(
+        config_read_ids(&x),
+        ["cfgread:local/rust-ws@src/lib.rs:env:REGION"]
+    );
+    let node = x.nodes.iter().find(|n| n.label == "ConfigRead").unwrap();
+    assert_eq!(evidence_spans(&node.props).len(), 3);
+    let sources: Vec<&str> = x
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .map(|edge| edge.src.as_str())
+        .collect();
+    assert_eq!(sources.len(), 2);
+    assert!(sources.contains(&"file:local/rust-ws@src/lib.rs"));
+
+    let lookalikes = [
+        "mod env { pub fn var(k: &str) -> String { k.into() } }\nfn a() -> String { env::var(\"LOCAL_MOD\") }\n",
+        "use other::env;\nfn a() { let _ = env::var(\"OTHER_CRATE\"); }\n",
+        "mod std { pub mod env { pub fn var(k: &str) -> String { k.into() } } }\nfn a() -> String { std::env::var(\"OWN_STD\") }\n",
+        "use std::env::var;\nfn a() -> String { let var = |k: &str| k.to_string(); var(\"CLOSURE\") }\n",
+        "fn a(env: Env) -> String { env.var(\"METHOD\") }\n",
+    ];
+    for text in lookalikes {
+        let x = extract_source(text.as_bytes(), "src/lib.rs", &id()).unwrap();
+        assert!(config_read_ids(&x).is_empty(), "{text}");
+    }
+}
