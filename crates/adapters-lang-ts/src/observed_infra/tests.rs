@@ -280,9 +280,12 @@ export const b = new Pool();
         .filter(|(src, _)| src.contains("cast.ts"))
         .collect();
     assert!(cast.is_empty(), "{cast:?}");
+    // The fixture also reads `process.env.DATABASE_URL`: its `READS_CONFIG`
+    // edge (#1789) is not a client edge and names no registry.
     let registry: Vec<_> = ex
         .edges
         .iter()
+        .filter(|edge| edge.label == "USES")
         .map(|edge| edge.props["registry"].as_str().unwrap())
         .collect();
     assert!(
@@ -842,4 +845,161 @@ fn observed_infra_fixture_matches_its_golden() {
     }
     let expected = std::fs::read_to_string(&golden).expect("golden file is checked in");
     assert_eq!(actual, expected);
+}
+
+fn config_reads(ex: &Extraction) -> Vec<&Node> {
+    ex.nodes
+        .iter()
+        .filter(|node| node.label == "ConfigRead")
+        .collect()
+}
+
+fn spans(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["byte_start"].as_u64().unwrap(),
+                e["byte_end"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+// AC-0597 (#1789, ADR-0059): one literal `process.env` read, one dynamic
+// read and one shadowed look-alike yield exactly one named ConfigRead, one
+// dynamic ConfigRead and nothing for the look-alike. Only the key name and
+// the span of the read are recorded, never the fallback value.
+#[test]
+fn process_env_reads_are_config_reads() {
+    let source = r#"export function load(name: string) {
+  const url = process.env.DATABASE_URL ?? "postgres://user:pw@db/app";
+  return [url, process.env[name]];
+}
+export function fake(process: { env: Record<string, string> }) {
+  return process.env.SHADOWED;
+}
+"#;
+    let ex = extract(&[("src/config.ts", source)]);
+    let reads = config_reads(&ex);
+    let ids: Vec<&str> = reads.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "cfgread:local/p@src/config.ts:env:DATABASE_URL",
+            "cfgread:local/p@src/config.ts:env:?",
+        ]
+    );
+    let named = reads[0];
+    assert_eq!(named.props["source"], "env");
+    assert_eq!(named.props["key"], "DATABASE_URL");
+    assert_eq!(named.props["language"], "typescript");
+    assert_eq!(named.props["prov"]["tier"], "Deterministic");
+    assert_eq!(named.props["prov"]["confidence_tier"], "Confirmed");
+    let at = source.find("process.env.DATABASE_URL").unwrap() as u64;
+    assert_eq!(
+        spans(&named.props),
+        [(at, at + "process.env.DATABASE_URL".len() as u64)]
+    );
+    let dynamic = reads[1];
+    assert_eq!(dynamic.props["dynamic"], true);
+    assert!(dynamic.props.get("key").is_none());
+    let at = source.find("process.env[name]").unwrap() as u64;
+    assert_eq!(
+        spans(&dynamic.props),
+        [(at, at + "process.env[name]".len() as u64)]
+    );
+    let edges: Vec<(&str, &str)> = ex
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    assert_eq!(
+        edges,
+        [
+            (
+                "sym:local/p@src/config.ts#load",
+                "cfgread:local/p@src/config.ts:env:DATABASE_URL"
+            ),
+            (
+                "sym:local/p@src/config.ts#load",
+                "cfgread:local/p@src/config.ts:env:?"
+            ),
+        ]
+    );
+    let all =
+        serde_json::to_string(&ex.nodes).unwrap() + &serde_json::to_string(&ex.edges).unwrap();
+    assert!(!all.contains("postgres://") && !all.contains("SHADOWED"));
+    // Determinism: a second run yields the same facts.
+    let again = extract(&[("src/config.ts", source)]);
+    assert_eq!(
+        serde_json::to_string(&ex.nodes).unwrap(),
+        serde_json::to_string(&again.nodes).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&ex.edges).unwrap(),
+        serde_json::to_string(&again.edges).unwrap()
+    );
+}
+
+// AC-0597 (ADR-0059 decisions 1, 4): the bracket form and an import of the
+// `process` module are the same read, every read of a key in a file is one
+// node citing each span in byte order, and a write, a rebound `process.env`,
+// a foreign `env` and `import.meta.env` are not reads.
+#[test]
+fn process_env_read_forms_and_refusals() {
+    let reads = r#"import proc from "node:process";
+import { env } from "process";
+const a = process.env["API_KEY"];
+const b = proc.env.API_KEY;
+const c = env.API_KEY;
+process.env.NODE_ENV = "test";
+delete process.env.GONE;
+const d = import.meta.env.VITE_API;
+"#;
+    let rebound = r#"process.env = { A: "1" };
+export const a = process.env.A;
+"#;
+    let foreign = r#"import { env } from "./env";
+const process = require("./fake");
+export const a = env.A;
+export const b = process.env.B;
+"#;
+    let ex = extract(&[
+        ("src/reads.js", reads),
+        ("src/rebound.ts", rebound),
+        ("src/foreign.ts", foreign),
+    ]);
+    let nodes = config_reads(&ex);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "{:?}",
+        nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+    );
+    assert_eq!(nodes[0].id, "cfgread:local/p@src/reads.js:env:API_KEY");
+    assert_eq!(nodes[0].props["language"], "javascript");
+    let starts = [
+        reads.find(r#"process.env["API_KEY"]"#).unwrap() as u64,
+        reads.find("proc.env.API_KEY").unwrap() as u64,
+        reads.find("c = env.API_KEY").unwrap() as u64 + 4,
+    ];
+    assert_eq!(
+        spans(&nodes[0].props)
+            .iter()
+            .map(|s| s.0)
+            .collect::<Vec<_>>(),
+        starts
+    );
+    let edges: Vec<&Edge> = ex
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .collect();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].src, "file:local/p@src/reads.js");
+    assert_eq!(spans(&edges[0].props).len(), 3);
 }

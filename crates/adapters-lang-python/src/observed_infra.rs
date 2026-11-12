@@ -20,6 +20,13 @@
 //! rules `follow_parameter` documents; anything else is a Gap naming the
 //! site.
 //!
+//! The same proof makes every such read a configuration read (#1789,
+//! ADR-0059): the shared `ConfigRead` shape ([`adapters_fw::config_read`])
+//! wherever the read stands, not only as a client identity. A key that is
+//! not a plain string literal is a dynamic read; a write
+//! (`os.environ["X"] = …`, `del`) is none; and a repository module or
+//! package named `os` voids every read (fail closed).
+//!
 //! The same proof admits HTTP client calls (#1238, AC-0424): a module
 //! function of `requests` or `httpx` (`get`, `post`, … or `request(method,
 //! url)`) becomes a [`FetchSite`] with its URL classified as above, but
@@ -36,6 +43,7 @@
 //! keys shape TypeScript sites only.
 
 use adapters_fw::client::{BaseJoin, FetchBase, FetchSite};
+use adapters_fw::config_read::ConfigReadSite;
 use adapters_fw::events::{
     ClientForm, Ecosystem, EventSite, IdentityArg, IdentityExpr, Registries, SdkPattern,
 };
@@ -455,6 +463,10 @@ struct Fetches {
     sites: Vec<FetchSite>,
     event_modules: Vec<String>,
     events: Vec<EventSite>,
+    /// Whether no repository module shadows the standard `os` (#1789).
+    os_std: bool,
+    /// Proven environment reads (#1789, ADR-0059).
+    config: Vec<ConfigReadSite>,
 }
 
 /// Whether a file's `patch("…")`/`monkeypatch.setattr("…")` targets may
@@ -1192,15 +1204,9 @@ fn keyword<'t>(cx: &FileCx, args: TsNode<'t>, key: &str) -> Option<TsNode<'t>> {
         .and_then(|arg| arg.child_by_field_name("value"))
 }
 
-/// The env variable an `os.environ[...]`, `os.environ.get(...)` or
-/// `os.getenv(...)` read names, through a proven `os` import.
-/// The name is read with `literal`.
-fn env_key(
-    cx: &FileCx,
-    node: TsNode,
-    scope: &Scope,
-    literal: fn(&FileCx, TsNode) -> Option<String>,
-) -> Option<String> {
+/// The key expression of an `os.environ[...]`, `os.environ.get(...)` or
+/// `os.getenv(...)` read, through a proven `os` import.
+fn env_key_node<'t>(cx: &FileCx, node: TsNode<'t>, scope: &Scope) -> Option<TsNode<'t>> {
     let names = |target: TsNode, attribute: &str| {
         callee_export(cx, target, scope).is_some_and(|(m, a)| m == "os" && a == attribute)
     };
@@ -1212,7 +1218,7 @@ fn env_key(
                 .children_by_field_name("subscript", &mut walk)
                 .collect();
             match index.as_slice() {
-                [key] if names(value, "environ") => literal(cx, *key),
+                [key] if names(value, "environ") => Some(*key),
                 _ => None,
             }
         }
@@ -1229,13 +1235,49 @@ fn env_key(
             let reads_env = environ_get || names(callee, "getenv");
             let args = node.child_by_field_name("arguments")?;
             match (reads_env, positional(args).first()) {
-                (true, Some(key)) => literal(cx, *key),
+                (true, Some(key)) => Some(*key),
                 _ => None,
             }
         }
         _ => None,
     }
-    .filter(|key| !key.is_empty())
+}
+
+/// The env variable an `os.environ[...]`, `os.environ.get(...)` or
+/// `os.getenv(...)` read names, through a proven `os` import.
+/// The name is read with `literal`.
+fn env_key(
+    cx: &FileCx,
+    node: TsNode,
+    scope: &Scope,
+    literal: fn(&FileCx, TsNode) -> Option<String>,
+) -> Option<String> {
+    env_key_node(cx, node, scope)
+        .and_then(|key| literal(cx, key))
+        .filter(|key| !key.is_empty())
+}
+
+/// The environment read `node` is (#1789, ADR-0059): `Some(Some(key))` for
+/// a plain string literal key, `Some(None)` for any other key (a dynamic
+/// read), `None` when `node` is no proven read or writes the variable
+/// (`os.environ["X"] = …`, `del os.environ["X"]`).
+fn env_read(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<Option<String>> {
+    let key = env_key_node(cx, node, scope)?;
+    if node.kind() == "subscript"
+        && let Some(parent) = node.parent()
+    {
+        let target = match parent.kind() {
+            "assignment" | "augmented_assignment" => parent
+                .child_by_field_name("left")
+                .is_some_and(|left| left.id() == node.id()),
+            "delete_statement" | "pattern_list" | "tuple_pattern" | "list_pattern" => true,
+            _ => false,
+        };
+        if target {
+            return None;
+        }
+    }
+    Some(exact_string(cx, key).filter(|key| !key.is_empty()))
 }
 
 fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool) -> IdentityExpr {
@@ -1499,6 +1541,20 @@ fn extract_file(
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
+        if fetches.os_std
+            && let Some(key) = env_read(&cx, node, &scope)
+        {
+            fetches.config.push(ConfigReadSite {
+                key,
+                language: "python",
+                symbol: enclosing_function_node(node)
+                    .and_then(|function| qualified_function_name(&cx, function))
+                    .map(|name| symbol_id(id.repo, path, &name)),
+                path: path.to_string(),
+                byte_start: node.start_byte() as u64,
+                byte_end: node.end_byte() as u64,
+            });
+        }
         if node.kind() != "call" {
             continue;
         }
@@ -1921,9 +1977,10 @@ pub fn extract_dir(
 /// Observed nodes and edges, and the fetch and event sites of the same pass.
 #[derive(Debug)]
 pub struct ObservedWithSites {
-    /// Observed `Resource` nodes and the Gaps of unresolved sites.
+    /// Observed `Resource` nodes and the Gaps of unresolved sites, then
+    /// the `ConfigRead` nodes of proven environment reads (#1789).
     pub nodes: Vec<Node>,
-    /// `USES` edges to the observed resources.
+    /// `USES` edges to the observed resources, then `READS_CONFIG` edges.
     pub edges: Vec<Edge>,
     /// `requests`/`httpx` calls (AC-0424, AC-0425).
     pub fetch_sites: Vec<FetchSite>,
@@ -1965,6 +2022,8 @@ pub fn extract_dir_with_sites(
         sites: Vec::new(),
         event_modules,
         events: Vec::new(),
+        os_std: unshadowed(&files, "os"),
+        config: Vec::new(),
     };
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
@@ -2013,14 +2072,17 @@ pub fn extract_dir_with_sites(
             .concat();
         }
     }
-    let (nodes, edges) = assemble(
-        &ObservedSource {
-            repo: id.repo,
-            commit: id.commit,
-            extractor: EXTRACTOR_ID,
-        },
-        &sites,
-    );
+    let source = ObservedSource {
+        repo: id.repo,
+        commit: id.commit,
+        extractor: EXTRACTOR_ID,
+    };
+    let (mut nodes, mut edges) = assemble(&source, &sites);
+    // Configuration reads (#1789, ADR-0059) follow the observed facts, which
+    // stay exactly as they were.
+    let (read_nodes, read_edges) = adapters_fw::config_read::assemble(&source, &fetches.config);
+    nodes.extend(read_nodes);
+    edges.extend(read_edges);
     Ok(ObservedWithSites {
         nodes,
         edges,

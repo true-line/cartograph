@@ -880,6 +880,13 @@ fn extract_source_inner(
         });
     }
 
+    // Configuration reads (#1789, AC-0597).
+    let functions_by_start: HashMap<usize, String> = function_items
+        .iter()
+        .map(|(function, symbol)| (function.start_byte(), symbol.clone()))
+        .collect();
+    config_read::extract(&cx, root, &bindings, &functions_by_start, &mut out);
+
     let client_fields = reqwest::client_fields(&cx, root, &bindings);
     let consumer_fields = rdkafka::consumer_fields(&cx, root, &bindings);
     for (fn_node, fn_sym) in &function_items {
@@ -1507,6 +1514,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod config_read;
 mod http;
 mod rdkafka;
 mod reqwest;
