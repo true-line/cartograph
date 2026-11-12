@@ -755,7 +755,10 @@ fn containerfile_and_dockerfile_suffix_names_are_read() {
             ("Containerfile.dockerignore", "node_modules\n"),
             (".dockerfile", stage),
             ("docs/api.dockerfile.md", stage),
-            ("docker/heredoc.dockerfile", "FROM alpine\nRUN <<EOF\ntrue\nEOF\n"),
+            (
+                "docker/heredoc.dockerfile",
+                "FROM alpine\nRUN <<EOF\ntrue\nEOF\n",
+            ),
         ],
     );
     let out = extract_dir(
