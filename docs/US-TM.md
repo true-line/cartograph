@@ -20,7 +20,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0014 | AC-0039..0040,AC-0060,AC-0205,AC-0208,AC-0217,AC-0223,AC-0423,AC-0526..0531,AC-0536..0550,AC-0593 | source-walk, adapters-lang-*, iac, ingest, core-graph, core-prov, app, ui | M10 | — | ADR-0006, ADR-0014, ADR-0018, ADR-0030 | T-0039..0040,T-0060,T-0205,T-0208,T-0217,T-0223,T-0423,T-0526..0531,T-0536..0550,T-0593 |
 | US-0015 | AC-0041..0042, AC-0380, AC-0383, AC-0387, AC-0395, AC-0446, AC-0448, AC-0599, AC-0656 | iac, spec, ui, adapters-lang-python | M9 | — | ADR-0003, ADR-0013 | T-0041..0042, T-0380, T-0383, T-0387, T-0395, T-0446, T-0448, T-0599, T-0656 |
 | US-0016 | AC-0071..0075 | adapters-lang-ts, adapters-fw, events, spec, app, ui | post-M10 | WebExtension flows | ADR-0003, ADR-0013 | T-0071..0075 |
-| US-0017 | AC-0068..0070, AC-0093, AC-0594 | adapters-*, ingest, app, ui | post-M10 | — | ADR-0003, ADR-0017 | T-0068..0070, T-0093, T-0594 |
+| US-0017 | AC-0068..0070, AC-0093, AC-0594, AC-0658 | adapters-*, ingest, app, ui | post-M10 | — | ADR-0003, ADR-0017, ADR-0062 | T-0068..0070, T-0093, T-0594, T-0658 |
 | US-0018 | AC-0090..0092, AC-0222 | app, ingest, ui, scripts | post-M10 | — | ADR-0002, ADR-0018 | T-0090..0092, T-0222 |
 | US-0019 | AC-0096..0097,AC-0598,AC-0650 | ingest (toolchain config facts; keys-only env files including `*.env`/`env.example` templates, quote-aware key parsing, span-free `CONFIGURED_IN` links from env-keyed observed resources, #734), core-graph, spec (topology draws `CONFIGURED_IN` env files), app, ui | post-M10 | — | ADR-0003, ADR-0058, ADR-0060 | T-0096..0097,T-0598,T-0650 |
 | US-0020 | AC-0101..0105, AC-0137..0139, AC-0232..0233, AC-0302..0303, AC-0460 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019, ADR-0047 | T-0101..0105, T-0137..0139, T-0232..0233, T-0302..0303, T-0460 |
@@ -140,6 +140,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0059 | Configuration-read facts: `ConfigRead` per file and key, `READS_CONFIG`, names only, proven standard-library reads (proposed; #1789, owner review) |
 | ADR-0058 | Citation ids derived from fact identity and the fact and evidence index (proposed; #1785, owner review) |
 | ADR-0061 | The curated read contract: a computed projection, a content-identity revision, DR-4 fields, one state per accepted record, conservative eligibility (proposed; #1746, owner review) |
+| ADR-0062 | A plugin failure on one file refuses that file and coverage records it: deterministic failure classes refuse, machine-dependent ones fail the ingest (proposed; #1810, owner review) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression

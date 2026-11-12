@@ -274,6 +274,7 @@ recorded when the repository was ingested:
 - the producers the layer hints excluded
 - the inputs that were not declared, such as a Terraform state file
 - the languages and constructs no installed producer covers, with the first place each was found
+- the files a gated plugin was refused on, with the reason: a fact the host does not accept, an error or trap in the plugin, or a fuel, memory or table bound
 
 Use them to tell a finding that is absent from a file that was never read. An
 entry that was not covered is a limit of the tool, not a gap in the system
@@ -290,7 +291,10 @@ totals by producer and by reason, and the detail for every repository is in
 **coverage.json**.
 
 The inventory counts files per producer. It does not list every file, so the
-documents name the first place a limit was found, not each file.
+documents name the first place a limit was found, not each file. Files a
+plugin was refused on are the exception: up to 256 are listed per plugin and
+the rest are counted. A refused file is not in that plugin's file count, and
+no fact from it by that plugin is in the graph.
 
 ## The fact and evidence index
 

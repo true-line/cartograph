@@ -142,9 +142,24 @@ RNG), and these bounds (`PluginLimits::default()`):
 | Wall-clock deadline | 5 seconds |
 
 Any violation — fuel exhaustion, memory/table cap, deadline, a trap, a
-malformed fact — fails that call closed: zero facts, never partial. Design
-for files in the low hundreds of KB parsed in well under a second; if your
-grammar is slow enough to worry about these numbers, that's a signal to
+malformed fact — fails that call closed: zero facts, never partial.
+
+What happens to the rest of the ingest depends on the violation:
+
+- **The file is refused and the ingest continues** when the failure depends
+  only on your plugin and the file: a malformed fact, an `Err` from
+  `extract-source`, a trap, or the fuel, memory or table bound. No fact from
+  that file by your plugin joins the graph. The coverage inventory lists the
+  file under your plugin with its reason class (`malformed_fact`,
+  `guest_error` or `bound_exceeded`) and does not count it as covered. Your
+  error text is not recorded.
+- **The whole ingest fails** on the wall-clock deadline, a call-stack
+  overflow, a failed instantiation, or any failure that is not a wasm trap.
+  These depend on the machine or have no established cause, so skipping the
+  file would give different graphs for the same commit.
+
+Design for files in the low hundreds of KB parsed in well under a second; if
+your grammar is slow enough to worry about these numbers, that's a signal to
 simplify before it's a signal to ask for more fuel.
 
 ### 6. Write the golden corpus

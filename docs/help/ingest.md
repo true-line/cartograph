@@ -45,10 +45,21 @@ revision and layer hints. The inventory also lists:
 - inputs that were not declared but would have enriched facts here, with the
   `cartograph.system.toml` field to add;
 - capabilities no installed producer covers. These are tool limitations, not
-  system gaps.
+  system gaps;
+- files a gated plugin was refused on. When a plugin emits a fact the host
+  does not accept, returns an error or traps, or exceeds its fuel, memory or
+  table bound on one file, that file is skipped for that plugin and the
+  recovery continues. The plugin's row gives the refused count by reason,
+  lists the files as not covered, and leaves them out of its file count. No
+  fact from a refused file by that plugin is in the graph. At most 256 files
+  are listed per plugin; the rest are counted.
 
 "Complete within the declared scope only" never means global completeness.
-Anything excluded, missing or unsupported marks the repo as limited.
+Anything excluded, missing, unsupported or refused marks the repo as limited.
+
+A plugin that runs past its time limit on a file still fails the whole
+recovery. How long a file takes depends on the machine, so skipping it would
+give different graphs for the same commit.
 
 ## Create a system manifest
 

@@ -2,6 +2,35 @@
 export type ProducerState =
   "ran" | "not_selected" | "not_applicable" | "missing_input";
 
+/** Why the plugin host refused one file's extraction (AC-0658). */
+export type RefusalReason = "malformed_fact" | "guest_error" | "bound_exceeded";
+
+/** The files a gated plugin was refused on. No fact from them by that
+ *  plugin joined the graph, and they are not in the producer's `files`. */
+export interface PluginRefusals {
+  malformed_fact: number;
+  guest_error: number;
+  bound_exceeded: number;
+  /** Refused files in path order, bounded by the inventory. */
+  files: { path: string; reason: RefusalReason }[];
+  /** Refused files counted above but not listed. */
+  omitted: number;
+}
+
+/** The not-covered capabilities the inventory records for refused files,
+ *  one per reason class. They are shown with the plugin that was refused. */
+export const REFUSAL_CAPABILITIES: readonly string[] = [
+  "plugin-malformed-fact",
+  "plugin-guest-error",
+  "plugin-bound-exceeded",
+];
+
+export const REFUSAL_REASON_TEXT: Record<RefusalReason, string> = {
+  malformed_fact: "the plugin emitted a fact the host does not accept",
+  guest_error: "the plugin returned an error or trapped",
+  bound_exceeded: "the plugin exceeded its fuel, memory or table bound",
+};
+
 export interface ProducerCoverage {
   id: string;
   kind: "deterministic" | "observational";
@@ -12,6 +41,8 @@ export interface ProducerCoverage {
   edges: number;
   inputs: string[];
   stopping_reason: string;
+  /** Present only for a gated plugin that was refused on a file. */
+  refusals?: PluginRefusals | null;
 }
 
 export interface MissingInput {
@@ -54,9 +85,16 @@ export function coverageVerdict(coverage: RepoCoverage): string {
       `${coverage.missing_inputs.length} missing input${coverage.missing_inputs.length === 1 ? "" : "s"}`,
     );
   }
-  if (coverage.unsupported.length > 0) {
+  const unsupported = unsupportedRows(coverage).length;
+  if (unsupported > 0) {
     parts.push(
-      `${coverage.unsupported.length} unsupported capabilit${coverage.unsupported.length === 1 ? "y" : "ies"}`,
+      `${unsupported} unsupported capabilit${unsupported === 1 ? "y" : "ies"}`,
+    );
+  }
+  const refused = refusedFileCount(coverage);
+  if (refused > 0) {
+    parts.push(
+      `${refused} file${refused === 1 ? "" : "s"} refused for a plugin`,
     );
   }
   const scope = coverage.limited
@@ -77,4 +115,28 @@ export function producerRows(coverage: RepoCoverage): {
       .filter((p) => p.state === "not_applicable")
       .map((p) => p.covers),
   };
+}
+
+/** Files refused for any gated plugin in this repo, listed or not. */
+export function refusedFileCount(coverage: RepoCoverage): number {
+  return coverage.producers.reduce(
+    (sum, producer) =>
+      sum +
+      (producer.refusals
+        ? producer.refusals.malformed_fact +
+          producer.refusals.guest_error +
+          producer.refusals.bound_exceeded
+        : 0),
+    0,
+  );
+}
+
+/** Unsupported capabilities other than refused plugin files, which are
+ *  listed with the plugin that was refused. */
+export function unsupportedRows(
+  coverage: RepoCoverage,
+): UnsupportedCapability[] {
+  return coverage.unsupported.filter(
+    (entry) => !REFUSAL_CAPABILITIES.includes(entry.capability),
+  );
 }

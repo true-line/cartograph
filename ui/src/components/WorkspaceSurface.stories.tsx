@@ -537,6 +537,87 @@ export const CoverageInventoryBeforeInterpretation: Story = {
   },
 };
 
+const REFUSED_COVERAGE = [
+  {
+    ...COVERAGE[0],
+    producers: [
+      ...COVERAGE[0].producers,
+      {
+        id: "t0.plugin-zig@0123456789ab",
+        kind: "deterministic" as const,
+        covers: "gated plugin",
+        state: "ran" as const,
+        files: 2,
+        nodes: 5,
+        edges: 3,
+        inputs: [],
+        stopping_reason:
+          "read 2 of the 5 files its extensions claim in acme/api@0123456789abcdef; the host refused its extraction of 3 (2 malformed fact, 1 bound exceeded), and no fact from those files by this plugin joined the graph",
+        refusals: {
+          malformed_fact: 2,
+          guest_error: 0,
+          bound_exceeded: 1,
+          files: [
+            { path: "lib/m.zig", reason: "malformed_fact" as const },
+            { path: "src/z.zig", reason: "bound_exceeded" as const },
+          ],
+          omitted: 1,
+        },
+      },
+    ],
+    unsupported: [
+      ...COVERAGE[0].unsupported,
+      {
+        capability: "plugin-malformed-fact",
+        occurrences: 2,
+        first_site: "lib/m.zig",
+        reason:
+          "2 file(s) were refused for a gated plugin because the plugin emitted a fact the host does not accept; no fact from them by that plugin joined the graph, so that plugin does not cover them: a plugin failure, not a system gap",
+      },
+      {
+        capability: "plugin-bound-exceeded",
+        occurrences: 1,
+        first_site: "src/z.zig",
+        reason:
+          "1 file(s) were refused for a gated plugin because the plugin exceeded its fuel, memory or table bound; no fact from them by that plugin joined the graph, so that plugin does not cover them: a plugin failure, not a system gap",
+      },
+    ],
+  },
+];
+
+export const CoverageInventoryNamesFilesAPluginWasRefusedOn: Story = {
+  // AC-0658: a gated plugin refused on some files is shown with the refused
+  // count by class, each listed file as not covered with its reason class,
+  // and the files past the listing bound as a count.
+  args: {
+    summary: { ...meta.args.summary, coverage: REFUSED_COVERAGE },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inventory = canvas.getByTestId("coverage-inventory");
+    await expect(inventory).toHaveTextContent(
+      "Limited coverage · 2 producers ran · 1 excluded by layer hints · 1 unsupported capability · 3 files refused for a plugin",
+    );
+    await expect(inventory).toHaveTextContent(
+      "Ran, files refused t0.plugin-zig@0123456789ab (gated plugin): read 2 of the 5 files its extensions claim in acme/api@0123456789abcdef; the host refused its extraction of 3 (2 malformed fact, 1 bound exceeded)",
+    );
+    const refused = within(
+      within(inventory).getByRole("list", {
+        name: "Files refused for t0.plugin-zig@0123456789ab",
+      }),
+    ).getAllByRole("listitem");
+    await expect(refused.map((item) => item.textContent)).toEqual([
+      "lib/m.zig: not covered, the plugin emitted a fact the host does not accept",
+      "src/z.zig: not covered, the plugin exceeded its fuel, memory or table bound",
+      "1 more refused files are counted but not listed",
+    ]);
+    // The refused files are listed with their plugin, not as a capability
+    // no producer covers.
+    await expect(inventory).not.toHaveTextContent("plugin-malformed-fact");
+    await expect(inventory).toHaveTextContent("Ruby ×2, first at lib/a.rb:1");
+  },
+};
+
 export const DraftAdapterWorkPacketsInCoverage: Story = {
   // AC-0371 (#1101): drafting adapter work packets for a recovered repo shows
   // each returned packet's language and Markdown in a read-only <pre> with a

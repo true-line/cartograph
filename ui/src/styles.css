@@ -4460,8 +4460,18 @@ details.investigation-section { display: block; }
 }
 
 .coverage-not_selected .coverage-state,
-.coverage-missing_input .coverage-state {
+.coverage-missing_input .coverage-state,
+.coverage-refused-producer .coverage-state {
   color: var(--finding-unsupported);
+}
+
+.coverage-refused {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+
+.coverage-refused code {
+  overflow-wrap: anywhere;
 }
 
 /* Local agent handoff packets; source-authored content stays inert text. */

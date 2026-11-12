@@ -1219,9 +1219,9 @@ struct DeclaredInputs {
 struct ProducerReads {
     /// TypeScript files the adapter read, before any infra-only projection.
     ts_files: u64,
-    /// Gated plugins that ran: pinned extractor id and what each read and
-    /// published.
-    plugins: Vec<(String, ingest::coverage::ProducerCount)>,
+    /// Gated plugins that ran: pinned extractor id, what each read and
+    /// published, and the files each was refused on (#1810).
+    plugins: Vec<ingest::coverage::PluginRead>,
     /// Captured TypeScript declarations left without a receipt, by file.
     omitted_declaration_receipts: std::collections::BTreeMap<String, u64>,
     /// Captured TypeScript rule facts left without a receipt, by file (#722).
@@ -1276,6 +1276,17 @@ impl ProducerReads {
 
     fn source_omissions(&self) -> Vec<core_graph::source::SourceOmission> {
         self.omitted_receipt_facts.clone()
+    }
+}
+
+/// The coverage class of a plugin-host refusal (#1810, AC-0658).
+fn refusal_reason(reason: adapters_plugin_host::RefusalReason) -> ingest::coverage::RefusalReason {
+    use adapters_plugin_host::RefusalReason as Host;
+    use ingest::coverage::RefusalReason as Recorded;
+    match reason {
+        Host::MalformedFact => Recorded::MalformedFact,
+        Host::GuestError => Recorded::GuestError,
+        Host::BoundExceeded => Recorded::BoundExceeded,
     }
 }
 
@@ -2155,8 +2166,13 @@ fn extract_tree_packed(
     }
     // Gated plugin adapters (#201): route the files each active plugin
     // claims via its golden-corpus extensions. Every fact arrives pinned to
-    // the exact artifact by the host; a failure fails the whole plugin pass
-    // closed (zero partial facts, AC-0070).
+    // the exact artifact by the host, and a failed call yields zero partial
+    // facts (AC-0070). A failure that is a function of the plugin and the
+    // file alone refuses that file: no fact from it by that plugin joins the
+    // graph, coverage names it, and the other files and plugins continue
+    // (#1810, AC-0658). Any other failure (the wall-clock deadline, the
+    // native stack, instantiation, IO) still fails the ingest, because
+    // skipping the file would make the graph depend on the machine.
     if !plugins.is_empty() {
         let host = adapters_plugin_host::PluginHost::new().map_err(|e| e.to_string())?;
         let plugin_source = adapters_plugin_host::SourceId {
@@ -2177,7 +2193,7 @@ fn extract_tree_packed(
             let loaded = host
                 .load(&wasm_bytes, &plugin.plugin_id)
                 .map_err(|e| e.to_string())?;
-            let (plugin_facts, files_read) = adapters_plugin_host::route::extract_claimed_counted(
+            let claimed = adapters_plugin_host::route::extract_claimed_counted(
                 &host,
                 &loaded,
                 root,
@@ -2186,14 +2202,23 @@ fn extract_tree_packed(
                 adapters_plugin_host::PluginLimits::default(),
             )
             .map_err(|e| e.to_string())?;
-            reads.plugins.push((
-                adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash),
-                ingest::coverage::ProducerCount {
-                    files: files_read,
+            let plugin_facts = claimed.facts;
+            reads.plugins.push(ingest::coverage::PluginRead {
+                id: adapters_plugin_host::pinned_extractor_id(
+                    &plugin.plugin_id,
+                    &plugin.content_hash,
+                ),
+                count: ingest::coverage::ProducerCount {
+                    files: claimed.files_read,
                     nodes: distinct_node_count(&plugin_facts.nodes),
                     edges: distinct_edge_count(&plugin_facts.edges),
                 },
-            ));
+                refused: claimed
+                    .refused
+                    .into_iter()
+                    .map(|file| (file.path, refusal_reason(file.reason)))
+                    .collect(),
+            });
             facts
                 .extend(plugin_facts.nodes, plugin_facts.edges)
                 .map_err(pack_err)?;
@@ -12836,6 +12861,197 @@ export function App() {
         newer.join().unwrap().unwrap();
     }
 
+    // AC-0658: a gated plugin that emits a malformed fact for one file of
+    // several does not fail the ingest. The other files' facts join the
+    // graph, no fact from the refused file by that plugin does, and coverage
+    // names the plugin, the file and the reason class. Two runs give the
+    // same graph and the same inventory.
+    #[test]
+    fn plugin_refused_on_one_file_keeps_the_ingest_and_is_named_in_coverage() {
+        use ingest::coverage::RefusalReason;
+        // A text-form component: the first byte of a source picks its
+        // behaviour, `M` being a fact with a `prov` field a plugin may not
+        // write.
+        const REFUSING_ADAPTER: &[u8] =
+            include_bytes!("../../crates/adapters-plugin-host/tests/fixtures/refusing-adapter.wat");
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("a.zz"), "fine").unwrap();
+        std::fs::write(project.join("src/b.zz"), "Malformed").unwrap();
+        std::fs::write(project.join("src/c.zz"), "fine too").unwrap();
+        let artifact = dir.path().join("t0.plugin-refusing.wasm");
+        std::fs::write(&artifact, REFUSING_ADAPTER).unwrap();
+        let root = super::paths::canonicalize(&project).unwrap();
+        let hash = core_prov::content_hash(REFUSING_ADAPTER);
+        let active = [super::ActivePlugin {
+            plugin_id: "t0.plugin-refusing".into(),
+            path: artifact,
+            content_hash: hash.clone(),
+            extensions: vec!["zz".into()],
+            cells: Vec::new(),
+            languages: std::collections::BTreeMap::new(),
+            gate_key: "gate".into(),
+        }];
+        let pinned = format!("t0.plugin-refusing@{}", &hash[..12]);
+        let repo = "acme/refused";
+
+        let run = || {
+            let mut reads = super::ProducerReads::default();
+            let (extraction, layers, _) = super::extract_tree_with_primary(
+                &root,
+                repo,
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeSet::new(),
+                None,
+                None,
+                &[],
+                &mut super::RepoExtractionCache::default(),
+                &active,
+                &mut |_| {},
+                None,
+                &mut Vec::new(),
+                &mut reads,
+            )
+            .expect("one refused file does not fail the ingest");
+            let coverage = super::repo_coverage(
+                repo,
+                "workdir",
+                None,
+                &[],
+                &layers,
+                &extraction,
+                &super::DeclaredInputs::default(),
+                &reads,
+            );
+            (extraction, reads, coverage)
+        };
+        let (extraction, reads, coverage) = run();
+
+        let by_plugin: Vec<&str> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.props["prov"]["extractor_id"] == serde_json::json!(pinned))
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            by_plugin,
+            ["acme/refused:a.zz", "acme/refused:src/c.zz"],
+            "the other files' facts join the graph and the refused file's do not"
+        );
+        assert!(
+            !extraction
+                .nodes
+                .iter()
+                .any(|node| node.id == "acme/refused:src/b.zz"),
+            "no fact from the refused file"
+        );
+        assert!(
+            !extraction
+                .edges
+                .iter()
+                .any(
+                    |edge| edge.props["prov"]["extractor_id"] == serde_json::json!(pinned)
+                        && (edge.src.contains("b.zz") || edge.dst.contains("b.zz"))
+                )
+        );
+
+        assert_eq!(reads.plugins.len(), 1);
+        assert_eq!(reads.plugins[0].id, pinned);
+        assert_eq!(reads.plugins[0].count.files, 2);
+        assert_eq!(
+            reads.plugins[0].refused,
+            [("src/b.zz".to_string(), RefusalReason::MalformedFact)]
+        );
+
+        let row = coverage
+            .producers
+            .iter()
+            .find(|producer| producer.id == pinned)
+            .expect("the plugin has a row");
+        assert_eq!(row.files, 2, "the refused file is not counted as covered");
+        assert_eq!(row.nodes, 2);
+        assert_eq!(
+            row.stopping_reason,
+            "read 2 of the 3 files its extensions claim in acme/refused@workdir; the host \
+             refused its extraction of 1 (1 malformed fact), and no fact from those files by \
+             this plugin joined the graph"
+        );
+        let refusals = row.refusals.as_ref().expect("the refusal is recorded");
+        assert_eq!(
+            (
+                refusals.malformed_fact,
+                refusals.guest_error,
+                refusals.bound_exceeded,
+                refusals.omitted
+            ),
+            (1, 0, 0, 0)
+        );
+        assert_eq!(refusals.files.len(), 1);
+        assert_eq!(refusals.files[0].path, "src/b.zz");
+        assert_eq!(refusals.files[0].reason, RefusalReason::MalformedFact);
+        assert!(coverage.limited);
+        let entry = coverage
+            .unsupported
+            .iter()
+            .find(|entry| entry.capability == RefusalReason::MalformedFact.capability())
+            .expect("the refused file is a not-covered entry");
+        assert_eq!(
+            (entry.occurrences, entry.first_site.as_str()),
+            (1, "src/b.zz")
+        );
+        // The reason class only: the host's error text quotes the guest.
+        let inventory_json = serde_json::to_string(&coverage).unwrap();
+        assert!(!inventory_json.contains("method"), "{inventory_json}");
+
+        // The coverage-qualified read accepts the inventory and counts the
+        // refusal as a limitation.
+        let record = core_graph::coverage::CoverageRecord {
+            repo_key: repo.into(),
+            registered_source_id: Some("source:refused".into()),
+            ingest_id: "job:1".into(),
+            config_hash: "config".into(),
+            inventory_json: inventory_json.clone(),
+        };
+        let qualification = context_hub::coverage::CoverageQualification::new(
+            &[context_hub::coverage::ScopedRepo {
+                repo_key: repo.into(),
+                registered_source_id: Some("source:refused".into()),
+                config_hash: "config".into(),
+                layer_hints: None,
+            }],
+            &[core_graph::coverage::StoredCoverage {
+                inventory_hash: record.inventory_hash(),
+                record,
+            }],
+        )
+        .expect("a refusal inventory is a valid coverage@1 inventory");
+        assert_eq!(
+            qualification.repos[0].status,
+            context_hub::coverage::CoverageStatus::Recorded
+        );
+        assert_eq!(qualification.repos[0].limited, Some(true));
+        assert_eq!(qualification.repos[0].counts.unwrap().unsupported, 1);
+
+        // Determinism: the same tree gives the same graph and inventory.
+        let (again, _, coverage_again) = run();
+        assert_eq!(
+            serde_json::to_string(&extraction.nodes).unwrap(),
+            serde_json::to_string(&again.nodes).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&extraction.edges).unwrap(),
+            serde_json::to_string(&again.edges).unwrap()
+        );
+        assert_eq!(
+            inventory_json,
+            serde_json::to_string(&coverage_again).unwrap()
+        );
+    }
+
     #[test]
     fn plugin_lane_end_to_end_gate_accept_reingest_closes_finding() {
         // AC-0093 (#201): request → gate pass → accept → re-scan. An
@@ -13077,8 +13293,9 @@ export function App() {
         .unwrap();
         let pinned = format!("t0.plugin-fixture@{}", &hash[..12]);
         assert_eq!(reads.plugins.len(), 1);
-        assert_eq!(reads.plugins[0].0, pinned);
-        assert_eq!(reads.plugins[0].1.files, 1, "one claimed file read");
+        assert_eq!(reads.plugins[0].id, pinned);
+        assert_eq!(reads.plugins[0].count.files, 1, "one claimed file read");
+        assert!(reads.plugins[0].refused.is_empty());
         let coverage = super::repo_coverage(
             &repo,
             "workdir",
