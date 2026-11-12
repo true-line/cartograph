@@ -523,7 +523,7 @@ pub(super) fn tool_descriptor(tool: ReadTool) -> Value {
         }
         ReadTool::ReadArtifact => {
             let mut properties = session_properties();
-            properties["artifact_id"] = json!({"type":"string","enum":spec::artifact_catalog().into_iter().map(|entry|entry.id).collect::<Vec<_>>()});
+            properties["artifact_id"] = json!({"type":"string","enum":super::artifacts::readable_catalog().into_iter().map(|entry|entry.id).collect::<Vec<_>>()});
             properties["expected_content_id"] = json!({"type":["string","null"],"description":"Required on nonzero offsets; binds exact complete artifact content."});
             properties["offset"] = json!({"type":"integer","minimum":0});
             properties["max_content_bytes"] = json!({"type":"integer","minimum":1});

@@ -211,7 +211,7 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
             .as_array()
             .unwrap()
             .len(),
-        spec::artifact_catalog().len()
+        crate::mcp_reads::artifacts::readable_catalog().len()
     );
     assert!(!catalog.to_string().contains("content_id"));
     let mut args = artifact_args(&dispatch);

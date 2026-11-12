@@ -134,7 +134,7 @@ pub(in crate::mcp_reads) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits
     json!({"name":tool.name(),"description":description,"inputSchema":schema,"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
 pub(super) fn catalog() -> Value {
-    let entries: Vec<_> = spec::artifact_catalog().into_iter().map(|metadata| {
+    let entries: Vec<_> = crate::mcp_reads::artifacts::readable_catalog().into_iter().map(|metadata| {
         let scope = match metadata.id {
             "data-model" => Some(("DataEntity", "whole_connected_entity_component")),
             "rule-evidence" | "rule-evidence-index" => Some(("BusinessRule", "explicit_rule_observation")),
