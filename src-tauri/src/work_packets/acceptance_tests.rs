@@ -357,6 +357,33 @@ fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
     }
 }
 
+// AC-0653: the curated document depends on the curated projection, which the
+// packet host does not compute. Its bytes here would say that no projection
+// was supplied, so it is refused like the pipeline and coverage artifacts and
+// never bound to bytes the export does not hold.
+#[test]
+fn ac0653_work_packet_refuses_the_curated_document() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let artifact = bundle.artifacts.iter().find(|a| a.id == "curated").unwrap();
+    // The exact identity the bare compiler gives it is refused too.
+    f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+}
+
 // AC-0249: stored decisions keep their exact earlier content. They neither
 // confer current authority nor disappear when today's provenance is invalid.
 #[test]

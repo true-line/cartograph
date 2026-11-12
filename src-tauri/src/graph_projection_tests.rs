@@ -247,18 +247,41 @@ fn spec_bundle_uses_one_revision_across_another_connection_commit() {
         let new = fixture("new");
         let (dir, reader, writer) = database(&old);
         let decisions = decisions(&dir.path().join("decisions.db"), &old, &new);
-        let before = crate::build_spec_bundle(&reader, &decisions, mode).unwrap();
-        let expected_after =
-            crate::build_spec_bundle(&memory_graph(&new), &decisions, mode).unwrap();
+        let before = crate::build_spec_bundle(
+            &reader,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let expected_after = crate::build_spec_bundle(
+            &memory_graph(&new),
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         assert_ne!(before, expected_after);
         assert_spec_policy(&before, "old");
         assert_spec_policy(&expected_after, "new");
 
         install_swap(&reader, writer, new);
-        let during = crate::build_spec_bundle(&reader, &decisions, mode).unwrap();
+        let during = crate::build_spec_bundle(
+            &reader,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         assert_eq!(during, before);
         // This also fails if the adapter bypasses the snapshot hook entirely.
-        let after = crate::build_spec_bundle(&reader, &decisions, mode).unwrap();
+        let after = crate::build_spec_bundle(
+            &reader,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         assert_eq!(after, expected_after);
     }
 }
@@ -299,9 +322,13 @@ fn project(
 ) -> Result<Value, String> {
     match projection {
         Projection::Atlas => Ok(serde_json::to_value(crate::build_atlas_snapshot(graph)?).unwrap()),
-        Projection::Spec(mode) => {
-            Ok(serde_json::to_value(crate::build_spec_bundle(graph, decisions, mode)?).unwrap())
-        }
+        Projection::Spec(mode) => Ok(serde_json::to_value(crate::build_spec_bundle(
+            graph,
+            decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )?)
+        .unwrap()),
     }
 }
 

@@ -7,6 +7,7 @@
 #[cfg(test)]
 mod conformance_tests;
 mod context;
+mod curated;
 mod drop_intake;
 mod egress;
 mod escalation;
@@ -6120,60 +6121,145 @@ fn persist_semantic_preview(
     Ok(preview)
 }
 
+/// The graph, traced flows, rejections and curated projection one spec
+/// compilation reads. Facts and inventories come from one read transaction,
+/// so the coverage artifacts describe the same revision as every other
+/// artifact (AC-0592); the curated projection is computed over that same
+/// snapshot (SPEC-12, AC-0653).
+struct SpecInputs {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    coverage: Vec<core_graph::coverage::StoredCoverage>,
+    flows: Vec<flowtracer::Flow>,
+    rejected_hashes: std::collections::BTreeSet<String>,
+    curated: CuratedInput,
+    /// `None` only when the projection was not read.
+    graph_basis: Option<spec::GraphBasis>,
+}
+
+/// The curated projection of one compilation (SPEC-12, AC-0653).
+enum CuratedInput {
+    /// A single artifact whose bytes do not depend on it.
+    NotRead,
+    /// It could not be computed. The export still succeeds: `curated.md`
+    /// states the reason and no `curated_basis` is stamped.
+    NotComputed(spec::CuratedFailure),
+    Computed(context_hub::curated::CuratedProjection),
+}
+
+impl SpecInputs {
+    fn supplied(&self) -> spec::Supplied<'_> {
+        spec::Supplied {
+            coverage: &self.coverage,
+            curated: match &self.curated {
+                CuratedInput::NotRead => spec::Curated::NotSupplied,
+                CuratedInput::NotComputed(failure) => spec::Curated::NotComputed(*failure),
+                CuratedInput::Computed(projection) => spec::Curated::Computed(projection),
+            },
+        }
+    }
+
+    /// Stamp what the bundle was compiled from: the graph basis (AC-0593)
+    /// and the curated basis beside it (AC-0653).
+    fn stamp(self, bundle: &mut spec::SpecBundle) {
+        bundle.curated_basis = match &self.curated {
+            CuratedInput::Computed(projection) => Some(spec::CuratedBasis::of(projection)),
+            CuratedInput::NotRead | CuratedInput::NotComputed(_) => None,
+        };
+        bundle.graph_basis = self.graph_basis;
+    }
+}
+
+fn spec_inputs(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+    review: Option<&curated::CuratedReview>,
+) -> Result<SpecInputs, String> {
+    let (revision, ((nodes, edges), coverage)) = curated::read_graph(graph)?;
+    let flows = flowtracer::trace(&nodes, &edges);
+    let assertion_decisions = decisions
+        .list_assertions()
+        .map_err(|error| error.to_string())?;
+    let rejected_hashes = assertion_decisions
+        .iter()
+        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+        .map(|record| record.assertion.provenance.content_hash.clone())
+        .collect();
+    let (curated, graph_basis) = match review {
+        Some(review) => {
+            let graph_basis = graph_basis_of(&nodes, &edges);
+            let projection = curated::project(
+                review,
+                &curated::Snapshot {
+                    nodes: &nodes,
+                    edges: &edges,
+                    flows: &flows,
+                    coverage: &coverage,
+                    content_hash: &graph_basis.content_hash,
+                    revision: &revision,
+                },
+                &assertion_decisions,
+            );
+            let curated = match projection {
+                Ok(projection) => CuratedInput::Computed(projection),
+                Err(failure) => CuratedInput::NotComputed(failure),
+            };
+            (curated, Some(graph_basis))
+        }
+        None => (CuratedInput::NotRead, None),
+    };
+    Ok(SpecInputs {
+        nodes,
+        edges,
+        coverage,
+        flows,
+        rejected_hashes,
+        curated,
+        graph_basis,
+    })
+}
+
+/// `review` is what `curated::gather` read before the caller took the graph
+/// and decision locks.
 fn build_spec_bundle(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
-    // Facts and inventories come from one read transaction, so the coverage
-    // artifacts describe the same revision as every other artifact (AC-0592).
-    let ((nodes, edges), coverage) = graph
-        .read_snapshot_with_coverage()
-        .map_err(|error| error.to_string())?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let rejected_hashes = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash)
-        .collect();
+    let inputs = spec_inputs(graph, decisions, Some(review))?;
     // An export whose citations do not resolve is refused (ADR-0058).
-    let mut bundle = spec::try_compile_spec_with_coverage(
-        &nodes,
-        &edges,
-        &flows,
+    let mut bundle = spec::try_compile_spec_supplied(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.flows,
         mode,
-        &rejected_hashes,
-        &coverage,
+        &inputs.rejected_hashes,
+        inputs.supplied(),
     )
     .map_err(|error| error.to_string())?;
-    bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
+    inputs.stamp(&mut bundle);
     Ok(bundle)
 }
 
 /// One official artifact compiled alone through the selected compiler, which
 /// produces the same bytes, content id and assertions as that artifact in
-/// `build_spec_bundle` without building the others (#1582).
+/// `build_spec_bundle` without building the others (#1582). `review` is
+/// required for an artifact that `curated::artifact_reads_projection` names
+/// and is not read for any other.
 fn build_spec_artifact(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: Option<&curated::CuratedReview>,
     mode: spec::ExportMode,
     artifact_id: &str,
 ) -> Result<spec::SpecArtifact, String> {
-    // Facts and inventories come from one read transaction, so the coverage
-    // artifacts describe the same revision as every other artifact (AC-0592).
-    let ((nodes, edges), coverage) = graph
-        .read_snapshot_with_coverage()
-        .map_err(|error| error.to_string())?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let rejected_hashes = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash)
-        .collect();
+    let review = if curated::artifact_reads_projection(artifact_id) {
+        Some(review.ok_or("The curated projection was not read for this artifact.")?)
+    } else {
+        None
+    };
+    let inputs = spec_inputs(graph, decisions, review)?;
     let unbounded = spec::SelectedCompileLimits {
         max_bytes: usize::MAX,
         adr: spec::AdrLimits {
@@ -6182,15 +6268,15 @@ fn build_spec_artifact(
         },
     };
     let unknown = || format!("unknown spec artifact id: {artifact_id}");
-    let outcome = spec::compile_spec_selected_with_coverage(
-        &nodes,
-        &edges,
-        &flows,
+    let outcome = spec::compile_spec_selected_supplied(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.flows,
         mode,
-        &rejected_hashes,
+        &inputs.rejected_hashes,
         &[artifact_id],
         unbounded,
-        &coverage,
+        inputs.supplied(),
     )
     .map_err(|_| unknown())?
     .pop()
@@ -6206,41 +6292,31 @@ fn build_spec_artifact(
 fn build_spec_with_views(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<(spec::SpecBundle, spec::SpecViewBundle), String> {
-    // Facts and inventories come from one read transaction, so the coverage
-    // artifacts describe the same revision as every other artifact (AC-0592).
-    let ((nodes, edges), coverage) = graph
-        .read_snapshot_with_coverage()
-        .map_err(|error| error.to_string())?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let rejected_hashes = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash)
-        .collect();
+    let inputs = spec_inputs(graph, decisions, Some(review))?;
     // An export whose citations do not resolve is refused (ADR-0058).
-    let (mut bundle, views) = spec::try_compile_spec_with_views_and_coverage(
-        &nodes,
-        &edges,
-        &flows,
+    let (mut bundle, views) = spec::try_compile_spec_with_views_supplied(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.flows,
         mode,
-        &rejected_hashes,
-        &coverage,
+        &inputs.rejected_hashes,
+        inputs.supplied(),
     )
     .map_err(|error| error.to_string())?;
-    bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
+    inputs.stamp(&mut bundle);
     Ok((bundle, views))
 }
 
 fn build_spec_views(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecViewBundle, String> {
-    Ok(build_spec_with_views(graph, decisions, mode)?.1)
+    Ok(build_spec_with_views(graph, decisions, review, mode)?.1)
 }
 
 /// Per-artifact content cap applied before a spec bundle crosses IPC (#488):
@@ -6301,10 +6377,14 @@ struct SpecBundlePreview {
     /// The graph the bundle was compiled from (#1765, AC-0593).
     #[serde(skip_serializing_if = "Option::is_none")]
     graph_basis: Option<spec::GraphBasis>,
+    /// The curated revision and counts it was compiled with (AC-0653).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    curated_basis: Option<spec::CuratedBasis>,
 }
 
 fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
     let graph_basis = bundle.graph_basis;
+    let curated_basis = bundle.curated_basis;
     let artifacts = bundle
         .artifacts
         .into_iter()
@@ -6344,6 +6424,7 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
         drift_count: bundle.drift_count,
         security_count: bundle.security_count,
         graph_basis,
+        curated_basis,
     }
 }
 
@@ -6362,9 +6443,11 @@ fn export_spec(
     mode: spec::ExportMode,
     state: State<'_, AppState>,
 ) -> Result<SpecBundlePreview, String> {
+    // Before the graph lock: the assessments take it themselves (SPEC-12).
+    let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let bundle = build_spec_bundle(&graph, &decisions, mode)?;
+    let bundle = build_spec_bundle(&graph, &decisions, &review, mode)?;
     Ok(preview_spec_bundle(bundle))
 }
 
@@ -6376,9 +6459,10 @@ fn export_spec_views(
     mode: spec::ExportMode,
     state: State<'_, AppState>,
 ) -> Result<spec::SpecViewBundle, String> {
+    let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_views(&graph, &decisions, mode)
+    build_spec_views(&graph, &decisions, &review, mode)
 }
 
 /// Compile the capped official spec bundle and its structured diagram views
@@ -6389,9 +6473,11 @@ fn export_spec_with_views(
     mode: spec::ExportMode,
     state: State<'_, AppState>,
 ) -> Result<SpecWithViewsPreview, String> {
+    // Before the graph lock: the assessments take it themselves (SPEC-12).
+    let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let (bundle, views) = build_spec_with_views(&graph, &decisions, mode)?;
+    let (bundle, views) = build_spec_with_views(&graph, &decisions, &review, mode)?;
     Ok(SpecWithViewsPreview {
         bundle: preview_spec_bundle(bundle),
         views,
@@ -6428,9 +6514,13 @@ fn read_spec_artifact(
     artifact_id: String,
     state: State<'_, AppState>,
 ) -> Result<SpecArtifactPreview, String> {
+    // Read only for an artifact whose bytes depend on the projection, and
+    // before the graph lock: the assessments take it themselves (SPEC-12).
+    let review = curated::artifact_reads_projection(&artifact_id).then(|| curated::gather(&state));
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_artifact(&graph, &decisions, mode, &artifact_id).map(full_artifact_preview)
+    build_spec_artifact(&graph, &decisions, review.as_ref(), mode, &artifact_id)
+        .map(full_artifact_preview)
 }
 
 /// Selected flow diagram, bound to the preview's full dossier identity (#1669).
@@ -7041,6 +7131,7 @@ mod tests {
             drift_count: 0,
             security_count: 0,
             graph_basis: None,
+            curated_basis: None,
         };
 
         let preview = super::preview_spec_bundle(bundle);
@@ -7124,19 +7215,36 @@ mod tests {
             })
             .unwrap();
 
-        let (bundle, views) =
-            super::build_spec_with_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap();
+        let (bundle, views) = super::build_spec_with_views(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            spec::ExportMode::BestEffort,
+        )
+        .unwrap();
         assert_eq!(
             serde_json::to_value(&bundle).unwrap(),
             serde_json::to_value(
-                super::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+                super::build_spec_bundle(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    spec::ExportMode::BestEffort
+                )
+                .unwrap()
             )
             .unwrap()
         );
         assert_eq!(
             serde_json::to_value(&views).unwrap(),
             serde_json::to_value(
-                super::build_spec_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+                super::build_spec_views(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    spec::ExportMode::BestEffort
+                )
+                .unwrap()
             )
             .unwrap()
         );
@@ -7146,6 +7254,7 @@ mod tests {
                 &super::build_spec_artifact(
                     &graph,
                     &decisions,
+                    Some(&crate::curated::CuratedReview::default()),
                     spec::ExportMode::BestEffort,
                     &artifact.id
                 )
@@ -7156,8 +7265,14 @@ mod tests {
             );
         }
         assert_eq!(
-            super::build_spec_artifact(&graph, &decisions, spec::ExportMode::BestEffort, "nope")
-                .unwrap_err(),
+            super::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                spec::ExportMode::BestEffort,
+                "nope"
+            )
+            .unwrap_err(),
             "unknown spec artifact id: nope"
         );
         let topology_art = bundle

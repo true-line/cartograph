@@ -29,7 +29,7 @@ export function ProposalHistory({
       </header>
       <p className="muted">
         Accepted proposals await context reconciliation. Review preserves T3 / InferredWeak;
-        it does not yet change context or exports. Evidence origins describe the saved input, not its current availability.
+        an export lists accepted proposals in curated.md with their state and changes no recovered fact. Evidence origins describe the saved input, not its current availability.
       </p>
       {error && <p className="error-text" role="alert">{error}</p>}
       {loading && <p className="muted" role="status">Loading saved proposals…</p>}

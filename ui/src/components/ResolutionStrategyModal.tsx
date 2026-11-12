@@ -158,7 +158,7 @@ export function ResolutionStrategyModal({
             <p className="muted">{proposal.annotation}</p>
             <p className="muted">
               Review preserves T3 / InferredWeak. Accepted proposals await context reconciliation;
-              review does not yet change context or exports, and never overwrites T0/T1.
+              an export lists them in curated.md with their state, and review never overwrites T0/T1.
             </p>
             <TaskEvidence basis={proposal.source_basis} />
             <details>

@@ -76,7 +76,13 @@ fn showcase_recover_and_export() {
         (spec::ExportMode::VerifiedOnly, "verified-only"),
         (spec::ExportMode::BestEffort, "best-effort"),
     ] {
-        let bundle = build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let bundle = build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         let root = output.join(dir);
         std::fs::create_dir(&root).unwrap();
         for artifact in &bundle.artifacts {

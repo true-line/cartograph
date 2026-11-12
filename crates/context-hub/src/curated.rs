@@ -456,8 +456,10 @@ fn valid_provenance(props: &serde_json::Value) -> Option<Provenance> {
         .filter(|provenance| provenance.validate().is_ok())
 }
 
-/// Mirrors `spec::is_gap_node`: a fact with no valid provenance is a Gap.
-fn is_gap(node: &Node) -> bool {
+/// Whether `node` is a Gap: label `Gap`, or provenance that is missing,
+/// invalid or Gap confidence. Mirrors `spec::is_gap_node`; a parity test in
+/// `spec`, which sees both, fails when the two differ (SPEC-12 slice 2).
+pub fn is_gap(node: &Node) -> bool {
     node.label == "Gap"
         || valid_provenance(&node.props)
             .is_none_or(|provenance| provenance.confidence_tier == ConfidenceTier::Gap)

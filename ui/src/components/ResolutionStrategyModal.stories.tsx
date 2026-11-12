@@ -23,7 +23,7 @@ const REPORT: GapStrategyReport = {
       latency: 'seconds to a minute on-device',
       privacy: 'payload never leaves the device',
       export_impact:
-        'Accepted proposals await context reconciliation. Source binding is unverified; review does not yet change context or exports. T3/InferredWeak is preserved.',
+        'Accepted proposals await context reconciliation. Source binding is unverified; an export lists accepted proposals in curated.md with their state. T3/InferredWeak is preserved.',
       available: true,
       unavailable_reason: null,
     },
@@ -37,7 +37,7 @@ const REPORT: GapStrategyReport = {
       latency: 'a few seconds via API',
       privacy: 'redacted payload leaves the device after a per-payload grant',
       export_impact:
-        'Accepted proposals await context reconciliation. Source binding is unverified; review does not yet change context or exports. T3/InferredWeak is preserved.',
+        'Accepted proposals await context reconciliation. Source binding is unverified; an export lists accepted proposals in curated.md with their state. T3/InferredWeak is preserved.',
       available: false,
       unavailable_reason:
         'T3 is not consented to cloud — enable the provider and grant consent in Settings (cloud fails closed)',

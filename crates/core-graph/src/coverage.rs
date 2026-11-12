@@ -312,6 +312,20 @@ impl SqliteGraphStore {
         Ok((graph, coverage))
     }
 
+    /// [`Self::read_snapshot_with_coverage`] with the store revision of the
+    /// same read transaction. The revision describes these rows, not
+    /// continued currency after return.
+    pub fn read_snapshot_with_coverage_and_revision(
+        &self,
+    ) -> Result<(crate::StoreRevision, CoveredSnapshot), GraphError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let revision = crate::generation::read_store_revision(&transaction)?;
+        let graph = self.read_snapshot_rows(None, None)?;
+        let coverage = read_all(&transaction)?;
+        transaction.commit()?;
+        Ok((revision, (graph, coverage)))
+    }
+
     /// [`Self::read_snapshot_with_coverage`] under admission limits: the
     /// inventories are counted and measured, and the graph is admitted as by
     /// [`Self::read_snapshot_bounded`], before either is materialized.

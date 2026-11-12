@@ -231,7 +231,7 @@ The existing documents do not print the id beside each statement yet; that
 is added one document at a time. Until a document prints its citations, it
 may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's twenty-three artifacts go
+## 3. Where today's twenty-four artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -251,10 +251,11 @@ may only make statements whose evidence one of §11.1 to §11.5 already holds.
 | `endpoint-permissions.md` | D6 §6.3 |
 | `pipelines.md` | D7 §7.5 |
 | `configuration.md` | D7 §7.3, D6 §6.4 |
+| `curated.md` | No section of its own. It lists the accepted proposals and their states (SPEC-12, ADR-0061); the A and P+A sections draw on them once drafting exists (#1748) |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
 | `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The twenty-three files keep being exported under their current names until each
+The twenty-four files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -297,7 +298,7 @@ of them.
    Each row stays unconfirmed until a person confirms it.
 5. **One file per document**, Markdown, with the appendices as separate
    files. Other formats are a rendering concern.
-6. **The current twenty-three artifacts stay exported** alongside the new
+6. **The current twenty-four artifacts stay exported** alongside the new
    documents until every consumer has moved.
 7. **Order of delivery:** D11 and the P sections of D4 and D5 first (no
    model needed), then D1, then D2 and D3, then the rest.

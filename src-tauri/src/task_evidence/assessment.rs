@@ -140,6 +140,16 @@ fn checked_availability(
 }
 
 pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessment, String> {
+    assess_observed(state, proposal_id).map(|(assessment, _)| assessment)
+}
+
+/// [`assess`], with the store revision its graph and association read
+/// observed. `None` when that read failed. A caller that combines the
+/// assessment with a later graph read compares the two revisions (SPEC-12).
+pub(crate) fn assess_observed(
+    state: &AppState,
+    proposal_id: &str,
+) -> Result<(BasisAssessment, Option<core_graph::StoreRevision>), String> {
     let staged = state
         .proposals
         .lock()
@@ -169,7 +179,7 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
                 status: Availability::WorkingTreeUnverified,
             })
             .collect();
-        return Ok(result);
+        return Ok((result, None));
     };
     let mut sources = BTreeMap::new();
     for origin in &basis.evidence {
@@ -253,8 +263,10 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
         .lock()
         .map_err(|_| ())
         .and_then(|graph| graph.read_source_selection_snapshot(&keys).map_err(|_| ()));
+    let mut revision = None;
     match observed {
         Ok(observed) => {
+            revision = Some(observed.revision);
             let snapshot = context_hub::ContextSnapshot::new(observed.graph.0, observed.graph.1);
             match snapshot {
                 Ok(snapshot) => {
@@ -289,7 +301,7 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
         }
     }
     drop(guards);
-    Ok(result)
+    Ok((result, revision))
 }
 
 #[tauri::command]
