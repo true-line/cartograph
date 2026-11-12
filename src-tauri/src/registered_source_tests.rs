@@ -1909,3 +1909,197 @@ fn captured_ingest_records_per_fact_store_capacity_omissions_and_retains_bound_f
     );
     assert!(!omitted_facts.contains(&bound_fact));
 }
+
+// AC-0593 (#1765): every completed ingest records the graph content hash, it
+// is shown with its source registration, and the export manifest carries the
+// whole-graph hash with the source revisions. Equality holds per
+// registration; two `local/` registrations of byte-identical trees differ.
+#[test]
+fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let first_root = directory(dir.path(), "first/project");
+    let second_root = directory(dir.path(), "second/project");
+    for root in [&first_root, &second_root] {
+        std::fs::write(
+            root.join("app.ts"),
+            "import { helper } from './helper';\nexport function run() { helper(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("helper.ts"), "export function helper() {}\n").unwrap();
+    }
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let state = app_state(&app_data);
+    let mut sources = Vec::new();
+    for root in [&first_root, &second_root] {
+        crate::preflight_uncancelled(root.to_str().unwrap(), app.handle(), &state).unwrap();
+        let source = state.sources.lock().unwrap().get_by_root(root).unwrap();
+        sources.push(source.unwrap());
+    }
+    let shown = |state: &AppState, repo: &str| {
+        crate::system_contents_for(state)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.repo == repo)
+            .map(|entry| (entry.commit, entry.graph_hash))
+    };
+
+    recover(&state, &sources[0]);
+    let first_hash = state.metrics.lock().unwrap().history(1).unwrap()[0]
+        .content_hash
+        .clone();
+    assert_eq!(
+        shown(&state, &sources[0].repo_key),
+        Some(("workdir".into(), Some(first_hash.clone())))
+    );
+
+    // A second registration's ingest records its own hash and leaves the
+    // first registration's untouched.
+    recover(&state, &sources[1]);
+    let second_hash = state.metrics.lock().unwrap().history(1).unwrap()[0]
+        .content_hash
+        .clone();
+    assert_eq!(
+        shown(&state, &sources[1].repo_key),
+        Some(("workdir".into(), Some(second_hash.clone())))
+    );
+    assert_eq!(
+        shown(&state, &sources[0].repo_key).unwrap().1,
+        Some(first_hash.clone())
+    );
+    // Scope: both are random `local/` keys over identical bytes, and no
+    // equality is claimed across registrations (or installations).
+    assert!(
+        sources
+            .iter()
+            .all(|source| source.repo_key.starts_with("local/"))
+    );
+    assert_ne!(first_hash, second_hash);
+
+    // Re-ingesting the same tree under the same registration records the
+    // identical hash.
+    recover(&state, &sources[0]);
+    let history = state.metrics.lock().unwrap().history(3).unwrap();
+    assert_eq!(history[0].repo, sources[0].repo_key);
+    assert_eq!(history[0].content_hash, first_hash);
+
+    // The export manifest states the graph it was built from.
+    let export = |state: &AppState| {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::build_spec_bundle(&*graph, &decisions, spec::ExportMode::BestEffort)
+            .unwrap()
+            .graph_basis
+            .unwrap()
+    };
+    let basis = export(&state);
+    let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+    assert_eq!(basis.content_hash, spec::graph_content_hash(&nodes, &edges));
+    let mut expected: Vec<_> = sources
+        .iter()
+        .map(|source| spec::SourceRevision {
+            repo: source.repo_key.clone(),
+            commit: "workdir".into(),
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(basis.sources, expected);
+    let preview = {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::preview_spec_bundle(
+            crate::build_spec_bundle(&*graph, &decisions, spec::ExportMode::VerifiedOnly).unwrap(),
+        )
+    };
+    assert_eq!(
+        serde_json::to_value(&preview).unwrap()["graph_basis"],
+        serde_json::to_value(&basis).unwrap(),
+        "the export payload carries the same basis in every mode"
+    );
+
+    // Curation is not a graph fact: a recorded decision changes no hash.
+    state
+        .decisions
+        .lock()
+        .unwrap()
+        .record_assertion(
+            &agents::CuratableAssertion {
+                subject_id: "edge:sym:a CALLS sym:b".into(),
+                summary: "CALLS: a → b".into(),
+                provenance: Provenance::new(
+                    Tier::Semantic,
+                    ConfidenceTier::InferredStrong,
+                    vec![reference(&sources[0].repo_key, "app.ts", 10)],
+                    "t2.semantic",
+                    b"sym:a CALLS sym:b",
+                )
+                .unwrap(),
+            },
+            agents::AssertionDecision::Rejected,
+            None,
+        )
+        .unwrap();
+    assert_eq!(export(&state), basis);
+    assert_eq!(
+        shown(&state, &sources[0].repo_key).unwrap().1,
+        Some(first_hash)
+    );
+}
+
+// AC-0593 (#1765): determinism on a real repository, not only on fixtures.
+// Ingests one checkout twice into fresh graphs at the production (Auto)
+// ingest parallelism, and once serially, and compares the graph content
+// hashes. The checkout is supplied by the caller so the test itself needs no
+// network: CARTOGRAPH_DETERMINISM_ROOT is the tree, and the optional
+// CARTOGRAPH_DETERMINISM_COMMIT is the pinned commit it is checked out at.
+#[test]
+#[ignore = "requires CARTOGRAPH_DETERMINISM_ROOT: a checkout of the pinned repository"]
+fn pinned_repository_reingest_yields_identical_graph_hash() {
+    let root = std::env::var("CARTOGRAPH_DETERMINISM_ROOT").expect("checkout path");
+    let root = crate::paths::canonicalize(PathBuf::from(root)).unwrap();
+    let commit =
+        std::env::var("CARTOGRAPH_DETERMINISM_COMMIT").unwrap_or_else(|_| "workdir".into());
+    // A fixed registration key: the comparison is within one registration.
+    let repo = "determinism/pinned";
+    let ingest = |workers: usize| {
+        source_walk::parallel::with_workers(workers, || {
+            let extraction =
+                extract_tree(&root, repo, &commit, &[], &BTreeMap::new(), None, None, &[]).unwrap();
+            let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+            load_into_graph(&mut graph, &extraction, repo, &root, &commit).unwrap();
+            crate::stitch_name_unique(&mut graph, &mut crate::OperationFacts::default()).unwrap();
+            let (nodes, edges) = graph.read_snapshot().unwrap();
+            let recorded = metrics::compute(
+                &nodes,
+                &edges,
+                &BTreeMap::new(),
+                &BTreeSet::from([repo.to_owned()]),
+            )
+            .content_hash;
+            (
+                spec::graph_content_hash(&nodes, &edges),
+                recorded,
+                deterministic_graph_hashes(&graph).unwrap(),
+                nodes.len(),
+                edges.len(),
+            )
+        })
+    };
+    let production = source_walk::parallel::Parallelism::Auto.workers();
+    let first = ingest(production);
+    println!(
+        "{} @ {commit}: {} nodes, {} edges, {production} workers, graph hash {}",
+        root.display(),
+        first.3,
+        first.4,
+        first.0
+    );
+    assert!(first.3 > 0, "the pinned checkout produced no facts");
+    assert!(
+        first == ingest(production),
+        "repeat ingest changed the graph"
+    );
+    assert!(first == ingest(1), "worker count changed the graph");
+}

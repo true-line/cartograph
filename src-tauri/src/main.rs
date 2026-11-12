@@ -993,6 +993,11 @@ struct SystemRepo {
     repo: String,
     commit: String,
     display_name: Option<String>,
+    /// Graph content hash recorded by the latest completed ingest of this
+    /// registration at `commit` (#1765, AC-0593); `None` when none is
+    /// recorded. Scoped per registration: a `local/` key is random per
+    /// installation, so the value is not comparable across installations.
+    graph_hash: Option<String>,
 }
 
 /// What the current system contains, derived from the graph's own facts
@@ -1003,6 +1008,10 @@ struct SystemRepo {
 /// Deterministic: sorted by repo.
 #[tauri::command]
 fn system_contents(state: State<'_, AppState>) -> Result<Vec<SystemRepo>, String> {
+    system_contents_for(&state)
+}
+
+fn system_contents_for(state: &AppState) -> Result<Vec<SystemRepo>, String> {
     let nodes = state
         .graph
         .lock()
@@ -1010,6 +1019,16 @@ fn system_contents(state: State<'_, AppState>) -> Result<Vec<SystemRepo>, String
         .all_nodes()
         .map_err(|e| e.to_string())?;
     let mut contents = system_contents_of(&nodes);
+    {
+        // The recorded hash is read back, never recomputed here: showing it
+        // costs one ingest-history lookup per registration, not a graph read.
+        let metrics = state.metrics.lock().map_err(|e| e.to_string())?;
+        for entry in &mut contents {
+            entry.graph_hash = metrics
+                .recorded_content_hash(&entry.repo, &entry.commit)
+                .map_err(|e| e.to_string())?;
+        }
+    }
     let registry = state.sources.lock().map_err(|e| e.to_string())?;
     for entry in &mut contents {
         entry.display_name = registry
@@ -1035,8 +1054,26 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
             repo,
             commit,
             display_name: None,
+            graph_hash: None,
         })
         .collect()
+}
+
+/// What an export was compiled from (#1765, AC-0593): the content hash of
+/// the whole base graph and the source revisions it holds, both taken from
+/// the snapshot the export itself read. Curation decisions and overlay facts
+/// are not graph facts and never enter the hash.
+fn graph_basis_of(nodes: &[Node], edges: &[Edge]) -> spec::GraphBasis {
+    spec::GraphBasis {
+        content_hash: spec::graph_content_hash(nodes, edges),
+        sources: system_contents_of(nodes)
+            .into_iter()
+            .map(|entry| spec::SourceRevision {
+                repo: entry.repo,
+                commit: entry.commit,
+            })
+            .collect(),
+    }
 }
 
 fn clear_graph_store(graph: &mut SqliteGraphStore) -> Result<GraphStats, String> {
@@ -6072,13 +6109,9 @@ fn build_spec_bundle(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    Ok(spec::compile_spec(
-        &nodes,
-        &edges,
-        &flows,
-        mode,
-        &rejected_hashes,
-    ))
+    let mut bundle = spec::compile_spec(&nodes, &edges, &flows, mode, &rejected_hashes);
+    bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
+    Ok(bundle)
 }
 
 /// One official artifact compiled alone through the selected compiler, which
@@ -6141,13 +6174,10 @@ fn build_spec_with_views(
         .filter(|record| record.decision == agents::AssertionDecision::Rejected)
         .map(|record| record.assertion.provenance.content_hash)
         .collect();
-    Ok(spec::compile_spec_with_views(
-        &nodes,
-        &edges,
-        &flows,
-        mode,
-        &rejected_hashes,
-    ))
+    let (mut bundle, views) =
+        spec::compile_spec_with_views(&nodes, &edges, &flows, mode, &rejected_hashes);
+    bundle.graph_basis = Some(graph_basis_of(&nodes, &edges));
+    Ok((bundle, views))
 }
 
 fn build_spec_views(
@@ -6213,9 +6243,13 @@ struct SpecBundlePreview {
     gap_count: usize,
     drift_count: usize,
     security_count: usize,
+    /// The graph the bundle was compiled from (#1765, AC-0593).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_basis: Option<spec::GraphBasis>,
 }
 
 fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
+    let graph_basis = bundle.graph_basis;
     let artifacts = bundle
         .artifacts
         .into_iter()
@@ -6254,6 +6288,7 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
         gap_count: bundle.gap_count,
         drift_count: bundle.drift_count,
         security_count: bundle.security_count,
+        graph_basis,
     }
 }
 
@@ -6950,6 +6985,7 @@ mod tests {
             gap_count: 0,
             drift_count: 0,
             security_count: 0,
+            graph_basis: None,
         };
 
         let preview = super::preview_spec_bundle(bundle);
@@ -9711,11 +9747,13 @@ export function queueOrder() {
                     repo: "acme/shop".into(),
                     display_name: None,
                     commit: "a1b2c3d".into(),
+                    graph_hash: None,
                 },
                 crate::SystemRepo {
                     repo: "local/infra".into(),
                     display_name: None,
                     commit: "workdir".into(),
+                    graph_hash: None,
                 },
             ]
         );

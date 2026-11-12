@@ -178,6 +178,11 @@ pub struct SpecBundle {
     pub drift_count: usize,
     /// Explicit auth/IAM findings in the security view.
     pub security_count: usize,
+    /// The graph this bundle was compiled from (#1765, AC-0593). Stamped by
+    /// the host, which holds the graph; absent from a bare compile, so those
+    /// bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_basis: Option<crate::GraphBasis>,
 }
 
 pub(crate) fn fallback_provenance(identity: &str) -> Provenance {

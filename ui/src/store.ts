@@ -285,6 +285,11 @@ export interface SystemRepo {
   repo: string;
   commit: string;
   display_name?: string | null;
+  /** Graph content hash recorded by the latest completed ingest of this
+   *  registration at `commit` (#1765); absent when none is recorded. Scoped
+   *  per registration — a `local/` key is random per installation, so the
+   *  value is not comparable across installations. */
+  graph_hash?: string | null;
 }
 
 /** One installed deterministic adapter, from the registry Preflight uses
@@ -405,6 +410,13 @@ export interface SpecArtifact {
   assertions_total: number;
 }
 
+/** What an export was compiled from (#1765): the content hash of the whole
+ *  base graph and the source revisions it holds. */
+export interface GraphBasis {
+  content_hash: string;
+  sources: { repo: string; commit: string }[];
+}
+
 export interface SpecBundle {
   mode: SpecExportMode;
   artifacts: SpecArtifact[];
@@ -412,6 +424,8 @@ export interface SpecBundle {
   gap_count: number;
   drift_count: number;
   security_count: number;
+  /** Carried into the exported bundle file unchanged. */
+  graph_basis?: GraphBasis;
 }
 
 export interface DeploymentRole {

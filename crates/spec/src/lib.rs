@@ -10,6 +10,10 @@ use flowtracer::Flow;
 
 mod adr;
 mod contract;
+mod graph_basis;
+pub use graph_basis::{
+    GraphBasis, SourceRevision, edge_fact_line, graph_content_hash, hash_fact_lines, node_fact_line,
+};
 mod knowledge;
 pub use knowledge::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
