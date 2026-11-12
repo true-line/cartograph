@@ -57,6 +57,8 @@ export function baseLayers(node: GraphNode): GraphLayer[] {
     case 'Endpoint':
     case 'DataEntity':
     case 'Config':
+    case 'ConfigRead':
+      // A configuration read belongs with the code that reads it (#1821).
       return ['server'];
     default:
       return [];
@@ -87,6 +89,7 @@ function edgeLayers(edge: GraphEdge): GraphLayer[] {
     case 'HANDLES':
     case 'READS':
     case 'WRITES':
+    case 'READS_CONFIG':
       return ['server'];
     default:
       return [];
@@ -167,7 +170,16 @@ function confidence(props: GraphNode['props'] | GraphEdge['props']): Tier {
     : 'Gap';
 }
 
+/** What a configuration read with no recorded key is called (ADR-0059
+ *  decision 2): the source does not state the key as a literal. */
+export const UNNAMED_CONFIG_KEY = 'key not named in source';
+
 export function displayName(node: GraphNode): string {
+  // A configuration read shows the key it reads, never its raw id (#1821).
+  if (node.label === 'ConfigRead') {
+    const key = node.props.key;
+    return typeof key === 'string' && key.length > 0 ? key : UNNAMED_CONFIG_KEY;
+  }
   const method = typeof node.props.method === 'string' ? node.props.method : null;
   const path = typeof node.props.path === 'string' ? node.props.path : null;
   if (method && path) return `${method} ${path}`;
