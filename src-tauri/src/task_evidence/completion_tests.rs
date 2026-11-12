@@ -57,7 +57,7 @@ impl<F: FnOnce() + Send> LlmProvider for DuringCall<F> {
 fn export(state: &AppState) -> serde_json::Value {
     serde_json::to_value(
         crate::build_spec_bundle(
-            &*state.graph.lock().unwrap(),
+            &state.graph.lock().unwrap(),
             &state.decisions.lock().unwrap(),
             spec::ExportMode::BestEffort,
         )

@@ -227,7 +227,7 @@ seven trace relations (`REALIZES`, `STEP_OF`, `GOVERNS`, `MAPS_TO`,
 field's type has no row. Until §11.7 exists, a document may only make
 statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's sixteen artifacts go
+## 3. Where today's eighteen artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -244,8 +244,9 @@ statements whose evidence one of §11.1 to §11.5 already holds.
 | `test_arrangements.md` | D8 §8.1 to §8.3 |
 | `journeys.md` | D9 §9.1 to §9.3 |
 | `rule-evidence.md`, `rule-evidence.json` | D1 §1.5, D11 §11.4 |
+| `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
 
-The sixteen files keep being exported under their current names until each
+The eighteen files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -263,7 +264,7 @@ row names the issue that tracks it.
 | D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied (#1791) |
 | D7 §7.3, D6 §6.4 | Keys read only in source are recovered for Python alone. The other five language adapters emit no configuration-read fact, so a key with no environment file entry is missing. Until then the section states which languages it covers (#1789) |
 | D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps (#1790) |
-| D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is not an exported artifact (#1786) |
+| D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is exported as `coverage.md` and `coverage.json` (#1786, fixed). It records each producer's file count, each missing input and each unsupported capability with its first site; it holds no list of every file found, read or skipped, so these sections cannot yet name each file |
 | D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement (#1785) |
 | Every header | The graph content hash is not available outside tests (#1765) |
 | Every A and P+A section | Section drafting (#1748) on the curated projection (#1746) |
@@ -288,7 +289,7 @@ of them.
    Each row stays unconfirmed until a person confirms it.
 5. **One file per document**, Markdown, with the appendices as separate
    files. Other formats are a rendering concern.
-6. **The current sixteen artifacts stay exported** alongside the new
+6. **The current eighteen artifacts stay exported** alongside the new
    documents until every consumer has moved.
 7. **Order of delivery:** D11 and the P sections of D4 and D5 first (no
    model needed), then D1, then D2 and D3, then the rest.

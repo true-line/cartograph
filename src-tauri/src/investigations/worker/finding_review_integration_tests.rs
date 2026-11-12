@@ -175,7 +175,7 @@ fn finding_review_scripted_worker_preserves_graph_export_and_source_boundaries()
         "the fixture includes a real graph Gap, not a display-only placeholder"
     );
     let bundle = crate::build_spec_bundle(
-        &*state.graph.lock().unwrap(),
+        &state.graph.lock().unwrap(),
         &state.decisions.lock().unwrap(),
         spec::ExportMode::BestEffort,
     )

@@ -232,6 +232,7 @@ The spec compiler **projects the graph → artifacts**. Artifact set:
 | Drift register | ADR/code conflicts | table |
 | Security findings | explicit endpoint auth facts + IAM `GRANTS` | table mapped to US/AC |
 | `rule-evidence.md` | stored `BusinessRule` observations | per-observation evidence; past 50 observations grouped by exit-source file with capped representatives and counted omissions, plus a `rule-evidence.json` index of every observation and relationship (AC-0221) |
+| `coverage.md` | stored coverage inventories, one per repository | per repository: producers that ran, files read, producers not selected, missing inputs and unsupported capabilities, each with its recorded reason, and the inventory hash; identical in both export modes; estate totals by producer and by reason; past 12 repositories the per-repository detail is only in the `coverage.json` index, which carries every stored inventory verbatim (AC-0592) |
 
 **US/AC mapping rule:** one `Capability` → one or more US; each terminal/branch condition of its realizing flows → AC (Given/When/Then). Security and performance facts (auth edges, rate limits, IAM grants, timeouts) map onto US/AC per the author's "security/perf mapped to US/AC" standard.
 
