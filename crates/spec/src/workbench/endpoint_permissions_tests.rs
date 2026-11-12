@@ -635,7 +635,8 @@ fn security_and_endpoint_permissions_word_a_missing_check_alike() {
             .find(|line| line.starts_with("| No authentication check recovered: GET /health |"))
             .expect("the same route is a security finding under the recovered wording");
         assert!(finding.contains("| InferredStrong |"));
-        assert!(!security.contains("Unauthenticated endpoint"));
+        assert!(!security.to_lowercase().contains("unauthenticated"));
+        assert!(finding.contains("| `no_auth_check_recovered` |"));
         assert!(security.contains("is not visible to this finding"));
         // The guarded route and the route outside recovery are not findings.
         assert!(!security.contains("GET /me |"));

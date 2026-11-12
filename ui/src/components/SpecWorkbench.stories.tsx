@@ -211,7 +211,7 @@ const BUNDLE: SpecBundle = {
         'Security findings',
         [UNAUTHENTICATED, OVER_BROAD_GRANT],
       ),
-      content: '# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n| No authentication check recovered: GET /admin | unauthenticated_endpoint | ep:admin | GET /admin | — | US-0015 / AC-0041 | Confirmed |\n| Over-broad IAM grant | over_broad_grant | res:admin GRANTS res:orders | arn:aws:s3:::orders/* | s3:Get* | US-0015 / AC-0042 | InferredWeak |\n',
+      content: '# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n| No authentication check recovered: GET /admin | no_auth_check_recovered | ep:admin | GET /admin | — | US-0015 / AC-0041 | Confirmed |\n| Over-broad IAM grant | over_broad_grant | res:admin GRANTS res:orders | arn:aws:s3:::orders/* | s3:Get* | US-0015 / AC-0042 | InferredWeak |\n',
     },
   ],
   assertion_count: 11,

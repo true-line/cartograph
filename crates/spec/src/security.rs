@@ -429,7 +429,8 @@ mod tests {
                 .find(|artifact| artifact.file_name == "security.md")
                 .expect("security.md is exported");
             assert!(security.content.contains(&format!("| {title} |")));
-            assert!(!security.content.contains("Unauthenticated endpoint"));
+            assert!(!security.content.to_lowercase().contains("unauthenticated"));
+            assert!(security.content.contains("| `no_auth_check_recovered` |"));
             // The coverage limit is stated once, before the table.
             assert_eq!(
                 security

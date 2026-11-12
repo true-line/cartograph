@@ -755,7 +755,9 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
             content,
             "| {} | `{}` | `{}` | ",
             Safe(NodeName(n)),
-            Safe(n.props["category"].as_str().unwrap_or("security")),
+            Safe(security_type(
+                n.props["category"].as_str().unwrap_or("security")
+            )),
             Safe(n.props["subject_id"].as_str().unwrap_or("—"))
         )?;
         list(&mut content, &strings(n, "resource_scope"))?;
@@ -773,6 +775,15 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
         content.push_str("| — | — | — | — | — | No explicit security findings | — |\n")?;
     }
     finish(content, assertions)
+}
+/// The Type cell of a `security.md` row. The stored category of an endpoint
+/// finding keeps its identity (`unauthenticated_endpoint`); the document names
+/// what was recovered, so it never calls the endpoint unauthenticated (#1820).
+fn security_type(category: &str) -> &str {
+    match category {
+        "unauthenticated_endpoint" => "no_auth_check_recovered",
+        other => other,
+    }
 }
 struct Settings<'a>(&'a Node);
 impl fmt::Display for Settings<'_> {
