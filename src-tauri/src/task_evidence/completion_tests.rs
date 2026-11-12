@@ -1024,3 +1024,483 @@ fn workbench_curated_read_reports_the_export_revision_and_counts_in_both_modes()
     assert_ne!(withdrawn["revision"], best["revision"]);
     assert_eq!(withdrawn["counts"]["accepted"], 0);
 }
+
+/// `records` accepted version 2 records, each assessable (all evidence
+/// captured and readable), over the fixture graph with `filler` more
+/// deterministic Symbol nodes and as many CALLS edges. The records are one
+/// prepared task staged under `records` jobs, so they differ only in
+/// identity.
+fn accepted_captured_records(
+    filler: usize,
+    records: usize,
+) -> (tempfile::TempDir, AppState, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let private = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&private);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let captured = capture(&state, &source, true);
+    let (owner, target) = rule_pair(&captured);
+    install_task(&state, &owner, &[target]);
+    if filler > 0 {
+        let symbol = |index: usize| format!("sym:filler:{index:06}");
+        let prov = |content: &str| {
+            core_prov::Provenance::new(
+                core_prov::Tier::Deterministic,
+                core_prov::ConfidenceTier::Confirmed,
+                vec![],
+                "test.curated-cost-fixture",
+                content.as_bytes(),
+            )
+            .unwrap()
+        };
+        let patch = core_graph::GraphPatch {
+            upsert_nodes: (0..filler)
+                .map(|index| Node {
+                    id: symbol(index),
+                    label: "Symbol".into(),
+                    props: serde_json::json!({
+                        "name": symbol(index), "prov": prov(&symbol(index)),
+                    }),
+                })
+                .collect(),
+            upsert_edges: (0..filler)
+                .map(|index| Edge {
+                    src: symbol(index),
+                    dst: symbol((index + 1) % filler),
+                    label: "CALLS".into(),
+                    props: serde_json::json!({"prov": prov(&format!("{index} calls"))}),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut graph = state.graph.lock().unwrap();
+        let expected = graph.read_snapshot().unwrap();
+        assert!(
+            graph
+                .apply_patch_if_snapshot_matches(&expected, &patch)
+                .unwrap()
+        );
+    }
+    let task = prepare(&state, GAP, "escalate:fixture").unwrap();
+    let provider = DuringCall {
+        task: task.task().clone(),
+        expect_prepared: true,
+        change: Mutex::new(Some(|| {})),
+    };
+    let proposal = agents::AgentBroker::bounded_default()
+        .propose_prepared(
+            &provider,
+            &EgressFirewall::new(EgressPolicy::local_only()),
+            &task,
+            None,
+        )
+        .unwrap();
+    let ids = (0..records)
+        .map(|index| {
+            let (_, execution) =
+                crate::start_job(&state, &format!("escalate:curated-{index}:local")).unwrap();
+            let staged =
+                crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal)
+                    .unwrap();
+            state
+                .proposals
+                .lock()
+                .unwrap()
+                .review(
+                    &staged.proposal_id,
+                    0,
+                    agents::ProposalDecision::Accepted,
+                    None,
+                )
+                .unwrap();
+            staged.proposal_id
+        })
+        .collect();
+    (dir, state, ids)
+}
+
+/// A Workbench decision on a statement that no stored fact and no derived
+/// statement carries.
+fn record_unmatched_decision(state: &AppState, content: &str) {
+    state
+        .decisions
+        .lock()
+        .unwrap()
+        .record_assertion(
+            &agents::CuratableAssertion {
+                subject_id: format!("edge:{content}"),
+                summary: "A statement the graph no longer makes".into(),
+                provenance: core_prov::Provenance::new(
+                    core_prov::Tier::Semantic,
+                    core_prov::ConfidenceTier::InferredStrong,
+                    vec![core_prov::EvidenceRef {
+                        repo: "local/fixture".into(),
+                        commit_sha: "workdir".into(),
+                        path: "gone.ts".into(),
+                        byte_start: 0,
+                        byte_end: 4,
+                    }],
+                    "t2.semantic",
+                    content.as_bytes(),
+                )
+                .unwrap(),
+            },
+            agents::AssertionDecision::Rejected,
+            None,
+        )
+        .unwrap();
+}
+
+#[test]
+#[ignore = "measurement, not a gate: run with --ignored --nocapture"]
+fn curated_export_cost_measurement() {
+    // #1834: where one export spends its time, with 0, 16 and 256 assessable
+    // accepted records over a graph of CURATED_COST_FILLER (default 20000)
+    // extra nodes and as many edges. Prints; asserts only the counts.
+    use std::time::Instant;
+    let filler: usize = std::env::var("CURATED_COST_FILLER")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20_000);
+    let ms = |from: Instant| from.elapsed().as_secs_f64() * 1000.0;
+    for records in [0usize, 16, 256] {
+        let (_dir, state, _ids) = accepted_captured_records(filler, records);
+        let mode = spec::ExportMode::BestEffort;
+
+        // What one assessment's graph observation costs on its own.
+        let at = Instant::now();
+        let observed = state
+            .graph
+            .lock()
+            .unwrap()
+            .read_source_selection_snapshot(&[])
+            .unwrap();
+        let copy_ms = ms(at);
+        let (nodes, edges) = (observed.graph.0.len(), observed.graph.1.len());
+        let at = Instant::now();
+        context_hub::ContextSnapshot::new(observed.graph.0, observed.graph.1).unwrap();
+        let identity_ms = ms(at);
+
+        let at = Instant::now();
+        let review = crate::curated::gather(&state);
+        let gather_ms = ms(at);
+
+        let export = |label: &str| {
+            let graph = state.graph.lock().unwrap();
+            let decisions = state.decisions.lock().unwrap();
+            let at = Instant::now();
+            let inputs = crate::spec_inputs(&graph, &decisions, Some(&review)).unwrap();
+            let inputs_ms = ms(at);
+            let at = Instant::now();
+            let bundle = spec::try_compile_spec_supplied(
+                &inputs.nodes,
+                &inputs.edges,
+                &inputs.flows,
+                mode,
+                &inputs.rejected_hashes,
+                inputs.supplied(),
+            )
+            .unwrap();
+            let compile_ms = ms(at);
+            let crate::CuratedInput::Computed(projection) = &inputs.curated else {
+                panic!("projection not computed");
+            };
+            assert_eq!(projection.counts.accepted, records);
+            assert_eq!(projection.counts.eligible, records);
+            eprintln!(
+                "  {label}: read+trace+project {inputs_ms:.1} ms, compile {compile_ms:.1} ms \
+                 ({} artifacts)",
+                bundle.artifacts.len()
+            );
+            inputs_ms
+        };
+        eprintln!(
+            "records={records} graph={nodes} nodes/{edges} edges: gather {gather_ms:.1} ms; \
+             one graph observation = copy {copy_ms:.1} ms + identity {identity_ms:.1} ms"
+        );
+        let plain = export("no unmatched decision");
+        record_unmatched_decision(&state, "sym:gone CALLS sym:nowhere");
+        let first = export("unmatched decision, 1st export");
+        let repeat = export("unmatched decision, 2nd export");
+        eprintln!(
+            "  settling the unmatched decision: 1st export +{:.1} ms, 2nd export +{:.1} ms",
+            first - plain,
+            repeat - plain
+        );
+    }
+}
+
+/// One node more in the graph: another store revision and content hash.
+fn move_graph(state: &AppState, id: &str) {
+    use core_graph::GraphStore;
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: id.into(),
+            label: "Symbol".into(),
+            props: serde_json::json!({}),
+        })
+        .unwrap();
+}
+
+#[test]
+fn unmatched_decision_costs_one_compile_for_a_revision_and_decision_set() {
+    // AC-0659 (#1834): a Workbench decision that no stored fact carries is
+    // settled by one compile for one store revision and one set of such
+    // decisions, in both modes and for the single-artifact read, not by one
+    // for every export. A new revision or another set compiles again, so no
+    // answer is carried to inputs it was not made for. Every export is, in
+    // every byte, revision and count, the one made with nothing kept (the
+    // path before #1834). An MCP read still makes no such compile and does
+    // not use the kept answer.
+    use crate::mcp_reads::curated_read::CuratedBasis;
+    let (_dir, state, _) = accepted_captured_records(0, 2);
+    let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
+    let compiles = crate::curated::derived_compiles;
+    let export = |mode| {
+        serde_json::to_value(crate::export_spec_with_views_blocking(mode, &state).unwrap()).unwrap()
+    };
+    // Nothing kept: the review settles alone, under the locks, as before.
+    let alone = |mode| {
+        let review = crate::curated::gather(&state).settling_alone();
+        let (bundle, views, curated) = crate::build_spec_with_views_and_curated(
+            &state.graph.lock().unwrap(),
+            &state.decisions.lock().unwrap(),
+            &review,
+            mode,
+        )
+        .unwrap();
+        serde_json::to_value(crate::SpecWithViewsPreview {
+            bundle: crate::preview_spec_bundle(bundle),
+            views,
+            curated,
+        })
+        .unwrap()
+    };
+    // Each mode exported twice costs `expected` (0 or 1) compiles in all,
+    // and is the export made alone, which costs that many every time.
+    let check = |expected: usize, what: &str| {
+        let before = compiles();
+        let exported = modes.map(export);
+        assert_eq!(modes.map(export), exported, "{what}");
+        assert_eq!(compiles() - before, expected, "{what}");
+        for (mode, exported) in modes.iter().zip(&exported) {
+            let before = compiles();
+            assert_eq!(&alone(*mode), exported, "{what} in {mode:?}");
+            assert_eq!(compiles() - before, expected, "{what}");
+            assert_eq!(exported["curated"]["status"], "computed", "{what}");
+            // One projection: the read beside the bundle is its basis.
+            let basis = &exported["bundle"]["curated_basis"];
+            assert_eq!(exported["curated"]["revision"], basis["revision"]);
+            assert_eq!(exported["curated"]["counts"], basis["counts"]);
+            assert_eq!(basis["counts"]["eligible"], 2, "{what}");
+            // The single-artifact read is the bundle's document and costs
+            // no compile of its own.
+            let before = compiles();
+            let document = crate::read_spec_artifact_blocking(*mode, "curated", &state).unwrap();
+            assert_eq!(compiles(), before, "{what}");
+            let listed = exported["bundle"]["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| artifact["id"] == "curated")
+                .unwrap();
+            assert_eq!(listed["content"], document.content.as_str(), "{what}");
+            assert_eq!(listed["content_id"], document.content_id.as_str());
+        }
+        exported
+    };
+
+    // Every decision on a stored fact, here none: no second compile at all.
+    let plain = check(0, "no unmatched decision");
+
+    record_unmatched_decision(&state, "sym:gone CALLS sym:nowhere");
+    let unmatched = check(1, "one unmatched decision");
+    assert_ne!(
+        unmatched[0]["curated"]["revision"],
+        plain[0]["curated"]["revision"]
+    );
+    // An MCP read of the same state: not computed, kept answer or not.
+    for mode in modes {
+        let before = compiles();
+        let session = mcp_session(&state, mode, || Ok(vec![])).unwrap();
+        assert_eq!(
+            session.basis().curated,
+            CuratedBasis::NotComputed(spec::CuratedFailure::DerivedDecisionsNeedCompile)
+        );
+        assert_eq!(compiles(), before);
+    }
+
+    // Another set of unmatched decisions: one compile again, then none.
+    record_unmatched_decision(&state, "sym:gone CALLS sym:elsewhere");
+    let two = check(1, "two unmatched decisions");
+    assert_ne!(
+        two[0]["curated"]["revision"],
+        unmatched[0]["curated"]["revision"]
+    );
+
+    // Another graph revision, the same decisions: one compile again.
+    move_graph(&state, "sym:later");
+    let before = compiles();
+    let moved = modes.map(export);
+    assert_eq!(modes.map(export), moved);
+    assert_eq!(compiles() - before, 1);
+    for (mode, moved) in modes.iter().zip(&moved) {
+        assert_eq!(&alone(*mode), moved, "{mode:?}");
+        assert_ne!(
+            moved["bundle"]["graph_basis"],
+            two[0]["bundle"]["graph_basis"]
+        );
+    }
+}
+
+#[test]
+fn assessments_of_one_export_share_one_graph_copy_at_one_store_revision() {
+    // AC-0659 (#1834): the assessments of one read copy the graph once
+    // between them, not once each, and each is the assessment made alone:
+    // same comparisons, same evidence, same observed revision. When the
+    // store moves between two of them the rows are read again, so the later
+    // one reports the new revision and the changed graph, and a review
+    // gathered before a move is still stale for the export that reads after
+    // it.
+    use super::assessment::{SharedObservation, assess_observed, graph_copies};
+    let (_dir, state, ids) = accepted_captured_records(0, 3);
+    let revision = || state.graph.lock().unwrap().read_revision().unwrap();
+    let assessed = |id: &str, shared: &mut SharedObservation| {
+        let (assessment, observed) = assess_observed(&state, id, shared).unwrap();
+        (serde_json::to_value(assessment).unwrap(), observed)
+    };
+
+    let before = graph_copies();
+    let alone: Vec<_> = ids
+        .iter()
+        .map(|id| assessed(id, &mut SharedObservation::default()))
+        .collect();
+    assert_eq!(graph_copies() - before, ids.len());
+    let before = graph_copies();
+    let mut shared = SharedObservation::default();
+    let together: Vec<_> = ids.iter().map(|id| assessed(id, &mut shared)).collect();
+    assert_eq!(graph_copies() - before, 1);
+    assert_eq!(together, alone);
+    for (assessment, observed) in &together {
+        assert_eq!(observed.as_ref(), Some(&revision()));
+        assert_eq!(assessment["graph_comparison"], "unchanged");
+        assert_eq!(assessment["association_comparison"], "unchanged");
+    }
+
+    // One export: one copy for its three assessments, all eligible.
+    let before = graph_copies();
+    let bundle = curated_export(&state, spec::ExportMode::BestEffort);
+    assert_eq!(graph_copies() - before, 1);
+    let basis = bundle.curated_basis.as_ref().unwrap();
+    assert_eq!((basis.counts.accepted, basis.counts.eligible), (3, 3));
+
+    // A review gathered before the graph moves describes another revision.
+    let review = crate::curated::gather(&state);
+    let old = revision();
+    move_graph(&state, "sym:later");
+    assert_ne!(revision(), old);
+    let stale = crate::build_spec_bundle(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        &review,
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap();
+    assert_eq!(stale.curated_basis.as_ref().unwrap().counts.eligible, 0);
+    for id in &ids {
+        let row = curated_row(&stale, id).unwrap();
+        assert!(row.contains("(`assessment_failed`)"), "{row}");
+    }
+
+    // The observation kept from before the move is not used after it.
+    let before = graph_copies();
+    let later = assessed(&ids[0], &mut shared);
+    assert_eq!(graph_copies() - before, 1);
+    assert_eq!(later, assessed(&ids[0], &mut SharedObservation::default()));
+    assert_eq!(later.1, Some(revision()));
+    assert_eq!(later.0["graph_comparison"], "changed");
+    // And the rows read then serve the next assessment.
+    let before = graph_copies();
+    assert_eq!(assessed(&ids[1], &mut shared).1, Some(revision()));
+    assert_eq!(graph_copies(), before);
+}
+
+#[test]
+fn export_commands_do_their_work_off_the_calling_thread() {
+    // AC-0659 (#1834): each export command hops to a blocking worker before
+    // it gathers, reads or compiles, so the invoking (main) thread runs none
+    // of it. Shown by the one compile an unmatched decision costs: the
+    // command makes it, this thread's count does not move, and what the
+    // worker settled then serves this thread. Each command returns what its
+    // blocking form returns.
+    use tauri::Manager;
+    let (_dir, state, _) = accepted_captured_records(0, 1);
+    record_unmatched_decision(&state, "sym:gone CALLS sym:nowhere");
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(state);
+    let state = app.state::<AppState>();
+    fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+    let compiles = crate::curated::derived_compiles;
+    let before = compiles();
+    let mode = spec::ExportMode::BestEffort;
+
+    let bundle =
+        tauri::async_runtime::block_on(crate::export_spec(mode, app.handle().clone())).unwrap();
+    // Settled, and not here.
+    assert_eq!(compiles(), before);
+    assert_eq!(
+        json(&bundle),
+        json(&crate::export_spec_blocking(mode, &state).unwrap())
+    );
+    assert_eq!(compiles(), before, "served from what the worker settled");
+    // With nothing kept, this thread would have compiled.
+    let review = crate::curated::gather(&state).settling_alone();
+    crate::build_spec_bundle(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        &review,
+        mode,
+    )
+    .unwrap();
+    assert_eq!(compiles(), before + 1);
+
+    let views =
+        tauri::async_runtime::block_on(crate::export_spec_views(mode, app.handle().clone()))
+            .unwrap();
+    assert_eq!(
+        json(&views),
+        json(&crate::export_spec_views_blocking(mode, &state).unwrap())
+    );
+    let with_views =
+        tauri::async_runtime::block_on(crate::export_spec_with_views(mode, app.handle().clone()))
+            .unwrap();
+    assert_eq!(
+        json(&with_views),
+        json(&crate::export_spec_with_views_blocking(mode, &state).unwrap())
+    );
+    assert_eq!(json(&with_views)["bundle"], json(&bundle));
+    assert_eq!(json(&with_views)["views"], json(&views));
+    for id in ["curated", "topology"] {
+        let artifact = tauri::async_runtime::block_on(crate::read_spec_artifact(
+            mode,
+            id.into(),
+            app.handle().clone(),
+        ))
+        .unwrap();
+        assert_eq!(
+            json(&artifact),
+            json(&crate::read_spec_artifact_blocking(mode, id, &state).unwrap()),
+            "{id}"
+        );
+    }
+    assert_eq!(compiles(), before + 1);
+}

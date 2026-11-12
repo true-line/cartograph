@@ -34,6 +34,7 @@ pub(crate) fn app_state(app_data: &Path) -> AppState {
         extraction_caches: Mutex::new(ExtractionCaches::default()),
         embedding_cache: None,
         knowledge_overlay: None,
+        curated_settled: Arc::default(),
         sources: Arc::new(Mutex::new(sources)),
         primary_sources: primary_source::PrimarySourceStore::open(app_data).unwrap(),
         metrics: Mutex::new(metrics::MetricsStore::open(&state_path).unwrap()),
