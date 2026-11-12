@@ -1870,7 +1870,13 @@ fn export_carries_the_stored_coverage_inventory_in_both_modes() {
     let export = |mode| {
         let graph = state.graph.lock().unwrap();
         let decisions = state.decisions.lock().unwrap();
-        crate::build_spec_bundle(&graph, &decisions, mode).unwrap()
+        crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap()
     };
     let artifact = |bundle: &spec::SpecBundle, id: &str| {
         bundle
@@ -1933,8 +1939,14 @@ fn export_carries_the_stored_coverage_inventory_in_both_modes() {
     let decisions = state.decisions.lock().unwrap();
     for (id, expected) in [("coverage", &markdown), ("coverage-index", &index)] {
         assert_eq!(
-            &crate::build_spec_artifact(&graph, &decisions, spec::ExportMode::BestEffort, id)
-                .unwrap(),
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                spec::ExportMode::BestEffort,
+                id
+            )
+            .unwrap(),
             expected
         );
     }
@@ -1976,7 +1988,13 @@ fn export_carries_a_fact_index_resolving_every_assertion() {
     let graph = state.graph.lock().unwrap();
     let decisions = state.decisions.lock().unwrap();
     for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
-        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         let artifact = |id: &str| {
             bundle
                 .artifacts
@@ -2044,12 +2062,25 @@ fn export_carries_a_fact_index_resolving_every_assertion() {
 
         // A second export is byte-identical, as is the single-artifact read.
         assert_eq!(
-            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
             bundle
         );
         for expected in [markdown, json] {
             assert_eq!(
-                &crate::build_spec_artifact(&graph, &decisions, mode, &expected.id).unwrap(),
+                &crate::build_spec_artifact(
+                    &graph,
+                    &decisions,
+                    Some(&crate::curated::CuratedReview::default()),
+                    mode,
+                    &expected.id
+                )
+                .unwrap(),
                 expected
             );
         }
@@ -2108,7 +2139,13 @@ fn export_projects_ingested_endpoints_against_permission_sites() {
     let decisions = state.decisions.lock().unwrap();
     let guard = flask.find("@login_required").unwrap();
     for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
-        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         let artifact = bundle
             .artifacts
             .iter()
@@ -2180,11 +2217,24 @@ fn export_projects_ingested_endpoints_against_permission_sites() {
             );
         }
         assert_eq!(
-            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
             bundle
         );
         assert_eq!(
-            &crate::build_spec_artifact(&graph, &decisions, mode, "endpoint-permissions").unwrap(),
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "endpoint-permissions"
+            )
+            .unwrap(),
             artifact
         );
     }
@@ -2238,7 +2288,13 @@ fn export_projects_ingested_pipelines_in_dependency_order() {
     let build = workflow.find("build:\n").unwrap();
     let checkout = workflow.find("uses: actions/checkout@v4").unwrap();
     for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
-        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         let artifact = bundle
             .artifacts
             .iter()
@@ -2322,11 +2378,24 @@ fn export_projects_ingested_pipelines_in_dependency_order() {
             );
         }
         assert_eq!(
-            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
             bundle
         );
         assert_eq!(
-            &crate::build_spec_artifact(&graph, &decisions, mode, "pipelines").unwrap(),
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "pipelines"
+            )
+            .unwrap(),
             artifact
         );
     }
@@ -2371,7 +2440,13 @@ fn export_projects_ingested_configuration_keys() {
     let read = config.find("process.env.DATABASE_URL").unwrap();
     let host = settings.find("os.getenv").unwrap();
     for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
-        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
         let artifact = bundle
             .artifacts
             .iter()
@@ -2448,11 +2523,24 @@ fn export_projects_ingested_configuration_keys() {
             );
         }
         assert_eq!(
-            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
             bundle
         );
         assert_eq!(
-            &crate::build_spec_artifact(&graph, &decisions, mode, "configuration").unwrap(),
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "configuration"
+            )
+            .unwrap(),
             artifact
         );
     }
@@ -2609,10 +2697,15 @@ fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
     let export = |state: &AppState| {
         let graph = state.graph.lock().unwrap();
         let decisions = state.decisions.lock().unwrap();
-        crate::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort)
-            .unwrap()
-            .graph_basis
-            .unwrap()
+        crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            spec::ExportMode::BestEffort,
+        )
+        .unwrap()
+        .graph_basis
+        .unwrap()
     };
     let basis = export(&state);
     let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
@@ -2630,7 +2723,13 @@ fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
         let graph = state.graph.lock().unwrap();
         let decisions = state.decisions.lock().unwrap();
         crate::preview_spec_bundle(
-            crate::build_spec_bundle(&graph, &decisions, spec::ExportMode::VerifiedOnly).unwrap(),
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                spec::ExportMode::VerifiedOnly,
+            )
+            .unwrap(),
         )
     };
     assert_eq!(

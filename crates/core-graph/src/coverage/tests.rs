@@ -191,6 +191,11 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
         .unwrap();
     assert_eq!((snapshot.graph, recorded), unbounded);
     assert_eq!(snapshot.revision, store.read_revision().unwrap());
+    // AC-0653: the unbounded sibling carries the same payload and revision.
+    assert_eq!(
+        store.read_snapshot_with_coverage_and_revision().unwrap(),
+        (store.read_revision().unwrap(), unbounded.clone())
+    );
     let stored: usize = unbounded
         .1
         .iter()

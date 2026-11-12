@@ -59,6 +59,7 @@ fn export(state: &AppState) -> serde_json::Value {
         crate::build_spec_bundle(
             &state.graph.lock().unwrap(),
             &state.decisions.lock().unwrap(),
+            &crate::curated::CuratedReview::default(),
             spec::ExportMode::BestEffort,
         )
         .unwrap(),
@@ -537,4 +538,216 @@ fn a_task_staged_between_reclaim_snapshots_keeps_its_receipts() {
             .iter()
             .all(|item| item.status == Availability::Available)
     );
+}
+
+fn curated_export(state: &AppState, mode: spec::ExportMode) -> spec::SpecBundle {
+    // The order `export_spec` uses: the review first, then the graph and
+    // decision locks.
+    let review = crate::curated::gather(state).unwrap();
+    crate::build_spec_bundle(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        &review,
+        mode,
+    )
+    .unwrap()
+}
+
+fn artifact<'a>(bundle: &'a spec::SpecBundle, id: &str) -> &'a spec::SpecArtifact {
+    bundle
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == id)
+        .unwrap()
+}
+
+/// The `curated.md` table row of one record.
+fn curated_row<'a>(bundle: &'a spec::SpecBundle, record_id: &str) -> Option<&'a str> {
+    artifact(bundle, "curated")
+        .content
+        .lines()
+        .find(|line| line.starts_with(&format!("| {record_id} |")))
+}
+
+#[test]
+fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_verified_only() {
+    // AC-0653 (SPEC-12 slice 2, ADR-0061 decisions 5 to 7): a version 2
+    // record whose captured evidence is still readable and whose basis is
+    // unchanged is eligible once accepted. A best-effort export shows it as
+    // an item marked InferredWeak and cites its nodes; a verified-only export
+    // shows no item and counts it. The base graph hash is the same in both
+    // and the same as before the review.
+    let dir = tempfile::tempdir().unwrap();
+    let private = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&private);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let captured = capture(&state, &source, true);
+    let (owner, target) = rule_pair(&captured);
+    install_task(&state, &owner, &[target]);
+    let task = prepare(&state, GAP, "escalate:fixture").unwrap();
+    let (_, execution) = crate::start_job(&state, "escalate:curated:local").unwrap();
+    let provider = DuringCall {
+        task: task.task().clone(),
+        expect_prepared: true,
+        change: Mutex::new(Some(|| {})),
+    };
+    let proposal = agents::AgentBroker::bounded_default()
+        .propose_prepared(
+            &provider,
+            &EgressFirewall::new(EgressPolicy::local_only()),
+            &task,
+            None,
+        )
+        .unwrap();
+    let staged =
+        crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal).unwrap();
+    let id = staged.proposal_id.as_str();
+    let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
+
+    // Staged and not reviewed: no accepted record.
+    let pending = modes.map(|mode| curated_export(&state, mode));
+    for bundle in &pending {
+        assert_eq!(bundle.curated_basis.as_ref().unwrap().counts.accepted, 0);
+        assert!(curated_row(bundle, id).is_none());
+    }
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .review(id, 0, agents::ProposalDecision::Accepted, None)
+        .unwrap();
+    let graph_before = state.graph.lock().unwrap().read_snapshot().unwrap();
+
+    let accepted = modes.map(|mode| curated_export(&state, mode));
+    let [best, verified] = &accepted;
+    for (before, after) in pending.iter().zip(&accepted) {
+        let basis = after.curated_basis.as_ref().unwrap();
+        assert_eq!(basis.counts.accepted, 1);
+        assert_eq!(basis.counts.eligible, 1, "{:?}", curated_row(after, id));
+        // Acceptance wrote nothing to the graph and moved no base hash.
+        assert_eq!(before.graph_basis, after.graph_basis);
+        assert_ne!(
+            before.curated_basis.as_ref().unwrap().revision,
+            basis.revision
+        );
+        // Only `curated.md` and the index of what it cites can differ.
+        for (old, new) in before.artifacts.iter().zip(&after.artifacts) {
+            if !crate::curated::artifact_reads_projection(&old.id) {
+                assert_eq!(old, new, "{} in {:?}", old.id, after.mode);
+            }
+        }
+    }
+    assert_eq!(
+        state.graph.lock().unwrap().read_snapshot().unwrap(),
+        graph_before
+    );
+    // One revision on both modes: the mode filters the document, not the
+    // projection.
+    assert_eq!(best.curated_basis, verified.curated_basis);
+
+    let row = curated_row(best, id).expect("best-effort shows the item");
+    assert!(
+        row.contains("| Agentic | InferredWeak | accepted |"),
+        "{row}"
+    );
+    assert!(row.contains("| eligible |"), "{row}");
+    assert!(row.contains("InferredWeak curated item"), "{row}");
+    assert!(
+        row.contains(&format!(
+            "| {GAP} | {} CALLS {} |",
+            owner.id, staged.proposal.target_id
+        )) || row.contains(GAP),
+        "{row}"
+    );
+    let cited: Vec<&str> = artifact(best, "curated")
+        .assertions
+        .iter()
+        .map(|assertion| assertion.subject_id.as_str())
+        .collect();
+    assert!(cited.contains(&GAP), "{cited:?}");
+    assert!(cited.contains(&staged.proposal.source_id.as_str()));
+    assert!(cited.contains(&staged.proposal.target_id.as_str()));
+
+    assert!(curated_row(verified, id).is_none());
+    assert!(!artifact(verified, "curated").content.contains(id));
+    assert!(
+        artifact(verified, "curated")
+            .content
+            .contains("Curated items left out: 1.")
+    );
+    assert!(artifact(verified, "curated").assertions.is_empty());
+    // With no item to cite, a verified-only export's fact index is unmoved.
+    for id in ["fact-index", "fact-index-json"] {
+        assert_eq!(artifact(&pending[1], id), artifact(verified, id));
+    }
+
+    // The artifact read alone is the bundle's, in both modes.
+    for bundle in &accepted {
+        let review = crate::curated::gather(&state).unwrap();
+        for id in ["curated", "fact-index-json"] {
+            assert_eq!(
+                &crate::build_spec_artifact(
+                    &state.graph.lock().unwrap(),
+                    &state.decisions.lock().unwrap(),
+                    Some(&review),
+                    bundle.mode,
+                    id,
+                )
+                .unwrap(),
+                artifact(bundle, id),
+                "{id} in {:?}",
+                bundle.mode
+            );
+        }
+    }
+
+    // An assessment made before the graph moved is not used for the graph an
+    // export reads afterwards: the record is listed, not shown as an item.
+    let review = crate::curated::gather(&state).unwrap();
+    {
+        use core_graph::GraphStore;
+        state
+            .graph
+            .lock()
+            .unwrap()
+            .put_node(&Node {
+                id: "sym:later".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({}),
+            })
+            .unwrap();
+    }
+    let moved = crate::build_spec_bundle(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        &review,
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap();
+    let row = curated_row(&moved, id).unwrap();
+    assert!(row.contains("| stale |"), "{row}");
+    assert!(row.contains("(`assessment_failed`)"), "{row}");
+    assert_eq!(moved.curated_basis.as_ref().unwrap().counts.eligible, 0);
+    // Read again, the assessment sees the changed graph and says so.
+    let reread = curated_export(&state, spec::ExportMode::BestEffort);
+    let row = curated_row(&reread, id).unwrap();
+    assert!(row.contains("| stale |"), "{row}");
+    assert!(row.contains("(`graph_changed`)"), "{row}");
+    assert!(artifact(&reread, "curated").assertions.is_empty());
+
+    // Withdrawal is rejection (ADR-0061 decision 9): the record leaves the
+    // document and the revision changes.
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .review(id, 1, agents::ProposalDecision::Rejected, None)
+        .unwrap();
+    let rejected = curated_export(&state, spec::ExportMode::BestEffort);
+    assert!(curated_row(&rejected, id).is_none());
+    let basis = rejected.curated_basis.as_ref().unwrap();
+    assert_eq!(basis.counts.accepted, 0);
+    assert_ne!(basis.revision, reread.curated_basis.unwrap().revision);
 }
