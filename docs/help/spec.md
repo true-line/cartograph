@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, pipelines, configuration keys, curated items, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -10,6 +10,9 @@ the content hash of the whole graph and each source with its commit.
 Curation decisions do not change that hash. It covers every source in
 the system, so with more than one source it differs from the per-source hash
 shown in **Workspace**.
+
+Beside it, `curated_basis` records the curated revision and the counts of
+accepted proposals by state. See **Curated items** below.
 
 ## Endpoints and permission sites
 
@@ -151,6 +154,76 @@ Not covered today:
   compose file, a deployment manifest, an infrastructure definition, a
   workflow `env:` map or a shell script is not listed as declared.
 - Languages other than the seven above.
+
+## Curated items
+
+Every export includes **curated.md**. It lists every proposal you accepted
+in **Proposal history** and says, for each, whether it is shown as a curated
+item or why it is not. No model is involved in writing it.
+
+A **curated item** is an accepted proposal whose evidence still holds. It is
+shown beside the recovered facts and is never one of them. It keeps the tier
+and confidence it was produced with, Agentic and InferredWeak. It is not
+written to the graph, it does not resolve its Gap, and the graph hash does
+not change.
+
+Most accepted proposals are listed as **unverified** today. A proposal
+becomes a curated item only when every piece of evidence it was given is
+source text that Cartograph captured and retained when it ingested the
+source. Most proposals are still made from text read from the working tree,
+which nothing verified, and accepting one does not verify it. This changes
+as more evidence is captured (#385), not when you accept again.
+
+Each accepted proposal has exactly one state:
+
+- **eligible**: every condition holds. This is a curated item.
+- **unverified**: the proposal has no evidence, some of its evidence was not
+  captured, or it was staged before captured evidence was recorded.
+- **already-covered**: the graph now holds the proposed relation as a
+  recovered fact from a lower tier, so the proposal is no longer needed.
+- **unresolvable**: the Gap, the source or the target of the proposal is no
+  longer in the graph, or the node it names as its Gap is no longer a Gap.
+- **stale**: the graph or the source associations of the facts the proposal
+  was made from have changed since it was made, its captured text can no
+  longer be read, or the comparison could not be made. Any change to the
+  graph makes a proposal stale, not only a change near its Gap.
+- **conflicted**: another accepted proposal proposes a different relation for
+  the same Gap. Neither is shown as an item. Reject one of them.
+
+The document gives the reason for each state in a sentence, with its code.
+
+A `best-effort` export shows the curated items, each marked InferredWeak,
+and cites the Gap, source and target of each through the fact index. A
+`verified-only` export shows no curated item and states how many it left
+out. The accepted proposals that are not items, the counts and the summary
+of Workbench decisions are the same in both. When a rejection or the export
+mode withholds a node that an item names, the item is still shown and the
+document says that the node is not cited.
+
+The document also summarises your Workbench decisions on inferred
+statements: how many rejections apply, and which decisions no longer match
+any statement the export makes. A decision stops matching when re-ingest
+changes the statement it was made on.
+
+The **curated revision** at the top identifies this exact set of reviews,
+states and reasons over this graph. The same reviews over the same graph
+give the same revision. Any review, including a rejection, gives a new one.
+A review note does not.
+
+Withdrawing an accepted proposal is rejecting it. A pending or rejected
+proposal is not listed.
+
+Limits today:
+
+- An export reads at most 4,096 proposals and at most 256 accepted ones. With
+  more, the export fails and says so. It never lists a part of them.
+- If the graph changes between the check of a proposal's evidence and the
+  export's own read of the graph, the proposal is listed as stale for that
+  export. Export again.
+- Investigation findings accepted for follow-up are not listed. A finding
+  has no relation to show.
+- The Workbench does not show curated items yet, and an MCP reader and a
+  work packet cannot select this document.
 
 ## Coverage in an export
 
