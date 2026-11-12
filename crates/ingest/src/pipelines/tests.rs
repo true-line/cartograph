@@ -736,3 +736,123 @@ fn dockerfile_stage_relations_are_exact_or_left_as_declared() {
     assert!(external.props.get("copy_from_stage").is_none());
     assert_eq!(node(&out, &stage(2)).props["depth"], 2);
 }
+
+// AC-TBD-1818: `Containerfile`, a dotted suffix of it and any `*.dockerfile`
+// name are read as Dockerfiles; an ignore list and a name that only contains
+// the word are not. One the reader cannot read exactly is still a named
+// limit under its own name.
+#[test]
+fn containerfile_and_dockerfile_suffix_names_are_read() {
+    let stage = "FROM alpine:3.20\nRUN true\n";
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("Containerfile", stage),
+            ("Containerfile.dev", stage),
+            ("docker/api.dockerfile", stage),
+            ("docker/Web.Dockerfile", stage),
+            ("Containerfile.dockerignore", "node_modules\n"),
+            (".dockerfile", stage),
+            ("docs/api.dockerfile.md", stage),
+            ("docker/heredoc.dockerfile", "FROM alpine\nRUN <<EOF\ntrue\nEOF\n"),
+        ],
+    );
+    let out = extract_dir(
+        dir.path(),
+        &SourceId {
+            repo: REPO,
+            commit: "abc",
+        },
+    )
+    .unwrap();
+    let mut pipelines: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Pipeline")
+        .map(|node| {
+            assert_eq!(node.props["format"], "dockerfile");
+            node.props["file"].as_str().unwrap()
+        })
+        .collect();
+    pipelines.sort_unstable();
+    assert_eq!(
+        pipelines,
+        [
+            "Containerfile",
+            "Containerfile.dev",
+            "docker/Web.Dockerfile",
+            "docker/api.dockerfile",
+        ]
+    );
+    assert_eq!(out.files, 4);
+    assert_eq!(
+        out.unread,
+        [Unread {
+            path: "docker/heredoc.dockerfile".into(),
+            reason: "Dockerfile uses a heredoc",
+        }]
+    );
+    let limit = unread(
+        "heredoc.dockerfile",
+        "docker/heredoc.dockerfile",
+        &dir.path().join("docker/heredoc.dockerfile"),
+    )
+    .unwrap();
+    assert_eq!(limit.kind, UNREADABLE_KIND);
+    assert!(
+        unread(
+            "Containerfile",
+            "Containerfile",
+            &dir.path().join("Containerfile")
+        )
+        .is_none()
+    );
+}
+
+// AC-TBD-1818: a `RUN --mount=…,from=` naming an earlier stage, by name or by
+// index, is a stage relation citing the instruction; an external image stays
+// a declared reference, and a quoted option list is not guessed at.
+#[test]
+fn run_mount_from_an_earlier_stage_is_a_stage_relation() {
+    let dockerfile = "FROM golang:1.23 AS deps\nRUN go mod download\nFROM alpine AS tools\nRUN true\nFROM scratch\nRUN --mount=type=bind,FROM=Deps,source=/go/pkg,target=/go/pkg --mount=type=cache,target=/root/.cache --mount=from=1,target=/tools make\nRUN --mount=type=bind,from=busybox:1.36,target=/bb true\nCOPY --from=deps /a /a\n";
+    let out = extract(&[("Dockerfile", dockerfile)]);
+    let stage = |index: usize| format!("pipeline-job:{REPO}@Dockerfile#stage-{index}");
+    // One relation per needed stage; both declarations of it are cited.
+    let deps = edge(&out, &stage(2), "NEEDS", &stage(0));
+    assert_eq!(
+        deps.props["via"],
+        serde_json::json!(["copy-from", "mount-from"])
+    );
+    assert_eq!(deps.props["prov"]["evidence"].as_array().unwrap().len(), 2);
+    let tools = edge(&out, &stage(2), "NEEDS", &stage(1));
+    assert_eq!(tools.props["via"], serde_json::json!(["mount-from"]));
+    assert!(cited(&tools.props, dockerfile).starts_with("RUN --mount=type=bind,FROM=Deps"));
+    assert_eq!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.label == "NEEDS")
+            .count(),
+        2
+    );
+    let run = node(&out, &format!("pipeline-step:{REPO}@Dockerfile#stage-2/1"));
+    assert_eq!(run.props["mount_from"], serde_json::json!(["Deps", "1"]));
+    assert_eq!(
+        run.props["mount_from_stages"],
+        serde_json::json!(["stage-0", "stage-1"])
+    );
+    let external = node(&out, &format!("pipeline-step:{REPO}@Dockerfile#stage-2/2"));
+    assert_eq!(
+        external.props["mount_from"],
+        serde_json::json!(["busybox:1.36"])
+    );
+    assert!(external.props.get("mount_from_stages").is_none());
+    assert_eq!(node(&out, &stage(2)).props["depth"], 1);
+
+    let quoted = extract(&[(
+        "Dockerfile",
+        "FROM alpine AS a\nFROM alpine\nRUN --mount=type=bind,\"from=a\",target=/a true\n",
+    )]);
+    assert!(quoted.nodes.is_empty());
+    assert_eq!(quoted.unread[0].reason, "a RUN --mount option is quoted");
+}
