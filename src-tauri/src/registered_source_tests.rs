@@ -2341,7 +2341,7 @@ fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
     let export = |state: &AppState| {
         let graph = state.graph.lock().unwrap();
         let decisions = state.decisions.lock().unwrap();
-        crate::build_spec_bundle(&*graph, &decisions, spec::ExportMode::BestEffort)
+        crate::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort)
             .unwrap()
             .graph_basis
             .unwrap()
@@ -2362,7 +2362,7 @@ fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
         let graph = state.graph.lock().unwrap();
         let decisions = state.decisions.lock().unwrap();
         crate::preview_spec_bundle(
-            crate::build_spec_bundle(&*graph, &decisions, spec::ExportMode::VerifiedOnly).unwrap(),
+            crate::build_spec_bundle(&graph, &decisions, spec::ExportMode::VerifiedOnly).unwrap(),
         )
     };
     assert_eq!(
