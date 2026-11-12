@@ -377,6 +377,11 @@ yields both. A fixture test per adapter holds one literal read, one dynamic
 read and one shadowed look-alike, and expects exactly one named fact, one
 dynamic fact and nothing for the look-alike (AC-0597).
 
+Each adapter states the capability as a `config_reads` cell in
+`COVERAGE_MATRIX` (`<language>.core.config_reads`, with its conformance
+fixture), and the cell's note names what that adapter does not read, so
+Preflight and Settings show which languages cover it.
+
 ## Path C: an event registry data file
 
 When an existing adapter already parses the language and only an SDK call
