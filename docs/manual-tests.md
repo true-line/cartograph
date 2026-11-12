@@ -1540,6 +1540,37 @@ It is run as step 8 of the release pilot ([readiness report](release/v1.0-readin
 4. Start an investigation and confirm its recorded limits show the new values.
 5. Choose **Restore defaults**; the window shows 10 and 3 again.
 
+## MT-1812-01 — Re-ingest determinism on a real repository (AC-0593, T-0593)
+
+**Status: Not run under this procedure.** AC-0593; #1812. Run at each milestone
+boundary until the check runs in CI. One earlier run of the same test on the
+Cartograph tree at `b0a139c2` passed (32,502 nodes, 58,430 edges, 323 s in a
+debug build).
+
+1. Check out the repository to compare at a fixed commit, with a clean work
+   tree. Record the repository and the full commit id on the milestone's task
+   issue.
+2. From the Cartograph root, run:
+
+   ```sh
+   CARTOGRAPH_DETERMINISM_ROOT=/path/to/checkout \
+   CARTOGRAPH_DETERMINISM_COMMIT=<full commit id> \
+   cargo test --locked -p app pinned_repository_reingest_yields_identical_graph_hash -- --ignored --nocapture
+   ```
+
+3. **Pass:** the test passes. It ingests the checkout twice into fresh graphs
+   at the production ingest parallelism and once with one worker, and the
+   whole-graph content hash, the hash recorded for the registration and the
+   T0 identity list are equal across the three.
+4. Record the printed line (node count, edge count, worker count, graph hash)
+   and the machine's operating system and CPU architecture on the task issue.
+5. **Fail:** any difference. Keep the output and open an issue; a milestone is
+   not closed over a failed run.
+
+The run covers extraction, load and name stitching. It does not cover the
+Tauri job path or the store on disk, and one machine does not establish
+equality across architectures.
+
 ### Captured start timing authority (#1626)
 
 Fresh analyst/auditor staging prints `captured-analyst-start-sha256` or
