@@ -88,6 +88,8 @@ their original task basis; actual producer/capture reconciliation remains #385.
 ## Delivery boundary
 
 This slice makes review durable and binds it to the material actually produced.
+*Amended for #1746 (ADR-0061, SPEC-12):* the curated projection now assigns each accepted record a state at read time, and UI copy states that state; the stored `awaiting_reconciliation` status is unchanged and is no longer shown. The original boundary follows.
+
 Accepted records are explicitly **awaiting context reconciliation**. UI copy must
 not promise that acceptance already affects exports. Recovered graph, context and
 export behavior remain as specified before this slice; H3 and AC-0108 stay open.

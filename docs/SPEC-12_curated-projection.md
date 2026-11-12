@@ -1,6 +1,6 @@
 # SPEC-12 — The curated projection
 
-- **Status:** Proposed for [#1746](https://github.com/true-line/cartograph/issues/1746); slices 1 (projection core, AC-0652), 2 (export, AC-0653) and 4 (MCP, AC-0654) are implemented; slice 3 (Workbench) is not.
+- **Status:** Proposed for [#1746](https://github.com/true-line/cartograph/issues/1746); slices 1 (projection core, AC-0652), 2 (export, AC-0653), 3 (Workbench, AC-0655) and 4 (MCP, AC-0654) are implemented. MT-H3-01 has not been run.
 - **Date:** 2026-11-12
 - **Scope:** US-0021 / AC-0108; SPEC-01 H3; ROADMAP W5.
 - **Decision:** [ADR-0061](adr/ADR-0061-curated-read-contract.md).
@@ -98,8 +98,13 @@ All three call the same function and report the same `revision` for the same
 inputs.
 
 - **Workbench.** A curated section lists items and listed records with their
-  DR-4 fields. The accept dialog and proposal history state the record's
-  state instead of "does not yet change context or exports".
+  DR-4 fields, the proposed edge, the Gap and the basis dimensions. It is
+  carried in the same response as the bundle (`export_spec_with_views`
+  returns `curated` beside `bundle`), so both come from one projection. The
+  records sit in a disclosure that is closed by default. The review dialog
+  and proposal history state an accepted record's state and reason; in
+  `verified-only` an eligible record is not returned, so they point to the
+  section instead.
 - **Export.** `SpecBundle` carries `curated_basis: {revision, counts}` beside
   `graph_basis`. A new artifact, `curated.md`, lists the items and the listed
   records. Each item cites its Gap and endpoints through the fact index
@@ -164,9 +169,8 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
   calling thread, and compiles the documents a second time when a Workbench
   decision matches no stored fact. Both costs are bounded and neither is
   moved off the calling thread yet.
-- `ContextStatus::AwaitingReconciliation` and the doc comment on
-  `ProposalDecision::Accepted` in `agents` still describe the model before
-  ADR-0061. They change with the slice that first shows a state to the user.
+- `ContextStatus::AwaitingReconciliation` stays on the wire and in stored
+  records unchanged; no surface shows it any more.
 - The MCP `user-stories` artifact and the desktop export are built from
   different inputs today (the knowledge overlay). Requirement 1 of #1746
   holds for `curated.md`, not for that artifact.
