@@ -1,6 +1,6 @@
 # SPEC-12 — The curated projection
 
-- **Status:** Proposed for [#1746](https://github.com/true-line/cartograph/issues/1746); slices 1 (projection core, AC-0652) and 2 (export, AC-0653) are implemented.
+- **Status:** Proposed for [#1746](https://github.com/true-line/cartograph/issues/1746); slices 1 (projection core, AC-0652), 2 (export, AC-0653) and 4 (MCP, AC-0654) are implemented; slice 3 (Workbench) is not.
 - **Date:** 2026-11-12
 - **Scope:** US-0021 / AC-0108; SPEC-01 H3; ROADMAP W5.
 - **Decision:** [ADR-0061](adr/ADR-0061-curated-read-contract.md).
@@ -116,11 +116,22 @@ inputs.
   absent, `curated.md` states the reason, nothing from the projection is
   rendered, and every other artifact is unchanged. A current curatable
   assertion is a stored or compiled T2/T3 inferred assertion with evidence.
-  Until slice 4, MCP reads and work packets refuse `curated`.
-- **MCP.** A curated read returns the projection. `h3_curated_available` is
-  true only in the capabilities and basis of a build where that read exists
-  and computed the projection. `ReadBasis` gains the curated revision, and a
-  read fails with `StaleBasis` when the revision changes during the read.
+  Work packets refuse `curated`: the packet host gathers no reviews.
+- **MCP.** A complete session reads the projection through the existing
+  artifact read: `curated` serves the export's `curated.md` bytes for the
+  same inputs and mode, and `curated-json` (`cartograph.mcp/curated-json@1`)
+  serves the same projection as data. `ReadBasis` carries the curated
+  revision, or the reason it was not computed, and it enters the basis
+  identity. `h3_curated_available` is true only for a session whose
+  projection was computed. Acquisition fails with `StaleBasis` when a review,
+  a Workbench rejection or the graph changes while it runs; a session is
+  frozen afterwards. Reviews are gathered only after the session's bounded
+  graph read has succeeded. An agent read never compiles every document: when
+  a Workbench decision matches no stored fact, the projection is not computed
+  for that session and the reason says so, while an export still computes it.
+  A scoped session has no complete graph and reports the read as unavailable.
+  A `verified-only` session gets no item, only the count. Notes, timestamps,
+  and pending or rejected records are not served.
 
 ## Slices
 
@@ -144,6 +155,11 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
   proven from the graph.
 - The Gap predicate is duplicated in `context-hub` and `spec`; a parity test
   in `spec` keeps them equal.
+- A Workbench decision on a derived statement, or one that has gone stale,
+  makes the curated read unavailable over MCP until the compile it needs is
+  accounted for in the worker's limits (#1834).
+- The fact index is not readable over MCP, so the citation ids `curated.md`
+  prints cannot be resolved there.
 - An export assesses each accepted record that could be eligible on the
   calling thread, and compiles the documents a second time when a Workbench
   decision matches no stored fact. Both costs are bounded and neither is
