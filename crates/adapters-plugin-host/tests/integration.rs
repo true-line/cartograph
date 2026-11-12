@@ -669,3 +669,235 @@ fn routing_extracts_only_claimed_files_and_is_deterministic() {
         serde_json::to_string(&second.edges).unwrap()
     );
 }
+
+const PROV_SOURCE: &[u8] = b"hello world";
+const PROV_PATH: &str = "src/lib.rs";
+
+/// One node and one edge carrying `prov` as a guest would have written
+/// it, run through the same host step `call_extract` applies to every
+/// guest extraction.
+fn enforce_guest_prov(
+    prov: serde_json::Value,
+) -> Result<adapters_plugin_host::PluginExtraction, HostError> {
+    let mut extraction = adapters_plugin_host::PluginExtraction {
+        nodes: vec![
+            core_graph::Node {
+                id: "n1".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({ "name": "hello", "prov": prov }),
+            },
+            core_graph::Node {
+                id: "n2".into(),
+                label: "Symbol".into(),
+                props: serde_json::json!({ "name": "world" }),
+            },
+        ],
+        edges: Vec::new(),
+    };
+    adapters_plugin_host::enforce_provenance(
+        &mut extraction,
+        "t0.plugin-fixture",
+        &core_prov::content_hash(OK_ADAPTER),
+        PROV_SOURCE,
+        PROV_PATH,
+        &source_id(),
+    )
+    .map(|()| extraction)
+}
+
+fn guest_span(path: &str, byte_start: u64, byte_end: u64) -> serde_json::Value {
+    serde_json::json!({
+        "repo": "owner/repo",
+        "path": path,
+        "byte_start": byte_start,
+        "byte_end": byte_end,
+        "commit_sha": "deadbeef",
+    })
+}
+
+fn guest_prov(tier: &str, confidence: &str, evidence: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "tier": tier,
+        "confidence_tier": confidence,
+        "evidence": [evidence],
+        "extractor_id": "t0.adapter-ts",
+        "content_hash": "f".repeat(64),
+    })
+}
+
+fn assert_malformed(result: Result<adapters_plugin_host::PluginExtraction, HostError>, why: &str) {
+    match result {
+        Err(HostError::MalformedFact(message)) => assert!(
+            message.starts_with("node n1: ") && message.contains(why),
+            "expected the rejection to name the fact and {why:?}, got {message:?}"
+        ),
+        other => panic!("expected MalformedFact ({why}), got {other:?}"),
+    }
+}
+
+/// T-0594 (AC-0594, #1756): a guest that writes T1 provenance, or any tier
+/// or confidence other than T0 Deterministic/Confirmed, is rejected with
+/// `MalformedFact`. The extraction is refused whole, so the well-formed
+/// fact beside it does not get through either.
+#[test]
+fn guest_written_t1_provenance_is_rejected() {
+    let span = || guest_span(PROV_PATH, 0, 5);
+    assert_malformed(
+        enforce_guest_prov(guest_prov("Dynamic", "Confirmed", span())),
+        "prov.tier is Dynamic",
+    );
+    for tier in ["Semantic", "Agentic"] {
+        assert_malformed(
+            enforce_guest_prov(guest_prov(tier, "Confirmed", span())),
+            "prov.tier",
+        );
+    }
+    for confidence in ["InferredStrong", "InferredWeak", "Gap"] {
+        assert_malformed(
+            enforce_guest_prov(guest_prov("Deterministic", confidence, span())),
+            "prov.confidence_tier",
+        );
+    }
+    // A prov object that leaves the tier out does not default to T0.
+    assert_malformed(
+        enforce_guest_prov(serde_json::json!({
+            "confidence_tier": "Confirmed",
+            "evidence": [span()],
+        })),
+        "prov.tier is missing",
+    );
+    // Claims the host cannot check are refused, not carried along.
+    let mut observed = guest_prov("Deterministic", "Confirmed", span());
+    observed["basis"] = serde_json::json!({ "kind": "observation" });
+    assert_malformed(enforce_guest_prov(observed), "prov.basis");
+    let mut human = guest_prov("Deterministic", "Confirmed", span());
+    human["method"] = serde_json::json!({ "kind": "human", "actor": "owner" });
+    assert_malformed(enforce_guest_prov(human), "prov.method");
+    assert_malformed(
+        enforce_guest_prov(serde_json::json!("Confirmed")),
+        "prov is not a JSON object",
+    );
+}
+
+/// T-0594 (AC-0594, #1756): a guest that cites bytes outside the source it
+/// was handed is rejected with `MalformedFact`.
+#[test]
+fn guest_evidence_span_outside_the_source_is_rejected() {
+    let len = PROV_SOURCE.len() as u64;
+    let reject = |start, end| {
+        assert_malformed(
+            enforce_guest_prov(guest_prov(
+                "Deterministic",
+                "Confirmed",
+                guest_span(PROV_PATH, start, end),
+            )),
+            "outside the 11-byte source",
+        );
+    };
+    reject(0, len + 1);
+    reject(len + 5, len + 9);
+    reject(7, 3);
+    reject(0, u64::MAX);
+    // One good reference does not excuse a bad one beside it.
+    let mut two = guest_prov("Deterministic", "Confirmed", guest_span(PROV_PATH, 0, 5));
+    two["evidence"]
+        .as_array_mut()
+        .unwrap()
+        .push(guest_span(PROV_PATH, 6, len + 1));
+    assert_malformed(enforce_guest_prov(two), "prov.evidence[1]");
+    // No evidence at all cannot be attributed to the mediated source.
+    let mut none = guest_prov("Deterministic", "Confirmed", guest_span(PROV_PATH, 0, 5));
+    none["evidence"] = serde_json::json!([]);
+    assert_malformed(enforce_guest_prov(none), "prov.evidence is empty");
+    // The whole file, and an empty span at its end, are inside the source.
+    for (start, end) in [(0, len), (len, len)] {
+        enforce_guest_prov(guest_prov(
+            "Deterministic",
+            "Confirmed",
+            guest_span(PROV_PATH, start, end),
+        ))
+        .expect("an in-range span is accepted");
+    }
+}
+
+/// T-0594 (AC-0594, #1756): a guest that cites another file, repository or
+/// commit than the mediated source is rejected with `MalformedFact`.
+#[test]
+fn guest_evidence_citing_another_file_is_rejected() {
+    for other in [
+        "src/other.rs",
+        "../secrets.env",
+        "/etc/passwd",
+        "SRC/lib.rs",
+    ] {
+        assert_malformed(
+            enforce_guest_prov(guest_prov(
+                "Deterministic",
+                "Confirmed",
+                guest_span(other, 0, 5),
+            )),
+            "not the mediated file",
+        );
+    }
+    let mut other_repo = guest_span(PROV_PATH, 0, 5);
+    other_repo["repo"] = serde_json::json!("owner/other");
+    assert_malformed(
+        enforce_guest_prov(guest_prov("Deterministic", "Confirmed", other_repo)),
+        "cites repo",
+    );
+    let mut other_commit = guest_span(PROV_PATH, 0, 5);
+    other_commit["commit_sha"] = serde_json::json!("cafef00d");
+    assert_malformed(
+        enforce_guest_prov(guest_prov("Deterministic", "Confirmed", other_commit)),
+        "cites commit",
+    );
+}
+
+/// T-0594 (AC-0594, #1756): a guest's valid T0 provenance keeps its tighter
+/// evidence span, while the extractor id and content hash are the host's:
+/// the hash is the one the host computes for the same fact without guest
+/// provenance, whatever the guest wrote.
+#[test]
+fn host_computes_the_content_hash_and_keeps_valid_guest_spans() {
+    let accepted = enforce_guest_prov(guest_prov(
+        "Deterministic",
+        "Confirmed",
+        guest_span(PROV_PATH, 0, 5),
+    ))
+    .expect("valid T0 guest provenance is accepted");
+    let artifact_hash = core_prov::content_hash(OK_ADAPTER);
+    let prov: core_prov::Provenance =
+        serde_json::from_value(accepted.nodes[0].props["prov"].clone()).expect("host provenance");
+    assert_eq!(prov.tier, core_prov::Tier::Deterministic);
+    assert_eq!(prov.confidence_tier, core_prov::ConfidenceTier::Confirmed);
+    assert_eq!(
+        prov.extractor_id,
+        adapters_plugin_host::pinned_extractor_id("t0.plugin-fixture", &artifact_hash)
+    );
+    assert_eq!(prov.evidence.len(), 1);
+    assert_eq!(
+        (prov.evidence[0].byte_start, prov.evidence[0].byte_end),
+        (0, 5)
+    );
+    assert_eq!(prov.evidence[0].path, PROV_PATH);
+
+    assert_ne!(prov.content_hash, "f".repeat(64));
+    let canonical_props = serde_json::json!({
+        "name": "hello",
+        "plugin_artifact_hash": artifact_hash,
+    });
+    assert_eq!(
+        prov.content_hash,
+        core_prov::content_hash(format!("n1:Symbol:{canonical_props}").as_bytes())
+    );
+    // The same fact without guest provenance gets the same hash, and the
+    // whole mediated file as its span.
+    let bare = enforce_guest_prov(serde_json::Value::Null).expect("absent prov is host-filled");
+    let filled: core_prov::Provenance =
+        serde_json::from_value(bare.nodes[0].props["prov"].clone()).expect("host provenance");
+    assert_eq!(filled.content_hash, prov.content_hash);
+    assert_eq!(
+        (filled.evidence[0].byte_start, filled.evidence[0].byte_end),
+        (0, PROV_SOURCE.len() as u64)
+    );
+}

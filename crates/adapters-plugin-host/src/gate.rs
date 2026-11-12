@@ -234,14 +234,16 @@ fn canonical(extraction: &PluginExtraction) -> Vec<String> {
 
 /// Expected facts, expressed exactly as the host will return them: built
 /// into a `PluginExtraction`, pinned with the same identity, and given the
-/// same host-filled provenance — golden authors never hand-write
-/// `plugin_artifact_hash`, the pinned extractor id, or baseline `prov`.
+/// same host-built provenance — golden authors never hand-write
+/// `plugin_artifact_hash`, the pinned extractor id, the content hash, or
+/// baseline `prov`. An expected `prov` is held to the same rules as a
+/// guest's (AC-0594), so a corpus cannot expect what the host rejects.
 fn expected_canonical(
     case: &GoldenCase,
     plugin_id: &str,
     artifact_hash: &str,
     source_id: &SourceId,
-) -> Vec<String> {
+) -> Result<Vec<String>, HostError> {
     let mut expected = PluginExtraction {
         nodes: case
             .nodes
@@ -263,16 +265,15 @@ fn expected_canonical(
             })
             .collect(),
     };
-    crate::pin_extraction(&mut expected, plugin_id, artifact_hash);
-    crate::fill_missing_provenance(
+    crate::enforce_provenance(
         &mut expected,
         plugin_id,
         artifact_hash,
         case.source.as_bytes(),
         &case.path,
         source_id,
-    );
-    canonical(&expected)
+    )?;
+    Ok(canonical(&expected))
 }
 
 /// Run the full conformance gate for one artifact against its corpus.
@@ -349,14 +350,16 @@ pub fn run_gate(
                 );
                 let got = canonical(&extraction);
                 let want = expected_canonical(case, plugin_id, plugin.artifact_hash(), source_id);
-                let matched = got == want;
+                let matched = want.as_ref().is_ok_and(|want| *want == got);
                 check(
                     &format!("golden:{}", case.path),
                     matched,
-                    if matched {
-                        "facts match the golden expectation exactly".into()
-                    } else {
-                        format!("expected {} fact(s), got {}", want.len(), got.len())
+                    match &want {
+                        Ok(_) if matched => "facts match the golden expectation exactly".into(),
+                        Ok(want) => {
+                            format!("expected {} fact(s), got {}", want.len(), got.len())
+                        }
+                        Err(error) => format!("golden expectation is not acceptable: {error}"),
                     },
                 );
                 first_runs.push(matched.then_some(extraction));
