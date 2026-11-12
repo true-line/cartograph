@@ -289,6 +289,47 @@ fn ac0248_host_verifies_full_artifact_and_keeps_requested_instructions_inert() {
     assert_eq!(f.runtime.store.lock().unwrap().list(50).unwrap().len(), 1);
 }
 
+// AC-0599: the endpoint permission projection is selected into a work packet
+// like any other graph-backed artifact and is bound to the official
+// compiler's exact bytes; the fact index is still not selectable.
+#[test]
+fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let select = |id: &str| {
+        let artifact = bundle.artifacts.iter().find(|a| a.id == id).unwrap();
+        (
+            json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]),
+            artifact,
+        )
+    };
+    let (selection, artifact) = select("endpoint-permissions");
+    f.request["artifacts"] = selection;
+    let generated = generate(&f.state, &f.runtime, &f.request.to_string()).unwrap();
+    assert_eq!(
+        generated.body.evidence.artifacts[0]
+            .artifact
+            .value()
+            .unwrap(),
+        artifact
+    );
+    f.request["artifacts"] = select("fact-index").0;
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+}
+
 // AC-0249: stored decisions keep their exact earlier content. They neither
 // confer current authority nor disappear when today's provenance is invalid.
 #[test]

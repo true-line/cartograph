@@ -1,8 +1,8 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, coverage, fact index) with T0-locked semantics: deterministic facts cannot
-be edited away, only annotated. Curation decisions (accept / reject / annotate)
+register, ADRs, endpoint permissions, coverage, fact index) with T0-locked semantics:
+deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
 The exported bundle file records what it was built from under `graph_basis`:
@@ -10,6 +10,43 @@ the content hash of the whole graph and each source with its commit.
 Curation decisions do not change that hash. It covers every source in
 the system, so with more than one source it differs from the per-source hash
 shown in **Workspace**.
+
+## Endpoints and permission sites
+
+Every export includes **endpoint-permissions.md**. It joins each recovered
+endpoint with the permission sites recovered for it. A permission site is a
+place in the source where a guard or a permission requirement was recovered,
+such as a login decorator. No model is involved.
+
+The document has four parts:
+
+- endpoints with a recovered permission site, each with the site and its source span
+- endpoints with none recovered, where the handler path was read to its end
+- endpoints whose reading is partial
+- a coverage note for endpoints in frameworks where no permission site is recovered
+
+**None recovered** means only that. It does not mean that no check runs. A
+check made by middleware, by a gateway in front of the service or by code
+inside the handler is not recovered. That is a limit of what the tool reads,
+not a finding about the system.
+
+Permission sites are recovered for three frameworks today: Flask guard
+decorators, Flask-Admin views that require a logged-in user, and the `Allow`
+decorator on NestJS GraphQL operations. The document lists them. An endpoint
+in any other framework appears under the coverage note and in neither table.
+
+The handler path is the endpoint's handler and the calls reachable from it.
+An endpoint is listed as partial when no site was recovered and the path was
+not read to its end: a call could not be resolved, no handler was recovered,
+the walk reached its bound, or the guards could not be classified. The walk
+follows at most 16 calls below the handler.
+
+Every row shows the tier, confidence and source span of the endpoint, and of
+the permission site where there is one.
+
+A `verified-only` export leaves out a row whose permission site is
+InferredWeak and states how many it left out. A `best-effort` export includes
+the row and marks it. The same graph gives the same document every time.
 
 ## Coverage in an export
 

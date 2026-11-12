@@ -141,7 +141,7 @@ always shown as unconfirmed until a human confirms each row.
 |---|---------|------|--------------|
 | 6.1 | Authentication and authorization model | P+A | Permission sites, `Actor` caller sets |
 | 6.2 | Permissions granted to infrastructure | P | `security.md` (IAM findings) |
-| 6.3 | Endpoints with no recovered authentication check | P | Endpoints against permission sites |
+| 6.3 | Endpoints with no recovered authentication check | P | `endpoint-permissions.md`: endpoints against the permission sites recovered for them (Flask, Flask-Admin and NestJS GraphQL today) |
 | 6.4 | Secrets and configuration handling | P | Toolchain facts (key names only, never values) |
 | 6.5 | External data flows | P | Flows that cross the system boundary |
 | 6.6 | Compliance obligations | H | — |
@@ -231,7 +231,7 @@ The existing documents do not print the id beside each statement yet; that
 is added one document at a time. Until a document prints its citations, it
 may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's twenty artifacts go
+## 3. Where today's twenty-one artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -248,10 +248,11 @@ may only make statements whose evidence one of §11.1 to §11.5 already holds.
 | `test_arrangements.md` | D8 §8.1 to §8.3 |
 | `journeys.md` | D9 §9.1 to §9.3 |
 | `rule-evidence.md`, `rule-evidence.json` | D1 §1.5, D11 §11.4 |
+| `endpoint-permissions.md` | D6 §6.3 |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
 | `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The twenty files keep being exported under their current names until each
+The twenty-one files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -264,7 +265,7 @@ row names the issue that tracks it.
 | D1 §1.1, D3 §3.4, D7 §7.5, D10 §10.2 | Target documentation as evidence (#1750) |
 | D1 §1.2, §1.3, D5 §5.3, D10 §10.3 on a real repository | The knowledge phase now reads a base past 50,000 rows, up to the ADR-0052 ceiling (#1771, fixed). A skip past the ceiling is still not shown in the app (#1782) |
 | D4 §4.1 | Endpoint inventory in the export (#1658) |
-| D6 §6.3 | A projection of endpoints against permission sites (#1787) |
+| D6 §6.3 | Endpoints are projected against permission sites as `endpoint-permissions.md` (#1787, fixed). Permission sites are recovered for Flask, Flask-Admin and NestJS GraphQL only, and only on the endpoint's own declaration: an endpoint of any other framework is listed under a coverage note in neither table, and a check made by middleware, a gateway or code inside a handler body is not recovered (#1320 covers Flask in-body checks). "None recovered" therefore never means that no check runs |
 | D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary (#1788) |
 | D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied (#1791) |
 | D7 §7.3, D6 §6.4 | Every compiled-in adapter (TypeScript/JavaScript, Python, Go, Java, Kotlin, Rust) emits a `ConfigRead` fact for a standard-library environment read, named for a literal key and unnamed for a dynamic one (ADR-0059); before that only a key that named a recognised client (`env_key` on an observed `Resource`, TypeScript and Python) was recorded. Still missing: the projection that lists each key with where it is declared and read, and reads through configuration frameworks (Spring `@Value`, NestJS `ConfigService`, Viper). There is no C# adapter (#1789) |
@@ -294,7 +295,7 @@ of them.
    Each row stays unconfirmed until a person confirms it.
 5. **One file per document**, Markdown, with the appendices as separate
    files. Other formats are a rendering concern.
-6. **The current twenty artifacts stay exported** alongside the new
+6. **The current twenty-one artifacts stay exported** alongside the new
    documents until every consumer has moved.
 7. **Order of delivery:** D11 and the P sections of D4 and D5 first (no
    model needed), then D1, then D2 and D3, then the rest.

@@ -370,6 +370,7 @@ fn parse_generation(
         "journeys",
         "rule-evidence",
         "rule-evidence-index",
+        "endpoint-permissions",
     ];
     if selection
         .artifacts

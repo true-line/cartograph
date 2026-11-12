@@ -1257,5 +1257,6 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         set_slots::<&str>(rows)?, // topology backed + configured
         slots::<&str>(values)?,
     ])?;
-    Some(data.max(tools).max(tests).max(simple))
+    let endpoints = super::endpoint_permissions::logical_index_bytes(rows)?;
+    Some(data.max(tools).max(tests).max(simple).max(endpoints))
 }

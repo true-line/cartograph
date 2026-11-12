@@ -899,13 +899,15 @@ mod tests {
     fn cited_endpoint_resolves_to_a_row_with_its_span() {
         let (nodes, edges) = graph();
         let bundle = export(&nodes, &edges, ExportMode::VerifiedOnly);
-        let citing: Vec<&str> = bundle
+        let mut citing: Vec<&str> = bundle
             .artifacts
             .iter()
             .filter(|artifact| artifact.assertions.iter().any(|a| a.subject_id == ENDPOINT))
             .map(|artifact| artifact.id.as_str())
             .collect();
         assert!(!citing.is_empty(), "a document states the endpoint");
+        // A row names its citing artifacts sorted, not in export order.
+        citing.sort_unstable();
 
         let index = index(&bundle);
         let cited = citation_id(&node_key(ENDPOINT));

@@ -82,7 +82,8 @@ pub use views::{
 pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,
     COVERAGE_DETAIL_REPO_LIMIT, CapabilityCompileWorkspaceBound, CapabilityStory,
-    CapabilityStoryInputError, CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS, ExportMode,
+    CapabilityStoryInputError, CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS,
+    ENDPOINT_PATH_MAX_DEPTH, ENDPOINT_PATH_MAX_RELATIONS, ENDPOINT_PATH_MAX_SYMBOLS, ExportMode,
     FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
     KnowledgeStoryCompileWorkspaceBound, PartitionAcquisition, PartitionArtifact,
     PartitionArtifactKind, PartitionError, PartitionWorkspaceBound, SelectedArtifactLimit,
