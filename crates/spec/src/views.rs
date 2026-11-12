@@ -421,6 +421,7 @@ pub fn try_compile_spec_with_views_and_coverage(
 ) -> Result<(SpecBundle, SpecViewBundle), crate::FactIndexError> {
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .expect("unbounded ADR derivation");
+    let beside = selected::Beside::new(nodes, edges, mode, rejected_hashes, coverage);
     let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
     let filtered_edges = filter_edges(&projection.edges, mode, rejected_hashes);
     let bundle = selected::try_bundle_from_filtered(
@@ -429,7 +430,7 @@ pub fn try_compile_spec_with_views_and_coverage(
         &projection.flows,
         mode,
         rejected_hashes,
-        coverage,
+        beside,
     )?;
 
     let artifact_for = |id: &str| -> &SpecArtifact {

@@ -1219,7 +1219,7 @@ mod tests {
                 &filtered_nodes,
                 &filtered_edges,
                 &projection.flows,
-                (mode, &none, &[]),
+                (mode, &none, Default::default()),
                 id,
             )
         };
