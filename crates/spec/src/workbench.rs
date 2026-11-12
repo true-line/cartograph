@@ -7,6 +7,8 @@ pub use accounting::{
     logical_capability_compile_bound, logical_compile_bound,
 };
 mod capabilities;
+mod configuration;
+pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
 pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
 pub(crate) mod diagrams;
@@ -933,7 +935,8 @@ mod tests {
             // stories render recovered names, ids and provenance as literal text
             // (#1453), which intentionally changes those bytes. The endpoint
             // permission projection (#1787), the pipeline projection (#1818),
-            // the coverage artifacts (#1786) and the fact index (#1785) are
+            // the configuration key projection (#1821), the coverage
+            // artifacts (#1786) and the fact index (#1785) are
             // appended after these and hashed apart, so the frozen bytes
             // still prove the graph artifacts are unchanged.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
@@ -941,13 +944,14 @@ mod tests {
     }
 
     /// The bundle without the endpoint permission projection (#1787), the
-    /// pipeline projection (#1818), the two coverage artifacts, which
-    /// project stored inventories instead of the graph (#1786), and the two
-    /// fact-index artifacts, which list what the others cite (#1785). The
-    /// six close the official order; the fixture has no endpoint and no
-    /// pipeline, so none carries an assertion here.
+    /// pipeline projection (#1818), the configuration key projection
+    /// (#1821), the two coverage artifacts, which project stored inventories
+    /// instead of the graph (#1786), and the two fact-index artifacts, which
+    /// list what the others cite (#1785). The seven close the official
+    /// order; the fixture has no endpoint, no pipeline, no environment file
+    /// and no configuration read, so none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 6);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 7);
         assert_eq!(
             appended
                 .iter()
@@ -956,6 +960,7 @@ mod tests {
             [
                 "endpoint-permissions",
                 "pipelines",
+                "configuration",
                 "coverage",
                 "coverage-index",
                 "fact-index",
@@ -1097,6 +1102,7 @@ mod tests {
                 "rule-evidence.json",
                 "endpoint-permissions.md",
                 "pipelines.md",
+                "configuration.md",
                 "coverage.md",
                 "coverage.json",
                 "fact-index.md",
@@ -2464,7 +2470,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 22);
+                assert_eq!(full.artifacts.len(), 23);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,

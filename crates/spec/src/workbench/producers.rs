@@ -1259,11 +1259,13 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
     ])?;
     let endpoints = super::endpoint_permissions::logical_index_bytes(rows)?;
     let pipelines = super::pipelines::logical_index_bytes(rows)?;
+    let configuration = super::configuration::logical_index_bytes(rows, values)?;
     Some(
         data.max(tools)
             .max(tests)
             .max(simple)
             .max(endpoints)
-            .max(pipelines),
+            .max(pipelines)
+            .max(configuration),
     )
 }
