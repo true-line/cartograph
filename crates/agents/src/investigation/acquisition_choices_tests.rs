@@ -1431,3 +1431,296 @@ fn completed_acquisition_replay_schema_uses_versioned_history_policy() {
             .any(|a| a["properties"]["type"]["const"] == "replay_query")
     );
 }
+
+// AC-0596: independent old query/new read placements are both covered.
+#[test]
+fn auditor14_closed_reserve_covers_query_read_feedback_in_both_slots() {
+    use staged_finish::RefusalFeedback;
+    let f = Fixture::new();
+    let empty = f.empty();
+    let upper = serde_json::to_value(
+        RefusalFeedback::sizing_closed_contract_envelope(&f.contract, &f.ledger, POLICY).unwrap(),
+    )
+    .unwrap();
+    let old = serde_json::to_value(
+        RefusalFeedback::sizing_replay_contract_envelope(&f.contract, &f.ledger, POLICY).unwrap(),
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(&upper).unwrap().len() < serde_json::to_vec(&old).unwrap().len());
+    let correction = |ledger: &InvestigationInputLedger| {
+        let choices = f.derive(ledger, &[]).unwrap();
+        choices
+            .citation_correction(
+                std::slice::from_ref(&f.target.target_id),
+                &f.contract,
+                &f.metadata,
+                ledger,
+                POLICY,
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let query = correction(&empty);
+    let read = correction(&f.ledger);
+    for (saved, current) in [(&query, &read), (&read, &query)] {
+        let feedback = serde_json::json!({"schema_version":2,"citation_correction":saved,"unmet":[{"obligation_id":saved.entries[0].obligation_id,"kind":"source","reason":"not_attempted"}]});
+        serde_json::from_value::<RefusalFeedback>(feedback.clone())
+            .unwrap()
+            .bytes_with_policy(POLICY)
+            .unwrap();
+        let pack = |a: serde_json::Value, b: serde_json::Value| {
+            serde_json::json!({"completion_metadata":{"feedback":a},"turn_progress":{"citation_correction":b}}).to_string()
+        };
+        let mut actual = pack(feedback, serde_json::to_value(current).unwrap());
+        let mut bound = pack(upper.clone(), upper.clone());
+        for _ in 0..5 {
+            assert!(actual.len() <= bound.len());
+            assert!(
+                core_redact::redact_text(&actual).0.len()
+                    <= core_redact::redact_text(&bound).0.len()
+            );
+            actual = serde_json::to_string(&actual).unwrap();
+            bound = serde_json::to_string(&bound).unwrap();
+        }
+    }
+}
+
+#[test]
+fn auditor14_closed_feedback_variants_and_contract_growth() {
+    use staged_finish::{ConflictingEvidence, ProseCorrection, RefusalFeedback, RefusalReason};
+    let f = Fixture::new();
+    let size = |contract: &InvestigationCompletionContract| {
+        serde_json::to_value(
+            RefusalFeedback::sizing_closed_contract_envelope(contract, &f.ledger, POLICY).unwrap(),
+        )
+        .unwrap()
+    };
+    let upper = size(&f.contract);
+    let mut feedback: RefusalFeedback = serde_json::from_value(
+        serde_json::to_value(
+            RefusalFeedback::sizing_upper_envelope_with_policy(&f.contract.obligations, POLICY)
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let position = ProsePosition {
+        field: ProseField::FindingLimitation {
+            finding: 11,
+            limitation: 7,
+        },
+        sentence: MAX_INPUT_BYTES as u32,
+    };
+    let location = ReplayLocation {
+        start: position.clone(),
+        end: position,
+    };
+    let variants = [
+        None,
+        Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse),
+        Some(ProseCorrection::ParaphraseWithoutQuotingSource),
+        Some(ProseCorrection::ParaphraseReplayAt(location.clone())),
+        Some(ProseCorrection::UnverifiedEnumerationClaimAt(
+            location.clone(),
+        )),
+        Some(ProseCorrection::UnverifiedConfigurationClaimAt(location)),
+        Some(ProseCorrection::LimitationDeniesAcquiredEvidence(Box::new(
+            ConflictingEvidence {
+                evidence_ids: (1..=POLICY.limits().evidence_items)
+                    .map(|i| format!("evidence-{i}"))
+                    .collect(),
+            },
+        ))),
+    ];
+    for correction in variants {
+        feedback.schema_version = if correction.is_some() { 5 } else { 1 };
+        feedback.prose_correction = correction;
+        for reason in [
+            RefusalReason::NotAttempted,
+            RefusalReason::ExcludedByCapacity,
+            RefusalReason::AcquiredNotSupplied,
+            RefusalReason::Redacted,
+            RefusalReason::HashMismatch,
+            RefusalReason::Unavailable,
+        ] {
+            for item in &mut feedback.unmet {
+                item.reason = reason;
+            }
+            let mut actual = serde_json::to_string(&feedback).unwrap();
+            let mut bound = serde_json::to_string(&upper).unwrap();
+            for _ in 0..6 {
+                assert!(actual.len() <= bound.len());
+                assert!(
+                    core_redact::redact_text(&actual).0.len()
+                        <= core_redact::redact_text(&bound).0.len()
+                );
+                actual = serde_json::to_string(&actual).unwrap();
+                bound = serde_json::to_string(&bound).unwrap();
+            }
+        }
+    }
+    // Shape-valid synthetic contracts: sizing grants no acquisition authority.
+    // IDs are taken from the contract itself, not a fixed nominal ID length.
+    let mut larger = f.contract.clone();
+    let mut target = f.target.clone();
+    if let crate::TaskFactKey::Node { id } = &mut target.fact {
+        id.push_str(&"z".repeat(900));
+    }
+    target.target_id = target.content_id().unwrap();
+    larger.obligations.obligations = vec![identified(Obligation::Source {
+        obligation_id: String::new(),
+        target: Box::new(target.clone()),
+    })];
+    larger.obligations = larger.obligations.normalized_with_policy(POLICY).unwrap();
+    larger.obligations_hash = larger.obligations.fingerprint_with_policy(POLICY).unwrap();
+    let long = size(&larger);
+    let mut short = larger.clone();
+    short.obligations.obligations = vec![identified(Obligation::Source {
+        obligation_id: String::new(),
+        target: Box::new(f.target.clone()),
+    })];
+    short.obligations = short.obligations.normalized_with_policy(POLICY).unwrap();
+    short.obligations_hash = short.obligations.fingerprint_with_policy(POLICY).unwrap();
+    assert!(
+        serde_json::to_vec(&long).unwrap().len() > serde_json::to_vec(&size(&short)).unwrap().len()
+    );
+    larger
+        .obligations
+        .obligations
+        .extend(short.obligations.obligations);
+    larger.obligations = larger.obligations.normalized_with_policy(POLICY).unwrap();
+    larger.obligations_hash = larger.obligations.fingerprint_with_policy(POLICY).unwrap();
+    assert!(
+        serde_json::to_vec(&size(&larger)).unwrap().len()
+            > serde_json::to_vec(&long).unwrap().len()
+    );
+}
+
+#[test]
+fn auditor14_real_seven_target_correction_fits_both_slots() {
+    use staged_finish::{ProseCorrection, RefusalFeedback};
+    let mut f = Fixture::new();
+    let mut ledger = f.empty();
+    ledger.receipt_references = f.ledger.receipt_references.clone();
+    ledger.queries = f.ledger.queries.clone();
+    ledger.queries[0].returned_facts = 4;
+    ledger.queries[0].total_selected = 4;
+    let selected = f.ledger.selected_facts[0].clone();
+    let graph = f
+        .ledger
+        .citations
+        .iter()
+        .find(|c| matches!(c.origin, InvestigationEvidenceOrigin::GraphMetadata))
+        .unwrap()
+        .clone();
+    let mut ids = Vec::new();
+    let mut sources = Vec::new();
+    for i in 0..7 {
+        let mut target = f.target.clone();
+        target.fact = TaskFactKey::Node {
+            id: format!("node:source-{i}"),
+        };
+        target.target_id = target.content_id().unwrap();
+        ids.push(target.target_id.clone());
+        if i < 4 {
+            let mut fact = selected.clone();
+            fact.fact = target.fact.clone();
+            let mut citation = graph.clone();
+            citation.fact = target.fact.clone();
+            citation.citation_id = format!("fact-{}", i + 1);
+            ledger.selected_facts.push(fact);
+            ledger.citations.push(citation);
+        }
+        sources.push(identified(Obligation::Source {
+            obligation_id: String::new(),
+            target: Box::new(target),
+        }));
+    }
+    f.contract.obligations.obligations.extend(sources);
+    f.contract.obligations.obligations.retain(|o| !matches!(o, Obligation::Source { target, .. } if target.target_id == f.target.target_id));
+    f.contract.obligations = f
+        .contract
+        .obligations
+        .normalized_with_policy(POLICY)
+        .unwrap();
+    f.contract.obligations_hash = f
+        .contract
+        .obligations
+        .fingerprint_with_policy(POLICY)
+        .unwrap();
+    f.metadata.obligations_hash = f.contract.obligations_hash.clone();
+    ledger.validate_with_policy(POLICY).unwrap();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    ids.push(ids[0].clone()); // Deduplicated, never two entries per target.
+    let mixed = choices
+        .citation_correction(&ids, &f.contract, &f.metadata, &ledger, POLICY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(mixed.entries.len(), 7);
+    assert_eq!(
+        mixed
+            .entries
+            .iter()
+            .filter(|e| matches!(e.action, AcquisitionAction::ReadEvidence { .. }))
+            .count(),
+        4
+    );
+    for entry in &mixed.entries {
+        if let AcquisitionAction::QueryContext { query, .. } = &entry.action {
+            assert!(query.labels.is_empty() && query.cursor.is_none());
+            assert_eq!(query.max_facts, 1);
+            assert_eq!(query.max_bytes, MAX_QUERY_BYTES);
+            assert!(matches!(query.scope, InvestigationScope::Node { .. }));
+        }
+    }
+    let empty = f.empty();
+    let query = f
+        .derive(&empty, &[])
+        .unwrap()
+        .citation_correction(&ids, &f.contract, &f.metadata, &empty, POLICY)
+        .unwrap()
+        .unwrap();
+    let upper = serde_json::to_value(
+        RefusalFeedback::sizing_closed_contract_envelope(&f.contract, &ledger, POLICY).unwrap(),
+    )
+    .unwrap();
+    for (saved, current) in [(&mixed, &query), (&query, &mixed)] {
+        let mut feedback: RefusalFeedback = serde_json::from_value(
+            serde_json::to_value(
+                RefusalFeedback::sizing_upper_envelope_with_policy(&f.contract.obligations, POLICY)
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        feedback.schema_version = 2;
+        feedback.citation_correction = Some(saved.clone());
+        for item in &mut feedback.unmet {
+            if item.kind == "source" {
+                item.reason = staged_finish::RefusalReason::NotAttempted;
+            }
+        }
+        feedback.bytes_with_policy(POLICY).unwrap();
+        let mut invalid = feedback.clone();
+        invalid.schema_version = 3;
+        invalid.prose_correction = Some(ProseCorrection::ParaphraseWithoutQuotingSource);
+        assert!(invalid.bytes_with_policy(POLICY).is_err());
+        let pack = |a: serde_json::Value, b: serde_json::Value| {
+            serde_json::json!({"completion_metadata":{"feedback":a},"turn_progress":{"citation_correction":b}}).to_string()
+        };
+        let mut actual = pack(
+            serde_json::to_value(feedback).unwrap(),
+            serde_json::to_value(current).unwrap(),
+        );
+        let mut bound = pack(upper.clone(), upper.clone());
+        for _ in 0..5 {
+            assert!(actual.len() <= bound.len());
+            assert!(
+                core_redact::redact_text(&actual).0.len()
+                    <= core_redact::redact_text(&bound).0.len()
+            );
+            actual = serde_json::to_string(&actual).unwrap();
+            bound = serde_json::to_string(&bound).unwrap();
+        }
+    }
+}

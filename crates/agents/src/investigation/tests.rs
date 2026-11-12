@@ -803,3 +803,28 @@ fn rejected_finish_diagnostic_codes_are_closed() {
         }
     }
 }
+
+#[test]
+fn auditor14_capacity_terminal_diagnostic_is_closed() {
+    let diagnostic = InvestigationTerminalDiagnostic::CapacityCompletion {
+        reason: CapacityCompletionReason::UnmetObligationsAfterCapacityExclusion,
+    };
+    let value = serde_json::to_value(diagnostic).unwrap();
+    assert_eq!(
+        value,
+        json!({"schema":"investigation-terminal-diagnostic@4","reason":"unmet_obligations_after_capacity_exclusion"})
+    );
+    assert_eq!(
+        serde_json::from_value::<InvestigationTerminalDiagnostic>(value.clone()).unwrap(),
+        diagnostic
+    );
+    for (field, text) in [
+        ("reason", "source prose"),
+        ("response_text", "forbidden"),
+        ("schema", "unknown@4"),
+    ] {
+        let mut changed = value.clone();
+        changed[field] = json!(text);
+        assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
+    }
+}

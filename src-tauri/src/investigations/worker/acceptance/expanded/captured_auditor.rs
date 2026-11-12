@@ -133,7 +133,10 @@ pub(super) fn stage(
         || wire(&normalized)? != wire(request)?
         || !matches!(
             request.specialist_id.as_str(),
-            "evidence-auditor@11" | "evidence-auditor@12" | "evidence-auditor@13"
+            "evidence-auditor@11"
+                | "evidence-auditor@12"
+                | "evidence-auditor@13"
+                | "evidence-auditor@14"
         )
         || !request
             .obligations
@@ -142,7 +145,9 @@ pub(super) fn stage(
             .any(|o| matches!(o, obligations::Obligation::Inventory { .. }))
         || sources.is_empty()
         || expected.specialist
-            != (if request.specialist_id == "evidence-auditor@13" {
+            != (if request.specialist_id == "evidence-auditor@14" {
+                SpecialistId::EvidenceAuditorV14
+            } else if request.specialist_id == "evidence-auditor@13" {
                 SpecialistId::EvidenceAuditorV13
             } else if request.specialist_id == "evidence-auditor@12" {
                 SpecialistId::EvidenceAuditorV12

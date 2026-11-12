@@ -108,6 +108,15 @@ pub(super) fn collect_bound(authority: &Authority<'_>) -> Result<Value, String> 
     collect_role(authority, "analyst")
 }
 fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'static str, String> {
+    if frozen == "evidence-auditor@14" || saved == SpecialistId::EvidenceAuditorV14 {
+        if frozen != "evidence-auditor@14"
+            || saved != SpecialistId::EvidenceAuditorV14
+            || role != "auditor"
+        {
+            return Err("Auditor correction receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist14-prompt13-disclosure6-result7");
+    }
     if frozen == "evidence-auditor@13" || saved == SpecialistId::EvidenceAuditorV13 {
         if frozen != "evidence-auditor@13"
             || saved != SpecialistId::EvidenceAuditorV13

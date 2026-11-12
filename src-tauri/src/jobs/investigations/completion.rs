@@ -2252,6 +2252,20 @@ pub(super) fn refused(
         } else {
             Some(InvestigationCompletionOutcome::ObligationsUnmet)
         };
+        // Only authenticated refusal feedback can attribute this terminal to
+        // capacity exclusion. Old roles and cancellation keep their saved shape.
+        if !task.detail.summary.cancel_requested
+            && task.detail.summary.specialist_id == SpecialistId::EvidenceAuditorV14
+            && entry.record.feedback.unmet.iter().any(|item| {
+                item.reason
+                    == agents::investigation::staged_finish::RefusalReason::ExcludedByCapacity
+            })
+        {
+            task.detail.terminal_diagnostic = Some(
+                agents::investigation::InvestigationTerminalDiagnostic::CapacityCompletion {
+                    reason: agents::investigation::CapacityCompletionReason::UnmetObligationsAfterCapacityExclusion,
+                });
+        }
         task.detail.error = Some(
             if task.detail.summary.cancel_requested {
                 "Cancellation won over a late unmet finish."
