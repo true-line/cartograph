@@ -159,7 +159,7 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
             Err(ReadError::InvalidRequest)
         ));
     }
-    assert_eq!(advertised.len(), official.len() - 2);
+    assert_eq!(advertised.len(), official.len() - 3);
     assert_eq!(selectable.len(), advertised.len());
     for id in advertised {
         assert!(
@@ -170,6 +170,50 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
             "{id} still reads"
         );
     }
+}
+
+// AC-0653: an MCP read does not compute the curated projection, so
+// `curated` is hidden from the catalogue and the tool schema and refused
+// before anything is traced or compiled. The capability flag stays false.
+#[test]
+fn mcp_read_hides_and_refuses_the_curated_document() {
+    let session = fixture(ExportMode::BestEffort);
+    let no_trace = flowtracer::TraceLimits {
+        max_output_bytes: 0,
+        ..trace_limits()
+    };
+    let no_output = spec::SelectedCompileLimits {
+        max_bytes: 0,
+        ..compile_limits()
+    };
+    assert!(
+        spec::artifact_catalog()
+            .iter()
+            .any(|artifact| artifact.id == "curated"),
+        "curated is an official artifact"
+    );
+    assert!(
+        session
+            .artifact_catalog()
+            .iter()
+            .all(|artifact| artifact.id != "curated")
+    );
+    let schema =
+        crate::mcp_reads::dispatch::tool_descriptor(mcp_wire::admission::ReadTool::ReadArtifact);
+    assert!(
+        schema["inputSchema"]["properties"]["artifact_id"]["enum"]
+            .as_array()
+            .expect("closed artifact id enum")
+            .iter()
+            .all(|value| value != "curated")
+    );
+    for (trace, compile) in [(no_trace, no_output), (trace_limits(), compile_limits())] {
+        assert!(matches!(
+            session.compile_artifact("curated", trace, compile),
+            Err(ReadError::InvalidRequest)
+        ));
+    }
+    assert!(!session.basis().h3_curated_available);
 }
 
 #[test]

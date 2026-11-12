@@ -53,7 +53,12 @@ pub(crate) struct ArtifactPage<'a> {
 /// it compiles every citing artifact and holds the rows, which the reserved
 /// `spec::logical_compile_bound` workspace does not model. The desktop export
 /// and single-artifact read still produce it.
-const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
+///
+/// `curated` (SPEC-12, AC-0653) is not readable either. An MCP read does not
+/// compute the curated projection, so the document compiled here could only
+/// say that none was supplied. The curated read of SPEC-12 slice 4 is the MCP
+/// surface for it, and `h3_curated_available` stays false until then.
+const NOT_READABLE: [&str; 3] = ["fact-index", "fact-index-json", "curated"];
 
 /// The official artifacts an MCP reader may select: the compiler's catalogue
 /// without the ids in [`NOT_READABLE`]. The one list behind the advertised
