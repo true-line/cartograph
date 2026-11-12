@@ -114,7 +114,14 @@ fn raw_and_filtered_identities_remain_distinct_and_policy_is_frozen() {
     assert_eq!(best.basis().recovered_graph_id, raw_id);
     assert_ne!(verified.basis().projection_snapshot_id, raw_id);
     assert_eq!(best.basis().projection_snapshot_id, raw_id);
-    assert!(!best.basis().h3_curated_available);
+    // AC-0654: the projection is computed for the session, with one
+    // revision in both modes, and the flag says so.
+    assert!(best.basis().h3_curated_available && verified.basis().h3_curated_available);
+    assert!(matches!(
+        best.basis().curated,
+        curated_read::CuratedBasis::Computed { .. }
+    ));
+    assert_eq!(best.basis().curated, verified.basis().curated);
     assert!(verified.qualified.shares_snapshot(&verified.snapshot));
     assert_eq!(verified.base.graph.0, raw.0);
     assert_eq!(verified.base.graph.1, raw.1);
@@ -200,8 +207,11 @@ fn accepted_annotation_changes_do_not_invent_a_curated_revision() {
         ExportMode::BestEffort,
     )
     .unwrap();
+    // AC-0654: the curated revision is in the basis, and an accepted
+    // decision on a current statement is neither a rejection nor stale, so
+    // it gives no other revision.
     assert_eq!(session.basis(), first.basis());
-    assert!(!session.basis().h3_curated_available);
+    assert!(session.basis().h3_curated_available);
 }
 
 #[test]

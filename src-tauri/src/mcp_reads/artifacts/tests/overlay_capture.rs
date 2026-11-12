@@ -110,6 +110,7 @@ impl Fixture {
             &self.graph,
             Some(&self.overlay),
             &self.decisions,
+            &crate::curated::NoReviews,
             || Ok(vec![]),
             limits,
             CoverageReadLimits::default(),

@@ -79,6 +79,13 @@ fn scoped_protocol_advertises_real_routes_and_keeps_discovery_lean() {
         assert_eq!(caps["result"]["structuredContent"]["mode"], "scoped");
         let capabilities = &caps["result"]["structuredContent"];
         assert_eq!(capabilities["evidence_absence_reason_available"], false);
+        // AC-0654: a scoped session reads no complete graph, computes no
+        // curated projection and offers no curated read.
+        assert_eq!(capabilities["h3_curated_available"], false);
+        assert_eq!(
+            capabilities["h3_curated_unavailable_reason"],
+            "complete_basis_required"
+        );
         assert_eq!(
             capabilities["receipt_omission_classification"]["available"],
             true

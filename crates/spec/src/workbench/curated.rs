@@ -25,9 +25,10 @@
 //! facts this compilation was given, is not cited: the row says so and the
 //! document counts them. No citation id is printed for a node without a row.
 //!
-//! **No projection.** A bare compile, the work-packet host and an MCP read
-//! supply none. The document then says that none was supplied and lists
-//! nothing; an empty list would not mean that no proposal was accepted.
+//! **No projection.** A bare compile and the work-packet host supply none.
+//! The document then says that none was supplied and lists nothing; an empty
+//! list would not mean that no proposal was accepted. An MCP read session
+//! supplies the projection it computed (SPEC-12 slice 4, AC-0654).
 //!
 //! **Cost.** One pass over the items and one over the listed records. When
 //! a `best-effort` export has items, one index of the admitted nodes by id;

@@ -1,7 +1,7 @@
 //! Official selected compilation and identity-bound artifact text pages.
 //! No cache: the caller owns every produced handle and its retention admission.
 
-use super::{ReadError, ReadSession};
+use super::{ReadError, ReadSession, curated_read};
 use serde::Serialize;
 use std::{
     io::{self, Write},
@@ -52,22 +52,28 @@ pub(crate) struct ArtifactPage<'a> {
 /// The fact and evidence index (ADR-0058) is not readable over MCP: compiling
 /// it compiles every citing artifact and holds the rows, which the reserved
 /// `spec::logical_compile_bound` workspace does not model. The desktop export
-/// and single-artifact read still produce it.
-///
-/// `curated` (SPEC-12, AC-0653) is not readable either. An MCP read does not
-/// compute the curated projection, so the document compiled here could only
-/// say that none was supplied. The curated read of SPEC-12 slice 4 is the MCP
-/// surface for it, and `h3_curated_available` stays false until then.
-const NOT_READABLE: [&str; 3] = ["fact-index", "fact-index-json", "curated"];
+/// and single-artifact read still produce it. A `curated` read therefore
+/// prints citation ids that this surface cannot look up.
+const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
 
-/// The official artifacts an MCP reader may select: the compiler's catalogue
-/// without the ids in [`NOT_READABLE`]. The one list behind the advertised
-/// catalogue, the tool's input schema and the read's own admission.
+/// The artifacts an MCP reader may select: the compiler's catalogue without
+/// the ids in [`NOT_READABLE`], and the structured form of the curated
+/// projection after `curated` (SPEC-12 slice 4, AC-0654). The one list
+/// behind the advertised catalogue, the tool's input schema and the read's
+/// own admission.
 pub(crate) fn readable_catalog() -> Vec<spec::ArtifactDescriptor> {
-    spec::artifact_catalog()
-        .into_iter()
-        .filter(|artifact| !NOT_READABLE.contains(&artifact.id))
-        .collect()
+    let mut catalog = Vec::new();
+    for artifact in spec::artifact_catalog() {
+        if NOT_READABLE.contains(&artifact.id) {
+            continue;
+        }
+        let curated = artifact.id == curated_read::ARTIFACT_ID;
+        catalog.push(artifact);
+        if curated {
+            catalog.push(curated_read::json_descriptor());
+        }
+    }
+    catalog
 }
 
 impl ReadSession {
@@ -87,6 +93,27 @@ impl ReadSession {
         // before any tracing or compilation.
         if !readable_catalog().iter().any(|artifact| artifact.id == id) {
             return Err(ReadError::InvalidRequest);
+        }
+        if id == curated_read::JSON_ARTIFACT_ID {
+            // The projection the session holds, serialized. Nothing is
+            // traced or compiled, and no partial document is returned.
+            let artifact = self
+                .curated
+                .json_artifact(self.basis.export_mode)
+                .map_err(|()| ReadError::Storage)?;
+            return Ok(if artifact.content.len() > compile_limits.max_bytes {
+                ArtifactCompilation::Limited {
+                    artifact_id: id.into(),
+                    limit: ArtifactLimit::Compiler(spec::SelectedArtifactLimit::OutputBytes {
+                        remaining: compile_limits.max_bytes,
+                    }),
+                }
+            } else {
+                ArtifactCompilation::Produced(CompiledArtifact {
+                    basis_id: self.basis_id()?,
+                    artifact,
+                })
+            });
         }
         let security = spec::security_projection_bound(
             self.graph_limits.max_bytes,
@@ -133,6 +160,27 @@ impl ReadSession {
                 },
             )
             .map_err(|_| ReadError::Storage)?
+        } else if id == curated_read::ARTIFACT_ID {
+            // The selected compiler the desktop single-artifact read uses,
+            // supplied with the projection this session computed. `curated.md`
+            // reads no coverage inventory and no security projection.
+            spec::compile_spec_selected_supplied(
+                &self.base.graph.0,
+                &self.base.graph.1,
+                &flows,
+                self.basis.export_mode,
+                &self.rejected_hashes,
+                &[id],
+                compile_limits,
+                spec::Supplied {
+                    coverage: &[],
+                    curated: self.curated.supplied(),
+                },
+            )
+            .map_err(|_| ReadError::InvalidRequest)?
+            .into_iter()
+            .next()
+            .ok_or(ReadError::Storage)?
         } else {
             spec::compile_spec_selected_with_security(
                 &self.base.graph.0,
@@ -173,6 +221,10 @@ impl CompiledArtifact {
     #[cfg(test)]
     pub(crate) fn basis_id(&self) -> &str {
         &self.basis_id
+    }
+    #[cfg(test)]
+    pub(crate) fn artifact(&self) -> &spec::SpecArtifact {
+        &self.artifact
     }
     pub(crate) fn content_id(&self) -> &str {
         &self.artifact.content_id

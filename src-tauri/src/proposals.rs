@@ -339,6 +339,180 @@ mod tests {
     }
 
     #[test]
+    fn mcp_curated_read_lists_reviewed_records_like_the_export_and_respects_its_bounds() {
+        // AC-0654 (SPEC-12 slice 4): an MCP read session over a staging
+        // store reads the records the export reads. Its `curated` artifact
+        // is the export's, its structured form lists each accepted record
+        // with its state and reason in both modes, a review made while the
+        // session is acquired is `StaleBasis`, and a store beyond the
+        // accepted bound leaves the projection not computed without failing
+        // the session.
+        use crate::mcp_reads::artifacts::ArtifactCompilation;
+        use crate::mcp_reads::curated_read::CuratedBasis;
+        use crate::mcp_reads::{ReadError, ReadSession};
+        use std::sync::Mutex;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProposalStore::open(dir.path().join("proposals.sqlite")).unwrap();
+        let mut ids = Vec::new();
+        for (index, decision) in [
+            Some(ProposalDecision::Accepted),
+            Some(ProposalDecision::Rejected),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let task = task(&format!("gap:{index}"));
+            let staged = store.stage(&task, &produce(&task), 1, &snapshot()).unwrap();
+            if let Some(decision) = decision {
+                store
+                    .review(&staged.proposal_id, 0, decision, Some("a private note"))
+                    .unwrap();
+            }
+            ids.push(staged.proposal_id);
+        }
+        let store = Mutex::new(store);
+        let graph = Mutex::new(core_graph::SqliteGraphStore::open_in_memory().unwrap());
+        let decisions = Mutex::new(agents::DecisionLog::open(":memory:").unwrap());
+        let acquire = |mode, scope: &mut dyn FnMut()| {
+            ReadSession::acquire_with_overlay(
+                &graph,
+                None,
+                &decisions,
+                &store,
+                || {
+                    scope();
+                    Ok(vec![])
+                },
+                core_graph::SnapshotReadLimits::default(),
+                core_graph::coverage::CoverageReadLimits::default(),
+                mode,
+            )
+        };
+        let read = |session: &ReadSession, id: &str| {
+            let trace = flowtracer::TraceLimits {
+                max_flows: 64,
+                max_hops: 512,
+                max_output_bytes: 1024 * 1024,
+            };
+            let compile = spec::SelectedCompileLimits {
+                max_bytes: 1024 * 1024,
+                adr: spec::AdrLimits {
+                    max_rows: 1024,
+                    max_output_bytes: 1024 * 1024,
+                },
+            };
+            match session.compile_artifact(id, trace, compile).unwrap() {
+                ArtifactCompilation::Produced(artifact) => artifact.artifact().clone(),
+                limited => panic!("{id}: {limited:?}"),
+            }
+        };
+        let export = |mode| {
+            let review = crate::curated::read_records(&store.lock().unwrap());
+            crate::build_spec_bundle(
+                &graph.lock().unwrap(),
+                &decisions.lock().unwrap(),
+                &review,
+                mode,
+            )
+            .unwrap()
+        };
+        let curated = |bundle: &spec::SpecBundle| {
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap()
+                .clone()
+        };
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let bundle = export(mode);
+            let session = acquire(mode, &mut || {}).unwrap();
+            assert_eq!(read(&session, "curated"), curated(&bundle), "{mode:?}");
+            assert_eq!(
+                session.basis().curated,
+                CuratedBasis::Computed {
+                    revision: bundle.curated_basis.as_ref().unwrap().revision.clone()
+                }
+            );
+            let structured = read(&session, "curated-json").content;
+            let data: serde_json::Value = serde_json::from_str(&structured).unwrap();
+            // A listed record asserts nothing and is the same in both modes.
+            assert_eq!(data["items"], serde_json::json!([]));
+            assert_eq!(data["items_omitted"], 0);
+            assert_eq!(data["listed"].as_array().unwrap().len(), 1);
+            let listed = &data["listed"][0];
+            assert_eq!(listed["record_id"], ids[0].as_str());
+            assert_eq!(listed["gap_id"], "gap:0");
+            assert_eq!(listed["source_id"], "source");
+            assert_eq!(listed["target_id"], "target");
+            assert_eq!(listed["edge_label"], "CALLS");
+            assert_eq!(listed["review_status"], "accepted");
+            assert_eq!(listed["state"], "unverified");
+            assert_eq!(listed["source_support"]["captured"], 0);
+            assert_eq!(data["counts"]["accepted"], 1);
+            assert_eq!(data["counts"]["unverified"], 1);
+            // Rejected and pending records are not listed, and no review
+            // note reaches the reader.
+            assert!(!structured.contains(&ids[1]) && !structured.contains(&ids[2]));
+            assert!(!structured.contains("a private note"));
+        }
+
+        // A review after the session gathered its reviews: stale.
+        let mut reviewed = false;
+        let stale = acquire(spec::ExportMode::BestEffort, &mut || {
+            if !std::mem::replace(&mut reviewed, true) {
+                store
+                    .lock()
+                    .unwrap()
+                    .review(&ids[2], 0, ProposalDecision::Accepted, None)
+                    .unwrap();
+            }
+        });
+        assert!(matches!(stale, Err(ReadError::StaleBasis)));
+        let before = acquire(spec::ExportMode::BestEffort, &mut || {}).unwrap();
+        assert_eq!(
+            read(&before, "curated"),
+            curated(&export(spec::ExportMode::BestEffort))
+        );
+
+        // Beyond the accepted bound the projection is not computed. The
+        // session is acquired, the flag is false with the reason, and the
+        // document is the one the export holds.
+        let bound = crate::curated::MAX_CURATED_ACCEPTED;
+        for index in 3..=bound + 1 {
+            let task = task(&format!("gap:{index}"));
+            let mut store = store.lock().unwrap();
+            let staged = store.stage(&task, &produce(&task), 1, &snapshot()).unwrap();
+            store
+                .review(&staged.proposal_id, 0, ProposalDecision::Accepted, None)
+                .unwrap();
+        }
+        let session = acquire(spec::ExportMode::BestEffort, &mut || {}).unwrap();
+        assert!(!session.basis().h3_curated_available);
+        assert_eq!(
+            session.basis().curated,
+            CuratedBasis::NotComputed(spec::CuratedFailure::TooManyAccepted { limit: bound })
+        );
+        assert_ne!(session.basis_id().unwrap(), before.basis_id().unwrap());
+        let bundle = export(spec::ExportMode::BestEffort);
+        assert_eq!(bundle.curated_basis, None);
+        assert_eq!(read(&session, "curated"), curated(&bundle));
+        assert!(
+            read(&session, "curated")
+                .content
+                .contains("(`too_many_accepted`)")
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&read(&session, "curated-json").content).unwrap();
+        assert_eq!(
+            data["failure"],
+            serde_json::json!({"reason":"too_many_accepted","limit":bound})
+        );
+        assert_eq!(read(&session, "topology"), read(&before, "topology"));
+    }
+
+    #[test]
     fn staged_result_survives_job_cleanup_without_activating_legacy_or_recovered_facts() {
         // AC-0128/AC-0131: a commit before job finalization survives restart and
         // job cleanup. Neither staging nor review alters a recovered fact or

@@ -11,6 +11,9 @@
 //! 2. [`project`], under the export's own graph and decision locks: the
 //!    assessments are checked against the store revision the export reads,
 //!    and the pure projection is computed over the export's own snapshot.
+//!
+//! An MCP read session (slice 4, AC-0654) runs the same two steps over the
+//! snapshot it froze, and takes its reviews through [`ReviewSource`].
 
 use agents::ProposalDecision;
 use agents::staging::{MAX_STAGED_PAGE_ITEMS, MAX_STAGED_REFERENCE_SCAN};
@@ -158,7 +161,8 @@ fn reviewed_records(
 }
 
 impl CuratedReview {
-    fn failed(failure: CuratedFailure) -> Self {
+    /// A review that read no record, with the reason.
+    pub(crate) fn failed(failure: CuratedFailure) -> Self {
         Self {
             failure: Some(failure),
             ..Self::default()
@@ -177,6 +181,89 @@ pub(crate) fn read_records(store: &agents::ProposalStore) -> CuratedReview {
             ..CuratedReview::default()
         },
         Err(failure) => CuratedReview::failed(failure),
+    }
+}
+
+impl CuratedReview {
+    /// Whether `records`, read later, are the records this review read. A
+    /// review that failed read none, so nothing is compared for it.
+    fn same_records(&self, records: &[ReviewedProposal]) -> bool {
+        self.failure.is_some() || self.proposals == records
+    }
+}
+
+/// Where a read gets its reviews (SPEC-12 slice 4, AC-0654). The export
+/// calls [`gather`] itself; an MCP read session takes its reviews through
+/// this, so the session code names no store it does not already hold.
+pub(crate) trait ReviewSource {
+    /// [`gather`]. Called with no graph or decision lock held.
+    fn gather(&self) -> CuratedReview;
+    /// Whether the reviewed records are still the ones `review` read. Takes
+    /// the staging lock alone; call it with no other lock held. An `Err` is
+    /// a record read that did not finish.
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure>;
+}
+
+impl ReviewSource for AppState {
+    fn gather(&self) -> CuratedReview {
+        gather(self)
+    }
+
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
+        let store = self
+            .proposals
+            .lock()
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        Ok(review.same_records(&reviewed_records(&store)?))
+    }
+}
+
+/// A read with no staging store: no record is reviewed, so the projection is
+/// computed over the graph and the Workbench decisions alone.
+#[cfg(test)]
+pub(crate) struct NoReviews;
+
+#[cfg(test)]
+impl ReviewSource for NoReviews {
+    fn gather(&self) -> CuratedReview {
+        CuratedReview::default()
+    }
+
+    fn unchanged(&self, _: &CuratedReview) -> Result<bool, CuratedFailure> {
+        Ok(true)
+    }
+}
+
+/// A staging store that cannot be read.
+#[cfg(test)]
+pub(crate) struct ReviewsUnreadable;
+
+#[cfg(test)]
+impl ReviewSource for ReviewsUnreadable {
+    fn gather(&self) -> CuratedReview {
+        CuratedReview::failed(CuratedFailure::ReviewsUnavailable)
+    }
+
+    fn unchanged(&self, _: &CuratedReview) -> Result<bool, CuratedFailure> {
+        Err(CuratedFailure::ReviewsUnavailable)
+    }
+}
+
+/// A staging store read with no assessment made.
+#[cfg(test)]
+impl ReviewSource for std::sync::Mutex<agents::ProposalStore> {
+    fn gather(&self) -> CuratedReview {
+        match self.lock() {
+            Ok(store) => read_records(&store),
+            Err(_) => CuratedReview::failed(CuratedFailure::ReviewsUnavailable),
+        }
+    }
+
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
+        let store = self
+            .lock()
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        Ok(review.same_records(&reviewed_records(&store)?))
     }
 }
 
@@ -281,10 +368,18 @@ fn current_assertion_hashes(
     if wanted.is_empty() {
         return Ok(current);
     }
+    let traced;
+    let flows = match snapshot.flows {
+        SnapshotFlows::Traced(flows) => flows,
+        SnapshotFlows::Untraced => {
+            traced = flowtracer::trace(snapshot.nodes, snapshot.edges);
+            &traced
+        }
+    };
     let bundle = spec::try_compile_spec_with_coverage(
         snapshot.nodes,
         snapshot.edges,
-        snapshot.flows,
+        flows,
         spec::ExportMode::BestEffort,
         &BTreeSet::new(),
         snapshot.coverage,
@@ -305,11 +400,22 @@ fn current_assertion_hashes(
     Ok(current)
 }
 
+/// The flows of a snapshot. They are read only to settle a Workbench decision
+/// that matches no stored fact, so a reader that has not traced them yet
+/// need not trace them for every read.
+#[derive(Clone, Copy)]
+pub(crate) enum SnapshotFlows<'a> {
+    /// `flowtracer::trace` of the snapshot, already made.
+    Traced(&'a [flowtracer::Flow]),
+    /// Not traced. The same trace is made if, and only if, it is read.
+    Untraced,
+}
+
 /// The graph an export read, as the projection needs it.
 pub(crate) struct Snapshot<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [Edge],
-    pub flows: &'a [flowtracer::Flow],
+    pub flows: SnapshotFlows<'a>,
     pub coverage: &'a [core_graph::coverage::StoredCoverage],
     /// `spec::graph_content_hash` of `nodes` and `edges`.
     pub content_hash: &'a str,

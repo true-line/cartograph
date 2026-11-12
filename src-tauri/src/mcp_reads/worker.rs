@@ -348,6 +348,8 @@ impl Worker {
                                             &state.graph,
                                             state.knowledge_overlay.as_deref(),
                                             &state.decisions,
+                                            // The reviews the export gathers.
+                                            &*state,
                                             || {
                                                 super::scope::coverage_scope(
                                                     &app,
