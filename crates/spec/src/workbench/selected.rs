@@ -166,6 +166,13 @@ const ARTIFACTS: &[Artifact] = &[
         title: "Source rule evidence index",
         format: "json",
     },
+    // After the frozen graph artifacts, so their bytes are unchanged (#1787).
+    Artifact {
+        id: "endpoint-permissions",
+        file: "endpoint-permissions.md",
+        title: "Endpoints and permission sites",
+        format: "markdown",
+    },
     Artifact {
         id: "coverage",
         file: "coverage.md",
@@ -393,6 +400,11 @@ fn produce(
                 assertions: output.assertions,
                 subjects: output.subjects,
             }
+        }
+        // A permission site carries its own provenance inside the endpoint
+        // fact, so mode and rejection apply to it here (AC-0599).
+        "endpoint-permissions" => {
+            endpoint_permissions::output(nodes, edges, (mode, rejected), max)?
         }
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,

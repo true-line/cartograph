@@ -420,6 +420,17 @@ impl Assertions {
             (None, omission.as_ref(), Subject::Node),
         )
     }
+    /// A fact derived from a stored one and carrying its own provenance (a
+    /// permission site inside an endpoint fact): cited by its own id.
+    pub(super) fn derived(
+        &mut self,
+        id: &dyn fmt::Display,
+        kind: &str,
+        summary: &dyn fmt::Display,
+        prov: Provenance,
+    ) -> Result<(), RenderLimit> {
+        self.add(id, id, kind, summary, prov, (None, None, Subject::Node))
+    }
     pub(super) fn journey(
         &mut self,
         candidate: &crate::rules::journey::JourneyCandidate,

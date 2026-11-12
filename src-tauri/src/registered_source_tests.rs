@@ -2056,6 +2056,140 @@ fn export_carries_a_fact_index_resolving_every_assertion() {
     }
 }
 
+// AC-0599 (#1787): the export of a real ingest carries the endpoint
+// permission projection. A Flask route behind `login_required` lists the
+// recovered guard with its span, a Flask route with none is not in that
+// table, and an Express route, for which no permission site is recovered, is
+// under the coverage note only. The text never states that an endpoint has
+// no check, every assertion has a fact-index row, and a second export and
+// the single-artifact read return the same bytes.
+#[test]
+fn export_projects_ingested_endpoints_against_permission_sites() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let flask = "from flask import Flask, jsonify\n\
+         from flask_login import login_required\n\
+         \n\
+         app = Flask(__name__)\n\
+         \n\
+         @app.route(\"/me\")\n\
+         @login_required\n\
+         def me():\n    return jsonify(ok=True)\n\
+         \n\
+         @app.route(\"/health\")\n\
+         def health():\n    return jsonify(ok=True)\n";
+    std::fs::write(root.join("app.py"), flask).unwrap();
+    std::fs::write(
+        root.join("server.ts"),
+        "import express from \"express\";\n\
+         const app = express();\n\
+         function listOrders(req, res) { res.json([]); }\n\
+         app.get(\"/orders\", listOrders);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"shop","dependencies":{"express":"^4.19.0"}}"#,
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let guard = flask.find("@login_required").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "endpoint-permissions")
+            .unwrap();
+        assert_eq!(artifact.file_name, "endpoint-permissions.md");
+        let content = &artifact.content;
+        let section = |heading: &str| {
+            let body = &content[content.find(&format!("\n## {heading}\n")).unwrap() + 1..];
+            body[1..].find("\n## ").map_or(body, |end| &body[..=end])
+        };
+        let row = |heading: &str, endpoint: &str| {
+            section(heading)
+                .lines()
+                .find(|line| line.starts_with(&format!("| {endpoint} |")))
+        };
+        const SITED: &str = "Endpoints with recovered permission sites";
+        const NONE: &str = "Endpoints with none recovered";
+        const PARTIAL: &str = "Endpoints whose handler path is partial";
+        const OUTSIDE: &str = "Coverage note: endpoints outside permission-site recovery";
+
+        let guarded = row(SITED, "GET /me").expect("the guarded route lists its site");
+        assert!(guarded.contains("guard: flask\\_login.login\\_required"));
+        assert!(guarded.contains(&format!(
+            "app.py bytes {guard}..{}",
+            guard + "@login_required".len()
+        )));
+        assert!(guarded.contains("| Deterministic | Confirmed |"));
+        for other in [NONE, PARTIAL, OUTSIDE] {
+            assert!(row(other, "GET /me").is_none(), "{other}");
+        }
+        assert!(row(SITED, "GET /health").is_none());
+        assert!(row(OUTSIDE, "GET /health").is_none());
+        let open = row(NONE, "GET /health").expect("the route with no guard: none recovered");
+        assert!(open.contains("| read: 1 facts, no unresolved hop |"));
+        assert!(row(PARTIAL, "GET /health").is_none());
+        assert!(row(OUTSIDE, "GET /orders").is_some());
+        for table in [SITED, NONE, PARTIAL] {
+            assert!(row(table, "GET /orders").is_none(), "{table}");
+        }
+        let text = content.to_lowercase();
+        assert!(!text.contains("unauthenticated") && !text.contains("unprotected"));
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        assert!(!artifact.assertions.is_empty());
+        for assertion in &artifact.assertions {
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "endpoint-permissions")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(&graph, &decisions, mode, "endpoint-permissions").unwrap(),
+            artifact
+        );
+    }
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)
