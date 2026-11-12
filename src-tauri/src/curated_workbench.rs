@@ -1,11 +1,10 @@
 //! The curated read of the Spec Workbench (SPEC-12 slice 3, ADR-0061,
 //! AC-0655).
 //!
-//! It is the projection an export computes, read without compiling a
-//! document: the same `curated::gather`, then the same `spec_inputs` under
-//! the graph and decision locks, in the order `export_spec` takes them. For
-//! the same reviews, graph and Workbench decisions its revision and counts
-//! are the `curated_basis` of the bundle.
+//! It is not a second read. `export_spec_with_views` returns it beside the
+//! bundle, made from the one projection that compile computed, so its
+//! revision and counts are the bundle's `curated_basis` by construction and
+//! the Workbench cannot show a projection of another revision.
 //!
 //! Each record carries its reason code and the sentence `curated.md` prints
 //! for that code, so the UI maps no code to prose. Every curated item is
@@ -20,12 +19,10 @@
 use context_hub::curated::{
     AssertionDecisionSummary, CuratedCounts, CuratedProjection, CuratedRecord, CuratedView,
 };
-use core_graph::SqliteGraphStore;
 use serde::Serialize;
 use spec::{CuratedFailure, ExportMode};
-use tauri::Manager;
 
-use crate::{AppState, CuratedInput, curated};
+use crate::CuratedInput;
 
 /// One accepted record with its DR-4 fields and the sentences for them.
 #[derive(Debug, Serialize)]
@@ -97,43 +94,18 @@ impl CuratedWorkbenchRead {
     }
 }
 
-/// The read under the caller's graph and decision locks. `review` is what
-/// `curated::gather` read before those locks were taken.
-pub(crate) fn read_locked(
-    graph: &SqliteGraphStore,
-    decisions: &agents::DecisionLog,
-    review: &curated::CuratedReview,
-    mode: ExportMode,
-) -> Result<CuratedWorkbenchRead, String> {
-    // The inputs of `build_spec_bundle`, so the projection is the one its
-    // `curated_basis` is stamped from.
-    match crate::spec_inputs(graph, decisions, Some(review))?.curated {
-        CuratedInput::Computed(projection) => Ok(CuratedWorkbenchRead::computed(&projection, mode)),
-        CuratedInput::NotComputed(failure) => Ok(CuratedWorkbenchRead::NotComputed {
-            export_mode: mode,
-            failure,
-            sentence: failure.sentence(),
-        }),
-        CuratedInput::NotRead => Err("The curated projection was not read.".into()),
+impl CuratedWorkbenchRead {
+    /// The read of the projection one compilation computed. `None` when
+    /// that compilation did not read the projection at all.
+    pub(crate) fn of(curated: &CuratedInput, mode: ExportMode) -> Option<Self> {
+        match curated {
+            CuratedInput::Computed(projection) => Some(Self::computed(projection, mode)),
+            CuratedInput::NotComputed(failure) => Some(Self::NotComputed {
+                export_mode: mode,
+                failure: *failure,
+                sentence: failure.sentence(),
+            }),
+            CuratedInput::NotRead => None,
+        }
     }
-}
-
-/// The read in the lock order of `export_spec`: the reviews first, because
-/// the assessments take the graph lock themselves, then the graph, then the
-/// Workbench decisions.
-pub(crate) fn read(state: &AppState, mode: ExportMode) -> Result<CuratedWorkbenchRead, String> {
-    let review = curated::gather(state);
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    read_locked(&graph, &decisions, &review, mode)
-}
-
-/// The curated projection for the Spec Workbench under one export mode
-/// (SPEC-12 "Surfaces", AC-0655). Read-only.
-#[tauri::command]
-pub(crate) async fn read_curated_projection(
-    mode: ExportMode,
-    app: tauri::AppHandle,
-) -> Result<CuratedWorkbenchRead, String> {
-    crate::off_ui_thread(move || read(&app.state::<AppState>(), mode)).await
 }

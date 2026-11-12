@@ -6296,7 +6296,29 @@ fn build_spec_with_views(
     review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<(spec::SpecBundle, spec::SpecViewBundle), String> {
+    let (bundle, views, _) = build_spec_with_views_and_curated(graph, decisions, review, mode)?;
+    Ok((bundle, views))
+}
+
+/// `build_spec_with_views` with the Workbench's curated read (SPEC-12 slice
+/// 3, AC-0655), made from the projection this compilation computed: the one
+/// the bundle's `curated_basis` is stamped from.
+fn build_spec_with_views_and_curated(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
+    mode: spec::ExportMode,
+) -> Result<
+    (
+        spec::SpecBundle,
+        spec::SpecViewBundle,
+        curated_workbench::CuratedWorkbenchRead,
+    ),
+    String,
+> {
     let inputs = spec_inputs(graph, decisions, Some(review))?;
+    let curated = curated_workbench::CuratedWorkbenchRead::of(&inputs.curated, mode)
+        .ok_or("The curated projection was not read.")?;
     // An export whose citations do not resolve is refused (ADR-0058).
     let (mut bundle, views) = spec::try_compile_spec_with_views_supplied(
         &inputs.nodes,
@@ -6308,7 +6330,7 @@ fn build_spec_with_views(
     )
     .map_err(|error| error.to_string())?;
     inputs.stamp(&mut bundle);
-    Ok((bundle, views))
+    Ok((bundle, views, curated))
 }
 
 fn build_spec_views(
@@ -6435,6 +6457,9 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
 struct SpecWithViewsPreview {
     bundle: SpecBundlePreview,
     views: spec::SpecViewBundle,
+    /// The curated projection `bundle.curated_basis` was stamped from, as
+    /// the Workbench shows it (SPEC-12 slice 3, AC-0655).
+    curated: curated_workbench::CuratedWorkbenchRead,
 }
 
 /// Compile the full official spec set under one R-INT-5 export policy,
@@ -6478,10 +6503,12 @@ fn export_spec_with_views(
     let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let (bundle, views) = build_spec_with_views(&graph, &decisions, &review, mode)?;
+    let (bundle, views, curated) =
+        build_spec_with_views_and_curated(&graph, &decisions, &review, mode)?;
     Ok(SpecWithViewsPreview {
         bundle: preview_spec_bundle(bundle),
         views,
+        curated,
     })
 }
 
@@ -6920,7 +6947,6 @@ fn main() {
             list_evals,
             proposals::record_agent_decision,
             proposals::list_staged_proposals,
-            curated_workbench::read_curated_projection,
             task_evidence::assessment::assess_staged_basis,
             list_agent_decisions,
             reapply_agent_decisions,

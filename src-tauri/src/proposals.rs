@@ -285,7 +285,8 @@ mod tests {
         assert!(bundle.artifacts.iter().any(|artifact| {
             artifact.id == "curated" && artifact.content.contains("| unverified |")
         }));
-        // AC-0655 (SPEC-12 slice 3): the Workbench read lists the same
+        // AC-0655 (SPEC-12 slice 3): the Workbench read, returned with the
+        // views, lists the same
         // records, each with the sentence `curated.md` prints for its
         // reason, and is the same in both modes for a listed record.
         let curated_md = |bundle: &spec::SpecBundle| {
@@ -298,10 +299,9 @@ mod tests {
                 .clone()
         };
         let workbench = |review: &crate::curated::CuratedReview, mode| {
-            serde_json::to_value(
-                crate::curated_workbench::read_locked(&graph, &decisions, review, mode).unwrap(),
-            )
-            .unwrap()
+            let (_, _, read) =
+                crate::build_spec_with_views_and_curated(&graph, &decisions, review, mode).unwrap();
+            serde_json::to_value(read).unwrap()
         };
         for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
             let read = workbench(&review, mode);

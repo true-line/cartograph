@@ -920,17 +920,33 @@ fn mcp_curated_read_serves_the_export_bytes_and_revision_for_an_eligible_record(
 
 #[test]
 fn workbench_curated_read_reports_the_export_revision_and_counts_in_both_modes() {
-    // AC-0655 (SPEC-12 slice 3, "Surfaces"): the Workbench read is the
-    // projection the export computes. For the same reviews, graph and mode
-    // its revision and counts are the bundle's `curated_basis`. An eligible
+    // AC-0655 (SPEC-12 slice 3, "Surfaces"): the Workbench read is returned
+    // beside the bundle, from the projection that compile computed. Its
+    // revision and counts are that bundle's `curated_basis`, and the basis of
+    // a separate export of the same reviews, graph and mode. An eligible
     // record is an item in best-effort, with every DR-4 field and the
     // sentence `curated.md` prints for its reason; a verified-only read
     // returns no item and the number left out (R-INT-5).
     let (_dir, state, owner, staged) = staged_captured_record();
     let id = staged.proposal_id.as_str();
     let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
-    let read =
-        |mode| serde_json::to_value(crate::curated_workbench::read(&state, mode).unwrap()).unwrap();
+    let read = |mode| {
+        // The order `export_spec_with_views` uses.
+        let review = crate::curated::gather(&state);
+        let (bundle, _, read) = crate::build_spec_with_views_and_curated(
+            &state.graph.lock().unwrap(),
+            &state.decisions.lock().unwrap(),
+            &review,
+            mode,
+        )
+        .unwrap();
+        let read = serde_json::to_value(read).unwrap();
+        // One projection: the read beside the bundle is the bundle's basis.
+        let basis = bundle.curated_basis.as_ref().unwrap();
+        assert_eq!(read["revision"], basis.revision.as_str(), "{mode:?}");
+        assert_eq!(read["counts"], serde_json::to_value(basis.counts).unwrap());
+        read
+    };
     let same_basis = |read: &serde_json::Value, mode| {
         let bundle = curated_export(&state, mode);
         let basis = bundle.curated_basis.as_ref().unwrap();
