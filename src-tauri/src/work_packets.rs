@@ -372,6 +372,7 @@ fn parse_generation(
         "rule-evidence-index",
         "endpoint-permissions",
         "configuration",
+        // `external` is refused until a decision says otherwise (SPEC-13).
     ];
     if selection
         .artifacts
