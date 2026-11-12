@@ -640,6 +640,7 @@ pub(crate) fn bundle_from_filtered(
         gap_count,
         drift_count,
         security_count,
+        graph_basis: None,
     }
 }
 

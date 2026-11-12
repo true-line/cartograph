@@ -136,9 +136,26 @@ export function WorkspaceSurface({
         <p className="system-contents" data-testid="system-contents">
           <span>
             System contents:{' '}
-            {systemContents
-              .map((entry) => `${repoLabel(entry.repo)} @ ${entry.commit.slice(0, 7)}`)
-              .join(' · ')}
+            {systemContents.map((entry, index) => (
+              <span key={entry.repo}>
+                {index > 0 ? ' · ' : ''}
+                {`${repoLabel(entry.repo)} @ ${entry.commit.slice(0, 7)}`}
+                {entry.graph_hash && (
+                  // #1765: the graph content hash recorded by this
+                  // registration's latest ingest at this revision.
+                  <>
+                    {' (graph '}
+                    <code
+                      data-testid="system-graph-hash"
+                      title={`Graph content hash ${entry.graph_hash}`}
+                    >
+                      {entry.graph_hash.slice(0, 8)}
+                    </code>
+                    )
+                  </>
+                )}
+              </span>
+            ))}
           </span>
           <span className="muted">
             {' '}

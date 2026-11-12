@@ -307,6 +307,33 @@ export const StackedSystemContentsAreStated: Story = {
   },
 };
 
+export const RecordedGraphHashIsShownWithItsRegistration: Story = {
+  // AC-0593 (#1765): each registration shows the graph content hash its
+  // latest ingest recorded; a registration with none recorded shows no hash.
+  args: {
+    systemContents: [
+      {
+        repo: 'acme/shop',
+        commit: 'a1b2c3d4e5f6',
+        graph_hash: '9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0',
+      },
+      { repo: 'local/infra', commit: 'workdir' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('system-contents')).toHaveTextContent(
+      'System contents: acme/shop @ a1b2c3d (graph 9f8e7d6c) · local/infra @ workdir',
+    );
+    const hashes = canvas.getAllByTestId('system-graph-hash');
+    await expect(hashes).toHaveLength(1);
+    await expect(hashes[0]).toHaveAttribute(
+      'title',
+      'Graph content hash 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0',
+    );
+  },
+};
+
 export const NoRecoveryYet: Story = {
   args: { summary: null, findings: null, bundle: null },
   play: async ({ canvasElement, args }) => {
