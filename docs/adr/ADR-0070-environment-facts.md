@@ -68,8 +68,9 @@ source does not state.
 - Terraform resources are not attached to an environment by this decision.
   Root modules that declare the same address collapse today (#1844); that is
   decided first.
-- Kubernetes manifests, kustomize overlays, Helm values and per-environment
-  settings files are stated as not covered until their increments land.
+- Helm charts and values, per-environment settings files, and manifest kinds
+  other than `Deployment`, `StatefulSet`, `DaemonSet` and `Job` are stated as
+  not covered until their increments land.
 
 ## Alternatives
 

@@ -1,6 +1,6 @@
 # SPEC-14 — Environments and what they declare
 
-- **Status:** Proposed for [#1791](https://github.com/true-line/cartograph/issues/1791); increment 1 (Compose) implemented; owner review of ADR-0070 pending.
+- **Status:** Proposed for [#1791](https://github.com/true-line/cartograph/issues/1791); increments 1 (Compose) and 2 (Kubernetes manifests, kustomize) implemented; owner review of ADR-0070 pending.
 - **Date:** 2026-11-12
 - **Scope:** US-0019 / AC-0661; `docs/DOCUMENT-CATALOGUE.md` D7 §7.2.
 - **Decision:** [ADR-0070](adr/ADR-0070-environment-facts.md).
@@ -142,6 +142,40 @@ the patch states its own.
 no `valueFrom` content is stored. `image` and port scalars pass through
 redaction. `configMapGenerator` and `secretGenerator` literals are never
 read.
+
+**As built.**
+
+- `{document index}` counts every YAML document of the file from 0.
+- An init container is marked `init: true`. `env_from` entries are
+  `ConfigMap/{name}` and `Secret/{name}` in file order.
+- `includes` and `via` hold kustomization file paths
+  (`base/kustomization.yaml`), not directories.
+- The store keeps one relation per source, target and label. When several
+  patch documents of one kustomization match one workload there is one
+  `PATCHES`: the first document's properties are on it and each later
+  document's under `more`, with one span each.
+- A file that a kustomization names as a patch and none names as a resource
+  is read only as a patch and yields no `Workload`. A patch is matched by
+  kind and `metadata.name`; namespace is not compared. A patch for a kind
+  that is not read is a Gap.
+- A named file that mixes read and unread kinds: `DECLARES` for the read
+  kinds, coverage for the others, no Gap.
+- Gap identities: one per kustomization, `gap:environment:{repo}@{path}`,
+  kind `kustomization`, with `unevaluated` listing transformer and generator
+  keys; one per manifest document,
+  `gap:environment:{repo}@{path}#{document index}`, kind `manifest-document`.
+  A kustomization that does not parse is a Gap and no `Environment`. A
+  problem inside an included kustomization is also stated on the including
+  environment as incomplete reach. A read-kind document without a plain
+  `metadata.name` is a Gap and no `Workload`; one with unreadable
+  `containers` is a `Workload` without them, plus a Gap.
+- Coverage: each manifest document of a kind that is not read is the
+  capability `kubernetes-manifest:{Kind}` (`kubernetes-manifest:other` when
+  the kind is not a plain name), with its document count and first site.
+  Kustomization files are read and no longer recorded as unread. The
+  file-level statement of increment 1 is replaced by this.
+- There is no per-repository cap beyond the depth bound; each kustomization
+  is expanded once per environment.
 
 **Workloads no environment declares.** A manifest workload that no
 kustomization reaches is still a `Workload`; it has no `DECLARES` edge.
