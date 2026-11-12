@@ -323,6 +323,60 @@ Wiring it in (`src-tauri/src/main.rs`):
    Settings show. Ingest tests fail on a claim with no fixture, a fixture
    with no claim, or an installed language with no cells.
 
+### Configuration reads: one shape for every adapter
+
+A standard-library read of an environment variable is a fact
+([ADR-0059](../adr/ADR-0059-configuration-read-facts.md), #1789). Every
+compiled-in adapter emits it through one function,
+`adapters_fw::config_read::assemble`, so the shape never differs by
+language. The adapter collects `ConfigReadSite`s (key or `None`, language,
+enclosing symbol or `None`, path, span of the read expression) and the
+function returns:
+
+| Fact | Shape |
+|---|---|
+| Named read | Node `ConfigRead`, id `cfgread:{repo}@{path}:env:{KEY}`, props `source: "env"`, `key`, `language`, `prov` |
+| Dynamic read (key is not a string literal) | Node `ConfigRead`, id `cfgread:{repo}@{path}:env:?`, props `source: "env"`, `dynamic: true`, `language`, `prov`; no `key` |
+| Who reads it | Edge `READS_CONFIG` from the enclosing symbol, or from `file:{repo}@{path}` when there is none, to the node; one edge per source and node |
+
+There is one node per file and key, not per read: `prov.evidence` lists the
+span of every read of that key in that file in byte order, and an edge cites
+the reads its source makes. Provenance is T0 Deterministic, Confirmed. Ids
+follow the other adapter ids (`{scheme}:{repo}@{path}…`, nothing escaped).
+The output is independent of the order sites were collected in.
+
+Rules an adapter must keep:
+
+- **Prove the call, or emit nothing.** A site is a read only when the callee
+  is provably the language's own environment read, by the means the adapter
+  already uses for an imported or global symbol. A look-alike (a local
+  function of the same name, a rebound receiver, another package under the
+  same alias) is not a site. Say in the module documentation what the proof
+  cannot rule out.
+- **Names only.** Never record a value, a default or a fallback. A literal
+  that is not a key name (empty, containing whitespace, longer than 128
+  bytes or matching a secret recognizer) is recorded as a dynamic read.
+- **A key is a literal as written.** A constant, a concatenation or a
+  template is a dynamic read; do not follow it.
+- **Reads, not writes.** Setting or deleting a variable is not a fact.
+- **Configuration frameworks are a different `source`** and are not emitted
+  yet (Spring `@Value`, NestJS `ConfigService`, Viper).
+
+| Adapter | Recognised | Proof | Module |
+|---|---|---|---|
+| TypeScript / JavaScript | `process.env.X`, `process.env["X"]` | `process` is the unbound global or an import of `process` / `node:process`; the file does not write `process.env` | `adapters-lang-ts/src/observed_infra.rs` |
+| Python | `os.environ["X"]`, `os.environ.get("X")`, `os.getenv("X")` | `os` (or `environ` / `getenv`) is a module-level import nothing rebinds; no repository module is named `os` | `adapters-lang-python/src/observed_infra.rs` |
+| Go | `os.Getenv("X")`, `os.LookupEnv("X")` | the operand is the file's import of `os`, unshadowed in the enclosing declaration | `adapters-lang-go/src/config_read.rs` |
+| Java | `System.getenv("X")` | nothing in the file or the repository's Java sources is named `System`; no static wildcard import | `adapters-lang-java/src/config_read.rs` |
+| Kotlin | `System.getenv("X")` | as Java, and every star import names a repository package | `adapters-lang-kotlin/src/config_read.rs` |
+| Rust | `std::env::var("X")`, `std::env::var_os("X")` | the callee path resolves to `std::env` through `use` or the qualified path | `adapters-lang-rust/src/config_read.rs` |
+
+The observed `Resource` with `env_key` (a client configured by a variable)
+is a separate fact and is unchanged; a read that is also a client identity
+yields both. A fixture test per adapter holds one literal read, one dynamic
+read and one shadowed look-alike, and expects exactly one named fact, one
+dynamic fact and nothing for the look-alike (AC-0597).
+
 ## Path C: an event registry data file
 
 When an existing adapter already parses the language and only an SDK call
