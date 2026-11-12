@@ -274,6 +274,11 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         "scheduled jobs",
         None,
     ),
+    (
+        crate::pipelines::PIPELINE_EXTRACTOR_ID,
+        "build and deployment pipeline",
+        None,
+    ),
     // Stitching consumes every layer's event and client-call sites.
     ("t0.events", "event and client-call site", None),
 ];
@@ -461,10 +466,16 @@ impl RepoCoverage {
                 continue;
             }
             unsupported.push(UnsupportedCapability {
-                reason: format!(
-                    "no installed producer covers {capability}: a tool limitation, \
-                     not a system gap"
-                ),
+                // A pipeline limit says what is present and why it was not
+                // read (#1790); every other kind keeps the general reason.
+                reason: if crate::pipelines::is_limit_kind(&finding.kind) {
+                    format!("{}: a tool limitation, not a system gap", finding.message)
+                } else {
+                    format!(
+                        "no installed producer covers {capability}: a tool limitation, \
+                         not a system gap"
+                    )
+                },
                 capability,
                 occurrences: 1,
                 first_site: format!("{}:{}", finding.path, finding.line),

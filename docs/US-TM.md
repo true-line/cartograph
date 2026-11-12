@@ -22,7 +22,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0016 | AC-0071..0075 | adapters-lang-ts, adapters-fw, events, spec, app, ui | post-M10 | WebExtension flows | ADR-0003, ADR-0013 | T-0071..0075 |
 | US-0017 | AC-0068..0070, AC-0093, AC-0594 | adapters-*, ingest, app, ui | post-M10 | — | ADR-0003, ADR-0017 | T-0068..0070, T-0093, T-0594 |
 | US-0018 | AC-0090..0092, AC-0222 | app, ingest, ui, scripts | post-M10 | — | ADR-0002, ADR-0018 | T-0090..0092, T-0222 |
-| US-0019 | AC-0096..0097 | ingest (toolchain config facts; keys-only env files including `*.env`/`env.example` templates, quote-aware key parsing, span-free `CONFIGURED_IN` links from env-keyed observed resources, #734), core-graph, spec (topology draws `CONFIGURED_IN` env files), app, ui | post-M10 | — | ADR-0003 | T-0096..0097 |
+| US-0019 | AC-0096..0097,AC-0598 | ingest (toolchain config facts; keys-only env files including `*.env`/`env.example` templates, quote-aware key parsing, span-free `CONFIGURED_IN` links from env-keyed observed resources, #734), core-graph, spec (topology draws `CONFIGURED_IN` env files), app, ui | post-M10 | — | ADR-0003, ADR-0060 | T-0096..0097,T-0598 |
 | US-0020 | AC-0101..0105, AC-0137..0139, AC-0232..0233, AC-0302..0303, AC-0460 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019, ADR-0047 | T-0101..0105, T-0137..0139, T-0232..0233, T-0302..0303, T-0460 |
 | US-0021 | AC-0106..0109 | context-hub, agents, spec, app, ui | H2–H3 | — | ADR-0019 | T-0106..0109 |
 | US-0022 | AC-0110..0114 | context-hub, agents, app, ui | H4–H5 | — | ADR-0019 | T-0110..0114 |
@@ -136,6 +136,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0055 | Bounded, independently bound refusal diagnostic sidecars outside workspace capacity accounting (#1707) |
 | ADR-0056 | Documentation reconstruction pipeline, two modes and the rebuild boundary (proposed; #1745, owner review) |
 | ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review); amended 2026-11-10 for the consent-free, recorded connection check (#1795) |
+| ADR-0060 | Build and deployment pipelines as ordered facts: four node labels, `PART_OF` and `NEEDS`, declared not evaluated (proposed; #1790, owner review) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression

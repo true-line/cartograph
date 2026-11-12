@@ -558,6 +558,12 @@ pub fn preflight_scan(
                 });
             }
         }
+        // Pipeline limits (#1790, AC-0598): another CI system's configuration
+        // is present and not read; a workflow or Dockerfile that cannot be
+        // read exactly yields no step facts. Both are named, never skipped.
+        if let Some(limit) = crate::pipelines::unread(&name, &rel, &path) {
+            unsupported.push(finding(limit.kind, &rel, 1, &limit.message));
+        }
         let Some(extension) = path.extension().map(|e| e.to_string_lossy().into_owned()) else {
             continue;
         };
