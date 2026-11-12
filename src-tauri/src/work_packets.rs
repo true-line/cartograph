@@ -371,6 +371,7 @@ fn parse_generation(
         "rule-evidence",
         "rule-evidence-index",
         "endpoint-permissions",
+        "configuration",
     ];
     if selection
         .artifacts

@@ -2332,6 +2332,132 @@ fn export_projects_ingested_pipelines_in_dependency_order() {
     }
 }
 
+// AC-0651 (#1821): the export of a real ingest carries the configuration
+// key projection. A key an environment file declares and source reads is
+// listed once with both; a key read and never declared and a key declared
+// and never read are marked; the file with a read whose key is not a literal
+// is listed; no value of the environment file reaches the document. Every
+// assertion has a fact-index row, and a second export and the
+// single-artifact read return the same bytes.
+#[test]
+fn export_projects_ingested_configuration_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(
+        root.join(".env.example"),
+        "DATABASE_URL=postgres://shop:hunter2@localhost/shop\nUNUSED_FLAG=1\n",
+    )
+    .unwrap();
+    let config = "export function load(name: string) {\n  \
+                  return [process.env.DATABASE_URL, process.env[name]];\n}\n";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/config.ts"), config).unwrap();
+    let settings = "import os\n\nHOST = os.getenv(\"SMTP_HOST\")\n";
+    std::fs::write(root.join("settings.py"), settings).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let read = config.find("process.env.DATABASE_URL").unwrap();
+    let host = settings.find("os.getenv").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "configuration")
+            .unwrap();
+        assert_eq!(artifact.file_name, "configuration.md");
+        let content = &artifact.content;
+        let row = |part: &str| {
+            content
+                .lines()
+                .find(|line| line.starts_with("| ") && line.contains(part))
+                .unwrap_or_else(|| panic!("no row containing {part:?} in:\n{content}"))
+        };
+        assert!(content.contains(
+            "Keys: 3. Declared and read: 1. Read, never declared: 1. Declared, never read: 1. \
+             Environment files: 1. Files with reads that cannot be named: 1."
+        ));
+        row("| DATABASE\\_URL | declared and read | 1 | 1 | — |");
+        row("| SMTP\\_HOST | read, never declared | 0 | 1 | — |");
+        row("| UNUSED\\_FLAG | declared, never read | 1 | 0 | — |");
+        row(
+            "| DATABASE\\_URL | .env.example | Deterministic | Confirmed | none stored for an \
+             environment file | — |",
+        );
+        let named = row(
+            "| DATABASE\\_URL | src/config.ts | typescript | load | Deterministic | \
+                         Confirmed |",
+        );
+        assert!(named.contains(&format!("src/config.ts bytes {read}..")));
+        let module = row(
+            "| SMTP\\_HOST | settings.py | python | file level | Deterministic | \
+                          Confirmed |",
+        );
+        assert!(module.contains(&format!("settings.py bytes {host}..")));
+        let unnamed = &content[content
+            .find("\n## Files with reads that cannot be named\n")
+            .unwrap()..];
+        let unnamed = &unnamed[..unnamed.find("\n## Languages read\n").unwrap()];
+        assert!(unnamed.contains("| src/config.ts | typescript | load | Deterministic |"));
+        assert!(!unnamed.contains("settings.py"));
+        // Names only: no value of the environment file is in the document.
+        assert!(!content.contains("hunter2") && !content.contains("postgres"));
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        // The environment file, three reads and their three relations.
+        assert_eq!(artifact.assertions.len(), 7);
+        for assertion in &artifact.assertions {
+            assert_eq!(
+                assertion.provenance.confidence_tier,
+                core_prov::ConfidenceTier::Confirmed
+            );
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "configuration")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(&graph, &decisions, mode, "configuration").unwrap(),
+            artifact
+        );
+    }
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)
