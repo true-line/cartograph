@@ -427,6 +427,7 @@ pub fn try_compile_spec_with_views_and_coverage(
         rejected_hashes,
         crate::Supplied {
             coverage,
+            stale_coverage: &[],
             curated: crate::Curated::NotSupplied,
         },
     )

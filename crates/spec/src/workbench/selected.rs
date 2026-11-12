@@ -69,9 +69,25 @@ pub enum SelectedArtifactOutcome {
 pub struct Supplied<'a> {
     /// The coverage inventories stored with the graph (AC-0592).
     pub coverage: &'a [StoredCoverage],
+    /// The repositories in `coverage` whose stored inventory the host does
+    /// not hold as current (AC-0657). Each is listed as stale with what was
+    /// compared, and nothing is read from its inventory. A host that makes
+    /// no such comparison supplies none.
+    pub stale_coverage: &'a [StaleCoverage<'a>],
     /// The curated projection the host computed for this graph, or why it
     /// computed none (SPEC-12, AC-0653).
     pub curated: Curated<'a>,
+}
+
+/// One stored inventory the host compared with the repository's current
+/// state and found recorded under another (AC-0657).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleCoverage<'a> {
+    /// The repository the stored inventory belongs to.
+    pub repo_key: &'a str,
+    /// What the host compared at read time, such as `registration` and
+    /// `plugins`. Which of them differs is not known.
+    pub compared: &'a [String],
 }
 
 /// What an artifact reads beside the admitted graph facts.
@@ -79,6 +95,8 @@ pub struct Supplied<'a> {
 pub(crate) struct Beside<'a> {
     /// The coverage inventories stored with the graph.
     pub(crate) coverage: &'a [StoredCoverage],
+    /// The repositories whose stored inventory is stale.
+    pub(crate) stale_coverage: &'a [StaleCoverage<'a>],
     /// Pipeline facts the export mode and the rejections withheld, counted
     /// before the filter (`pipelines::withheld`).
     pub(crate) pipelines_withheld: usize,
@@ -100,6 +118,7 @@ impl<'a> Beside<'a> {
     ) -> Self {
         Self {
             coverage: supplied.coverage,
+            stale_coverage: supplied.stale_coverage,
             pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
             configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
             curated: supplied.curated,
@@ -492,7 +511,9 @@ fn produce(
         // its items cite (AC-0653). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
         // The stored inventories only: no graph fact, mode or rejection applies.
-        "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,
+        "coverage" | "coverage-index" => {
+            coverage::output(coverage, beside.stale_coverage, a.id == "coverage", max)?
+        }
         // The two index artifacts are rendered from the collected citations.
         _ => unreachable!("validated static artifact id"),
     };
@@ -602,6 +623,7 @@ pub fn compile_spec_selected_with_coverage(
         limits,
         Supplied {
             coverage,
+            stale_coverage: &[],
             curated: Curated::NotSupplied,
         },
     )

@@ -11,9 +11,17 @@
 //! up to [`COVERAGE_DETAIL_REPO_LIMIT`] repositories. The JSON index carries
 //! every stored inventory body verbatim, so no site, input path or stopping
 //! reason is reachable only through a document that grows with the estate.
+//!
+//! Stale inventories (#1814, AC-0657): a host that compares each stored
+//! inventory with the repository's current registration names the ones
+//! recorded under another. Such a repository keeps its row and its inventory
+//! hash and is stated to be stale with what was compared. Nothing is read
+//! from its inventory, in either artifact, and it enters no total. A host
+//! that makes no comparison names none, and its artifacts are unchanged.
 
 use super::producers::Output;
 use super::render::{Budget, RenderLimit, Safe, Text};
+use super::selected::StaleCoverage;
 use core_graph::coverage::StoredCoverage;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -85,19 +93,34 @@ struct Repo<'a> {
     key: &'a str,
     hash: &'a str,
     body: &'a str,
-    /// `None` when this version cannot read the body. Such a repository is
-    /// listed as unread, never counted as covered or as unlimited.
+    /// `None` when this version cannot read the body, or when the inventory
+    /// is stale and is not read. Such a repository is listed as unread,
+    /// never counted as covered or as unlimited.
     inventory: Option<Inventory>,
+    /// What the host compared when it found this inventory stale.
+    stale: Option<&'a [String]>,
 }
 
-fn repos(records: &[StoredCoverage]) -> Vec<Repo<'_>> {
+fn repos<'a>(records: &'a [StoredCoverage], stale: &[StaleCoverage<'a>]) -> Vec<Repo<'a>> {
+    let stale: BTreeMap<&str, &'a [String]> = stale
+        .iter()
+        .map(|entry| (entry.repo_key, entry.compared))
+        .collect();
     let mut repos: Vec<_> = records
         .iter()
-        .map(|stored| Repo {
-            key: &stored.record.repo_key,
-            hash: &stored.inventory_hash,
-            body: &stored.record.inventory_json,
-            inventory: serde_json::from_str(&stored.record.inventory_json).ok(),
+        .map(|stored| {
+            let stale = stale.get(stored.record.repo_key.as_str()).copied();
+            Repo {
+                key: &stored.record.repo_key,
+                hash: &stored.inventory_hash,
+                body: &stored.record.inventory_json,
+                // A stale body is not read at all.
+                inventory: match stale {
+                    Some(_) => None,
+                    None => serde_json::from_str(&stored.record.inventory_json).ok(),
+                },
+                stale,
+            }
         })
         .collect();
     // The store reads by repo key already; sorting keeps the artifact
@@ -139,6 +162,7 @@ struct ReasonTotal {
 struct Totals {
     limited: usize,
     unreadable: usize,
+    stale: usize,
     producers: Vec<ProducerTotal>,
     reasons: Vec<ReasonTotal>,
 }
@@ -148,9 +172,14 @@ fn totals(repos: &[Repo<'_>]) -> Totals {
     let mut reasons: BTreeMap<(&'static str, &str), (u64, u64)> = BTreeMap::new();
     let mut limited = 0;
     let mut unreadable = 0;
+    let mut stale = 0;
     for repo in repos {
         let Some(inventory) = &repo.inventory else {
-            unreadable += 1;
+            if repo.stale.is_some() {
+                stale += 1;
+            } else {
+                unreadable += 1;
+            }
             continue;
         };
         limited += usize::from(inventory.limited);
@@ -199,6 +228,7 @@ fn totals(repos: &[Repo<'_>]) -> Totals {
     Totals {
         limited,
         unreadable,
+        stale,
         producers: producers.into_values().collect(),
         reasons: reasons
             .into_iter()
@@ -229,6 +259,15 @@ fn state_text(state: &str) -> &str {
         NOT_APPLICABLE => "nothing to read",
         MISSING_INPUT => "missing input",
         other => other,
+    }
+}
+
+/// What the host compared for a stale inventory, as the artifacts print it.
+fn compared_text(compared: &[String]) -> String {
+    if compared.is_empty() {
+        "nothing recorded".into()
+    } else {
+        compared.join(", ")
     }
 }
 
@@ -271,6 +310,16 @@ fn markdown(repos: &[Repo<'_>], out: &mut Text) -> std::fmt::Result {
         "- Inventories this version cannot read: {}",
         totals.unreadable
     )?;
+    // Stated only by a host that compares inventories with the current
+    // registration, so every other export keeps its bytes.
+    if totals.stale != 0 {
+        writeln!(
+            out,
+            "- Stale inventories (recorded under a registration or plugin basis that is not the \
+             repository's current one; nothing is read from them): {}",
+            totals.stale
+        )?;
+    }
     if detailed {
         out.push_str(
             "- Every stored inventory, with each site, declared input and stopping reason, is in \
@@ -292,6 +341,17 @@ fn markdown(repos: &[Repo<'_>], out: &mut Text) -> std::fmt::Result {
          |\n|---|---|---|---|---|---|---|---|---|\n",
     )?;
     for repo in repos {
+        if let Some(compared) = repo.stale {
+            writeln!(
+                out,
+                "| {} | unknown | `{}` | unknown: the stored inventory is stale (compared: {}) | \
+                 — | — | — | — | — |",
+                Safe(repo.key),
+                Safe(repo.hash),
+                Safe(compared_text(compared))
+            )?;
+            continue;
+        }
         let Some(inventory) = &repo.inventory else {
             writeln!(
                 out,
@@ -383,6 +443,17 @@ fn markdown(repos: &[Repo<'_>], out: &mut Text) -> std::fmt::Result {
     for repo in repos {
         writeln!(out, "\n### {}\n", Safe(repo.key))?;
         writeln!(out, "- Inventory hash: `{}`", Safe(repo.hash))?;
+        if let Some(compared) = repo.stale {
+            writeln!(
+                out,
+                "- The stored inventory is stale: it was recorded under a registration or plugin \
+                 basis that is not this repository's current one (compared when this document \
+                 was read: {}). Nothing is read from it, so nothing is stated about what the \
+                 trace read in this repository.",
+                Safe(compared_text(compared))
+            )?;
+            continue;
+        }
         let Some(inventory) = &repo.inventory else {
             out.push_str(
                 "- This version cannot read the stored inventory, so nothing is stated about \
@@ -465,6 +536,15 @@ fn markdown(repos: &[Repo<'_>], out: &mut Text) -> std::fmt::Result {
 enum Body<'a> {
     Json(&'a RawValue),
     Text(&'a str),
+    /// A stale inventory's body is not carried: `null`.
+    Withheld,
+}
+
+/// Why a repository's stored inventory is not read.
+#[derive(Serialize)]
+struct Stale<'a> {
+    /// What the host compared with the repository's current state.
+    compared: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -474,6 +554,9 @@ struct IndexRepo<'a> {
     inventory_hash: &'a str,
     /// Whether this version could read the body for the totals.
     readable: bool,
+    /// Present only for a stale inventory, whose body is then `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale: Option<Stale<'a>>,
     inventory: Body<'a>,
 }
 
@@ -483,9 +566,16 @@ struct Index<'a> {
     inventories: usize,
     limited: usize,
     unreadable: usize,
+    /// Present only when a host named a stale inventory.
+    #[serde(skip_serializing_if = "is_zero")]
+    stale: usize,
     producers: Vec<ProducerTotal>,
     reasons: Vec<ReasonTotal>,
     repositories: Vec<IndexRepo<'a>>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 fn index(repos: &[Repo<'_>], out: &mut Text) -> Result<(), RenderLimit> {
@@ -495,6 +585,7 @@ fn index(repos: &[Repo<'_>], out: &mut Text) -> Result<(), RenderLimit> {
         inventories: repos.len(),
         limited: totals.limited,
         unreadable: totals.unreadable,
+        stale: totals.stale,
         producers: totals.producers,
         reasons: totals.reasons,
         repositories: repos
@@ -503,8 +594,12 @@ fn index(repos: &[Repo<'_>], out: &mut Text) -> Result<(), RenderLimit> {
                 repo: repo.key,
                 inventory_hash: repo.hash,
                 readable: repo.inventory.is_some(),
-                inventory: serde_json::from_str::<&RawValue>(repo.body)
-                    .map_or(Body::Text(repo.body), Body::Json),
+                stale: repo.stale.map(|compared| Stale { compared }),
+                inventory: match repo.stale {
+                    Some(_) => Body::Withheld,
+                    None => serde_json::from_str::<&RawValue>(repo.body)
+                        .map_or(Body::Text(repo.body), Body::Json),
+                },
             })
             .collect(),
     };
@@ -514,13 +609,16 @@ fn index(repos: &[Repo<'_>], out: &mut Text) -> Result<(), RenderLimit> {
 /// `coverage.md` (`markdown`) or `coverage.json` over the stored inventories,
 /// refused whole when it would exceed `max`. Neither carries assertions:
 /// an inventory entry is a statement about the run, not a graph fact.
+/// A repository named in `stale` is listed as stale and its inventory is
+/// not read.
 pub(super) fn output(
     records: &[StoredCoverage],
+    stale: &[StaleCoverage<'_>],
     as_markdown: bool,
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
-    let repos = repos(records);
+    let repos = repos(records, stale);
     let mut content = Text::new(&budget, "")?;
     if as_markdown {
         markdown(&repos, &mut content)?;
@@ -532,6 +630,29 @@ pub(super) fn output(
         assertions: Vec::new(),
         subjects: Vec::new(),
     })
+}
+
+/// Logical workspace of the `coverage` and `coverage-index` producers over
+/// stored inventories admitted under `records` rows and `bytes` body bytes,
+/// in the currency of [`super::accounting`]. It is added to
+/// [`crate::logical_compile_bound`], which models neither the supplied
+/// inventories nor these producers. The inventories themselves stay with
+/// the caller and are borrowed, never copied. Not an allocator or RSS claim.
+pub fn logical_coverage_render_bound(records: usize, bytes: usize) -> Option<usize> {
+    use super::accounting::{json_bytes, map_slots, slots, sum};
+    sum(&[
+        // One row per stored record and the stale-repository lookup.
+        slots::<Repo<'_>>(records)?,
+        map_slots::<&str, &[String]>(records)?,
+        // Every inventory is parsed to its typed body and all are held
+        // together: their strings are at most the stored body bytes.
+        json_bytes(bytes)?,
+        // Totals clone producer, coverage and capability names, at most the
+        // stored body bytes again, into rows keyed by borrowed names.
+        json_bytes(bytes)?,
+        // The index validates one borrowed body at a time.
+        json_bytes(bytes.min(core_graph::coverage::MAX_INVENTORY_BYTES))?,
+    ])
 }
 
 #[cfg(test)]
@@ -909,5 +1030,97 @@ mod tests {
             read.repositories[0].inventory.get(),
             future.record.inventory_json
         );
+    }
+
+    // AC-0657 (#1814): a repository whose stored inventory the host names as
+    // stale keeps its row and hash and is stated to be stale. Nothing of its
+    // inventory is read or carried, it enters no total, and the other
+    // repository is unchanged. A host that names none gets the same bytes
+    // as before.
+    #[test]
+    fn coverage_artifacts_state_a_stale_inventory_and_read_nothing_from_it() {
+        let records = [
+            stored("acme/known", inventory("acme/known")),
+            stored("acme/moved", inventory("acme/moved")),
+        ];
+        let compared = ["registration".to_string(), "plugins".to_string()];
+        let compile = |stale: &[crate::StaleCoverage<'_>]| {
+            let mut outcomes = crate::compile_spec_selected_supplied(
+                &[],
+                &[],
+                &[],
+                ExportMode::VerifiedOnly,
+                &BTreeSet::new(),
+                &["coverage", "coverage-index"],
+                SelectedCompileLimits {
+                    max_bytes: usize::MAX,
+                    adr: crate::AdrLimits {
+                        max_rows: usize::MAX,
+                        max_output_bytes: usize::MAX,
+                    },
+                },
+                crate::Supplied {
+                    coverage: &records,
+                    stale_coverage: stale,
+                    curated: crate::Curated::NotSupplied,
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|outcome| match outcome {
+                SelectedArtifactOutcome::Produced(artifact) => artifact,
+                SelectedArtifactOutcome::Limited { .. } => panic!("unbounded"),
+            });
+            (outcomes.next().unwrap(), outcomes.next().unwrap())
+        };
+        assert_eq!(compile(&[]), export(&records, ExportMode::VerifiedOnly));
+
+        let (markdown, index) = compile(&[crate::StaleCoverage {
+            repo_key: "acme/moved",
+            compared: &compared,
+        }]);
+        let hash = &records[1].inventory_hash;
+        assert!(
+            markdown.content.contains(&format!(
+                "| acme/moved | unknown | `{hash}` | unknown: the stored inventory is stale \
+                 (compared: registration, plugins) | — | — | — | — | — |"
+            )),
+            "{}",
+            markdown.content
+        );
+        assert!(markdown.content.contains("- Stale inventories ("));
+        assert!(markdown.content.contains(
+            "- The stored inventory is stale: it was recorded under a registration or plugin \
+             basis that is not this repository's current one"
+        ));
+        // The current repository is still read; the stale one adds nothing.
+        assert!(markdown.content.contains("| acme/known | 0123abc |"));
+        assert!(!markdown.content.contains("acme/moved@0123abc"));
+        assert!(markdown.content.contains(
+            "| No installed producer covers it, or a tool limit was reached | Ruby | 1 | 1 |"
+        ));
+        assert!(
+            markdown
+                .content
+                .contains("- Inventories this version cannot read: 0")
+        );
+
+        let read: serde_json::Value = serde_json::from_str(&index.content).unwrap();
+        assert_eq!(read["inventories"], 2);
+        assert_eq!(read["stale"], 1);
+        assert_eq!(
+            (&read["limited"], &read["unreadable"]),
+            (&json!(1), &json!(0))
+        );
+        assert_eq!(read["repositories"][0]["repo"], "acme/known");
+        assert!(read["repositories"][0].get("stale").is_none());
+        assert_eq!(
+            read["repositories"][1],
+            json!({
+                "repo": "acme/moved", "inventory_hash": hash, "readable": false,
+                "stale": {"compared": ["registration", "plugins"]}, "inventory": null
+            })
+        );
+        assert!(!index.content.contains("acme/moved@0123abc"));
     }
 }

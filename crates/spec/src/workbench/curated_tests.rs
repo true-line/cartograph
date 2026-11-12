@@ -142,6 +142,7 @@ fn compile(
         rejected,
         Supplied {
             coverage: &[],
+            stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
         },
     )
@@ -238,6 +239,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
         assert_eq!(json!(failure)["reason"], code);
         let supplied = Supplied {
             coverage: &[],
+            stale_coverage: &[],
             curated: Curated::NotComputed(failure),
         };
         for mode in MODES {
@@ -302,6 +304,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             &BTreeSet::new(),
             Supplied {
                 coverage: &[],
+                stale_coverage: &[],
                 curated: Curated::NotComputed(CuratedFailure::TooManyAccepted { limit: 256 }),
             },
         )
@@ -548,6 +551,7 @@ fn curated_is_deterministic_selected_alone_and_bounded() {
                 limits(max_bytes),
                 Supplied {
                     coverage: &[],
+                    stale_coverage: &[],
                     curated: Curated::Computed(&projection),
                 },
             )

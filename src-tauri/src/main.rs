@@ -6152,6 +6152,8 @@ impl SpecInputs {
     fn supplied(&self) -> spec::Supplied<'_> {
         spec::Supplied {
             coverage: &self.coverage,
+            // The export compares no inventory with a current registration.
+            stale_coverage: &[],
             curated: match &self.curated {
                 CuratedInput::NotRead => spec::Curated::NotSupplied,
                 CuratedInput::NotComputed(failure) => spec::Curated::NotComputed(*failure),

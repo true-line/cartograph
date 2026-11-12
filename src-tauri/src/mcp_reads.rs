@@ -4,6 +4,11 @@
 //! export uses, `crate::curated::gather` and `crate::curated::project`, and
 //! frozen with the rest of the basis.
 //!
+//! The stored coverage inventories of the session's one bounded graph and
+//! coverage read stay with the session, moved and never copied, for the
+//! `coverage` and `coverage-index` artifacts (#1814, AC-0657). They are the
+//! rows of the revision every other read of the session is served from.
+//!
 //! Store admission bounds raw/canonical graph and coverage bytes. It does not
 //! bound exact RSS: retained raw facts, projection indexes, temporary identity
 //! construction and future artifact caches need separate service admission.
@@ -28,7 +33,7 @@ use context_hub::coverage::{
 use context_hub::{ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResponse};
 #[cfg(test)]
 use context_hub::{QueryRequest, QueryResponse};
-use core_graph::coverage::CoverageReadLimits;
+use core_graph::coverage::{CoverageReadLimits, StoredCoverage};
 use core_graph::overlay::{OverlayFact, OverlayIdentity, OverlayRead, OverlayStore};
 #[cfg(test)]
 use core_graph::{Edge, Node};
@@ -238,6 +243,9 @@ pub(crate) struct ReadSession {
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
     qualified: CoverageContext,
+    /// The inventories `qualified` was made from, as stored: the rows of the
+    /// same bounded read as `base`, within its `CoverageReadLimits`.
+    recorded: Vec<StoredCoverage>,
 }
 
 impl ReadSession {
@@ -436,6 +444,7 @@ impl ReadSession {
             #[cfg(test)]
             snapshot,
             qualified,
+            recorded,
         })
     }
 
