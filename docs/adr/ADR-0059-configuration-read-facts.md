@@ -46,7 +46,15 @@ shape has to be decided.
    `env_key` resources and `CONFIGURED_IN` edges are unchanged; a read that is
    also a client identity yields both facts, so §7.3 is built from one fact
    kind.
-7. **Configuration frameworks are not covered** (Spring `@Value`, NestJS
+7. **A literal that is not a key name is not stored.** An empty, blank,
+   over-long or secret-shaped literal is recorded as a dynamic read.
+8. **A configuration read is never a candidate target for a gap.** The
+   agentic tier's candidate lists skip `ConfigRead` nodes; they stay in the
+   surrounding context a prompt may show.
+9. **Coverage is stated per language.** Each adapter has a `config_reads`
+   coverage cell with a conformance fixture, and the cell names what that
+   adapter does not read.
+10. **Configuration frameworks are not covered** (Spring `@Value`, NestJS
    `ConfigService`, Viper). They follow as separate increments under the same
    label with a different `source`.
 
@@ -61,6 +69,14 @@ shape has to be decided.
 - A key read in ten files is ten nodes. The projection groups them by key.
 - Until a projection reads them (a later increment of #1789), the facts appear
   only in the graph and in graph-backed lists.
+- Java and Kotlin record `System.getenv` when nothing in the repository
+  declares, imports or shadows a `System`. A member of that name inherited
+  from a class outside the repository cannot be ruled out; the coverage cells
+  say so. Kotlin files with library star imports yield nothing.
+- TypeScript does not read `import.meta.env` or destructured `process.env`;
+  Python does not read `"X" in os.environ`; Rust does not read `env!`.
+- The nodes are not grouped under a layer in the Atlas yet and show their raw
+  id there.
 
 ## Alternatives
 
