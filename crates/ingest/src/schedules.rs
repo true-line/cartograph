@@ -740,7 +740,7 @@ fn normalize(absolute: &str) -> String {
 
 /// Logical `Dockerfile` instructions with their spans: continuation lines
 /// joined, comment and blank lines dropped.
-fn instructions(text: &str) -> Vec<((u64, u64), String)> {
+pub(crate) fn instructions(text: &str) -> Vec<((u64, u64), String)> {
     let mut out = Vec::new();
     let mut current: Option<(u64, String)> = None;
     let mut offset = 0u64;
@@ -1229,7 +1229,7 @@ fn value_of<'t>(text: &str, mapping: TsNode<'t>, name: &str) -> Option<TsNode<'t
 }
 
 /// A GitHub Actions workflow: a YAML file directly in `.github/workflows`.
-fn workflow_file(rel: &str) -> bool {
+pub(crate) fn workflow_file(rel: &str) -> bool {
     rel.strip_prefix(".github/workflows/")
         .is_some_and(|name| !name.contains('/'))
 }
@@ -1349,7 +1349,7 @@ fn words(text: &str, node: TsNode) -> Option<Vec<String>> {
         .collect()
 }
 
-fn first_mapping(node: TsNode) -> Option<TsNode> {
+pub(crate) fn first_mapping(node: TsNode) -> Option<TsNode> {
     let mut walk = node.walk();
     for child in node.named_children(&mut walk) {
         match child.kind() {
@@ -1393,7 +1393,7 @@ fn pairs(mapping: TsNode) -> Vec<(TsNode, TsNode)> {
         .collect()
 }
 
-fn contains_kind(node: TsNode, kinds: &[&str]) -> bool {
+pub(crate) fn contains_kind(node: TsNode, kinds: &[&str]) -> bool {
     if kinds.contains(&node.kind()) {
         return true;
     }
@@ -1406,7 +1406,7 @@ fn contains_kind(node: TsNode, kinds: &[&str]) -> bool {
 
 /// A plain or quoted scalar's value; `None` for anything else, including a
 /// double-quoted scalar with escapes.
-fn scalar(text: &str, node: TsNode) -> Option<String> {
+pub(crate) fn scalar(text: &str, node: TsNode) -> Option<String> {
     let mut node = node;
     loop {
         match node.kind() {
