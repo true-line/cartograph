@@ -435,6 +435,7 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
         "Environments",
         "Workloads by environment",
         "Declared in more than one environment",
+        "Workloads no environment declares",
         "Not established",
         "Coverage note: what this document does not cover",
     ] {
@@ -444,6 +445,7 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
         "Environments",
         "Workloads by environment",
         "Declared in more than one environment",
+        "Workloads no environment declares",
         "Not established",
     ] {
         let rows = table(&content, heading);
@@ -452,7 +454,8 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
     }
     for stated in [
         "A file or directory name is never used as an environment name.",
-        "Kubernetes manifests, kustomize files, Helm charts and Helm values files are not read.",
+        // AC-0662: Kubernetes manifests and kustomize files are read now.
+        "Helm charts and Helm values files are not read",
         "Nothing is merged.",
         "No value of an environment key is read or stored, and no secret.",
         "Terraform resources are not attached to an environment.",
@@ -528,12 +531,18 @@ fn two_exports_are_byte_identical_whatever_the_input_order() {
     }
 }
 
-// AC-0661: `Workload` facts and their `DEPENDS_ON` relations change no
-// other document: the topology map and the flow dossiers of a graph are the
-// same bytes with and without them.
+// AC-0661, AC-0662: `Workload` facts and their `DEPENDS_ON` relations, and
+// the kustomize facts (several `DECLARES` relations into one workload, and
+// `PATCHES`), change no other document: every graph document but the gap
+// register, which lists the new Gaps like any other, is the same bytes with
+// and without them.
 #[test]
 fn workload_dependencies_change_neither_the_topology_nor_the_flows() {
-    let f = shop();
+    let mut f = shop();
+    let kustomize = kustomize::overlays();
+    f.nodes.extend(kustomize.nodes);
+    f.edges.extend(kustomize.edges);
+    assert!(f.edges.iter().any(|edge| edge.label == "PATCHES"));
     let resource = |id: &str| Node {
         id: id.into(),
         label: "Resource".into(),
@@ -554,7 +563,26 @@ fn workload_dependencies_change_neither_the_topology_nor_the_flows() {
     for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
         let without = compile_spec(&infra, &infra_edges, &[], mode, &BTreeSet::new());
         let with = compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
-        for id in ["topology", "flow-dossiers", "data-model", "security-view"] {
+        for id in [
+            "topology",
+            "flow-dossiers",
+            "data-model",
+            "security-view",
+            "user-stories",
+            "us-tm",
+            "us-tm-index",
+            "adrs",
+            "drift-register",
+            "toolchain",
+            "test-arrangements",
+            "journeys",
+            "rule-evidence",
+            "rule-evidence-index",
+            "endpoint-permissions",
+            "pipelines",
+            "configuration",
+            "external",
+        ] {
             let pick = |bundle: &crate::SpecBundle| {
                 bundle
                     .artifacts
@@ -628,3 +656,6 @@ fn every_row_cites_a_fact_that_resolves_in_the_fact_index() {
         );
     }
 }
+
+#[path = "environments_kustomize_tests.rs"]
+mod kustomize;

@@ -2174,13 +2174,16 @@ fn extract_tree_packed(
             .extend(pipeline_facts.nodes, pipeline_facts.edges)
             .map_err(pack_err)?;
     }
-    // Environments (#1791, AC-0661, ADR-0070): each Compose file is an
-    // Environment with a Workload per service; an environment file that
-    // names an environment only by its file name is a Gap. Runs for every
-    // layer selection, as the toolchain reader does. The reader emits no
-    // File node and leaves the toolchain reader's Compose `Tool` fact as it
-    // is. Kubernetes manifests, kustomize files and Helm charts are named by
-    // Preflight's findings, which the coverage inventory lists.
+    // Environments (#1791, AC-0661, AC-0662, ADR-0070): each Compose file
+    // is an Environment with a Workload per service; each kustomization is
+    // an Environment that DECLARES the pod-bearing Kubernetes manifest
+    // workloads its `resources` chain reaches and PATCHES those its patch
+    // files name; an environment file that names an environment only by its
+    // file name is a Gap. Runs for every layer selection, as the toolchain
+    // reader does. The reader emits no File node and leaves the toolchain
+    // reader's Compose `Tool` fact and the schedule reader's `CronJob`
+    // facts as they are. Helm charts and manifests of other kinds are named
+    // by Preflight's findings, which the coverage inventory lists.
     {
         let environment_id = ingest::environments::SourceId { repo, commit };
         let environment_facts =

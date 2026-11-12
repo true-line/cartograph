@@ -1,9 +1,11 @@
-//! Environments and what they declare (#1791, AC-0661, ADR-0070, SPEC-14):
-//! Compose files as T0 facts, each citing the exact byte span that declares
-//! it.
+//! Environments and what they declare (#1791, AC-0661, AC-0662, ADR-0070,
+//! SPEC-14): Compose files, kustomization files and Kubernetes manifests as
+//! T0 facts, each citing the exact byte span that declares it.
 //!
 //! An environment is a declared deployable set. A Compose file that parses
-//! and has a `services` mapping is one:
+//! and has a `services` mapping is one, and so is every kustomization file
+//! (the `kustomize` module); the pod-bearing Kubernetes manifest kinds are
+//! workloads (the `kubernetes` module). For a Compose file:
 //!
 //! - `Environment` (`env:{repo}@{path}`): one Compose file. Its identity is
 //!   the file's path. It has a `name` only where the file states a top-level
@@ -41,15 +43,27 @@
 //! Nothing is merged across files: which Compose files a deployment combines
 //! is not declared in them.
 //!
-//! Kubernetes manifests, kustomize files and Helm charts are not read. They
-//! are named as present and not read ([`unread`]).
+//! **Kubernetes and kustomize.** A `Deployment`, `StatefulSet`, `DaemonSet`
+//! or `Job` document is a `Workload`
+//! (`workload:{repo}@{path}#{document index}:{Kind}/{name}`) with its
+//! containers. A kustomization file is an `Environment`, named only where it
+//! states a `namespace`. It `DECLARES` every such workload its `resources`
+//! chain reaches inside the repository, and `PATCHES` each one a patch file
+//! names, stating what the patch writes. Nothing is merged and no
+//! transformer is applied. A file that a kustomization names as a patch and
+//! none names as a resource is read only as a patch.
+//!
+//! Helm charts and values files are not read, and neither is a manifest of
+//! any other kind. They are named as present and not read ([`unread`]), a
+//! manifest by its kind.
 //!
 //! This tier never calls an LLM.
 
-use crate::pipelines::{Field, Limit, Span, field, fields, items, sanitize, span_of};
+use crate::pipelines::{Field, Span, field, fields, items, sanitize, span_of};
 use crate::schedules::{contains_kind, first_mapping, scalar, workflow_file};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
+use kustomize::{Reach, Tree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
@@ -66,10 +80,19 @@ const NOT_READ: &str = "present and not read: no installed producer recovers env
 
 /// Files detected and not read: finding kind and what the file is.
 const UNREAD: &[(&str, &str)] = &[
-    ("kubernetes-manifest", "Kubernetes manifest"),
-    ("kustomize-file", "kustomize file"),
     ("helm-chart", "Helm chart"),
     ("helm-values-file", "Helm values file"),
+];
+
+/// What the finding kind of an unread manifest document starts with; the
+/// document's `kind` follows.
+const UNREAD_MANIFEST: &str = "kubernetes-manifest:";
+
+/// YAML constructs that are stepped over and stated, never evaluated.
+const UNEVALUATED_YAML: &[(&str, &str)] = &[
+    ("anchor", "a YAML anchor is not evaluated"),
+    ("alias", "a YAML alias is not evaluated"),
+    ("tag", "a YAML tag is not evaluated"),
 ];
 
 type Props = serde_json::Map<String, serde_json::Value>;
@@ -88,16 +111,29 @@ pub struct SourceId<'a> {
 pub struct EnvironmentExtraction {
     /// `Environment`, `Workload` and `Gap` nodes.
     pub nodes: Vec<Node>,
-    /// `DECLARES` and `DEPENDS_ON` edges.
+    /// `DECLARES`, `DEPENDS_ON` and `PATCHES` edges.
     pub edges: Vec<Edge>,
-    /// Compose files and name-only environment files that yielded a fact.
+    /// Compose files, kustomization files, manifest files and name-only
+    /// environment files that yielded a fact.
     pub files: u64,
+}
+
+/// Something present and not read, as Preflight reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unread {
+    /// Finding kind: `helm-chart`, `helm-values-file`, or
+    /// `kubernetes-manifest:` followed by the document's `kind`.
+    pub kind: String,
+    /// 1-based line it starts at.
+    pub line: u64,
+    /// What is present and why it was not read.
+    pub message: String,
 }
 
 /// True when `kind` is a finding kind this module produces. Coverage quotes
 /// such a finding's own message as its reason.
 pub fn is_limit_kind(kind: &str) -> bool {
-    UNREAD.iter().any(|(known, _)| *known == kind)
+    kind.starts_with(UNREAD_MANIFEST) || UNREAD.iter().any(|(known, _)| *known == kind)
 }
 
 fn yaml(name: &str) -> bool {
@@ -149,104 +185,76 @@ fn names_an_environment(name: &str) -> bool {
 /// The largest YAML file opened to see whether it is a Kubernetes manifest.
 const MAX_MANIFEST_PROBE_BYTES: u64 = 1024 * 1024;
 
-/// The limit `rel` carries, if any: a Kubernetes manifest, a kustomize file
-/// or a Helm chart or values file, present and not read. A YAML file is read
-/// only to see whether a document of it has top-level `apiVersion` and `kind`
-/// scalars; nothing else of it is looked at. A file whose only such documents
-/// are the `batch/*` `CronJob`s the schedule reader covers is not named.
-pub fn unread(name: &str, rel: &str, path: &Path) -> Option<Limit> {
-    let index = if matches!(
-        name,
-        "kustomization.yaml" | "kustomization.yml" | "Kustomization"
-    ) {
-        1
-    } else if name == "Chart.yaml" {
-        2
-    } else if yaml(name) && helm_values(name) && path.with_file_name("Chart.yaml").is_file() {
-        3
-    } else if yaml(name) && !compose_file(name) && !workflow_file(rel) {
-        // Bounded: a manifest is small, and a larger YAML file is not
-        // opened to look for two keys.
-        if std::fs::metadata(path).ok()?.len() > MAX_MANIFEST_PROBE_BYTES {
-            return None;
-        }
-        let text = std::fs::read_to_string(path).ok()?;
-        if !kubernetes_manifest(&text) {
-            return None;
-        }
-        0
-    } else {
-        return None;
+/// True for a YAML file that may hold Kubernetes manifest documents: not a
+/// Compose file, a workflow or a kustomization.
+fn manifest_candidate(name: &str, rel: &str) -> bool {
+    yaml(name)
+        && !compose_file(name)
+        && !workflow_file(rel)
+        && !kustomize::FILE_NAMES.contains(&name)
+}
+
+/// What `rel` holds that is present and not read: a Helm chart or values
+/// file, or one entry for each Kubernetes manifest document of a kind this
+/// reader does not read. A YAML file is read only to see which documents of
+/// it have top-level `apiVersion` and `kind` scalars. The pod-bearing kinds
+/// are read, a `batch/*` `CronJob` is the schedule reader's, and a
+/// kustomization is read, so none of them is named.
+pub fn unread(name: &str, rel: &str, path: &Path) -> Vec<Unread> {
+    let file = |index: usize| {
+        let (kind, what) = UNREAD[index];
+        vec![Unread {
+            kind: kind.into(),
+            line: 1,
+            message: format!("{what} is {NOT_READ}"),
+        }]
     };
-    let (kind, what) = UNREAD[index];
-    Some(Limit {
-        kind,
-        message: format!("{what} is {NOT_READ}"),
-    })
+    if name == "Chart.yaml" {
+        return file(0);
+    }
+    if yaml(name) && helm_values(name) && path.with_file_name("Chart.yaml").is_file() {
+        return file(1);
+    }
+    if !manifest_candidate(name, rel) {
+        return Vec::new();
+    }
+    // Bounded: a manifest is small, and a larger YAML file is not opened to
+    // look for two keys.
+    if std::fs::metadata(path).map_or(true, |meta| meta.len() > MAX_MANIFEST_PROBE_BYTES) {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    if !kubernetes::may_hold_manifest(&text) {
+        return Vec::new();
+    }
+    kubernetes::documents(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|document| document.read.is_none() && !document.cronjob)
+        .map(|document| match kubernetes::plain_kind(&document.kind) {
+            Some(kind) => Unread {
+                kind: format!("{UNREAD_MANIFEST}{kind}"),
+                line: document.line,
+                message: format!("Kubernetes `{kind}` manifest is {NOT_READ}"),
+            },
+            // A kind is quoted only when it is a plain name.
+            None => Unread {
+                kind: format!("{UNREAD_MANIFEST}other"),
+                line: document.line,
+                message: format!(
+                    "Kubernetes manifest of a kind not written as a plain name is {NOT_READ}"
+                ),
+            },
+        })
+        .collect()
 }
 
 /// `values.yaml` and its variants (`values-prod.yaml`, `values.dev.yml`).
 fn helm_values(name: &str) -> bool {
     name.strip_prefix("values")
         .is_some_and(|rest| rest.starts_with(['.', '-', '_']))
-}
-
-/// True when a document of `text` has top-level `apiVersion` and `kind`
-/// scalars and is not a `batch/*` `CronJob`.
-fn kubernetes_manifest(text: &str) -> bool {
-    // Both keys start a line in any block-style manifest; most YAML has
-    // neither and is not parsed.
-    let starts = |key: &str| text.lines().any(|line| line.starts_with(key));
-    if !starts("apiVersion:") || !starts("kind:") {
-        return false;
-    }
-    let mut parser = Parser::new();
-    if parser
-        .set_language(&tree_sitter_yaml::LANGUAGE.into())
-        .is_err()
-    {
-        return false;
-    }
-    let Some(tree) = parser.parse(text, None) else {
-        return false;
-    };
-    let root = tree.root_node();
-    if root.has_error() {
-        return false;
-    }
-    let mut walk = root.walk();
-    let documents: Vec<TsNode> = root
-        .named_children(&mut walk)
-        .filter(|node| node.kind() == "document")
-        .collect();
-    documents.into_iter().any(|document| {
-        let Some(top) = first_mapping(document) else {
-            return false;
-        };
-        let mut walk = top.walk();
-        let mut api = None;
-        let mut kind = None;
-        for pair in top
-            .named_children(&mut walk)
-            .filter(|pair| pair.kind() == "block_mapping_pair")
-        {
-            let (Some(key), Some(value)) = (
-                pair.child_by_field_name("key"),
-                pair.child_by_field_name("value"),
-            ) else {
-                continue;
-            };
-            match scalar(text, key).as_deref() {
-                Some("apiVersion") => api = scalar(text, value),
-                Some("kind") => kind = scalar(text, value),
-                _ => {}
-            }
-        }
-        match (api, kind) {
-            (Some(api), Some(kind)) => !(kind == "CronJob" && api.starts_with("batch/")),
-            _ => false,
-        }
-    })
 }
 
 /// Props under construction: what redaction replaced and which properties
@@ -302,7 +310,7 @@ impl Draft {
 }
 
 /// What a Gap states: the constructs, in the order found, and their spans.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Findings {
     reasons: Vec<String>,
     spans: BTreeSet<Span>,
@@ -374,6 +382,11 @@ fn mapping_of(node: TsNode) -> Option<TsNode> {
             _ => return None,
         }
     }
+}
+
+/// The entries of the mapping under `name` in `body`.
+fn section<'t>(text: &str, body: &[Field<'t>], name: &str) -> Option<Vec<Field<'t>>> {
+    fields(text, mapping_of(field(body, name)?.value?)?).ok()
 }
 
 /// A service name as Compose allows it, and short enough not to be withheld.
@@ -683,15 +696,18 @@ fn dependencies(text: &str, node: TsNode) -> Option<Vec<(String, Span)>> {
     )
 }
 
-/// Walk `root` and turn every Compose file into environment facts, and every
-/// name-only environment file into a Gap. Deterministic for a given tree: the
-/// walk is sorted, and every id derives from the path and the service name.
+/// Walk `root` and turn every Compose file, kustomization file and
+/// Kubernetes manifest into environment facts, and every name-only
+/// environment file into a Gap. Deterministic for a given tree: the walk is
+/// sorted, and every id derives from the path and the service name, or from
+/// the path and the document.
 pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExtraction> {
     let walked = source_walk::files(
         root,
         &crate::preflight::skip_dir,
         source_walk::Gitignores::Honor,
     )?;
+    let tree = Tree::read(&walked);
     let mut out = EnvironmentExtraction::default();
     for file in &walked {
         let emitter = Emitter { id, rel: &file.rel };
@@ -720,6 +736,21 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
         {
             out.files += 1;
             out.nodes.push(emitter.name_only());
+        } else if let Some(parsed) = tree.kustomization(&file.rel) {
+            out.files += 1;
+            match parsed {
+                Ok(kustomization) => {
+                    let reach = tree.reach(&file.rel, kustomization);
+                    emitter.kustomization(kustomization, reach, &tree, &mut out);
+                }
+                Err((reason, span)) => {
+                    let mut findings = Findings::default();
+                    findings.add(*reason, *span);
+                    out.nodes.push(emitter.kustomization_gap(findings, &[]));
+                }
+            }
+        } else if emitter.manifest(tree.documents(&file.rel), &mut out) {
+            out.files += 1;
         }
     }
     Ok(out)
@@ -741,13 +772,26 @@ impl Emitter<'_> {
         spans: &[Span],
         identity: &str,
     ) -> serde_json::Value {
+        let evidence: Vec<(&str, Span)> = spans.iter().map(|span| (self.rel, *span)).collect();
+        self.seal_at(props, confidence, &evidence, identity)
+    }
+
+    /// [`Emitter::seal`] over spans that may lie in other files of the
+    /// repository: a patch document is cited where it is written.
+    fn seal_at(
+        &self,
+        props: Props,
+        confidence: ConfidenceTier,
+        evidence: &[(&str, Span)],
+        identity: &str,
+    ) -> serde_json::Value {
         let mut props = serde_json::Value::Object(props);
         let input = serde_json::to_vec(&serde_json::json!([identity, &props])).expect("serializes");
-        let evidence = spans
+        let evidence = evidence
             .iter()
-            .map(|&(start, end)| EvidenceRef {
+            .map(|&(path, (start, end))| EvidenceRef {
                 repo: self.id.repo.to_string(),
-                path: self.rel.to_string(),
+                path: path.to_string(),
                 byte_start: start,
                 byte_end: end,
                 commit_sha: self.id.commit.to_string(),
@@ -870,7 +914,194 @@ impl Emitter<'_> {
             }
         }
     }
+
+    /// The id of the workload a manifest document of `rel` declares.
+    fn workload_id(&self, rel: &str, index: usize, kind: &str, name: &str) -> String {
+        format!("workload:{}@{rel}#{index}:{kind}/{name}", self.id.repo)
+    }
+
+    /// The Gap of a kustomization file: every finding, and the transformer
+    /// and generator keys that are present and not evaluated.
+    fn kustomization_gap(&self, findings: Findings, unevaluated: &[&str]) -> Node {
+        let id = self.gap_id(None);
+        let mut props = Props::new();
+        props.insert("kind".into(), "kustomization".into());
+        props.insert("path".into(), self.rel.into());
+        if !unevaluated.is_empty() {
+            props.insert("unevaluated".into(), unevaluated.into());
+        }
+        props.insert("reason".into(), findings.reasons.join("; ").into());
+        props.insert("attempted_tiers".into(), serde_json::json!(["T0"]));
+        let spans: Vec<Span> = findings.spans.into_iter().collect();
+        Node {
+            props: self.seal(props, ConfidenceTier::Gap, &spans, &id),
+            id,
+            label: "Gap".into(),
+        }
+    }
+
+    /// One kustomization file: an `Environment`, `DECLARES` to each workload
+    /// it reaches, `PATCHES` for each one a patch file names, and one Gap
+    /// for everything that was not followed, matched or evaluated.
+    fn kustomization(
+        &self,
+        decl: &kustomize::Kustomization,
+        reach: Reach,
+        tree: &Tree,
+        out: &mut EnvironmentExtraction,
+    ) {
+        let environment = format!("env:{}@{}", self.id.repo, self.rel);
+        let mut props = decl.props.clone();
+        props.insert("declared_by".into(), "kustomize".into());
+        props.insert("path".into(), self.rel.into());
+        if !reach.includes.is_empty() {
+            props.insert("includes".into(), reach.includes.clone().into());
+        }
+        out.nodes.push(Node {
+            props: self.seal(props, ConfidenceTier::Confirmed, &[decl.span], &environment),
+            id: environment.clone(),
+            label: "Environment".into(),
+        });
+        if !reach.findings.reasons.is_empty() {
+            out.nodes
+                .push(self.kustomization_gap(reach.findings, &decl.unevaluated));
+        }
+        let workload = |path: &str, index: usize| {
+            let document = tree
+                .documents(path)
+                .iter()
+                .find(|document| document.index == index)?;
+            let name = document.read.as_ref()?.name.as_ref()?;
+            Some(self.workload_id(path, index, &document.kind, name))
+        };
+        for ((path, index), declared) in &reach.declares {
+            let Some(dst) = workload(path, *index) else {
+                continue;
+            };
+            let mut props = Props::new();
+            props.insert("via".into(), declared.via.clone().into());
+            let spans: Vec<Span> = declared.spans.iter().copied().collect();
+            out.edges.push(Edge {
+                props: self.seal(
+                    props,
+                    ConfidenceTier::Confirmed,
+                    &spans,
+                    &format!("{environment} DECLARES {dst}"),
+                ),
+                src: environment.clone(),
+                dst,
+                label: "DECLARES".into(),
+            });
+        }
+        // One edge per workload: the store keys an edge by its ends and
+        // label. The first patch document gives the edge its properties;
+        // each further one is listed under `more`, in the order written.
+        for ((path, index), statements) in reach.patches {
+            let Some(dst) = workload(path, index) else {
+                continue;
+            };
+            let evidence: Vec<(&str, Span)> = statements
+                .iter()
+                .map(|statement| (statement.path, statement.span))
+                .collect();
+            let mut stated = statements.into_iter().map(|statement| {
+                let mut props = statement.props;
+                props.insert("path".into(), statement.path.into());
+                props
+            });
+            let Some(mut props) = stated.next() else {
+                continue;
+            };
+            let more: Vec<serde_json::Value> = stated.map(serde_json::Value::Object).collect();
+            if !more.is_empty() {
+                props.insert("more".into(), more.into());
+            }
+            out.edges.push(Edge {
+                props: self.seal_at(
+                    props,
+                    ConfidenceTier::Confirmed,
+                    &evidence,
+                    &format!("{environment} PATCHES {dst}"),
+                ),
+                src: environment.clone(),
+                dst,
+                label: "PATCHES".into(),
+            });
+        }
+    }
+
+    /// The workloads of one manifest file, and a Gap for each document that
+    /// states something this reader does not read. True when it yielded a
+    /// fact.
+    fn manifest(
+        &self,
+        documents: &[kubernetes::Document],
+        out: &mut EnvironmentExtraction,
+    ) -> bool {
+        let before = out.nodes.len();
+        for document in documents {
+            let Some(read) = &document.read else {
+                continue;
+            };
+            let mut findings = read.findings.clone();
+            let workload = read.name.as_ref().map(|name| {
+                (
+                    name,
+                    self.workload_id(self.rel, document.index, &document.kind, name),
+                )
+            });
+            match &workload {
+                Some((name, id)) => {
+                    let mut props = read.props.clone();
+                    props.insert("kind".into(), read.fact_kind.into());
+                    props.insert("name".into(), name.as_str().into());
+                    props.insert("path".into(), self.rel.into());
+                    out.nodes.push(Node {
+                        props: self.seal(props, ConfidenceTier::Confirmed, &[document.span], id),
+                        id: id.clone(),
+                        label: "Workload".into(),
+                    });
+                    if !read.containers_stated {
+                        findings.add(
+                            "`spec.template.spec.containers` is not a sequence of mappings",
+                            document.span,
+                        );
+                    }
+                }
+                None => findings.add(
+                    "the document has no plain scalar `metadata.name`, so no workload is recorded",
+                    document.span,
+                ),
+            }
+            if findings.reasons.is_empty() {
+                continue;
+            }
+            let id = format!("{}#{}", self.gap_id(None), document.index);
+            let mut props = Props::new();
+            props.insert("kind".into(), "manifest-document".into());
+            props.insert("path".into(), self.rel.into());
+            props.insert("document".into(), document.index.into());
+            if let Some((name, _)) = &workload {
+                props.insert(
+                    "workload".into(),
+                    format!("{}/{name}", document.kind).into(),
+                );
+            }
+            props.insert("reason".into(), findings.reasons.join("; ").into());
+            props.insert("attempted_tiers".into(), serde_json::json!(["T0"]));
+            let spans: Vec<Span> = findings.spans.into_iter().collect();
+            out.nodes.push(Node {
+                props: self.seal(props, ConfidenceTier::Gap, &spans, &id),
+                id,
+                label: "Gap".into(),
+            });
+        }
+        out.nodes.len() > before
+    }
 }
+
+mod kubernetes;
+mod kustomize;
 
 #[cfg(test)]
 mod tests;
