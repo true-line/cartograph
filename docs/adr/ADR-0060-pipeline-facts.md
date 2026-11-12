@@ -24,7 +24,7 @@ domain-layer trace relation.
 2. **Two edge labels:** `PART_OF` (trigger or job to pipeline, step to job),
    carrying the declared position as `index`; and `NEEDS` (job to job),
    carrying how the dependency was declared (`needs`, `FROM <stage>`,
-   `COPY --from`). Order is always a stored property, never store order. A
+   `COPY --from`, and since #1818 `RUN --mount=…,from=<stage>`). Order is always a stored property, never store order. A
    job's `depth` is its longest resolved dependency chain.
 3. **No existing edge label is reused.** `DEFINED_IN` is walked by the flow
    tracer, `TRIGGERS` and `DEPENDS_ON` are drawn on the topology map, and
@@ -51,13 +51,14 @@ domain-layer trace relation.
 ## Consequences
 
 - An authored deployment section can cite jobs, steps and stages in order.
-  The projection that lists them per pipeline is a later change.
+  The projection that lists them per pipeline is `pipelines.md` (#1818).
 - Re-ingesting a repository with workflows or Dockerfiles adds facts, so its
   graph content hash changes once.
 - Redaction fails closed: a path or identifier of forty or more token
   characters inside a command is withheld like a token would be.
 - Dockerfiles using heredocs, and workflows using YAML anchors, are reported
-  as not read until the reader covers them.
+  as not read until the reader covers them. `Containerfile` and
+  `*.dockerfile` names are read since #1818.
 - A repository with an unread CI system or an unreadable pipeline file has a
   limited coverage inventory.
 
