@@ -544,7 +544,12 @@ fn mcp_security_artifact_preserves_legacy_compiler_identity() {
         panic!("legacy security fixture")
     };
     assert_eq!(&actual.artifact, expected);
-    assert!(actual.artifact.content.contains("Unauthenticated endpoint"));
+    assert!(
+        actual
+            .artifact
+            .content
+            .contains("No authentication check recovered")
+    );
 }
 
 mod overlay_capture;

@@ -733,6 +733,8 @@ fn list(out: &mut Text, values: &[&str]) -> fmt::Result {
         write!(out, "{}", Safe(Join(values, ", ")))
     }
 }
+/// `security.md`. An endpoint finding states what was recovered, in the words
+/// `endpoint-permissions.md` uses for the same fact (#1820, AC-0656).
 pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let findings: Vec<_> = nodes
@@ -746,14 +748,16 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
     }
     let mut content = Text::new(
         &budget,
-        "# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
+        "# Security findings\n\n\"No authentication check recovered\" means none recovered in the source that was read: a check outside it, such as a gateway or middleware the adapters do not read, is not visible to this finding.\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
     )?;
     for n in &findings {
         write!(
             content,
             "| {} | `{}` | `{}` | ",
             Safe(NodeName(n)),
-            Safe(n.props["category"].as_str().unwrap_or("security")),
+            Safe(security_type(
+                n.props["category"].as_str().unwrap_or("security")
+            )),
             Safe(n.props["subject_id"].as_str().unwrap_or("—"))
         )?;
         list(&mut content, &strings(n, "resource_scope"))?;
@@ -771,6 +775,15 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
         content.push_str("| — | — | — | — | — | No explicit security findings | — |\n")?;
     }
     finish(content, assertions)
+}
+/// The Type cell of a `security.md` row. The stored category of an endpoint
+/// finding keeps its identity (`unauthenticated_endpoint`); the document names
+/// what was recovered, so it never calls the endpoint unauthenticated (#1820).
+fn security_type(category: &str) -> &str {
+    match category {
+        "unauthenticated_endpoint" => "no_auth_check_recovered",
+        other => other,
+    }
 }
 struct Settings<'a>(&'a Node);
 impl fmt::Display for Settings<'_> {

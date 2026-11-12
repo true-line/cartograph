@@ -607,3 +607,39 @@ fn text_never_calls_an_endpoint_unauthenticated_or_unprotected() {
         }
     }
 }
+
+// AC-0656 (#1820): one fact, one wording. The route with no recovered check
+// is under "none recovered" in endpoint-permissions.md and under "No
+// authentication check recovered" in security.md, which never calls it an
+// unauthenticated endpoint.
+#[test]
+fn security_and_endpoint_permissions_word_a_missing_check_alike() {
+    let fixture = three_routes();
+    for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+        let bundle = compile_spec(&fixture.nodes, &fixture.edges, &[], mode, &BTreeSet::new());
+        let content = |file: &str| {
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.file_name == file)
+                .unwrap_or_else(|| panic!("{file} is exported"))
+                .content
+        };
+
+        let permissions = content("endpoint-permissions.md");
+        assert!(row(section(permissions, NONE), "/health").is_some());
+
+        let security = content("security.md");
+        let finding = security
+            .lines()
+            .find(|line| line.starts_with("| No authentication check recovered: GET /health |"))
+            .expect("the same route is a security finding under the recovered wording");
+        assert!(finding.contains("| InferredStrong |"));
+        assert!(!security.to_lowercase().contains("unauthenticated"));
+        assert!(finding.contains("| `no_auth_check_recovered` |"));
+        assert!(security.contains("is not visible to this finding"));
+        // The guarded route and the route outside recovery are not findings.
+        assert!(!security.contains("GET /me |"));
+        assert!(!security.contains("GET /orders |"));
+    }
+}

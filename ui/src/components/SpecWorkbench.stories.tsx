@@ -109,7 +109,7 @@ const UNAUTHENTICATED: SpecAssertion = {
   id: 'node:finding:security:admin',
   subject_id: 'finding:security:admin',
   subject_kind: 'Finding',
-  summary: 'Finding: Unauthenticated endpoint: GET /admin',
+  summary: 'Finding: No authentication check recovered: GET /admin',
   provenance: {
     ...CONFIRMED.provenance,
     extractor_id: 't0.security-projection',
@@ -211,7 +211,7 @@ const BUNDLE: SpecBundle = {
         'Security findings',
         [UNAUTHENTICATED, OVER_BROAD_GRANT],
       ),
-      content: '# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n| Unauthenticated endpoint: GET /admin | unauthenticated_endpoint | ep:admin | GET /admin | — | US-0015 / AC-0041 | Confirmed |\n| Over-broad IAM grant | over_broad_grant | res:admin GRANTS res:orders | arn:aws:s3:::orders/* | s3:Get* | US-0015 / AC-0042 | InferredWeak |\n',
+      content: '# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n| No authentication check recovered: GET /admin | no_auth_check_recovered | ep:admin | GET /admin | — | US-0015 / AC-0041 | Confirmed |\n| Over-broad IAM grant | over_broad_grant | res:admin GRANTS res:orders | arn:aws:s3:::orders/* | s3:Get* | US-0015 / AC-0042 | InferredWeak |\n',
     },
   ],
   assertion_count: 11,
@@ -343,7 +343,7 @@ export const SecurityFindings: Story = {
     const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
     await userEvent.click(within(nav).getByRole('button', { name: /Security findings/ }));
     await expect(canvas.getByText('2 security findings')).toBeInTheDocument();
-    await expect(canvas.getByText('Finding: Unauthenticated endpoint: GET /admin')).toBeInTheDocument();
+    await expect(canvas.getByText('Finding: No authentication check recovered: GET /admin')).toBeInTheDocument();
     await expect(
       canvas.getByText('Finding: Over-broad IAM grant: admin policy → orders/*'),
     ).toBeInTheDocument();
@@ -833,7 +833,7 @@ export const MarkdownArtifactsRenderByDefault: Story = {
           ? {
               ...item,
               content:
-                '# Security findings\n\nInspect `GET /admin` exposure.\n\n| Finding | Confidence |\n|---|---|\n| Unauthenticated endpoint: GET /admin | Confirmed |\n',
+                '# Security findings\n\nInspect `GET /admin` exposure.\n\n| Finding | Confidence |\n|---|---|\n| No authentication check recovered: GET /admin | Confirmed |\n',
             }
           : item,
       ),
@@ -852,7 +852,7 @@ export const MarkdownArtifactsRenderByDefault: Story = {
     const rendered = within(canvas.getByTestId('spec-artifact-rendered'));
     await expect(rendered.getByRole('heading', { name: 'Security findings' })).toBeInTheDocument();
     const table = rendered.getByRole('table');
-    await expect(table).toHaveTextContent('Unauthenticated endpoint: GET /admin');
+    await expect(table).toHaveTextContent('No authentication check recovered: GET /admin');
     await expect(table).toHaveTextContent('Confirmed');
     await expect(rendered.getByText('GET /admin').tagName).toBe('CODE');
 
@@ -867,7 +867,7 @@ export const MarkdownArtifactsRenderByDefault: Story = {
     await expect(renderedBtn).toHaveAttribute('aria-pressed', 'true');
     await expect(
       within(canvas.getByTestId('spec-artifact-rendered')).getByRole('table'),
-    ).toHaveTextContent('Unauthenticated endpoint: GET /admin');
+    ).toHaveTextContent('No authentication check recovered: GET /admin');
   },
 };
 
