@@ -10,7 +10,9 @@
 //! bytes passed as the call argument (host-mediated, read-only). Every
 //! failure mode (fuel exhaustion, memory cap, deadline, trap, malformed
 //! output) fails the call closed: callers get an [`Err`] and must treat the
-//! call as having produced zero facts (AC-0070).
+//! call as having produced zero facts (AC-0070). Routing ([`route`]) then
+//! either refuses that one file or fails the whole pass, by
+//! [`HostError::refusal`].
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,9 +126,58 @@ pub enum HostError {
     /// the provenance rules in [`enforce_provenance`].
     #[error("plugin emitted a malformed fact: {0}")]
     MalformedFact(String),
-    /// The plugin trapped for a reason not covered by a bound above.
+    /// The plugin hit a wasm trap not covered by a bound above (for example
+    /// `unreachable`, which is how a guest panic ends). A trap code is a
+    /// function of the plugin and its input alone.
     #[error("plugin trapped: {0}")]
     Trap(String),
+    /// The plugin overflowed its call stack. Kept apart from
+    /// [`HostError::Trap`]: the depth at which the stack runs out depends on
+    /// the host's native frame sizes, so it is not a function of the plugin
+    /// and its input alone.
+    #[error("plugin exhausted its call stack")]
+    StackOverflow,
+    /// The call failed without a wasm trap code (for example a host
+    /// function error), so its cause is not established.
+    #[error("plugin call failed: {0}")]
+    CallFailed(String),
+}
+
+/// Why the host refused one file's extraction by one plugin, as coverage
+/// records it (#1810, AC-0658). Only failures that are a function of the
+/// plugin, the file and the limits alone are refusals; see
+/// [`HostError::refusal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RefusalReason {
+    /// The plugin emitted a fact the host cannot accept.
+    MalformedFact,
+    /// The plugin returned an extraction error or trapped.
+    GuestError,
+    /// The plugin exceeded its fuel, memory or table bound.
+    BoundExceeded,
+}
+
+impl HostError {
+    /// The refusal class when this failure is a deterministic function of
+    /// the plugin, the file and the limits, so skipping the file gives the
+    /// same graph on every run. `None` for a failure that depends on the
+    /// machine (the wall-clock deadline, the native stack), that is not
+    /// about one file (compilation, instantiation), or whose cause is not
+    /// established: those keep failing the whole pass.
+    pub fn refusal(&self) -> Option<RefusalReason> {
+        match self {
+            Self::MalformedFact(_) => Some(RefusalReason::MalformedFact),
+            Self::GuestError(_) | Self::Trap(_) => Some(RefusalReason::GuestError),
+            Self::FuelExhausted(_) | Self::MemoryLimitExceeded(_) | Self::TableLimitExceeded(_) => {
+                Some(RefusalReason::BoundExceeded)
+            }
+            Self::InvalidComponent(_)
+            | Self::Instantiation(_)
+            | Self::DeadlineExceeded(_)
+            | Self::StackOverflow
+            | Self::CallFailed(_) => None,
+        }
+    }
 }
 
 /// Marker error returned by the memory [`wasmtime::ResourceLimiter`] so the
@@ -376,6 +427,7 @@ fn classify_call_error(
         return match trap {
             wasmtime::Trap::OutOfFuel => HostError::FuelExhausted(limits.max_fuel),
             wasmtime::Trap::Interrupt => HostError::DeadlineExceeded(limits.deadline),
+            wasmtime::Trap::StackOverflow => HostError::StackOverflow,
             other => HostError::Trap(other.to_string()),
         };
     }
@@ -385,7 +437,7 @@ fn classify_call_error(
     if remaining_fuel == 0 {
         return HostError::FuelExhausted(limits.max_fuel);
     }
-    HostError::Trap(err.to_string())
+    HostError::CallFailed(err.to_string())
 }
 
 fn convert_extraction(extraction: WitExtraction) -> Result<PluginExtraction, HostError> {
@@ -686,6 +738,42 @@ mod tests {
         let err = wasmtime::ResourceLimiter::table_growing(&mut state, 0, 11, None)
             .expect_err("past cap must be denied");
         assert!(err.downcast_ref::<TableCapExceeded>().is_some());
+    }
+
+    // AC-0658: only a failure that is a function of the plugin, the file and
+    // the limits is a refusal, in one of three classes. The wall-clock
+    // deadline, the native stack, compilation, instantiation and a failure
+    // of unknown cause are not.
+    #[test]
+    fn refusal_classes_cover_only_deterministic_failures() {
+        let text = || "guest text".to_string();
+        assert_eq!(
+            HostError::MalformedFact(text()).refusal(),
+            Some(RefusalReason::MalformedFact)
+        );
+        for error in [HostError::GuestError(text()), HostError::Trap(text())] {
+            assert_eq!(error.refusal(), Some(RefusalReason::GuestError), "{error}");
+        }
+        for error in [
+            HostError::FuelExhausted(1),
+            HostError::MemoryLimitExceeded(1),
+            HostError::TableLimitExceeded(1),
+        ] {
+            assert_eq!(
+                error.refusal(),
+                Some(RefusalReason::BoundExceeded),
+                "{error}"
+            );
+        }
+        for error in [
+            HostError::DeadlineExceeded(Duration::from_secs(5)),
+            HostError::StackOverflow,
+            HostError::CallFailed(text()),
+            HostError::Instantiation(text()),
+            HostError::InvalidComponent(text()),
+        ] {
+            assert_eq!(error.refusal(), None, "{error}");
+        }
     }
 
     #[test]

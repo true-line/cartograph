@@ -18,6 +18,12 @@
 //! hash and is stated to be stale with what was compared. Nothing is read
 //! from its inventory, in either artifact, and it enters no total. A host
 //! that makes no comparison names none, and its artifacts are unchanged.
+//!
+//! Plugin refusals (#1810, AC-0658): a gated plugin's row may record the
+//! files the host refused its extraction of, by reason class. The Markdown
+//! lists those files under the repository's producers and totals them under
+//! their own reason. The row's file count never includes them. An inventory
+//! that records no refusal renders the bytes it did before.
 
 use super::producers::Output;
 use super::render::{Budget, RenderLimit, Safe, Text};
@@ -66,6 +72,26 @@ struct Producer {
     edges: u64,
     inputs: Vec<String>,
     stopping_reason: String,
+    /// Files a gated plugin was refused on; absent when there are none.
+    #[serde(default)]
+    refusals: Option<Refusals>,
+}
+
+/// The bounded list of files one plugin was refused on. The counts by class
+/// are read from the stopping reason and the not-covered entries.
+#[derive(Deserialize)]
+struct Refusals {
+    #[serde(default)]
+    files: Vec<RefusedFile>,
+    /// Refused files the inventory counted but did not list.
+    #[serde(default)]
+    omitted: u64,
+}
+
+#[derive(Deserialize)]
+struct RefusedFile {
+    path: String,
+    reason: String,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +113,16 @@ const RAN: &str = "ran";
 const NOT_SELECTED: &str = "not_selected";
 const NOT_APPLICABLE: &str = "not_applicable";
 const MISSING_INPUT: &str = "missing_input";
+const UNSUPPORTED: &str = "unsupported";
+const PLUGIN_REFUSED: &str = "plugin_refused";
+
+/// The not-covered capabilities `ingest::coverage` records for files a
+/// gated plugin was refused on, one per reason class.
+const REFUSAL_CAPABILITIES: [&str; 3] = [
+    "plugin-malformed-fact",
+    "plugin-guest-error",
+    "plugin-bound-exceeded",
+];
 
 /// One stored record with its body read, in repo-key order.
 struct Repo<'a> {
@@ -151,7 +187,8 @@ struct ProducerTotal {
 /// Estate totals for one reason something was not read or not covered.
 #[derive(Serialize)]
 struct ReasonTotal {
-    /// `not_selected`, `missing_input` or `unsupported`.
+    /// `not_selected`, `missing_input`, `unsupported` or, for files a gated
+    /// plugin was refused on, `plugin_refused`.
     reason: &'static str,
     /// The producer coverage, manifest input or capability concerned.
     what: String,
@@ -214,9 +251,12 @@ fn totals(repos: &[Repo<'_>]) -> Totals {
             *seen.entry((MISSING_INPUT, &missing.input)).or_default() += 1;
         }
         for unsupported in &inventory.unsupported {
-            let occurrences = seen
-                .entry(("unsupported", &unsupported.capability))
-                .or_default();
+            let reason = if REFUSAL_CAPABILITIES.contains(&unsupported.capability.as_str()) {
+                PLUGIN_REFUSED
+            } else {
+                UNSUPPORTED
+            };
+            let occurrences = seen.entry((reason, &unsupported.capability)).or_default();
             *occurrences = occurrences.saturating_add(unsupported.occurrences);
         }
         for (key, occurrences) in seen {
@@ -248,6 +288,7 @@ fn reason_text(reason: &str) -> &'static str {
     match reason {
         NOT_SELECTED => "Producer excluded by the layer hints",
         MISSING_INPUT => "Input not declared",
+        PLUGIN_REFUSED => "A gated plugin's extraction of the file was refused",
         _ => "No installed producer covers it, or a tool limit was reached",
     }
 }
@@ -268,6 +309,17 @@ fn compared_text(compared: &[String]) -> String {
         "nothing recorded".into()
     } else {
         compared.join(", ")
+    }
+}
+
+/// A refusal reason class as the Markdown prints it. A class this version
+/// does not name is printed as recorded.
+fn refusal_text(reason: &str) -> &str {
+    match reason {
+        "malformed_fact" => "the plugin emitted a fact the host does not accept",
+        "guest_error" => "the plugin returned an error or trapped",
+        "bound_exceeded" => "the plugin exceeded its fuel, memory or table bound",
+        other => other,
     }
 }
 
@@ -498,6 +550,40 @@ fn markdown(repos: &[Repo<'_>], out: &mut Text) -> std::fmt::Result {
                 Safe(list(&producer.inputs)),
                 Safe(&producer.stopping_reason)
             )?;
+        }
+        // Written only when a refusal is recorded, so every other
+        // inventory keeps its bytes.
+        let refused = || {
+            inventory
+                .producers
+                .iter()
+                .filter_map(|producer| Some((producer, producer.refusals.as_ref()?)))
+        };
+        if refused().next().is_some() {
+            out.push_str(
+                "\nFiles a gated plugin's extraction was refused on. No fact from these files by \
+                 that plugin joined the graph, and they are not in its file count.\n\n| Producer \
+                 | File | Why refused |\n|---|---|---|\n",
+            )?;
+            for (producer, refusals) in refused() {
+                for file in &refusals.files {
+                    writeln!(
+                        out,
+                        "| `{}` | `{}` | {} |",
+                        Safe(&producer.id),
+                        Safe(&file.path),
+                        Safe(refusal_text(&file.reason))
+                    )?;
+                }
+                if refusals.omitted != 0 {
+                    writeln!(
+                        out,
+                        "| `{}` | {} more refused files are counted but not listed | — |",
+                        Safe(&producer.id),
+                        refusals.omitted
+                    )?;
+                }
+            }
         }
         if inventory.missing_inputs.is_empty() && inventory.unsupported.is_empty() {
             out.push_str("\nNo missing input and nothing not covered is recorded.\n")?;
@@ -829,6 +915,149 @@ mod tests {
             "reason": "unsupported", "what": "symlink-not-followed",
             "repositories": 1, "occurrences": 1
         })));
+    }
+
+    const PLUGIN: &str = "plugin.zig@0123456789ab";
+    const MALFORMED_REASON: &str = "2 file(s) were refused for a gated plugin because the plugin \
+         emitted a fact the host does not accept; no fact from them by that plugin joined the \
+         graph, so that plugin does not cover them: a plugin failure, not a system gap";
+
+    /// [`inventory`] with a gated plugin row. With `refused`, the row is in
+    /// the shape `ingest::coverage` records for a plugin refused on three of
+    /// five claimed files, one of them past the listing bound.
+    fn plugin_inventory(repo: &str, refused: bool) -> String {
+        let mut body: serde_json::Value = serde_json::from_str(&inventory(repo)).unwrap();
+        let mut row = json!({
+            "id": PLUGIN, "kind": "deterministic", "covers": "gated plugin", "state": "ran",
+            "files": 2, "nodes": 5, "edges": 3, "inputs": [],
+            "stopping_reason": format!("completed over the files its extensions claim in {repo}@0123abc")
+        });
+        if refused {
+            row["stopping_reason"] = json!(format!(
+                "read 2 of the 5 files its extensions claim in {repo}@0123abc; the host refused \
+                 its extraction of 3 (2 malformed fact, 1 bound exceeded), and no fact from those \
+                 files by this plugin joined the graph"
+            ));
+            row["refusals"] = json!({
+                "malformed_fact": 2, "guest_error": 0, "bound_exceeded": 1,
+                "files": [
+                    {"path": "lib/m.zig", "reason": "malformed_fact"},
+                    {"path": "src/z.zig", "reason": "bound_exceeded"}
+                ],
+                "omitted": 1
+            });
+            let unsupported = body["unsupported"].as_array_mut().unwrap();
+            unsupported.push(json!({
+                "capability": "plugin-malformed-fact", "occurrences": 2,
+                "first_site": "lib/m.zig", "reason": MALFORMED_REASON
+            }));
+            unsupported.push(json!({
+                "capability": "plugin-bound-exceeded", "occurrences": 1,
+                "first_site": "src/z.zig", "reason": "recorded reason"
+            }));
+        }
+        body["producers"].as_array_mut().unwrap().push(row);
+        body.to_string()
+    }
+
+    // AC-0658: a plugin refused on some files is listed with the refused
+    // count by class, the refused files and their class, and a file count
+    // that leaves them out. The index carries the recorded refusals verbatim.
+    #[test]
+    fn coverage_artifacts_list_the_files_a_plugin_was_refused_on() {
+        let records = [stored("acme/api", plugin_inventory("acme/api", true))];
+        let (markdown, index) = export(&records, ExportMode::VerifiedOnly);
+        assert!(
+            markdown.content.contains(&format!(
+                "| gated plugin | `{PLUGIN}` | deterministic | ran | 2 | 5 | 3 | — | read 2 of \
+                 the 5 files its extensions claim in acme/api@0123abc; the host refused its \
+                 extraction of 3 (2 malformed fact, 1 bound exceeded), and no fact from those \
+                 files by this plugin joined the graph |"
+            )),
+            "{}",
+            markdown.content
+        );
+        assert!(markdown.content.contains(&format!(
+            "\nFiles a gated plugin's extraction was refused on. No fact from these files by that \
+             plugin joined the graph, and they are not in its file count.\n\n\
+             | Producer | File | Why refused |\n|---|---|---|\n\
+             | `{PLUGIN}` | `lib/m.zig` | the plugin emitted a fact the host does not accept |\n\
+             | `{PLUGIN}` | `src/z.zig` | the plugin exceeded its fuel, memory or table bound |\n\
+             | `{PLUGIN}` | 1 more refused files are counted but not listed | — |\n"
+        )));
+        assert!(markdown.content.contains(&format!(
+            "| plugin-malformed-fact | 2 | `lib/m.zig` | {MALFORMED_REASON} |"
+        )));
+        // File reads are the TypeScript file and the plugin's two read
+        // files: the three refused files are not read files.
+        assert!(markdown.content.contains(&format!(
+            "| acme/api | 0123abc | `{}` | yes | 2 | 3 | 1 | 1 | 4 / 5 |",
+            records[0].inventory_hash
+        )));
+        assert!(markdown.content.contains(
+            "| A gated plugin's extraction of the file was refused | plugin-malformed-fact | 1 \
+             | 2 |"
+        ));
+        assert!(markdown.content.contains(
+            "| A gated plugin's extraction of the file was refused | plugin-bound-exceeded | 1 \
+             | 1 |"
+        ));
+
+        let read: ReadIndex = serde_json::from_str(&index.content).unwrap();
+        assert!(read.repositories[0].readable);
+        assert_eq!(
+            read.repositories[0].inventory.get(),
+            records[0].record.inventory_json
+        );
+        assert!(read.reasons.contains(&json!({
+            "reason": "plugin_refused", "what": "plugin-malformed-fact",
+            "repositories": 1, "occurrences": 2
+        })));
+        // The same stored inventory gives the same bytes.
+        assert_eq!(
+            (markdown, index),
+            export(&records, ExportMode::VerifiedOnly)
+        );
+    }
+
+    // AC-0658: an inventory that records no refusal states none. A plugin
+    // row without the field, as stored before the field existed, reads as
+    // before and adds nothing to either artifact.
+    #[test]
+    fn coverage_artifacts_state_no_refusal_when_none_is_recorded() {
+        let records = [stored("acme/api", plugin_inventory("acme/api", false))];
+        let (markdown, index) = export(&records, ExportMode::VerifiedOnly);
+        assert!(markdown.content.contains(&format!(
+            "| gated plugin | `{PLUGIN}` | deterministic | ran | 2 | 5 | 3 | — | completed over \
+             the files its extensions claim in acme/api@0123abc |"
+        )));
+        for content in [&markdown.content, &index.content] {
+            assert!(!content.contains("refused"), "{content}");
+        }
+        let read: ReadIndex = serde_json::from_str(&index.content).unwrap();
+        assert!(read.repositories[0].readable);
+        assert_eq!((read.limited, read.unreadable), (1, 0));
+
+        // The plugin row is the only difference from the same inventory
+        // without a plugin.
+        let (plain, _) = export(
+            &[stored("acme/api", inventory("acme/api"))],
+            ExportMode::VerifiedOnly,
+        );
+        let without_plugin_rows: String = markdown
+            .content
+            .lines()
+            .filter(|line| !line.contains(PLUGIN))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let hash_line = |content: &str| {
+            content
+                .lines()
+                .filter(|line| !line.contains("Inventory hash") && !line.contains("| acme/api |"))
+                .map(|line| format!("{line}\n"))
+                .collect::<String>()
+        };
+        assert_eq!(hash_line(&without_plugin_rows), hash_line(&plain.content));
     }
 
     // AC-0592: both artifacts carry the stored inventory hash, and the index
