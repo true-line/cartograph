@@ -626,6 +626,62 @@ fn source_selection_distinguishes_missing_absent_present_and_orders_unique_keys(
 }
 
 #[test]
+fn selections_over_an_observed_snapshot_match_a_new_read_and_refuse_a_moved_store() {
+    // AC-0659 (#1834): one graph copy serves many selections. Over a
+    // snapshot already read, the states of any keys are the ones a new
+    // snapshot read returns, bindings and missing facts included; once the
+    // store has moved nothing is answered from the old rows, and the same
+    // key bound applies.
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let (a, ae, b, _) = seed(&mut store);
+    let missing = FactKey::Node {
+        id: "missing".into(),
+    };
+    let observed = store.read_source_selection_snapshot(&[]).unwrap();
+    for keys in [
+        vec![],
+        vec![a.fact.clone()],
+        vec![
+            b.fact.clone(),
+            missing.clone(),
+            ae.fact.clone(),
+            b.fact.clone(),
+        ],
+    ] {
+        let fresh = store.read_source_selection_snapshot(&keys).unwrap();
+        assert_eq!(fresh.revision, observed.revision);
+        assert_eq!(
+            store.read_source_selections_at(&observed, &keys).unwrap(),
+            fresh.selections
+        );
+    }
+    assert!(matches!(
+        store.read_source_selections_at(
+            &observed,
+            &vec![a.fact.clone(); MAX_SOURCE_SELECTION_KEYS + 1]
+        ),
+        Err(GraphError::SourceBinding("too many source selection keys"))
+    ));
+    store.put_node(&node("later")).unwrap();
+    assert!(matches!(
+        store.read_source_selections_at(&observed, std::slice::from_ref(&a.fact)),
+        Err(GraphError::Generation(crate::GenerationError::Changed))
+    ));
+    let moved = store.read_source_selection_snapshot(&[]).unwrap();
+    assert_ne!(moved.revision, observed.revision);
+    assert_eq!(
+        store
+            .read_source_selections_at(&moved, std::slice::from_ref(&a.fact))
+            .unwrap(),
+        store
+            .read_source_selection_snapshot(std::slice::from_ref(&a.fact))
+            .unwrap()
+            .selections
+    );
+    assert!(store.conn.is_autocommit());
+}
+
+#[test]
 fn source_selection_rejects_raw_key_budget_and_invalid_keys_before_graph_access() {
     // AC-0173: the raw request bound precedes deduplication and database access;
     // malformed keys do not become missing facts, even with a broken schema.

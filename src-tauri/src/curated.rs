@@ -8,9 +8,10 @@
 //! 1. [`gather`], with no graph or decision lock held: one bounded read of
 //!    the staging store, then one assessment for each accepted record that
 //!    could be eligible. Nothing is persisted.
-//! 2. [`project`], under the export's own graph and decision locks: the
-//!    assessments are checked against the store revision the export reads,
-//!    and the pure projection is computed over the export's own snapshot.
+//! 2. [`project`], over the snapshot the export read under its own graph and
+//!    decision locks: the assessments are checked against the store revision
+//!    of that snapshot, and the pure projection is computed over it. It takes
+//!    no store lock, so an export calls it after releasing them (#1834).
 //!
 //! An MCP read session (slice 4, AC-0654) runs the same two steps over the
 //! snapshot it froze, and takes its reviews through [`ReviewSource`]. It
@@ -27,6 +28,7 @@ use core_graph::{Edge, Node, SqliteGraphStore, StoreRevision};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 use spec::CuratedFailure;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use crate::AppState;
 use crate::task_evidence::assessment::{self, Availability, BasisComparison};
@@ -36,9 +38,10 @@ use crate::task_evidence::assessment::{self, Availability, BasisComparison};
 /// of it.
 pub(crate) const MAX_CURATED_RECORD_SCAN: usize = MAX_STAGED_REFERENCE_SCAN;
 /// Most accepted records one projection takes. Each one that could be
-/// eligible costs one SPEC-09 assessment, and each assessment copies the
-/// graph, so this bounds the work of one read. More than this fails the
-/// read.
+/// eligible costs one SPEC-09 assessment, which reads its retained bytes
+/// and its source associations, so this bounds the work of one read. The
+/// graph is copied once for all of them while the store does not move
+/// (`assessment::SharedObservation`). More than this fails the read.
 pub(crate) const MAX_CURATED_ACCEPTED: usize = 256;
 
 /// What [`gather`] read: the reviewed records and the assessments made for
@@ -55,6 +58,112 @@ pub(crate) struct CuratedReview {
     /// By record identity, with the store revision the assessment's graph
     /// read observed (`None` when that read failed).
     assessments: BTreeMap<String, (BasisAssessment, Option<StoreRevision>)>,
+    /// Where [`project`] keeps what the documents' compile said of the
+    /// decisions no stored fact carries: the application's when [`gather`]
+    /// made this review, and otherwise one that starts empty.
+    settled: Arc<DerivedSettlements>,
+}
+
+/// What the compile of [`DerivedDecisions::Compile`] last found, kept in
+/// memory so that a decision matching nothing does not cost every export a
+/// second compile (#1834). Nothing is persisted.
+///
+/// The answer is a function of the rows that compile reads (nodes, edges and
+/// coverage inventories, all read in one transaction with the store
+/// revision) and of the hashes looked for. It is kept under exactly those:
+/// the store revision, the graph content hash and the set of hashes. A read
+/// with any of the three different compiles again and replaces the entry,
+/// so no answer is used for another graph or another set of decisions. A
+/// compile that fails is not kept.
+#[derive(Debug, Default)]
+pub(crate) struct DerivedSettlements(Mutex<Option<Settled>>);
+
+#[derive(Debug)]
+struct Settled {
+    revision: StoreRevision,
+    content_hash: String,
+    /// The decided hashes no stored fact carried.
+    wanted: BTreeSet<String>,
+    /// Those of `wanted` a curatable derived statement carries.
+    carried: BTreeSet<String>,
+}
+
+impl Settled {
+    fn answers(&self, snapshot: &Snapshot<'_>, wanted: &BTreeSet<String>) -> bool {
+        &self.revision == snapshot.revision
+            && self.content_hash == snapshot.content_hash
+            && &self.wanted == wanted
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DERIVED_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread made the compile of
+/// [`DerivedDecisions::Compile`].
+#[cfg(test)]
+pub(crate) fn derived_compiles() -> usize {
+    DERIVED_COMPILES.with(std::cell::Cell::get)
+}
+
+impl DerivedSettlements {
+    /// Which of `wanted` a curatable derived statement of `snapshot`
+    /// carries: the kept answer when it was made for this revision, content
+    /// and set, and otherwise one compile of the `best-effort` documents
+    /// with no rejection, which is then kept.
+    ///
+    /// The entry stays locked across the compile, so two exports of one
+    /// revision compile once between them. No store lock is taken while it
+    /// is held. A poisoned entry is not read or written: the compile runs.
+    fn carried(
+        &self,
+        snapshot: &Snapshot<'_>,
+        flows: &[flowtracer::Flow],
+        wanted: BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, CuratedFailure> {
+        let mut entry = self.0.lock().ok();
+        if let Some(Some(settled)) = entry.as_deref()
+            && settled.answers(snapshot, &wanted)
+        {
+            return Ok(settled.carried.clone());
+        }
+        #[cfg(test)]
+        DERIVED_COMPILES.with(|count| count.set(count.get() + 1));
+        let bundle = spec::try_compile_spec_with_coverage(
+            snapshot.nodes,
+            snapshot.edges,
+            flows,
+            spec::ExportMode::BestEffort,
+            &BTreeSet::new(),
+            snapshot.coverage,
+        )
+        .map_err(|_| CuratedFailure::AssertionsNotCompiled)?;
+        let mut left = wanted.clone();
+        let mut carried = BTreeSet::new();
+        for assertion in bundle
+            .artifacts
+            .iter()
+            .flat_map(|artifact| &artifact.assertions)
+        {
+            if left.contains(&assertion.provenance.content_hash)
+                && curatable(&assertion.provenance)
+                && let Some(hash) = left.take(&assertion.provenance.content_hash)
+            {
+                carried.insert(hash);
+            }
+        }
+        if let Some(entry) = entry.as_deref_mut() {
+            *entry = Some(Settled {
+                revision: snapshot.revision.clone(),
+                content_hash: snapshot.content_hash.to_owned(),
+                wanted,
+                carried: carried.clone(),
+            });
+        }
+        Ok(carried)
+    }
 }
 
 /// Whether one artifact's bytes depend on the curated projection: the
@@ -186,6 +295,17 @@ pub(crate) fn read_records(store: &agents::ProposalStore) -> CuratedReview {
     }
 }
 
+#[cfg(test)]
+impl CuratedReview {
+    /// This review with nothing kept from an earlier export, as every
+    /// export read before #1834: a decision that no stored fact carries is
+    /// settled by a compile of its own.
+    pub(crate) fn settling_alone(mut self) -> Self {
+        self.settled = Arc::default();
+        self
+    }
+}
+
 impl CuratedReview {
     /// Whether `records`, read later, are the records this review read. A
     /// review that failed read none, so nothing is compared for it.
@@ -273,7 +393,9 @@ impl ReviewSource for std::sync::Mutex<agents::ProposalStore> {
 /// held for the record read alone and released before any assessment. Each
 /// assessment then takes the staging lock, the source registry, the
 /// retention leases and the graph lock in its own order, one record at a
-/// time; none is held between records. Nothing is written.
+/// time; none is held between records. The assessments share one copy of
+/// the graph, and each checks under the graph lock that the store is still
+/// at the revision of that copy. Nothing is written.
 ///
 /// It does not fail: a read that could not finish is carried as the reason
 /// in the result, with no record.
@@ -288,8 +410,10 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         Err(failure) => return CuratedReview::failed(failure),
     };
     let mut assessments = BTreeMap::new();
+    // One graph copy and one snapshot identity for all of them (#1834).
+    let mut observed = assessment::SharedObservation::default();
     for record in proposals.iter().filter(|record| needs_assessment(record)) {
-        let assessed = match assessment::assess_observed(state, &record.record_id) {
+        let assessed = match assessment::assess_observed(state, &record.record_id, &mut observed) {
             Ok((assessed, revision)) => (BasisAssessment::Assessed(dimensions(assessed)), revision),
             // The record could not be read back. Not eligible, and listed.
             Err(_) => (BasisAssessment::Failed, None),
@@ -300,6 +424,7 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         failure: None,
         proposals,
         assessments,
+        settled: Arc::clone(&state.curated_settled),
     }
 }
 
@@ -348,11 +473,18 @@ fn match_stored<'a>(
 /// a finding) or matches nothing; those are settled by compiling the
 /// `best-effort` documents once with no rejection and reading their
 /// assertions. That second compile runs only when such a decision exists,
-/// and only for a reader that compiles ([`DerivedDecisions::Compile`]). For
-/// any other reader such a decision leaves the projection not computed.
+/// only for a reader that compiles ([`DerivedDecisions::Compile`]), and once
+/// for one store revision and set of such decisions ([`DerivedSettlements`]).
+/// For any other reader such a decision leaves the projection not computed.
+///
+/// The export's own compile cannot settle them instead. It leaves out every
+/// rejected inference, and in `verified-only` every InferredWeak one, so a
+/// rejected derived statement is not among its assertions; and the
+/// projection these hashes feed is an input of that compile.
 fn current_assertion_hashes(
     snapshot: &Snapshot<'_>,
     decided: &[core::AssertionDecisionEntry],
+    settled: &DerivedSettlements,
 ) -> Result<BTreeSet<String>, CuratedFailure> {
     let mut wanted: BTreeSet<String> = decided
         .iter()
@@ -378,27 +510,7 @@ fn current_assertion_hashes(
             return Err(CuratedFailure::DerivedDecisionsNeedCompile);
         }
     };
-    let bundle = spec::try_compile_spec_with_coverage(
-        snapshot.nodes,
-        snapshot.edges,
-        flows,
-        spec::ExportMode::BestEffort,
-        &BTreeSet::new(),
-        snapshot.coverage,
-    )
-    .map_err(|_| CuratedFailure::AssertionsNotCompiled)?;
-    for assertion in bundle
-        .artifacts
-        .iter()
-        .flat_map(|artifact| &artifact.assertions)
-    {
-        if wanted.contains(&assertion.provenance.content_hash)
-            && curatable(&assertion.provenance)
-            && let Some(hash) = wanted.take(&assertion.provenance.content_hash)
-        {
-            current.insert(hash);
-        }
-    }
+    current.extend(settled.carried(snapshot, flows, wanted)?);
     Ok(current)
 }
 
@@ -406,7 +518,8 @@ fn current_assertion_hashes(
 #[derive(Clone, Copy)]
 pub(crate) enum DerivedDecisions<'a> {
     /// By compiling every document once from these flows, the
-    /// `flowtracer::trace` of the snapshot. The export does this.
+    /// `flowtracer::trace` of the snapshot, unless that compile was already
+    /// made for this revision and these decisions. The export does this.
     Compile(&'a [flowtracer::Flow]),
     /// Not at all: the reader's work is bounded and that compile is not in
     /// its bound (an MCP read session). Such a decision leaves the
@@ -427,9 +540,9 @@ pub(crate) struct Snapshot<'a> {
     pub revision: &'a StoreRevision,
 }
 
-/// Step 2. The projection over the snapshot an export read, under that
-/// export's graph and decision locks. An `Err` is the reason `curated.md`
-/// states; it never fails the export.
+/// Step 2. The projection over the snapshot an export read under its graph
+/// and decision locks. It reads no store, so it needs neither lock. An `Err`
+/// is the reason `curated.md` states; it never fails the export.
 ///
 /// An assessment whose graph read observed another store revision than the
 /// export's describes a graph the export did not read. It is replaced by a
@@ -462,7 +575,7 @@ pub(crate) fn project(
         .iter()
         .map(agents::curated::curated_assertion_decision)
         .collect();
-    let current = current_assertion_hashes(snapshot, &decided)?;
+    let current = current_assertion_hashes(snapshot, &decided, &review.settled)?;
     core::project(&ProjectionInput {
         nodes: snapshot.nodes,
         edges: snapshot.edges,

@@ -90,6 +90,9 @@ struct AppState {
     sources: Arc<Mutex<SourceRegistry>>,
     primary_sources: primary_source::PrimarySourceStore,
     metrics: Mutex<metrics::MetricsStore>,
+    /// In memory only: what an export's second compile settled for the
+    /// current graph revision (`curated::DerivedSettlements`, #1834).
+    curated_settled: Arc<curated::DerivedSettlements>,
 }
 
 #[derive(Default)]
@@ -6198,64 +6201,124 @@ impl SpecInputs {
     }
 }
 
+/// Everything one spec compilation reads from the stores. It is read under
+/// the graph and decision locks; nothing derived from it needs them, so an
+/// export command releases both before it traces, projects and compiles
+/// (#1834).
+struct SpecRead {
+    /// The store revision of the transaction that read the rows below.
+    revision: core_graph::StoreRevision,
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    coverage: Vec<core_graph::coverage::StoredCoverage>,
+    assertion_decisions: Vec<agents::AssertionDecisionRecord>,
+}
+
+fn read_spec(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+) -> Result<SpecRead, String> {
+    let (revision, ((nodes, edges), coverage)) = curated::read_graph(graph)?;
+    let assertion_decisions = decisions
+        .list_assertions()
+        .map_err(|error| error.to_string())?;
+    Ok(SpecRead {
+        revision,
+        nodes,
+        edges,
+        coverage,
+        assertion_decisions,
+    })
+}
+
+/// [`read_spec`] under the application's graph and decision locks, both
+/// released on return.
+fn read_spec_locked(state: &AppState) -> Result<SpecRead, String> {
+    let graph = state.graph.lock().map_err(|error| error.to_string())?;
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    read_spec(&graph, &decisions)
+}
+
+impl SpecRead {
+    /// The flow trace and, with a `review`, the curated projection of what
+    /// was read. No store is read and no lock is needed.
+    fn inputs(self, review: Option<&curated::CuratedReview>) -> SpecInputs {
+        let Self {
+            revision,
+            nodes,
+            edges,
+            coverage,
+            assertion_decisions,
+        } = self;
+        let flows = flowtracer::trace(&nodes, &edges);
+        let rejected_hashes = assertion_decisions
+            .iter()
+            .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+            .map(|record| record.assertion.provenance.content_hash.clone())
+            .collect();
+        let (curated, graph_basis) = match review {
+            Some(review) => {
+                let graph_basis = graph_basis_of(&nodes, &edges);
+                let projection = curated::project(
+                    review,
+                    &curated::Snapshot {
+                        nodes: &nodes,
+                        edges: &edges,
+                        derived_decisions: curated::DerivedDecisions::Compile(&flows),
+                        coverage: &coverage,
+                        content_hash: &graph_basis.content_hash,
+                        revision: &revision,
+                    },
+                    &assertion_decisions,
+                );
+                let curated = match projection {
+                    Ok(projection) => CuratedInput::Computed(projection),
+                    Err(failure) => CuratedInput::NotComputed(failure),
+                };
+                (curated, Some(graph_basis))
+            }
+            None => (CuratedInput::NotRead, None),
+        };
+        SpecInputs {
+            nodes,
+            edges,
+            coverage,
+            flows,
+            rejected_hashes,
+            curated,
+            graph_basis,
+        }
+    }
+}
+
+/// The inputs of one compilation over stores the caller holds. The export
+/// commands run the same two steps, `read_spec` then `SpecRead::inputs`,
+/// and release the application's locks between them (`export_inputs`).
+#[cfg(test)]
 fn spec_inputs(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     review: Option<&curated::CuratedReview>,
 ) -> Result<SpecInputs, String> {
-    let (revision, ((nodes, edges), coverage)) = curated::read_graph(graph)?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let assertion_decisions = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?;
-    let rejected_hashes = assertion_decisions
-        .iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash.clone())
-        .collect();
-    let (curated, graph_basis) = match review {
-        Some(review) => {
-            let graph_basis = graph_basis_of(&nodes, &edges);
-            let projection = curated::project(
-                review,
-                &curated::Snapshot {
-                    nodes: &nodes,
-                    edges: &edges,
-                    derived_decisions: curated::DerivedDecisions::Compile(&flows),
-                    coverage: &coverage,
-                    content_hash: &graph_basis.content_hash,
-                    revision: &revision,
-                },
-                &assertion_decisions,
-            );
-            let curated = match projection {
-                Ok(projection) => CuratedInput::Computed(projection),
-                Err(failure) => CuratedInput::NotComputed(failure),
-            };
-            (curated, Some(graph_basis))
-        }
-        None => (CuratedInput::NotRead, None),
-    };
-    Ok(SpecInputs {
-        nodes,
-        edges,
-        coverage,
-        flows,
-        rejected_hashes,
-        curated,
-        graph_basis,
-    })
+    Ok(read_spec(graph, decisions)?.inputs(review))
 }
 
 /// `review` is what `curated::gather` read before the caller took the graph
-/// and decision locks.
+/// and decision locks. `export_spec` over stores the caller holds.
+#[cfg(test)]
 fn build_spec_bundle(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
     review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
-    let inputs = spec_inputs(graph, decisions, Some(review))?;
+    compile_spec_bundle(spec_inputs(graph, decisions, Some(review))?, mode)
+}
+
+fn compile_spec_bundle(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+) -> Result<spec::SpecBundle, String> {
     // An export whose citations do not resolve is refused (ADR-0058).
     let mut bundle = spec::try_compile_spec_supplied(
         &inputs.nodes,
@@ -6274,7 +6337,9 @@ fn build_spec_bundle(
 /// produces the same bytes, content id and assertions as that artifact in
 /// `build_spec_bundle` without building the others (#1582). `review` is
 /// required for an artifact that `curated::artifact_reads_projection` names
-/// and is not read for any other.
+/// and is not read for any other. `read_spec_artifact` over stores the
+/// caller holds.
+#[cfg(test)]
 fn build_spec_artifact(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
@@ -6282,12 +6347,31 @@ fn build_spec_artifact(
     mode: spec::ExportMode,
     artifact_id: &str,
 ) -> Result<spec::SpecArtifact, String> {
-    let review = if curated::artifact_reads_projection(artifact_id) {
-        Some(review.ok_or("The curated projection was not read for this artifact.")?)
+    let review = artifact_review(review, artifact_id)?;
+    compile_spec_artifact(spec_inputs(graph, decisions, review)?, mode, artifact_id)
+}
+
+/// The review one artifact's compilation projects from: `review` for an
+/// artifact that `curated::artifact_reads_projection` names, where it is
+/// required, and none for any other.
+fn artifact_review<'a>(
+    review: Option<&'a curated::CuratedReview>,
+    artifact_id: &str,
+) -> Result<Option<&'a curated::CuratedReview>, String> {
+    if curated::artifact_reads_projection(artifact_id) {
+        Ok(Some(review.ok_or(
+            "The curated projection was not read for this artifact.",
+        )?))
     } else {
-        None
-    };
-    let inputs = spec_inputs(graph, decisions, review)?;
+        Ok(None)
+    }
+}
+
+fn compile_spec_artifact(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+    artifact_id: &str,
+) -> Result<spec::SpecArtifact, String> {
     let unbounded = spec::SelectedCompileLimits {
         max_bytes: usize::MAX,
         adr: spec::AdrLimits {
@@ -6317,6 +6401,7 @@ fn build_spec_artifact(
     }
 }
 
+#[cfg(test)]
 fn build_spec_with_views(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
@@ -6329,7 +6414,9 @@ fn build_spec_with_views(
 
 /// `build_spec_with_views` with the Workbench's curated read (SPEC-12 slice
 /// 3, AC-0655), made from the projection this compilation computed: the one
-/// the bundle's `curated_basis` is stamped from.
+/// the bundle's `curated_basis` is stamped from. `export_spec_with_views`
+/// over stores the caller holds.
+#[cfg(test)]
 fn build_spec_with_views_and_curated(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
@@ -6343,7 +6430,20 @@ fn build_spec_with_views_and_curated(
     ),
     String,
 > {
-    let inputs = spec_inputs(graph, decisions, Some(review))?;
+    compile_spec_with_views_and_curated(spec_inputs(graph, decisions, Some(review))?, mode)
+}
+
+fn compile_spec_with_views_and_curated(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+) -> Result<
+    (
+        spec::SpecBundle,
+        spec::SpecViewBundle,
+        curated_workbench::CuratedWorkbenchRead,
+    ),
+    String,
+> {
     let curated = curated_workbench::CuratedWorkbenchRead::of(&inputs.curated, mode)
         .ok_or("The curated projection was not read.")?;
     // An export whose citations do not resolve is refused (ADR-0058).
@@ -6360,6 +6460,7 @@ fn build_spec_with_views_and_curated(
     Ok((bundle, views, curated))
 }
 
+#[cfg(test)]
 fn build_spec_views(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
@@ -6491,47 +6592,70 @@ struct SpecWithViewsPreview {
 
 /// Compile the full official spec set under one R-INT-5 export policy,
 /// capped per artifact before it crosses IPC (#488).
+///
+/// Like every export command below it runs on a blocking worker, never on
+/// the main thread (#1834, AC-0659): one export assesses up to
+/// `curated::MAX_CURATED_ACCEPTED` records and compiles every document.
 #[tauri::command]
-fn export_spec(
+async fn export_spec<R: tauri::Runtime>(
     mode: spec::ExportMode,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<SpecBundlePreview, String> {
-    // Before the graph lock: the assessments take it themselves (SPEC-12).
-    let review = curated::gather(&state);
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let bundle = build_spec_bundle(&graph, &decisions, &review, mode)?;
-    Ok(preview_spec_bundle(bundle))
+    off_ui_thread(move || export_spec_blocking(mode, &app.state::<AppState>())).await
+}
+
+/// The three steps of every export. The review first, with no graph or
+/// decision lock held: the assessments take the graph lock themselves
+/// (SPEC-12). Then the snapshot and the decisions under both locks. Then
+/// the trace, the projection and the compile with both released, so a
+/// command that needs the graph meanwhile waits for the read alone.
+fn export_inputs(state: &AppState) -> Result<SpecInputs, String> {
+    let review = curated::gather(state);
+    Ok(read_spec_locked(state)?.inputs(Some(&review)))
+}
+
+fn export_spec_blocking(
+    mode: spec::ExportMode,
+    state: &AppState,
+) -> Result<SpecBundlePreview, String> {
+    compile_spec_bundle(export_inputs(state)?, mode).map(preview_spec_bundle)
 }
 
 /// Compile structured diagram views (`topology`, `flow-dossiers`, `data-model`)
 /// bound to the same projection and artifact content identities as `export_spec`
 /// (US-0036, AC-0246, AC-0247).
 #[tauri::command]
-fn export_spec_views(
+async fn export_spec_views<R: tauri::Runtime>(
     mode: spec::ExportMode,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<spec::SpecViewBundle, String> {
-    let review = curated::gather(&state);
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_views(&graph, &decisions, &review, mode)
+    off_ui_thread(move || export_spec_views_blocking(mode, &app.state::<AppState>())).await
+}
+
+fn export_spec_views_blocking(
+    mode: spec::ExportMode,
+    state: &AppState,
+) -> Result<spec::SpecViewBundle, String> {
+    Ok(compile_spec_with_views_and_curated(export_inputs(state)?, mode)?.1)
 }
 
 /// Compile the capped official spec bundle and its structured diagram views
 /// from one snapshot read, flow trace, and projection pass (US-0036, AC-0246,
 /// AC-0247).
 #[tauri::command]
-fn export_spec_with_views(
+async fn export_spec_with_views<R: tauri::Runtime>(
     mode: spec::ExportMode,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<SpecWithViewsPreview, String> {
-    // Before the graph lock: the assessments take it themselves (SPEC-12).
-    let review = curated::gather(&state);
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    off_ui_thread(move || export_spec_with_views_blocking(mode, &app.state::<AppState>())).await
+}
+
+fn export_spec_with_views_blocking(
+    mode: spec::ExportMode,
+    state: &AppState,
+) -> Result<SpecWithViewsPreview, String> {
     let (bundle, views, curated) =
-        build_spec_with_views_and_curated(&graph, &decisions, &review, mode)?;
+        compile_spec_with_views_and_curated(export_inputs(state)?, mode)?;
     Ok(SpecWithViewsPreview {
         bundle: preview_spec_bundle(bundle),
         views,
@@ -6564,18 +6688,26 @@ fn full_artifact_preview(artifact: spec::SpecArtifact) -> SpecArtifactPreview {
 /// One official spec artifact's complete content and assertions, fetched on
 /// demand for copy/export after `export_spec`'s IPC-capped preview (#488).
 #[tauri::command]
-fn read_spec_artifact(
+async fn read_spec_artifact<R: tauri::Runtime>(
     mode: spec::ExportMode,
     artifact_id: String,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
+) -> Result<SpecArtifactPreview, String> {
+    off_ui_thread(move || read_spec_artifact_blocking(mode, &artifact_id, &app.state::<AppState>()))
+        .await
+}
+
+fn read_spec_artifact_blocking(
+    mode: spec::ExportMode,
+    artifact_id: &str,
+    state: &AppState,
 ) -> Result<SpecArtifactPreview, String> {
     // Read only for an artifact whose bytes depend on the projection, and
     // before the graph lock: the assessments take it themselves (SPEC-12).
-    let review = curated::artifact_reads_projection(&artifact_id).then(|| curated::gather(&state));
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_artifact(&graph, &decisions, review.as_ref(), mode, &artifact_id)
-        .map(full_artifact_preview)
+    let review = curated::artifact_reads_projection(artifact_id).then(|| curated::gather(state));
+    let review = artifact_review(review.as_ref(), artifact_id)?;
+    let inputs = read_spec_locked(state)?.inputs(review);
+    compile_spec_artifact(inputs, mode, artifact_id).map(full_artifact_preview)
 }
 
 /// Selected flow diagram, bound to the preview's full dossier identity (#1669).
@@ -6924,6 +7056,7 @@ fn main() {
                 primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
                     .map_err(std::io::Error::other)?,
                 metrics: Mutex::new(recovery_metrics),
+                curated_settled: Arc::default(),
             });
             Ok(())
         })
@@ -11426,6 +11559,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -12416,6 +12550,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(dir).unwrap(),
             sources: test_source_registry(&state_path, &std::collections::BTreeSet::new()),
             metrics: std::sync::Mutex::new(
@@ -13122,6 +13257,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -13383,6 +13519,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )

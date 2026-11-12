@@ -162,13 +162,15 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
   in `spec` keeps them equal.
 - A Workbench decision on a derived statement, or one that has gone stale,
   makes the curated read unavailable over MCP until the compile it needs is
-  accounted for in the worker's limits (#1834).
+  accounted for in the worker's limits. #1834 did not change this.
 - The fact index is not readable over MCP, so the citation ids `curated.md`
   prints cannot be resolved there.
-- An export assesses each accepted record that could be eligible on the
-  calling thread, and compiles the documents a second time when a Workbench
-  decision matches no stored fact. Both costs are bounded and neither is
-  moved off the calling thread yet.
+- Export costs (#1834, AC-0659): the export commands run off the UI thread;
+  the assessments of one export share one graph copy at one store revision;
+  the extra compile for a Workbench decision that matches no stored fact runs
+  once per store revision, graph content hash and set of such decisions, and
+  its answer is kept in memory only. Measured in a debug build only; not
+  verified for responsiveness in a running app.
 - `ContextStatus::AwaitingReconciliation` stays on the wire and in stored
   records unchanged; no surface shows it any more.
 - The MCP `user-stories` artifact and the desktop export are built from
