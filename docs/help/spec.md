@@ -216,7 +216,10 @@ proposal is not listed.
 Limits today:
 
 - An export reads at most 4,096 proposals and at most 256 accepted ones. With
-  more, the export fails and says so. It never lists a part of them.
+  more, or when the proposal history cannot be read, the export still
+  succeeds: **curated.md** says that the curated projection was not computed
+  and why, it shows no accepted proposal, the bundle has no `curated_basis`,
+  and every other document is unchanged. It never lists a part of them.
 - If the graph changes between the check of a proposal's evidence and the
   export's own read of the graph, the proposal is listed as stale for that
   export. Export again.

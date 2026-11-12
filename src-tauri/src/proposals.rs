@@ -273,24 +273,69 @@ mod tests {
             }
         }
         // Exactly the bound, read across several pages, is complete.
-        let review = crate::curated::read_records(&store).unwrap();
+        let review = crate::curated::read_records(&store);
         let graph = core_graph::SqliteGraphStore::open_in_memory().unwrap();
         let decisions = agents::DecisionLog::open(":memory:").unwrap();
         let bundle =
             crate::build_spec_bundle(&graph, &decisions, &review, spec::ExportMode::BestEffort)
                 .unwrap();
-        let counts = bundle.curated_basis.unwrap().counts;
+        let counts = bundle.curated_basis.clone().unwrap().counts;
         assert_eq!(counts.accepted, bound);
         assert_eq!(counts.unverified, bound);
+        assert!(bundle.artifacts.iter().any(|artifact| {
+            artifact.id == "curated" && artifact.content.contains("| unverified |")
+        }));
         let pending = store.list(1, None).unwrap().items.remove(0);
         store
             .review(&pending.proposal_id, 0, ProposalDecision::Accepted, None)
             .unwrap();
-        let error = crate::curated::read_records(&store).unwrap_err();
-        assert!(
-            error.contains(&format!("more than {bound} proposals are accepted")),
-            "{error}"
-        );
+        // One more, and nothing of the read is projected. The export still
+        // succeeds in both modes: the recovered documents do not depend on
+        // the review stores. `curated.md` gives the reason, no curated basis
+        // is stamped, and every other artifact is the one a compile with no
+        // projection produces.
+        let review = crate::curated::read_records(&store);
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let bundle = crate::build_spec_bundle(&graph, &decisions, &review, mode).unwrap();
+            assert_eq!(bundle.curated_basis, None);
+            assert!(bundle.graph_basis.is_some());
+            let bare = spec::compile_spec(&nodes, &edges, &[], mode, &Default::default());
+            for (bare, failed) in bare.artifacts.iter().zip(&bundle.artifacts) {
+                assert_eq!(bare == failed, bare.id != "curated", "{}", bare.id);
+            }
+            let curated = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap();
+            assert!(
+                curated
+                    .content
+                    .contains("The curated projection was not computed for this export"),
+                "{}",
+                curated.content
+            );
+            assert!(
+                curated
+                    .content
+                    .contains(&format!("More than {bound} proposals are accepted")),
+                "{}",
+                curated.content
+            );
+            assert!(curated.content.contains("(`too_many_accepted`)"));
+            assert!(!curated.content.contains("gap:"));
+            assert!(curated.assertions.is_empty());
+            // The views build and the single-artifact read succeed too.
+            let (with_views, _) =
+                crate::build_spec_with_views(&graph, &decisions, &review, mode).unwrap();
+            assert_eq!(with_views, bundle);
+            assert_eq!(
+                &crate::build_spec_artifact(&graph, &decisions, Some(&review), mode, "curated")
+                    .unwrap(),
+                curated
+            );
+        }
     }
 
     #[test]
@@ -388,7 +433,7 @@ mod tests {
                 crate::build_spec_bundle(
                     &graph,
                     &legacy,
-                    &crate::curated::read_records(&restored).unwrap(),
+                    &crate::curated::read_records(&restored),
                     spec::ExportMode::BestEffort
                 )
                 .unwrap()
@@ -408,7 +453,7 @@ mod tests {
         // is not a curated item: `curated.md` and the curated basis change,
         // and every other artifact, the fact index and the graph basis are
         // byte-identical in both modes.
-        let review = crate::curated::read_records(&restored).unwrap();
+        let review = crate::curated::read_records(&restored);
         for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
             let before = crate::build_spec_bundle(
                 &graph,

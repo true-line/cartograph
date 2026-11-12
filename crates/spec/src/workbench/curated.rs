@@ -68,6 +68,105 @@ impl CuratedBasis {
     }
 }
 
+/// What the caller supplies for the `curated` artifact (SPEC-12, AC-0653).
+#[derive(Debug, Clone, Copy, Default)]
+pub enum Curated<'a> {
+    /// The caller computes no curated projection. The document says so.
+    #[default]
+    NotSupplied,
+    /// The caller tried and could not. The document says so with the
+    /// reason, shows no accepted proposal, and no other artifact changes.
+    NotComputed(CuratedFailure),
+    /// The projection the document lists.
+    Computed(&'a CuratedProjection),
+}
+
+impl<'a> Curated<'a> {
+    /// The projection, when one was computed.
+    pub fn projection(self) -> Option<&'a CuratedProjection> {
+        match self {
+            Self::Computed(projection) => Some(projection),
+            Self::NotSupplied | Self::NotComputed(_) => None,
+        }
+    }
+}
+
+/// Why a curated projection could not be computed. The recovered documents
+/// do not depend on it, so an export states the reason and still succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum CuratedFailure {
+    /// The proposal history could not be read.
+    ReviewsUnavailable,
+    /// The proposal history holds more records than one read takes.
+    TooManyRecords {
+        /// The most records one read takes.
+        limit: usize,
+    },
+    /// More proposals are accepted than one read takes.
+    TooManyAccepted {
+        /// The most accepted records one read takes.
+        limit: usize,
+    },
+    /// Two reviewed proposals share one record identity.
+    DuplicateRecord,
+    /// Two Workbench decisions share one content hash.
+    DuplicateAssertionDecision,
+    /// The current statements could not be compiled to match Workbench
+    /// decisions against.
+    AssertionsNotCompiled,
+    /// The curated revision could not be encoded.
+    RevisionNotEncoded,
+}
+
+impl CuratedFailure {
+    /// The reason code, as serialized, and a plain sentence.
+    fn text(self) -> (&'static str, String) {
+        match self {
+            Self::ReviewsUnavailable => (
+                "reviews_unavailable",
+                "The proposal history could not be read.".into(),
+            ),
+            Self::TooManyRecords { limit } => (
+                "too_many_records",
+                format!(
+                    "The proposal history holds more than {limit} records, which is the most \
+                     one export reads. A part of them is never shown as if it were all."
+                ),
+            ),
+            Self::TooManyAccepted { limit } => (
+                "too_many_accepted",
+                format!(
+                    "More than {limit} proposals are accepted, which is the most one export \
+                     reads. A part of them is never shown as if it were all."
+                ),
+            ),
+            Self::DuplicateRecord => (
+                "duplicate_record",
+                "Two reviewed proposals have the same record identity, so the set of reviews \
+                 is ambiguous."
+                    .into(),
+            ),
+            Self::DuplicateAssertionDecision => (
+                "duplicate_assertion_decision",
+                "Two Workbench decisions were made on the same statement, so the set of \
+                 decisions is ambiguous."
+                    .into(),
+            ),
+            Self::AssertionsNotCompiled => (
+                "assertions_not_compiled",
+                "The current statements could not be compiled to compare the Workbench \
+                 decisions with."
+                    .into(),
+            ),
+            Self::RevisionNotEncoded => (
+                "revision_not_encoded",
+                "The curated revision could not be encoded, and none is invented.".into(),
+            ),
+        }
+    }
+}
+
 const INTRO: &str = "# Curated items\n\n\
 Accepted agent proposals, as the curated projection reports them. A proposal is an edge that an \
 agent suggested for a Gap and a person accepted. An accepted proposal whose evidence still holds \
@@ -107,6 +206,10 @@ were available. It is not a freshness flag.\n\n";
 const NO_PROJECTION: &str = "No curated projection was supplied to this compilation, so nothing \
 is stated here about accepted proposals. An empty list below would not mean that there are \
 none.\n";
+
+const NOT_COMPUTED: &str = "The curated projection was not computed for this export, so no \
+accepted proposal is shown here, neither as a curated item nor in a list. Nothing below would \
+mean that there are none. Every other document of this export is unaffected.\n";
 
 const NO_ACCEPTED: &str = "No accepted proposal is recorded. There is no curated item and \
 nothing is listed.\n";
@@ -409,17 +512,28 @@ fn decisions(projection: &CuratedProjection, out: &mut Text) -> fmt::Result {
 /// export mode admitted.
 pub(super) fn output(
     nodes: &[&Node],
-    curated: Option<&CuratedProjection>,
+    curated: Curated<'_>,
     mode: ExportMode,
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let mut assertions = Assertions::new(&budget);
     let mut content = Text::new(&budget, INTRO)?;
-    let Some(projection) = curated else {
-        writeln!(content, "Export mode: `{}`.\n", mode_name(mode))?;
-        content.push_str(NO_PROJECTION)?;
-        return finish(content, assertions);
+    let projection = match curated {
+        Curated::Computed(projection) => projection,
+        Curated::NotSupplied => {
+            writeln!(content, "Export mode: `{}`.\n", mode_name(mode))?;
+            content.push_str(NO_PROJECTION)?;
+            return finish(content, assertions);
+        }
+        // Nothing of a projection that failed is rendered, in either mode.
+        Curated::NotComputed(failure) => {
+            writeln!(content, "Export mode: `{}`.\n", mode_name(mode))?;
+            content.push_str(NOT_COMPUTED)?;
+            let (code, sentence) = failure.text();
+            writeln!(content, "\nReason: {sentence} (`{code}`)")?;
+            return finish(content, assertions);
+        }
     };
 
     // Only a best-effort export shows items, so only it cites.

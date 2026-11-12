@@ -6132,24 +6132,40 @@ struct SpecInputs {
     coverage: Vec<core_graph::coverage::StoredCoverage>,
     flows: Vec<flowtracer::Flow>,
     rejected_hashes: std::collections::BTreeSet<String>,
-    /// `None` only for a single artifact whose bytes do not depend on it.
-    curated: Option<context_hub::curated::CuratedProjection>,
-    /// `None` exactly when `curated` is.
+    curated: CuratedInput,
+    /// `None` only when the projection was not read.
     graph_basis: Option<spec::GraphBasis>,
+}
+
+/// The curated projection of one compilation (SPEC-12, AC-0653).
+enum CuratedInput {
+    /// A single artifact whose bytes do not depend on it.
+    NotRead,
+    /// It could not be computed. The export still succeeds: `curated.md`
+    /// states the reason and no `curated_basis` is stamped.
+    NotComputed(spec::CuratedFailure),
+    Computed(context_hub::curated::CuratedProjection),
 }
 
 impl SpecInputs {
     fn supplied(&self) -> spec::Supplied<'_> {
         spec::Supplied {
             coverage: &self.coverage,
-            curated: self.curated.as_ref(),
+            curated: match &self.curated {
+                CuratedInput::NotRead => spec::Curated::NotSupplied,
+                CuratedInput::NotComputed(failure) => spec::Curated::NotComputed(*failure),
+                CuratedInput::Computed(projection) => spec::Curated::Computed(projection),
+            },
         }
     }
 
     /// Stamp what the bundle was compiled from: the graph basis (AC-0593)
     /// and the curated basis beside it (AC-0653).
     fn stamp(self, bundle: &mut spec::SpecBundle) {
-        bundle.curated_basis = self.curated.as_ref().map(spec::CuratedBasis::of);
+        bundle.curated_basis = match &self.curated {
+            CuratedInput::Computed(projection) => Some(spec::CuratedBasis::of(projection)),
+            CuratedInput::NotRead | CuratedInput::NotComputed(_) => None,
+        };
         bundle.graph_basis = self.graph_basis;
     }
 }
@@ -6183,10 +6199,14 @@ fn spec_inputs(
                     revision: &revision,
                 },
                 &assertion_decisions,
-            )?;
-            (Some(projection), Some(graph_basis))
+            );
+            let curated = match projection {
+                Ok(projection) => CuratedInput::Computed(projection),
+                Err(failure) => CuratedInput::NotComputed(failure),
+            };
+            (curated, Some(graph_basis))
         }
-        None => (None, None),
+        None => (CuratedInput::NotRead, None),
     };
     Ok(SpecInputs {
         nodes,
@@ -6424,7 +6444,7 @@ fn export_spec(
     state: State<'_, AppState>,
 ) -> Result<SpecBundlePreview, String> {
     // Before the graph lock: the assessments take it themselves (SPEC-12).
-    let review = curated::gather(&state)?;
+    let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
     let bundle = build_spec_bundle(&graph, &decisions, &review, mode)?;
@@ -6439,7 +6459,7 @@ fn export_spec_views(
     mode: spec::ExportMode,
     state: State<'_, AppState>,
 ) -> Result<spec::SpecViewBundle, String> {
-    let review = curated::gather(&state)?;
+    let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
     build_spec_views(&graph, &decisions, &review, mode)
@@ -6454,7 +6474,7 @@ fn export_spec_with_views(
     state: State<'_, AppState>,
 ) -> Result<SpecWithViewsPreview, String> {
     // Before the graph lock: the assessments take it themselves (SPEC-12).
-    let review = curated::gather(&state)?;
+    let review = curated::gather(&state);
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
     let (bundle, views) = build_spec_with_views(&graph, &decisions, &review, mode)?;
@@ -6496,9 +6516,7 @@ fn read_spec_artifact(
 ) -> Result<SpecArtifactPreview, String> {
     // Read only for an artifact whose bytes depend on the projection, and
     // before the graph lock: the assessments take it themselves (SPEC-12).
-    let review = curated::artifact_reads_projection(&artifact_id)
-        .then(|| curated::gather(&state))
-        .transpose()?;
+    let review = curated::artifact_reads_projection(&artifact_id).then(|| curated::gather(&state));
     let graph = state.graph.lock().map_err(|error| error.to_string())?;
     let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
     build_spec_artifact(&graph, &decisions, review.as_ref(), mode, &artifact_id)

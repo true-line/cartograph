@@ -12,7 +12,7 @@ pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
 pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
 mod curated;
-pub use curated::CuratedBasis;
+pub use curated::{Curated, CuratedBasis, CuratedFailure};
 pub(crate) mod diagrams;
 mod endpoint_permissions;
 pub use endpoint_permissions::{
@@ -712,7 +712,7 @@ pub fn try_compile_spec_with_coverage(
         rejected_hashes,
         Supplied {
             coverage,
-            curated: None,
+            curated: crate::Curated::NotSupplied,
         },
     )
 }

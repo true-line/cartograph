@@ -543,7 +543,7 @@ fn a_task_staged_between_reclaim_snapshots_keeps_its_receipts() {
 fn curated_export(state: &AppState, mode: spec::ExportMode) -> spec::SpecBundle {
     // The order `export_spec` uses: the review first, then the graph and
     // decision locks.
-    let review = crate::curated::gather(state).unwrap();
+    let review = crate::curated::gather(state);
     crate::build_spec_bundle(
         &state.graph.lock().unwrap(),
         &state.decisions.lock().unwrap(),
@@ -685,7 +685,7 @@ fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_veri
 
     // The artifact read alone is the bundle's, in both modes.
     for bundle in &accepted {
-        let review = crate::curated::gather(&state).unwrap();
+        let review = crate::curated::gather(&state);
         for id in ["curated", "fact-index-json"] {
             assert_eq!(
                 &crate::build_spec_artifact(
@@ -705,7 +705,7 @@ fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_veri
 
     // An assessment made before the graph moved is not used for the graph an
     // export reads afterwards: the record is listed, not shown as an item.
-    let review = crate::curated::gather(&state).unwrap();
+    let review = crate::curated::gather(&state);
     {
         use core_graph::GraphStore;
         state

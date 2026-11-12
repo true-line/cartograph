@@ -142,7 +142,7 @@ fn compile(
         rejected,
         Supplied {
             coverage: &[],
-            curated,
+            curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
         },
     )
     .unwrap()
@@ -196,6 +196,113 @@ fn a_compile_with_no_projection_says_that_none_was_supplied() {
             supplied
         );
     }
+}
+
+// AC-0653: a projection that could not be computed does not fail the
+// export. The document states that and the reason, shows no accepted
+// proposal and cites nothing; every other artifact is byte-identical to a
+// compile with no projection, in both modes and compiled alone.
+#[test]
+fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() {
+    let failures = [
+        (CuratedFailure::ReviewsUnavailable, "reviews_unavailable"),
+        (
+            CuratedFailure::TooManyRecords { limit: 4096 },
+            "too_many_records",
+        ),
+        (
+            CuratedFailure::TooManyAccepted { limit: 256 },
+            "too_many_accepted",
+        ),
+        (CuratedFailure::DuplicateRecord, "duplicate_record"),
+        (
+            CuratedFailure::DuplicateAssertionDecision,
+            "duplicate_assertion_decision",
+        ),
+        (
+            CuratedFailure::AssertionsNotCompiled,
+            "assertions_not_compiled",
+        ),
+        (CuratedFailure::RevisionNotEncoded, "revision_not_encoded"),
+    ];
+    let mut sentences = BTreeSet::new();
+    for (failure, code) in failures {
+        assert_eq!(json!(failure)["reason"], code);
+        let supplied = Supplied {
+            coverage: &[],
+            curated: Curated::NotComputed(failure),
+        };
+        for mode in MODES {
+            let bare = compile(mode, &BTreeSet::new(), None);
+            let failed =
+                try_compile_spec_supplied(&nodes(), &[], &[], mode, &BTreeSet::new(), supplied)
+                    .unwrap();
+            assert_eq!(failed.curated_basis, None);
+            assert_eq!(bare.artifacts.len(), failed.artifacts.len());
+            for (before, after) in bare.artifacts.iter().zip(&failed.artifacts) {
+                assert_eq!(
+                    before == after,
+                    before.id != "curated",
+                    "{} in {mode:?}",
+                    before.id
+                );
+            }
+            let curated = artifact(&failed, "curated");
+            assert!(curated.content.contains(NOT_COMPUTED));
+            assert!(curated.content.contains(&format!("(`{code}`)")));
+            assert!(!curated.content.contains(NO_PROJECTION));
+            for heading in ["## Curated items", "## Accepted records", "## Counts"] {
+                assert!(!curated.content.contains(heading), "{heading}");
+            }
+            assert!(!curated.content.contains("Curated revision"));
+            assert!(curated.assertions.is_empty());
+            assert!(index_rows_cited_by(&failed, "curated").is_empty());
+            let reason = curated
+                .content
+                .lines()
+                .find(|line| line.starts_with("Reason: "))
+                .unwrap();
+            assert!(reason.ends_with(&format!(". (`{code}`)")), "{reason}");
+            sentences.insert(reason.to_string());
+            let alone = compile_spec_selected_supplied(
+                &nodes(),
+                &[],
+                &[],
+                mode,
+                &BTreeSet::new(),
+                &["curated"],
+                SelectedCompileLimits {
+                    max_bytes: usize::MAX,
+                    adr: crate::AdrLimits {
+                        max_rows: usize::MAX,
+                        max_output_bytes: usize::MAX,
+                    },
+                },
+                supplied,
+            )
+            .unwrap();
+            assert_eq!(alone, [SelectedArtifactOutcome::Produced(curated.clone())]);
+        }
+    }
+    assert_eq!(sentences.len(), failures.len());
+    let limited = artifact(
+        &try_compile_spec_supplied(
+            &nodes(),
+            &[],
+            &[],
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            Supplied {
+                coverage: &[],
+                curated: Curated::NotComputed(CuratedFailure::TooManyAccepted { limit: 256 }),
+            },
+        )
+        .unwrap(),
+        "curated",
+    )
+    .content
+    .clone();
+    assert!(limited.contains("More than 256 proposals are accepted"));
 }
 
 // AC-0653: with no accepted record the document says so, and every other
@@ -433,7 +540,7 @@ fn curated_is_deterministic_selected_alone_and_bounded() {
                 limits(max_bytes),
                 Supplied {
                     coverage: &[],
-                    curated: Some(&projection),
+                    curated: Curated::Computed(&projection),
                 },
             )
             .unwrap()

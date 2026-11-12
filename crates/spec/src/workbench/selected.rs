@@ -1,6 +1,5 @@
 //! Selected artifact dispatch; projection and native renderers are shared.
 use super::*;
-use context_hub::curated::CuratedProjection;
 use core_graph::coverage::StoredCoverage;
 use std::{fmt, io};
 
@@ -70,9 +69,9 @@ pub enum SelectedArtifactOutcome {
 pub struct Supplied<'a> {
     /// The coverage inventories stored with the graph (AC-0592).
     pub coverage: &'a [StoredCoverage],
-    /// The curated projection the host computed for this graph (SPEC-12,
-    /// AC-0653). `None` when the host computed none.
-    pub curated: Option<&'a CuratedProjection>,
+    /// The curated projection the host computed for this graph, or why it
+    /// computed none (SPEC-12, AC-0653).
+    pub curated: Curated<'a>,
 }
 
 /// What an artifact reads beside the admitted graph facts.
@@ -85,8 +84,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) pipelines_withheld: usize,
     /// Configuration facts withheld the same way (`configuration::withheld`).
     pub(crate) configuration_withheld: usize,
-    /// The curated projection, when the host supplied one.
-    pub(crate) curated: Option<&'a CuratedProjection>,
+    /// The curated projection, or why there is none.
+    pub(crate) curated: Curated<'a>,
 }
 
 impl<'a> Beside<'a> {
@@ -603,7 +602,7 @@ pub fn compile_spec_selected_with_coverage(
         limits,
         Supplied {
             coverage,
-            curated: None,
+            curated: Curated::NotSupplied,
         },
     )
 }

@@ -20,6 +20,7 @@ use context_hub::curated::{
 };
 use core_graph::{Edge, Node, SqliteGraphStore, StoreRevision};
 use core_prov::{ConfidenceTier, Provenance, Tier};
+use spec::CuratedFailure;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::AppState;
@@ -36,9 +37,15 @@ pub(crate) const MAX_CURATED_RECORD_SCAN: usize = MAX_STAGED_REFERENCE_SCAN;
 pub(crate) const MAX_CURATED_ACCEPTED: usize = 256;
 
 /// What [`gather`] read: the reviewed records and the assessments made for
-/// them. The default is a store with no reviewed record.
+/// them, or why the read did not finish. The default is a store with no
+/// reviewed record.
+///
+/// A read that fails does not fail the export: the recovered documents do
+/// not depend on the review stores. It holds no record, so nothing from it
+/// is projected, and `curated.md` states the reason.
 #[derive(Debug, Default)]
 pub(crate) struct CuratedReview {
+    failure: Option<CuratedFailure>,
     proposals: Vec<ReviewedProposal>,
     /// By record identity, with the store revision the assessment's graph
     /// read observed (`None` when that read failed).
@@ -113,20 +120,21 @@ fn needs_assessment(record: &ReviewedProposal) -> bool {
 /// Every reviewed record of `store`, in pages of [`MAX_STAGED_PAGE_ITEMS`],
 /// newest first; the caller holds the staging lock across all of them. The
 /// projection orders the records by record identity itself.
-fn reviewed_records(store: &agents::ProposalStore) -> Result<Vec<ReviewedProposal>, String> {
+fn reviewed_records(
+    store: &agents::ProposalStore,
+) -> Result<Vec<ReviewedProposal>, CuratedFailure> {
     let mut records = Vec::new();
     let (mut scanned, mut accepted) = (0usize, 0usize);
     let mut cursor: Option<String> = None;
     loop {
         let page = store
             .list(MAX_STAGED_PAGE_ITEMS, cursor.as_deref())
-            .map_err(|_| "Proposal history is unavailable or invalid.")?;
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
         scanned += page.items.len();
         if scanned > MAX_CURATED_RECORD_SCAN {
-            return Err(format!(
-                "The curated projection was not computed: proposal history holds more than \
-                 {MAX_CURATED_RECORD_SCAN} records."
-            ));
+            return Err(CuratedFailure::TooManyRecords {
+                limit: MAX_CURATED_RECORD_SCAN,
+            });
         }
         for staged in &page.items {
             if staged.review_decision.is_none() {
@@ -135,10 +143,9 @@ fn reviewed_records(store: &agents::ProposalStore) -> Result<Vec<ReviewedProposa
             if staged.review_decision == Some(ProposalDecision::Accepted) {
                 accepted += 1;
                 if accepted > MAX_CURATED_ACCEPTED {
-                    return Err(format!(
-                        "The curated projection was not computed: more than \
-                         {MAX_CURATED_ACCEPTED} proposals are accepted."
-                    ));
+                    return Err(CuratedFailure::TooManyAccepted {
+                        limit: MAX_CURATED_ACCEPTED,
+                    });
                 }
             }
             records.push(agents::curated::curated_record(staged));
@@ -150,15 +157,27 @@ fn reviewed_records(store: &agents::ProposalStore) -> Result<Vec<ReviewedProposa
     }
 }
 
+impl CuratedReview {
+    fn failed(failure: CuratedFailure) -> Self {
+        Self {
+            failure: Some(failure),
+            ..Self::default()
+        }
+    }
+}
+
 /// The reviewed records of `store` with no assessment made. Every accepted
 /// record that could be eligible is then listed as `stale` for want of one;
 /// [`gather`] is the read an export uses.
 #[cfg(test)]
-pub(crate) fn read_records(store: &agents::ProposalStore) -> Result<CuratedReview, String> {
-    Ok(CuratedReview {
-        proposals: reviewed_records(store)?,
-        assessments: BTreeMap::new(),
-    })
+pub(crate) fn read_records(store: &agents::ProposalStore) -> CuratedReview {
+    match reviewed_records(store) {
+        Ok(proposals) => CuratedReview {
+            proposals,
+            ..CuratedReview::default()
+        },
+        Err(failure) => CuratedReview::failed(failure),
+    }
 }
 
 /// Step 1. Call it with no graph or decision lock held. The staging lock is
@@ -166,13 +185,19 @@ pub(crate) fn read_records(store: &agents::ProposalStore) -> Result<CuratedRevie
 /// assessment then takes the staging lock, the source registry, the
 /// retention leases and the graph lock in its own order, one record at a
 /// time; none is held between records. Nothing is written.
-pub(crate) fn gather(state: &AppState) -> Result<CuratedReview, String> {
-    let proposals = reviewed_records(
-        &*state
-            .proposals
-            .lock()
-            .map_err(|_| "Proposal history is unavailable.")?,
-    )?;
+///
+/// It does not fail: a read that could not finish is carried as the reason
+/// in the result, with no record.
+pub(crate) fn gather(state: &AppState) -> CuratedReview {
+    let read = state
+        .proposals
+        .lock()
+        .map_err(|_| CuratedFailure::ReviewsUnavailable)
+        .and_then(|store| reviewed_records(&store));
+    let proposals = match read {
+        Ok(proposals) => proposals,
+        Err(failure) => return CuratedReview::failed(failure),
+    };
     let mut assessments = BTreeMap::new();
     for record in proposals.iter().filter(|record| needs_assessment(record)) {
         let assessed = match assessment::assess_observed(state, &record.record_id) {
@@ -182,10 +207,11 @@ pub(crate) fn gather(state: &AppState) -> Result<CuratedReview, String> {
         };
         assessments.insert(record.record_id.clone(), assessed);
     }
-    Ok(CuratedReview {
+    CuratedReview {
+        failure: None,
         proposals,
         assessments,
-    })
+    }
 }
 
 fn curatable(provenance: &Provenance) -> bool {
@@ -236,7 +262,7 @@ fn match_stored<'a>(
 fn current_assertion_hashes(
     snapshot: &Snapshot<'_>,
     decided: &[core::AssertionDecisionEntry],
-) -> Result<BTreeSet<String>, String> {
+) -> Result<BTreeSet<String>, CuratedFailure> {
     let mut wanted: BTreeSet<String> = decided
         .iter()
         .map(|entry| entry.content_hash.clone())
@@ -263,7 +289,7 @@ fn current_assertion_hashes(
         &BTreeSet::new(),
         snapshot.coverage,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| CuratedFailure::AssertionsNotCompiled)?;
     for assertion in bundle
         .artifacts
         .iter()
@@ -292,7 +318,8 @@ pub(crate) struct Snapshot<'a> {
 }
 
 /// Step 2. The projection over the snapshot an export read, under that
-/// export's graph and decision locks.
+/// export's graph and decision locks. An `Err` is the reason `curated.md`
+/// states; it never fails the export.
 ///
 /// An assessment whose graph read observed another store revision than the
 /// export's describes a graph the export did not read. It is replaced by a
@@ -302,7 +329,10 @@ pub(crate) fn project(
     review: &CuratedReview,
     snapshot: &Snapshot<'_>,
     decisions: &[agents::AssertionDecisionRecord],
-) -> Result<CuratedProjection, String> {
+) -> Result<CuratedProjection, CuratedFailure> {
+    if let Some(failure) = review.failure {
+        return Err(failure);
+    }
     let assessments: BTreeMap<String, BasisAssessment> = review
         .assessments
         .iter()
@@ -333,7 +363,13 @@ pub(crate) fn project(
         current_assertion_hashes: &current,
         policy_version: core::CURATED_POLICY_VERSION,
     })
-    .map_err(|error| format!("The curated projection was not computed: {error}."))
+    .map_err(|error| match error {
+        core::ProjectionError::DuplicateRecord => CuratedFailure::DuplicateRecord,
+        core::ProjectionError::DuplicateAssertionDecision => {
+            CuratedFailure::DuplicateAssertionDecision
+        }
+        core::ProjectionError::Encoding => CuratedFailure::RevisionNotEncoded,
+    })
 }
 
 /// The snapshot with its inventories and the store revision of the same
