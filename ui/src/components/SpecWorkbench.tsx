@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type {
   AssertionDecision,
   AssertionDecisionRecord,
-  CuratedSectionRead,
+  CuratedRead,
   GraphEdge,
   GraphNode,
   SpecArtifact,
@@ -25,9 +25,9 @@ import { CuratedSection } from './CuratedSection';
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
   views?: SpecViewBundle | null;
-  /** The curated projection of `bundle`'s revision (SPEC-12 slice 3,
-   *  AC-0655); `null` or absent when it was not read. */
-  curated?: CuratedSectionRead | null;
+  /** The curated projection `bundle` was compiled with, from the same host
+   *  response (SPEC-12 slice 3, AC-0655); `null` or absent when none. */
+  curated?: CuratedRead | null;
   onRefreshCurated?: () => void;
   pageSize?: number;
   mode: SpecExportMode;

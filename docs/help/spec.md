@@ -238,6 +238,8 @@ The Workbench shows the same projection above the document list, under
   **Full identifiers**, for the whole value. The revision is the one the
   bundle on screen carries as `curated_basis`.
 - The counts of accepted proposals by state.
+- **Records and decisions**, closed until you open it, with the three lists
+  below.
 - The curated items, each with its record id, proposed relation, Gap, tier
   and confidence as produced, review, source support, basis and state. Each
   is marked InferredWeak. In `verified-only` mode no item is shown, only how
@@ -252,9 +254,9 @@ mean there are none.
 
 The section is read again when you record a review, change the export mode,
 record a Workbench decision, or choose **Refresh curated items**. It does
-not update by itself while you look at it. If a review or an ingest lands
-while it is being read, it says so instead of showing items beside a bundle
-they do not describe; refresh to read both again.
+not update by itself while you look at it. It is computed together with
+the documents on screen, so it always describes the same reviews and graph
+as they do.
 
 **Proposal history** and the review dialog show the state and reason of an
 accepted proposal when this read returned it. An eligible proposal is not

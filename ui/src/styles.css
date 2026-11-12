@@ -1482,6 +1482,8 @@ button.flow-hop-card:hover {
    alone (R-INT-2). */
 .curated-section {
   display: grid;
+  /* A wide table scrolls in its own region and never widens the section. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.7rem;
   padding: 0.9rem 1.25rem 1rem;
   border-bottom: 1px solid var(--border);
@@ -1570,9 +1572,29 @@ button.flow-hop-card:hover {
   margin-top: 0.35rem;
 }
 
+.curated-records {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.6rem;
+  font-size: 0.75rem;
+  color: var(--text-body);
+}
+
+.curated-records > summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.curated-records[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+.curated-records > section {
+  margin-top: 0.6rem;
+}
+
 .curated-table {
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   border-collapse: collapse;
   font-size: 0.72rem;
 }
@@ -1586,13 +1608,20 @@ button.flow-hop-card:hover {
 
 .curated-table th,
 .curated-table td {
-  max-width: 44ch;
   padding: 0.35rem 0.5rem;
   border: 1px solid var(--border);
   color: var(--text-body);
+  /* Words stay whole; only identifiers may break anywhere (below). */
+  overflow-wrap: break-word;
   text-align: left;
   vertical-align: top;
   font-weight: 400;
+}
+
+.curated-table tbody th,
+.curated-table tbody td:nth-child(2),
+.curated-table tbody td:nth-child(3) {
+  overflow-wrap: anywhere;
 }
 
 .curated-table thead th {
@@ -1601,7 +1630,13 @@ button.flow-hop-card:hover {
   font-weight: 600;
 }
 
+.curated-table .curated-state {
+  white-space: nowrap;
+}
+
 .curated-tier {
+  display: block;
+  margin-bottom: 0.25rem;
   font-family: var(--font-mono);
 }
 

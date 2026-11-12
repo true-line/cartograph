@@ -1,10 +1,10 @@
-import type { CuratedRecord, CuratedRecordState, CuratedSectionRead } from '../store';
+import type { CuratedRecord, CuratedRecordState, CuratedRead } from '../store';
 import { TierBadge } from './TierBadge';
 
 export interface CuratedSectionProps {
-  /** The host's curated read for the bundle on screen; `null` when it was
-   *  not read. */
-  read: CuratedSectionRead | null;
+  /** The host's curated read, returned with the bundle on screen; `null`
+   *  when there is none. */
+  read: CuratedRead | null;
   busy?: boolean;
   onRefresh?: () => void;
 }
@@ -43,7 +43,7 @@ function RecordRows({ records, last }: {
           <td>{record.review_status}</td>
           <td>captured {record.source_support.captured}, unverified {record.source_support.unverified}</td>
           <td>{record.basis_summary}</td>
-          <td><code>{record.state}</code></td>
+          <td className="curated-state"><code>{record.state}</code></td>
           <td>{last(record)}</td>
         </tr>
       ))}
@@ -114,13 +114,6 @@ export function CuratedSection({ read, busy, onRefresh }: CuratedSectionProps) {
         </p>
       )}
 
-      {read?.status === 'changed_while_reading' && (
-        <p className="curated-notice" role="status" data-testid="curated-changed">
-          A review or the graph changed while the curated items were read, so they are not
-          shown beside a bundle they do not describe. Refresh to read both again.
-        </p>
-      )}
-
       {read?.status === 'not_computed' && (
         <div className="curated-notice" role="status" data-testid="curated-not-computed">
           <p>
@@ -175,13 +168,23 @@ export function CuratedSection({ read, busy, onRefresh }: CuratedSectionProps) {
             </p>
           )}
 
-          {read.export_mode === 'verified-only' ? (
+          {read.export_mode === 'verified-only' && (
             <p className="curated-notice" role="note" data-testid="curated-omitted">
               No curated item is shown: this is a <code>verified-only</code> read, and every
               curated item is InferredWeak. Curated items left out: {read.items_omitted}. A{' '}
               <code>best-effort</code> export includes them, each marked.
             </p>
-          ) : read.items.length > 0 && (
+          )}
+
+          {/* Closed until asked for, so the records do not push the
+              documents off the screen; the counts above stay in view. */}
+          <details className="curated-records">
+            <summary>
+              Records and decisions: {read.items.length} curated {read.items.length === 1 ? 'item' : 'items'} shown,{' '}
+              {read.listed.length} listed with a reason, {read.assertion_decisions.stale.length} Workbench{' '}
+              {read.assertion_decisions.stale.length === 1 ? 'decision' : 'decisions'} matching nothing
+            </summary>
+          {read.items.length > 0 && (
             <RecordTable
               caption={`Curated items (${read.items.length})`}
               lastHeading="Note"
@@ -244,7 +247,7 @@ export function CuratedSection({ read, busy, onRefresh }: CuratedSectionProps) {
                           <code title={entry.content_hash}>{shortIdentity(entry.content_hash)}</code>
                         </th>
                         <td>{entry.decision}</td>
-                        <td><code>{entry.state}</code></td>
+                        <td className="curated-state"><code>{entry.state}</code></td>
                       </tr>
                     ))}
                   </tbody>
@@ -252,6 +255,7 @@ export function CuratedSection({ read, busy, onRefresh }: CuratedSectionProps) {
               </div>
             )}
           </section>
+          </details>
         </>
       )}
     </section>

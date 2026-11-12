@@ -46,6 +46,14 @@ export const ItemsAndListedRecordsInSeveralStates: Story = {
     await expect(counts).toHaveTextContent('Conflicted1');
     await expect(counts).toHaveTextContent('Unresolvable0');
 
+    // The records are closed until asked for; the summary counts them.
+    const records = canvas.getByText(/^Records and decisions:/);
+    await expect(records).toHaveTextContent(
+      '1 curated item shown, 3 listed with a reason, 1 Workbench decision matching nothing',
+    );
+    await expect(records.closest('details')).not.toHaveAttribute('open');
+    await userEvent.click(records);
+
     // The item: every DR-4 field, marked InferredWeak.
     const items = within(canvas.getByRole('table', { name: 'Curated items (1)' }));
     const item = within(items.getByRole('row', { name: /proposal:eligible/ }));
@@ -107,6 +115,7 @@ export const NoAcceptedProposal: Story = {
     await expect(canvas.getByTestId('curated-empty')).toHaveTextContent('No accepted proposal is recorded.');
     await expect(canvas.getByTestId('curated-revision')).toHaveTextContent('curated-revision-v1:000000000000');
     await expect(canvas.getByLabelText('Curated record counts')).toHaveTextContent('Accepted0');
+    await userEvent.click(canvas.getByText(/^Records and decisions: 0 curated items shown, 0 listed/));
     await expect(canvas.queryByRole('table')).not.toBeInTheDocument();
     await expect(canvas.queryByTestId('curated-not-computed')).not.toBeInTheDocument();
     await expect(canvas.getByText(/Rejections applied: 0\. Decisions that match no current statement: 0\./)).toBeVisible();
@@ -142,6 +151,7 @@ export const VerifiedOnlyLeavesItemsOutWithTheCount: Story = {
     const omitted = canvas.getByTestId('curated-omitted');
     await expect(omitted).toHaveTextContent('No curated item is shown');
     await expect(omitted).toHaveTextContent('Curated items left out: 1.');
+    await userEvent.click(canvas.getByText(/^Records and decisions: 0 curated items shown, 3 listed/));
     await expect(canvas.queryByText('proposal:eligible')).not.toBeInTheDocument();
     await expect(canvas.queryByRole('table', { name: /Curated items/ })).not.toBeInTheDocument();
     // The count of eligible records is still reported, and so is the revision.
@@ -149,19 +159,6 @@ export const VerifiedOnlyLeavesItemsOutWithTheCount: Story = {
     await expect(canvas.getByTestId('curated-revision')).toHaveAttribute('title', CURATED_REVISION);
     await expect(canvas.getByRole('table', { name: 'State unverified (1)' })).toBeVisible();
     await expect(canvas.getByRole('table', { name: 'State stale (1)' })).toBeVisible();
-  },
-};
-
-export const ChangedWhileReading: Story = {
-  // AC-0655: a read that does not describe the bundle on screen is not shown
-  // as its projection.
-  args: { read: { status: 'changed_while_reading' } },
-  play: async ({ canvasElement, args }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByTestId('curated-changed')).toHaveTextContent('Refresh to read both again.');
-    await expect(canvas.queryByTestId('curated-revision')).not.toBeInTheDocument();
-    await userEvent.click(canvas.getByRole('button', { name: 'Refresh curated items' }));
-    await expect(args.onRefresh).toHaveBeenCalledOnce();
   },
 };
 

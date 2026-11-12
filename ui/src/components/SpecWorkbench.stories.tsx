@@ -444,6 +444,10 @@ export const CuratedSectionShowsTheBundleRevision: Story = {
       'title',
       args.bundle?.curated_basis?.revision,
     );
+    // The records are closed until asked for, so the artifacts stay in view.
+    await expect(section.getByRole('table', { name: 'Curated items (1)' })).not.toBeVisible();
+    await expect(section.getByLabelText('Curated record counts')).toHaveTextContent('Accepted4');
+    await userEvent.click(section.getByText(/^Records and decisions:/));
     await expect(section.getByRole('table', { name: 'Curated items (1)' })).toBeVisible();
     await expect(section.getByRole('table', { name: 'State stale (1)' })).toBeVisible();
     // The artifacts stay reachable below it.
