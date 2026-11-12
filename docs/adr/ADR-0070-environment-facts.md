@@ -50,6 +50,13 @@ source does not state.
    interpolation in a service key), is a Gap or a recorded limit. Nothing is
    guessed.
 
+8. **Kustomize (increment 2).** Every kustomization file is an
+   `Environment`; a base that overlays include is one too, shown as included.
+   It declares the pod-bearing manifest workloads its `resources` chain
+   reaches inside the repository. A patch file is a `PATCHES` relation that
+   states what the patch writes; nothing is merged, and transformers are
+   named, not applied.
+
 ## Consequences
 
 - A repository with a Compose file gains `Environment`, `Workload` and
@@ -61,8 +68,9 @@ source does not state.
 - Terraform resources are not attached to an environment by this decision.
   Root modules that declare the same address collapse today (#1844); that is
   decided first.
-- Kubernetes manifests, kustomize overlays, Helm values and per-environment
-  settings files are stated as not covered until their increments land.
+- Helm charts and values, per-environment settings files, and manifest kinds
+  other than `Deployment`, `StatefulSet`, `DaemonSet` and `Job` are stated as
+  not covered until their increments land.
 
 ## Alternatives
 

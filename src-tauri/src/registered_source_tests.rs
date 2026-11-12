@@ -2547,8 +2547,9 @@ fn export_projects_ingested_pipelines_in_dependency_order() {
 // by path, neither named from its path; the workload both declare is listed
 // once per declaration with the properties that differ and both spans; an
 // environment file that names an environment only by its file name is a Gap
-// with no span and no value; a Kubernetes manifest is named in the stored
-// coverage inventory as present and not read. The reader's facts add no hop
+// with no span and no value; a Kubernetes manifest of a kind that is not
+// read is named in the stored coverage inventory, by kind, as present and
+// not read (AC-0662). The reader's facts add no hop
 // to any flow and nothing to the topology map, and the toolchain reader's
 // Compose fact is still there. Every assertion has a fact-index row, a
 // second export and the single-artifact read return the same bytes, a
@@ -2571,8 +2572,8 @@ fn export_projects_ingested_environments() {
     std::fs::write(root.join("staging.env"), "SESSION_KEY=hunter2-sentinel\n").unwrap();
     std::fs::create_dir_all(root.join("k8s")).unwrap();
     std::fs::write(
-        root.join("k8s/deployment.yaml"),
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+        root.join("k8s/service.yaml"),
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n",
     )
     .unwrap();
     let app = tauri::test::mock_builder()
@@ -2773,7 +2774,8 @@ fn export_projects_ingested_environments() {
                 artifact
             );
 
-            // The Kubernetes manifest is in the stored coverage inventory.
+            // The Kubernetes manifest is in the stored coverage inventory,
+            // under its kind.
             let coverage = &bundle
                 .artifacts
                 .iter()
@@ -2782,9 +2784,13 @@ fn export_projects_ingested_environments() {
                 .content;
             assert!(coverage.contains("t0.environments"), "{coverage}");
             assert!(
+                coverage.contains("kubernetes-manifest:Service"),
+                "{coverage}"
+            );
+            assert!(
                 coverage.contains(
-                    "Kubernetes manifest is present and not read: no installed producer \
-                     recovers environments from it"
+                    "manifest is present and not read: no installed producer recovers \
+                     environments from it"
                 ),
                 "{coverage}"
             );
@@ -2828,6 +2834,445 @@ fn export_projects_ingested_environments() {
             .all(|node| !node.id.starts_with("gap:environment:"))
     );
     assert!(nodes.iter().any(|node| node.label == "Environment"));
+}
+
+// AC-0662 (#1791, ADR-0070 decision 8, SPEC-14 increment 2): the issue's
+// acceptance tree through a real ingest and export. A Compose file is one
+// environment; a kustomize base and its two overlays are three, each listing
+// the base workload with its span, the overlays through the base and each
+// with what its own patch states; an environment is named only where its
+// file states a namespace; a bare `staging.env` is a Gap and not an
+// environment. No value reaches the graph or the document, every assertion
+// has a fact-index row, a second ingest gives the same graph content hash,
+// and the facts leave the graph with their files.
+#[test]
+fn export_projects_ingested_kustomize_environments() {
+    const SENTINEL: &str = "hunter2-sentinel";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let compose = format!(
+        "services:\n  web:\n    image: shop/web:1\n    environment:\n      - \
+         SESSION_KEY={SENTINEL}\n    depends_on:\n      - db\n  db:\n    image: postgres:16\n"
+    );
+    let base = "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - \
+                deployment.yaml\n  - service.yaml\n";
+    let deployment = format!(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 1\n  \
+         template:\n    spec:\n      containers:\n        - name: web\n          image: \
+         shop/web:1\n          ports:\n            - containerPort: 8080\n          env:\n            \
+         - name: SESSION_KEY\n              value: {SENTINEL}\n          envFrom:\n            - \
+         secretRef:\n                name: web-secrets\n"
+    );
+    let staging = "namespace: shop-staging\nresources:\n  - ../../base\npatches:\n  - path: \
+                   patch.yaml\nimages:\n  - name: shop/web\n    newTag: 2-rc\n";
+    let staging_patch = format!(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 2\n  \
+         template:\n    spec:\n      containers:\n        - name: web\n          env:\n            - \
+         name: LOG_LEVEL\n              value: {SENTINEL}\n"
+    );
+    let prod = "resources:\n  - ../../base\npatchesStrategicMerge:\n  - patch.yaml\nnamePrefix: \
+                live-\n";
+    let prod_patch = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  \
+                      replicas: 5\n";
+    let files: [(&str, &str); 9] = [
+        ("docker-compose.yml", &compose),
+        ("k8s/base/kustomization.yaml", base),
+        ("k8s/base/deployment.yaml", &deployment),
+        (
+            "k8s/base/service.yaml",
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n",
+        ),
+        ("k8s/overlays/staging/kustomization.yaml", staging),
+        ("k8s/overlays/staging/patch.yaml", &staging_patch),
+        ("k8s/overlays/prod/kustomization.yaml", prod),
+        ("k8s/overlays/prod/patch.yaml", prod_patch),
+        ("staging.env", "SESSION_KEY=hunter2-sentinel\n"),
+    ];
+    for (path, body) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let ingest = || {
+        let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+        let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+        run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+    };
+    ingest();
+    let repo = registered.repo_key.as_str();
+    let shown = repo.replace('_', "\\_");
+    let hashes = || {
+        let graph = state.graph.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&*graph).unwrap(),
+        )
+    };
+    let first = hashes();
+    let web = format!("workload:{repo}@k8s/base/deployment.yaml#0:Deployment/web");
+    let environment = |path: &str| format!("env:{repo}@{path}");
+
+    {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        // Four environments and no fifth: `staging.env` is a Gap.
+        let mut environments: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node.label == "Environment")
+            .map(|node| node.id.as_str())
+            .collect();
+        environments.sort_unstable();
+        assert_eq!(
+            environments,
+            [
+                environment("docker-compose.yml"),
+                environment("k8s/base/kustomization.yaml"),
+                environment("k8s/overlays/prod/kustomization.yaml"),
+                environment("k8s/overlays/staging/kustomization.yaml"),
+            ]
+        );
+        let gap = nodes
+            .iter()
+            .find(|node| node.id == format!("gap:environment:{repo}@staging.env"))
+            .unwrap();
+        assert_eq!(gap.label, "Gap");
+        assert_eq!(gap.props["kind"], "name-only-environment");
+        // One Kubernetes workload: the patch files are read only as patches.
+        let workloads: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node.label == "Workload" && node.props["kind"] == "k8s-deployment")
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(workloads, [web.as_str()]);
+        for path in [
+            "k8s/base/kustomization.yaml",
+            "k8s/overlays/prod/kustomization.yaml",
+            "k8s/overlays/staging/kustomization.yaml",
+        ] {
+            assert!(
+                edges.iter().any(|edge| edge.src == environment(path)
+                    && edge.label == "DECLARES"
+                    && edge.dst == web),
+                "{path}"
+            );
+        }
+        let patched: Vec<&str> = edges
+            .iter()
+            .filter(|edge| edge.label == "PATCHES")
+            .map(|edge| edge.src.as_str())
+            .collect();
+        assert_eq!(patched.len(), 2);
+        // No value is anywhere in the graph.
+        assert!(!serialized(&(&nodes, &edges)).contains(SENTINEL));
+        // No flow and no topology line comes from the new facts.
+        assert!(flowtracer::trace(&nodes, &edges).is_empty());
+        assert!(!spec::topology_mermaid(&nodes, &edges).contains("workload"));
+
+        let span = |text: &str, part: &str| {
+            let start = text.find(part).unwrap();
+            format!("bytes {start}..{}", start + part.len())
+        };
+        for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+            let bundle = crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode,
+            )
+            .unwrap();
+            let artifact = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "environments")
+                .unwrap();
+            let content = &artifact.content;
+            let row = |start: &str| {
+                content
+                    .lines()
+                    .find(|line| line.starts_with(start))
+                    .unwrap_or_else(|| panic!("no row starting {start:?} in:\n{content}"))
+            };
+            assert!(content.contains(
+                "Environments: 4. Workloads: 3. Environments named only by a file name: 1. \
+                 Other items not established: 1. Workloads no environment declares: 0."
+            ));
+            // Each environment by its path, with its span; only the one
+            // that states a namespace has a name.
+            let listed = row(&format!(
+                "| {shown} | docker-compose.yml | none stated | compose | 2 | Deterministic | \
+                 Confirmed |"
+            ));
+            assert!(listed.contains("docker-compose.yml bytes 0..8 @"));
+            let listed = row(&format!(
+                "| {shown} | k8s/base/kustomization.yaml | none stated | kustomize | 1 | \
+                 Deterministic | Confirmed |"
+            ));
+            assert!(listed.contains(&span(base, "resources")));
+            assert!(listed.ends_with(
+                "| included by k8s/overlays/prod/kustomization.yaml, \
+                 k8s/overlays/staging/kustomization.yaml |"
+            ));
+            let listed = row(&format!(
+                "| {shown} | k8s/overlays/prod/kustomization.yaml | none stated | kustomize | 1 | \
+                 Deterministic | Confirmed |"
+            ));
+            assert!(listed.contains(&span(prod, "resources")));
+            assert!(listed.contains("sets `namePrefix`"));
+            let listed = row(&format!(
+                "| {shown} | k8s/overlays/staging/kustomization.yaml | shop-staging | kustomize | \
+                 1 | Deterministic | Confirmed |"
+            ));
+            assert!(listed.contains(&span(staging, "resources")));
+            assert!(!content.contains("| prod |"));
+            assert!(!content.contains("| staging |"));
+
+            // Each environment lists its workloads, each with its span.
+            let compose_web = compose.find("image: shop/web:1").unwrap();
+            assert!(
+                row(&format!(
+                    "| {shown} | docker-compose.yml | web | shop/web:1 |"
+                ))
+                .contains(&format!("docker-compose.yml bytes {compose_web}.."))
+            );
+            row(&format!(
+                "| {shown} | docker-compose.yml | db | postgres:16 |"
+            ));
+            let document = format!("k8s/base/deployment.yaml bytes 0..{} @", deployment.len());
+            for (path, through) in [
+                ("k8s/base/kustomization.yaml", "its own entry"),
+                (
+                    "k8s/overlays/prod/kustomization.yaml",
+                    "k8s/base/kustomization.yaml",
+                ),
+                (
+                    "k8s/overlays/staging/kustomization.yaml",
+                    "k8s/base/kustomization.yaml",
+                ),
+            ] {
+                let listed = row(&format!(
+                    "| {shown} | {path} | {through} | web | Deployment | \
+                     k8s/base/deployment.yaml | — | 1 | web | shop/web:1 | 8080 | SESSION\\_KEY | \
+                     Secret/web-secrets | Deterministic | Confirmed |"
+                ));
+                assert!(listed.contains(&document), "{listed}");
+            }
+
+            // `web` is declared twice, as a Compose service and as one
+            // Deployment that three kustomizations reach: one row for each
+            // fact, never one for each reaching environment, and only what
+            // both kinds state is compared.
+            let declared = &content[content
+                .find("\n## Declared in more than one environment\n")
+                .unwrap()
+                ..content
+                    .find("\nA Kubernetes workload that two or more kustomizations reach")
+                    .unwrap()];
+            let facts: Vec<&str> = declared
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web |")))
+                .collect();
+            assert_eq!(facts.len(), 2, "{declared}");
+            assert!(facts[0].contains(
+                "| Compose service | docker-compose.yml | docker-compose.yml | ports: not \
+                 stated |"
+            ));
+            assert!(facts[1].contains(
+                "| Deployment | k8s/base/deployment.yaml | k8s/base/kustomization.yaml, \
+                 k8s/overlays/prod/kustomization.yaml, k8s/overlays/staging/kustomization.yaml \
+                 | ports: 8080 |"
+            ));
+            assert!(!declared.contains("replicas"));
+
+            // The workload three environments reach: one row for each, with
+            // that environment's patch and `images` entries.
+            let several = &content[content
+                .find("\nA Kubernetes workload that two or more kustomizations reach")
+                .unwrap()
+                ..content
+                    .find("\n## Workloads no environment declares\n")
+                    .unwrap()];
+            let rows: Vec<&str> = several
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web | Deployment |")))
+                .collect();
+            assert_eq!(rows.len(), 3, "{several}");
+            assert!(rows[0].contains(
+                "| k8s/base/kustomization.yaml | its own entry | no patch stated | none names \
+                 its images |"
+            ));
+            assert!(rows[0].contains(&span(base, "deployment.yaml")));
+            assert!(rows[1].contains(
+                "| k8s/overlays/prod/kustomization.yaml | k8s/base/kustomization.yaml | patch \
+                 k8s/overlays/prod/patch.yaml states replicas 5 | none names its images |"
+            ));
+            assert!(rows[1].contains(&span(prod, "../../base")));
+            assert!(rows[1].contains("the deployed name differs from the recorded one"));
+            assert!(rows[2].contains(
+                "| k8s/overlays/staging/kustomization.yaml | k8s/base/kustomization.yaml | patch \
+                 k8s/overlays/staging/patch.yaml states replicas 2; container web: environment \
+                 key names LOG\\_LEVEL | name shop/web, newTag 2-rc |"
+            ));
+            assert!(rows[2].contains(&span(staging, "../../base")));
+            assert!(!content.to_lowercase().contains("overrid"));
+
+            // `staging.env`: a Gap, no span, no value, and not an environment.
+            let gap = row(&format!(
+                "| {shown} | staging.env | — | environment named only by a file name |"
+            ));
+            assert!(gap.ends_with("| Deterministic | Gap | none stored for an environment file |"));
+            let listed = &content[content.find("\n## Environments\n").unwrap()
+                ..content.find("\n## Workloads by environment\n").unwrap()];
+            assert!(!listed.contains("staging.env"));
+            // The transformer is named, not applied.
+            row(&format!(
+                "| {shown} | k8s/overlays/prod/kustomization.yaml | — | kustomization | \
+                 \\`namePrefix\\` is present and not evaluated |"
+            ));
+            assert!(!content.contains("live-"));
+            assert!(!content.contains(SENTINEL));
+
+            let index: spec::FactIndex = serde_json::from_str(
+                &bundle
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.id == "fact-index-json")
+                    .unwrap()
+                    .content,
+            )
+            .unwrap();
+            // 4 environments, 3 workloads, 2 + 3 DECLARES, 1 DEPENDS_ON,
+            // 2 PATCHES and 2 Gaps.
+            assert_eq!(artifact.assertions.len(), 4 + 3 + 5 + 1 + 2 + 2);
+            for assertion in &artifact.assertions {
+                assert!(
+                    index.rows.iter().any(|row| {
+                        row.cited_by.iter().any(|by| by == "environments")
+                            && match &row.fact {
+                                core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                                core_graph::FactKey::Edge {
+                                    source,
+                                    label,
+                                    destination,
+                                } => {
+                                    format!("{source} {label} {destination}")
+                                        == assertion.subject_id
+                                }
+                            }
+                    }),
+                    "{} has a fact-index row",
+                    assertion.subject_id
+                );
+            }
+            assert_eq!(
+                crate::build_spec_bundle(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    mode
+                )
+                .unwrap(),
+                bundle
+            );
+            // The Service is in the stored coverage inventory by its kind;
+            // the Deployment and the kustomizations are read and are not.
+            let coverage = &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "coverage")
+                .unwrap()
+                .content;
+            assert!(
+                coverage.contains("kubernetes-manifest:Service"),
+                "{coverage}"
+            );
+            assert!(!coverage.contains("kubernetes-manifest:Deployment"));
+            assert!(!coverage.contains("kustomize-file"));
+        }
+    }
+
+    // The same tree again: the same graph.
+    ingest();
+    assert_eq!(hashes(), first);
+    // And in a fresh graph, as the determinism gate ingests it.
+    let fresh = || {
+        let extraction = extract_tree(
+            &root,
+            repo,
+            "workdir",
+            &[],
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        load_into_graph(&mut graph, &extraction, repo, &root, "workdir").unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&graph).unwrap(),
+        )
+    };
+    assert_eq!(fresh(), fresh());
+
+    // One overlay goes: its environment, its relations and its Gap go with
+    // it, and the workload the others still reach stays.
+    std::fs::remove_dir_all(root.join("k8s/overlays/prod")).unwrap();
+    ingest();
+    {
+        let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+        let prod = environment("k8s/overlays/prod/kustomization.yaml");
+        assert!(nodes.iter().all(|node| node.id != prod));
+        assert!(
+            nodes
+                .iter()
+                .all(|node| !node.id.ends_with("@k8s/overlays/prod/kustomization.yaml"))
+        );
+        assert!(edges.iter().all(|edge| edge.src != prod));
+        assert!(nodes.iter().any(|node| node.id == web));
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.label == "DECLARES" && edge.dst == web)
+                .count(),
+            2
+        );
+    }
+    // Everything goes: no kustomize or Kubernetes fact is left, and the
+    // Compose environment is untouched.
+    std::fs::remove_dir_all(root.join("k8s")).unwrap();
+    std::fs::remove_file(root.join("staging.env")).unwrap();
+    ingest();
+    let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+    assert!(nodes.iter().all(|node| !node.id.contains("@k8s/")));
+    assert!(
+        edges
+            .iter()
+            .all(|edge| !edge.src.contains("@k8s/") && !edge.dst.contains("@k8s/"))
+    );
+    assert!(edges.iter().all(|edge| edge.label != "PATCHES"));
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !node.id.starts_with("gap:environment:"))
+    );
+    let left: Vec<&str> = nodes
+        .iter()
+        .filter(|node| node.label == "Environment")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(left, [environment("docker-compose.yml")]);
 }
 
 // AC-0651 (#1821): the export of a real ingest carries the configuration

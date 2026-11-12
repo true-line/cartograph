@@ -343,9 +343,10 @@ fn environments_and_their_workloads_are_listed_with_spans() {
 }
 
 // AC-0661 (ADR-0070 decision 6): a workload name that two environments of
-// one repository declare has one row per declaration, with the properties
-// that differ and each span; the document never says one overrides another,
-// and never joins repositories.
+// one repository declare has one row per declaration (each workload fact),
+// with its kind, the file that declares it, the environments that reach it,
+// the properties that differ and its span; the document never says one
+// overrides another, and never joins repositories.
 #[test]
 fn a_workload_declared_in_two_environments_shows_both_declarations() {
     let f = shop();
@@ -353,20 +354,23 @@ fn a_workload_declared_in_two_environments_shows_both_declarations() {
     assert_eq!(
         table(&content, "Declared in more than one environment"),
         [
-            "| acme/shop | db | deploy/docker-compose.prod.yml | none: the recorded properties \
-             are the same in each declaration | Deterministic | Confirmed | \
+            "| acme/shop | db | Compose service | deploy/docker-compose.prod.yml | \
+             deploy/docker-compose.prod.yml | none: the recorded properties are the same in \
+             each declaration | Deterministic | Confirmed | \
              acme/shop:deploy/docker-compose.prod.yml bytes 230..260 @ 0123abc | — |",
-            "| acme/shop | db | docker-compose.yml | none: the recorded properties are the same \
-             in each declaration | Deterministic | Confirmed | acme/shop:docker-compose.yml \
-             bytes 300..330 @ 0123abc | — |",
-            "| acme/shop | web | deploy/docker-compose.prod.yml | image: shop/web:2; build \
-             context: not stated; ports: 443:8443; environment files: not stated; \
-             dependencies: not stated; profiles: not stated | Deterministic | Confirmed | \
+            "| acme/shop | db | Compose service | docker-compose.yml | docker-compose.yml | \
+             none: the recorded properties are the same in each declaration | Deterministic | \
+             Confirmed | acme/shop:docker-compose.yml bytes 300..330 @ 0123abc | — |",
+            "| acme/shop | web | Compose service | deploy/docker-compose.prod.yml | \
+             deploy/docker-compose.prod.yml | image: shop/web:2; build context: not stated; \
+             ports: 443:8443; environment files: not stated; dependencies: not stated; \
+             profiles: not stated | Deterministic | Confirmed | \
              acme/shop:deploy/docker-compose.prod.yml bytes 120..220 @ 0123abc | — |",
-            "| acme/shop | web | docker-compose.yml | image: shop/web:1; build context: ./web; \
-             ports: 8080:80, target=443 published=8443; environment files: web.env; \
-             dependencies: api, db; profiles: frontend | Deterministic | Confirmed | \
-             acme/shop:docker-compose.yml bytes 20..140 @ 0123abc | — |",
+            "| acme/shop | web | Compose service | docker-compose.yml | docker-compose.yml | \
+             image: shop/web:1; build context: ./web; ports: 8080:80, target=443 \
+             published=8443; environment files: web.env; dependencies: api, db; profiles: \
+             frontend | Deterministic | Confirmed | acme/shop:docker-compose.yml bytes 20..140 @ \
+             0123abc | — |",
         ]
     );
     // `web` of `acme/other` is another repository's and is not joined.
@@ -435,6 +439,7 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
         "Environments",
         "Workloads by environment",
         "Declared in more than one environment",
+        "Workloads no environment declares",
         "Not established",
         "Coverage note: what this document does not cover",
     ] {
@@ -444,6 +449,7 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
         "Environments",
         "Workloads by environment",
         "Declared in more than one environment",
+        "Workloads no environment declares",
         "Not established",
     ] {
         let rows = table(&content, heading);
@@ -452,7 +458,8 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
     }
     for stated in [
         "A file or directory name is never used as an environment name.",
-        "Kubernetes manifests, kustomize files, Helm charts and Helm values files are not read.",
+        // AC-0662: Kubernetes manifests and kustomize files are read now.
+        "Helm charts and Helm values files are not read",
         "Nothing is merged.",
         "No value of an environment key is read or stored, and no secret.",
         "Terraform resources are not attached to an environment.",
@@ -528,12 +535,18 @@ fn two_exports_are_byte_identical_whatever_the_input_order() {
     }
 }
 
-// AC-0661: `Workload` facts and their `DEPENDS_ON` relations change no
-// other document: the topology map and the flow dossiers of a graph are the
-// same bytes with and without them.
+// AC-0661, AC-0662: `Workload` facts and their `DEPENDS_ON` relations, and
+// the kustomize facts (several `DECLARES` relations into one workload, and
+// `PATCHES`), change no other document: every graph document but the gap
+// register, which lists the new Gaps like any other, is the same bytes with
+// and without them.
 #[test]
 fn workload_dependencies_change_neither_the_topology_nor_the_flows() {
-    let f = shop();
+    let mut f = shop();
+    let kustomize = kustomize::overlays();
+    f.nodes.extend(kustomize.nodes);
+    f.edges.extend(kustomize.edges);
+    assert!(f.edges.iter().any(|edge| edge.label == "PATCHES"));
     let resource = |id: &str| Node {
         id: id.into(),
         label: "Resource".into(),
@@ -554,7 +567,26 @@ fn workload_dependencies_change_neither_the_topology_nor_the_flows() {
     for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
         let without = compile_spec(&infra, &infra_edges, &[], mode, &BTreeSet::new());
         let with = compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
-        for id in ["topology", "flow-dossiers", "data-model", "security-view"] {
+        for id in [
+            "topology",
+            "flow-dossiers",
+            "data-model",
+            "security-view",
+            "user-stories",
+            "us-tm",
+            "us-tm-index",
+            "adrs",
+            "drift-register",
+            "toolchain",
+            "test-arrangements",
+            "journeys",
+            "rule-evidence",
+            "rule-evidence-index",
+            "endpoint-permissions",
+            "pipelines",
+            "configuration",
+            "external",
+        ] {
             let pick = |bundle: &crate::SpecBundle| {
                 bundle
                     .artifacts
@@ -628,3 +660,6 @@ fn every_row_cites_a_fact_that_resolves_in_the_fact_index() {
         );
     }
 }
+
+#[path = "environments_kustomize_tests.rs"]
+mod kustomize;

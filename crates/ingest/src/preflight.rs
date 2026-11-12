@@ -564,11 +564,13 @@ pub fn preflight_scan(
         if let Some(limit) = crate::pipelines::unread(&name, &rel, &path) {
             unsupported.push(finding(limit.kind, &rel, 1, &limit.message));
         }
-        // Environment limits (#1791, AC-0661): a Kubernetes manifest, a
-        // kustomize file and a Helm chart or values file are present and not
-        // read. Compose files are read and carry no limit here.
-        if let Some(limit) = crate::environments::unread(&name, &rel, &path) {
-            unsupported.push(finding(limit.kind, &rel, 1, &limit.message));
+        // Environment limits (#1791, AC-0661, AC-0662): a Helm chart or
+        // values file, and each Kubernetes manifest document of a kind that
+        // is not read, are present and not read. Compose files,
+        // kustomizations and the pod-bearing kinds are read and carry no
+        // limit here.
+        for limit in crate::environments::unread(&name, &rel, &path) {
+            unsupported.push(finding(&limit.kind, &rel, limit.line, &limit.message));
         }
         let Some(extension) = path.extension().map(|e| e.to_string_lossy().into_owned()) else {
             continue;

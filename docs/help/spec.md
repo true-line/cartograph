@@ -214,26 +214,54 @@ Every export includes **environments.md**. It lists the environments your
 sources declare and what each one declares to run. No model is involved.
 
 - **An environment** is one file that declares a set of things to run
-  together. Today that is a Compose file with a `services` section: each
-  such file is one environment.
+  together: a Compose file with a `services` section, or a kustomization
+  file (`kustomization.yaml`, `kustomization.yml` or `Kustomization`). Each
+  such file is one environment. A kustomize base is one too; its row says
+  which kustomizations include it.
 - **An environment is shown by the path of its file.** It has a name only
-  when the file states one (a top-level `name`). Otherwise the name reads
-  "none stated". Cartograph never turns a file or folder name such as
-  `prod` into an environment name.
+  when the file states one (a top-level `name` in a Compose file, a
+  `namespace` in a kustomization). Otherwise the name reads "none stated".
+  Cartograph never turns a file or folder name such as `prod` into an
+  environment name.
 - **A workload** is one Compose service, with its image, build context,
   ports, the names of its environment keys, its environment files, its
-  dependencies and its profiles, as the file writes them.
+  dependencies and its profiles, as the file writes them. For Kubernetes it
+  is one `Deployment`, `StatefulSet`, `DaemonSet` or `Job` document, with
+  one row for each container: image, ports, the names of its environment
+  keys and the names of the ConfigMaps and Secrets it references.
+- **A kustomization declares** the Kubernetes workloads that its
+  `resources` and `bases` entries reach inside the repository, through
+  other kustomizations where they name one.
 - **Declared in more than one environment** lists a workload name that two
-  or more Compose files of one repository declare, such as `web` in
+  or more declarations of one repository share, such as `web` in
   `docker-compose.yml` and `docker-compose.prod.yml`. Each declaration has
-  its own row, with the properties that differ and its source span. The
-  document does not say which one is used where: no file says which files a
-  deployment combines.
-- **Not established** lists what was found and could not be stated: a
-  Compose file that could not be read, `extends`, `include`, a YAML anchor,
-  alias or tag, a dependency on a service the file does not declare, and an
-  environment file such as `staging.env` or `.env.production`, whose name is
-  the only thing that names an environment.
+  one row, with its kind, the file that writes it, the environments that
+  reach it, the properties that differ and its source span. A workload that
+  several kustomizations reach is still one declaration there. Where a name
+  is declared both as a Compose service and as a Kubernetes workload, only
+  the images, ports and environment key names are compared. A
+  Kubernetes workload that two or more kustomizations reach has one row for
+  each of them, with what that kustomization's patch files and `images`
+  entries state for it, or "no patch stated". Nothing is applied: the
+  document shows what each file writes and does not say which one is used
+  where.
+- **Workloads no environment declares** lists a Kubernetes workload that no
+  kustomization reaches.
+- **Not established** lists what was found and could not be stated: a file
+  that could not be read, `extends`, `include`, a YAML anchor, alias or tag,
+  a dependency on a service the file does not declare, a kustomization
+  entry that is remote, missing or outside the repository, a patch that
+  matches no workload, an inline patch, a `target` selector,
+  `patchesJson6902`, a transformer or generator such as `namePrefix` or
+  `secretGenerator`, and an environment file such as `staging.env` or
+  `.env.production`, whose name is the only thing that names an
+  environment. Where a kustomization sets `namePrefix` or `nameSuffix`, its
+  rows say that the deployed name differs from the recorded one.
+
+Helm charts and values files are not read, and neither is a Kubernetes
+manifest of any other kind, such as a `Service` or a `ConfigMap`. The
+coverage document lists each kind found as present and not read. A
+`CronJob` is listed as a scheduled job, not as a workload.
 
 Only the names of environment keys are listed, never a value. A value
 written as `${...}` is shown as written and marked as not resolved. A long

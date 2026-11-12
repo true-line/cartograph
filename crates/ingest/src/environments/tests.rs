@@ -604,10 +604,13 @@ fn the_compose_tool_fact_is_unchanged() {
     );
 }
 
-// AC-0661: Kubernetes manifests, kustomize files and Helm charts and values
-// files are recorded in coverage as present and not read, with the reason; a
-// `CronJob` file the schedule reader covers is not reported again, and
-// arbitrary YAML is not reported at all.
+// AC-0661, AC-0662: Helm charts and values files are recorded in coverage as
+// present and not read, and so is each Kubernetes manifest document of a
+// kind this reader does not read, by kind, with its count and first site. A
+// file that holds only read kinds, a kustomization and a `CronJob` the
+// schedule reader covers are not reported, and arbitrary YAML is not
+// reported at all. The name is the one `docs/test-map.md` binds T-0661 to;
+// kustomize files and the pod-bearing kinds are read since increment 2.
 #[test]
 fn kubernetes_kustomize_and_helm_files_are_present_and_not_read() {
     let deployment = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n";
@@ -619,14 +622,21 @@ fn kubernetes_kustomize_and_helm_files_are_present_and_not_read() {
         &[
             ("k8s/deployment.yaml", deployment),
             (
+                "k8s/extra.yaml",
+                "apiVersion: networking.k8s.io/v1\nkind: Ingress\n---\napiVersion: v1\nkind: \
+                 Service\n",
+            ),
+            (
                 "k8s/service.yml",
                 "# a service\napiVersion: v1\nkind: Service\n---\napiVersion: v1\nkind: ConfigMap\n",
             ),
             ("k8s/cron.yaml", cronjob),
             ("k8s/mixed.yaml", &format!("{cronjob}---\n{deployment}")),
+            ("k8s/odd.yaml", "apiVersion: v1\nkind: \"not a kind\"\n"),
             (
                 "overlays/prod/kustomization.yaml",
-                "resources:\n  - ../../k8s\n",
+                "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  \
+                 - ../../k8s/deployment.yaml\n",
             ),
             (
                 "chart/Chart.yaml",
@@ -682,33 +692,58 @@ fn kubernetes_kustomize_and_helm_files_are_present_and_not_read() {
                  environments from it: a tool limitation, not a system gap"
             ),
             (
-                "kubernetes-manifest",
-                3,
-                "k8s/deployment.yaml:1",
-                "Kubernetes manifest is present and not read: no installed producer recovers \
-                 environments from it: a tool limitation, not a system gap"
+                "kubernetes-manifest:Ingress",
+                1,
+                "k8s/extra.yaml:1",
+                "Kubernetes `Ingress` manifest is present and not read: no installed producer \
+                 recovers environments from it: a tool limitation, not a system gap"
             ),
             (
-                "kustomize-file",
+                "kubernetes-manifest:Service",
+                2,
+                "k8s/extra.yaml:4",
+                "Kubernetes `Service` manifest is present and not read: no installed producer \
+                 recovers environments from it: a tool limitation, not a system gap"
+            ),
+            (
+                "kubernetes-manifest:other",
                 1,
-                "overlays/prod/kustomization.yaml:1",
-                "kustomize file is present and not read: no installed producer recovers \
-                 environments from it: a tool limitation, not a system gap"
+                "k8s/odd.yaml:1",
+                "Kubernetes manifest of a kind not written as a plain name is present and not \
+                 read: no installed producer recovers environments from it: a tool limitation, \
+                 not a system gap"
+            ),
+            (
+                "kubernetes-manifest:ConfigMap",
+                1,
+                "k8s/service.yml:5",
+                "Kubernetes `ConfigMap` manifest is present and not read: no installed producer \
+                 recovers environments from it: a tool limitation, not a system gap"
             ),
         ]
     );
     assert!(coverage.limited);
-    // The CronJob file is the schedule reader's, and is not named here.
-    assert!(
-        report
-            .unsupported
-            .iter()
-            .filter(|finding| is_limit_kind(&finding.kind))
-            .all(|finding| finding.path != "k8s/cron.yaml")
-    );
-    assert!(kubernetes_manifest(deployment));
-    assert!(!kubernetes_manifest(cronjob));
-    assert!(!kubernetes_manifest("apiVersion: v1\nkind: [unclosed\n"));
+    // A file of read kinds, the CronJob file and the kustomization are not
+    // named here.
+    for path in [
+        "k8s/cron.yaml",
+        "k8s/deployment.yaml",
+        "k8s/mixed.yaml",
+        "overlays/prod/kustomization.yaml",
+    ] {
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .filter(|finding| is_limit_kind(&finding.kind))
+                .all(|finding| finding.path != path),
+            "{path}"
+        );
+    }
+    // A file that is not valid YAML is not a manifest.
+    let broken = dir.path().join("broken.yaml");
+    std::fs::write(&broken, "apiVersion: v1\nkind: [unclosed\n").unwrap();
+    assert!(unread("broken.yaml", "broken.yaml", &broken).is_empty());
 }
 
 // AC-0661: the reader is a producer in the coverage inventory, with its
@@ -754,3 +789,5 @@ fn the_reader_is_a_producer_in_the_coverage_inventory() {
             && producer.state == crate::coverage::ProducerState::NotApplicable
     }));
 }
+
+mod manifests;
