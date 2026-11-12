@@ -929,9 +929,8 @@ fn workbench_curated_read_reports_the_export_revision_and_counts_in_both_modes()
     let (_dir, state, owner, staged) = staged_captured_record();
     let id = staged.proposal_id.as_str();
     let modes = [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly];
-    let read = |mode| {
-        serde_json::to_value(crate::curated_workbench::read(&state, mode).unwrap()).unwrap()
-    };
+    let read =
+        |mode| serde_json::to_value(crate::curated_workbench::read(&state, mode).unwrap()).unwrap();
     let same_basis = |read: &serde_json::Value, mode| {
         let bundle = curated_export(&state, mode);
         let basis = bundle.curated_basis.as_ref().unwrap();

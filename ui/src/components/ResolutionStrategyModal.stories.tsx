@@ -241,7 +241,10 @@ export const RunFailureIsExplicit: Story = {
   },
 };
 
-export const AcceptedReviewStatesTheRecordState: Story = {
+// The export name is bound by the test map (T-0129) and is kept; the story
+// now asserts the record's state, not an "awaiting" label.
+export const AcceptedReviewAwaitsReconciliation: Story = {
+  name: 'Accepted Review States The Record State',
   // AC-0129: reviewed history never claims source freshness or export activation.
   // AC-0655: the dialog states the state and reason sentence the host's
   // curated read gave this record, not a fixed "awaiting" label.
