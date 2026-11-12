@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, pipelines, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -47,6 +47,57 @@ the permission site where there is one.
 A `verified-only` export leaves out a row whose permission site is
 InferredWeak and states how many it left out. A `best-effort` export includes
 the row and marks it. The same graph gives the same document every time.
+
+## Build and deployment pipelines
+
+Every export includes **pipelines.md**. It lists what the repository's
+GitHub Actions workflows and Dockerfiles declare about building and
+deploying. No model is involved, and nothing is run or evaluated: the
+document states what the files declare, not what a run did.
+
+A pipeline is one workflow file or one Dockerfile. A job is a workflow job
+or a Dockerfile stage. A step is a workflow step or a Dockerfile
+instruction. For each pipeline the document lists:
+
+- its triggers, in the order the file declares them
+- its jobs in dependency order: a job comes after every job it needs, and
+  where jobs do not depend on each other the one declared first comes first
+- each job's steps, in the order the file declares them
+
+A job has no place in the order when one of its needs could not be resolved,
+when it needs such a job, or when its needs form a cycle. These jobs are
+listed after the ordered ones, each with the reason.
+
+Every row shows the tier, confidence and source span of its fact.
+
+A `verified-only` export leaves out InferredWeak rows and states how many
+pipeline facts it left out. A `best-effort` export includes them and marks
+them. The same graph gives the same document every time.
+
+**Files present and not read** are listed with the reason recorded when the
+repository was ingested: GitLab CI, Jenkins, CircleCI and Azure Pipelines
+files, and workflows or Dockerfiles that could not be read exactly. For each
+kind and repository the list gives the number of files, the first file and
+the reason recorded for that first file. The other files are counted and not
+named. This part needs the stored coverage inventory. A reader without it,
+such as a specialist reading the document over MCP, is told that nothing is
+stated about unread files. For the same reason the document cannot be
+selected in a work packet.
+
+Not covered today:
+
+- A Dockerfile that uses a heredoc (`<<`) or changes its escape character is
+  not read.
+- A workflow that uses a YAML alias, anchor or tag is not read.
+- A file with another name is not found at all, so it is not listed as
+  unread either. Workflows are YAML files directly in `.github/workflows`.
+  Dockerfiles are named `Dockerfile` or `Containerfile`, either with a dotted
+  suffix such as `Dockerfile.dev`, or end in `.dockerfile`.
+- A matrix is one job as written. Expressions and variables stay as written.
+- A reusable workflow and a third-party action are references. Their own
+  jobs and steps are not resolved.
+- The values of `with:` inputs, `ENV` and `ARG` are not stored. A secret is
+  recorded by name only.
 
 ## Coverage in an export
 

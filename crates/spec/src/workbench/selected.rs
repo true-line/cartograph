@@ -63,6 +63,33 @@ pub enum SelectedArtifactOutcome {
     },
 }
 
+/// What an artifact reads beside the admitted graph facts.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Beside<'a> {
+    /// The coverage inventories stored with the graph.
+    pub(crate) coverage: &'a [StoredCoverage],
+    /// Pipeline facts the export mode and the rejections withheld, counted
+    /// before the filter (`pipelines::withheld`).
+    pub(crate) pipelines_withheld: usize,
+}
+
+impl<'a> Beside<'a> {
+    /// Counted over the stored facts, before the projection and the export
+    /// filter drop what the mode and the rejections withhold.
+    pub(crate) fn new<N: Borrow<Node>, E: Borrow<Edge>>(
+        nodes: &[N],
+        edges: &[E],
+        mode: ExportMode,
+        rejected: &BTreeSet<String>,
+        coverage: &'a [StoredCoverage],
+    ) -> Self {
+        Self {
+            coverage,
+            pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
+        }
+    }
+}
+
 struct Artifact {
     id: &'static str,
     file: &'static str,
@@ -171,6 +198,13 @@ const ARTIFACTS: &[Artifact] = &[
         id: "endpoint-permissions",
         file: "endpoint-permissions.md",
         title: "Endpoints and permission sites",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1818).
+    Artifact {
+        id: "pipelines",
+        file: "pipelines.md",
+        title: "Build and deployment pipelines",
         format: "markdown",
     },
     Artifact {
@@ -317,14 +351,15 @@ fn produce(
     edges: &[&Edge],
     flows: &[Flow],
     gaps: usize,
-    (mode, rejected, stories, coverage): (
+    (mode, rejected, stories, beside): (
         ExportMode,
         &BTreeSet<String>,
         Option<&capabilities::Stories<'_>>,
-        &[StoredCoverage],
+        Beside<'_>,
     ),
     max: Option<usize>,
 ) -> Result<Cited, render::RenderLimit> {
+    let coverage = beside.coverage;
     use producers::Output;
     let Output {
         content,
@@ -406,6 +441,16 @@ fn produce(
         "endpoint-permissions" => {
             endpoint_permissions::output(nodes, edges, (mode, rejected), max)?
         }
+        // Pipeline facts in the admitted graph, the count the mode and the
+        // rejections withheld, and the files the inventories record as
+        // present and not read (AC-0650).
+        "pipelines" => pipelines::output(
+            nodes,
+            edges,
+            coverage,
+            (mode, beside.pipelines_withheld),
+            max,
+        )?,
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => coverage::output(coverage, a.id == "coverage", max)?,
         // The two index artifacts are rendered from the collected citations.
@@ -590,6 +635,7 @@ fn compile_selected(
                 .collect());
         }
     };
+    let beside = Beside::new(nodes, edges, mode, rejected, coverage);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
     let gaps = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
@@ -642,7 +688,7 @@ fn compile_selected(
                 &edges,
                 &projection.flows,
                 gaps,
-                (mode, rejected, stories, coverage),
+                (mode, rejected, stories, beside),
                 max,
             )
         };
@@ -717,9 +763,10 @@ pub(super) fn all(
 ) -> Result<SpecBundle, FactIndexError> {
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
+    let beside = Beside::new(nodes, edges, mode, rejected, coverage);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
-    try_bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, coverage)
+    try_bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, beside)
 }
 pub(crate) fn flow_artifact_from_filtered(
     nodes: &[&Node],
@@ -738,7 +785,7 @@ pub(crate) fn flow_artifact_from_filtered(
         edges,
         flows,
         0,
-        (mode, rejected, None, &[]),
+        (mode, rejected, None, Beside::default()),
         None,
     )
     .expect("unbounded flow dossier renderer")
@@ -754,9 +801,9 @@ pub(crate) fn try_bundle_from_filtered(
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
-    coverage: &[StoredCoverage],
+    beside: Beside<'_>,
 ) -> Result<SpecBundle, FactIndexError> {
-    bundle_with_citation_ids(nodes, edges, flows, (mode, rejected, coverage), citation_id)
+    bundle_with_citation_ids(nodes, edges, flows, (mode, rejected, beside), citation_id)
 }
 
 fn cite(
@@ -777,7 +824,7 @@ pub(super) fn bundle_with_citation_ids(
     nodes: &[&Node],
     edges: &[&Edge],
     flows: &[Flow],
-    (mode, rejected, coverage): (ExportMode, &BTreeSet<String>, &[StoredCoverage]),
+    (mode, rejected, beside): (ExportMode, &BTreeSet<String>, Beside<'_>),
     id_of: fn(&core_graph::FactKey) -> String,
 ) -> Result<SpecBundle, FactIndexError> {
     let mut citations = Some(fact_index::Collector::new(mode, id_of));
@@ -865,7 +912,7 @@ pub(super) fn bundle_with_citation_ids(
             edges,
             flows,
             gap_count,
-            (mode, rejected, None, coverage),
+            (mode, rejected, None, beside),
             None,
         )
         .expect("unbounded native artifact");

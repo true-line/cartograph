@@ -18,7 +18,8 @@
 //! - `PART_OF` (trigger → pipeline, job → pipeline, step → job) carries the
 //!   declared position as `index`; order is never implied by store order.
 //! - `NEEDS` (job → job): a workflow `needs`, a stage built `FROM` an
-//!   earlier stage, or a `COPY --from=` an earlier stage (`via` names which).
+//!   earlier stage, a `COPY --from=` an earlier stage, or a `RUN
+//!   --mount=…,from=` an earlier stage (`via` names which).
 //!
 //! The labels are deliberately not `DEFINED_IN`, `STEP_OF`, `TRIGGERS` or
 //! `DEPENDS_ON`: the flow tracer and the topology map walk those, and a
@@ -185,14 +186,24 @@ impl Format {
     }
 }
 
-/// Which format `rel` is, by the same names the toolchain reader accepts.
+/// Which format `rel` is. A workflow is a YAML file directly in
+/// `.github/workflows`. A `Dockerfile` is named `Dockerfile` or
+/// `Containerfile`, either of them with a dotted suffix (`Dockerfile.dev`),
+/// or anything ending in `.dockerfile` (`api.dockerfile`, any case; #1818).
 fn format_of(name: &str, rel: &str) -> Option<Format> {
     if workflow_file(rel) && (name.ends_with(".yml") || name.ends_with(".yaml")) {
         return Some(Format::Workflow);
     }
+    const SUFFIX: &str = ".dockerfile";
+    let named = ["Dockerfile", "Containerfile"].iter().any(|base| {
+        name.strip_prefix(base)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    });
+    let suffixed = name.len() > SUFFIX.len()
+        && name.is_char_boundary(name.len() - SUFFIX.len())
+        && name[name.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX);
     // `Dockerfile.dockerignore` is an ignore list, not a build.
-    ((name == "Dockerfile" || name.starts_with("Dockerfile.")) && !name.ends_with(".dockerignore"))
-        .then_some(Format::Dockerfile)
+    ((named || suffixed) && !name.ends_with(".dockerignore")).then_some(Format::Dockerfile)
 }
 
 type Span = (u64, u64);
@@ -909,6 +920,21 @@ fn instruction_text(draft: &mut Draft, keyword: &str, instruction: &str) {
     }
 }
 
+/// The earlier stage `source` names: by its `AS` name, else by its index.
+/// Anything else is an external image or build context, left as declared.
+fn earlier_stage(earlier: &[Option<String>], source: &str) -> Option<usize> {
+    let lowered = source.to_ascii_lowercase();
+    earlier
+        .iter()
+        .rposition(|known| known.as_deref() == Some(&lowered))
+        .or_else(|| {
+            source
+                .parse::<usize>()
+                .ok()
+                .filter(|target| *target < earlier.len())
+        })
+}
+
 /// A `Dockerfile`, all of it or none of it: stages in declared order, each
 /// with its base image and instructions; the last stage is the default
 /// build target.
@@ -1007,19 +1033,7 @@ fn dockerfile(text: &str) -> Result<Decl, &'static str> {
                 .collect();
             if let [source] = sources.as_slice() {
                 draft.text("copy_from", source);
-                let lowered = source.to_ascii_lowercase();
-                // A stage by name, else by index; anything else is an
-                // external image or build context, recorded as declared.
-                let target = names[..stage_index]
-                    .iter()
-                    .rposition(|known| known.as_deref() == Some(&lowered))
-                    .or_else(|| {
-                        source
-                            .parse::<usize>()
-                            .ok()
-                            .filter(|target| *target < stage_index)
-                    });
-                if let Some(target) = target {
+                if let Some(target) = earlier_stage(&names[..stage_index], source) {
                     draft.set("copy_from_stage", format!("stage-{target}"));
                     stages[stage_index].needs.push(Need {
                         name: source.to_string(),
@@ -1030,6 +1044,50 @@ fn dockerfile(text: &str) -> Result<Decl, &'static str> {
                 }
             } else if !sources.is_empty() {
                 return Err("a COPY instruction carries more than one --from");
+            }
+        }
+        if upper == "RUN" {
+            // `RUN --mount=type=bind,from=build,…`: a mount whose `from`
+            // names an earlier stage builds on that stage (#1818).
+            let mut declared: Vec<String> = Vec::new();
+            let mut mounted: Vec<String> = Vec::new();
+            for flag in args.iter().take_while(|arg| arg.starts_with("--")) {
+                let Some(options) = flag.strip_prefix("--mount=") else {
+                    continue;
+                };
+                // A quoted option list is CSV-quoted; it is not split here.
+                if options.contains(['"', '\'']) {
+                    return Err("a RUN --mount option is quoted");
+                }
+                let mut sources = options
+                    .split(',')
+                    .filter_map(|option| option.split_once('='))
+                    .filter(|(key, _)| key.eq_ignore_ascii_case("from"))
+                    .map(|(_, source)| source);
+                let Some(source) = sources.next() else {
+                    continue;
+                };
+                if sources.next().is_some() {
+                    return Err("a RUN --mount carries more than one from");
+                }
+                let (safe, count) = sanitize(source);
+                draft.redactions += count;
+                declared.push(safe);
+                if let Some(target) = earlier_stage(&names[..stage_index], source) {
+                    mounted.push(format!("stage-{target}"));
+                    stages[stage_index].needs.push(Need {
+                        name: source.to_string(),
+                        target: Some(target),
+                        via: "mount-from",
+                        span,
+                    });
+                }
+            }
+            if !declared.is_empty() {
+                draft.set("mount_from", declared);
+            }
+            if !mounted.is_empty() {
+                draft.set("mount_from_stages", mounted);
             }
         }
         let key = format!("stage-{stage_index}/{index}");
