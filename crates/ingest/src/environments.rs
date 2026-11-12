@@ -146,6 +146,9 @@ fn names_an_environment(name: &str) -> bool {
         .any(|part| !TEMPLATE_WORDS.contains(&part.to_ascii_lowercase().as_str()))
 }
 
+/// The largest YAML file opened to see whether it is a Kubernetes manifest.
+const MAX_MANIFEST_PROBE_BYTES: u64 = 1024 * 1024;
+
 /// The limit `rel` carries, if any: a Kubernetes manifest, a kustomize file
 /// or a Helm chart or values file, present and not read. A YAML file is read
 /// only to see whether a document of it has top-level `apiVersion` and `kind`
@@ -162,6 +165,11 @@ pub fn unread(name: &str, rel: &str, path: &Path) -> Option<Limit> {
     } else if yaml(name) && helm_values(name) && path.with_file_name("Chart.yaml").is_file() {
         3
     } else if yaml(name) && !compose_file(name) && !workflow_file(rel) {
+        // Bounded: a manifest is small, and a larger YAML file is not
+        // opened to look for two keys.
+        if std::fs::metadata(path).ok()?.len() > MAX_MANIFEST_PROBE_BYTES {
+            return None;
+        }
         let text = std::fs::read_to_string(path).ok()?;
         if !kubernetes_manifest(&text) {
             return None;
