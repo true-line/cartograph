@@ -462,7 +462,7 @@
 - **AC-0109** Given multiple named project contexts, when the app restarts or changes project, then each domain's evidence, review history and task references remain scoped to its project and revision.
 - **Security:** Agents propose only; human acceptance cannot mint confirmed facts.
 - **Performance:** Domain queries expose scope and uncovered portions rather than claiming a complete inventory from partial extraction.
-- **Trace:** H2–H3 (SPEC-01) · `context-hub`, `agents`, `spec`, `app`, `ui` · — · T-0106..0109
+- **Trace:** H2–H3 (SPEC-01, SPEC-12) · `context-hub`, `agents`, `spec`, `app`, `ui` · ADR-0061 · T-0106..0109
 
 ### US-0022 — Request durable specialist work through MCP and ACP
 - **Actor:** Human developer or external development agent
