@@ -2190,6 +2190,148 @@ fn export_projects_ingested_endpoints_against_permission_sites() {
     }
 }
 
+// AC-TBD-1818 (#1818): the export of a real ingest carries the pipeline
+// projection. A workflow's jobs are listed in dependency order against their
+// declared order, with steps in declared order and spans; a `Containerfile`
+// stage that mounts from an earlier stage is ordered after it; GitLab CI and
+// a Dockerfile with a heredoc are listed as present and not read, from the
+// stored coverage inventory. Every assertion has a fact-index row, and a
+// second export and the single-artifact read return the same bytes.
+#[test]
+fn export_projects_ingested_pipelines_in_dependency_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let workflow = "name: Deploy\n\
+         on:\n  push:\n    branches: [main]\n\
+         jobs:\n\
+         \x20 deploy:\n    needs: [build]\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./deploy.sh\n\
+         \x20 build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: make build\n";
+    std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    std::fs::write(root.join(".github/workflows/deploy.yml"), workflow).unwrap();
+    std::fs::write(
+        root.join("Containerfile"),
+        "FROM golang:1.23 AS deps\nRUN go mod download\nFROM scratch\n\
+         RUN --mount=type=bind,from=deps,target=/deps true\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("docker")).unwrap();
+    std::fs::write(
+        root.join("docker/legacy.dockerfile"),
+        "FROM alpine\nRUN <<EOF\ntrue\nEOF\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitlab-ci.yml"), "build:\n  script: make\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let build = workflow.find("build:\n").unwrap();
+    let checkout = workflow.find("uses: actions/checkout@v4").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(&graph, &decisions, mode).unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "pipelines")
+            .unwrap();
+        assert_eq!(artifact.file_name, "pipelines.md");
+        let content = &artifact.content;
+        let row = |start: &str| {
+            content
+                .lines()
+                .find(|line| line.starts_with(start))
+                .unwrap_or_else(|| panic!("no row starting {start:?} in:\n{content}"))
+        };
+        assert!(content.contains("Pipelines: 2. Triggers: 1. Jobs: 4, of which not ordered: 0."));
+
+        // Declared deploy then build; build is needed, so it is first.
+        let first = row("| 1 | build | job | 1 | — |");
+        assert!(first.contains("| Deterministic | Confirmed |"));
+        assert!(first.contains(&format!("deploy.yml bytes {build}..")));
+        row("| 2 | deploy | job | 0 | build (via needs) |");
+        let step = row("| build | 0 | uses | uses: actions/checkout@v4 |");
+        assert!(step.contains(&format!("deploy.yml bytes {checkout}..")));
+        row("| build | 1 | run | run: make build |");
+        row("| deploy | 0 | run | run: ./deploy.sh |");
+        row("| 0 | push | filters: branches: \\[main\\] |");
+        // The Containerfile is read, and the mount is a stage relation.
+        row("| 1 | stage-0 | stage | 0 | — |");
+        row("| 2 | stage-1 | stage | 1 | stage-0 (via mount-from) |");
+
+        let unread = &content[content.find("\n## Files present and not read\n").unwrap()..];
+        let unread = &unread[..unread.find("\n## Coverage note").unwrap()];
+        let listed = |what: &str| {
+            unread
+                .lines()
+                .find(|line| line.contains(&format!("| {what} | 1 |")))
+                .unwrap_or_else(|| panic!("{what} is listed in:\n{unread}"))
+        };
+        assert!(
+            listed("GitLab CI configuration")
+                .contains("| .gitlab-ci.yml:1 | GitLab CI configuration is present and not read")
+        );
+        assert!(
+            listed("GitHub Actions workflow or Dockerfile that could not be read exactly")
+                .contains(
+                    "| docker/legacy.dockerfile:1 | Dockerfile is present and its steps were \
+                     not recovered: Dockerfile uses a heredoc"
+                )
+        );
+        assert!(unread.contains("Stored inventories read: 1."));
+        assert!(!content.contains("legacy.dockerfile bytes"));
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        assert!(!artifact.assertions.is_empty());
+        for assertion in &artifact.assertions {
+            assert_eq!(
+                assertion.provenance.confidence_tier,
+                core_prov::ConfidenceTier::Confirmed
+            );
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "pipelines")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(&graph, &decisions, mode).unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(&graph, &decisions, mode, "pipelines").unwrap(),
+            artifact
+        );
+    }
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)

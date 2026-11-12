@@ -328,6 +328,20 @@ fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
             .code,
         "invalid_input"
     );
+    // AC-TBD-1818: the pipeline projection also lists files from the stored
+    // coverage inventory, which the packet host does not read. Its bytes
+    // here would differ from the export's, so it is refused like the
+    // coverage artifacts, never bound to bytes the export does not hold.
+    for id in ["pipelines", "coverage"] {
+        f.request["artifacts"] = select(id).0;
+        assert_eq!(
+            generate(&f.state, &f.runtime, &f.request.to_string())
+                .unwrap_err()
+                .code,
+            "invalid_input",
+            "{id}"
+        );
+    }
 }
 
 // AC-0249: stored decisions keep their exact earlier content. They neither
