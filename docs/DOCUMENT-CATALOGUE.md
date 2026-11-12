@@ -156,7 +156,7 @@ always shown as unconfirmed until a human confirms each row.
 |---|---------|------|--------------|
 | 7.1 | Build and toolchain | P | `toolchain.md` |
 | 7.2 | Environments and deployed resources | P | Infrastructure facts, observed state where supplied |
-| 7.3 | Configuration: every key the system declares or reads | P | Key names from environment files (`Tool` facts, category `environment`) and from Python `os.environ` / `os.getenv` reads; never values |
+| 7.3 | Configuration: every key the system declares or reads | P | Key names from environment files (`Tool` facts, category `environment`) and from `ConfigRead` facts: standard-library environment reads in TypeScript/JavaScript, Python, Go, Java, Kotlin and Rust (ADR-0059). No projection lists the read keys yet (#1789); never values |
 | 7.4 | Scheduled jobs | P | `Schedule` flow triggers (yacron, crontab, Kubernetes `CronJob`) |
 | 7.5 | How to deploy | A | `Tool` facts from CI workflows and Dockerfiles, target documentation |
 | 7.6 | Dependencies on external services | P | External endpoints and channels |
@@ -261,7 +261,7 @@ row names the issue that tracks it.
 | D6 §6.3 | A projection of endpoints against permission sites (#1787) |
 | D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary (#1788) |
 | D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied (#1791) |
-| D7 §7.3, D6 §6.4 | Keys read only in source are recovered for Python alone. The other five language adapters emit no configuration-read fact, so a key with no environment file entry is missing. Until then the section states which languages it covers (#1789) |
+| D7 §7.3, D6 §6.4 | Every compiled-in adapter (TypeScript/JavaScript, Python, Go, Java, Kotlin, Rust) emits a `ConfigRead` fact for a standard-library environment read, named for a literal key and unnamed for a dynamic one (ADR-0059); before that only a key that named a recognised client (`env_key` on an observed `Resource`, TypeScript and Python) was recorded. Still missing: the projection that lists each key with where it is declared and read, and reads through configuration frameworks (Spring `@Value`, NestJS `ConfigService`, Viper). There is no C# adapter (#1789) |
 | D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps (#1790) |
 | D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is not an exported artifact (#1786) |
 | D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement (#1785) |
