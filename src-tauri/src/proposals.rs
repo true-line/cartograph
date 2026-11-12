@@ -285,6 +285,41 @@ mod tests {
         assert!(bundle.artifacts.iter().any(|artifact| {
             artifact.id == "curated" && artifact.content.contains("| unverified |")
         }));
+        // AC-0655 (SPEC-12 slice 3): the Workbench read lists the same
+        // records, each with the sentence `curated.md` prints for its
+        // reason, and is the same in both modes for a listed record.
+        let curated_md = |bundle: &spec::SpecBundle| {
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap()
+                .content
+                .clone()
+        };
+        let workbench = |review: &crate::curated::CuratedReview, mode| {
+            serde_json::to_value(
+                crate::curated_workbench::read_locked(&graph, &decisions, review, mode).unwrap(),
+            )
+            .unwrap()
+        };
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let read = workbench(&review, mode);
+            assert_eq!(read["status"], "computed");
+            let basis = bundle.curated_basis.as_ref().unwrap();
+            assert_eq!(read["revision"], basis.revision.as_str());
+            assert_eq!(read["counts"], serde_json::to_value(basis.counts).unwrap());
+            assert_eq!(read["items"], serde_json::json!([]));
+            assert_eq!(read["items_omitted"], 0);
+            let listed = read["listed"].as_array().unwrap();
+            assert_eq!(listed.len(), bound);
+            assert_eq!(listed[0]["state"], "unverified");
+            assert_eq!(listed[0]["tier"], "Agentic");
+            assert_eq!(listed[0]["confidence"], "InferredWeak");
+            assert_eq!(listed[0]["reason"], "legacy_record");
+            let sentence = listed[0]["reason_sentence"].as_str().unwrap();
+            assert!(curated_md(&bundle).contains(&format!("| {sentence} (`legacy_record`) |")));
+        }
         let pending = store.list(1, None).unwrap().items.remove(0);
         store
             .review(&pending.proposal_id, 0, ProposalDecision::Accepted, None)
@@ -325,6 +360,16 @@ mod tests {
             );
             assert!(curated.content.contains("(`too_many_accepted`)"));
             assert!(!curated.content.contains("gap:"));
+            // The Workbench read gives the same reason and sentence, and
+            // no record.
+            let read = workbench(&review, mode);
+            assert_eq!(read["status"], "not_computed");
+            assert_eq!(read["reason"], "too_many_accepted");
+            assert_eq!(read["limit"], bound);
+            let sentence = read["sentence"].as_str().unwrap();
+            assert!(curated.content.contains(&format!("Reason: {sentence} (")));
+            assert!(read.get("items").is_none() && read.get("listed").is_none());
+            assert!(!read.to_string().contains("gap:"));
             assert!(curated.assertions.is_empty());
             // The views build and the single-artifact read succeed too.
             let (with_views, _) =

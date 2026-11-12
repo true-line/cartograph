@@ -8,6 +8,7 @@
 mod conformance_tests;
 mod context;
 mod curated;
+mod curated_workbench;
 mod drop_intake;
 mod egress;
 mod escalation;
@@ -6919,6 +6920,7 @@ fn main() {
             list_evals,
             proposals::record_agent_decision,
             proposals::list_staged_proposals,
+            curated_workbench::read_curated_projection,
             task_evidence::assessment::assess_staged_basis,
             list_agent_decisions,
             reapply_agent_decisions,

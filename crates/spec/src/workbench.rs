@@ -12,7 +12,9 @@ pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
 pub use coverage::COVERAGE_DETAIL_REPO_LIMIT;
 mod curated;
-pub use curated::{Curated, CuratedBasis, CuratedFailure};
+pub use curated::{
+    Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_reason_sentence,
+};
 pub(crate) mod diagrams;
 mod endpoint_permissions;
 pub use endpoint_permissions::{
