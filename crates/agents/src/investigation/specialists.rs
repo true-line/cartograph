@@ -87,6 +87,8 @@ pub enum SpecialistId {
     EvidenceAuditorV13,
     #[serde(rename = "evidence-auditor@14")]
     EvidenceAuditorV14,
+    #[serde(rename = "evidence-auditor@15")]
+    EvidenceAuditorV15,
     #[serde(rename = "spec-writer@1")]
     SpecWriterV1,
     #[serde(rename = "spec-writer@2")]
@@ -265,6 +267,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -309,6 +312,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -354,6 +358,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -392,6 +397,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -424,6 +430,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -456,6 +463,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -485,6 +493,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -515,7 +524,7 @@ impl SpecialistId {
             Self::DomainAnalystV12 | Self::EvidenceAuditorV12 => 12,
             Self::DomainAnalystV13 | Self::EvidenceAuditorV13 => 13,
             Self::DomainAnalystV14 | Self::EvidenceAuditorV14 => 14,
-            Self::DomainAnalystV15 => 15,
+            Self::DomainAnalystV15 | Self::EvidenceAuditorV15 => 15,
             Self::DomainAnalystV17 => 17,
             Self::DomainAnalystV18 => 18,
             Self::DomainAnalystV19 => 19,
@@ -533,7 +542,7 @@ impl SpecialistId {
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
-        if self == Self::EvidenceAuditorV14 {
+        if matches!(self, Self::EvidenceAuditorV14 | Self::EvidenceAuditorV15) {
             return 13;
         }
         if matches!(
@@ -550,7 +559,10 @@ impl SpecialistId {
         }
         if matches!(
             self,
-            Self::DomainAnalystV22 | Self::EvidenceAuditorV13 | Self::EvidenceAuditorV14
+            Self::DomainAnalystV22
+                | Self::EvidenceAuditorV13
+                | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         ) {
             return 12;
         }
@@ -564,6 +576,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
@@ -617,7 +630,10 @@ impl SpecialistId {
     pub fn uses_query_budget_refusals(self) -> bool {
         matches!(
             self,
-            Self::EvidenceAuditorV12 | Self::EvidenceAuditorV13 | Self::EvidenceAuditorV14
+            Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
+                | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -637,6 +653,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -657,6 +674,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         )
     }
 
@@ -664,6 +682,7 @@ impl SpecialistId {
         matches!(
             self,
             Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
                 | Self::DomainAnalystV23
@@ -679,6 +698,7 @@ impl SpecialistId {
             self,
             Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
                 | Self::DomainAnalystV22
                 | Self::DomainAnalystV23
                 | Self::DomainAnalystV24
@@ -693,6 +713,7 @@ impl SpecialistId {
             self,
             Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
                 | Self::DomainAnalystV20
                 | Self::DomainAnalystV21
                 | Self::DomainAnalystV22
@@ -705,7 +726,8 @@ impl SpecialistId {
     }
 
     pub(super) fn is_typed_citation_prompt(system: &str) -> bool {
-        system == Self::EvidenceAuditorV14.prompt()
+        system == Self::EvidenceAuditorV15.prompt()
+            || system == Self::EvidenceAuditorV14.prompt()
             || system == Self::EvidenceAuditorV13.prompt()
             || system == Self::DomainAnalystV20.prompt()
             || system == Self::DomainAnalystV21.prompt()
@@ -715,6 +737,12 @@ impl SpecialistId {
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::EvidenceAuditorV15 {
+            return format!(
+                "{}\nSaved parent identity@1: refer to parent findings only by their saved ids; never state that a listed saved finding is withheld. The host withholding summary concerns findings absent from the saved result. Saved finding ids are final; do not infer identities from counts or historical positions.",
+                Self::EvidenceAuditorV14.prompt()
+            );
+        }
         if self == Self::EvidenceAuditorV14 {
             return format!(
                 "{}\nCapacity exclusion@1: The host removes actions refused for prompt capacity on this unchanged input ledger. Select another offered action; do not repeat an excluded action. When only finish is offered, report unresolved capacity gaps honestly. Excluded obligations remain unattempted and unacquired; they never count as satisfied. The existing single finish-correction allowance and all budgets remain unchanged.",
@@ -860,7 +888,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV11
             | Self::EvidenceAuditorV12
             | Self::EvidenceAuditorV13
-            | Self::EvidenceAuditorV14 => {
+            | Self::EvidenceAuditorV14
+            | Self::EvidenceAuditorV15 => {
                 "Audit the support and limits of existing claims within the question's scope. Identify missing links, unsupported interpretations and unresolved design evidence. Do not mistake missing evidence in a searched subset for proof of absence across the project."
             }
         };
@@ -958,6 +987,7 @@ impl SpecialistId {
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
                 | Self::DomainAnalystV12
                 | Self::DomainAnalystV13
                 | Self::DomainAnalystV14
@@ -980,7 +1010,10 @@ impl SpecialistId {
         };
         if matches!(
             self,
-            Self::EvidenceAuditorV12 | Self::EvidenceAuditorV13 | Self::EvidenceAuditorV14
+            Self::EvidenceAuditorV12
+                | Self::EvidenceAuditorV13
+                | Self::EvidenceAuditorV14
+                | Self::EvidenceAuditorV15
         ) {
             let prompt = format!(
                 "{}\nCompiled auditor response schema templates: choice={} finish_only={}. Host admission remains authoritative.",
@@ -1060,7 +1093,8 @@ impl SpecialistId {
             | Self::EvidenceAuditorV11
             | Self::EvidenceAuditorV12
             | Self::EvidenceAuditorV13
-            | Self::EvidenceAuditorV14 => (
+            | Self::EvidenceAuditorV14
+            | Self::EvidenceAuditorV15 => (
                 "Evidence auditor",
                 "Audit claim support, coverage limitations and unresolved evidence.",
             ),
@@ -1746,5 +1780,45 @@ mod auditor14_tests {
                 .prompt_fingerprint,
             "53ba32844123470d574cfca4798a792ada72a18ba1d147c418f1f73ecb734c8b"
         );
+    }
+}
+
+#[cfg(test)]
+mod auditor15_tests {
+    use super::*;
+    #[test]
+    fn auditor15_preserves_historical_definitions() {
+        // AC-0600: immutable prompt versions, shared capacity and privacy rules.
+        let role = SpecialistId::EvidenceAuditorV15;
+        assert_eq!(role.version(), 15);
+        assert_eq!(role.prompt_generation(), 13);
+        assert!(role.uses_capacity_exclusions());
+        assert!(role.uses_typed_citation_correction());
+        assert!(role.uses_finish_feedback_witness());
+        assert!(!role.uses_exact_source_reservation());
+        assert!(!role.uses_combined_finish_feedback());
+        assert!(
+            role.prompt()
+                .starts_with(&SpecialistId::EvidenceAuditorV14.prompt())
+        );
+        assert!(
+            role.prompt()
+                .contains("never state that a listed saved finding is withheld")
+        );
+        assert_eq!(
+            SpecialistId::EvidenceAuditorV14
+                .definition()
+                .unwrap()
+                .prompt_fingerprint,
+            "63baf32616bacd95fece131a46ff8a081325bb55fe30fa6ca7ea930876f5a329"
+        );
+        assert_eq!(
+            SpecialistId::EvidenceAuditorV13
+                .definition()
+                .unwrap()
+                .prompt_fingerprint,
+            "53ba32844123470d574cfca4798a792ada72a18ba1d147c418f1f73ecb734c8b"
+        );
+        assert!(role.definition().is_ok());
     }
 }

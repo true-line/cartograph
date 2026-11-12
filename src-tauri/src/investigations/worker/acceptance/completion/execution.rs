@@ -39,6 +39,10 @@ pub(in super::super) struct InvocationObservation {
     pub inventory_hashes: BTreeMap<String, String>,
     pub history_hash: Option<String>,
     pub parent_result_hashes: BTreeMap<String, String>,
+    /// Projected bodies remain separately observable; the collector authenticates
+    /// the entire projection against a fresh production parent-history read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parent_projection_hashes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<ResponseObservation>,
 }
@@ -240,6 +244,7 @@ fn observation(
         ))
     };
     let mut parent_result_hashes = BTreeMap::new();
+    let mut parent_projection_hashes = BTreeMap::new();
     for raw in history {
         let entry: Value =
             serde_json::from_str(raw.as_str().ok_or("History is not a string record.")?)
@@ -247,11 +252,23 @@ fn observation(
         if !entry["saved_result"].is_null() {
             let result: InvestigationResult = serde_json::from_value(entry["saved_result"].clone())
                 .map_err(|error| error.to_string())?;
-            if parent_result_hashes
-                .insert(
+            let result_hash = if entry["projection_schema"] == "saved-parent-history@2" {
+                parent_projection_hashes.insert(
                     result.result_id.clone(),
-                    content_hash(&serde_json::to_vec(&result).map_err(|error| error.to_string())?),
-                )
+                    entry["projection_hash"]
+                        .as_str()
+                        .ok_or("Missing projection hash")?
+                        .into(),
+                );
+                entry["source_result_hash"]
+                    .as_str()
+                    .ok_or("Missing original result hash")?
+                    .to_owned()
+            } else {
+                content_hash(&serde_json::to_vec(&result).map_err(|error| error.to_string())?)
+            };
+            if parent_result_hashes
+                .insert(result.result_id.clone(), result_hash)
                 .is_some()
             {
                 return Err("Duplicate parent history result.".into());
@@ -267,6 +284,7 @@ fn observation(
         inventory_hashes,
         history_hash,
         parent_result_hashes,
+        parent_projection_hashes,
     })
 }
 impl LlmProvider for ObservedProvider {

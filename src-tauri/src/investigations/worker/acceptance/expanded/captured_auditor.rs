@@ -137,6 +137,7 @@ pub(super) fn stage(
                 | "evidence-auditor@12"
                 | "evidence-auditor@13"
                 | "evidence-auditor@14"
+                | "evidence-auditor@15"
         )
         || !request
             .obligations
@@ -145,7 +146,9 @@ pub(super) fn stage(
             .any(|o| matches!(o, obligations::Obligation::Inventory { .. }))
         || sources.is_empty()
         || expected.specialist
-            != (if request.specialist_id == "evidence-auditor@14" {
+            != (if request.specialist_id == "evidence-auditor@15" {
+                SpecialistId::EvidenceAuditorV15
+            } else if request.specialist_id == "evidence-auditor@14" {
                 SpecialistId::EvidenceAuditorV14
             } else if request.specialist_id == "evidence-auditor@13" {
                 SpecialistId::EvidenceAuditorV13
@@ -191,12 +194,13 @@ pub(super) fn stage(
     }
     let mut jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
     // Production reader preserves exact status/uncertainty under the fresh child history policy.
-    jobs.investigation_next_parent_history_with_policy(
+    jobs.investigation_next_parent_history_for_specialist(
         parent.analyst_id,
         conversation,
         &INVESTIGATION_V2_POLICY
             .with_parent_history_32768()
             .ok_or("History policy unavailable")?,
+        expected.specialist.id,
     )
     .map_err(|e| e.to_string())?;
     let fresh_output = preparing && !output.exists();
@@ -362,11 +366,50 @@ fn collect(
         &observations,
         &policy,
     )?;
+    // A projection's declared source hash is not itself authority. Rebuild the
+    // complete projection from the authenticated parent and compare its wire hash.
+    let projected_history = if expected.specialist.id == SpecialistId::EvidenceAuditorV15 {
+        let state = parent.app.state::<crate::AppState>();
+        let jobs = state.jobs.lock().map_err(|_| "Job store unavailable.")?;
+        let history = jobs
+            .investigation_next_parent_history_for_specialist(
+                parent.analyst_id,
+                expected
+                    .request
+                    .conversation_id
+                    .as_deref()
+                    .ok_or("Missing conversation")?,
+                &policy,
+                expected.specialist.id,
+            )
+            .map_err(|e| e.to_string())?
+            .into_history();
+        let entry: Value = serde_json::from_str(history.first().ok_or("Missing parent history")?)
+            .map_err(|e| e.to_string())?;
+        Some((
+            content_hash(&wire(&history)?),
+            entry["projection_hash"]
+                .as_str()
+                .ok_or("Missing projection hash")?
+                .to_owned(),
+        ))
+    } else {
+        None
+    };
     let parent_exact = !observations.is_empty()
         && observations.iter().all(|o| {
             o.parent_result_hashes.len() == 1
                 && o.parent_result_hashes.get(&expected.parent_result_id)
                     == Some(&expected.parent_result_hash)
+                && match &projected_history {
+                    Some((history, projection)) => {
+                        o.history_hash.as_ref() == Some(history)
+                            && o.parent_projection_hashes.len() == 1
+                            && o.parent_projection_hashes.get(&expected.parent_result_id)
+                                == Some(projection)
+                    }
+                    None => o.parent_projection_hashes.is_empty(),
+                }
         });
     receipt["observations"] = serde_json::to_value(&observations).map_err(|e| e.to_string())?;
     receipt["mechanical_checks"] = json!({"payload_disclosure_match":matching,"request_context_bound":bound,
@@ -889,6 +932,7 @@ mod tests {
                 "inventory",
                 "history",
                 "parent",
+                "projection",
             ] {
                 let mut changed = observations.clone();
                 if field == "empty" {
@@ -908,6 +952,10 @@ mod tests {
                                 .insert("foreign-inventory".into(), "f".repeat(64));
                         }
                         "history" => last.history_hash = Some("f".repeat(64)),
+                        "projection" => {
+                            last.parent_projection_hashes
+                                .insert(expected.parent_result_id.clone(), "f".repeat(64));
+                        }
                         "parent" => {
                             last.parent_result_hashes
                                 .insert("foreign-parent".into(), "f".repeat(64));

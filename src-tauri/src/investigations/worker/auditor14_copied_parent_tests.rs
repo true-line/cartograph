@@ -54,6 +54,28 @@ impl LlmProvider for Replay {
         assert_eq!((c.check)(), CallDirective::Continue);
         assert!(c.dispatching.unwrap()(100));
         let p: Value = serde_json::from_str(&r.payload().prompt).unwrap();
+        if role == "evidence-auditor@15" {
+            let raw = p["prior_findings_as_t3_history"][0]
+                .as_str()
+                .expect("mandatory parent");
+            let history: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(history["projection_schema"], "saved-parent-history@2");
+            assert_eq!(history["withholding_summary"]["withheld_count"], 1);
+            assert_eq!(history["withholding_summary"]["saved_finding_count"], 8);
+            assert_eq!(
+                history["saved_result"]["findings"][2]["finding_id"],
+                "finding-3"
+            );
+            for field in [
+                "withheld_indexes",
+                "survivor_indexes",
+                "original_finding_count",
+            ] {
+                assert!(!raw.contains(field));
+                assert!(!r.payload().prompt.contains(field));
+                assert!(!r.payload().system.contains(field));
+            }
+        }
         let entries = p["turn_progress"]["acquisition_choices"]["entries"]
             .as_array()
             .unwrap();
@@ -116,6 +138,15 @@ impl LlmProvider for Replay {
 #[test]
 #[ignore]
 fn auditor14_copied_real_parent_whole_run() {
+    copied_real_parent_whole_run();
+}
+#[test]
+#[ignore]
+fn auditor15_copied_real_parent_whole_run() {
+    assert_eq!(std::env::var("REPRO_ROLE").unwrap(), "evidence-auditor@15");
+    copied_real_parent_whole_run();
+}
+fn copied_real_parent_whole_run() {
     let base = std::path::PathBuf::from(std::env::var("CARTOGRAPH_OFFLINE_REPRO").unwrap());
     assert!(base.starts_with("/tmp/cartograph-codex/auditor14/probes"));
     let root = std::path::Path::new("/tmp/cartograph-codex/auditor14/probes")
@@ -298,7 +329,10 @@ fn auditor14_copied_real_parent_whole_run() {
                 .is_empty()
         );
         println!("auditor14_forced_capacity refusals={refusals} terminal_honest=true");
-    } else if request.specialist_id == "evidence-auditor@14" {
+    } else if matches!(
+        request.specialist_id.as_str(),
+        "evidence-auditor@14" | "evidence-auditor@15"
+    ) {
         assert_eq!(
             detail.summary.status,
             InvestigationStatus::Completed,

@@ -250,7 +250,10 @@ impl InvestigationInput {
         );
         if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
             let upper = serde_json::to_value(
-                if self.frozen_specialist()? == SpecialistId::EvidenceAuditorV14 {
+                if matches!(
+                    self.frozen_specialist()?,
+                    SpecialistId::EvidenceAuditorV14 | SpecialistId::EvidenceAuditorV15
+                ) {
                     staged_finish::RefusalFeedback::sizing_closed_contract_envelope(
                         &contract,
                         &self.ledger,
@@ -808,6 +811,7 @@ impl InvestigationInput {
             SpecialistId::EvidenceAuditorV12,
             SpecialistId::EvidenceAuditorV13,
             SpecialistId::EvidenceAuditorV14,
+            SpecialistId::EvidenceAuditorV15,
         ]
         .contains(&role)
         {
@@ -1097,6 +1101,7 @@ impl InvestigationInput {
         matches!(
             self.specialist,
             SpecialistId::EvidenceAuditorV14
+                | SpecialistId::EvidenceAuditorV15
                 | SpecialistId::DomainAnalystV21
                 | SpecialistId::DomainAnalystV22
                 | SpecialistId::DomainAnalystV23
@@ -1200,6 +1205,7 @@ impl InvestigationInput {
             || (matches!(
                 self.frozen_specialist()?,
                 SpecialistId::EvidenceAuditorV14
+                    | SpecialistId::EvidenceAuditorV15
                     | SpecialistId::DomainAnalystV21
                     | SpecialistId::DomainAnalystV22
                     | SpecialistId::DomainAnalystV23

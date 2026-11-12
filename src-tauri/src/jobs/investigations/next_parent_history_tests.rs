@@ -431,3 +431,151 @@ fn versioned_parent_history_bound_and_canonical_replay() {
         );
     }
 }
+
+#[test]
+fn auditor15_parent_projection_preserves_saved_ids() {
+    // AC-0600: real attempt-6 shape, not original-position IDs masquerading as saved IDs.
+    let f = completed();
+    let parent = f.saved();
+    let tx = f.base.f.store.conn.unchecked_transaction().unwrap();
+    let mut result = load_result(&tx, &parent).unwrap().unwrap();
+    let finding = agents::investigation::InvestigationFinding {
+        finding_id: "finding-1".into(),
+        claim_kind: agents::investigation::InvestigationClaimKind::InferredInterpretation,
+        title: "Synthetic survivor".into(),
+        statement: "Provider-free identity fixture.".into(),
+        citation_ids: vec![],
+        limitations: vec![],
+        tier: core_prov::Tier::Agentic,
+        confidence_tier: core_prov::ConfidenceTier::InferredWeak,
+    };
+    result.findings = (1..=8)
+        .map(|index| {
+            let mut finding = finding.clone();
+            finding.finding_id = format!("finding-{index}");
+            finding
+        })
+        .collect();
+    let hash = "a".repeat(64);
+    let completion = result.completion.as_mut().unwrap();
+    completion.outcome =
+        agents::investigation::staged_finish::CompletionOutcome::FindingsWithheldAfterCorrection;
+    completion.withholding = Some(agents::investigation::FindingWithholdingWitness {
+        schema_version: 1,
+        disposition: agents::investigation::WithholdingDisposition::FindingsWithheldAfterCorrection,
+        detector_version: 1,
+        original_finish_hash: hash.clone(),
+        original_response_hash: hash.clone(),
+        request_hash: hash.clone(),
+        obligations_hash: hash.clone(),
+        input_ledger_hash: hash.clone(),
+        disclosure_hash: format!("investigation-disclosure-v6:{hash}"),
+        prior_correction_witness_hash: hash.clone(),
+        projected_result_hash: hash,
+        original_finding_count: 9,
+        withheld_indexes: vec![2],
+        survivor_indexes: vec![0, 1, 3, 4, 5, 6, 7, 8],
+    });
+    let result = Some(result);
+    let before = encode(&result, MAX_RECORD_BYTES).unwrap();
+    let raw = encode_parent_history_with_limit(f.base.id(), &parent.detail.summary, &result, 32768)
+        .unwrap();
+    let legacy: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let mut projected = legacy.clone();
+    agents::investigation::project_saved_parent_history(&mut projected, 32768).unwrap();
+    assert_eq!(projected["projection_schema"], "saved-parent-history@2");
+    assert_eq!(projected["withholding_summary"]["withheld_count"], 1);
+    assert_eq!(projected["withholding_summary"]["saved_finding_count"], 8);
+    assert_eq!(
+        projected["saved_result"]["findings"][2]["finding_id"],
+        "finding-3"
+    );
+    assert_eq!(
+        projected["saved_result"]["findings"],
+        legacy["saved_result"]["findings"]
+    );
+    assert_eq!(
+        projected["saved_result"]["result_id"],
+        legacy["saved_result"]["result_id"]
+    );
+    assert!(
+        projected["saved_result"]["completion"]
+            .get("withholding")
+            .is_none()
+    );
+    let wire = encode(&projected, 32768).unwrap();
+    for forbidden in [
+        "withheld_indexes",
+        "survivor_indexes",
+        "original_finding_count",
+    ] {
+        assert!(!String::from_utf8_lossy(&wire).contains(forbidden));
+    }
+    let hash = projected
+        .as_object_mut()
+        .unwrap()
+        .remove("projection_hash")
+        .unwrap();
+    assert_eq!(
+        hash,
+        core_prov::content_hash(&encode(&projected, 32768).unwrap())
+    );
+    assert_eq!(before, encode(&result, MAX_RECORD_BYTES).unwrap());
+    assert_eq!(
+        raw,
+        encode_parent_history_with_limit(f.base.id(), &parent.detail.summary, &result, 32768)
+            .unwrap()
+    );
+}
+
+#[test]
+fn auditor15_history_routing_keeps_legacy_bytes_and_parent_unchanged() {
+    // AC-0600: production readers, not just the projection helper.
+    let f = completed();
+    let parent = f.saved();
+    let conversation = &parent.detail.summary.conversation_id;
+    let store = &f.base.f.store;
+    let policy = INVESTIGATION_V2_POLICY.with_parent_history_32768().unwrap();
+    let legacy = store
+        .investigation_next_parent_history_with_policy(f.base.id(), conversation, &policy)
+        .unwrap();
+    for role in [
+        SpecialistId::EvidenceAuditorV11,
+        SpecialistId::EvidenceAuditorV12,
+        SpecialistId::EvidenceAuditorV13,
+        SpecialistId::EvidenceAuditorV14,
+    ] {
+        assert_eq!(
+            store
+                .investigation_next_parent_history_for_specialist(
+                    f.base.id(),
+                    conversation,
+                    &policy,
+                    role
+                )
+                .unwrap()
+                .history(),
+            legacy.history()
+        );
+    }
+    let projected = store
+        .investigation_next_parent_history_for_specialist(
+            f.base.id(),
+            conversation,
+            &policy,
+            SpecialistId::EvidenceAuditorV15,
+        )
+        .unwrap();
+    let projected: serde_json::Value = serde_json::from_str(&projected.history()[0]).unwrap();
+    let old: serde_json::Value = serde_json::from_str(&legacy.history()[0]).unwrap();
+    assert_eq!(projected["projection_schema"], "saved-parent-history@2");
+    assert_eq!(projected["saved_result"], old["saved_result"]);
+    assert!(projected["withholding_summary"].is_null());
+    assert_eq!(
+        store
+            .investigation_next_parent_history_with_policy(f.base.id(), conversation, &policy)
+            .unwrap()
+            .history(),
+        legacy.history()
+    );
+}

@@ -649,7 +649,20 @@ impl InvestigationInput {
             }
             for raw in supplied_history {
                 strict::preflight(raw, policy.supplied_history_bytes(), 32, 16384, 128)?;
-                let history: PriorHistory = decode_record(raw)?;
+                let history: PriorHistory = if specialist == SpecialistId::EvidenceAuditorV15 {
+                    let mut value: Value =
+                        serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidInput)?;
+                    super::parent_history_projection::verify_saved_parent_projection(
+                        &mut value,
+                        policy.supplied_history_bytes(),
+                    )?;
+                    let encoded = bounded_bytes(&value, policy.supplied_history_bytes())?;
+                    let raw = std::str::from_utf8(&encoded)
+                        .map_err(|_| InvestigationError::InvalidInput)?;
+                    decode_record(raw)?
+                } else {
+                    decode_record(raw)?
+                };
                 if let Some(result) = history.saved_result {
                     for finding in result.findings {
                         supplied_strings.push(finding.title);

@@ -280,3 +280,20 @@ it('recognizes auditor14 only in the advertised generation7 family', async () =>
   policy.request_schema_version = 7;
   expect(investigationPolicy(catalog, 'investigation-v2', 'evidence-auditor@14')).toBe(policy);
 });
+
+// AC-0600: the new auditor is explicitly advertised; saved @11/@12 remain distinct.
+it('recognizes auditor15 only in the advertised generation7 family', async () => {
+  const { completionFamily, isCompletionSpecialist, isExpandedSpecialist } = await import('./investigationFamilies');
+  expect(isCompletionSpecialist('evidence-auditor@15')).toBe(true);
+  expect(isExpandedSpecialist('evidence-auditor@15')).toBe(true);
+  expect(completionFamily(7)?.specialistIds).toContain('evidence-auditor@15');
+  expect(completionFamily(7)?.specialistIds).toContain('evidence-auditor@11');
+  expect(completionFamily(7)?.specialistIds).toContain('evidence-auditor@12');
+  expect(completionFamily(6)?.specialistIds).not.toContain('evidence-auditor@15');
+  expect(investigationPolicy(null, 'investigation-v1', 'evidence-auditor@15')).toBeUndefined();
+  const catalog = structuredClone(queryHistoryCatalog);
+  const policy = catalog.policies![0];
+  policy.specialist_ids = ['evidence-auditor@15'];
+  policy.request_schema_version = 7;
+  expect(investigationPolicy(catalog, 'investigation-v2', 'evidence-auditor@15')).toBe(policy);
+});

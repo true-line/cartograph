@@ -1254,10 +1254,11 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .as_deref()
                 .ok_or(HostError::InvalidInput)?;
             return Ok(jobs
-                .investigation_next_parent_history_with_policy(
+                .investigation_next_parent_history_for_specialist(
                     parent_id,
                     conversation,
                     &request.policy,
+                    request.specialist_id,
                 )?
                 .into_history());
         }

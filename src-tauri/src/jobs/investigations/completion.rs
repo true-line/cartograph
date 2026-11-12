@@ -2255,7 +2255,10 @@ pub(super) fn refused(
         // Only authenticated refusal feedback can attribute this terminal to
         // capacity exclusion. Old roles and cancellation keep their saved shape.
         if !task.detail.summary.cancel_requested
-            && task.detail.summary.specialist_id == SpecialistId::EvidenceAuditorV14
+            && matches!(
+                task.detail.summary.specialist_id,
+                SpecialistId::EvidenceAuditorV14 | SpecialistId::EvidenceAuditorV15
+            )
             && entry.record.feedback.unmet.iter().any(|item| {
                 item.reason
                     == agents::investigation::staged_finish::RefusalReason::ExcludedByCapacity

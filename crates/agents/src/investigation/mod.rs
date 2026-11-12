@@ -188,3 +188,6 @@ pub use query_history::*;
 
 mod query_history_protocol;
 pub use query_history_protocol::*;
+
+mod parent_history_projection;
+pub use parent_history_projection::project_saved_parent_history;

@@ -10,6 +10,7 @@ pub(super) enum Rejection {
     Repeated,
     ShortTitle,
     Sensitive,
+    HostIdentity,
 }
 struct RejectFinish {
     inner: Arc<dyn LlmProvider>,
@@ -41,12 +42,34 @@ impl LlmProvider for RejectFinish {
         request: &AuthorizedBoundedCompletion,
         control: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
+        let payload: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        let history: Value =
+            serde_json::from_str(payload["prior_findings_as_t3_history"][0].as_str().unwrap())
+                .unwrap();
+        if history["projection_schema"] == "saved-parent-history@2" {
+            for field in [
+                "withheld_indexes",
+                "survivor_indexes",
+                "original_finding_count",
+            ] {
+                assert!(!request.payload().prompt.contains(field));
+                assert!(!request.payload().system.contains(field));
+            }
+        }
+        let identity = if matches!(self.rejection, Rejection::HostIdentity) {
+            let text = history["withholding_summary"]["identity"].as_str().unwrap();
+            assert_eq!(text, self.text);
+            assert!(text.chars().filter(|c| !c.is_whitespace()).count() < 48);
+            Some(text)
+        } else {
+            None
+        };
         let mut response = self.inner.complete_bounded(request, control)?;
         let mut value: Value = serde_json::from_str(&response.text).unwrap();
         if value["action"]["type"] == "finish" {
             let finish = self.finishes.fetch_add(1, Ordering::SeqCst);
             if finish == 0 || matches!(self.rejection, Rejection::Repeated | Rejection::Sensitive) {
-                value["action"]["limitations"] = json!([self.text]);
+                value["action"]["limitations"] = json!([identity.unwrap_or(&self.text)]);
                 response.text = value.to_string();
             }
         }
@@ -74,6 +97,7 @@ pub(super) fn provider(
                 .expect("short saved parent title");
             title.clone()
         }
+        Rejection::HostIdentity => "Withheld findings are absent; saved ids are final.".into(),
         Rejection::Sensitive => "password=syntheticsecret123".into(),
         _ => {
             let text: String = parent.findings[0].statement.chars().take(160).collect();
@@ -96,11 +120,18 @@ pub(super) fn verify(
 ) {
     let corrected = matches!(
         role,
-        SpecialistId::EvidenceAuditorV13 | SpecialistId::EvidenceAuditorV14
+        SpecialistId::EvidenceAuditorV13
+            | SpecialistId::EvidenceAuditorV14
+            | SpecialistId::EvidenceAuditorV15
     ) && matches!(rejection, Rejection::Once | Rejection::ShortTitle);
+    let identity_accepted = matches!(rejection, Rejection::HostIdentity);
     assert_eq!(
         actual["detail"]["status"],
-        if corrected { "completed" } else { "failed" },
+        if corrected || identity_accepted {
+            "completed"
+        } else {
+            "failed"
+        },
         "{}",
         actual["detail"]["error"]
     );
@@ -110,8 +141,10 @@ pub(super) fn verify(
         observations.len(),
         if matches!(
             role,
-            SpecialistId::EvidenceAuditorV13 | SpecialistId::EvidenceAuditorV14
-        ) && !matches!(rejection, Rejection::Sensitive)
+            SpecialistId::EvidenceAuditorV13
+                | SpecialistId::EvidenceAuditorV14
+                | SpecialistId::EvidenceAuditorV15
+        ) && !matches!(rejection, Rejection::Sensitive | Rejection::HostIdentity)
         {
             5
         } else {
@@ -138,7 +171,14 @@ pub(super) fn verify(
             .as_str()
             .is_some_and(|s| !s.is_empty())
     );
-    if corrected {
+    if identity_accepted {
+        assert!(actual["detail"]["terminal_diagnostic"].is_null());
+        assert_eq!(actual["finish_refusal_count"], 0);
+        assert_eq!(
+            actual["result"]["limitations"],
+            json!(["Withheld findings are absent; saved ids are final."])
+        );
+    } else if corrected {
         assert!(actual["detail"]["terminal_diagnostic"].is_null());
         assert_eq!(actual["finish_refusal_count"], 1);
     } else {
@@ -197,4 +237,21 @@ fn auditor14_replay_correction_and_withheld_parent_receipt_reopen() {
         );
     }
     exercise_auditor_role(Scenario::WithheldCloud, SpecialistId::EvidenceAuditorV14);
+}
+
+// AC-0600: scripted only, no hosted or semantic acceptance claim.
+#[test]
+fn auditor15_projected_parent_and_replay_correction_reopen() {
+    for rejection in [Rejection::Once, Rejection::Repeated, Rejection::ShortTitle] {
+        exercise_auditor_configured(
+            Scenario::CloudComplete,
+            SpecialistId::EvidenceAuditorV15,
+            Some(rejection),
+        );
+    }
+    exercise_auditor_configured(
+        Scenario::WithheldCloud,
+        SpecialistId::EvidenceAuditorV15,
+        Some(Rejection::HostIdentity),
+    );
 }

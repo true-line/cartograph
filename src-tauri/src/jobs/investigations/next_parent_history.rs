@@ -133,11 +133,12 @@ fn legacy_parent_pending_workspace() -> Option<(usize, usize)> {
 
 /// Shared by task creation in its writer transaction and by the worker in a
 /// readonly snapshot. Public requests use the same saved-family validation.
-pub(super) fn load_with_policy(
+pub(super) fn load_for_specialist(
     connection: &Connection,
     parent_id: &str,
     conversation_id: &str,
     policy: &InvestigationPolicy,
+    specialist: agents::investigation::SpecialistId,
 ) -> Result<NextParentHistory, InvestigationStoreError> {
     let parent = load_execution_task(connection, parent_id)?;
     if parent.detail.summary.conversation_id != conversation_id {
@@ -152,6 +153,18 @@ pub(super) fn load_with_policy(
         &result,
         policy.supplied_history_bytes(),
     )?;
+    let raw = if specialist == agents::investigation::SpecialistId::EvidenceAuditorV15 {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&raw).map_err(|_| InvestigationStoreError::Invalid)?;
+        agents::investigation::project_saved_parent_history(
+            &mut value,
+            policy.supplied_history_bytes(),
+        )
+        .map_err(|_| InvestigationStoreError::Invalid)?;
+        encode(&value, policy.supplied_history_bytes())?
+    } else {
+        raw
+    };
     let history = vec![String::from_utf8(raw).map_err(|_| InvestigationStoreError::Invalid)?];
     encode(&history, policy.supplied_history_bytes())?;
     Ok(NextParentHistory { history })
@@ -219,15 +232,30 @@ impl JobStore {
             &INVESTIGATION_V2_POLICY,
         )
     }
+    #[cfg(test)]
     pub(crate) fn investigation_next_parent_history_with_policy(
         &self,
         parent_id: &str,
         conversation_id: &str,
         policy: &InvestigationPolicy,
     ) -> Result<NextParentHistory, InvestigationStoreError> {
+        self.investigation_next_parent_history_for_specialist(
+            parent_id,
+            conversation_id,
+            policy,
+            agents::investigation::SpecialistId::EvidenceAuditorV14,
+        )
+    }
+    pub(crate) fn investigation_next_parent_history_for_specialist(
+        &self,
+        parent_id: &str,
+        conversation_id: &str,
+        policy: &InvestigationPolicy,
+        specialist: agents::investigation::SpecialistId,
+    ) -> Result<NextParentHistory, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
-        let history = load_with_policy(&tx, parent_id, conversation_id, policy)?;
+        let history = load_for_specialist(&tx, parent_id, conversation_id, policy, specialist)?;
         tx.commit()?;
         Ok(history)
     }

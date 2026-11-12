@@ -847,6 +847,7 @@ fn response_observation_is_text_free_and_historical_wire_stays_readable() {
         inventory_hashes: BTreeMap::new(),
         history_hash: None,
         parent_result_hashes: BTreeMap::new(),
+        parent_projection_hashes: BTreeMap::new(),
         response: None,
     };
     let wire = serde_json::to_string(&old).unwrap();

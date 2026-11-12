@@ -14,7 +14,8 @@ pub fn next_prompt_validation_workspace() -> Option<usize> {
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?)
         .max(definition_workspace(SpecialistId::EvidenceAuditorV12)?)
         .max(definition_workspace(SpecialistId::EvidenceAuditorV13)?)
-        .max(definition_workspace(SpecialistId::EvidenceAuditorV14)?);
+        .max(definition_workspace(SpecialistId::EvidenceAuditorV14)?)
+        .max(definition_workspace(SpecialistId::EvidenceAuditorV15)?);
     let text = core_redact::direct_source_json_content_bound(MAX_QUESTION_BYTES.max(2048))?;
     // redact_text retains the prior output during each replacement pass.
     let redaction = sum(&[text, text, slots::<String>(2)?])?;
@@ -58,6 +59,9 @@ pub(super) fn definition_workspace(role: SpecialistId) -> Option<usize> {
         18
     } else if role == SpecialistId::DomainAnalystV21 {
         17
+    } else if role == SpecialistId::EvidenceAuditorV15 {
+        // @15 retains the complete @14 prompt while appending final-ID guidance.
+        15
     } else if role == SpecialistId::DomainAnalystV20 {
         16
     } else if matches!(

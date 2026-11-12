@@ -1134,7 +1134,13 @@ impl JobStore {
         if let Some(parent) = &request.parent_id {
             require_request_owner(&tx, parent, mcp.map(|identity| &identity.client))?;
             if next_prompt {
-                next_parent_history::load_with_policy(&tx, parent, &conversation_id, policy)?;
+                next_parent_history::load_for_specialist(
+                    &tx,
+                    parent,
+                    &conversation_id,
+                    policy,
+                    request.specialist_id,
+                )?;
             } else {
                 let parent = load_execution_task(&tx, parent)?;
                 if parent.detail.summary.conversation_id != conversation_id {

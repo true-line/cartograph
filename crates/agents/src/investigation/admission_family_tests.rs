@@ -76,13 +76,14 @@ fn admission_family_internal_request_seven_has_distinct_hash_and_unchanged_envel
 
 #[test]
 fn admission_family_public_raw_and_ipc_accept_exact_request_seven_tuple() {
-    // AC-0287 / T-0287: activation changes only the exact family discriminator.
+    // AC-0287 / T-0287, AC-0600: activation changes only the exact family discriminator.
     let policy = &INVESTIGATION_V2_POLICY;
     for role in [
         "domain-analyst@10",
         "evidence-auditor@10",
         "evidence-auditor@13",
         "evidence-auditor@14",
+        "evidence-auditor@15",
     ] {
         let current = request(role);
         let raw = serde_json::to_string(&current).unwrap();
@@ -134,7 +135,7 @@ fn admission_family_public_decoder_rejects_mixed_tuples_and_unknown_authority() 
             "domain-analyst@7",
             "evidence-auditor@8",
             "domain-analyst@9",
-            "evidence-auditor@15",
+            "evidence-auditor@16",
         ] {
             let mut wrong = value.clone();
             wrong["specialist_id"] = role.into();

@@ -1037,6 +1037,7 @@ pub(super) fn append_for_task_with_merge(
         && request.specialist_id != "domain-analyst@22"
         && request.specialist_id != "evidence-auditor@13"
         && request.specialist_id != "evidence-auditor@14"
+        && request.specialist_id != "evidence-auditor@15"
         && request.specialist_id != "domain-analyst@23"
         && !matches!(
             request.specialist_id.as_str(),
