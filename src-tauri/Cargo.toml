@@ -11,7 +11,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-rfd = "0.17"
+rfd = "0.18"
 tempfile = "3"
 # Already in the dependency graph via tauri/wry; canonicalize without the
 # Windows \\?\ verbatim prefix at the storage boundary (#225).
