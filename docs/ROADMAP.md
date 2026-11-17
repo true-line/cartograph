@@ -269,7 +269,7 @@ no recovered test arrangements or journeys. The order changes as follows.
 Identifiers reserved for this realignment: US-0041 and AC-0288..0290 for
 W8a, plus ADR-0044 (Codex). AC-0291 and ADR-0043, first reserved for #691,
 are retired unused because #691 landed under AC-0280. AC-0292 is #722, and
-ADR-0045 is reserved for the living-wiki design (#724). The next free
+ADR-0045, reserved for the living-wiki design (#724), is written for #1749. The next free
 identifiers are US-0042, AC-0293 and ADR-0046.
 
 
@@ -357,7 +357,7 @@ authorship. Stages 4 and 5 have their inputs and no product path.
 | W5 | Curated projection (unchanged from section 4; now first) | #1746 | An accepted proposal appears in the Workbench, a `best-effort` export and an MCP read under one curated revision; the base graph hash is unchanged |
 | W14 | Enterprise document catalogue | #1747 | A versioned catalogue approved by the owner: each document's reader, sections, deterministic inputs, authorable sections and acceptance |
 | W13 | Agent-authored document sections | #1748; contract proposed in [SPEC-15](SPEC-15_authored-sections.md), ADR-0064 | One SimpleLogin document with authored sections scored claim by claim against an expected set written before the run |
-| W15 | Living documentation | #1749 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run |
+| W15 | Living documentation | #1749; contract proposed in [SPEC-17](SPEC-17_living-documentation.md), ADR-0045 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run |
 | W16 | Existing documentation as evidence | #1750 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited |
 | W17 | Rebuild handoff bundle | #1752; defined in [SPEC-16](SPEC-16_rebuild-handoff-bundle.md) | One SimpleLogin bundle reviewed against the sufficiency checklist by someone who did not produce it |
 
