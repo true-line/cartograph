@@ -368,7 +368,7 @@ test('the native ownership harness includes production modules without a Tauri d
   assert.doesNotMatch(harness, /\b(?:fn|struct|enum|impl)\s|include_str!|include_bytes!|allow\(warnings\)/u);
   const guidance = readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(guidance, /native job ownership tests on Windows:\s+`cargo test --locked -p job-execution-tests --test ownership`/u);
-  assert.match(guidance, /No job runs on a GitHub-hosted runner\./u);
+  assert.match(guidance, /no job runs on a\s+self-hosted runner/u);
 });
 
 test('workflow runtime policy is pinned and installer processes are centrally bounded', () => {
