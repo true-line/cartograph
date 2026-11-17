@@ -797,3 +797,234 @@ fn a_reference_holding_a_secret_is_stored_redacted() {
             && node.id.ends_with(node.props["key"].as_str().unwrap())
     }));
 }
+
+// AC-0681 (T-0681): the compiled artifact and a draft's citation set.
+
+/// [`system`] with a stored provenance on each fact, and the facts of the
+/// documentation pass over it for one README.
+fn evidenced(markdown: &str) -> (Vec<Node>, Vec<Edge>) {
+    let (documents, edges) = pass(markdown);
+    let stored = documents[0].props["prov"].clone();
+    let mut nodes: Vec<Node> = system()
+        .into_iter()
+        .filter(|node| node.label != "Document")
+        .map(|mut node| {
+            node.props["prov"] = stored.clone();
+            node
+        })
+        .collect();
+    nodes.extend(documents);
+    (nodes, edges)
+}
+
+#[test]
+fn documentation_evidence_lists_sections_and_mentions_with_citations_that_resolve() {
+    let markdown = "# Shop\n\nRefunds are settled nightly. `GET /orders/{id}` is in \
+        `src/orders.ts`.\n\n## Events\n\n`orders-events` and `GET /refunds/{id}` and \
+        [gone](docs/gone.md).\n";
+    let (nodes, edges) = evidenced(markdown);
+    let id = |node: &str| crate::citation_id(&core_graph::FactKey::Node { id: node.into() });
+    let link = |source: &str, destination: &str| {
+        crate::citation_id(&core_graph::FactKey::Edge {
+            source: source.into(),
+            label: "MENTIONS".into(),
+            destination: destination.into(),
+        })
+    };
+    for mode in [
+        crate::ExportMode::BestEffort,
+        crate::ExportMode::VerifiedOnly,
+    ] {
+        let bundle = crate::compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "documentation-evidence")
+            .unwrap();
+        assert_eq!(artifact.file_name, "documentation-evidence.md");
+        let content = &artifact.content;
+        let named = match mode {
+            crate::ExportMode::BestEffort => "best-effort",
+            crate::ExportMode::VerifiedOnly => "verified-only",
+        };
+        assert!(
+            content.contains(&format!(
+                "Export mode: `{named}`. Documents: 1. Sections: 2. Exact references linked to \
+                 a fact: 3. Documentation drift entries: 2.\n"
+            )),
+            "{content}"
+        );
+        assert!(
+            content.contains(
+                "## Links by rule\n\n| Rule | Links |\n|---|---|\n| `fact_id` | 0 |\n\
+                 | `file_path` | 1 |\n| `route` | 1 |\n| `name` | 1 |\n"
+            ),
+            "{content}"
+        );
+        assert!(
+            content.contains(
+                "| Kind | Entries |\n|---|---|\n| `doc-route-method-differs` | 0 |\n\
+                 | `doc-route-not-served` | 1 |\n| `doc-file-missing` | 1 |\n"
+            ),
+            "{content}"
+        );
+        let document = id("doc:local/shop@README.md");
+        let first = id("docsec:local/shop@README.md#0");
+        let second = id("docsec:local/shop@README.md#1");
+        assert!(
+            content.contains(&format!(
+                "### local/shop: README.md\n\nTitle: Shop. Format: `markdown`. Citation: \
+                 `{document}`.\n\n\
+                 | Section | Level | Heading | Citation | Facts mentioned |\n|---|---|---|---|---|\n\
+                 | 0 | 1 | Shop | `{first}` | 2 |\n\
+                 | 1 | 2 | Events | `{second}` | 1 |\n"
+            )),
+            "{content}"
+        );
+        for (section, fact, kind, rule) in [
+            (0, "file:local/shop@src/orders.ts", "File", "file_path"),
+            (0, "ep:orders:list", "Endpoint", "route"),
+            (1, "chan:orders", "Channel", "name"),
+        ] {
+            let source = format!("docsec:local/shop@README.md#{section}");
+            // The fact id cell is escaped Markdown; the rest of the row is exact.
+            let row = format!(
+                "| {kind} | `{rule}` | 1 | `{}` | `{}` |\n",
+                id(fact),
+                link(&source, fact)
+            );
+            assert!(content.contains(&format!("\n| {section} | ")));
+            assert!(content.contains(&row), "{row}\n{content}");
+        }
+        // No section text, and every citation id printed has a row in the
+        // fact index of the same export.
+        assert!(!content.contains("settled nightly"));
+        let index: serde_json::Value = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        let rows: BTreeSet<&str> = index["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["citation_id"].as_str().unwrap())
+            .collect();
+        let printed: BTreeSet<&str> = content
+            .split('`')
+            .filter(|part| part.starts_with("F-") && part.len() == 18)
+            .collect();
+        assert_eq!(printed.len(), 9, "{printed:?}");
+        for cited in printed {
+            assert!(rows.contains(cited), "{cited}");
+        }
+    }
+}
+
+#[test]
+fn a_bundle_with_no_documentation_states_that_and_cites_nothing() {
+    let bundle = crate::compile_spec(
+        &[],
+        &[],
+        &[],
+        crate::ExportMode::BestEffort,
+        &BTreeSet::new(),
+    );
+    let artifact = bundle
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "documentation-evidence")
+        .unwrap();
+    assert!(artifact.assertions.is_empty());
+    assert!(artifact.content.contains(
+        "Documents: 0. Sections: 0. Exact references linked to a fact: 0. Documentation drift \
+         entries: 0.\n"
+    ));
+    assert!(
+        artifact
+            .content
+            .contains("No documentation file is among the facts of this export.\n")
+    );
+}
+
+#[test]
+fn a_subject_draft_may_cite_the_sections_that_mention_a_fact_in_its_set() {
+    use crate::{CATALOGUE_VERSION, drafted_section, section_citation_set};
+    let id = |node: &str| crate::citation_id(&core_graph::FactKey::Node { id: node.into() });
+    let edge = |src: &str, label: &str, dst: &str| Edge {
+        src: src.into(),
+        dst: dst.into(),
+        label: label.into(),
+        props: serde_json::json!({}),
+    };
+    let nodes = [
+        fact("cap:checkout", "Capability", serde_json::json!({})),
+        fact("actor:admin", "Actor", serde_json::json!({})),
+        fact("rule:limit", "BusinessRule", serde_json::json!({})),
+        fact(
+            "docsec:local/shop@README.md#0",
+            "DocSection",
+            serde_json::json!({}),
+        ),
+        fact(
+            "docsec:local/shop@README.md#1",
+            "DocSection",
+            serde_json::json!({}),
+        ),
+        fact(
+            "docsec:local/shop@README.md#2",
+            "DocSection",
+            serde_json::json!({}),
+        ),
+    ];
+    let edges = [
+        edge("actor:admin", "PERFORMS", "cap:checkout"),
+        // One section names the subject, one a fact beside it, one a fact
+        // outside the set.
+        edge("docsec:local/shop@README.md#0", "MENTIONS", "cap:checkout"),
+        edge("docsec:local/shop@README.md#1", "MENTIONS", "actor:admin"),
+        edge("docsec:local/shop@README.md#2", "MENTIONS", "rule:limit"),
+    ];
+    let link = |section: usize, fact: &str| {
+        crate::citation_id(&core_graph::FactKey::Edge {
+            source: format!("docsec:local/shop@README.md#{section}"),
+            label: "MENTIONS".into(),
+            destination: fact.into(),
+        })
+    };
+    let all: BTreeSet<String> = nodes
+        .iter()
+        .map(|node| id(&node.id))
+        .chain([
+            link(0, "cap:checkout"),
+            link(1, "actor:admin"),
+            link(2, "rule:limit"),
+        ])
+        .collect();
+    let capabilities = drafted_section(CATALOGUE_VERSION, "D1", "1.3").unwrap();
+    let set =
+        section_citation_set(capabilities, &id("cap:checkout"), &nodes, &edges, &all).unwrap();
+    let admitted = |cited: &str| set.contains_key(cited);
+    for cited in [
+        id("cap:checkout"),
+        id("actor:admin"),
+        id("docsec:local/shop@README.md#0"),
+        id("docsec:local/shop@README.md#1"),
+        link(0, "cap:checkout"),
+        link(1, "actor:admin"),
+    ] {
+        assert!(admitted(&cited), "{cited}");
+    }
+    for cited in [
+        id("rule:limit"),
+        id("docsec:local/shop@README.md#2"),
+        link(2, "rule:limit"),
+    ] {
+        assert!(!admitted(&cited), "{cited}");
+    }
+    assert_eq!(set.len(), 6);
+}

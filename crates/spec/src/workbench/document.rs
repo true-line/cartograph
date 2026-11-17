@@ -285,8 +285,11 @@ pub fn drafted_section(
 ///
 /// The system scope admits every fact of `nodes` and `edges`, which holds
 /// the section's frame. A subject scope admits the subject node, every edge
-/// that touches it and the node at the other end of each. One pass over
-/// each; nothing is kept beyond the cited ids.
+/// that touches it and the node at the other end of each, and then each
+/// `DocSection` whose `MENTIONS` link names one of those nodes, with that
+/// link, so a `documented_intent` claim can cite the section it reports
+/// (ADR-0065, AC-0681). Two passes over the edges and one over the nodes;
+/// nothing is kept beyond the cited ids.
 pub fn section_citation_set(
     section: &CatalogueSection,
     scope: &str,
@@ -313,9 +316,23 @@ pub fn section_citation_set(
         near.insert(edge.src.as_str());
         near.insert(edge.dst.as_str());
     }
+    // The documentation sections that name a fact of the set. A link has a
+    // section as its source and never makes the set grow further.
+    let mentions = |edge: &&Edge| {
+        edge.label == "MENTIONS"
+            && edge.src.starts_with("docsec:")
+            && near.contains(edge.dst.as_str())
+    };
+    let sections: BTreeSet<&str> = edges
+        .iter()
+        .filter(mentions)
+        .map(|edge| edge.src.as_str())
+        .collect();
     Ok(hashes_of(
-        nodes.iter().filter(|node| near.contains(node.id.as_str())),
-        edges.iter().filter(touching),
+        nodes
+            .iter()
+            .filter(|node| near.contains(node.id.as_str()) || sections.contains(node.id.as_str())),
+        edges.iter().filter(|edge| touching(edge) || mentions(edge)),
         cited,
     ))
 }

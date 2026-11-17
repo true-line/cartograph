@@ -281,6 +281,40 @@ Helm values files (the coverage document lists each kind it found as present
 and not read); Terraform resources per environment; the combined result of
 several Compose files; which environment is production; and live state.
 
+## Documentation evidence
+
+Every export includes **documentation-evidence.md**. It lists the
+documentation your sources already hold (README files, Markdown and text
+files) and what each part of it names. No model is involved.
+
+- **A document** is one documentation file. **A section** is the part under
+  one heading. The page shows each section's heading, never its text: to
+  read what a section says, open the file.
+- **A fact mentioned** is something a section names exactly: a file path, a
+  route such as `GET /orders/{id}`, a fact id, or a name only one recovered
+  thing has. Each row gives the rule that made the link and two citation
+  ids, one for the fact and one for the link. Both are in the fact and
+  evidence index.
+- **A link is not agreement.** It says the section names that thing. It does
+  not say the section describes it correctly, and it never changes what was
+  recovered from the code.
+- **Counts.** The page counts the links by rule and the documentation drift
+  entries by kind. The entries themselves are under "Documentation drift"
+  in **drift_register.md**: a route the documentation names that is not
+  served, one served with other methods, and a link or path to a file that
+  is not there.
+- A heading or a reference that holds a secret is shown redacted.
+- The page cannot be selected in a work packet.
+
+When a section of a document is drafted for one subject, the draft may cite
+the documentation sections that name that subject or something directly
+related to it. That is how a statement of documented intent points at where
+the documentation says it.
+
+Not covered today: reStructuredText and AsciiDoc structure (those files are
+read as plain text), and anything a section says in prose without naming a
+file, route, id or unique name.
+
 ## Product specification
 
 Every export includes **product-specification.md**. It is the first document

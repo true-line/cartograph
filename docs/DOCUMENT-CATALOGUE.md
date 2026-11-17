@@ -231,7 +231,7 @@ The existing documents do not print the id beside each statement yet; that
 is added one document at a time. Until a document prints its citations, it
 may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's twenty-six artifacts go
+## 3. Where today's twenty-seven artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -253,11 +253,12 @@ may only make statements whose evidence one of §11.1 to §11.5 already holds.
 | `configuration.md` | D7 §7.3, D6 §6.4 |
 | `external.md` | D7 §7.6, D6 §6.5 |
 | `environments.md` | D7 §7.2 |
+| `documentation-evidence.md` | No section of its own. It lists the target's documentation files, their sections and the facts each names (SPEC-18, ADR-0065); D1 §1.1, D3 §3.4 and D10 §10.2 draw on those sections through `documented_intent` claims |
 | `curated.md` | No section of its own. It lists the accepted proposals and their states (SPEC-12, ADR-0061); the A and P+A sections draw on them once drafting exists (#1748) |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
 | `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The twenty-six files keep being exported under their current names until each
+The twenty-seven files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -267,7 +268,7 @@ row names the issue that tracks it.
 
 | Section | What is missing |
 |---------|-----------------|
-| D1 §1.1, D3 §3.4, D7 §7.5, D10 §10.2 | Target documentation as evidence (#1750) |
+| D1 §1.1, D3 §3.4, D7 §7.5, D10 §10.2 | Target documentation is recovered as `Document` and `DocSection` facts and projected as `documentation-evidence.md` (#1750, SPEC-18). What a section says is not stored: a draft cites the section, and a reader opens the file |
 | D1 §1.2, §1.3, D5 §5.3, D10 §10.3 on a real repository | The knowledge phase now reads a base past 50,000 rows, up to the ADR-0052 ceiling (#1771, fixed). A skip past the ceiling is still not shown in the app (#1782) |
 | D4 §4.1 | Endpoint inventory in the export (#1658) |
 | D6 §6.3 | Endpoints are projected against permission sites as `endpoint-permissions.md` (#1787, fixed). Permission sites are recovered for Flask, Flask-Admin and NestJS GraphQL only, and only on the endpoint's own declaration: an endpoint of any other framework is listed under a coverage note in neither table, and a check made by middleware, a gateway or code inside a handler body is not recovered (#1320 covers Flask in-body checks). "None recovered" therefore never means that no check runs |

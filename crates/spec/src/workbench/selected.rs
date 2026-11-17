@@ -277,6 +277,13 @@ const ARTIFACTS: &[Artifact] = &[
         title: "Environments and the workloads they declare",
         format: "markdown",
     },
+    // After it, for the same reason (#1750).
+    Artifact {
+        id: documentation::ARTIFACT_ID,
+        file: "documentation-evidence.md",
+        title: "Documentation evidence",
+        format: "markdown",
+    },
     // After it, for the same reason (#1746).
     Artifact {
         id: curated::ARTIFACT_ID,
@@ -552,6 +559,10 @@ fn produce(
         "environments" => {
             environments::output(nodes, edges, (mode, beside.environments_withheld), max)?
         }
+        // Document and section facts in the admitted graph with the facts
+        // their exact references name, and the documentation drift counts
+        // (AC-0681). No stored inventory is read.
+        documentation::ARTIFACT_ID => documentation::output(nodes, edges, mode, max)?,
         // The curated projection the host supplied, and the admitted nodes
         // its items cite (AC-0653). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
