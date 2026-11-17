@@ -14,7 +14,7 @@ fn inventory(repo: &str) -> String {
             covers:"synthetic control input".into(),state:ProducerState::MissingInput,files:0,nodes:0,edges:0,inputs:vec![],
             stopping_reason:"Harness-generated synthetic control inventory: the named control producer did not run because its optional control input was not declared. This record is not a full ingest-pipeline coverage claim.".into(),refusals:None}],
         missing_inputs:vec![MissingInput {input:"synthetic_control_input".into(),producer:"harness-generated-synthetic-control@1".into(),reason:"Optional synthetic control input was not declared for this recorded scope.".into()}],
-        unsupported:vec![],limited:true}).unwrap()
+        unsupported:vec![],limited:true,documents:None}).unwrap()
 }
 
 fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>, String> {

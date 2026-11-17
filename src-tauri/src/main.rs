@@ -3143,6 +3143,31 @@ fn found_adr_patch(
     (patch, linked)
 }
 
+/// What the documentation reader finds in one repository, for the coverage
+/// inventory published with that repository's facts (AC-0677). It is the
+/// read [`collect_documents`] makes once the system is in, over the same
+/// guarded tree.
+fn document_coverage(
+    root: &std::path::Path,
+    repo: &str,
+    commit: &str,
+) -> Result<ingest::coverage::DocumentCoverage, String> {
+    let counts = spec::extract_documents(root, repo, commit)
+        .map_err(|e| e.to_string())?
+        .counts;
+    Ok(ingest::coverage::DocumentCoverage {
+        found: counts.found,
+        read: counts.read,
+        skipped: counts
+            .skipped
+            .into_iter()
+            .map(|(reason, files)| (reason.to_owned(), files))
+            .collect(),
+        sections: counts.sections,
+        sections_truncated: counts.sections_truncated,
+    })
+}
+
 /// Read the documentation files of every repository in the graph.
 fn collect_documents<'a>(
     nodes: &[Node],
@@ -5004,7 +5029,8 @@ fn run_ingest<R: tauri::Runtime>(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
     )
-    .with_unfollowed_links(&reads.unfollowed_links);
+    .with_unfollowed_links(&reads.unfollowed_links)
+    .with_documents(document_coverage(root, &repo, commit).map_err(&fail)?);
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5450,7 +5476,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
     )
-    .with_unfollowed_links(&reads.unfollowed_links);
+    .with_unfollowed_links(&reads.unfollowed_links)
+    .with_documents(document_coverage(root, &source.repo_key, &cloned.commit_sha).map_err(&fail)?);
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5759,7 +5786,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             ingest::coverage::ReceiptOmission::StoreCapacity,
             &reads.omitted_stored_receipts,
         )
-        .with_unfollowed_links(&reads.unfollowed_links);
+        .with_unfollowed_links(&reads.unfollowed_links)
+        .with_documents(document_coverage(root, &repo, &commit).map_err(&fail)?);
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         let omission_records = reads.source_omissions();
@@ -8266,6 +8294,39 @@ resource "aws_sqs_queue" "orders" {
             ]
         );
         assert_eq!(sections, 2);
+    }
+
+    #[test]
+    fn the_coverage_inventory_counts_the_documentation_the_reader_stores() {
+        // AC-0677 (T-0677): the counts recorded with a repository's
+        // inventory are those of the read that stores its documents.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("README.md"), "# Shop\n\n## Routes\n").unwrap();
+        std::fs::write(root.join("binary.txt"), [0xff, 0xfe]).unwrap();
+        let counted = crate::document_coverage(root, "local/shop", "workdir").unwrap();
+        assert_eq!(
+            counted,
+            ingest::coverage::DocumentCoverage {
+                found: 2,
+                read: 1,
+                skipped: std::collections::BTreeMap::from([("not_utf8".to_string(), 1)]),
+                sections: 2,
+                sections_truncated: 0,
+            }
+        );
+        let stored = spec::extract_documents(root, "local/shop", "workdir").unwrap();
+        let labelled = |label: &str| {
+            stored
+                .nodes
+                .iter()
+                .filter(|node| node.label == label)
+                .count() as u64
+        };
+        assert_eq!(
+            (labelled("Document"), labelled("DocSection")),
+            (counted.read, counted.sections)
+        );
     }
 
     #[test]
