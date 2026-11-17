@@ -24,8 +24,9 @@ use agents::section_draft::{SectionAddress, admit};
 use agents::section_run::{SECTION_WRITER_ROLE, finish_of, question, requested_address};
 use agents::source_basis::TaskFactKey;
 use core_graph::FactKey;
+use core_graph::{Edge, Node};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tauri::Manager;
 
 /// Most stored drafts read to find the returned draft a new one succeeds.
@@ -122,13 +123,29 @@ fn fact_key(fact: &TaskFactKey) -> FactKey {
     }
 }
 
-/// The newest returned draft for `address` that no draft has succeeded yet.
-fn predecessor(
+/// The stored drafts for one address, read to find what a new draft
+/// replaces.
+struct AddressDrafts {
+    /// Drafts some draft names as replaced, whatever its review.
+    succeeded: BTreeSet<String>,
+    /// Drafts a successor that is not rejected names as replaced.
+    standing: BTreeSet<String>,
+    /// Returned drafts, newest first.
+    returned: Vec<String>,
+    /// Accepted drafts with the hashes they recorded, newest first.
+    accepted: Vec<(String, BTreeMap<String, String>)>,
+}
+
+fn address_drafts(
     store: &agents::draft_store::DraftStore,
     address: &SectionAddress,
-) -> Result<Option<String>, DraftStoreError> {
-    let mut succeeded = BTreeSet::new();
-    let mut returned = Vec::new();
+) -> Result<AddressDrafts, DraftStoreError> {
+    let mut drafts = AddressDrafts {
+        succeeded: BTreeSet::new(),
+        standing: BTreeSet::new(),
+        returned: Vec::new(),
+        accepted: Vec::new(),
+    };
     let mut before = None;
     let mut read = 0;
     loop {
@@ -139,10 +156,17 @@ fn predecessor(
                 continue;
             }
             if let Some(replaced) = item.replaces {
-                succeeded.insert(replaced);
+                if item.review_decision != Some(DraftDecision::Rejected) {
+                    drafts.standing.insert(replaced.clone());
+                }
+                drafts.succeeded.insert(replaced);
             }
-            if item.review_decision == Some(DraftDecision::Returned) {
-                returned.push(item.draft_id);
+            match item.review_decision {
+                Some(DraftDecision::Returned) => drafts.returned.push(item.draft_id),
+                Some(DraftDecision::Accepted) => drafts
+                    .accepted
+                    .push((item.draft_id, item.draft.cited_hashes)),
+                Some(DraftDecision::Rejected) | None => {}
             }
         }
         before = page.next_before;
@@ -150,8 +174,77 @@ fn predecessor(
             break;
         }
     }
+    Ok(drafts)
+}
+
+/// Whether a cited fact of an accepted draft changed or is gone: the draft
+/// is `stale` or `unresolvable` in the curated projection (ADR-0045).
+fn drifted(recorded: &BTreeMap<String, String>, nodes: &[Node], edges: &[Edge]) -> bool {
+    let cited: BTreeSet<String> = recorded.keys().cloned().collect();
+    spec::cited_fact_hashes(nodes, edges, &cited) != *recorded
+}
+
+/// The draft a new draft for `address` replaces. First the newest returned
+/// draft that no draft has succeeded (ADR-0064 decision 6). Otherwise the
+/// one accepted draft whose cited facts drifted and that has no standing
+/// successor: the new draft is its re-draft (ADR-0045 decision 6). Two such
+/// accepted drafts are in conflict and neither is chosen.
+pub(crate) fn predecessor(
+    store: &agents::draft_store::DraftStore,
+    address: &SectionAddress,
+    (nodes, edges): (&[Node], &[Edge]),
+) -> Result<Option<String>, DraftStoreError> {
+    let drafts = address_drafts(store, address)?;
     // Pages are newest first, so the first unsucceeded one is the newest.
-    Ok(returned.into_iter().find(|id| !succeeded.contains(id)))
+    if let Some(returned) = drafts
+        .returned
+        .iter()
+        .find(|id| !drafts.succeeded.contains(*id))
+    {
+        return Ok(Some(returned.clone()));
+    }
+    let mut stale = drafts
+        .accepted
+        .iter()
+        .filter(|(id, recorded)| !drafts.standing.contains(id) && drifted(recorded, nodes, edges));
+    match (stale.next(), stale.next()) {
+        (Some((id, _)), None) => Ok(Some(id.clone())),
+        _ => Ok(None),
+    }
+}
+
+/// The question that starts a re-draft of the accepted draft `draft_id`, or
+/// the closed reason it cannot be re-drafted. Only a draft the curated
+/// projection lists as `stale` or `unresolvable` is re-drafted, and only
+/// while no successor of it stands.
+pub(crate) fn redraft_question(state: &AppState, draft_id: &str) -> Result<String, String> {
+    let (nodes, edges) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let (_, (snapshot, _)) = crate::curated::read_graph(&graph)?;
+        snapshot
+    };
+    let store = state.drafts.lock().map_err(|e| e.to_string())?;
+    let Some(draft) = store.get(draft_id).map_err(|e| e.to_string())? else {
+        return Err("unknown_draft".to_owned());
+    };
+    if draft.review_decision != Some(DraftDecision::Accepted) {
+        return Err("draft_not_accepted".to_owned());
+    }
+    let address = &draft.draft.address;
+    let drafts = address_drafts(&store, address).map_err(|e| e.to_string())?;
+    if drafts.standing.contains(draft_id) {
+        return Err("successor_pending".to_owned());
+    }
+    if !drifted(&draft.draft.cited_hashes, &nodes, &edges) {
+        return Err("draft_not_stale".to_owned());
+    }
+    drafting_question(
+        &address.catalogue_version,
+        &address.document,
+        &address.section,
+        &address.scope,
+    )
+    .map_err(str::to_owned)
 }
 
 /// Stage the draft of the completed drafting run `id`, or say why it staged
@@ -195,9 +288,12 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         .iter()
         .flat_map(|claim| claim.citations.iter().cloned())
         .collect();
-    let (citation_set, graph_content_hash) = {
+    let (nodes, edges) = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let (_, ((nodes, edges), _)) = crate::curated::read_graph(&graph)?;
+        let (_, (snapshot, _)) = crate::curated::read_graph(&graph)?;
+        snapshot
+    };
+    let (citation_set, graph_content_hash) = {
         // The table held the section when the address was checked above.
         let section = spec::drafted_section(
             &address.catalogue_version,
@@ -224,7 +320,7 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         graph_content_hash,
     };
     let mut store = state.drafts.lock().map_err(|e| e.to_string())?;
-    let replaces = predecessor(&store, &address).map_err(|e| e.to_string())?;
+    let replaces = predecessor(&store, &address, (&nodes, &edges)).map_err(|e| e.to_string())?;
     match store.store(&draft, &origin, replaces.as_deref()) {
         Ok(stored) => Ok(DraftingOutcome::Staged {
             draft_id: stored.draft_id,
@@ -252,6 +348,15 @@ pub(crate) async fn section_draft_question(
     scope: String,
 ) -> Result<String, String> {
     drafting_question(&catalogue_version, &document, &section, &scope).map_err(str::to_owned)
+}
+
+/// The question that starts a re-draft of one accepted draft (SPEC-17).
+#[tauri::command]
+pub(crate) async fn section_redraft_question(
+    draft_id: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    crate::off_ui_thread(move || redraft_question(&app.state::<AppState>(), &draft_id)).await
 }
 
 /// What the drafting run `investigation_id` produced. Stages the draft of a
