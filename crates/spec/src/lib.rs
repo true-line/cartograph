@@ -103,6 +103,10 @@ pub use workbench::{
     logical_partition_bound, project_recovered_facts, provenance, try_compile_spec_supplied,
     try_compile_spec_with_coverage,
 };
+pub use workbench::{
+    CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
+    catalogue_sections,
+};
 
 /// Edge labels that appear on the topology map — callers use this to query
 /// exactly the edges the artifact renders.

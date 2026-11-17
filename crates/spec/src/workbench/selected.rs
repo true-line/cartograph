@@ -277,6 +277,14 @@ const ARTIFACTS: &[Artifact] = &[
         title: "Curated items",
         format: "markdown",
     },
+    // After it: the document's header carries the curated revision, and its
+    // frames are cited before the index (#1748, AC-0663).
+    Artifact {
+        id: document::D1_ARTIFACT_ID,
+        file: "product-specification.md",
+        title: "Product specification (D1)",
+        format: "markdown",
+    },
     Artifact {
         id: "coverage",
         file: "coverage.md",
@@ -540,6 +548,9 @@ fn produce(
         // The curated projection the host supplied, and the admitted nodes
         // its items cite (AC-0653). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
+        // The catalogue's D1 over the admitted nodes and flows, the gap
+        // count and the supplied projection's revision (AC-0663).
+        document::D1_ARTIFACT_ID => document::d1(nodes, flows, gaps, beside.curated, mode, max)?,
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => {
             coverage::output(coverage, beside.stale_coverage, a.id == "coverage", max)?
