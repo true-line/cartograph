@@ -65,6 +65,11 @@ export interface CuratedDraftRow {
   state: CuratedDraftState;
   reason: string;
   reason_sentence: string;
+  /** Cited ids whose fact changed since the draft recorded it, sorted
+   *  (ADR-0045, AC-0671); absent from a host that predates them. */
+  changed?: string[];
+  /** Cited ids that resolve to no fact now, sorted. */
+  missing?: string[];
 }
 
 export interface CuratedDraftCounts {

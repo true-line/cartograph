@@ -361,3 +361,64 @@ fn two_drafts_with_one_identity_fail_closed() {
         );
     }
 }
+
+// AC-0671 (ADR-0045 decision 2): the changed and missing cited ids are
+// named, in id order, whatever state the draft has, and the same inputs
+// give the same lists.
+#[test]
+fn the_changed_and_missing_cited_facts_are_named_in_id_order() {
+    let lists = |projection: &CuratedProjection, id: &str| {
+        let entry = projection
+            .drafts
+            .iter()
+            .find(|entry| entry.draft_id == id)
+            .unwrap();
+        (entry.changed.clone(), entry.missing.clone())
+    };
+    let none: Vec<String> = Vec::new();
+
+    // Unchanged: both lists are empty.
+    let projection = run_with(&[draft("d1")], &current(), GRAPH_HASH).unwrap();
+    assert_eq!(lists(&projection, "d1"), (none.clone(), none.clone()));
+
+    // Both cited facts changed: stale, both named, in id order.
+    let mut both = current();
+    both.insert("F-2".into(), "hash-2b".into());
+    both.insert("F-1".into(), "hash-1b".into());
+    let projection = run_with(&[draft("d1")], &both, GRAPH_HASH).unwrap();
+    assert_eq!(outcome(&projection, "d1").0, DraftState::Stale);
+    assert_eq!(
+        lists(&projection, "d1"),
+        (vec!["F-1".to_owned(), "F-2".to_owned()], none.clone())
+    );
+
+    // One changed and one gone: unresolvable, and each list names its own.
+    let mut gone = current();
+    gone.remove("F-2");
+    gone.insert("F-1".into(), "hash-1b".into());
+    let projection = run_with(&[draft("d1")], &gone, GRAPH_HASH).unwrap();
+    assert_eq!(outcome(&projection, "d1").0, DraftState::Unresolvable);
+    assert_eq!(
+        lists(&projection, "d1"),
+        (vec!["F-1".to_owned()], vec!["F-2".to_owned()])
+    );
+    // The same inputs give the same lists.
+    let again = run_with(&[draft("d1")], &gone, GRAPH_HASH).unwrap();
+    assert_eq!(lists(&again, "d1"), lists(&projection, "d1"));
+    assert_eq!(again.revision, projection.revision);
+
+    // A superseded draft still names what changed under it.
+    let successor = ReviewedDraft {
+        replaces: Some("d1".into()),
+        ..draft("d2")
+    };
+    let projection = run_with(&[draft("d1"), successor], &both, GRAPH_HASH).unwrap();
+    assert_eq!(outcome(&projection, "d1").0, DraftState::Superseded);
+    assert_eq!(lists(&projection, "d1").0, ["F-1", "F-2"]);
+
+    // An uncited fact changing names nothing.
+    let mut other = current();
+    other.insert("F-3".into(), "hash-3b".into());
+    let projection = run_with(&[draft("d1")], &other, GRAPH_HASH).unwrap();
+    assert_eq!(lists(&projection, "d1"), (none.clone(), none));
+}

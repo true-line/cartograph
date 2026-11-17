@@ -427,3 +427,59 @@ fn the_citation_set_is_the_scope_by_citation_id_with_current_hashes() {
     assert_eq!(refused, SectionScopeError::NotPerSubject);
     assert_eq!(refused.code(), "section_not_per_subject");
 }
+
+// AC-0671 (ADR-0045 decisions 2 and 3): `curated.md` names, for each
+// accepted draft, the cited facts that changed and the ids that are gone,
+// in both modes, and repeats no claim. With no accepted draft the artifact
+// keeps its bytes.
+#[test]
+fn curated_names_the_changed_and_missing_facts_of_each_accepted_draft() {
+    fn curated(bundle: &SpecBundle) -> &str {
+        &bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "curated")
+            .unwrap()
+            .content
+    }
+    let mut stale = draft("draft-s", "1.1", "Stale.", &[id("cap:checkout")]);
+    stale
+        .cited_hashes
+        .insert(id("cap:checkout"), "another-hash".into());
+    let mut gone = draft("draft-u", "1.2", "Gone.", &[id("actor:admin")]);
+    gone.claims[0].citations = vec!["F-0000000000000000".into()];
+    gone.cited_hashes = BTreeMap::from([("F-0000000000000000".to_owned(), "hash".to_owned())]);
+    let drafts = [
+        stale,
+        gone,
+        draft("draft-e", "1.3", "Current.", &[id("rule:limit")]),
+    ];
+    let empty = projection(&[], &nodes());
+    let projection = projection(&drafts, &nodes());
+    for mode in MODES {
+        let bundle = compile(mode, &projection, &BTreeSet::new());
+        let content = curated(&bundle);
+        let rows = section(content, "## Accepted section drafts");
+        assert!(rows.contains(&format!(
+            "| draft-s | D1 | 1.1 | system | stale | `cited_fact_changed` | {} | — |\n",
+            id("cap:checkout")
+        )));
+        assert!(rows.contains(
+            "| draft-u | D1 | 1.2 | system | unresolvable | `cited_fact_missing` | — | \
+             F-0000000000000000 |\n"
+        ));
+        assert!(rows.contains(
+            "| draft-e | D1 | 1.3 | system | eligible | `all_conditions_hold` | — | — |\n"
+        ));
+        for statement in ["Stale.", "Gone.", "Current."] {
+            assert!(!content.contains(statement), "{statement}");
+        }
+        // The same inputs give the same bytes.
+        assert_eq!(
+            content,
+            curated(&compile(mode, &projection, &BTreeSet::new()))
+        );
+    }
+    let none = compile(ExportMode::BestEffort, &empty, &BTreeSet::new());
+    assert!(!curated(&none).contains("Accepted section drafts"));
+}

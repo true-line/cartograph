@@ -550,6 +550,47 @@ fn decisions(projection: &CuratedProjection, out: &mut Text) -> fmt::Result {
     Ok(())
 }
 
+/// The accepted section drafts with their state and the cited facts that
+/// changed or are gone (ADR-0045 decisions 2 and 3, AC-0671). No claim is
+/// repeated here: a document prints the claims. The section is written only
+/// when a draft is accepted, so a project without one keeps its bytes.
+fn drafts(projection: &CuratedProjection, out: &mut Text) -> fmt::Result {
+    if projection.drafts.is_empty() {
+        return Ok(());
+    }
+    out.push_str(
+        "\n## Accepted section drafts\n\n\
+         Each accepted draft of a document section, with its state. `Changed` lists the cited \
+         facts whose content differs from what the draft recorded; `Missing` lists the cited ids \
+         that resolve to no fact in this graph. The lists are the same in both export modes, \
+         and no drafted claim is repeated here.\n\n\
+         | Draft | Document | Section | Scope | State | Reason | Changed | Missing |\n\
+         |---|---|---|---|---|---|---|---|\n",
+    )?;
+    let ids = |ids: &[String]| {
+        if ids.is_empty() {
+            "—".to_owned()
+        } else {
+            ids.join(", ")
+        }
+    };
+    for draft in &projection.drafts {
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | `{}` | {} | {} |",
+            Literal(&draft.draft_id),
+            Literal(&draft.address.document),
+            Literal(&draft.address.section),
+            Literal(&draft.address.scope),
+            super::document::state_name(draft.state),
+            super::document::reason_name(draft.reason),
+            Literal(ids(&draft.changed)),
+            Literal(ids(&draft.missing)),
+        )?;
+    }
+    Ok(())
+}
+
 /// `curated.md` over the projection the host supplied and the nodes the
 /// export mode admitted.
 pub(super) fn output(
@@ -688,6 +729,7 @@ pub(super) fn output(
         content.push_str("| — | — | None | — | — | — | — | — | — | — |\n")?;
     }
 
+    drafts(projection, &mut content)?;
     decisions(projection, &mut content)?;
     counts(totals, &mut content)?;
     finish(content, assertions)

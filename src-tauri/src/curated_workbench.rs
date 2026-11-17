@@ -61,6 +61,11 @@ pub(crate) struct DraftRow {
     reason: DraftStateReason,
     /// What `reason` means, in one sentence.
     reason_sentence: &'static str,
+    /// Cited ids whose fact changed since the draft recorded it, sorted
+    /// (ADR-0045, AC-0671).
+    changed: Vec<String>,
+    /// Cited ids that resolve to no fact now, sorted.
+    missing: Vec<String>,
 }
 
 /// What a draft state reason means.
@@ -95,6 +100,8 @@ impl DraftRow {
             state: draft.state,
             reason: draft.reason,
             reason_sentence: draft_reason_sentence(draft.reason),
+            changed: draft.changed.clone(),
+            missing: draft.missing.clone(),
         }
     }
 }
@@ -241,6 +248,13 @@ mod draft_tests {
                 row("draft-b")["reason_sentence"],
                 draft_reason_sentence(DraftStateReason::CitedFactChanged)
             );
+            // AC-0671: the facts behind the state are named.
+            assert_eq!(
+                row("draft-b")["changed"],
+                serde_json::json!(["F-0000000000000001"])
+            );
+            assert_eq!(row("draft-b")["missing"], serde_json::json!([]));
+            assert_eq!(row("draft-a")["changed"], serde_json::json!([]));
             assert_eq!(row("draft-a")["address"]["section"], "1.3");
             assert_eq!(row("draft-a")["cited_facts"], 1);
             for row in rows {

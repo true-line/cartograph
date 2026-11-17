@@ -172,7 +172,7 @@ fn frame(
     }
 }
 
-fn state_name(state: DraftState) -> &'static str {
+pub(super) fn state_name(state: DraftState) -> &'static str {
     match state {
         DraftState::Superseded => "superseded",
         DraftState::Unresolvable => "unresolvable",
@@ -182,7 +182,7 @@ fn state_name(state: DraftState) -> &'static str {
     }
 }
 
-fn reason_name(reason: DraftStateReason) -> &'static str {
+pub(super) fn reason_name(reason: DraftStateReason) -> &'static str {
     match reason {
         DraftStateReason::ReplacedByAcceptedDraft => "replaced_by_accepted_draft",
         DraftStateReason::CitedFactMissing => "cited_fact_missing",
