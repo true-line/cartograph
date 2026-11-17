@@ -59,6 +59,33 @@ struct Inventory {
     missing_inputs: Vec<MissingInput>,
     unsupported: Vec<Unsupported>,
     limited: bool,
+    /// Documentation files found, read and skipped; absent when the
+    /// repository has none or the inventory predates the reader.
+    #[serde(default)]
+    documents: Option<Documents>,
+}
+
+/// What the documentation reader recorded (ADR-0065, AC-0677).
+#[derive(Deserialize)]
+struct Documents {
+    found: u64,
+    read: u64,
+    #[serde(default)]
+    skipped: BTreeMap<String, u64>,
+    sections: u64,
+    #[serde(default)]
+    sections_truncated: u64,
+}
+
+/// A documentation skip reason in words; an unknown code is shown as
+/// recorded.
+fn skip_text(reason: &str) -> &str {
+    match reason {
+        "too_large" => "larger than the file limit",
+        "not_utf8" => "not UTF-8 text",
+        "over_file_limit" => "past the per-repository file limit",
+        other => other,
+    }
 }
 
 #[derive(Deserialize)]
@@ -550,6 +577,33 @@ fn markdown(repos: &[Repo<'_>], out: &mut Text) -> std::fmt::Result {
                 Safe(list(&producer.inputs)),
                 Safe(&producer.stopping_reason)
             )?;
+        }
+        // Written only when the inventory records documentation files, so
+        // every other inventory keeps its bytes.
+        if let Some(documents) = &inventory.documents {
+            writeln!(
+                out,
+                "\nDocumentation files (Markdown and plain text): {} found, {} read into \
+                 {} sections, {} not read. These count this repository at this commit; they \
+                 do not state that its documentation is complete.",
+                documents.found,
+                documents.read,
+                documents.sections,
+                documents.found.saturating_sub(documents.read)
+            )?;
+            if !documents.skipped.is_empty() || documents.sections_truncated != 0 {
+                out.push_str("\n| Documentation not read | Files |\n|---|---|\n")?;
+                for (reason, files) in &documents.skipped {
+                    writeln!(out, "| {} | {} |", Safe(skip_text(reason)), files)?;
+                }
+                if documents.sections_truncated != 0 {
+                    writeln!(
+                        out,
+                        "| read to the section limit, later sections left out | {} |",
+                        documents.sections_truncated
+                    )?;
+                }
+            }
         }
         // Written only when a refusal is recorded, so every other
         // inventory keeps its bytes.
@@ -1058,6 +1112,61 @@ mod tests {
                 .collect::<String>()
         };
         assert_eq!(hash_line(&without_plugin_rows), hash_line(&plain.content));
+    }
+
+    // AC-0677 (T-0677): the documentation files the reader found, read and
+    // skipped are printed as counts of the repository at its commit; an
+    // inventory that records none renders the bytes it did before.
+    #[test]
+    fn coverage_artifacts_count_the_documentation_files_read_and_skipped() {
+        let with = |documents: serde_json::Value| {
+            let mut body: serde_json::Value = serde_json::from_str(&inventory("acme/api")).unwrap();
+            body["documents"] = documents;
+            stored("acme/api", body.to_string())
+        };
+        let records = [with(json!({
+            "found": 7, "read": 4,
+            "skipped": {"not_utf8": 1, "over_file_limit": 1, "too_large": 1},
+            "sections": 31, "sections_truncated": 2
+        }))];
+        let (markdown, index) = export(&records, ExportMode::VerifiedOnly);
+        assert!(
+            markdown.content.contains(
+                "\nDocumentation files (Markdown and plain text): 7 found, 4 read into 31 \
+                 sections, 3 not read. These count this repository at this commit; they do not \
+                 state that its documentation is complete.\n\n\
+                 | Documentation not read | Files |\n|---|---|\n\
+                 | not UTF-8 text | 1 |\n\
+                 | past the per-repository file limit | 1 |\n\
+                 | larger than the file limit | 1 |\n\
+                 | read to the section limit, later sections left out | 2 |\n"
+            ),
+            "{}",
+            markdown.content
+        );
+        // The index carries the recorded counts verbatim.
+        assert!(index.content.contains("\"sections_truncated\":2"));
+        for mode in [ExportMode::BestEffort, ExportMode::VerifiedOnly] {
+            assert_eq!(export(&records, mode).0.content, markdown.content);
+        }
+
+        // Every file read: the counts and no table.
+        let all = [with(json!({
+            "found": 2, "read": 2, "skipped": {}, "sections": 5, "sections_truncated": 0
+        }))];
+        let (read, _) = export(&all, ExportMode::VerifiedOnly);
+        assert!(
+            read.content
+                .contains("2 found, 2 read into 5 sections, 0 not read.")
+        );
+        assert!(!read.content.contains("Documentation not read"));
+
+        // No documentation recorded: nothing is said about it.
+        let (plain, _) = export(
+            &[stored("acme/api", inventory("acme/api"))],
+            ExportMode::VerifiedOnly,
+        );
+        assert!(!plain.content.contains("Documentation"));
     }
 
     // AC-0592: both artifacts carry the stored inventory hash, and the index

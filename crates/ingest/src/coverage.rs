@@ -8,6 +8,7 @@
 
 use crate::preflight::PreflightReport;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Versioned identity of the inventory rules, recorded on every inventory.
 pub const INVENTORY_ID: &str = "coverage@1";
@@ -337,10 +338,39 @@ pub struct RepoCoverage {
     pub missing_inputs: Vec<MissingInput>,
     /// Constructs no installed producer covers.
     pub unsupported: Vec<UnsupportedCapability>,
-    /// True when any producer was excluded or lacked its input, or any
-    /// capability is unsupported. A limited inventory never reads as
-    /// exhaustive.
+    /// True when any producer was excluded or lacked its input, any
+    /// capability is unsupported, or a documentation file was not read in
+    /// full. A limited inventory never reads as exhaustive.
     pub limited: bool,
+    /// Documentation files found, read and skipped (ADR-0065, AC-0677).
+    /// Absent when the repository has no documentation file, so such an
+    /// inventory keeps the bytes it had before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documents: Option<DocumentCoverage>,
+}
+
+/// What the documentation reader found in one repository: counts of the
+/// declared repository at its commit, never a statement that the
+/// documentation is complete.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentCoverage {
+    /// Files with a documentation extension.
+    pub found: u64,
+    /// Files read into a `Document` fact.
+    pub read: u64,
+    /// Files found and not read, by closed reason code.
+    pub skipped: BTreeMap<String, u64>,
+    /// `DocSection` facts.
+    pub sections: u64,
+    /// Files read to the section bound, with later sections left out.
+    pub sections_truncated: u64,
+}
+
+impl DocumentCoverage {
+    /// Whether any file was skipped or read only in part.
+    pub fn partial(&self) -> bool {
+        self.read != self.found || self.sections_truncated != 0
+    }
 }
 
 /// Facts one producer published.
@@ -623,6 +653,7 @@ impl RepoCoverage {
             missing_inputs,
             unsupported: Vec::new(),
             limited: false,
+            documents: None,
         };
         coverage.unsupported = coverage.refused_capabilities();
         coverage.refresh_limited();
@@ -756,9 +787,24 @@ impl RepoCoverage {
         self
     }
 
+    /// Record what the documentation reader found. A repository with no
+    /// documentation file records nothing. A skipped or partly read file
+    /// makes the inventory limited.
+    pub fn with_documents(mut self, documents: DocumentCoverage) -> Self {
+        if documents.found != 0 {
+            self.documents = Some(documents);
+            self.refresh_limited();
+        }
+        self
+    }
+
     fn refresh_limited(&mut self) {
         self.limited = !self.missing_inputs.is_empty()
             || !self.unsupported.is_empty()
+            || self
+                .documents
+                .as_ref()
+                .is_some_and(DocumentCoverage::partial)
             || self
                 .producers
                 .iter()
