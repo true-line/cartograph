@@ -61,6 +61,18 @@ pub enum DraftReview {
     Returned,
 }
 
+/// One statement of a draft with the citation ids it rests on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftClaim {
+    /// The statement, as plain text.
+    pub statement: String,
+    /// What it asserts about: `implemented`, `documented_intent` or
+    /// `interpretation`.
+    pub kind: String,
+    /// The citation ids it rests on, in the order given.
+    pub citations: Vec<String>,
+}
+
 /// One stored draft as the host read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewedDraft {
@@ -70,6 +82,8 @@ pub struct ReviewedDraft {
     pub address: DraftAddress,
     /// The author role.
     pub role: String,
+    /// The claims, in reading order.
+    pub claims: Vec<DraftClaim>,
     /// Citation id to the content hash the draft recorded for it.
     pub cited_hashes: BTreeMap<String, String>,
     /// The returned draft this one replaces.
@@ -119,6 +133,9 @@ pub struct CuratedDraft {
     pub address: DraftAddress,
     /// The author role.
     pub role: String,
+    /// The claims, in reading order: the content a document prints when
+    /// the draft is eligible.
+    pub claims: Vec<DraftClaim>,
     /// The returned draft it replaces.
     pub replaces: Option<String>,
     /// Always Agentic: acceptance changes no tier.
@@ -274,6 +291,7 @@ pub(super) fn project_drafts<'a>(
             draft_id: draft.draft_id.clone(),
             address: draft.address.clone(),
             role: draft.role.clone(),
+            claims: draft.claims.clone(),
             replaces: draft.replaces.clone(),
             tier: Tier::Agentic,
             confidence: ConfidenceTier::InferredWeak,

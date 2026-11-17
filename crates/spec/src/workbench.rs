@@ -22,6 +22,7 @@ pub use curated::{
 };
 pub(crate) mod diagrams;
 mod document;
+pub use document::cited_fact_hashes;
 mod endpoint_permissions;
 mod environments;
 mod external;
