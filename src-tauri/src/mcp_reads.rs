@@ -240,6 +240,8 @@ pub(crate) struct ReadSession {
     rejected_hashes: BTreeSet<String>,
     /// The projection `basis.curated` names, or why there is none.
     curated: CuratedRead,
+    /// `spec::graph_content_hash` of `base`, as the D1 header states it.
+    graph_content_hash: String,
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
     qualified: CoverageContext,
@@ -372,8 +374,9 @@ impl ReadSession {
         // Every store observation is made. The projection is computed over
         // the snapshot this session keeps; an assessment that observed
         // another graph revision counts as failed (`curated::project`).
+        let graph_content_hash = spec::graph_content_hash(&base.graph.0, &base.graph.1);
         let curated = {
-            let content_hash = spec::graph_content_hash(&base.graph.0, &base.graph.1);
+            let content_hash = &graph_content_hash;
             CuratedRead::of(curated::project(
                 &review,
                 &curated::Snapshot {
@@ -382,7 +385,7 @@ impl ReadSession {
                     // No document is compiled while a session is acquired.
                     derived_decisions: curated::DerivedDecisions::NotCompiled,
                     coverage: &recorded,
-                    content_hash: &content_hash,
+                    content_hash,
                     revision: &base.revision,
                 },
                 &assertion_decisions,
@@ -441,6 +444,7 @@ impl ReadSession {
             actors,
             rejected_hashes,
             curated,
+            graph_content_hash,
             #[cfg(test)]
             snapshot,
             qualified,
