@@ -134,7 +134,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (accepted 2026-11-06, #1678) |
 | ADR-0055 | Bounded, independently bound refusal diagnostic sidecars outside workspace capacity accounting (#1707) |
-| ADR-0056 | Documentation reconstruction pipeline, two modes and the rebuild boundary (proposed; #1745, owner review) |
+| ADR-0056 | Documentation reconstruction pipeline, two modes and the rebuild boundary (accepted 2026-11-17, #1853; proposed in #1745) |
 | ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review); amended 2026-11-10 for the consent-free, recorded connection check (#1795) |
 | ADR-0060 | Build and deployment pipelines as ordered facts: four node labels, `PART_OF` and `NEEDS`, declared not evaluated (proposed; #1790, owner review) |
 | ADR-0059 | Configuration-read facts: `ConfigRead` per file and key, `READS_CONFIG`, names only, proven standard-library reads (proposed; #1789, owner review) |
