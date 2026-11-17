@@ -41,6 +41,7 @@ mod provider_credentials;
 mod registered_source_tests;
 #[cfg(test)]
 mod registry_tests;
+mod section_review;
 #[cfg(test)]
 mod semantic_cache_tests;
 mod semantic_evaluation;
@@ -7126,6 +7127,8 @@ fn main() {
             investigations::commands::start_investigation,
             investigations::section_drafts::section_draft_question,
             investigations::section_drafts::section_draft_outcome,
+            section_review::section_document,
+            section_review::review_section_draft,
             investigations::commands::list_investigations,
             investigations::commands::list_specialist_task_activity,
             investigations::commands::check_local_ollama,

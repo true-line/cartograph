@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 6 are implemented; the rest is not.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 7 are implemented; the pilot is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -210,6 +210,20 @@ document among the artifacts citing each fact its frames print.
   offers "Draft this section" and the review actions.
 - **MCP.** The artifact is readable as the export's bytes for the same
   inputs and mode. Drafting and review are not exposed over MCP.
+
+As built (slice 7): `section_document` returns the section table of a
+document with each section's kind and its stored drafts, system scope first,
+at most 2000 drafts. `review_section_draft` records accept, reject or return
+with an optional note at the revision the view read; a stale revision is
+refused and no content changes. The curated Workbench read gains one row per
+accepted draft with its state and reason and no claim text, so the view
+states an accepted draft's state only from that read and states none when
+the read is absent or older than the review. A citation selects the fact
+index in the artifact list; it does not yet scroll to the fact's row.
+"Draft this section" asks the host for the drafting question of the address,
+puts it in the investigation composer with the Section Writer role selected,
+and leaves starting the run to the user, so consent and limits are the
+composer's.
 
 ## Slices
 
