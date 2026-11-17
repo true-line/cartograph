@@ -7,7 +7,22 @@ pub use accounting::{
     logical_capability_compile_bound, logical_compile_bound,
 };
 mod capabilities;
+mod configuration;
+pub use configuration::CONFIG_READ_COVERAGE;
+mod coverage;
+pub use coverage::{COVERAGE_DETAIL_REPO_LIMIT, logical_coverage_render_bound};
+mod curated;
+pub use curated::{
+    Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_reason_sentence,
+};
 pub(crate) mod diagrams;
+mod endpoint_permissions;
+mod environments;
+mod external;
+pub use endpoint_permissions::{
+    ENDPOINT_PATH_MAX_DEPTH, ENDPOINT_PATH_MAX_RELATIONS, ENDPOINT_PATH_MAX_SYMBOLS,
+};
+pub(crate) mod fact_index;
 pub use capabilities::{
     ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
     KnowledgeStoryCompileWorkspaceBound, compile_capability_user_stories,
@@ -16,7 +31,12 @@ pub use capabilities::{
     compile_knowledge_user_stories_with_flows_and_security, logical_actor_story_workspace_bound,
     logical_knowledge_story_compile_bound,
 };
+pub use fact_index::{
+    FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
+    check_citations, citation_id,
+};
 mod partition;
+mod pipelines;
 mod producers;
 pub use partition::{
     DATA_PARTITION_EDGE_LABELS, PartitionAcquisition, PartitionArtifact, PartitionArtifactKind,
@@ -31,7 +51,8 @@ use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
 pub use selected::{
     ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
-    SelectedCompileLimits, artifact_catalog, compile_spec_selected,
+    SelectedCompileLimits, StaleCoverage, Supplied, artifact_catalog, compile_spec_selected,
+    compile_spec_selected_supplied, compile_spec_selected_with_coverage,
     compile_spec_selected_with_security, project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
@@ -178,6 +199,17 @@ pub struct SpecBundle {
     pub drift_count: usize,
     /// Explicit auth/IAM findings in the security view.
     pub security_count: usize,
+    /// The graph this bundle was compiled from (#1765, AC-0593). Stamped by
+    /// the host, which holds the graph; absent from a bare compile, so those
+    /// bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_basis: Option<crate::GraphBasis>,
+    /// The curated projection this bundle's `curated` artifact lists
+    /// (SPEC-12, AC-0653): its revision and record counts. Stamped by the
+    /// host, which computes the projection; absent from a bare compile, so
+    /// those bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curated_basis: Option<CuratedBasis>,
 }
 
 pub(crate) fn fallback_provenance(identity: &str) -> Provenance {
@@ -618,6 +650,14 @@ pub fn is_drift_node(node: &Node) -> bool {
 
 /// Compile the complete official artifact set with one R-INT-5 policy.
 /// Rejected inferred content hashes are suppressed without upgrading any fact.
+/// No coverage inventory is supplied here, so the two coverage artifacts say
+/// so and claim nothing; a store-backed export uses
+/// [`compile_spec_with_coverage`].
+///
+/// # Panics
+///
+/// When the export's citations do not resolve (see
+/// [`try_compile_spec_with_coverage`]).
 pub fn compile_spec(
     nodes: &[Node],
     edges: &[Edge],
@@ -625,7 +665,84 @@ pub fn compile_spec(
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
 ) -> SpecBundle {
-    selected::all(nodes, edges, flows, mode, rejected_hashes)
+    compile_spec_with_coverage(nodes, edges, flows, mode, rejected_hashes, &[])
+}
+
+/// [`compile_spec`] with the coverage inventories stored beside the graph
+/// (AC-0592). The `coverage` and `coverage-index` artifacts project exactly
+/// these records, in both export modes; without them, as in [`compile_spec`],
+/// those two artifacts state that no inventory was supplied.
+///
+/// # Panics
+///
+/// When the export's citations do not resolve (see
+/// [`try_compile_spec_with_coverage`], which returns that as an error).
+pub fn compile_spec_with_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    coverage: &[core_graph::coverage::StoredCoverage],
+) -> SpecBundle {
+    resolved(try_compile_spec_with_coverage(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        coverage,
+    ))
+}
+
+/// [`compile_spec_with_coverage`], failing closed instead of panicking when
+/// the export's citations do not resolve (ADR-0058 decision 6, AC-0595): an
+/// assertion cites an id with no row in the fact index, two different facts
+/// share one citation id, or a `verified-only` export cites an InferredWeak
+/// fact. No bundle is returned for such an export.
+pub fn try_compile_spec_with_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    coverage: &[core_graph::coverage::StoredCoverage],
+) -> Result<SpecBundle, FactIndexError> {
+    try_compile_spec_supplied(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        Supplied {
+            coverage,
+            stale_coverage: &[],
+            curated: crate::Curated::NotSupplied,
+        },
+    )
+}
+
+/// [`try_compile_spec_with_coverage`] with everything the host supplies
+/// beside the graph: the stored coverage inventories and the curated
+/// projection the `curated` artifact lists (SPEC-12, AC-0653). Without a
+/// projection that artifact states that none was supplied. The host stamps
+/// [`SpecBundle::curated_basis`]; this function does not.
+pub fn try_compile_spec_supplied(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    supplied: Supplied<'_>,
+) -> Result<SpecBundle, FactIndexError> {
+    selected::all(nodes, edges, flows, mode, rejected_hashes, supplied)
+}
+
+/// The bundle of an export whose citations resolve. The infallible compilers
+/// keep their signatures and stop here instead of returning an export with a
+/// citation that leads nowhere.
+pub(crate) fn resolved<T>(compiled: Result<T, FactIndexError>) -> T {
+    compiled.unwrap_or_else(|error| panic!("spec export refused: {error}"))
 }
 
 #[cfg(test)]
@@ -835,29 +952,77 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "3887723f58220dd2bf282c5ea97cdcf8155aa5298c12b0d251bb285f20d3e58e",
+                "fbcfe1e3ce4f10b4c67068563724b8afbcc3a2b3494a5edd45cd478b802aac51",
             ),
             (
                 ExportMode::BestEffort,
-                "73caed7f670f05bd7059e5a23d9a7e2a472fd875b651569c124b46ab5881f057",
+                "18647678ef108c4ee9a0eb0110f74eb137d20071f014a6b5c59a1b36ea0b85e6",
             ),
         ] {
-            let bytes = serde_json::to_vec(&compile_spec(
+            let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
                 &nodes,
                 &edges,
                 &flows,
                 mode,
                 &BTreeSet::new(),
-            ))
+            )))
             .unwrap();
             // Frozen native #603 (03d776d) output, with the already-integrated
             // method column, projection stamping and artifact identity seams,
             // plus the test-arrangements (#946) and journeys artifacts; verified-only
             // journeys state that they withhold InferredWeak candidates. User
             // stories render recovered names, ids and provenance as literal text
-            // (#1453), which intentionally changes those bytes.
+            // (#1453), which intentionally changes those bytes, as does
+            // security.md stating "no authentication check recovered" and its
+            // coverage limit (#1820). The endpoint
+            // permission projection (#1787), the pipeline projection (#1818),
+            // the configuration key projection (#1821), the boundary
+            // projection (#1788), the environments projection (#1791), the
+            // curated items
+            // (#1746), the coverage artifacts (#1786) and the fact index
+            // (#1785) are appended after these and hashed apart, so the
+            // frozen bytes still prove the graph artifacts are unchanged.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
+    }
+
+    /// The bundle without the endpoint permission projection (#1787), the
+    /// pipeline projection (#1818), the configuration key projection
+    /// (#1821), the boundary projection (#1788), the environments projection
+    /// (#1791), the curated items, which list a projection the host supplies
+    /// (#1746), the two coverage artifacts, which project stored inventories
+    /// instead of the graph (#1786), and the two fact-index artifacts, which
+    /// list what the others cite (#1785). The ten close the official order;
+    /// the fixture has no endpoint, no pipeline, no environment file, no
+    /// configuration read, no outbound call, no observed client, no channel
+    /// and no Compose file, and a bare compile has no curated projection, so
+    /// none carries an assertion here.
+    fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 10);
+        assert_eq!(
+            appended
+                .iter()
+                .map(|artifact| artifact.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "endpoint-permissions",
+                "pipelines",
+                "configuration",
+                "external",
+                "environments",
+                "curated",
+                "coverage",
+                "coverage-index",
+                "fact-index",
+                "fact-index-json"
+            ]
+        );
+        assert!(
+            appended
+                .iter()
+                .all(|artifact| artifact.assertions.is_empty())
+        );
+        bundle
     }
 
     fn fixture() -> (Vec<Node>, Vec<Edge>, Vec<Flow>) {
@@ -985,9 +1150,22 @@ mod tests {
                 "journeys.md",
                 "rule-evidence.md",
                 "rule-evidence.json",
+                "endpoint-permissions.md",
+                "pipelines.md",
+                "configuration.md",
+                "external.md",
+                "environments.md",
+                "curated.md",
+                "coverage.md",
+                "coverage.json",
+                "fact-index.md",
+                "fact-index.json",
             ]
         );
-        for artifact in &bundle.artifacts {
+        // The coverage artifacts state facts about the run, not graph
+        // assertions, so they carry no provenance block (#1786); the fact
+        // index is that provenance, listed once per fact (#1785).
+        for artifact in &graph_artifacts(bundle.clone()).artifacts {
             assert_eq!(
                 artifact
                     .content
@@ -1486,7 +1664,7 @@ mod tests {
         assert!(
             security
                 .content
-                .contains("Unauthenticated endpoint: GET /admin")
+                .contains("No authentication check recovered: GET /admin")
         );
         assert!(security.content.contains("arn:aws:s3:::orders/*"));
         assert!(security.content.contains("US-0015 / AC-0041"));
@@ -2345,7 +2523,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 16);
+                assert_eq!(full.artifacts.len(), 26);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,
@@ -2414,17 +2592,19 @@ mod tests {
         // projection and identity seams; independently compared before removal.
         // The test-arrangements (#946) and journeys artifacts extend the bundle;
         // verified-only journeys state that they withhold InferredWeak candidates.
+        // security.md states its coverage limit (#1820), which changes its bytes.
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "91a0a3018e0875a671e49e270a881f10050bad35d1d4621c3aa4a051e4bf6045",
+                "b29f43b99f7ba96d3fbf76fbaa78a478c3d21ed393930c905305d991d4026610",
             ),
             (
                 ExportMode::BestEffort,
-                "75e1dfa7cde4953048cd08555c6efbb136f3a590ef71d489506817287e5c34b1",
+                "160c4f667290b2a1429411afea07a38ad2fd6088df3a994cb7e8ed7099269bde",
             ),
         ] {
-            let full = compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new());
+            let full =
+                graph_artifacts(compile_spec(&nodes, &edges, &flows, mode, &BTreeSet::new()));
             assert_eq!(
                 blake3::hash(&serde_json::to_vec(&full).unwrap())
                     .to_hex()

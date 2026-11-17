@@ -24,6 +24,146 @@ pub const STORED_RECEIPT_OMISSION_CAPABILITY: &str = "receipt-store-capacity";
 /// Capability naming symlinks the captured TypeScript selection did not follow (#1229).
 pub const UNFOLLOWED_LINK_CAPABILITY: &str = "symlink-not-followed";
 
+/// Most refused file paths one plugin's [`PluginRefusals::files`] lists
+/// (#1810). The rest are counted in [`PluginRefusals::omitted`].
+pub const MAX_REFUSED_FILES_LISTED: usize = 256;
+/// Most UTF-8 bytes of refused file paths one plugin's
+/// [`PluginRefusals::files`] lists, so long paths cannot grow the inventory
+/// past its stored bound.
+pub const MAX_REFUSED_PATH_BYTES: usize = 32 * 1024;
+
+/// Why the plugin host refused one file's extraction by one plugin (#1810,
+/// AC-0658). The class only: the host's error text is guest-controlled and
+/// is never recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// The plugin emitted a fact the host does not accept.
+    MalformedFact,
+    /// The plugin returned an extraction error or trapped.
+    GuestError,
+    /// The plugin exceeded its fuel, memory or table bound.
+    BoundExceeded,
+}
+
+impl RefusalReason {
+    /// Every class, in report order.
+    pub const ALL: [Self; 3] = [Self::MalformedFact, Self::GuestError, Self::BoundExceeded];
+
+    /// The capability naming files refused for this reason in
+    /// [`RepoCoverage::unsupported`].
+    pub fn capability(self) -> &'static str {
+        match self {
+            Self::MalformedFact => "plugin-malformed-fact",
+            Self::GuestError => "plugin-guest-error",
+            Self::BoundExceeded => "plugin-bound-exceeded",
+        }
+    }
+
+    /// The class as a reader sees it in a stopping reason.
+    fn label(self) -> &'static str {
+        match self {
+            Self::MalformedFact => "malformed fact",
+            Self::GuestError => "guest error",
+            Self::BoundExceeded => "bound exceeded",
+        }
+    }
+
+    fn cause(self) -> &'static str {
+        match self {
+            Self::MalformedFact => "the plugin emitted a fact the host does not accept",
+            Self::GuestError => "the plugin returned an error or trapped",
+            Self::BoundExceeded => "the plugin exceeded its fuel, memory or table bound",
+        }
+    }
+}
+
+/// One file a plugin was refused on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedFile {
+    /// Repo-relative path.
+    pub path: String,
+    /// Why the host refused it.
+    pub reason: RefusalReason,
+}
+
+/// The files one plugin was refused on (#1810, AC-0658). No fact from these
+/// files by this plugin joined the graph, and they are not counted in the
+/// producer's `files`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRefusals {
+    /// Files refused for a malformed fact.
+    pub malformed_fact: u64,
+    /// Files refused because the plugin returned an error or trapped.
+    pub guest_error: u64,
+    /// Files refused because the plugin exceeded a fuel, memory or table bound.
+    pub bound_exceeded: u64,
+    /// Refused files in path order, at most [`MAX_REFUSED_FILES_LISTED`]
+    /// paths and [`MAX_REFUSED_PATH_BYTES`] path bytes.
+    pub files: Vec<RefusedFile>,
+    /// Refused files past those bounds, counted above but not listed.
+    pub omitted: u64,
+}
+
+impl PluginRefusals {
+    /// Every refused file, listed or not.
+    pub fn total(&self) -> u64 {
+        self.malformed_fact
+            .saturating_add(self.guest_error)
+            .saturating_add(self.bound_exceeded)
+    }
+
+    /// Files refused for `reason`.
+    pub fn count(&self, reason: RefusalReason) -> u64 {
+        match reason {
+            RefusalReason::MalformedFact => self.malformed_fact,
+            RefusalReason::GuestError => self.guest_error,
+            RefusalReason::BoundExceeded => self.bound_exceeded,
+        }
+    }
+
+    /// The bounded record of `refused`, or `None` when nothing was refused.
+    /// Sorted by path, so the record does not depend on the order given.
+    fn record(refused: &[(String, RefusalReason)]) -> Option<Self> {
+        if refused.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<&(String, RefusalReason)> = refused.iter().collect();
+        sorted.sort();
+        let mut refusals = Self::default();
+        for (_, reason) in &sorted {
+            match reason {
+                RefusalReason::MalformedFact => refusals.malformed_fact += 1,
+                RefusalReason::GuestError => refusals.guest_error += 1,
+                RefusalReason::BoundExceeded => refusals.bound_exceeded += 1,
+            }
+        }
+        let mut bytes = 0usize;
+        for (path, reason) in sorted {
+            bytes = bytes.saturating_add(path.len());
+            if refusals.files.len() == MAX_REFUSED_FILES_LISTED || bytes > MAX_REFUSED_PATH_BYTES {
+                break;
+            }
+            refusals.files.push(RefusedFile {
+                path: path.clone(),
+                reason: *reason,
+            });
+        }
+        refusals.omitted = refusals.total() - refusals.files.len() as u64;
+        Some(refusals)
+    }
+
+    /// "2 malformed fact, 1 bound exceeded": the classes that occurred.
+    fn by_class(&self) -> String {
+        RefusalReason::ALL
+            .into_iter()
+            .filter(|reason| self.count(*reason) != 0)
+            .map(|reason| format!("{} {}", self.count(reason), reason.label()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Why a recovered fact has no retained primary receipt. Each kind is a tool
 /// limitation named in coverage, never a gap in the system under study.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +284,11 @@ pub struct ProducerCoverage {
     pub inputs: Vec<String>,
     /// Why recovery stopped here, scoped to the repo, revision, layer hints and inputs.
     pub stopping_reason: String,
+    /// Files a gated plugin was refused on (#1810, AC-0658). Absent for
+    /// every other producer and for a plugin with no refusal, so such an
+    /// inventory keeps the bytes it had before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusals: Option<PluginRefusals>,
 }
 
 /// An input whose absence leaves facts at a lower tier than they could reach.
@@ -209,6 +354,18 @@ pub struct ProducerCount {
     pub edges: u64,
 }
 
+/// What one gated plugin read and was refused on in this ingest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginRead {
+    /// Pinned extractor id, as recorded in provenance.
+    pub id: String,
+    /// Files whose extraction succeeded, and the facts they published.
+    pub count: ProducerCount,
+    /// Files the host refused for this plugin, each with its reason class
+    /// (#1810). No fact from them by this plugin joined the graph.
+    pub refused: Vec<(String, RefusalReason)>,
+}
+
 /// One observational producer's declared input and what it could enrich.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
@@ -241,8 +398,9 @@ pub struct CoverageFacts<'a> {
     /// Facts each deterministic producer published, by extractor id. A
     /// producer the catalog names but this map lacks published nothing.
     pub deterministic: Vec<(&'static str, ProducerCount)>,
-    /// Gated plugins that ran, by id, with the facts each published.
-    pub plugins: Vec<(String, ProducerCount)>,
+    /// Gated plugins that ran, with the facts each published and the files
+    /// each was refused on.
+    pub plugins: Vec<PluginRead>,
     /// Observational producers with their declared inputs.
     pub observations: Vec<Observation>,
 }
@@ -272,6 +430,16 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
     (
         crate::schedules::SCHEDULE_EXTRACTOR_ID,
         "scheduled jobs",
+        None,
+    ),
+    (
+        crate::pipelines::PIPELINE_EXTRACTOR_ID,
+        "build and deployment pipeline",
+        None,
+    ),
+    (
+        crate::environments::ENVIRONMENT_EXTRACTOR_ID,
+        "environments and workloads",
         None,
     ),
     // Stitching consumes every layer's event and client-call sites.
@@ -351,21 +519,36 @@ impl RepoCoverage {
                 edges: count.edges,
                 inputs: Vec::new(),
                 stopping_reason,
+                refusals: None,
             });
         }
-        for (plugin, count) in &facts.plugins {
+        for plugin in &facts.plugins {
+            let refusals = PluginRefusals::record(&plugin.refused);
+            let stopping_reason = match &refusals {
+                None => format!("completed over the files its extensions claim in {scope}"),
+                // A refused file is not covered by this plugin, and the row
+                // says so: `files` counts only the files it read.
+                Some(refusals) => format!(
+                    "read {} of the {} files its extensions claim in {scope}; the host refused \
+                     its extraction of {} ({}), and no fact from those files by this plugin \
+                     joined the graph",
+                    plugin.count.files,
+                    plugin.count.files.saturating_add(refusals.total()),
+                    refusals.total(),
+                    refusals.by_class()
+                ),
+            };
             producers.push(ProducerCoverage {
-                id: plugin.clone(),
+                id: plugin.id.clone(),
                 kind: ProducerKind::Deterministic,
                 covers: "gated plugin".into(),
                 state: ProducerState::Ran,
-                files: count.files,
-                nodes: count.nodes,
-                edges: count.edges,
+                files: plugin.count.files,
+                nodes: plugin.count.nodes,
+                edges: plugin.count.edges,
                 inputs: Vec::new(),
-                stopping_reason: format!(
-                    "completed over the files its extensions claim in {scope}"
-                ),
+                stopping_reason,
+                refusals,
             });
         }
         let mut missing_inputs = Vec::new();
@@ -424,6 +607,7 @@ impl RepoCoverage {
                 edges: 0,
                 inputs: observation.declared.clone(),
                 stopping_reason,
+                refusals: None,
             });
         }
         let commit_note = facts
@@ -440,12 +624,54 @@ impl RepoCoverage {
             unsupported: Vec::new(),
             limited: false,
         };
+        coverage.unsupported = coverage.refused_capabilities();
         coverage.refresh_limited();
         coverage
     }
 
+    /// Files gated plugins were refused on, as one not-covered entry per
+    /// reason class (#1810, AC-0658). The entry is what makes the inventory
+    /// limited: a refused file is never read as covered. Derived from the
+    /// producer rows, so it survives [`RepoCoverage::with_unsupported`].
+    fn refused_capabilities(&self) -> Vec<UnsupportedCapability> {
+        RefusalReason::ALL
+            .into_iter()
+            .filter_map(|reason| {
+                let refused = || self.producers.iter().filter_map(|p| p.refusals.as_ref());
+                let occurrences = refused().fold(0u64, |sum, refusals| {
+                    sum.saturating_add(refusals.count(reason))
+                });
+                // A class whose files all fell past the listing bound names
+                // the plugin instead of a path.
+                let first_site = refused()
+                    .flat_map(|refusals| &refusals.files)
+                    .filter(|file| file.reason == reason)
+                    .map(|file| file.path.as_str())
+                    .min()
+                    .or_else(|| {
+                        self.producers
+                            .iter()
+                            .find(|p| p.refusals.as_ref().is_some_and(|r| r.count(reason) != 0))
+                            .map(|producer| producer.id.as_str())
+                    })?;
+                Some(UnsupportedCapability {
+                    capability: reason.capability().into(),
+                    occurrences,
+                    first_site: first_site.to_string(),
+                    reason: format!(
+                        "{occurrences} file(s) were refused for a gated plugin because {}; no \
+                         fact from them by that plugin joined the graph, so that plugin does \
+                         not cover them: a plugin failure, not a system gap",
+                        reason.cause()
+                    ),
+                })
+            })
+            .collect()
+    }
+
     /// Add the constructs no installed producer covers, grouped by uncovered
-    /// language or finding kind in first-seen order.
+    /// language or finding kind in first-seen order, followed by the files
+    /// gated plugins were refused on.
     pub fn with_unsupported(mut self, report: &PreflightReport) -> Self {
         let mut unsupported: Vec<UnsupportedCapability> = Vec::new();
         for finding in &report.unsupported {
@@ -461,15 +687,25 @@ impl RepoCoverage {
                 continue;
             }
             unsupported.push(UnsupportedCapability {
-                reason: format!(
-                    "no installed producer covers {capability}: a tool limitation, \
-                     not a system gap"
-                ),
+                // A pipeline limit (#1790) and an environment limit (#1791)
+                // say what is present and why it was not read; every other
+                // kind keeps the general reason.
+                reason: if crate::pipelines::is_limit_kind(&finding.kind)
+                    || crate::environments::is_limit_kind(&finding.kind)
+                {
+                    format!("{}: a tool limitation, not a system gap", finding.message)
+                } else {
+                    format!(
+                        "no installed producer covers {capability}: a tool limitation, \
+                         not a system gap"
+                    )
+                },
                 capability,
                 occurrences: 1,
                 first_site: format!("{}:{}", finding.path, finding.line),
             });
         }
+        unsupported.extend(self.refused_capabilities());
         self.unsupported = unsupported;
         self.refresh_limited();
         self

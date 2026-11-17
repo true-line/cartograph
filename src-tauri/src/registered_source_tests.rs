@@ -34,6 +34,7 @@ pub(crate) fn app_state(app_data: &Path) -> AppState {
         extraction_caches: Mutex::new(ExtractionCaches::default()),
         embedding_cache: None,
         knowledge_overlay: None,
+        curated_settled: Arc::default(),
         sources: Arc::new(Mutex::new(sources)),
         primary_sources: primary_source::PrimarySourceStore::open(app_data).unwrap(),
         metrics: Mutex::new(metrics::MetricsStore::open(&state_path).unwrap()),
@@ -1838,6 +1839,1864 @@ fn captured_ingest_skips_symlinks_and_names_them_in_coverage() {
     assert!(inventory.limited);
 }
 
+// AC-0592 (#1786): the export of a real ingest carries the coverage
+// artifacts. A tree with one file left unread (a symlink) and one language no
+// producer covers lists both with their recorded reasons, carries the stored
+// inventory hash, is the same in both modes and is byte-identical when
+// exported again.
+#[cfg(unix)]
+#[test]
+fn export_carries_the_stored_coverage_inventory_in_both_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("AGENTS.md"), "notes").unwrap();
+    std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
+    std::fs::write(root.join("report.rb"), "puts 'report'\n").unwrap();
+    std::os::unix::fs::symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let stored = state.graph.lock().unwrap().coverage_records().unwrap();
+    assert_eq!(stored.len(), 1);
+    let stored = &stored[0];
+    let export = |mode| {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap()
+    };
+    let artifact = |bundle: &spec::SpecBundle, id: &str| {
+        bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == id)
+            .cloned()
+            .unwrap()
+    };
+    let verified = export(spec::ExportMode::VerifiedOnly);
+    let markdown = artifact(&verified, "coverage");
+    let index = artifact(&verified, "coverage-index");
+    assert_eq!(markdown.file_name, "coverage.md");
+    assert_eq!(index.file_name, "coverage.json");
+
+    // Both limits are listed with the reason the inventory recorded.
+    assert!(
+        markdown.content.contains(
+            "| Ruby | 1 | `report.rb:1` | no installed producer covers Ruby: a tool \
+             limitation, not a system gap |"
+        ),
+        "{}",
+        markdown.content
+    );
+    assert!(
+        markdown.content.contains(
+            "| symlink-not-followed | 1 | `CLAUDE.md` | 1 symlink(s) in the selected tree were \
+             not followed or read; sources they point to are not covered unless also present in \
+             the tree |"
+        ),
+        "{}",
+        markdown.content
+    );
+
+    // The hash is the stored inventory's, and the index carries that body.
+    assert_eq!(stored.inventory_hash, stored.record.inventory_hash());
+    assert!(
+        markdown
+            .content
+            .contains(&format!("- Inventory hash: `{}`", stored.inventory_hash))
+    );
+    let read: serde_json::Value = serde_json::from_str(&index.content).unwrap();
+    let listed = &read["repositories"][0];
+    assert_eq!(read["inventories"], 1);
+    assert_eq!(listed["repo"], stored.record.repo_key.as_str());
+    assert_eq!(listed["inventory_hash"], stored.inventory_hash.as_str());
+    assert_eq!(
+        listed["inventory"],
+        serde_json::from_str::<serde_json::Value>(&stored.record.inventory_json).unwrap()
+    );
+    assert!(index.content.contains(&stored.record.inventory_json));
+
+    // A second export is byte-identical, and mode filters nothing.
+    assert_eq!(export(spec::ExportMode::VerifiedOnly), verified);
+    let best = export(spec::ExportMode::BestEffort);
+    assert_eq!(artifact(&best, "coverage"), markdown);
+    assert_eq!(artifact(&best, "coverage-index"), index);
+    // The single-artifact read used for copy and save returns the same bytes.
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    for (id, expected) in [("coverage", &markdown), ("coverage-index", &index)] {
+        assert_eq!(
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                spec::ExportMode::BestEffort,
+                id
+            )
+            .unwrap(),
+            expected
+        );
+    }
+}
+
+// AC-0657 (#1814): an MCP read of `coverage` and `coverage-index` is
+// supplied with the inventories of the session's own bounded read. On a real
+// ingest with one language no producer covers it returns that language's
+// entry, not the "not supplied" sentence, and is byte-equal to the artifact
+// the desktop export produces from the same store state. An inventory the
+// session's qualification holds as stale is stated to be stale for its
+// repository; it is neither read as current nor left out.
+#[cfg(unix)]
+#[test]
+fn mcp_coverage_read_equals_the_desktop_export_and_states_a_stale_inventory() {
+    use crate::mcp_reads::{ReadSession, artifacts::ArtifactCompilation};
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
+    std::fs::write(root.join("report.rb"), "puts 'report'\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let stored = state.graph.lock().unwrap().coverage_records().unwrap();
+    assert_eq!(stored.len(), 1);
+    let stored = &stored[0];
+    let desktop = |id: &str| {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::build_spec_artifact(&graph, &decisions, None, spec::ExportMode::VerifiedOnly, id)
+            .unwrap()
+    };
+    let read = |session: &ReadSession, id: &str| {
+        let compiled = session
+            .compile_artifact(
+                id,
+                flowtracer::TraceLimits {
+                    max_flows: 64,
+                    max_hops: 512,
+                    max_output_bytes: 1024 * 1024,
+                },
+                spec::SelectedCompileLimits {
+                    max_bytes: 1024 * 1024,
+                    adr: spec::AdrLimits {
+                        max_rows: 1024,
+                        max_output_bytes: 1024 * 1024,
+                    },
+                },
+            )
+            .unwrap();
+        match compiled {
+            ArtifactCompilation::Produced(compiled) => compiled.artifact().clone(),
+            ArtifactCompilation::Limited { .. } => panic!("the fixture fits"),
+        }
+    };
+    let acquire = |scope: &dyn Fn() -> Vec<context_hub::coverage::ScopedRepo>| {
+        ReadSession::acquire(
+            &state.graph,
+            &state.decisions,
+            || Ok(scope()),
+            core_graph::SnapshotReadLimits::default(),
+            core_graph::coverage::CoverageReadLimits::default(),
+            spec::ExportMode::VerifiedOnly,
+        )
+        .unwrap()
+    };
+
+    // The scope the desktop qualifies with: the registered source under its
+    // current plugin basis, so the stored inventory is current.
+    let current = || crate::context::coverage_scope(app.handle(), &state).unwrap();
+    let session = acquire(&current);
+    let markdown = read(&session, "coverage");
+    assert!(
+        markdown.content.contains(
+            "| Ruby | 1 | `report.rb:1` | no installed producer covers Ruby: a tool \
+             limitation, not a system gap |"
+        ),
+        "{}",
+        markdown.content
+    );
+    assert!(!markdown.content.contains("No stored coverage inventory"));
+    assert_eq!(markdown, desktop("coverage"));
+    let index = read(&session, "coverage-index");
+    assert!(index.content.contains(&stored.record.inventory_json));
+    assert_eq!(index, desktop("coverage-index"));
+    // The read's basis already binds the inventories.
+    assert!(
+        session
+            .basis()
+            .coverage_id
+            .starts_with("coverage-context-v1:")
+    );
+
+    // The same store, read by a session whose plugin basis has moved: the
+    // qualification holds the inventory as stale.
+    let moved = || {
+        let mut scope = current();
+        scope[0].config_hash = "another plugin basis".into();
+        scope
+    };
+    let stale = acquire(&moved);
+    assert_ne!(stale.basis().coverage_id, session.basis().coverage_id);
+    assert_ne!(stale.basis_id().unwrap(), session.basis_id().unwrap());
+    let markdown = read(&stale, "coverage");
+    assert!(
+        markdown.content.contains(&format!(
+            "| {} | unknown | `{}` | unknown: the stored inventory is stale (compared: \
+             registration, plugins) |",
+            stored.record.repo_key, stored.inventory_hash
+        )),
+        "{}",
+        markdown.content
+    );
+    assert!(markdown.content.contains("- The stored inventory is stale"));
+    assert!(!markdown.content.contains("No stored coverage inventory"));
+    assert!(!markdown.content.contains("report.rb"));
+    let index: serde_json::Value =
+        serde_json::from_str(&read(&stale, "coverage-index").content).unwrap();
+    assert_eq!(index["stale"], 1);
+    let listed = &index["repositories"][0];
+    assert_eq!(listed["repo"], stored.record.repo_key.as_str());
+    assert_eq!(listed["inventory_hash"], stored.inventory_hash.as_str());
+    assert_eq!(
+        listed["stale"]["compared"],
+        json!(["registration", "plugins"])
+    );
+    assert!(listed["inventory"].is_null());
+    // A repository that is no longer registered is stale the same way.
+    let unregistered = acquire(&Vec::new);
+    assert!(
+        read(&unregistered, "coverage")
+            .content
+            .contains("- The stored inventory is stale")
+    );
+}
+
+// AC-0595 (#1785, ADR-0058): the export of a real ingest carries the fact and
+// evidence index. Every assertion of every exported artifact has a row, a
+// verified-only export holds no InferredWeak row, a second export is
+// byte-identical and the single-artifact read returns the same bytes.
+#[test]
+fn export_carries_a_fact_index_resolving_every_assertion() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(
+        root.join("app.ts"),
+        "import express from \"express\";\n\
+         const app = express();\n\
+         function listOrders(req, res) { res.json([]); }\n\
+         app.get(\"/orders\", listOrders);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"shop","dependencies":{"express":"^4.19.0"},"scripts":{"build":"tsc"}}"#,
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let artifact = |id: &str| {
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == id)
+                .unwrap()
+        };
+        let (markdown, json) = (artifact("fact-index"), artifact("fact-index-json"));
+        assert_eq!(markdown.file_name, "fact-index.md");
+        assert_eq!(json.file_name, "fact-index.json");
+        assert!(markdown.assertions.is_empty() && json.assertions.is_empty());
+
+        let index: spec::FactIndex = serde_json::from_str(&json.content).unwrap();
+        assert_eq!(index.mode, mode);
+        assert!(bundle.assertion_count > 0, "the ingest recovered facts");
+        assert!(!index.rows.is_empty());
+        // Every cited fact is a row with its artifact, and nothing else is.
+        let mut cited = std::collections::BTreeSet::new();
+        for row in &index.rows {
+            assert_eq!(row.citation_id, spec::citation_id(&row.fact));
+            let subject = match &row.fact {
+                core_graph::FactKey::Node { id } => id.clone(),
+                core_graph::FactKey::Edge {
+                    source,
+                    label,
+                    destination,
+                } => format!("{source} {label} {destination}"),
+            };
+            for id in &row.cited_by {
+                assert!(
+                    artifact(id)
+                        .assertions
+                        .iter()
+                        .any(|assertion| assertion.subject_id == subject),
+                    "{id} states {subject}"
+                );
+                cited.insert((id.clone(), subject.clone()));
+            }
+            assert!(
+                markdown
+                    .content
+                    .contains(&format!("| {} |", row.citation_id))
+            );
+            if mode == spec::ExportMode::VerifiedOnly {
+                assert!(row.records.iter().all(|record| !record.inferred_weak));
+            }
+        }
+        let stated: std::collections::BTreeSet<_> = bundle
+            .artifacts
+            .iter()
+            .flat_map(|artifact| {
+                artifact
+                    .assertions
+                    .iter()
+                    .map(|assertion| (artifact.id.clone(), assertion.subject_id.clone()))
+            })
+            .collect();
+        assert_eq!(cited, stated);
+        spec::check_citations(
+            &index,
+            index.rows.iter().map(|row| row.citation_id.as_str()),
+        )
+        .unwrap();
+        assert!(spec::check_citations(&index, ["F-0000000000000000"]).is_err());
+
+        // A second export is byte-identical, as is the single-artifact read.
+        assert_eq!(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
+            bundle
+        );
+        for expected in [markdown, json] {
+            assert_eq!(
+                &crate::build_spec_artifact(
+                    &graph,
+                    &decisions,
+                    Some(&crate::curated::CuratedReview::default()),
+                    mode,
+                    &expected.id
+                )
+                .unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+// AC-0599 (#1787): the export of a real ingest carries the endpoint
+// permission projection. A Flask route behind `login_required` lists the
+// recovered guard with its span, a Flask route with none is not in that
+// table, and an Express route, for which no permission site is recovered, is
+// under the coverage note only. The text never states that an endpoint has
+// no check, every assertion has a fact-index row, and a second export and
+// the single-artifact read return the same bytes.
+#[test]
+fn export_projects_ingested_endpoints_against_permission_sites() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let flask = "from flask import Flask, jsonify\n\
+         from flask_login import login_required\n\
+         \n\
+         app = Flask(__name__)\n\
+         \n\
+         @app.route(\"/me\")\n\
+         @login_required\n\
+         def me():\n    return jsonify(ok=True)\n\
+         \n\
+         @app.route(\"/health\")\n\
+         def health():\n    return jsonify(ok=True)\n";
+    std::fs::write(root.join("app.py"), flask).unwrap();
+    std::fs::write(
+        root.join("server.ts"),
+        "import express from \"express\";\n\
+         const app = express();\n\
+         function listOrders(req, res) { res.json([]); }\n\
+         app.get(\"/orders\", listOrders);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"shop","dependencies":{"express":"^4.19.0"}}"#,
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let guard = flask.find("@login_required").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "endpoint-permissions")
+            .unwrap();
+        assert_eq!(artifact.file_name, "endpoint-permissions.md");
+        let content = &artifact.content;
+        let section = |heading: &str| {
+            let body = &content[content.find(&format!("\n## {heading}\n")).unwrap() + 1..];
+            body[1..].find("\n## ").map_or(body, |end| &body[..=end])
+        };
+        let row = |heading: &str, endpoint: &str| {
+            section(heading)
+                .lines()
+                .find(|line| line.starts_with(&format!("| {endpoint} |")))
+        };
+        const SITED: &str = "Endpoints with recovered permission sites";
+        const NONE: &str = "Endpoints with none recovered";
+        const PARTIAL: &str = "Endpoints whose handler path is partial";
+        const OUTSIDE: &str = "Coverage note: endpoints outside permission-site recovery";
+
+        let guarded = row(SITED, "GET /me").expect("the guarded route lists its site");
+        assert!(guarded.contains("guard: flask\\_login.login\\_required"));
+        assert!(guarded.contains(&format!(
+            "app.py bytes {guard}..{}",
+            guard + "@login_required".len()
+        )));
+        assert!(guarded.contains("| Deterministic | Confirmed |"));
+        for other in [NONE, PARTIAL, OUTSIDE] {
+            assert!(row(other, "GET /me").is_none(), "{other}");
+        }
+        assert!(row(SITED, "GET /health").is_none());
+        assert!(row(OUTSIDE, "GET /health").is_none());
+        let open = row(NONE, "GET /health").expect("the route with no guard: none recovered");
+        assert!(open.contains("| read: 1 facts, no unresolved hop |"));
+        assert!(row(PARTIAL, "GET /health").is_none());
+        assert!(row(OUTSIDE, "GET /orders").is_some());
+        for table in [SITED, NONE, PARTIAL] {
+            assert!(row(table, "GET /orders").is_none(), "{table}");
+        }
+        let text = content.to_lowercase();
+        assert!(!text.contains("unauthenticated") && !text.contains("unprotected"));
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        assert!(!artifact.assertions.is_empty());
+        for assertion in &artifact.assertions {
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "endpoint-permissions")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "endpoint-permissions"
+            )
+            .unwrap(),
+            artifact
+        );
+    }
+}
+
+// AC-0650 (#1818): the export of a real ingest carries the pipeline
+// projection. A workflow's jobs are listed in dependency order against their
+// declared order, with steps in declared order and spans; a `Containerfile`
+// stage that mounts from an earlier stage is ordered after it; GitLab CI and
+// a Dockerfile with a heredoc are listed as present and not read, from the
+// stored coverage inventory. Every assertion has a fact-index row, and a
+// second export and the single-artifact read return the same bytes.
+#[test]
+fn export_projects_ingested_pipelines_in_dependency_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let workflow = "name: Deploy\n\
+         on:\n  push:\n    branches: [main]\n\
+         jobs:\n\
+         \x20 deploy:\n    needs: [build]\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./deploy.sh\n\
+         \x20 build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: make build\n";
+    std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    std::fs::write(root.join(".github/workflows/deploy.yml"), workflow).unwrap();
+    std::fs::write(
+        root.join("Containerfile"),
+        "FROM golang:1.23 AS deps\nRUN go mod download\nFROM scratch\n\
+         RUN --mount=type=bind,from=deps,target=/deps true\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("docker")).unwrap();
+    std::fs::write(
+        root.join("docker/legacy.dockerfile"),
+        "FROM alpine\nRUN <<EOF\ntrue\nEOF\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitlab-ci.yml"), "build:\n  script: make\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let build = workflow.find("build:\n").unwrap();
+    let checkout = workflow.find("uses: actions/checkout@v4").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "pipelines")
+            .unwrap();
+        assert_eq!(artifact.file_name, "pipelines.md");
+        let content = &artifact.content;
+        let row = |start: &str| {
+            content
+                .lines()
+                .find(|line| line.starts_with(start))
+                .unwrap_or_else(|| panic!("no row starting {start:?} in:\n{content}"))
+        };
+        assert!(content.contains("Pipelines: 2. Triggers: 1. Jobs: 4, of which not ordered: 0."));
+
+        // Declared deploy then build; build is needed, so it is first.
+        let first = row("| 1 | build | job | 1 | — |");
+        assert!(first.contains("| Deterministic | Confirmed |"));
+        assert!(first.contains(&format!("deploy.yml bytes {build}..")));
+        row("| 2 | deploy | job | 0 | build (via needs) |");
+        let step = row("| build | 0 | uses | uses: actions/checkout@v4 |");
+        assert!(step.contains(&format!("deploy.yml bytes {checkout}..")));
+        row("| build | 1 | run | run: make build |");
+        row("| deploy | 0 | run | run: ./deploy.sh |");
+        row("| 0 | push | filters: branches: \\[main\\] |");
+        // The Containerfile is read, and the mount is a stage relation.
+        row("| 1 | stage-0 | stage | 0 | — |");
+        row("| 2 | stage-1 | stage | 1 | stage-0 (via mount-from) |");
+
+        let unread = &content[content.find("\n## Files present and not read\n").unwrap()..];
+        let unread = &unread[..unread.find("\n## Coverage note").unwrap()];
+        let listed = |what: &str| {
+            unread
+                .lines()
+                .find(|line| line.contains(&format!("| {what} | 1 |")))
+                .unwrap_or_else(|| panic!("{what} is listed in:\n{unread}"))
+        };
+        assert!(
+            listed("GitLab CI configuration")
+                .contains("| .gitlab-ci.yml:1 | GitLab CI configuration is present and not read")
+        );
+        assert!(
+            listed("GitHub Actions workflow or Dockerfile that could not be read exactly")
+                .contains(
+                    "| docker/legacy.dockerfile:1 | Dockerfile is present and its steps were \
+                     not recovered: Dockerfile uses a heredoc"
+                )
+        );
+        assert!(unread.contains("Stored inventories read: 1."));
+        assert!(!content.contains("legacy.dockerfile bytes"));
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        assert!(!artifact.assertions.is_empty());
+        for assertion in &artifact.assertions {
+            assert_eq!(
+                assertion.provenance.confidence_tier,
+                core_prov::ConfidenceTier::Confirmed
+            );
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "pipelines")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "pipelines"
+            )
+            .unwrap(),
+            artifact
+        );
+    }
+}
+
+// AC-0661 (#1791, ADR-0070, SPEC-14): the export of a real ingest carries
+// the environments projection. Two Compose files are two environments shown
+// by path, neither named from its path; the workload both declare is listed
+// once per declaration with the properties that differ and both spans; an
+// environment file that names an environment only by its file name is a Gap
+// with no span and no value; a Kubernetes manifest of a kind that is not
+// read is named in the stored coverage inventory, by kind, as present and
+// not read (AC-0662). The reader's facts add no hop
+// to any flow and nothing to the topology map, and the toolchain reader's
+// Compose fact is still there. Every assertion has a fact-index row, a
+// second export and the single-artifact read return the same bytes, a
+// second ingest of the same tree gives the same graph content hash, and a
+// name-only Gap leaves the graph with its file.
+#[test]
+fn export_projects_ingested_environments() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let base = "services:\n\
+         \x20 web:\n    image: shop/web:1\n    ports:\n      - \"8080:80\"\n    environment:\n      \
+         - SESSION_KEY=hunter2-sentinel\n    depends_on:\n      - db\n\
+         \x20 db:\n    image: postgres:16\n";
+    let prod = "services:\n\
+         \x20 web:\n    image: shop/web:2\n    ports:\n      - \"443:8443\"\n    environment:\n      \
+         SESSION_KEY: hunter2-sentinel\n";
+    std::fs::write(root.join("docker-compose.yml"), base).unwrap();
+    std::fs::write(root.join("docker-compose.prod.yml"), prod).unwrap();
+    std::fs::write(root.join("staging.env"), "SESSION_KEY=hunter2-sentinel\n").unwrap();
+    std::fs::create_dir_all(root.join("k8s")).unwrap();
+    std::fs::write(
+        root.join("k8s/service.yaml"),
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n",
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let ingest = || {
+        let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+        let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+        run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+    };
+    ingest();
+    let repo = registered.repo_key.as_str();
+    // As the document writes it: literal text, so `_` is escaped.
+    let shown = repo.replace('_', "\\_");
+    let hashes = || {
+        let graph = state.graph.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&*graph).unwrap(),
+        )
+    };
+    let first = hashes();
+
+    {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        let workload = |file: &str, name: &str| format!("workload:{repo}@{file}#{name}");
+        let web = nodes
+            .iter()
+            .find(|node| node.id == workload("docker-compose.yml", "web"))
+            .unwrap();
+        assert_eq!(web.label, "Workload");
+        assert_eq!(web.props["prov"]["extractor_id"], "t0.environments");
+        assert_eq!(
+            web.props["environment_keys"],
+            serde_json::json!(["SESSION_KEY"])
+        );
+        // No value of an environment key is anywhere in the graph.
+        assert!(!serialized(&(&nodes, &edges)).contains("hunter2-sentinel"));
+        assert!(edges.iter().any(|edge| {
+            edge.src == workload("docker-compose.yml", "web")
+                && edge.label == "DEPENDS_ON"
+                && edge.dst == workload("docker-compose.yml", "db")
+        }));
+        // The toolchain reader's Compose fact is still recorded.
+        let tool = nodes
+            .iter()
+            .find(|node| node.id == format!("tool:{repo}@docker-compose.yml"))
+            .unwrap();
+        assert_eq!(tool.props["display"], "Docker Compose");
+        assert_eq!(
+            tool.props["settings"]["services"],
+            serde_json::json!(["web", "db"])
+        );
+        // No flow and no topology line comes from a workload.
+        assert!(flowtracer::trace(&nodes, &edges).is_empty());
+        assert!(!spec::topology_mermaid(&nodes, &edges).contains("workload"));
+
+        let staging = format!("gap:environment:{repo}@staging.env");
+        let web_base = base.find("image: shop/web:1").unwrap();
+        let web_prod = prod.find("image: shop/web:2").unwrap();
+        for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+            let bundle = crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode,
+            )
+            .unwrap();
+            let artifact = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "environments")
+                .unwrap();
+            assert_eq!(artifact.file_name, "environments.md");
+            let content = &artifact.content;
+            let row = |start: &str| {
+                content
+                    .lines()
+                    .find(|line| line.starts_with(start))
+                    .unwrap_or_else(|| panic!("no row starting {start:?} in:\n{content}"))
+            };
+            assert!(content.contains(
+                "Environments: 2. Workloads: 3. Environments named only by a file name: 1. \
+                 Other items not established: 0."
+            ));
+            // Two environments, by path; neither is named.
+            let listed = row(&format!(
+                "| {shown} | docker-compose.prod.yml | none stated | compose | 1 | Deterministic \
+                 | Confirmed |"
+            ));
+            assert!(listed.contains(&format!(
+                "docker-compose.prod.yml bytes {}..{}",
+                0,
+                "services".len()
+            )));
+            row(&format!(
+                "| {shown} | docker-compose.yml | none stated | compose | 2 | Deterministic | \
+                 Confirmed |"
+            ));
+            assert!(!content.contains("| prod |"));
+            assert!(!content.contains("| staging |"));
+            // The workload both declare: each declaration, what differs, and
+            // each span. Environment key names are the same and not listed.
+            let declared = &content[content
+                .find("\n## Declared in more than one environment\n")
+                .unwrap()
+                ..content.find("\n## Not established\n").unwrap()];
+            let both: Vec<&str> = declared
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web |")))
+                .collect();
+            assert_eq!(both.len(), 2, "{declared}");
+            assert!(both[0].contains(
+                "| docker-compose.prod.yml | image: shop/web:2; ports: 443:8443; dependencies: \
+                 not stated |"
+            ));
+            assert!(both[0].contains(&format!("docker-compose.prod.yml bytes {web_prod}..")));
+            assert!(both[1].contains(
+                "| docker-compose.yml | image: shop/web:1; ports: 8080:80; dependencies: db |"
+            ));
+            assert!(both[1].contains(&format!("docker-compose.yml bytes {web_base}..")));
+            assert!(!declared.contains("| db |"));
+            assert!(!content.to_lowercase().contains("overrid"));
+            // The name-only environment file: a Gap, no span, no value.
+            let gap = row(&format!(
+                "| {shown} | staging.env | — | environment named only by a file name |"
+            ));
+            assert!(gap.ends_with("| Deterministic | Gap | none stored for an environment file |"));
+            assert!(!content.contains("hunter2-sentinel"));
+            // Nowhere is an environment labelled with its path.
+            assert!(!content.contains("Environment: docker-compose"));
+            assert!(content.contains(&format!("| Environment: env:{shown}@docker-compose.yml |")));
+
+            let index: spec::FactIndex = serde_json::from_str(
+                &bundle
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.id == "fact-index-json")
+                    .unwrap()
+                    .content,
+            )
+            .unwrap();
+            // 2 environments, 3 workloads, 3 DECLARES, 1 DEPENDS_ON, 1 Gap.
+            assert_eq!(artifact.assertions.len(), 2 + 3 + 3 + 1 + 1);
+            for assertion in &artifact.assertions {
+                assert!(
+                    index.rows.iter().any(|row| {
+                        row.cited_by.iter().any(|by| by == "environments")
+                            && match &row.fact {
+                                core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                                core_graph::FactKey::Edge {
+                                    source,
+                                    label,
+                                    destination,
+                                } => {
+                                    format!("{source} {label} {destination}")
+                                        == assertion.subject_id
+                                }
+                            }
+                    }),
+                    "{} has a fact-index row",
+                    assertion.subject_id
+                );
+            }
+            assert!(
+                artifact
+                    .assertions
+                    .iter()
+                    .any(|assertion| assertion.subject_id == staging
+                        && assertion.provenance.evidence.is_empty())
+            );
+            assert_eq!(
+                crate::build_spec_bundle(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    mode
+                )
+                .unwrap(),
+                bundle
+            );
+            assert_eq!(
+                &crate::build_spec_artifact(
+                    &graph,
+                    &decisions,
+                    Some(&crate::curated::CuratedReview::default()),
+                    mode,
+                    "environments"
+                )
+                .unwrap(),
+                artifact
+            );
+
+            // The Kubernetes manifest is in the stored coverage inventory,
+            // under its kind.
+            let coverage = &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "coverage")
+                .unwrap()
+                .content;
+            assert!(coverage.contains("t0.environments"), "{coverage}");
+            assert!(
+                coverage.contains("kubernetes-manifest:Service"),
+                "{coverage}"
+            );
+            assert!(
+                coverage.contains(
+                    "manifest is present and not read: no installed producer recovers \
+                     environments from it"
+                ),
+                "{coverage}"
+            );
+        }
+    }
+
+    // The same tree again: the same graph.
+    ingest();
+    assert_eq!(hashes(), first);
+    // And in a fresh graph, as the determinism gate ingests it.
+    let fresh = || {
+        let extraction = extract_tree(
+            &root,
+            repo,
+            "workdir",
+            &[],
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        load_into_graph(&mut graph, &extraction, repo, &root, "workdir").unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&graph).unwrap(),
+        )
+    };
+    assert_eq!(fresh(), fresh());
+
+    // The Gap has no evidence span to be owned by; it still leaves the graph
+    // when its file does.
+    std::fs::remove_file(root.join("staging.env")).unwrap();
+    ingest();
+    let (nodes, _) = state.graph.lock().unwrap().read_snapshot().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !node.id.starts_with("gap:environment:"))
+    );
+    assert!(nodes.iter().any(|node| node.label == "Environment"));
+}
+
+// AC-0662 (#1791, ADR-0070 decision 8, SPEC-14 increment 2): the issue's
+// acceptance tree through a real ingest and export. A Compose file is one
+// environment; a kustomize base and its two overlays are three, each listing
+// the base workload with its span, the overlays through the base and each
+// with what its own patch states; an environment is named only where its
+// file states a namespace; a bare `staging.env` is a Gap and not an
+// environment. No value reaches the graph or the document, every assertion
+// has a fact-index row, a second ingest gives the same graph content hash,
+// and the facts leave the graph with their files.
+#[test]
+fn export_projects_ingested_kustomize_environments() {
+    const SENTINEL: &str = "hunter2-sentinel";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let compose = format!(
+        "services:\n  web:\n    image: shop/web:1\n    environment:\n      - \
+         SESSION_KEY={SENTINEL}\n    depends_on:\n      - db\n  db:\n    image: postgres:16\n"
+    );
+    let base = "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - \
+                deployment.yaml\n  - service.yaml\n";
+    let deployment = format!(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 1\n  \
+         template:\n    spec:\n      containers:\n        - name: web\n          image: \
+         shop/web:1\n          ports:\n            - containerPort: 8080\n          env:\n            \
+         - name: SESSION_KEY\n              value: {SENTINEL}\n          envFrom:\n            - \
+         secretRef:\n                name: web-secrets\n"
+    );
+    let staging = "namespace: shop-staging\nresources:\n  - ../../base\npatches:\n  - path: \
+                   patch.yaml\nimages:\n  - name: shop/web\n    newTag: 2-rc\n";
+    let staging_patch = format!(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 2\n  \
+         template:\n    spec:\n      containers:\n        - name: web\n          env:\n            - \
+         name: LOG_LEVEL\n              value: {SENTINEL}\n"
+    );
+    let prod = "resources:\n  - ../../base\npatchesStrategicMerge:\n  - patch.yaml\nnamePrefix: \
+                live-\n";
+    let prod_patch = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  \
+                      replicas: 5\n";
+    let files: [(&str, &str); 9] = [
+        ("docker-compose.yml", &compose),
+        ("k8s/base/kustomization.yaml", base),
+        ("k8s/base/deployment.yaml", &deployment),
+        (
+            "k8s/base/service.yaml",
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n",
+        ),
+        ("k8s/overlays/staging/kustomization.yaml", staging),
+        ("k8s/overlays/staging/patch.yaml", &staging_patch),
+        ("k8s/overlays/prod/kustomization.yaml", prod),
+        ("k8s/overlays/prod/patch.yaml", prod_patch),
+        ("staging.env", "SESSION_KEY=hunter2-sentinel\n"),
+    ];
+    for (path, body) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let ingest = || {
+        let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+        let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+        run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+    };
+    ingest();
+    let repo = registered.repo_key.as_str();
+    let shown = repo.replace('_', "\\_");
+    let hashes = || {
+        let graph = state.graph.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&*graph).unwrap(),
+        )
+    };
+    let first = hashes();
+    let web = format!("workload:{repo}@k8s/base/deployment.yaml#0:Deployment/web");
+    let environment = |path: &str| format!("env:{repo}@{path}");
+
+    {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        // Four environments and no fifth: `staging.env` is a Gap.
+        let mut environments: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node.label == "Environment")
+            .map(|node| node.id.as_str())
+            .collect();
+        environments.sort_unstable();
+        assert_eq!(
+            environments,
+            [
+                environment("docker-compose.yml"),
+                environment("k8s/base/kustomization.yaml"),
+                environment("k8s/overlays/prod/kustomization.yaml"),
+                environment("k8s/overlays/staging/kustomization.yaml"),
+            ]
+        );
+        let gap = nodes
+            .iter()
+            .find(|node| node.id == format!("gap:environment:{repo}@staging.env"))
+            .unwrap();
+        assert_eq!(gap.label, "Gap");
+        assert_eq!(gap.props["kind"], "name-only-environment");
+        // One Kubernetes workload: the patch files are read only as patches.
+        let workloads: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node.label == "Workload" && node.props["kind"] == "k8s-deployment")
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(workloads, [web.as_str()]);
+        for path in [
+            "k8s/base/kustomization.yaml",
+            "k8s/overlays/prod/kustomization.yaml",
+            "k8s/overlays/staging/kustomization.yaml",
+        ] {
+            assert!(
+                edges.iter().any(|edge| edge.src == environment(path)
+                    && edge.label == "DECLARES"
+                    && edge.dst == web),
+                "{path}"
+            );
+        }
+        let patched: Vec<&str> = edges
+            .iter()
+            .filter(|edge| edge.label == "PATCHES")
+            .map(|edge| edge.src.as_str())
+            .collect();
+        assert_eq!(patched.len(), 2);
+        // No value is anywhere in the graph.
+        assert!(!serialized(&(&nodes, &edges)).contains(SENTINEL));
+        // No flow and no topology line comes from the new facts.
+        assert!(flowtracer::trace(&nodes, &edges).is_empty());
+        assert!(!spec::topology_mermaid(&nodes, &edges).contains("workload"));
+
+        let span = |text: &str, part: &str| {
+            let start = text.find(part).unwrap();
+            format!("bytes {start}..{}", start + part.len())
+        };
+        for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+            let bundle = crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode,
+            )
+            .unwrap();
+            let artifact = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "environments")
+                .unwrap();
+            let content = &artifact.content;
+            let row = |start: &str| {
+                content
+                    .lines()
+                    .find(|line| line.starts_with(start))
+                    .unwrap_or_else(|| panic!("no row starting {start:?} in:\n{content}"))
+            };
+            assert!(content.contains(
+                "Environments: 4. Workloads: 3. Environments named only by a file name: 1. \
+                 Other items not established: 1. Workloads no environment declares: 0."
+            ));
+            // Each environment by its path, with its span; only the one
+            // that states a namespace has a name.
+            let listed = row(&format!(
+                "| {shown} | docker-compose.yml | none stated | compose | 2 | Deterministic | \
+                 Confirmed |"
+            ));
+            assert!(listed.contains("docker-compose.yml bytes 0..8 @"));
+            let listed = row(&format!(
+                "| {shown} | k8s/base/kustomization.yaml | none stated | kustomize | 1 | \
+                 Deterministic | Confirmed |"
+            ));
+            assert!(listed.contains(&span(base, "resources")));
+            assert!(listed.ends_with(
+                "| included by k8s/overlays/prod/kustomization.yaml, \
+                 k8s/overlays/staging/kustomization.yaml |"
+            ));
+            let listed = row(&format!(
+                "| {shown} | k8s/overlays/prod/kustomization.yaml | none stated | kustomize | 1 | \
+                 Deterministic | Confirmed |"
+            ));
+            assert!(listed.contains(&span(prod, "resources")));
+            assert!(listed.contains("sets `namePrefix`"));
+            let listed = row(&format!(
+                "| {shown} | k8s/overlays/staging/kustomization.yaml | shop-staging | kustomize | \
+                 1 | Deterministic | Confirmed |"
+            ));
+            assert!(listed.contains(&span(staging, "resources")));
+            assert!(!content.contains("| prod |"));
+            assert!(!content.contains("| staging |"));
+
+            // Each environment lists its workloads, each with its span.
+            let compose_web = compose.find("image: shop/web:1").unwrap();
+            assert!(
+                row(&format!(
+                    "| {shown} | docker-compose.yml | web | shop/web:1 |"
+                ))
+                .contains(&format!("docker-compose.yml bytes {compose_web}.."))
+            );
+            row(&format!(
+                "| {shown} | docker-compose.yml | db | postgres:16 |"
+            ));
+            let document = format!("k8s/base/deployment.yaml bytes 0..{} @", deployment.len());
+            for (path, through) in [
+                ("k8s/base/kustomization.yaml", "its own entry"),
+                (
+                    "k8s/overlays/prod/kustomization.yaml",
+                    "k8s/base/kustomization.yaml",
+                ),
+                (
+                    "k8s/overlays/staging/kustomization.yaml",
+                    "k8s/base/kustomization.yaml",
+                ),
+            ] {
+                let listed = row(&format!(
+                    "| {shown} | {path} | {through} | web | Deployment | \
+                     k8s/base/deployment.yaml | — | 1 | web | shop/web:1 | 8080 | SESSION\\_KEY | \
+                     Secret/web-secrets | Deterministic | Confirmed |"
+                ));
+                assert!(listed.contains(&document), "{listed}");
+            }
+
+            // `web` is declared twice, as a Compose service and as one
+            // Deployment that three kustomizations reach: one row for each
+            // fact, never one for each reaching environment, and only what
+            // both kinds state is compared.
+            let declared = &content[content
+                .find("\n## Declared in more than one environment\n")
+                .unwrap()
+                ..content
+                    .find("\nA Kubernetes workload that two or more kustomizations reach")
+                    .unwrap()];
+            let facts: Vec<&str> = declared
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web |")))
+                .collect();
+            assert_eq!(facts.len(), 2, "{declared}");
+            assert!(facts[0].contains(
+                "| Compose service | docker-compose.yml | docker-compose.yml | ports: not \
+                 stated |"
+            ));
+            assert!(facts[1].contains(
+                "| Deployment | k8s/base/deployment.yaml | k8s/base/kustomization.yaml, \
+                 k8s/overlays/prod/kustomization.yaml, k8s/overlays/staging/kustomization.yaml \
+                 | ports: 8080 |"
+            ));
+            assert!(!declared.contains("replicas"));
+
+            // The workload three environments reach: one row for each, with
+            // that environment's patch and `images` entries.
+            let several = &content[content
+                .find("\nA Kubernetes workload that two or more kustomizations reach")
+                .unwrap()
+                ..content
+                    .find("\n## Workloads no environment declares\n")
+                    .unwrap()];
+            let rows: Vec<&str> = several
+                .lines()
+                .filter(|line| line.starts_with(&format!("| {shown} | web | Deployment |")))
+                .collect();
+            assert_eq!(rows.len(), 3, "{several}");
+            assert!(rows[0].contains(
+                "| k8s/base/kustomization.yaml | its own entry | no patch stated | none names \
+                 its images |"
+            ));
+            assert!(rows[0].contains(&span(base, "deployment.yaml")));
+            assert!(rows[1].contains(
+                "| k8s/overlays/prod/kustomization.yaml | k8s/base/kustomization.yaml | patch \
+                 k8s/overlays/prod/patch.yaml states replicas 5 | none names its images |"
+            ));
+            assert!(rows[1].contains(&span(prod, "../../base")));
+            assert!(rows[1].contains("the deployed name differs from the recorded one"));
+            assert!(rows[2].contains(
+                "| k8s/overlays/staging/kustomization.yaml | k8s/base/kustomization.yaml | patch \
+                 k8s/overlays/staging/patch.yaml states replicas 2; container web: environment \
+                 key names LOG\\_LEVEL | name shop/web, newTag 2-rc |"
+            ));
+            assert!(rows[2].contains(&span(staging, "../../base")));
+            assert!(!content.to_lowercase().contains("overrid"));
+
+            // `staging.env`: a Gap, no span, no value, and not an environment.
+            let gap = row(&format!(
+                "| {shown} | staging.env | — | environment named only by a file name |"
+            ));
+            assert!(gap.ends_with("| Deterministic | Gap | none stored for an environment file |"));
+            let listed = &content[content.find("\n## Environments\n").unwrap()
+                ..content.find("\n## Workloads by environment\n").unwrap()];
+            assert!(!listed.contains("staging.env"));
+            // The transformer is named, not applied.
+            row(&format!(
+                "| {shown} | k8s/overlays/prod/kustomization.yaml | — | kustomization | \
+                 \\`namePrefix\\` is present and not evaluated |"
+            ));
+            assert!(!content.contains("live-"));
+            assert!(!content.contains(SENTINEL));
+
+            let index: spec::FactIndex = serde_json::from_str(
+                &bundle
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.id == "fact-index-json")
+                    .unwrap()
+                    .content,
+            )
+            .unwrap();
+            // 4 environments, 3 workloads, 2 + 3 DECLARES, 1 DEPENDS_ON,
+            // 2 PATCHES and 2 Gaps.
+            assert_eq!(artifact.assertions.len(), 4 + 3 + 5 + 1 + 2 + 2);
+            for assertion in &artifact.assertions {
+                assert!(
+                    index.rows.iter().any(|row| {
+                        row.cited_by.iter().any(|by| by == "environments")
+                            && match &row.fact {
+                                core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                                core_graph::FactKey::Edge {
+                                    source,
+                                    label,
+                                    destination,
+                                } => {
+                                    format!("{source} {label} {destination}")
+                                        == assertion.subject_id
+                                }
+                            }
+                    }),
+                    "{} has a fact-index row",
+                    assertion.subject_id
+                );
+            }
+            assert_eq!(
+                crate::build_spec_bundle(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    mode
+                )
+                .unwrap(),
+                bundle
+            );
+            // The Service is in the stored coverage inventory by its kind;
+            // the Deployment and the kustomizations are read and are not.
+            let coverage = &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "coverage")
+                .unwrap()
+                .content;
+            assert!(
+                coverage.contains("kubernetes-manifest:Service"),
+                "{coverage}"
+            );
+            assert!(!coverage.contains("kubernetes-manifest:Deployment"));
+            assert!(!coverage.contains("kustomize-file"));
+        }
+    }
+
+    // The same tree again: the same graph.
+    ingest();
+    assert_eq!(hashes(), first);
+    // And in a fresh graph, as the determinism gate ingests it.
+    let fresh = || {
+        let extraction = extract_tree(
+            &root,
+            repo,
+            "workdir",
+            &[],
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        load_into_graph(&mut graph, &extraction, repo, &root, "workdir").unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        (
+            spec::graph_content_hash(&nodes, &edges),
+            deterministic_graph_hashes(&graph).unwrap(),
+        )
+    };
+    assert_eq!(fresh(), fresh());
+
+    // One overlay goes: its environment, its relations and its Gap go with
+    // it, and the workload the others still reach stays.
+    std::fs::remove_dir_all(root.join("k8s/overlays/prod")).unwrap();
+    ingest();
+    {
+        let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+        let prod = environment("k8s/overlays/prod/kustomization.yaml");
+        assert!(nodes.iter().all(|node| node.id != prod));
+        assert!(
+            nodes
+                .iter()
+                .all(|node| !node.id.ends_with("@k8s/overlays/prod/kustomization.yaml"))
+        );
+        assert!(edges.iter().all(|edge| edge.src != prod));
+        assert!(nodes.iter().any(|node| node.id == web));
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.label == "DECLARES" && edge.dst == web)
+                .count(),
+            2
+        );
+    }
+    // Everything goes: no kustomize or Kubernetes fact is left, and the
+    // Compose environment is untouched.
+    std::fs::remove_dir_all(root.join("k8s")).unwrap();
+    std::fs::remove_file(root.join("staging.env")).unwrap();
+    ingest();
+    let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+    assert!(nodes.iter().all(|node| !node.id.contains("@k8s/")));
+    assert!(
+        edges
+            .iter()
+            .all(|edge| !edge.src.contains("@k8s/") && !edge.dst.contains("@k8s/"))
+    );
+    assert!(edges.iter().all(|edge| edge.label != "PATCHES"));
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !node.id.starts_with("gap:environment:"))
+    );
+    let left: Vec<&str> = nodes
+        .iter()
+        .filter(|node| node.label == "Environment")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(left, [environment("docker-compose.yml")]);
+}
+
+// AC-0651 (#1821): the export of a real ingest carries the configuration
+// key projection. A key an environment file declares and source reads is
+// listed once with both; a key read and never declared and a key declared
+// and never read are marked; the file with a read whose key is not a literal
+// is listed; no value of the environment file reaches the document. Every
+// assertion has a fact-index row, and a second export and the
+// single-artifact read return the same bytes.
+#[test]
+fn export_projects_ingested_configuration_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(
+        root.join(".env.example"),
+        "DATABASE_URL=postgres://shop:hunter2@localhost/shop\nUNUSED_FLAG=1\n",
+    )
+    .unwrap();
+    let config = "export function load(name: string) {\n  \
+                  return [process.env.DATABASE_URL, process.env[name]];\n}\n";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/config.ts"), config).unwrap();
+    let settings = "import os\n\nHOST = os.getenv(\"SMTP_HOST\")\n";
+    std::fs::write(root.join("settings.py"), settings).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let read = config.find("process.env.DATABASE_URL").unwrap();
+    let host = settings.find("os.getenv").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "configuration")
+            .unwrap();
+        assert_eq!(artifact.file_name, "configuration.md");
+        let content = &artifact.content;
+        let row = |part: &str| {
+            content
+                .lines()
+                .find(|line| line.starts_with("| ") && line.contains(part))
+                .unwrap_or_else(|| panic!("no row containing {part:?} in:\n{content}"))
+        };
+        assert!(content.contains(
+            "Keys: 3. Declared and read: 1. Read, never declared: 1. Declared, never read: 1. \
+             Environment files: 1. Files with reads that cannot be named: 1."
+        ));
+        row("| DATABASE\\_URL | declared and read | 1 | 1 | — |");
+        row("| SMTP\\_HOST | read, never declared | 0 | 1 | — |");
+        row("| UNUSED\\_FLAG | declared, never read | 1 | 0 | — |");
+        row(
+            "| DATABASE\\_URL | .env.example | Deterministic | Confirmed | none stored for an \
+             environment file | — |",
+        );
+        let named = row(
+            "| DATABASE\\_URL | src/config.ts | typescript | load | Deterministic | \
+                         Confirmed |",
+        );
+        assert!(named.contains(&format!("src/config.ts bytes {read}..")));
+        let module = row(
+            "| SMTP\\_HOST | settings.py | python | file level | Deterministic | \
+                          Confirmed |",
+        );
+        assert!(module.contains(&format!("settings.py bytes {host}..")));
+        let unnamed = &content[content
+            .find("\n## Files with reads that cannot be named\n")
+            .unwrap()..];
+        let unnamed = &unnamed[..unnamed.find("\n## Languages read\n").unwrap()];
+        assert!(unnamed.contains("| src/config.ts | typescript | load | Deterministic |"));
+        assert!(!unnamed.contains("settings.py"));
+        // Names only: no value of the environment file is in the document.
+        assert!(!content.contains("hunter2") && !content.contains("postgres"));
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        // The environment file, three reads and their three relations.
+        assert_eq!(artifact.assertions.len(), 7);
+        for assertion in &artifact.assertions {
+            assert_eq!(
+                assertion.provenance.confidence_tier,
+                core_prov::ConfidenceTier::Confirmed
+            );
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "configuration")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "configuration"
+            )
+            .unwrap(),
+            artifact
+        );
+    }
+}
+
+/// The rows of `external.md` under `## heading`, as cells.
+fn external_rows(content: &str, heading: &str) -> Vec<Vec<String>> {
+    let start = content
+        .find(&format!("\n## {heading}\n"))
+        .unwrap_or_else(|| panic!("no section {heading} in:\n{content}"));
+    content[start..]
+        .lines()
+        .skip(1)
+        .skip_while(|line| !line.starts_with("|---"))
+        .skip(1)
+        .take_while(|line| line.starts_with('|'))
+        .map(|line| {
+            line.trim_matches('|')
+                .split(" | ")
+                .map(|cell| cell.trim().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+const EXTERNAL_CLIENT: &str = "export function Checkout() {\n  \
+    const submit = () => fetch('https://orders.example.com/v1/orders', { method: 'POST' });\n  \
+    const charge = () => fetch('https://api.stripe.com/v1/charges', { method: 'POST' });\n  \
+    return <button onClick={submit}>Order</button>;\n}\n";
+const EXTERNAL_WORKER: &str = "import requests\n\n\ndef rates():\n    \
+    return requests.get(\"https://api.tax.example/v2/rates\")\n";
+
+// AC-0660 (#1788): through the real adapters, with no system manifest, a
+// literal third-party `fetch` and a literal third-party `requests` call are
+// listed in `external.md` as outside, each with its site, method, path and
+// span, as Gap facts. The `fetch` call is one site although the observed
+// client pass records it as well. Every assertion has a fact-index row, and
+// a second export and the single-artifact read return the same bytes.
+#[test]
+fn export_lists_ingested_third_party_calls_as_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "web");
+    std::fs::write(root.join("client.tsx"), EXTERNAL_CLIENT).unwrap();
+    std::fs::write(root.join("worker.py"), EXTERNAL_WORKER).unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    let charge = EXTERNAL_CLIENT
+        .find("fetch('https://api.stripe.com")
+        .unwrap();
+    let rates = EXTERNAL_WORKER.find("requests.get").unwrap();
+    for mode in [spec::ExportMode::VerifiedOnly, spec::ExportMode::BestEffort] {
+        let bundle = crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            mode,
+        )
+        .unwrap();
+        let artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "external")
+            .unwrap();
+        assert_eq!(artifact.file_name, "external.md");
+        let content = &artifact.content;
+        // Without a declared binding the sibling service's host is outside
+        // too, and the document says so.
+        let origins: Vec<String> = external_rows(content, "External services")
+            .into_iter()
+            .map(|row| format!("{} {} {}", row[0], row[1], row[2]))
+            .collect();
+        assert_eq!(
+            origins,
+            [
+                "https://api.stripe.com outside 1",
+                "https://api.tax.example outside 1",
+                "https://orders.example.com outside 1",
+            ],
+            "{content}"
+        );
+        assert!(content.contains(
+            "**Without declared bindings, a call to another registered repository by absolute \
+             URL is listed as outside.**"
+        ));
+        let sites = external_rows(content, "Sites of each external service");
+        let site = |origin: &str| {
+            sites
+                .iter()
+                .find(|row| row[0] == origin)
+                .unwrap_or_else(|| panic!("no site of {origin} in:\n{content}"))
+        };
+        let stripe = site("https://api.stripe.com");
+        assert_eq!(stripe[2..5], ["POST", "/v1/charges", "fetch"]);
+        assert_eq!(stripe[5..7], ["Deterministic", "Gap"]);
+        assert!(
+            stripe[7].contains(&format!("client.tsx bytes {charge}..")),
+            "{stripe:?}"
+        );
+        let tax = site("https://api.tax.example");
+        assert_eq!(tax[1..4], ["rates", "GET", "/v2/rates"]);
+        assert_eq!(tax[5..7], ["Deterministic", "Gap"]);
+        assert!(
+            tax[7].contains(&format!("worker.py bytes {rates}..")),
+            "{tax:?}"
+        );
+        assert!(
+            external_rows(content, "Unclassified")[0][1] == "None in this export",
+            "{content}"
+        );
+
+        let index: spec::FactIndex = serde_json::from_str(
+            &bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "fact-index-json")
+                .unwrap()
+                .content,
+        )
+        .unwrap();
+        assert!(!artifact.assertions.is_empty());
+        for assertion in &artifact.assertions {
+            assert!(
+                index.rows.iter().any(|row| {
+                    row.cited_by.iter().any(|by| by == "external")
+                        && match &row.fact {
+                            core_graph::FactKey::Node { id } => *id == assertion.subject_id,
+                            core_graph::FactKey::Edge {
+                                source,
+                                label,
+                                destination,
+                            } => format!("{source} {label} {destination}") == assertion.subject_id,
+                        }
+                }),
+                "{} has a fact-index row",
+                assertion.subject_id
+            );
+        }
+        assert_eq!(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                mode
+            )
+            .unwrap(),
+            bundle
+        );
+        assert_eq!(
+            &crate::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                mode,
+                "external"
+            )
+            .unwrap(),
+            artifact
+        );
+    }
+}
+
+// AC-0660 (#1788): through the production `add_system` path, with a declared
+// service binding, the call the binding pass joins to the other repository's
+// endpoint is not listed in `external.md`, as a call or as an observed
+// client, and is not counted as outside. The third-party calls the binding
+// pass evaluated are listed as unclassified with the sentence it recorded:
+// the kept Gap does not record, other than in that sentence, that no
+// declared binding covers its host.
+#[test]
+fn export_does_not_list_a_call_bound_into_another_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let system = directory(dir.path(), "system");
+    let api = directory(&system, "api");
+    let web = directory(&system, "web");
+    std::fs::write(
+        api.join("server.ts"),
+        "import express from 'express';\nconst app = express();\n\
+         app.post('/v1/orders', (req, res) => {});\n",
+    )
+    .unwrap();
+    std::fs::write(web.join("client.tsx"), EXTERNAL_CLIENT).unwrap();
+    std::fs::write(web.join("worker.py"), EXTERNAL_WORKER).unwrap();
+    let manifest = system.join(ingest::manifest::MANIFEST_NAME);
+    std::fs::write(
+        &manifest,
+        "[[repos]]\nurl = \"api\"\n[[repos]]\nurl = \"web\"\n[[services]]\nname = \"orders\"\n\
+         repo = \"api\"\nbase_urls = [\"https://orders.example.com\"]\n",
+    )
+    .unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    crate::add_system_blocking(
+        manifest.to_string_lossy().into_owned(),
+        app.handle().clone(),
+    )
+    .unwrap();
+
+    let state = tauri::Manager::state::<AppState>(&app);
+    let graph = state.graph.lock().unwrap();
+    let decisions = state.decisions.lock().unwrap();
+    // The bound call is a relation into the other repository.
+    let (_, edges) = graph.read_snapshot().unwrap();
+    assert!(
+        edges.iter().any(|edge| edge.label == "FETCHES"
+            && edge.dst.ends_with("@POST:/v1/orders")
+            && edge.props["binding"][0]["service"] == "orders"),
+        "the binding pass joined the call"
+    );
+    let bundle = crate::build_spec_bundle(
+        &graph,
+        &decisions,
+        &crate::curated::CuratedReview::default(),
+        spec::ExportMode::VerifiedOnly,
+    )
+    .unwrap();
+    let content = &bundle
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "external")
+        .unwrap()
+        .content;
+    for heading in [
+        "External services",
+        "Sites of each external service",
+        "External data flows",
+        "Unclassified",
+    ] {
+        for row in external_rows(content, heading) {
+            assert!(
+                row.iter().all(|cell| !cell.contains("orders.example.com")),
+                "{heading}: {row:?}"
+            );
+        }
+    }
+    assert!(
+        content.contains("Outside targets: 0. Unclassified targets: 2."),
+        "{content}"
+    );
+    let unclassified: Vec<(String, String, String)> = external_rows(content, "Unclassified")
+        .into_iter()
+        .map(|row| (row[0].clone(), row[4].clone(), row[5].clone()))
+        .collect();
+    let unrecorded = "binding evidence was evaluated for this call, and the fact does not record \
+                      whether a declared binding covers its host";
+    assert_eq!(
+        unclassified,
+        [
+            (
+                "POST https://api.stripe.com/v1/charges".to_string(),
+                unrecorded.to_string(),
+                "no binding evidence: no declared service or gateway route covers \
+                 https://api.stripe.com/v1/charges"
+                    .to_string()
+            ),
+            (
+                "GET https://api.tax.example/v2/rates".to_string(),
+                unrecorded.to_string(),
+                "no binding evidence: no declared service or gateway route covers \
+                 https://api.tax.example/v2/rates"
+                    .to_string()
+            ),
+        ],
+        "{content}"
+    );
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)
@@ -1908,4 +3767,209 @@ fn captured_ingest_records_per_fact_store_capacity_omissions_and_retains_bound_f
         "expected at least one StoreCapacity omission record"
     );
     assert!(!omitted_facts.contains(&bound_fact));
+}
+
+// AC-0593 (#1765): every completed ingest records the graph content hash, it
+// is shown with its source registration, and the export manifest carries the
+// whole-graph hash with the source revisions. Equality holds per
+// registration; two `local/` registrations of byte-identical trees differ.
+#[test]
+fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let first_root = directory(dir.path(), "first/project");
+    let second_root = directory(dir.path(), "second/project");
+    for root in [&first_root, &second_root] {
+        std::fs::write(
+            root.join("app.ts"),
+            "import { helper } from './helper';\nexport function run() { helper(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("helper.ts"), "export function helper() {}\n").unwrap();
+    }
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let state = app_state(&app_data);
+    let mut sources = Vec::new();
+    for root in [&first_root, &second_root] {
+        crate::preflight_uncancelled(root.to_str().unwrap(), app.handle(), &state).unwrap();
+        let source = state.sources.lock().unwrap().get_by_root(root).unwrap();
+        sources.push(source.unwrap());
+    }
+    let shown = |state: &AppState, repo: &str| {
+        crate::system_contents_for(state)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.repo == repo)
+            .map(|entry| (entry.commit, entry.graph_hash))
+    };
+
+    recover(&state, &sources[0]);
+    let first_hash = state.metrics.lock().unwrap().history(1).unwrap()[0]
+        .content_hash
+        .clone();
+    assert_eq!(
+        shown(&state, &sources[0].repo_key),
+        Some(("workdir".into(), Some(first_hash.clone())))
+    );
+
+    // A second registration's ingest records its own hash and leaves the
+    // first registration's untouched.
+    recover(&state, &sources[1]);
+    let second_hash = state.metrics.lock().unwrap().history(1).unwrap()[0]
+        .content_hash
+        .clone();
+    assert_eq!(
+        shown(&state, &sources[1].repo_key),
+        Some(("workdir".into(), Some(second_hash.clone())))
+    );
+    assert_eq!(
+        shown(&state, &sources[0].repo_key).unwrap().1,
+        Some(first_hash.clone())
+    );
+    // Scope: both are random `local/` keys over identical bytes, and no
+    // equality is claimed across registrations (or installations).
+    assert!(
+        sources
+            .iter()
+            .all(|source| source.repo_key.starts_with("local/"))
+    );
+    assert_ne!(first_hash, second_hash);
+
+    // Re-ingesting the same tree under the same registration records the
+    // identical hash.
+    recover(&state, &sources[0]);
+    let history = state.metrics.lock().unwrap().history(3).unwrap();
+    assert_eq!(history[0].repo, sources[0].repo_key);
+    assert_eq!(history[0].content_hash, first_hash);
+
+    // The export manifest states the graph it was built from.
+    let export = |state: &AppState| {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::build_spec_bundle(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            spec::ExportMode::BestEffort,
+        )
+        .unwrap()
+        .graph_basis
+        .unwrap()
+    };
+    let basis = export(&state);
+    let (nodes, edges) = state.graph.lock().unwrap().read_snapshot().unwrap();
+    assert_eq!(basis.content_hash, spec::graph_content_hash(&nodes, &edges));
+    let mut expected: Vec<_> = sources
+        .iter()
+        .map(|source| spec::SourceRevision {
+            repo: source.repo_key.clone(),
+            commit: "workdir".into(),
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(basis.sources, expected);
+    let preview = {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        crate::preview_spec_bundle(
+            crate::build_spec_bundle(
+                &graph,
+                &decisions,
+                &crate::curated::CuratedReview::default(),
+                spec::ExportMode::VerifiedOnly,
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(
+        serde_json::to_value(&preview).unwrap()["graph_basis"],
+        serde_json::to_value(&basis).unwrap(),
+        "the export payload carries the same basis in every mode"
+    );
+
+    // Curation is not a graph fact: a recorded decision changes no hash.
+    state
+        .decisions
+        .lock()
+        .unwrap()
+        .record_assertion(
+            &agents::CuratableAssertion {
+                subject_id: "edge:sym:a CALLS sym:b".into(),
+                summary: "CALLS: a → b".into(),
+                provenance: Provenance::new(
+                    Tier::Semantic,
+                    ConfidenceTier::InferredStrong,
+                    vec![reference(&sources[0].repo_key, "app.ts", 10)],
+                    "t2.semantic",
+                    b"sym:a CALLS sym:b",
+                )
+                .unwrap(),
+            },
+            agents::AssertionDecision::Rejected,
+            None,
+        )
+        .unwrap();
+    assert_eq!(export(&state), basis);
+    assert_eq!(
+        shown(&state, &sources[0].repo_key).unwrap().1,
+        Some(first_hash)
+    );
+}
+
+// AC-0593 (#1765): determinism on a real repository, not only on fixtures.
+// Ingests one checkout twice into fresh graphs at the production (Auto)
+// ingest parallelism, and once serially, and compares the graph content
+// hashes. The checkout is supplied by the caller so the test itself needs no
+// network: CARTOGRAPH_DETERMINISM_ROOT is the tree, and the optional
+// CARTOGRAPH_DETERMINISM_COMMIT is the pinned commit it is checked out at.
+#[test]
+#[ignore = "requires CARTOGRAPH_DETERMINISM_ROOT: a checkout of the pinned repository"]
+fn pinned_repository_reingest_yields_identical_graph_hash() {
+    let root = std::env::var("CARTOGRAPH_DETERMINISM_ROOT").expect("checkout path");
+    let root = crate::paths::canonicalize(PathBuf::from(root)).unwrap();
+    let commit =
+        std::env::var("CARTOGRAPH_DETERMINISM_COMMIT").unwrap_or_else(|_| "workdir".into());
+    // A fixed registration key: the comparison is within one registration.
+    let repo = "determinism/pinned";
+    let ingest = |workers: usize| {
+        source_walk::parallel::with_workers(workers, || {
+            let extraction =
+                extract_tree(&root, repo, &commit, &[], &BTreeMap::new(), None, None, &[]).unwrap();
+            let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+            load_into_graph(&mut graph, &extraction, repo, &root, &commit).unwrap();
+            crate::stitch_name_unique(&mut graph, &mut crate::OperationFacts::default()).unwrap();
+            let (nodes, edges) = graph.read_snapshot().unwrap();
+            let recorded = metrics::compute(
+                &nodes,
+                &edges,
+                &BTreeMap::new(),
+                &BTreeSet::from([repo.to_owned()]),
+            )
+            .content_hash;
+            (
+                spec::graph_content_hash(&nodes, &edges),
+                recorded,
+                deterministic_graph_hashes(&graph).unwrap(),
+                nodes.len(),
+                edges.len(),
+            )
+        })
+    };
+    let production = source_walk::parallel::Parallelism::Auto.workers();
+    let first = ingest(production);
+    println!(
+        "{} @ {commit}: {} nodes, {} edges, {production} workers, graph hash {}",
+        root.display(),
+        first.3,
+        first.4,
+        first.0
+    );
+    assert!(first.3 > 0, "the pinned checkout produced no facts");
+    assert!(
+        first == ingest(production),
+        "repeat ingest changed the graph"
+    );
+    assert!(first == ingest(1), "worker count changed the graph");
 }

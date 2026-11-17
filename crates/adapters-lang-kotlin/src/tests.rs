@@ -5529,3 +5529,149 @@ class CommentedController {
         ]
     );
 }
+
+fn evidence_spans(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["byte_start"].as_u64().unwrap(),
+                e["byte_end"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn config_read_ids(out: &Extraction) -> Vec<&str> {
+    out.nodes
+        .iter()
+        .filter(|node| node.label == "ConfigRead")
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+// AC-0597 (#1789, ADR-0059): one literal `System.getenv` read, one dynamic
+// read and one shadowed look-alike (a local function named `getenv`) yield
+// exactly one named ConfigRead, one dynamic ConfigRead and nothing for the
+// look-alike. Only the key name and the span of the call are recorded,
+// never the fallback value.
+#[test]
+fn system_getenv_reads_are_config_reads() {
+    let text = r#"package com.acme
+
+fun getenv(key: String): String = key
+
+fun load(name: String): List<String?> {
+    val url = System.getenv("DATABASE_URL") ?: "postgres://user:pw@db/app"
+    return listOf(url, System.getenv(name))
+}
+
+fun fake(): String = getenv("SHADOWED")
+"#;
+    let path = "src/main/kotlin/com/acme/Config.kt";
+    let out = extract_source(text.as_bytes(), path, &id()).unwrap();
+    assert_eq!(
+        config_read_ids(&out),
+        [
+            "cfgread:local/demo@src/main/kotlin/com/acme/Config.kt:env:DATABASE_URL",
+            "cfgread:local/demo@src/main/kotlin/com/acme/Config.kt:env:?",
+        ]
+    );
+    let named = node(
+        &out.nodes,
+        "cfgread:local/demo@src/main/kotlin/com/acme/Config.kt:env:DATABASE_URL",
+    );
+    assert_eq!(named.props["source"], "env");
+    assert_eq!(named.props["key"], "DATABASE_URL");
+    assert_eq!(named.props["language"], "kotlin");
+    assert_eq!(named.props["prov"]["tier"], "Deterministic");
+    assert_eq!(named.props["prov"]["confidence_tier"], "Confirmed");
+    let read = r#"System.getenv("DATABASE_URL")"#;
+    let at = text.find(read).unwrap() as u64;
+    assert_eq!(evidence_spans(&named.props), [(at, at + read.len() as u64)]);
+    let dynamic = node(
+        &out.nodes,
+        "cfgread:local/demo@src/main/kotlin/com/acme/Config.kt:env:?",
+    );
+    assert_eq!(dynamic.props["dynamic"], true);
+    assert!(dynamic.props.get("key").is_none());
+    let at = text.find("System.getenv(name)").unwrap() as u64;
+    assert_eq!(
+        evidence_spans(&dynamic.props),
+        [(at, at + "System.getenv(name)".len() as u64)]
+    );
+    let reads: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .collect();
+    assert_eq!(reads.len(), 2);
+    let load = out
+        .nodes
+        .iter()
+        .find(|node| node.label == "Symbol" && node.id.contains("#load"))
+        .expect("the reading function is a symbol");
+    assert!(reads.iter().all(|edge| edge.src == load.id));
+    let all = serde_json::to_string(&(&out.nodes, &out.edges)).unwrap();
+    assert!(!all.contains("postgres://") && !all.contains("SHADOWED"));
+    // Determinism: a second run yields the same facts.
+    let again = extract_source(text.as_bytes(), path, &id()).unwrap();
+    assert_eq!(
+        all,
+        serde_json::to_string(&(&again.nodes, &again.edges)).unwrap()
+    );
+}
+
+// AC-0597 (ADR-0059 decision 4): a parameter, local, property, import,
+// import alias or declared type named `System` voids the file's reads, as
+// does a star import of a package the repository does not declare; a
+// `System` declared anywhere in the repository, in Kotlin or product Java,
+// voids every Kotlin read.
+#[test]
+fn system_getenv_needs_an_unshadowed_system() {
+    let shadowed = [
+        r#"fun f(System: Env) = System.getenv("PARAM")"#,
+        "fun f(): String { val System = Env(); return System.getenv(\"LOCAL\") }",
+        "class A { val System = Env()\n fun f() = System.getenv(\"PROPERTY\") }",
+        "import com.fake.System\nfun f() = System.getenv(\"IMPORT\")",
+        "import com.fake.Env as System\nfun f() = System.getenv(\"ALIAS\")",
+        "import com.fake.*\nfun f() = System.getenv(\"STAR\")",
+        "object System { fun getenv(k: String) = k }\nfun f() = System.getenv(\"OBJECT\")",
+    ];
+    for text in shadowed {
+        let out = extract_source(text.as_bytes(), "src/main/kotlin/A.kt", &id()).unwrap();
+        assert!(config_read_ids(&out).is_empty(), "{text}");
+    }
+
+    let reader =
+        "package com.acme\n\nimport com.acme.util.*\n\nval region = System.getenv(\"REGION\")\n";
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "src/main/kotlin/com/acme/Reader.kt", reader);
+    write(
+        dir.path(),
+        "src/main/kotlin/com/acme/util/Util.kt",
+        "package com.acme.util\n\nfun helper() = 1\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    // A star import of a repository package is covered by the repo check.
+    assert_eq!(
+        config_read_ids(&out),
+        ["cfgread:local/demo@src/main/kotlin/com/acme/Reader.kt:env:REGION"]
+    );
+    // A top-level initializer has no enclosing function: the file reads it.
+    edge(
+        &out.edges,
+        "file:local/demo@src/main/kotlin/com/acme/Reader.kt",
+        "cfgread:local/demo@src/main/kotlin/com/acme/Reader.kt:env:REGION",
+        "READS_CONFIG",
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/acme/util/System.java",
+        "package com.acme.util;\npublic class System { public static String getenv(String k) { return k; } }\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    assert!(config_read_ids(&out).is_empty());
+}

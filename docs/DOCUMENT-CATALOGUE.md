@@ -141,9 +141,9 @@ always shown as unconfirmed until a human confirms each row.
 |---|---------|------|--------------|
 | 6.1 | Authentication and authorization model | P+A | Permission sites, `Actor` caller sets |
 | 6.2 | Permissions granted to infrastructure | P | `security.md` (IAM findings) |
-| 6.3 | Endpoints with no recovered authentication check | P | Endpoints against permission sites |
-| 6.4 | Secrets and configuration handling | P | Toolchain facts (key names only, never values) |
-| 6.5 | External data flows | P | Flows that cross the system boundary |
+| 6.3 | Endpoints with no recovered authentication check | P | `endpoint-permissions.md`: endpoints against the permission sites recovered for them (Flask, Flask-Admin and NestJS GraphQL today) |
+| 6.4 | Secrets and configuration handling | P | `configuration.md`: key names declared in environment files and read in source (never values), and toolchain facts |
+| 6.5 | External data flows | P | `external.md`, "External data flows": one row for each flow and outside HTTP origin it reaches, with the entry point and the data entities read or written on that flow (SPEC-13, ADR-0063) |
 | 6.6 | Compliance obligations | H | — |
 
 **Acceptance:** P sections by fixture; 6.1 prose by content acceptance.
@@ -155,11 +155,11 @@ always shown as unconfirmed until a human confirms each row.
 | # | Section | Kind | Source today |
 |---|---------|------|--------------|
 | 7.1 | Build and toolchain | P | `toolchain.md` |
-| 7.2 | Environments and deployed resources | P | Infrastructure facts, observed state where supplied |
-| 7.3 | Configuration: every key the system declares or reads | P | Key names from environment files (`Tool` facts, category `environment`) and from Python `os.environ` / `os.getenv` reads; never values |
+| 7.2 | Environments and deployed resources | P | `environments.md`: each Compose file and each kustomization file as one environment, shown by its path and named only where the file states a name (a Compose `name`, a kustomize `namespace`), with the workloads it declares: Compose services (image, build context, ports, environment key names, environment files, dependencies, profiles) and the `Deployment`, `StatefulSet`, `DaemonSet` and `Job` manifests a kustomization's `resources` chain reaches, one row per container; each workload name that several environments of one repository declare with the properties that differ and each span; each Kubernetes workload that several kustomizations reach, once per environment with what that environment's patch files and `images` entries state, nothing applied; Kubernetes workloads no environment declares; and what is not established (increments 1 and 2 of SPEC-14, ADR-0070); infrastructure facts and observed state where supplied |
+| 7.3 | Configuration: every key the system declares or reads | P | `configuration.md`: each key once per repository, with the environment files that declare it (`Tool` facts, category `environment`) and the files and symbols that read it (`ConfigRead` facts: standard-library environment reads in TypeScript/JavaScript, Python, Go, Java, Kotlin and Rust; ADR-0059), keys read and never declared, keys declared and never read, and the files with reads it cannot name; never values |
 | 7.4 | Scheduled jobs | P | `Schedule` flow triggers (yacron, crontab, Kubernetes `CronJob`) |
-| 7.5 | How to deploy | A | `Tool` facts from CI workflows and Dockerfiles, target documentation |
-| 7.6 | Dependencies on external services | P | External endpoints and channels |
+| 7.5 | How to deploy | A | `pipelines.md`: each pipeline with its triggers, its jobs in dependency order and their steps (GitHub Actions workflows and Dockerfiles; ADR-0060), `Tool` facts, target documentation |
+| 7.6 | Dependencies on external services | P | `external.md`, "External services": each outside HTTP origin with its call sites and spans, and the unclassified targets (run-time or configured hosts, SDK and auth-provider clients, published channels with no subscriber or backing resource) with their reasons (SPEC-13, ADR-0063) |
 | 7.7 | Alerts, on-call and recovery procedures | H | — |
 
 **Acceptance:** P sections by fixture; 7.5 by content acceptance.
@@ -218,16 +218,20 @@ written from its public documentation (ROADMAP W11).
 | 11.4 | Rule evidence | P | `rule-evidence.md`, `rule-evidence.json` |
 | 11.5 | Flow dossiers, complete | P | `flow_dossiers.md` |
 | 11.6 | Coverage: what was read, skipped and why | P | Coverage inventory |
-| 11.7 | Fact and evidence index: every fact a document cites, with its tier, confidence, method and source span | P | Not produced today (section 4) |
+| 11.7 | Fact and evidence index: every fact a document cites, with its tier, confidence, method and source span | P | `fact-index.md`, `fact-index.json` (ADR-0058) |
 
 No authored content. Every statement in D1 to D10 must resolve to a row in
-§11.7. Today's traceability matrix cannot carry that: it indexes only the
+§11.7. The traceability matrix cannot carry that: it indexes only the
 seven trace relations (`REALIZES`, `STEP_OF`, `GOVERNS`, `MAPS_TO`,
 `DECIDES`, `TRIGGERED_BY`, `PERFORMED_BY`), so an endpoint's method or a
-field's type has no row. Until §11.7 exists, a document may only make
-statements whose evidence one of §11.1 to §11.5 already holds.
+field's type has no row there. §11.7 lists every fact an exported artifact
+asserts, once, under a citation id that names the fact and not its place in
+a document (ADR-0058). Compiling an export fails if a cited id has no row.
+The existing documents do not print the id beside each statement yet; that
+is added one document at a time. Until a document prints its citations, it
+may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's sixteen artifacts go
+## 3. Where today's twenty-six artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -244,8 +248,16 @@ statements whose evidence one of §11.1 to §11.5 already holds.
 | `test_arrangements.md` | D8 §8.1 to §8.3 |
 | `journeys.md` | D9 §9.1 to §9.3 |
 | `rule-evidence.md`, `rule-evidence.json` | D1 §1.5, D11 §11.4 |
+| `endpoint-permissions.md` | D6 §6.3 |
+| `pipelines.md` | D7 §7.5 |
+| `configuration.md` | D7 §7.3, D6 §6.4 |
+| `external.md` | D7 §7.6, D6 §6.5 |
+| `environments.md` | D7 §7.2 |
+| `curated.md` | No section of its own. It lists the accepted proposals and their states (SPEC-12, ADR-0061); the A and P+A sections draw on them once drafting exists (#1748) |
+| `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
+| `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The sixteen files keep being exported under their current names until each
+The twenty-six files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -258,13 +270,13 @@ row names the issue that tracks it.
 | D1 §1.1, D3 §3.4, D7 §7.5, D10 §10.2 | Target documentation as evidence (#1750) |
 | D1 §1.2, §1.3, D5 §5.3, D10 §10.3 on a real repository | The knowledge phase now reads a base past 50,000 rows, up to the ADR-0052 ceiling (#1771, fixed). A skip past the ceiling is still not shown in the app (#1782) |
 | D4 §4.1 | Endpoint inventory in the export (#1658) |
-| D6 §6.3 | A projection of endpoints against permission sites (#1787) |
-| D6 §6.5, D7 §7.6 | A projection of flows and calls that leave the system boundary (#1788) |
-| D7 §7.2 | Environments are recovered only where Terraform or observed state is supplied (#1791) |
-| D7 §7.3, D6 §6.4 | Keys read only in source are recovered for Python alone. The other five language adapters emit no configuration-read fact, so a key with no environment file entry is missing. Until then the section states which languages it covers (#1789) |
-| D7 §7.5 | CI workflows and Dockerfiles are read as `Tool` facts (which tool, which settings), not as ordered build and deployment steps (#1790) |
-| D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is not an exported artifact (#1786) |
-| D11 §11.7 | No projection lists every cited fact with its evidence. Needed before D4 §4.2, D5 §5.2 and D7 can be checked statement by statement (#1785) |
+| D6 §6.3 | Endpoints are projected against permission sites as `endpoint-permissions.md` (#1787, fixed). Permission sites are recovered for Flask, Flask-Admin and NestJS GraphQL only, and only on the endpoint's own declaration: an endpoint of any other framework is listed under a coverage note in neither table, and a check made by middleware, a gateway or code inside a handler body is not recovered (#1320 covers Flask in-body checks). "None recovered" therefore never means that no check runs |
+| D6 §6.5, D7 §7.6 | Calls and publishes that leave the system boundary are projected as `external.md` by one predicate (#1788, fixed; ADR-0063, SPEC-13): each literal HTTP origin no declared binding covers, with its sites, the flows that reach it and the entities read or written on them; unclassified targets with their reasons; and a count of calls binding evidence places in a registered repository. The outside list is a lower bound. Still not covered: the system manifest is not stored, so a declared binding is known only where it joined a call or left its candidates, and a call the binding pass kept for another reason is unclassified, because the Gap records that outcome as a sentence only; operators of SDK providers; inbound channels and webhooks; what a request body contains |
+| D7 §7.2 | Environments are recovered from Compose files, kustomization files and Kubernetes manifests and projected as `environments.md` (#1791, increments 1 and 2; ADR-0070, SPEC-14): one environment for each Compose file and each kustomization file, shown by path and never named from it; one workload for each Compose service and each `Deployment`, `StatefulSet`, `DaemonSet` and `Job` document; a kustomization declares the workloads its `resources` chain reaches inside the repository, and a patch file is shown as what it writes; a Gap for an unreadable file, a construct that is not evaluated (`extends`, `include`, anchors, aliases, tags, kustomize transformers and generators, inline and JSON patches, `target` selectors), a dependency on an undeclared service, a kustomization entry that is remote, missing or outside the repository, a patch that matches nothing, and an environment file that names an environment only by its file name. Still not covered: Helm charts and Helm values files and per-environment settings files (increment 3; Helm files and manifests of other kinds are named in coverage as present and not read); Terraform root modules are not attached to an environment (#1844 first); nothing is merged or applied, so the effective configuration of a deployment is not shown; nothing says which environment is production; no value of an environment key is stored |
+| D7 §7.3, D6 §6.4 | Every compiled-in adapter (TypeScript/JavaScript, Python, Go, Java, Kotlin, Rust) emits a `ConfigRead` fact for a standard-library environment read, named for a literal key and unnamed for a dynamic one (#1789, ADR-0059), and the keys are projected as `configuration.md` (#1821, fixed): each key once per repository with where it is declared and read, each with tier, confidence and span, and the files with reads it cannot name. Still not covered: `import.meta.env` and destructured `process.env`, `"X" in os.environ`, Rust `env!`, and reads through configuration frameworks (Spring `@Value`, NestJS `ConfigService`, Viper); only environment files count as declarations, so a key set in a compose file, a manifest, a workflow or a shell script is listed as never declared; an environment file has no span. There is no C# adapter. The sections themselves are not drafted yet (#1748) |
+| D7 §7.5 | The ordered build and deployment steps of GitHub Actions workflows and Dockerfiles are recovered as facts (#1790, ADR-0060) and projected as `pipelines.md` (#1818, fixed): triggers, jobs in dependency order and steps in declared order, each with tier, confidence and span. Still not covered: a Dockerfile with a heredoc and a workflow with a YAML alias, anchor or tag are listed as present and not read; GitLab CI, Jenkins, CircleCI and Azure Pipelines are named and not read; nothing is evaluated, so matrices, expressions, reusable workflows and third-party actions stay as declared. The coverage inventory holds a count and the first file for each kind of unread file, not every file. The section itself is authored and is not drafted yet (#1748) |
+| D2 §2.2, D10 §10.1, D11 §11.6 | The coverage inventory is exported as `coverage.md` and `coverage.json` (#1786, fixed). It records each producer's file count, each missing input and each unsupported capability with its first site; it holds no list of every file found, read or skipped, so these sections cannot yet name each file |
+| D11 §11.7 | The fact and evidence index is exported as `fact-index.md` and `fact-index.json` (#1785, fixed; ADR-0058). It has one row for each fact an exported artifact asserts, with its tier, confidence, method, evidence basis, extractor and spans, and the export fails if a cited id has no row. The existing documents do not yet print the citation id beside each statement, so D4 §4.2, D5 §5.2 and D7 become checkable statement by statement only as each document adds its citations |
 | Every header | The graph content hash is not available outside tests (#1765) |
 | Every A and P+A section | Section drafting (#1748) on the curated projection (#1746) |
 
@@ -288,7 +300,7 @@ them as written; changing one is a new catalogue version.
    Each row stays unconfirmed until a person confirms it.
 5. **One file per document**, Markdown, with the appendices as separate
    files. Other formats are a rendering concern.
-6. **The current sixteen artifacts stay exported** alongside the new
+6. **The current twenty-six artifacts stay exported** alongside the new
    documents until every consumer has moved.
 7. **Order of delivery:** D11 and the P sections of D4 and D5 first (no
    model needed), then D1, then D2 and D3, then the rest.

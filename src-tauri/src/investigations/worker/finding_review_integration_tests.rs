@@ -152,9 +152,9 @@ fn finding_review_scripted_worker_preserves_graph_export_and_source_boundaries()
         "counter observes a real current-checkout read separately from retained inspection"
     );
     let export_before = serde_json::to_vec(
-        &crate::export_spec(
+        &crate::export_spec_blocking(
             spec::ExportMode::BestEffort,
-            fixture.app.state::<AppState>(),
+            &fixture.app.state::<AppState>(),
         )
         .unwrap(),
     )
@@ -175,8 +175,9 @@ fn finding_review_scripted_worker_preserves_graph_export_and_source_boundaries()
         "the fixture includes a real graph Gap, not a display-only placeholder"
     );
     let bundle = crate::build_spec_bundle(
-        &*state.graph.lock().unwrap(),
+        &state.graph.lock().unwrap(),
         &state.decisions.lock().unwrap(),
+        &crate::curated::CuratedReview::default(),
         spec::ExportMode::BestEffort,
     )
     .unwrap();
@@ -276,9 +277,9 @@ fn finding_review_scripted_worker_preserves_graph_export_and_source_boundaries()
     );
     assert_eq!(
         serde_json::to_vec(
-            &crate::export_spec(
+            &crate::export_spec_blocking(
                 spec::ExportMode::BestEffort,
-                fixture.app.state::<AppState>(),
+                &fixture.app.state::<AppState>(),
             )
             .unwrap()
         )
@@ -389,9 +390,9 @@ fn finding_review_survives_confirmed_forget_and_retained_object_failures() {
             stored_rows(&fixture.app_data.join("retained-source/receipts.sqlite"));
         let graph_before = state.graph.lock().unwrap().read_snapshot().unwrap();
         let export_before = serde_json::to_vec(
-            &crate::export_spec(
+            &crate::export_spec_blocking(
                 spec::ExportMode::BestEffort,
-                fixture.app.state::<AppState>(),
+                &fixture.app.state::<AppState>(),
             )
             .unwrap(),
         )
@@ -451,9 +452,9 @@ fn finding_review_survives_confirmed_forget_and_retained_object_failures() {
         );
         assert_eq!(
             serde_json::to_vec(
-                &crate::export_spec(
+                &crate::export_spec_blocking(
                     spec::ExportMode::BestEffort,
-                    fixture.app.state::<AppState>()
+                    &fixture.app.state::<AppState>()
                 )
                 .unwrap()
             )

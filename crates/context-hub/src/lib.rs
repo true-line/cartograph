@@ -6,6 +6,7 @@
 //! part of this first recovered-graph projection.
 
 pub mod coverage;
+pub mod curated;
 pub mod logical;
 mod scope_refs;
 

@@ -99,7 +99,10 @@ export async function smoke(options) {
       const call = (name, args) => send('tools/call', { name, arguments: args });
       stage = 'capabilities';
       const capabilities = structured(await call('cartograph_capabilities', {}));
-      if (typeof capabilities.session_id !== 'string' || typeof capabilities.basis_id !== 'string' || capabilities.h3_curated_available !== false) throw new Error('invalid capabilities');
+      if (typeof capabilities.session_id !== 'string' || typeof capabilities.basis_id !== 'string') throw new Error('invalid capabilities');
+      // The flag is true exactly where the session computed the curated projection (SPEC-12, AC-0654).
+      const curatedStatus = capabilities.basis?.curated?.status;
+      if (!['computed', 'not_computed'].includes(curatedStatus) || capabilities.h3_curated_available !== (curatedStatus === 'computed')) throw new Error('invalid capabilities');
       const identity = { session_id: capabilities.session_id, basis_id: capabilities.basis_id };
       const discover = (request, context_id = null) => call('cartograph_discover', { ...identity, request: { request, context_id } });
       const scenarioName = options.scenario ?? 'retained';

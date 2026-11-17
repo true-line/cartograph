@@ -7,6 +7,8 @@
 #[cfg(test)]
 mod conformance_tests;
 mod context;
+mod curated;
+mod curated_workbench;
 mod drop_intake;
 mod egress;
 mod escalation;
@@ -88,6 +90,9 @@ struct AppState {
     sources: Arc<Mutex<SourceRegistry>>,
     primary_sources: primary_source::PrimarySourceStore,
     metrics: Mutex<metrics::MetricsStore>,
+    /// In memory only: what an export's second compile settled for the
+    /// current graph revision (`curated::DerivedSettlements`, #1834).
+    curated_settled: Arc<curated::DerivedSettlements>,
 }
 
 #[derive(Default)]
@@ -320,6 +325,10 @@ struct LayerBreakdown {
     webext: LayerSummary,
     tools: LayerSummary,
     schedules: LayerSummary,
+    /// Ordered workflow and Dockerfile steps (#1790).
+    pipelines: LayerSummary,
+    /// Environments and workloads from Compose files (#1791).
+    environments: LayerSummary,
     /// Channel and client-call stitching over every layer's sites (#874).
     events: LayerSummary,
 }
@@ -336,6 +345,8 @@ impl LayerBreakdown {
         self.webext.add(other.webext);
         self.tools.add(other.tools);
         self.schedules.add(other.schedules);
+        self.pipelines.add(other.pipelines);
+        self.environments.add(other.environments);
         self.events.add(other.events);
     }
 
@@ -993,6 +1004,11 @@ struct SystemRepo {
     repo: String,
     commit: String,
     display_name: Option<String>,
+    /// Graph content hash recorded by the latest completed ingest of this
+    /// registration at `commit` (#1765, AC-0593); `None` when none is
+    /// recorded. Scoped per registration: a `local/` key is random per
+    /// installation, so the value is not comparable across installations.
+    graph_hash: Option<String>,
 }
 
 /// What the current system contains, derived from the graph's own facts
@@ -1003,6 +1019,10 @@ struct SystemRepo {
 /// Deterministic: sorted by repo.
 #[tauri::command]
 fn system_contents(state: State<'_, AppState>) -> Result<Vec<SystemRepo>, String> {
+    system_contents_for(&state)
+}
+
+fn system_contents_for(state: &AppState) -> Result<Vec<SystemRepo>, String> {
     let nodes = state
         .graph
         .lock()
@@ -1010,6 +1030,16 @@ fn system_contents(state: State<'_, AppState>) -> Result<Vec<SystemRepo>, String
         .all_nodes()
         .map_err(|e| e.to_string())?;
     let mut contents = system_contents_of(&nodes);
+    {
+        // The recorded hash is read back, never recomputed here: showing it
+        // costs one ingest-history lookup per registration, not a graph read.
+        let metrics = state.metrics.lock().map_err(|e| e.to_string())?;
+        for entry in &mut contents {
+            entry.graph_hash = metrics
+                .recorded_content_hash(&entry.repo, &entry.commit)
+                .map_err(|e| e.to_string())?;
+        }
+    }
     let registry = state.sources.lock().map_err(|e| e.to_string())?;
     for entry in &mut contents {
         entry.display_name = registry
@@ -1035,8 +1065,26 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
             repo,
             commit,
             display_name: None,
+            graph_hash: None,
         })
         .collect()
+}
+
+/// What an export was compiled from (#1765, AC-0593): the content hash of
+/// the whole base graph and the source revisions it holds, both taken from
+/// the snapshot the export itself read. Curation decisions and overlay facts
+/// are not graph facts and never enter the hash.
+fn graph_basis_of(nodes: &[Node], edges: &[Edge]) -> spec::GraphBasis {
+    spec::GraphBasis {
+        content_hash: spec::graph_content_hash(nodes, edges),
+        sources: system_contents_of(nodes)
+            .into_iter()
+            .map(|entry| spec::SourceRevision {
+                repo: entry.repo,
+                commit: entry.commit,
+            })
+            .collect(),
+    }
 }
 
 fn clear_graph_store(graph: &mut SqliteGraphStore) -> Result<GraphStats, String> {
@@ -1177,9 +1225,9 @@ struct DeclaredInputs {
 struct ProducerReads {
     /// TypeScript files the adapter read, before any infra-only projection.
     ts_files: u64,
-    /// Gated plugins that ran: pinned extractor id and what each read and
-    /// published.
-    plugins: Vec<(String, ingest::coverage::ProducerCount)>,
+    /// Gated plugins that ran: pinned extractor id, what each read and
+    /// published, and the files each was refused on (#1810).
+    plugins: Vec<ingest::coverage::PluginRead>,
     /// Captured TypeScript declarations left without a receipt, by file.
     omitted_declaration_receipts: std::collections::BTreeMap<String, u64>,
     /// Captured TypeScript rule facts left without a receipt, by file (#722).
@@ -1234,6 +1282,17 @@ impl ProducerReads {
 
     fn source_omissions(&self) -> Vec<core_graph::source::SourceOmission> {
         self.omitted_receipt_facts.clone()
+    }
+}
+
+/// The coverage class of a plugin-host refusal (#1810, AC-0658).
+fn refusal_reason(reason: adapters_plugin_host::RefusalReason) -> ingest::coverage::RefusalReason {
+    use adapters_plugin_host::RefusalReason as Host;
+    use ingest::coverage::RefusalReason as Recorded;
+    match reason {
+        Host::MalformedFact => Recorded::MalformedFact,
+        Host::GuestError => Recorded::GuestError,
+        Host::BoundExceeded => Recorded::BoundExceeded,
     }
 }
 
@@ -1333,6 +1392,14 @@ fn repo_coverage(
             (
                 ingest::schedules::SCHEDULE_EXTRACTOR_ID,
                 count(&layers.schedules),
+            ),
+            (
+                ingest::pipelines::PIPELINE_EXTRACTOR_ID,
+                count(&layers.pipelines),
+            ),
+            (
+                ingest::environments::ENVIRONMENT_EXTRACTOR_ID,
+                count(&layers.environments),
             ),
             (events::STITCH_EXTRACTOR_ID, count(&layers.events)),
         ],
@@ -2089,10 +2156,56 @@ fn extract_tree_packed(
             )
             .map_err(pack_err)?;
     }
+    // Build and deployment order (#1790, AC-0598): workflows and Dockerfiles
+    // become ordered Pipeline facts. Runs for every layer selection, as the
+    // toolchain reader does. The reader emits no File node: a file it could
+    // not read exactly yields no facts and is named by Preflight's
+    // `unreadable-pipeline-file` finding, which the coverage inventory lists.
+    {
+        let pipeline_id = ingest::pipelines::SourceId { repo, commit };
+        let pipeline_facts =
+            ingest::pipelines::extract_dir(root, &pipeline_id).map_err(|e| e.to_string())?;
+        layers.pipelines = LayerSummary {
+            files: pipeline_facts.files,
+            nodes: distinct_node_count(&pipeline_facts.nodes),
+            edges: distinct_edge_count(&pipeline_facts.edges),
+        };
+        facts
+            .extend(pipeline_facts.nodes, pipeline_facts.edges)
+            .map_err(pack_err)?;
+    }
+    // Environments (#1791, AC-0661, AC-0662, ADR-0070): each Compose file
+    // is an Environment with a Workload per service; each kustomization is
+    // an Environment that DECLARES the pod-bearing Kubernetes manifest
+    // workloads its `resources` chain reaches and PATCHES those its patch
+    // files name; an environment file that names an environment only by its
+    // file name is a Gap. Runs for every layer selection, as the toolchain
+    // reader does. The reader emits no File node and leaves the toolchain
+    // reader's Compose `Tool` fact and the schedule reader's `CronJob`
+    // facts as they are. Helm charts and manifests of other kinds are named
+    // by Preflight's findings, which the coverage inventory lists.
+    {
+        let environment_id = ingest::environments::SourceId { repo, commit };
+        let environment_facts =
+            ingest::environments::extract_dir(root, &environment_id).map_err(|e| e.to_string())?;
+        layers.environments = LayerSummary {
+            files: environment_facts.files,
+            nodes: distinct_node_count(&environment_facts.nodes),
+            edges: distinct_edge_count(&environment_facts.edges),
+        };
+        facts
+            .extend(environment_facts.nodes, environment_facts.edges)
+            .map_err(pack_err)?;
+    }
     // Gated plugin adapters (#201): route the files each active plugin
     // claims via its golden-corpus extensions. Every fact arrives pinned to
-    // the exact artifact by the host; a failure fails the whole plugin pass
-    // closed (zero partial facts, AC-0070).
+    // the exact artifact by the host, and a failed call yields zero partial
+    // facts (AC-0070). A failure that is a function of the plugin and the
+    // file alone refuses that file: no fact from it by that plugin joins the
+    // graph, coverage names it, and the other files and plugins continue
+    // (#1810, AC-0658). Any other failure (the wall-clock deadline, the
+    // native stack, instantiation, IO) still fails the ingest, because
+    // skipping the file would make the graph depend on the machine.
     if !plugins.is_empty() {
         let host = adapters_plugin_host::PluginHost::new().map_err(|e| e.to_string())?;
         let plugin_source = adapters_plugin_host::SourceId {
@@ -2113,7 +2226,7 @@ fn extract_tree_packed(
             let loaded = host
                 .load(&wasm_bytes, &plugin.plugin_id)
                 .map_err(|e| e.to_string())?;
-            let (plugin_facts, files_read) = adapters_plugin_host::route::extract_claimed_counted(
+            let claimed = adapters_plugin_host::route::extract_claimed_counted(
                 &host,
                 &loaded,
                 root,
@@ -2122,14 +2235,23 @@ fn extract_tree_packed(
                 adapters_plugin_host::PluginLimits::default(),
             )
             .map_err(|e| e.to_string())?;
-            reads.plugins.push((
-                adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash),
-                ingest::coverage::ProducerCount {
-                    files: files_read,
+            let plugin_facts = claimed.facts;
+            reads.plugins.push(ingest::coverage::PluginRead {
+                id: adapters_plugin_host::pinned_extractor_id(
+                    &plugin.plugin_id,
+                    &plugin.content_hash,
+                ),
+                count: ingest::coverage::ProducerCount {
+                    files: claimed.files_read,
                     nodes: distinct_node_count(&plugin_facts.nodes),
                     edges: distinct_edge_count(&plugin_facts.edges),
                 },
-            ));
+                refused: claimed
+                    .refused
+                    .into_iter()
+                    .map(|file| (file.path, refusal_reason(file.reason)))
+                    .collect(),
+            });
             facts
                 .extend(plugin_facts.nodes, plugin_facts.edges)
                 .map_err(pack_err)?;
@@ -2250,6 +2372,9 @@ fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
         || id.starts_with(&format!("gap:call:{repo}@"))
         || id.starts_with(&format!("gap:chan:{repo}@"))
         || id.starts_with(&format!("gap:fetch:{repo}@"))
+        // A name-only environment Gap has no evidence span to own it by
+        // (AC-0097), like the environment-file `Tool` fact (#1791).
+        || id.starts_with(&format!("gap:environment:{repo}@"))
 }
 
 fn edge_key(edge: &Edge) -> (String, String, String) {
@@ -6058,47 +6183,228 @@ fn persist_semantic_preview(
     Ok(preview)
 }
 
-fn build_spec_bundle(
-    graph: &impl GraphStore,
+/// The graph, traced flows, rejections and curated projection one spec
+/// compilation reads. Facts and inventories come from one read transaction,
+/// so the coverage artifacts describe the same revision as every other
+/// artifact (AC-0592); the curated projection is computed over that same
+/// snapshot (SPEC-12, AC-0653).
+struct SpecInputs {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    coverage: Vec<core_graph::coverage::StoredCoverage>,
+    flows: Vec<flowtracer::Flow>,
+    rejected_hashes: std::collections::BTreeSet<String>,
+    curated: CuratedInput,
+    /// `None` only when the projection was not read.
+    graph_basis: Option<spec::GraphBasis>,
+}
+
+/// The curated projection of one compilation (SPEC-12, AC-0653).
+enum CuratedInput {
+    /// A single artifact whose bytes do not depend on it.
+    NotRead,
+    /// It could not be computed. The export still succeeds: `curated.md`
+    /// states the reason and no `curated_basis` is stamped.
+    NotComputed(spec::CuratedFailure),
+    Computed(context_hub::curated::CuratedProjection),
+}
+
+impl SpecInputs {
+    fn supplied(&self) -> spec::Supplied<'_> {
+        spec::Supplied {
+            coverage: &self.coverage,
+            // The export compares no inventory with a current registration.
+            stale_coverage: &[],
+            curated: match &self.curated {
+                CuratedInput::NotRead => spec::Curated::NotSupplied,
+                CuratedInput::NotComputed(failure) => spec::Curated::NotComputed(*failure),
+                CuratedInput::Computed(projection) => spec::Curated::Computed(projection),
+            },
+        }
+    }
+
+    /// Stamp what the bundle was compiled from: the graph basis (AC-0593)
+    /// and the curated basis beside it (AC-0653).
+    fn stamp(self, bundle: &mut spec::SpecBundle) {
+        bundle.curated_basis = match &self.curated {
+            CuratedInput::Computed(projection) => Some(spec::CuratedBasis::of(projection)),
+            CuratedInput::NotRead | CuratedInput::NotComputed(_) => None,
+        };
+        bundle.graph_basis = self.graph_basis;
+    }
+}
+
+/// Everything one spec compilation reads from the stores. It is read under
+/// the graph and decision locks; nothing derived from it needs them, so an
+/// export command releases both before it traces, projects and compiles
+/// (#1834).
+struct SpecRead {
+    /// The store revision of the transaction that read the rows below.
+    revision: core_graph::StoreRevision,
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    coverage: Vec<core_graph::coverage::StoredCoverage>,
+    assertion_decisions: Vec<agents::AssertionDecisionRecord>,
+}
+
+fn read_spec(
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+) -> Result<SpecRead, String> {
+    let (revision, ((nodes, edges), coverage)) = curated::read_graph(graph)?;
+    let assertion_decisions = decisions
+        .list_assertions()
+        .map_err(|error| error.to_string())?;
+    Ok(SpecRead {
+        revision,
+        nodes,
+        edges,
+        coverage,
+        assertion_decisions,
+    })
+}
+
+/// [`read_spec`] under the application's graph and decision locks, both
+/// released on return.
+fn read_spec_locked(state: &AppState) -> Result<SpecRead, String> {
+    let graph = state.graph.lock().map_err(|error| error.to_string())?;
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    read_spec(&graph, &decisions)
+}
+
+impl SpecRead {
+    /// The flow trace and, with a `review`, the curated projection of what
+    /// was read. No store is read and no lock is needed.
+    fn inputs(self, review: Option<&curated::CuratedReview>) -> SpecInputs {
+        let Self {
+            revision,
+            nodes,
+            edges,
+            coverage,
+            assertion_decisions,
+        } = self;
+        let flows = flowtracer::trace(&nodes, &edges);
+        let rejected_hashes = assertion_decisions
+            .iter()
+            .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+            .map(|record| record.assertion.provenance.content_hash.clone())
+            .collect();
+        let (curated, graph_basis) = match review {
+            Some(review) => {
+                let graph_basis = graph_basis_of(&nodes, &edges);
+                let projection = curated::project(
+                    review,
+                    &curated::Snapshot {
+                        nodes: &nodes,
+                        edges: &edges,
+                        derived_decisions: curated::DerivedDecisions::Compile(&flows),
+                        coverage: &coverage,
+                        content_hash: &graph_basis.content_hash,
+                        revision: &revision,
+                    },
+                    &assertion_decisions,
+                );
+                let curated = match projection {
+                    Ok(projection) => CuratedInput::Computed(projection),
+                    Err(failure) => CuratedInput::NotComputed(failure),
+                };
+                (curated, Some(graph_basis))
+            }
+            None => (CuratedInput::NotRead, None),
+        };
+        SpecInputs {
+            nodes,
+            edges,
+            coverage,
+            flows,
+            rejected_hashes,
+            curated,
+            graph_basis,
+        }
+    }
+}
+
+/// The inputs of one compilation over stores the caller holds. The export
+/// commands run the same two steps, `read_spec` then `SpecRead::inputs`,
+/// and release the application's locks between them (`export_inputs`).
+#[cfg(test)]
+fn spec_inputs(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+    review: Option<&curated::CuratedReview>,
+) -> Result<SpecInputs, String> {
+    Ok(read_spec(graph, decisions)?.inputs(review))
+}
+
+/// `review` is what `curated::gather` read before the caller took the graph
+/// and decision locks. `export_spec` over stores the caller holds.
+#[cfg(test)]
+fn build_spec_bundle(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
-    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let rejected_hashes = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash)
-        .collect();
-    Ok(spec::compile_spec(
-        &nodes,
-        &edges,
-        &flows,
+    compile_spec_bundle(spec_inputs(graph, decisions, Some(review))?, mode)
+}
+
+fn compile_spec_bundle(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+) -> Result<spec::SpecBundle, String> {
+    // An export whose citations do not resolve is refused (ADR-0058).
+    let mut bundle = spec::try_compile_spec_supplied(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.flows,
         mode,
-        &rejected_hashes,
-    ))
+        &inputs.rejected_hashes,
+        inputs.supplied(),
+    )
+    .map_err(|error| error.to_string())?;
+    inputs.stamp(&mut bundle);
+    Ok(bundle)
 }
 
 /// One official artifact compiled alone through the selected compiler, which
 /// produces the same bytes, content id and assertions as that artifact in
-/// `build_spec_bundle` without building the other fifteen (#1582).
+/// `build_spec_bundle` without building the others (#1582). `review` is
+/// required for an artifact that `curated::artifact_reads_projection` names
+/// and is not read for any other. `read_spec_artifact` over stores the
+/// caller holds.
+#[cfg(test)]
 fn build_spec_artifact(
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: Option<&curated::CuratedReview>,
     mode: spec::ExportMode,
     artifact_id: &str,
 ) -> Result<spec::SpecArtifact, String> {
-    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let rejected_hashes = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash)
-        .collect();
+    let review = artifact_review(review, artifact_id)?;
+    compile_spec_artifact(spec_inputs(graph, decisions, review)?, mode, artifact_id)
+}
+
+/// The review one artifact's compilation projects from: `review` for an
+/// artifact that `curated::artifact_reads_projection` names, where it is
+/// required, and none for any other.
+fn artifact_review<'a>(
+    review: Option<&'a curated::CuratedReview>,
+    artifact_id: &str,
+) -> Result<Option<&'a curated::CuratedReview>, String> {
+    if curated::artifact_reads_projection(artifact_id) {
+        Ok(Some(review.ok_or(
+            "The curated projection was not read for this artifact.",
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn compile_spec_artifact(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+    artifact_id: &str,
+) -> Result<spec::SpecArtifact, String> {
     let unbounded = spec::SelectedCompileLimits {
         max_bytes: usize::MAX,
         adr: spec::AdrLimits {
@@ -6107,14 +6413,15 @@ fn build_spec_artifact(
         },
     };
     let unknown = || format!("unknown spec artifact id: {artifact_id}");
-    let outcome = spec::compile_spec_selected(
-        &nodes,
-        &edges,
-        &flows,
+    let outcome = spec::compile_spec_selected_supplied(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.flows,
         mode,
-        &rejected_hashes,
+        &inputs.rejected_hashes,
         &[artifact_id],
         unbounded,
+        inputs.supplied(),
     )
     .map_err(|_| unknown())?
     .pop()
@@ -6127,35 +6434,73 @@ fn build_spec_artifact(
     }
 }
 
+#[cfg(test)]
 fn build_spec_with_views(
-    graph: &impl GraphStore,
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<(spec::SpecBundle, spec::SpecViewBundle), String> {
-    let (nodes, edges) = graph.read_snapshot().map_err(|error| error.to_string())?;
-    let flows = flowtracer::trace(&nodes, &edges);
-    let rejected_hashes = decisions
-        .list_assertions()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| record.decision == agents::AssertionDecision::Rejected)
-        .map(|record| record.assertion.provenance.content_hash)
-        .collect();
-    Ok(spec::compile_spec_with_views(
-        &nodes,
-        &edges,
-        &flows,
-        mode,
-        &rejected_hashes,
-    ))
+    let (bundle, views, _) = build_spec_with_views_and_curated(graph, decisions, review, mode)?;
+    Ok((bundle, views))
 }
 
-fn build_spec_views(
-    graph: &impl GraphStore,
+/// `build_spec_with_views` with the Workbench's curated read (SPEC-12 slice
+/// 3, AC-0655), made from the projection this compilation computed: the one
+/// the bundle's `curated_basis` is stamped from. `export_spec_with_views`
+/// over stores the caller holds.
+#[cfg(test)]
+fn build_spec_with_views_and_curated(
+    graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
+    mode: spec::ExportMode,
+) -> Result<
+    (
+        spec::SpecBundle,
+        spec::SpecViewBundle,
+        curated_workbench::CuratedWorkbenchRead,
+    ),
+    String,
+> {
+    compile_spec_with_views_and_curated(spec_inputs(graph, decisions, Some(review))?, mode)
+}
+
+fn compile_spec_with_views_and_curated(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+) -> Result<
+    (
+        spec::SpecBundle,
+        spec::SpecViewBundle,
+        curated_workbench::CuratedWorkbenchRead,
+    ),
+    String,
+> {
+    let curated = curated_workbench::CuratedWorkbenchRead::of(&inputs.curated, mode)
+        .ok_or("The curated projection was not read.")?;
+    // An export whose citations do not resolve is refused (ADR-0058).
+    let (mut bundle, views) = spec::try_compile_spec_with_views_supplied(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.flows,
+        mode,
+        &inputs.rejected_hashes,
+        inputs.supplied(),
+    )
+    .map_err(|error| error.to_string())?;
+    inputs.stamp(&mut bundle);
+    Ok((bundle, views, curated))
+}
+
+#[cfg(test)]
+fn build_spec_views(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+    review: &curated::CuratedReview,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecViewBundle, String> {
-    Ok(build_spec_with_views(graph, decisions, mode)?.1)
+    Ok(build_spec_with_views(graph, decisions, review, mode)?.1)
 }
 
 /// Per-artifact content cap applied before a spec bundle crosses IPC (#488):
@@ -6213,9 +6558,17 @@ struct SpecBundlePreview {
     gap_count: usize,
     drift_count: usize,
     security_count: usize,
+    /// The graph the bundle was compiled from (#1765, AC-0593).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_basis: Option<spec::GraphBasis>,
+    /// The curated revision and counts it was compiled with (AC-0653).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    curated_basis: Option<spec::CuratedBasis>,
 }
 
 fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
+    let graph_basis = bundle.graph_basis;
+    let curated_basis = bundle.curated_basis;
     let artifacts = bundle
         .artifacts
         .into_iter()
@@ -6254,6 +6607,8 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
         gap_count: bundle.gap_count,
         drift_count: bundle.drift_count,
         security_count: bundle.security_count,
+        graph_basis,
+        curated_basis,
     }
 }
 
@@ -6263,48 +6618,81 @@ fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
 struct SpecWithViewsPreview {
     bundle: SpecBundlePreview,
     views: spec::SpecViewBundle,
+    /// The curated projection `bundle.curated_basis` was stamped from, as
+    /// the Workbench shows it (SPEC-12 slice 3, AC-0655).
+    curated: curated_workbench::CuratedWorkbenchRead,
 }
 
 /// Compile the full official spec set under one R-INT-5 export policy,
 /// capped per artifact before it crosses IPC (#488).
+///
+/// Like every export command below it runs on a blocking worker, never on
+/// the main thread (#1834, AC-0659): one export assesses up to
+/// `curated::MAX_CURATED_ACCEPTED` records and compiles every document.
 #[tauri::command]
-fn export_spec(
+async fn export_spec<R: tauri::Runtime>(
     mode: spec::ExportMode,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<SpecBundlePreview, String> {
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let bundle = build_spec_bundle(&*graph, &decisions, mode)?;
-    Ok(preview_spec_bundle(bundle))
+    off_ui_thread(move || export_spec_blocking(mode, &app.state::<AppState>())).await
+}
+
+/// The three steps of every export. The review first, with no graph or
+/// decision lock held: the assessments take the graph lock themselves
+/// (SPEC-12). Then the snapshot and the decisions under both locks. Then
+/// the trace, the projection and the compile with both released, so a
+/// command that needs the graph meanwhile waits for the read alone.
+fn export_inputs(state: &AppState) -> Result<SpecInputs, String> {
+    let review = curated::gather(state);
+    Ok(read_spec_locked(state)?.inputs(Some(&review)))
+}
+
+fn export_spec_blocking(
+    mode: spec::ExportMode,
+    state: &AppState,
+) -> Result<SpecBundlePreview, String> {
+    compile_spec_bundle(export_inputs(state)?, mode).map(preview_spec_bundle)
 }
 
 /// Compile structured diagram views (`topology`, `flow-dossiers`, `data-model`)
 /// bound to the same projection and artifact content identities as `export_spec`
 /// (US-0036, AC-0246, AC-0247).
 #[tauri::command]
-fn export_spec_views(
+async fn export_spec_views<R: tauri::Runtime>(
     mode: spec::ExportMode,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<spec::SpecViewBundle, String> {
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_views(&*graph, &decisions, mode)
+    off_ui_thread(move || export_spec_views_blocking(mode, &app.state::<AppState>())).await
+}
+
+fn export_spec_views_blocking(
+    mode: spec::ExportMode,
+    state: &AppState,
+) -> Result<spec::SpecViewBundle, String> {
+    Ok(compile_spec_with_views_and_curated(export_inputs(state)?, mode)?.1)
 }
 
 /// Compile the capped official spec bundle and its structured diagram views
 /// from one snapshot read, flow trace, and projection pass (US-0036, AC-0246,
 /// AC-0247).
 #[tauri::command]
-fn export_spec_with_views(
+async fn export_spec_with_views<R: tauri::Runtime>(
     mode: spec::ExportMode,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<SpecWithViewsPreview, String> {
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    let (bundle, views) = build_spec_with_views(&*graph, &decisions, mode)?;
+    off_ui_thread(move || export_spec_with_views_blocking(mode, &app.state::<AppState>())).await
+}
+
+fn export_spec_with_views_blocking(
+    mode: spec::ExportMode,
+    state: &AppState,
+) -> Result<SpecWithViewsPreview, String> {
+    let (bundle, views, curated) =
+        compile_spec_with_views_and_curated(export_inputs(state)?, mode)?;
     Ok(SpecWithViewsPreview {
         bundle: preview_spec_bundle(bundle),
         views,
+        curated,
     })
 }
 
@@ -6333,14 +6721,26 @@ fn full_artifact_preview(artifact: spec::SpecArtifact) -> SpecArtifactPreview {
 /// One official spec artifact's complete content and assertions, fetched on
 /// demand for copy/export after `export_spec`'s IPC-capped preview (#488).
 #[tauri::command]
-fn read_spec_artifact(
+async fn read_spec_artifact<R: tauri::Runtime>(
     mode: spec::ExportMode,
     artifact_id: String,
-    state: State<'_, AppState>,
+    app: tauri::AppHandle<R>,
 ) -> Result<SpecArtifactPreview, String> {
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    build_spec_artifact(&*graph, &decisions, mode, &artifact_id).map(full_artifact_preview)
+    off_ui_thread(move || read_spec_artifact_blocking(mode, &artifact_id, &app.state::<AppState>()))
+        .await
+}
+
+fn read_spec_artifact_blocking(
+    mode: spec::ExportMode,
+    artifact_id: &str,
+    state: &AppState,
+) -> Result<SpecArtifactPreview, String> {
+    // Read only for an artifact whose bytes depend on the projection, and
+    // before the graph lock: the assessments take it themselves (SPEC-12).
+    let review = curated::artifact_reads_projection(artifact_id).then(|| curated::gather(state));
+    let review = artifact_review(review.as_ref(), artifact_id)?;
+    let inputs = read_spec_locked(state)?.inputs(review);
+    compile_spec_artifact(inputs, mode, artifact_id).map(full_artifact_preview)
 }
 
 /// Selected flow diagram, bound to the preview's full dossier identity (#1669).
@@ -6689,6 +7089,7 @@ fn main() {
                 primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
                     .map_err(std::io::Error::other)?,
                 metrics: Mutex::new(recovery_metrics),
+                curated_settled: Arc::default(),
             });
             Ok(())
         })
@@ -6950,6 +7351,8 @@ mod tests {
             gap_count: 0,
             drift_count: 0,
             security_count: 0,
+            graph_basis: None,
+            curated_basis: None,
         };
 
         let preview = super::preview_spec_bundle(bundle);
@@ -7033,19 +7436,36 @@ mod tests {
             })
             .unwrap();
 
-        let (bundle, views) =
-            super::build_spec_with_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap();
+        let (bundle, views) = super::build_spec_with_views(
+            &graph,
+            &decisions,
+            &crate::curated::CuratedReview::default(),
+            spec::ExportMode::BestEffort,
+        )
+        .unwrap();
         assert_eq!(
             serde_json::to_value(&bundle).unwrap(),
             serde_json::to_value(
-                super::build_spec_bundle(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+                super::build_spec_bundle(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    spec::ExportMode::BestEffort
+                )
+                .unwrap()
             )
             .unwrap()
         );
         assert_eq!(
             serde_json::to_value(&views).unwrap(),
             serde_json::to_value(
-                super::build_spec_views(&graph, &decisions, spec::ExportMode::BestEffort).unwrap()
+                super::build_spec_views(
+                    &graph,
+                    &decisions,
+                    &crate::curated::CuratedReview::default(),
+                    spec::ExportMode::BestEffort
+                )
+                .unwrap()
             )
             .unwrap()
         );
@@ -7055,6 +7475,7 @@ mod tests {
                 &super::build_spec_artifact(
                     &graph,
                     &decisions,
+                    Some(&crate::curated::CuratedReview::default()),
                     spec::ExportMode::BestEffort,
                     &artifact.id
                 )
@@ -7065,8 +7486,14 @@ mod tests {
             );
         }
         assert_eq!(
-            super::build_spec_artifact(&graph, &decisions, spec::ExportMode::BestEffort, "nope")
-                .unwrap_err(),
+            super::build_spec_artifact(
+                &graph,
+                &decisions,
+                Some(&crate::curated::CuratedReview::default()),
+                spec::ExportMode::BestEffort,
+                "nope"
+            )
+            .unwrap_err(),
             "unknown spec artifact id: nope"
         );
         let topology_art = bundle
@@ -8775,6 +9202,71 @@ export function queueOrder() {
     }
 
     #[test]
+    fn pipeline_facts_land_in_the_graph_in_declared_order() {
+        // AC-0598 (#1790): a normal extraction turns a workflow and a
+        // Dockerfile into ordered Pipeline facts, through the FK-enforcing
+        // graph load, without adding a hop to any flow.
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("ci.yml"),
+            "on:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n  build:\n    steps:\n      - run: make\n  \
+             deploy:\n    needs: build\n    steps:\n      - uses: acme/deploy@v1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Dockerfile"),
+            "FROM node:22 AS build\nRUN make\nFROM scratch\nCOPY --from=build /out /out\n",
+        )
+        .unwrap();
+        let (extraction, summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/ship",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(summary.pipelines.files, 2);
+
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        crate::load_into_graph(&mut graph, &extraction, "local/ship", dir.path(), "workdir")
+            .unwrap();
+        let job = |key: &str| format!("pipeline-job:local/ship@.github/workflows/ci.yml#{key}");
+        let deploy = graph.get_node(&job("deploy")).unwrap().unwrap();
+        assert_eq!(deploy.label, "PipelineJob");
+        assert_eq!(deploy.props["index"], 1);
+        assert_eq!(deploy.props["depth"], 1);
+        assert_eq!(deploy.props["prov"]["extractor_id"], "t0.pipeline");
+        let step = graph
+            .get_node("pipeline-step:local/ship@.github/workflows/ci.yml#deploy/0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(step.props["uses"], "acme/deploy@v1");
+        let edges = graph.all_edges().unwrap();
+        assert!(edges.iter().any(|edge| edge.src == job("deploy")
+            && edge.dst == job("build")
+            && edge.label == "NEEDS"));
+        assert!(edges.iter().any(
+            |edge| edge.src == "pipeline-job:local/ship@Dockerfile#stage-1"
+                && edge.dst == "pipeline-job:local/ship@Dockerfile#stage-0"
+                && edge.label == "NEEDS"
+        ));
+        // No pipeline fact uses a label the flow tracer walks: the scheduled
+        // workflow's flow is the one the schedule reader alone produces.
+        assert!(
+            edges
+                .iter()
+                .filter(|edge| edge.props["prov"]["extractor_id"] == "t0.pipeline")
+                .all(|edge| !flowtracer::FLOW_EDGE_LABELS.contains(&edge.label.as_str()))
+        );
+    }
+
+    #[test]
     fn webextension_manifest_ingest_reports_layer_and_security_grants() {
         // US-0016: a Manifest V3 extension yields deterministic topology,
         // entry bindings against .ts sources, and exact-scope GRANTS that
@@ -9711,11 +10203,13 @@ export function queueOrder() {
                     repo: "acme/shop".into(),
                     display_name: None,
                     commit: "a1b2c3d".into(),
+                    graph_hash: None,
                 },
                 crate::SystemRepo {
                     repo: "local/infra".into(),
                     display_name: None,
                     commit: "workdir".into(),
+                    graph_hash: None,
                 },
             ]
         );
@@ -11098,6 +11592,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -12088,6 +12583,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(dir).unwrap(),
             sources: test_source_registry(&state_path, &std::collections::BTreeSet::new()),
             metrics: std::sync::Mutex::new(
@@ -12533,6 +13029,197 @@ export function App() {
         newer.join().unwrap().unwrap();
     }
 
+    // AC-0658: a gated plugin that emits a malformed fact for one file of
+    // several does not fail the ingest. The other files' facts join the
+    // graph, no fact from the refused file by that plugin does, and coverage
+    // names the plugin, the file and the reason class. Two runs give the
+    // same graph and the same inventory.
+    #[test]
+    fn plugin_refused_on_one_file_keeps_the_ingest_and_is_named_in_coverage() {
+        use ingest::coverage::RefusalReason;
+        // A text-form component: the first byte of a source picks its
+        // behaviour, `M` being a fact with a `prov` field a plugin may not
+        // write.
+        const REFUSING_ADAPTER: &[u8] =
+            include_bytes!("../../crates/adapters-plugin-host/tests/fixtures/refusing-adapter.wat");
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("a.zz"), "fine").unwrap();
+        std::fs::write(project.join("src/b.zz"), "Malformed").unwrap();
+        std::fs::write(project.join("src/c.zz"), "fine too").unwrap();
+        let artifact = dir.path().join("t0.plugin-refusing.wasm");
+        std::fs::write(&artifact, REFUSING_ADAPTER).unwrap();
+        let root = super::paths::canonicalize(&project).unwrap();
+        let hash = core_prov::content_hash(REFUSING_ADAPTER);
+        let active = [super::ActivePlugin {
+            plugin_id: "t0.plugin-refusing".into(),
+            path: artifact,
+            content_hash: hash.clone(),
+            extensions: vec!["zz".into()],
+            cells: Vec::new(),
+            languages: std::collections::BTreeMap::new(),
+            gate_key: "gate".into(),
+        }];
+        let pinned = format!("t0.plugin-refusing@{}", &hash[..12]);
+        let repo = "acme/refused";
+
+        let run = || {
+            let mut reads = super::ProducerReads::default();
+            let (extraction, layers, _) = super::extract_tree_with_primary(
+                &root,
+                repo,
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeSet::new(),
+                None,
+                None,
+                &[],
+                &mut super::RepoExtractionCache::default(),
+                &active,
+                &mut |_| {},
+                None,
+                &mut Vec::new(),
+                &mut reads,
+            )
+            .expect("one refused file does not fail the ingest");
+            let coverage = super::repo_coverage(
+                repo,
+                "workdir",
+                None,
+                &[],
+                &layers,
+                &extraction,
+                &super::DeclaredInputs::default(),
+                &reads,
+            );
+            (extraction, reads, coverage)
+        };
+        let (extraction, reads, coverage) = run();
+
+        let by_plugin: Vec<&str> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.props["prov"]["extractor_id"] == serde_json::json!(pinned))
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            by_plugin,
+            ["acme/refused:a.zz", "acme/refused:src/c.zz"],
+            "the other files' facts join the graph and the refused file's do not"
+        );
+        assert!(
+            !extraction
+                .nodes
+                .iter()
+                .any(|node| node.id == "acme/refused:src/b.zz"),
+            "no fact from the refused file"
+        );
+        assert!(
+            !extraction
+                .edges
+                .iter()
+                .any(
+                    |edge| edge.props["prov"]["extractor_id"] == serde_json::json!(pinned)
+                        && (edge.src.contains("b.zz") || edge.dst.contains("b.zz"))
+                )
+        );
+
+        assert_eq!(reads.plugins.len(), 1);
+        assert_eq!(reads.plugins[0].id, pinned);
+        assert_eq!(reads.plugins[0].count.files, 2);
+        assert_eq!(
+            reads.plugins[0].refused,
+            [("src/b.zz".to_string(), RefusalReason::MalformedFact)]
+        );
+
+        let row = coverage
+            .producers
+            .iter()
+            .find(|producer| producer.id == pinned)
+            .expect("the plugin has a row");
+        assert_eq!(row.files, 2, "the refused file is not counted as covered");
+        assert_eq!(row.nodes, 2);
+        assert_eq!(
+            row.stopping_reason,
+            "read 2 of the 3 files its extensions claim in acme/refused@workdir; the host \
+             refused its extraction of 1 (1 malformed fact), and no fact from those files by \
+             this plugin joined the graph"
+        );
+        let refusals = row.refusals.as_ref().expect("the refusal is recorded");
+        assert_eq!(
+            (
+                refusals.malformed_fact,
+                refusals.guest_error,
+                refusals.bound_exceeded,
+                refusals.omitted
+            ),
+            (1, 0, 0, 0)
+        );
+        assert_eq!(refusals.files.len(), 1);
+        assert_eq!(refusals.files[0].path, "src/b.zz");
+        assert_eq!(refusals.files[0].reason, RefusalReason::MalformedFact);
+        assert!(coverage.limited);
+        let entry = coverage
+            .unsupported
+            .iter()
+            .find(|entry| entry.capability == RefusalReason::MalformedFact.capability())
+            .expect("the refused file is a not-covered entry");
+        assert_eq!(
+            (entry.occurrences, entry.first_site.as_str()),
+            (1, "src/b.zz")
+        );
+        // The reason class only: the host's error text quotes the guest.
+        let inventory_json = serde_json::to_string(&coverage).unwrap();
+        assert!(!inventory_json.contains("method"), "{inventory_json}");
+
+        // The coverage-qualified read accepts the inventory and counts the
+        // refusal as a limitation.
+        let record = core_graph::coverage::CoverageRecord {
+            repo_key: repo.into(),
+            registered_source_id: Some("source:refused".into()),
+            ingest_id: "job:1".into(),
+            config_hash: "config".into(),
+            inventory_json: inventory_json.clone(),
+        };
+        let qualification = context_hub::coverage::CoverageQualification::new(
+            &[context_hub::coverage::ScopedRepo {
+                repo_key: repo.into(),
+                registered_source_id: Some("source:refused".into()),
+                config_hash: "config".into(),
+                layer_hints: None,
+            }],
+            &[core_graph::coverage::StoredCoverage {
+                inventory_hash: record.inventory_hash(),
+                record,
+            }],
+        )
+        .expect("a refusal inventory is a valid coverage@1 inventory");
+        assert_eq!(
+            qualification.repos[0].status,
+            context_hub::coverage::CoverageStatus::Recorded
+        );
+        assert_eq!(qualification.repos[0].limited, Some(true));
+        assert_eq!(qualification.repos[0].counts.unwrap().unsupported, 1);
+
+        // Determinism: the same tree gives the same graph and inventory.
+        let (again, _, coverage_again) = run();
+        assert_eq!(
+            serde_json::to_string(&extraction.nodes).unwrap(),
+            serde_json::to_string(&again.nodes).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&extraction.edges).unwrap(),
+            serde_json::to_string(&again.edges).unwrap()
+        );
+        assert_eq!(
+            inventory_json,
+            serde_json::to_string(&coverage_again).unwrap()
+        );
+    }
+
     #[test]
     fn plugin_lane_end_to_end_gate_accept_reingest_closes_finding() {
         // AC-0093 (#201): request → gate pass → accept → re-scan. An
@@ -12603,6 +13290,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )
@@ -12774,8 +13462,9 @@ export function App() {
         .unwrap();
         let pinned = format!("t0.plugin-fixture@{}", &hash[..12]);
         assert_eq!(reads.plugins.len(), 1);
-        assert_eq!(reads.plugins[0].0, pinned);
-        assert_eq!(reads.plugins[0].1.files, 1, "one claimed file read");
+        assert_eq!(reads.plugins[0].id, pinned);
+        assert_eq!(reads.plugins[0].count.files, 1, "one claimed file read");
+        assert!(reads.plugins[0].refused.is_empty());
         let coverage = super::repo_coverage(
             &repo,
             "workdir",
@@ -12863,6 +13552,7 @@ export function App() {
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
             knowledge_overlay: None,
+            curated_settled: std::sync::Arc::default(),
             primary_sources: super::primary_source::PrimarySourceStore::open(
                 state_path.parent().unwrap(),
             )

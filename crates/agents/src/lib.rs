@@ -23,6 +23,7 @@ pub use decision_selection::{
     MAX_SELECTED_ASSERTION_BYTES, MAX_SELECTED_ASSERTION_KEYS, MAX_SELECTED_ASSERTION_ROW_BYTES,
     SelectedAssertionDecision,
 };
+pub mod curated;
 pub mod investigation;
 pub mod prepared;
 pub mod source_basis;
@@ -572,9 +573,14 @@ struct RawProposal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalDecision {
-    /// Admit to the curated/best-effort overlay as InferredWeak.
+    /// The reviewer accepted the proposal. Acceptance writes nothing to the
+    /// graph and admits nothing by itself: the curated projection assigns
+    /// each accepted record one state when it is read, and only an
+    /// `eligible` record is a curated item, still Agentic / InferredWeak
+    /// (ADR-0061 decisions 4 to 6).
     Accepted,
-    /// Keep the Gap and suppress this proposal.
+    /// Keep the Gap and suppress this proposal. Rejecting an accepted record
+    /// withdraws it from curated content (ADR-0061 decision 9).
     Rejected,
 }
 

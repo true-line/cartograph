@@ -256,9 +256,313 @@ mod tests {
     }
 
     #[test]
+    fn curated_record_read_fails_whole_beyond_its_accepted_bound() {
+        // AC-0653 (SPEC-12 "The projection"): the staging read is bounded and
+        // never returns a part of the accepted records as if it were all.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProposalStore::open(dir.path().join("proposals.sqlite")).unwrap();
+        let bound = crate::curated::MAX_CURATED_ACCEPTED;
+        for index in 0..=bound {
+            let task = task(&format!("gap:{index}"));
+            let staged = store.stage(&task, &produce(&task), 1, &snapshot()).unwrap();
+            // The last one stays pending: pending records do not count.
+            if index < bound {
+                store
+                    .review(&staged.proposal_id, 0, ProposalDecision::Accepted, None)
+                    .unwrap();
+            }
+        }
+        // Exactly the bound, read across several pages, is complete.
+        let review = crate::curated::read_records(&store);
+        let graph = core_graph::SqliteGraphStore::open_in_memory().unwrap();
+        let decisions = agents::DecisionLog::open(":memory:").unwrap();
+        let bundle =
+            crate::build_spec_bundle(&graph, &decisions, &review, spec::ExportMode::BestEffort)
+                .unwrap();
+        let counts = bundle.curated_basis.clone().unwrap().counts;
+        assert_eq!(counts.accepted, bound);
+        assert_eq!(counts.unverified, bound);
+        assert!(bundle.artifacts.iter().any(|artifact| {
+            artifact.id == "curated" && artifact.content.contains("| unverified |")
+        }));
+        // AC-0655 (SPEC-12 slice 3): the Workbench read, returned with the
+        // views, lists the same
+        // records, each with the sentence `curated.md` prints for its
+        // reason, and is the same in both modes for a listed record.
+        let curated_md = |bundle: &spec::SpecBundle| {
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap()
+                .content
+                .clone()
+        };
+        let workbench = |review: &crate::curated::CuratedReview, mode| {
+            let (_, _, read) =
+                crate::build_spec_with_views_and_curated(&graph, &decisions, review, mode).unwrap();
+            serde_json::to_value(read).unwrap()
+        };
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let read = workbench(&review, mode);
+            assert_eq!(read["status"], "computed");
+            let basis = bundle.curated_basis.as_ref().unwrap();
+            assert_eq!(read["revision"], basis.revision.as_str());
+            assert_eq!(read["counts"], serde_json::to_value(basis.counts).unwrap());
+            assert_eq!(read["items"], serde_json::json!([]));
+            assert_eq!(read["items_omitted"], 0);
+            let listed = read["listed"].as_array().unwrap();
+            assert_eq!(listed.len(), bound);
+            assert_eq!(listed[0]["state"], "unverified");
+            assert_eq!(listed[0]["tier"], "Agentic");
+            assert_eq!(listed[0]["confidence"], "InferredWeak");
+            assert_eq!(listed[0]["reason"], "legacy_record");
+            let sentence = listed[0]["reason_sentence"].as_str().unwrap();
+            assert!(curated_md(&bundle).contains(&format!("| {sentence} (`legacy_record`) |")));
+        }
+        let pending = store.list(1, None).unwrap().items.remove(0);
+        store
+            .review(&pending.proposal_id, 0, ProposalDecision::Accepted, None)
+            .unwrap();
+        // One more, and nothing of the read is projected. The export still
+        // succeeds in both modes: the recovered documents do not depend on
+        // the review stores. `curated.md` gives the reason, no curated basis
+        // is stamped, and every other artifact is the one a compile with no
+        // projection produces.
+        let review = crate::curated::read_records(&store);
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let bundle = crate::build_spec_bundle(&graph, &decisions, &review, mode).unwrap();
+            assert_eq!(bundle.curated_basis, None);
+            assert!(bundle.graph_basis.is_some());
+            let bare = spec::compile_spec(&nodes, &edges, &[], mode, &Default::default());
+            for (bare, failed) in bare.artifacts.iter().zip(&bundle.artifacts) {
+                assert_eq!(bare == failed, bare.id != "curated", "{}", bare.id);
+            }
+            let curated = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap();
+            assert!(
+                curated
+                    .content
+                    .contains("The curated projection was not computed for this export"),
+                "{}",
+                curated.content
+            );
+            assert!(
+                curated
+                    .content
+                    .contains(&format!("More than {bound} proposals are accepted")),
+                "{}",
+                curated.content
+            );
+            assert!(curated.content.contains("(`too_many_accepted`)"));
+            assert!(!curated.content.contains("gap:"));
+            // The Workbench read gives the same reason and sentence, and
+            // no record.
+            let read = workbench(&review, mode);
+            assert_eq!(read["status"], "not_computed");
+            assert_eq!(read["reason"], "too_many_accepted");
+            assert_eq!(read["limit"], bound);
+            let sentence = read["sentence"].as_str().unwrap();
+            assert!(curated.content.contains(&format!("Reason: {sentence} (")));
+            assert!(read.get("items").is_none() && read.get("listed").is_none());
+            assert!(!read.to_string().contains("gap:"));
+            assert!(curated.assertions.is_empty());
+            // The views build and the single-artifact read succeed too.
+            let (with_views, _) =
+                crate::build_spec_with_views(&graph, &decisions, &review, mode).unwrap();
+            assert_eq!(with_views, bundle);
+            assert_eq!(
+                &crate::build_spec_artifact(&graph, &decisions, Some(&review), mode, "curated")
+                    .unwrap(),
+                curated
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_curated_read_lists_reviewed_records_like_the_export_and_respects_its_bounds() {
+        // AC-0654 (SPEC-12 slice 4): an MCP read session over a staging
+        // store reads the records the export reads. Its `curated` artifact
+        // is the export's, its structured form lists each accepted record
+        // with its state and reason in both modes, a review made while the
+        // session is acquired is `StaleBasis`, and a store beyond the
+        // accepted bound leaves the projection not computed without failing
+        // the session.
+        use crate::mcp_reads::artifacts::ArtifactCompilation;
+        use crate::mcp_reads::curated_read::CuratedBasis;
+        use crate::mcp_reads::{ReadError, ReadSession};
+        use std::sync::Mutex;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProposalStore::open(dir.path().join("proposals.sqlite")).unwrap();
+        let mut ids = Vec::new();
+        for (index, decision) in [
+            Some(ProposalDecision::Accepted),
+            Some(ProposalDecision::Rejected),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let task = task(&format!("gap:{index}"));
+            let staged = store.stage(&task, &produce(&task), 1, &snapshot()).unwrap();
+            if let Some(decision) = decision {
+                store
+                    .review(&staged.proposal_id, 0, decision, Some("a private note"))
+                    .unwrap();
+            }
+            ids.push(staged.proposal_id);
+        }
+        let store = Mutex::new(store);
+        let graph = Mutex::new(core_graph::SqliteGraphStore::open_in_memory().unwrap());
+        let decisions = Mutex::new(agents::DecisionLog::open(":memory:").unwrap());
+        let acquire = |mode, scope: &mut dyn FnMut()| {
+            ReadSession::acquire_with_overlay(
+                &graph,
+                None,
+                &decisions,
+                &store,
+                || {
+                    scope();
+                    Ok(vec![])
+                },
+                core_graph::SnapshotReadLimits::default(),
+                core_graph::coverage::CoverageReadLimits::default(),
+                mode,
+            )
+        };
+        let read = |session: &ReadSession, id: &str| {
+            let trace = flowtracer::TraceLimits {
+                max_flows: 64,
+                max_hops: 512,
+                max_output_bytes: 1024 * 1024,
+            };
+            let compile = spec::SelectedCompileLimits {
+                max_bytes: 1024 * 1024,
+                adr: spec::AdrLimits {
+                    max_rows: 1024,
+                    max_output_bytes: 1024 * 1024,
+                },
+            };
+            match session.compile_artifact(id, trace, compile).unwrap() {
+                ArtifactCompilation::Produced(artifact) => artifact.artifact().clone(),
+                limited => panic!("{id}: {limited:?}"),
+            }
+        };
+        let export = |mode| {
+            let review = crate::curated::read_records(&store.lock().unwrap());
+            crate::build_spec_bundle(
+                &graph.lock().unwrap(),
+                &decisions.lock().unwrap(),
+                &review,
+                mode,
+            )
+            .unwrap()
+        };
+        let curated = |bundle: &spec::SpecBundle| {
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap()
+                .clone()
+        };
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let bundle = export(mode);
+            let session = acquire(mode, &mut || {}).unwrap();
+            assert_eq!(read(&session, "curated"), curated(&bundle), "{mode:?}");
+            assert_eq!(
+                session.basis().curated,
+                CuratedBasis::Computed {
+                    revision: bundle.curated_basis.as_ref().unwrap().revision.clone()
+                }
+            );
+            let structured = read(&session, "curated-json").content;
+            let data: serde_json::Value = serde_json::from_str(&structured).unwrap();
+            // A listed record asserts nothing and is the same in both modes.
+            assert_eq!(data["items"], serde_json::json!([]));
+            assert_eq!(data["items_omitted"], 0);
+            assert_eq!(data["listed"].as_array().unwrap().len(), 1);
+            let listed = &data["listed"][0];
+            assert_eq!(listed["record_id"], ids[0].as_str());
+            assert_eq!(listed["gap_id"], "gap:0");
+            assert_eq!(listed["source_id"], "source");
+            assert_eq!(listed["target_id"], "target");
+            assert_eq!(listed["edge_label"], "CALLS");
+            assert_eq!(listed["review_status"], "accepted");
+            assert_eq!(listed["state"], "unverified");
+            assert_eq!(listed["source_support"]["captured"], 0);
+            assert_eq!(data["counts"]["accepted"], 1);
+            assert_eq!(data["counts"]["unverified"], 1);
+            // Rejected and pending records are not listed, and no review
+            // note reaches the reader.
+            assert!(!structured.contains(&ids[1]) && !structured.contains(&ids[2]));
+            assert!(!structured.contains("a private note"));
+        }
+
+        // A review after the session gathered its reviews: stale. The
+        // scope is read before the graph and again after the reviews.
+        let mut calls = 0;
+        let stale = acquire(spec::ExportMode::BestEffort, &mut || {
+            calls += 1;
+            if calls == 2 {
+                store
+                    .lock()
+                    .unwrap()
+                    .review(&ids[2], 0, ProposalDecision::Accepted, None)
+                    .unwrap();
+            }
+        });
+        assert!(matches!(stale, Err(ReadError::StaleBasis)));
+        let before = acquire(spec::ExportMode::BestEffort, &mut || {}).unwrap();
+        assert_eq!(
+            read(&before, "curated"),
+            curated(&export(spec::ExportMode::BestEffort))
+        );
+
+        // Beyond the accepted bound the projection is not computed. The
+        // session is acquired, the flag is false with the reason, and the
+        // document is the one the export holds.
+        let bound = crate::curated::MAX_CURATED_ACCEPTED;
+        for index in 3..=bound + 1 {
+            let task = task(&format!("gap:{index}"));
+            let mut store = store.lock().unwrap();
+            let staged = store.stage(&task, &produce(&task), 1, &snapshot()).unwrap();
+            store
+                .review(&staged.proposal_id, 0, ProposalDecision::Accepted, None)
+                .unwrap();
+        }
+        let session = acquire(spec::ExportMode::BestEffort, &mut || {}).unwrap();
+        assert!(!session.basis().h3_curated_available);
+        assert_eq!(
+            session.basis().curated,
+            CuratedBasis::NotComputed(spec::CuratedFailure::TooManyAccepted { limit: bound })
+        );
+        assert_ne!(session.basis_id().unwrap(), before.basis_id().unwrap());
+        let bundle = export(spec::ExportMode::BestEffort);
+        assert_eq!(bundle.curated_basis, None);
+        assert_eq!(read(&session, "curated"), curated(&bundle));
+        assert!(
+            read(&session, "curated")
+                .content
+                .contains("(`too_many_accepted`)")
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&read(&session, "curated-json").content).unwrap();
+        assert_eq!(
+            data["failure"],
+            serde_json::json!({"reason":"too_many_accepted","limit":bound})
+        );
+        assert_eq!(read(&session, "topology"), read(&before, "topology"));
+    }
+
+    #[test]
     fn staged_result_survives_job_cleanup_without_activating_legacy_or_recovered_facts() {
         // AC-0128/AC-0131: a commit before job finalization survives restart and
-        // job cleanup. Neither staging nor review alters recovered exports or
+        // job cleanup. Neither staging nor review alters a recovered fact or
         // imports legacy caller-body decisions into the staged history.
         let dir = tempfile::tempdir().unwrap();
         let stage_path = dir.path().join("proposals.sqlite");
@@ -302,7 +606,13 @@ mod tests {
             .unwrap();
         assert!(store.list(10, None).unwrap().items.is_empty());
         let before = serde_json::to_value(
-            crate::build_spec_bundle(&graph, &legacy, spec::ExportMode::BestEffort).unwrap(),
+            crate::build_spec_bundle(
+                &graph,
+                &legacy,
+                &crate::curated::CuratedReview::default(),
+                spec::ExportMode::BestEffort,
+            )
+            .unwrap(),
         )
         .unwrap();
         let job = jobs.enqueue("escalate:restart:local").unwrap();
@@ -338,6 +648,20 @@ mod tests {
         jobs.lock().unwrap().clear_finished().unwrap();
         assert!(jobs.lock().unwrap().get(job.id).is_err());
         let mut restored = ProposalStore::open(&stage_path).unwrap();
+        // A staged proposal nobody has reviewed changes no byte of the export.
+        assert_eq!(
+            serde_json::to_value(
+                crate::build_spec_bundle(
+                    &graph,
+                    &legacy,
+                    &crate::curated::read_records(&restored),
+                    spec::ExportMode::BestEffort
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            before
+        );
         let accepted = restored
             .review(&staged.proposal_id, 0, ProposalDecision::Accepted, None)
             .unwrap();
@@ -345,13 +669,66 @@ mod tests {
             accepted.proposal.provenance.confidence_tier,
             ConfidenceTier::InferredWeak
         );
-        assert_eq!(
-            serde_json::to_value(
-                crate::build_spec_bundle(&graph, &legacy, spec::ExportMode::BestEffort).unwrap()
+        // AC-0653 (SPEC-12 slice 2): acceptance now reaches the export, and
+        // only as a listed state. This record has no captured evidence, so it
+        // is not a curated item: `curated.md` and the curated basis change,
+        // and every other artifact, the fact index and the graph basis are
+        // byte-identical in both modes.
+        let review = crate::curated::read_records(&restored);
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let before = crate::build_spec_bundle(
+                &graph,
+                &legacy,
+                &crate::curated::CuratedReview::default(),
+                mode,
             )
-            .unwrap(),
-            before
-        );
+            .unwrap();
+            let after = crate::build_spec_bundle(&graph, &legacy, &review, mode).unwrap();
+            assert_eq!(before.artifacts.len(), after.artifacts.len());
+            for (before, after) in before.artifacts.iter().zip(&after.artifacts) {
+                assert_eq!(
+                    before == after,
+                    before.id != "curated",
+                    "{} in {mode:?}",
+                    before.id
+                );
+            }
+            assert_eq!(before.graph_basis, after.graph_basis);
+            assert_eq!(before.assertion_count, after.assertion_count);
+            let (before_basis, basis) = (
+                before.curated_basis.unwrap(),
+                after.curated_basis.clone().unwrap(),
+            );
+            assert_eq!(before_basis.counts.accepted, 0);
+            assert_ne!(before_basis.revision, basis.revision);
+            assert_eq!(basis.counts.accepted, 1);
+            assert_eq!(basis.counts.unverified, 1);
+            assert_eq!(basis.counts.eligible, 0);
+            let curated = after
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "curated")
+                .unwrap();
+            assert!(curated.assertions.is_empty());
+            assert!(curated.content.contains(&basis.revision));
+            assert!(curated.content.contains("Curated items: 0."));
+            let row = curated
+                .content
+                .lines()
+                .find(|line| line.starts_with(&format!("| {} |", staged.proposal_id)))
+                .unwrap();
+            assert!(
+                row.contains("| Agentic | InferredWeak | accepted |"),
+                "{row}"
+            );
+            assert!(row.contains("| unverified |"), "{row}");
+            // The artifact compiled alone is the bundle's.
+            assert_eq!(
+                &crate::build_spec_artifact(&graph, &legacy, Some(&review), mode, "curated")
+                    .unwrap(),
+                curated
+            );
+        }
         assert_eq!(legacy.list().unwrap().len(), 1);
         assert_eq!(
             context_hub::ContextSnapshot::new(

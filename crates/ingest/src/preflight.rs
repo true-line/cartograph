@@ -558,6 +558,20 @@ pub fn preflight_scan(
                 });
             }
         }
+        // Pipeline limits (#1790, AC-0598): another CI system's configuration
+        // is present and not read; a workflow or Dockerfile that cannot be
+        // read exactly yields no step facts. Both are named, never skipped.
+        if let Some(limit) = crate::pipelines::unread(&name, &rel, &path) {
+            unsupported.push(finding(limit.kind, &rel, 1, &limit.message));
+        }
+        // Environment limits (#1791, AC-0661, AC-0662): a Helm chart or
+        // values file, and each Kubernetes manifest document of a kind that
+        // is not read, are present and not read. Compose files,
+        // kustomizations and the pod-bearing kinds are read and carry no
+        // limit here.
+        for limit in crate::environments::unread(&name, &rel, &path) {
+            unsupported.push(finding(&limit.kind, &rel, limit.line, &limit.message));
+        }
         let Some(extension) = path.extension().map(|e| e.to_string_lossy().into_owned()) else {
             continue;
         };

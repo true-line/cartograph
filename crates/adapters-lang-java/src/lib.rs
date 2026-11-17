@@ -92,6 +92,10 @@ pub struct Extraction {
     /// annotation types included: the package members that can shadow a
     /// wildcard import.
     package_types: Vec<String>,
+    /// `System.getenv` sites awaiting the repo-wide `System` check (#1789).
+    pending_config: Vec<adapters_fw::config_read::ConfigReadSite>,
+    /// Some file declares or imports something named `System`.
+    system_rebound: bool,
 }
 
 /// One declared method or constructor, indexed for overload resolution by
@@ -823,6 +827,13 @@ pub fn extract_source(
         package_types.contains(fqn)
     });
     out.fetch_sites.extend(feign_sites);
+    config_read::resolve(
+        id,
+        std::mem::take(&mut out.pending_config),
+        out.system_rebound,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     Ok(out)
 }
 
@@ -1050,6 +1061,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         .extend(retrofit::sites(&cx, &methods, &imports));
     out.retrofit_bases
         .extend(retrofit::bases(&cx, root, &imports));
+
+    // Configuration reads (#1789, AC-0597) wait for the repo-wide check.
+    let (config_sites, system_rebound) = config_read::sites(&cx, root, &methods_by_start);
+    out.pending_config.extend(config_sites);
+    out.system_rebound |= system_rebound;
 
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
@@ -1683,6 +1699,8 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_endpoints.extend(extraction.pending_endpoints);
             out.pending_feign.extend(extraction.pending_feign);
             out.package_types.extend(extraction.package_types);
+            out.pending_config.extend(extraction.pending_config);
+            out.system_rebound |= extraction.system_rebound;
             Ok(())
         },
     );
@@ -1744,6 +1762,13 @@ pub fn extract_dir_incremental_with_progress(
         package_types.contains(fqn)
     });
     out.fetch_sites.extend(feign_sites);
+    config_read::resolve(
+        id,
+        std::mem::take(&mut out.pending_config),
+        out.system_rebound,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     for pending in std::mem::take(&mut out.pending_calls) {
         let declared = types_by_fqn.get(pending.fqn.as_str()).copied().flatten();
         match declared {
@@ -1838,6 +1863,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod config_read;
 mod feign;
 mod http_request;
 mod okhttp;

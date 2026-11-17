@@ -4,6 +4,7 @@
 //! language adapter consults them while walking the AST.
 
 pub mod client;
+pub mod config_read;
 pub mod events;
 pub mod observed;
 pub mod tsconfig;

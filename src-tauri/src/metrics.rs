@@ -147,10 +147,7 @@ pub fn compute(
         tally(&provenance);
         cover(&provenance);
         if in_recorded_scope(&provenance) || is_own_registration_node(node) {
-            lines.push(format!(
-                "n {} {} {}",
-                node.id, node.label, provenance.content_hash
-            ));
+            lines.push(spec::node_fact_line(node, &provenance));
         }
     }
     for edge in edges {
@@ -159,10 +156,12 @@ pub fn compute(
         tally(&provenance);
         cover(&provenance);
         if in_recorded_scope(&provenance) {
-            lines.push(format!("e {} {}", identity, provenance.content_hash));
+            lines.push(spec::edge_fact_line(edge, &provenance));
         }
     }
-    lines.sort();
+    // One definition of the graph content hash, shared with the export
+    // manifest (#1765, AC-0593): sorted lines, so store order is irrelevant.
+    let content_hash = spec::hash_fact_lines(lines);
 
     // Scope-declared extractors always appear — a covering adapter that
     // produced zero facts is a 0% row, not a missing row.
@@ -201,7 +200,7 @@ pub fn compute(
         inferred_weak,
         gap,
         graph_facts: (nodes.len() + edges.len()) as u64,
-        content_hash: core_prov::content_hash(lines.join("\n").as_bytes()),
+        content_hash,
         coverage,
     }
 }
@@ -324,6 +323,26 @@ impl MetricsStore {
             })
         })?;
         rows.collect()
+    }
+
+    /// The graph content hash recorded by the latest completed ingest of
+    /// `repo` at `commit` (#1765, AC-0593), or `None` when no ingest of that
+    /// registration at that revision has been recorded — a whole-system
+    /// ingest records one hash for the system, not one per registration.
+    pub fn recorded_content_hash(
+        &self,
+        repo: &str,
+        commit: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT content_hash FROM ingest_history
+                 WHERE repo = ?1 AND commit_sha = ?2 ORDER BY id DESC LIMIT 1",
+                params![repo, commit],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Coverage rows for the most recent ingest (empty before the first).
@@ -608,5 +627,60 @@ mod tests {
         let coverage = store.latest_coverage().unwrap();
         assert_eq!(coverage.len(), 1);
         assert_eq!(coverage[0].coverage_pct, Some(100.0));
+    }
+
+    // AC-0593: the recorded hash and the export manifest's hash are one
+    // definition — an unscoped record equals the whole-graph content hash.
+    #[test]
+    fn unscoped_recorded_hash_equals_the_whole_graph_content_hash() {
+        let mut foreign = node("z", "t0.adapter-ts", "Confirmed", "src/z.ts");
+        foreign.props["prov"]["evidence"][0]["repo"] = json!("local/other");
+        let nodes = vec![node("a", "t0.adapter-ts", "Confirmed", "src/a.ts"), foreign];
+        let edges = vec![edge("a", "z", "t0.adapter-ts")];
+
+        let unscoped = compute(&nodes, &edges, &BTreeMap::new(), &BTreeSet::new());
+        assert_eq!(
+            unscoped.content_hash,
+            spec::graph_content_hash(&nodes, &edges)
+        );
+        // A registration's own record covers only its facts.
+        let scoped = compute(&nodes, &edges, &BTreeMap::new(), &fixture_repos());
+        assert_ne!(scoped.content_hash, unscoped.content_hash);
+    }
+
+    // AC-0593: the hash shown with a source registration is the latest one
+    // recorded for that registration at that revision, and no other.
+    #[test]
+    fn recorded_content_hash_is_per_registration_and_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MetricsStore::open(dir.path().join("state.db")).unwrap();
+        let hash = |id: &str| {
+            compute(
+                &[node(id, "t0.adapter-ts", "Confirmed", "src/a.ts")],
+                &[],
+                &ts_scope(1),
+                &fixture_repos(),
+            )
+        };
+        let (old, new, other) = (hash("old"), hash("new"), hash("other"));
+        store
+            .record(1, "local/fixture", "workdir", &old, 0, 0)
+            .unwrap();
+        store
+            .record(2, "local/fixture", "workdir", &new, 0, 0)
+            .unwrap();
+        store
+            .record(3, "acme/shop", "abc123", &other, 0, 0)
+            .unwrap();
+        store
+            .record(4, "local/fixture,acme/shop", "system", &other, 0, 0)
+            .unwrap();
+
+        let recorded =
+            |repo: &str, commit: &str| store.recorded_content_hash(repo, commit).unwrap();
+        assert_eq!(recorded("local/fixture", "workdir"), Some(new.content_hash));
+        assert_eq!(recorded("acme/shop", "abc123"), Some(other.content_hash));
+        assert_eq!(recorded("acme/shop", "def456"), None);
+        assert_eq!(recorded("local/unknown", "workdir"), None);
     }
 }

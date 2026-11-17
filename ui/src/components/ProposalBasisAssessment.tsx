@@ -56,7 +56,7 @@ export function ProposalBasisAssessment({ state, onAssess }: ProposalBasisAssess
             <p>Observed graph: <code>{result.current_graph_snapshot_id ?? 'Unavailable'}</code></p>
             <p>Captured file validation: {result.captured_validation_bytes} / {result.max_captured_validation_bytes} bytes.</p>
           </details>
-          <p className="muted">This observation does not change the saved proposal, its review or its awaiting-reconciliation status.</p>
+          <p className="muted">This observation does not change the saved proposal or its review. The curated state of an accepted proposal is computed separately, each time the curated items are read.</p>
         </>
       )}
     </section>

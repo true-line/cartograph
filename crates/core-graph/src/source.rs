@@ -1058,10 +1058,56 @@ impl SqliteGraphStore {
             Some(limits) => self.read_snapshot_rows_bounded(limits)?,
             None => self.read_snapshot_rows(None, None)?,
         };
+        let selections = self.selections_in(&graph, unique)?;
+        transaction.commit()?;
+        Ok(SourceSelectionSnapshot {
+            graph,
+            selections,
+            revision,
+        })
+    }
+
+    /// The source-selection states of `keys` over a snapshot this store
+    /// returned earlier, without copying the graph again: what
+    /// [`Self::read_source_selection_snapshot`] would return as `selections`
+    /// for `keys` while the store is still at `observed.revision`. It refuses
+    /// with [`crate::GenerationError::Changed`] before reading any selection
+    /// when the store has moved, so the states always describe the rows of
+    /// `observed.graph`. The key cap and identity checks are the same and
+    /// run before database access.
+    pub fn read_source_selections_at(
+        &self,
+        observed: &SourceSelectionSnapshot,
+        keys: &[FactKey],
+    ) -> Result<Vec<FactSourceSelection>, GraphError> {
+        if keys.len() > MAX_SOURCE_SELECTION_KEYS {
+            return Err(GraphError::SourceBinding("too many source selection keys"));
+        }
+        for key in keys {
+            key.validate()?;
+        }
+        let unique: BTreeSet<_> = keys.iter().collect();
+        let transaction = self.conn.unchecked_transaction()?;
+        check_schema(&self.conn)?;
+        if crate::generation::read_store_revision(&transaction)? != observed.revision {
+            return Err(crate::GenerationError::Changed.into());
+        }
+        let selections = self.selections_in(&observed.graph, unique)?;
+        transaction.commit()?;
+        Ok(selections)
+    }
+
+    /// The selection state of each key over `graph`, inside the caller's
+    /// read transaction, which read `graph` or checked its revision.
+    fn selections_in(
+        &self,
+        graph: &(Vec<Node>, Vec<Edge>),
+        unique: BTreeSet<&FactKey>,
+    ) -> Result<Vec<FactSourceSelection>, GraphError> {
         let complete_coverage = omission_coverage_complete(&self.conn)?;
         let mut selections = Vec::with_capacity(unique.len());
         for fact in unique {
-            let fact_digest = snapshot_digest(&graph, fact)?;
+            let fact_digest = snapshot_digest(graph, fact)?;
             let omission =
                 selection_omission(&self.conn, fact, fact_digest.as_deref(), complete_coverage)?;
             let binding = load_selection_binding(&self.conn, fact)?;
@@ -1093,12 +1139,7 @@ impl SqliteGraphStore {
                 omission,
             });
         }
-        transaction.commit()?;
-        Ok(SourceSelectionSnapshot {
-            graph,
-            selections,
-            revision,
-        })
+        Ok(selections)
     }
 
     /// Publish scoped facts and replace only this repo's current source bindings

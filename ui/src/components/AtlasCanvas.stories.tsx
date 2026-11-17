@@ -2,7 +2,15 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { assignBands, buildAtlasScene, clusterKeyFor } from '../atlasLayout';
 import type { AtlasSnapshot, GraphNode, Provenance, Tier } from '../store';
-import { AtlasCanvas, CY_STYLE, focusAtlasGraph, nodeShapeClass } from './AtlasCanvas';
+import {
+  AtlasCanvas,
+  CY_STYLE,
+  displayName,
+  filterAtlasGraph,
+  focusAtlasGraph,
+  nodeShapeClass,
+  UNNAMED_CONFIG_KEY,
+} from './AtlasCanvas';
 
 function prov(confidence_tier: Tier, path: string): Provenance {
   return {
@@ -501,6 +509,54 @@ export const ToolsBandExcludesPlaceholders: Story = {
     await expect(scene.bands.map((band) => band.label).sort()).toEqual(['Server code', 'Tools/Build']);
     await expect(scene.nodes.some((node) => node.id === externalPlaceholderModule.id)).toBe(false);
     await expect(scene.nodes.some((node) => node.id === unresolvedPlaceholderModule.id)).toBe(true);
+  },
+};
+
+const configReadNodes: GraphNode[] = [
+  {
+    id: 'sym:local/shop@src/db.ts#connect',
+    label: 'Symbol',
+    props: { name: 'connect', prov: prov('Confirmed', 'src/db.ts') },
+  },
+  {
+    id: 'cfgread:local/shop@src/db.ts:env:DATABASE_URL',
+    label: 'ConfigRead',
+    props: { source: 'env', key: 'DATABASE_URL', language: 'typescript', prov: prov('Confirmed', 'src/db.ts') },
+  },
+  {
+    id: 'cfgread:local/shop@src/db.ts:env:?',
+    label: 'ConfigRead',
+    props: { source: 'env', dynamic: true, language: 'typescript', prov: prov('Confirmed', 'src/db.ts') },
+  },
+];
+
+const configReadFixture: AtlasSnapshot = {
+  nodes: configReadNodes,
+  edges: [
+    {
+      src: configReadNodes[0].id,
+      dst: configReadNodes[1].id,
+      label: 'READS_CONFIG',
+      props: { prov: prov('Confirmed', 'src/db.ts') },
+    },
+  ],
+};
+
+export const ConfigurationReadsShowTheKey: Story = {
+  // AC-0651, #1821: a configuration read is filed under Server code beside
+  // the symbol that reads it, not under Unclassified, and is labelled with
+  // the key it reads, never its raw id. A read whose key the source does
+  // not state as a literal says so.
+  args: { snapshot: configReadFixture },
+  play: async ({ canvasElement }) => {
+    const bands = assignBands(configReadFixture);
+    await expect(configReadNodes.map((node) => bands.get(node.id))).toEqual(['server', 'server', 'server']);
+    const scene = buildAtlasScene(configReadFixture, new Set());
+    await expect(scene.bands.map((band) => band.label)).toEqual(['Server code']);
+    await expect(new Set(configReadNodes.map(clusterKeyFor))).toEqual(new Set(['local/shop · src']));
+    await expect(configReadNodes.map(displayName)).toEqual(['connect', 'DATABASE_URL', UNNAMED_CONFIG_KEY]);
+    await expect(filterAtlasGraph(configReadFixture, 'server').nodes).toHaveLength(3);
+    await expect(within(canvasElement).getByTestId('atlas-canvas')).toBeInTheDocument();
   },
 };
 

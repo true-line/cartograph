@@ -1,6 +1,15 @@
 import { useRef, useState } from "react";
-import { coverageVerdict, producerRows, type RepoCoverage } from "../coverage";
+import {
+  coverageVerdict,
+  producerRows,
+  REFUSAL_REASON_TEXT,
+  unsupportedRows,
+  type RepoCoverage,
+} from "../coverage";
 import { useAppStore, type DraftAdapterPacket } from "../store";
+
+/** A plugin that was refused on a file ran, but not over every file. */
+const REFUSED_LABEL = "Ran, files refused";
 
 const STATE_LABEL: Record<string, string> = {
   ran: "Ran",
@@ -37,6 +46,7 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const { shown, notApplicable } = producerRows(repo);
+  const unsupported = unsupportedRows(repo);
 
   const handleDraft = async () => {
     const ticket = ++generation.current;
@@ -72,12 +82,40 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
       </summary>
       <ul className="coverage-producers">
         {shown.map((producer) => (
-          <li key={producer.id} className={`coverage-${producer.state}`}>
+          <li
+            key={producer.id}
+            className={
+              producer.refusals
+                ? "coverage-refused-producer"
+                : `coverage-${producer.state}`
+            }
+          >
             <span className="coverage-state">
-              {STATE_LABEL[producer.state]}
+              {producer.refusals
+                ? REFUSED_LABEL
+                : STATE_LABEL[producer.state]}
             </span>{" "}
             <code>{producer.id}</code> ({producer.covers}):{" "}
             {producer.stopping_reason}
+            {producer.refusals && (
+              <ul
+                className="coverage-refused"
+                aria-label={`Files refused for ${producer.id}`}
+              >
+                {producer.refusals.files.map((file) => (
+                  <li key={file.path}>
+                    <code>{file.path}</code>: not covered,{" "}
+                    {REFUSAL_REASON_TEXT[file.reason] ?? file.reason}
+                  </li>
+                ))}
+                {producer.refusals.omitted > 0 && (
+                  <li>
+                    {producer.refusals.omitted} more refused files are counted
+                    but not listed
+                  </li>
+                )}
+              </ul>
+            )}
           </li>
         ))}
       </ul>
@@ -98,11 +136,11 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
           </ul>
         </>
       )}
-      {repo.unsupported.length > 0 && (
+      {unsupported.length > 0 && (
         <>
           <h4>Unsupported capabilities</h4>
           <ul>
-            {repo.unsupported.map((unsupported) => (
+            {unsupported.map((unsupported) => (
               <li key={unsupported.capability}>
                 {unsupported.capability} ×{unsupported.occurrences}, first at{" "}
                 <code>{unsupported.first_site}</code>: {unsupported.reason}

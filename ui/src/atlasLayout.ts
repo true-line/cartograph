@@ -156,6 +156,11 @@ function kindBand(node: GraphNode, configFileIds: ReadonlySet<string>): Band | n
     case 'Endpoint':
     case 'DataEntity':
       return 'server';
+    case 'ConfigRead':
+      // A configuration read (ADR-0059, #1821) sits with the code that
+      // reads it: its id carries the reading file's path, so it clusters
+      // with that file's module instead of landing in Unclassified.
+      return 'server';
     case 'File':
       // Config-file evidence (#215): a File proving a Tool node belongs
       // with it in Tools/Build, not scattered into Server (#244). Either

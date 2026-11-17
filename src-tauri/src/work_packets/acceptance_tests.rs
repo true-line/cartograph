@@ -289,6 +289,204 @@ fn ac0248_host_verifies_full_artifact_and_keeps_requested_instructions_inert() {
     assert_eq!(f.runtime.store.lock().unwrap().list(50).unwrap().len(), 1);
 }
 
+// AC-0599: the endpoint permission projection is selected into a work packet
+// like any other graph-backed artifact and is bound to the official
+// compiler's exact bytes; the fact index is still not selectable.
+#[test]
+fn ac0599_work_packet_carries_the_endpoint_permission_artifact() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let select = |id: &str| {
+        let artifact = bundle.artifacts.iter().find(|a| a.id == id).unwrap();
+        (
+            json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]),
+            artifact,
+        )
+    };
+    let (selection, artifact) = select("endpoint-permissions");
+    f.request["artifacts"] = selection;
+    let generated = generate(&f.state, &f.runtime, &f.request.to_string()).unwrap();
+    assert_eq!(
+        generated.body.evidence.artifacts[0]
+            .artifact
+            .value()
+            .unwrap(),
+        artifact
+    );
+    // AC-0651: the configuration key projection reads graph facts only, no
+    // stored coverage inventory, so the packet host compiles the export's
+    // exact bytes and it is selected like the endpoint projection.
+    let (selection, artifact) = select("configuration");
+    f.request["artifacts"] = selection;
+    let generated = generate(&f.state, &f.runtime, &f.request.to_string()).unwrap();
+    assert_eq!(
+        generated.body.evidence.artifacts[0]
+            .artifact
+            .value()
+            .unwrap(),
+        artifact
+    );
+    f.request["artifacts"] = select("fact-index").0;
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    // AC-0650: the pipeline projection also lists files from the stored
+    // coverage inventory, which the packet host does not read. Its bytes
+    // here would differ from the export's, so it is refused like the
+    // coverage artifacts, never bound to bytes the export does not hold.
+    for id in ["pipelines", "coverage"] {
+        f.request["artifacts"] = select(id).0;
+        assert_eq!(
+            generate(&f.state, &f.runtime, &f.request.to_string())
+                .unwrap_err()
+                .code,
+            "invalid_input",
+            "{id}"
+        );
+    }
+}
+
+// AC-0657 (#1814): decision recorded — work packets do not carry coverage artifacts.
+// Both ids are refused before any compilation, with the export's own
+// identities selected.
+#[test]
+fn ac0657_work_packet_refuses_both_coverage_artifacts() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let saved = f.runtime.store.lock().unwrap().list(50).unwrap().len();
+    for id in ["coverage", "coverage-index"] {
+        let artifact = bundle.artifacts.iter().find(|a| a.id == id).unwrap();
+        f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+        assert_eq!(
+            generate(&f.state, &f.runtime, &f.request.to_string())
+                .unwrap_err()
+                .code,
+            "invalid_input",
+            "{id}"
+        );
+    }
+    assert_eq!(
+        f.runtime.store.lock().unwrap().list(50).unwrap().len(),
+        saved
+    );
+}
+
+// AC-0653: the curated document depends on the curated projection, which the
+// packet host does not compute. Its bytes here would say that no projection
+// was supplied, so it is refused like the pipeline and coverage artifacts and
+// never bound to bytes the export does not hold.
+#[test]
+fn ac0653_work_packet_refuses_the_curated_document() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let artifact = bundle.artifacts.iter().find(|a| a.id == "curated").unwrap();
+    // The exact identity the bare compiler gives it is refused too.
+    f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+}
+
+// AC-0660 (SPEC-13): work packets refuse the boundary projection until a
+// decision says otherwise. The exact identity the export gives it is refused
+// before any compilation, and nothing is stored.
+#[test]
+fn ac0660_work_packet_refuses_the_external_document() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let saved = f.runtime.store.lock().unwrap().list(50).unwrap().len();
+    let artifact = bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "external")
+        .unwrap();
+    assert_eq!(artifact.file_name, "external.md");
+    f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(
+        f.runtime.store.lock().unwrap().list(50).unwrap().len(),
+        saved
+    );
+}
+
+// AC-0661 (SPEC-14): work packets refuse the environments projection until a
+// decision says otherwise. The exact identity the export gives it is refused
+// before any compilation, and nothing is stored.
+#[test]
+fn ac0661_work_packet_refuses_the_environments_document() {
+    let mut f = fixture();
+    let (nodes, edges) = f.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let flows = flowtracer::trace(&nodes, &edges);
+    let bundle = spec::compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        spec::ExportMode::VerifiedOnly,
+        &Default::default(),
+    );
+    let saved = f.runtime.store.lock().unwrap().list(50).unwrap().len();
+    let artifact = bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "environments")
+        .unwrap();
+    assert_eq!(artifact.file_name, "environments.md");
+    f.request["artifacts"] = json!([{"id":artifact.id,"schema":artifact.schema,"content_id":artifact.content_id,"mode":"verified-only"}]);
+    assert_eq!(
+        generate(&f.state, &f.runtime, &f.request.to_string())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(
+        f.runtime.store.lock().unwrap().list(50).unwrap().len(),
+        saved
+    );
+}
+
 // AC-0249: stored decisions keep their exact earlier content. They neither
 // confer current authority nor disappear when today's provenance is invalid.
 #[test]

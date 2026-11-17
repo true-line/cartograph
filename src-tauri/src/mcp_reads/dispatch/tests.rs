@@ -146,7 +146,14 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
     let data = &capabilities["result"]["structuredContent"];
     assert_eq!(data["basis_id"], dispatch.basis_id);
     assert_eq!(data["session_id"], dispatch.session_id);
-    assert_eq!(data["h3_curated_available"], false);
+    // AC-0654: this session computed the projection.
+    assert_eq!(data["h3_curated_available"], true);
+    assert_eq!(data["basis"]["h3_curated_available"], true);
+    assert_eq!(data["basis"]["curated"]["status"], "computed");
+    assert_eq!(
+        data["curated_access"],
+        json!({"via":"official_artifact","artifact_id":"curated","structured_artifact_id":"curated-json","revision":"basis.curated"})
+    );
     assert_eq!(data["evidence_available"], false);
     assert_eq!(data["evidence_absence_reason_available"], false);
     assert_eq!(data["structured_content_required"], true);
@@ -211,7 +218,7 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
             .as_array()
             .unwrap()
             .len(),
-        spec::artifact_catalog().len()
+        crate::mcp_reads::artifacts::readable_catalog().len()
     );
     assert!(!catalog.to_string().contains("content_id"));
     let mut args = artifact_args(&dispatch);
@@ -228,6 +235,100 @@ fn real_capabilities_discovery_catalog_and_identity_bound_artifact_pages() {
         second["result"]["structuredContent"]["artifact"]["content_id"]
     );
     assert_eq!(second["result"]["isError"], false);
+}
+
+fn unreviewable_session() -> ReadSession {
+    ReadSession::acquire_with_overlay(
+        &Mutex::new(SqliteGraphStore::open_in_memory().unwrap()),
+        None,
+        &Mutex::new(DecisionLog::open(":memory:").unwrap()),
+        &crate::curated::ReviewsUnreadable,
+        || Ok(vec![]),
+        SnapshotReadLimits::default(),
+        CoverageReadLimits::default(),
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap()
+}
+
+#[test]
+fn curated_read_and_capability_flag_follow_the_session_projection() {
+    // AC-0654 (ADR-0061 decisions 3 and 11): the curated read is the
+    // `curated` artifact and its structured form, read with the artifact
+    // tool. The flag is true where the session computed the projection and
+    // false, with the reason in the basis, where it did not; the read then
+    // returns the not-computed statement and no other read fails.
+    let mut dispatch = new(limits());
+    init(&mut dispatch);
+    let args = identity(&dispatch);
+    let catalog = call(&mut dispatch, 1, "cartograph_artifacts", args);
+    let ids: Vec<_> = catalog["result"]["structuredContent"]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_owned())
+        .collect();
+    let at = ids.iter().position(|id| id == "curated").expect("curated");
+    assert_eq!(ids[at + 1], "curated-json");
+    let capabilities = call(&mut dispatch, 2, "cartograph_capabilities", json!({}));
+    let revision = capabilities["result"]["structuredContent"]["basis"]["curated"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut args = artifact_args(&dispatch);
+    args["artifact_id"] = json!("curated");
+    let page = call(&mut dispatch, 3, "cartograph_read_artifact", args.clone());
+    assert_eq!(page["result"]["isError"], false);
+    let page = &page["result"]["structuredContent"]["artifact"];
+    assert_eq!(page["artifact_id"], "curated");
+    assert_eq!(page["partial"], false);
+    assert!(page["content"].as_str().unwrap().contains(&revision));
+    args["artifact_id"] = json!("curated-json");
+    let page = call(&mut dispatch, 4, "cartograph_read_artifact", args);
+    let page = &page["result"]["structuredContent"]["artifact"];
+    assert_eq!(page["schema"], "cartograph.mcp/curated-json@1");
+    let data: Value = serde_json::from_str(page["content"].as_str().unwrap()).unwrap();
+    assert_eq!(data["view"], "curated");
+    assert_eq!(data["revision"], revision.as_str());
+    assert_eq!(data["counts"]["accepted"], 0);
+
+    let mut dispatch = Dispatcher::new(
+        unreviewable_session(),
+        "opaque-fixture-session".into(),
+        limits(),
+    )
+    .unwrap();
+    init(&mut dispatch);
+    let capabilities = call(&mut dispatch, 1, "cartograph_capabilities", json!({}));
+    let data = &capabilities["result"]["structuredContent"];
+    assert_eq!(data["h3_curated_available"], false);
+    assert_eq!(data["basis"]["h3_curated_available"], false);
+    assert_eq!(
+        data["basis"]["curated"],
+        json!({"status":"not_computed","reason":"reviews_unavailable"})
+    );
+    let mut args = artifact_args(&dispatch);
+    let topology = call(&mut dispatch, 2, "cartograph_read_artifact", args.clone());
+    assert_eq!(topology["result"]["isError"], false);
+    args["artifact_id"] = json!("curated");
+    let page = call(&mut dispatch, 3, "cartograph_read_artifact", args.clone());
+    assert_eq!(page["result"]["isError"], false);
+    assert!(
+        page["result"]["structuredContent"]["artifact"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("reviews_unavailable")
+    );
+    args["artifact_id"] = json!("curated-json");
+    let page = call(&mut dispatch, 4, "cartograph_read_artifact", args);
+    let data: Value = serde_json::from_str(
+        page["result"]["structuredContent"]["artifact"]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["status"], "not_computed");
+    assert_eq!(data["failure"]["reason"], "reviews_unavailable");
 }
 
 #[test]
@@ -432,6 +533,24 @@ fn security_derivation_limits_preserve_closed_stage_resource_shape() {
                 })
             )),
             json!({"stage":"security_derivation","resource":name,"maximum":7})
+        );
+    }
+}
+
+// AC-0595 (ADR-0058): an index whose citations do not resolve is reported
+// as its own stage, never as a size limit.
+#[test]
+fn fact_index_failures_have_a_closed_stage_resource_shape() {
+    for (failure, name) in [
+        (spec::FactIndexFailure::Unresolved, "unresolved_citation"),
+        (spec::FactIndexFailure::Collision, "citation_id_collision"),
+        (spec::FactIndexFailure::Withheld, "withheld_citation"),
+    ] {
+        assert_eq!(
+            limit_value(ArtifactLimit::Compiler(
+                spec::SelectedArtifactLimit::FactIndex(failure)
+            )),
+            json!({"stage":"fact_index","resource":name})
         );
     }
 }

@@ -17,4 +17,8 @@ demand.
   shows the focus path.
 - The **confidence overlay** colors facts by confidence; shapes encode kind
   (octagon = gap, diamond = channel) so color never carries alone.
+- A **configuration read** (an environment variable read in source) is in
+  the Server code band, in the cluster of the file that reads it. It is
+  labelled with the key it reads. A read whose key is not written as a
+  literal in the source is labelled "key not named in source".
 - Every node and edge opens read-only evidence.

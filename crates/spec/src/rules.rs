@@ -517,6 +517,14 @@ impl<'a> Assertion<'a> {
             omission: self.omission.as_ref(),
         }
     }
+    /// How the subject id maps onto a fact key (ADR-0058).
+    fn subject(&self) -> crate::workbench::fact_index::Subject {
+        use crate::workbench::fact_index::Subject;
+        match self.source {
+            AssertionSource::Node { .. } => Subject::Node,
+            AssertionSource::Edge(edge) => Subject::edge(&edge.src, &edge.label),
+        }
+    }
     fn into_owned(self) -> SpecAssertion {
         #[cfg(test)]
         OWNED_ASSERTIONS.with(|counter| counter.set(counter.get() + 1));
@@ -707,6 +715,8 @@ pub(crate) struct InventoryOutput {
     pub markdown: Option<String>,
     pub index: Option<String>,
     pub assertions: Vec<SpecAssertion>,
+    /// The fact-key shape of each assertion's subject (ADR-0058).
+    pub subjects: Vec<crate::workbench::fact_index::Subject>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuleInventoryLimitExceeded {
@@ -831,19 +841,23 @@ pub(crate) fn inventory_selected_roots(
     } else {
         None
     };
-    let assertions = if selection.markdown {
+    let (assertions, subjects) = if selection.markdown {
         observations
             .into_iter()
             .flat_map(|observation| observation.assertions)
-            .map(Assertion::into_owned)
-            .collect()
+            .map(|assertion| {
+                let subject = assertion.subject();
+                (assertion.into_owned(), subject)
+            })
+            .unzip()
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     Ok(InventoryOutput {
         markdown,
         index,
         assertions,
+        subjects,
     })
 }
 

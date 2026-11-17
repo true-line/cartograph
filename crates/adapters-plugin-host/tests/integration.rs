@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use adapters_plugin_host::{HostError, PluginHost, PluginLimits, SourceId};
+use adapters_plugin_host::{HostError, PluginHost, PluginLimits, RefusalReason, SourceId};
 
 const OK_ADAPTER: &[u8] = include_bytes!("fixtures/compiled/ok-adapter.wasm");
 const BUSY_LOOP: &[u8] = include_bytes!("fixtures/compiled/busy-loop.wasm");
@@ -635,7 +635,7 @@ fn routing_extracts_only_claimed_files_and_is_deterministic() {
 
     // The counted route reports every claimed file read, under the same
     // pinned identity the facts carry.
-    let (counted, files_read) = extract_claimed_counted(
+    let counted = extract_claimed_counted(
         &host,
         &plugin,
         root,
@@ -644,8 +644,10 @@ fn routing_extracts_only_claimed_files_and_is_deterministic() {
         PluginLimits::default(),
     )
     .expect("counted routing succeeds");
-    assert_eq!(files_read, 2);
-    assert_eq!(counted.nodes, first.nodes);
+    assert_eq!(counted.files_read, 2);
+    assert!(counted.refused.is_empty());
+    assert_eq!(counted.facts.nodes, first.nodes);
+    assert_eq!(counted.facts.edges, first.edges);
     assert_eq!(
         adapters_plugin_host::pinned_extractor_id("t0.plugin-fixture", &hash),
         format!("t0.plugin-fixture@{short}")
@@ -667,6 +669,248 @@ fn routing_extracts_only_claimed_files_and_is_deterministic() {
     assert_eq!(
         serde_json::to_string(&first.edges).unwrap(),
         serde_json::to_string(&second.edges).unwrap()
+    );
+}
+
+/// A text-form component whose behaviour is chosen by the first byte of the
+/// source (see the fixture's header), so one plugin fails on some files of a
+/// tree and succeeds on the others.
+const REFUSING_ADAPTER: &[u8] = include_bytes!("fixtures/refusing-adapter.wat");
+
+/// A tree of `.foo` files, one per `(name, source)`.
+fn foo_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, source) in files {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+    dir
+}
+
+/// Route the refusing fixture over `files` under `limits`.
+fn route_refusing(
+    files: &[(&str, &str)],
+    limits: PluginLimits,
+) -> Result<adapters_plugin_host::route::ClaimedExtraction, adapters_plugin_host::route::RouteError>
+{
+    let dir = foo_tree(files);
+    let host = PluginHost::new().expect("engine");
+    let plugin = host
+        .load(REFUSING_ADAPTER, "t0.plugin-refusing")
+        .expect("text component loads");
+    adapters_plugin_host::route::extract_claimed_counted(
+        &host,
+        &plugin,
+        dir.path(),
+        &["foo".to_string()],
+        &source_id(),
+        limits,
+    )
+}
+
+fn refused(claimed: &adapters_plugin_host::route::ClaimedExtraction) -> Vec<(&str, RefusalReason)> {
+    claimed
+        .refused
+        .iter()
+        .map(|file| (file.path.as_str(), file.reason))
+        .collect()
+}
+
+fn node_ids(claimed: &adapters_plugin_host::route::ClaimedExtraction) -> Vec<&str> {
+    claimed
+        .facts
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+/// Bounds a refusing-fixture call reaches quickly, with a deadline far
+/// enough away that the fuel bound is always reached first.
+fn tight_limits() -> PluginLimits {
+    PluginLimits {
+        max_fuel: 1_000_000,
+        max_memory_bytes: 16 * 1024 * 1024,
+        max_table_elements: 10_000,
+        deadline: Duration::from_secs(60),
+    }
+}
+
+// AC-0658: a plugin that emits a malformed fact for one file of several is
+// refused on that file only. The other files' facts are kept, no fact of the
+// refused file is, and two runs give the same facts and the same refusal.
+#[test]
+fn routing_refuses_one_malformed_file_and_keeps_the_others() {
+    let files = [
+        ("a.foo", "fine"),
+        ("src/b.foo", "Malformed"),
+        ("src/c.foo", "fine too"),
+    ];
+    let first = route_refusing(&files, PluginLimits::default()).expect("the pass continues");
+    assert_eq!(
+        first.files_read, 2,
+        "the refused file is not counted as read"
+    );
+    assert_eq!(
+        refused(&first),
+        [("src/b.foo", RefusalReason::MalformedFact)]
+    );
+    assert_eq!(
+        node_ids(&first),
+        ["owner/repo:a.foo", "owner/repo:src/c.foo"]
+    );
+    assert!(
+        !serde_json::to_string(&first.facts.nodes)
+            .unwrap()
+            .contains("b.foo"),
+        "no fact of the refused file"
+    );
+
+    let second = route_refusing(&files, PluginLimits::default()).expect("the pass continues");
+    assert_eq!(first.refused, second.refused);
+    assert_eq!(
+        serde_json::to_string(&first.facts.nodes).unwrap(),
+        serde_json::to_string(&second.facts.nodes).unwrap()
+    );
+    assert_eq!(first.facts.edges, second.facts.edges);
+
+    // The all-or-nothing route still fails on the same file.
+    let dir = foo_tree(&files);
+    let host = PluginHost::new().expect("engine");
+    let plugin = host
+        .load(REFUSING_ADAPTER, "t0.plugin-refusing")
+        .expect("text component loads");
+    let error = adapters_plugin_host::route::extract_claimed(
+        &host,
+        &plugin,
+        dir.path(),
+        &["foo".to_string()],
+        &source_id(),
+        PluginLimits::default(),
+    )
+    .expect_err("all-or-nothing routing fails");
+    assert!(
+        matches!(
+            &error,
+            adapters_plugin_host::route::RouteError::Host {
+                path,
+                error: HostError::MalformedFact(_)
+            } if path == "src/b.foo"
+        ),
+        "{error}"
+    );
+}
+
+// AC-0658: a plugin that returns an extraction error, or traps, is refused
+// on that file as a guest error.
+#[test]
+fn routing_refuses_a_guest_error_or_trap_as_guest_error() {
+    let claimed = route_refusing(
+        &[
+            ("error.foo", "Error"),
+            ("ok.foo", "fine"),
+            ("trap.foo", "Trap"),
+        ],
+        PluginLimits::default(),
+    )
+    .expect("the pass continues");
+    assert_eq!(
+        refused(&claimed),
+        [
+            ("error.foo", RefusalReason::GuestError),
+            ("trap.foo", RefusalReason::GuestError)
+        ]
+    );
+    assert_eq!(node_ids(&claimed), ["owner/repo:ok.foo"]);
+    assert_eq!(claimed.files_read, 1);
+}
+
+// AC-0658: a plugin that exceeds its fuel, memory or table bound is refused
+// on that file as bound exceeded.
+#[test]
+fn routing_refuses_a_fuel_memory_or_table_bound_as_bound_exceeded() {
+    let claimed = route_refusing(
+        &[
+            ("fuel.foo", "Fuel"),
+            ("memory.foo", "Grow memory"),
+            ("ok.foo", "fine"),
+            ("table.foo", "Big table"),
+        ],
+        tight_limits(),
+    )
+    .expect("the pass continues");
+    assert_eq!(
+        refused(&claimed),
+        [
+            ("fuel.foo", RefusalReason::BoundExceeded),
+            ("memory.foo", RefusalReason::BoundExceeded),
+            ("table.foo", RefusalReason::BoundExceeded)
+        ]
+    );
+    assert_eq!(node_ids(&claimed), ["owner/repo:ok.foo"]);
+
+    // Each bound is the one the host names.
+    let host = PluginHost::new().expect("engine");
+    let plugin = host
+        .load(REFUSING_ADAPTER, "t0.plugin-refusing")
+        .expect("text component loads");
+    let call = |source: &[u8]| {
+        host.call_extract(&plugin, source, "x.foo", &source_id(), tight_limits())
+            .expect_err("bound reached")
+    };
+    assert!(matches!(call(b"F"), HostError::FuelExhausted(_)));
+    assert!(matches!(call(b"G"), HostError::MemoryLimitExceeded(_)));
+    assert!(matches!(call(b"B"), HostError::TableLimitExceeded(_)));
+}
+
+// AC-0658: the wall-clock deadline is not a refusal. It still fails the
+// whole pass with no facts, because skipping the file would make the result
+// depend on the speed of the machine.
+#[test]
+fn routing_still_fails_the_whole_pass_on_a_deadline() {
+    let error = route_refusing(
+        &[("a.foo", "fine"), ("slow.foo", "Forever")],
+        PluginLimits {
+            max_fuel: u64::MAX,
+            deadline: Duration::from_millis(60),
+            ..tight_limits()
+        },
+    )
+    .expect_err("a deadline fails the pass");
+    assert!(
+        matches!(
+            &error,
+            adapters_plugin_host::route::RouteError::Host {
+                path,
+                error: HostError::DeadlineExceeded(_)
+            } if path == "slow.foo"
+        ),
+        "{error}"
+    );
+}
+
+// AC-0658: a call-stack overflow is not a refusal either: the depth at
+// which the stack runs out depends on the host, so it fails the whole pass.
+#[test]
+fn routing_still_fails_the_whole_pass_on_a_stack_overflow() {
+    let error = route_refusing(
+        &[("a.foo", "fine"), ("deep.foo", "Stack")],
+        PluginLimits {
+            max_fuel: u64::MAX,
+            ..tight_limits()
+        },
+    )
+    .expect_err("a stack overflow fails the pass");
+    assert!(
+        matches!(
+            &error,
+            adapters_plugin_host::route::RouteError::Host {
+                path,
+                error: HostError::StackOverflow
+            } if path == "deep.foo"
+        ),
+        "{error}"
     );
 }
 

@@ -191,6 +191,11 @@ pub fn assemble_task(
         if spec::is_gap_node(node) {
             continue;
         }
+        // A configuration read (ADR-0059) is never the endpoint of the edge
+        // a gap needs, so it is no candidate and takes no slot.
+        if node.label == adapters_fw::config_read::CONFIG_READ {
+            continue;
+        }
         let provenance = spec::provenance(&node.props, &node.id);
         if provenance.confidence_tier == ConfidenceTier::Gap {
             continue;
@@ -259,8 +264,8 @@ pub fn strategies(
     payload_bytes: u64,
     edge_label_allowed: bool,
 ) -> GapStrategyReport {
-    let export_impact = "Review decisions are saved with the staged proposal. Accepted proposals \
-                         await shared-context reconciliation; they do not yet change exports. \
+    let export_impact = "Review decisions are saved with the staged proposal. An accepted proposal \
+                         gets one state each time it is read: only an eligible one is a curated item, and every other is listed in curated.md with its reason. \
                          Evidence origins are recorded per supplied item; retained parser input still has incomplete input coverage. \
                          Proposals retain T3/InferredWeak and never modify T0/T1 facts."
         .to_string();
@@ -419,6 +424,22 @@ mod tests {
                 &task,
             )
             .unwrap();
+    }
+
+    // AC-0597 (#1789, ADR-0059): a `ConfigRead` node in the gap's context
+    // sorts before every real target; it is never a candidate, so the call
+    // neighbour is.
+    #[test]
+    fn config_reads_are_never_escalation_candidates() {
+        let read = "cfgread:local/fixture@src/capture.ts:env:API_URL";
+        let (mut nodes, mut edges) = fixture();
+        nodes.insert(0, node(read, "ConfigRead", "Confirmed", "src/capture.ts"));
+        nodes.push(node("sym:helper", "Symbol", "Confirmed", "src/helper.ts"));
+        edges.push(edge("sym:capture", read, "READS_CONFIG"));
+        edges.push(edge("sym:capture", "sym:helper", "CALLS"));
+        let task = assemble_task(&nodes, &edges, "gap:sync", "escalate:test", &read_span).unwrap();
+        let ids: Vec<&str> = task.candidates.iter().map(|c| c.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["ch:events", "res:queue", "sym:helper"]);
     }
 
     #[test]

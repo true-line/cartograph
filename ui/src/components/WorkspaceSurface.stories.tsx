@@ -307,6 +307,33 @@ export const StackedSystemContentsAreStated: Story = {
   },
 };
 
+export const RecordedGraphHashIsShownWithItsRegistration: Story = {
+  // AC-0593 (#1765): each registration shows the graph content hash its
+  // latest ingest recorded; a registration with none recorded shows no hash.
+  args: {
+    systemContents: [
+      {
+        repo: 'acme/shop',
+        commit: 'a1b2c3d4e5f6',
+        graph_hash: '9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0',
+      },
+      { repo: 'local/infra', commit: 'workdir' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('system-contents')).toHaveTextContent(
+      'System contents: acme/shop @ a1b2c3d (graph 9f8e7d6c) · local/infra @ workdir',
+    );
+    const hashes = canvas.getAllByTestId('system-graph-hash');
+    await expect(hashes).toHaveLength(1);
+    await expect(hashes[0]).toHaveAttribute(
+      'title',
+      'Graph content hash 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0',
+    );
+  },
+};
+
 export const NoRecoveryYet: Story = {
   args: { summary: null, findings: null, bundle: null },
   play: async ({ canvasElement, args }) => {
@@ -507,6 +534,87 @@ export const CoverageInventoryBeforeInterpretation: Story = {
       inventory.compareDocumentPosition(entry) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  },
+};
+
+const REFUSED_COVERAGE = [
+  {
+    ...COVERAGE[0],
+    producers: [
+      ...COVERAGE[0].producers,
+      {
+        id: "t0.plugin-zig@0123456789ab",
+        kind: "deterministic" as const,
+        covers: "gated plugin",
+        state: "ran" as const,
+        files: 2,
+        nodes: 5,
+        edges: 3,
+        inputs: [],
+        stopping_reason:
+          "read 2 of the 5 files its extensions claim in acme/api@0123456789abcdef; the host refused its extraction of 3 (2 malformed fact, 1 bound exceeded), and no fact from those files by this plugin joined the graph",
+        refusals: {
+          malformed_fact: 2,
+          guest_error: 0,
+          bound_exceeded: 1,
+          files: [
+            { path: "lib/m.zig", reason: "malformed_fact" as const },
+            { path: "src/z.zig", reason: "bound_exceeded" as const },
+          ],
+          omitted: 1,
+        },
+      },
+    ],
+    unsupported: [
+      ...COVERAGE[0].unsupported,
+      {
+        capability: "plugin-malformed-fact",
+        occurrences: 2,
+        first_site: "lib/m.zig",
+        reason:
+          "2 file(s) were refused for a gated plugin because the plugin emitted a fact the host does not accept; no fact from them by that plugin joined the graph, so that plugin does not cover them: a plugin failure, not a system gap",
+      },
+      {
+        capability: "plugin-bound-exceeded",
+        occurrences: 1,
+        first_site: "src/z.zig",
+        reason:
+          "1 file(s) were refused for a gated plugin because the plugin exceeded its fuel, memory or table bound; no fact from them by that plugin joined the graph, so that plugin does not cover them: a plugin failure, not a system gap",
+      },
+    ],
+  },
+];
+
+export const CoverageInventoryNamesFilesAPluginWasRefusedOn: Story = {
+  // AC-0658: a gated plugin refused on some files is shown with the refused
+  // count by class, each listed file as not covered with its reason class,
+  // and the files past the listing bound as a count.
+  args: {
+    summary: { ...meta.args.summary, coverage: REFUSED_COVERAGE },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inventory = canvas.getByTestId("coverage-inventory");
+    await expect(inventory).toHaveTextContent(
+      "Limited coverage · 2 producers ran · 1 excluded by layer hints · 1 unsupported capability · 3 files refused for a plugin",
+    );
+    await expect(inventory).toHaveTextContent(
+      "Ran, files refused t0.plugin-zig@0123456789ab (gated plugin): read 2 of the 5 files its extensions claim in acme/api@0123456789abcdef; the host refused its extraction of 3 (2 malformed fact, 1 bound exceeded)",
+    );
+    const refused = within(
+      within(inventory).getByRole("list", {
+        name: "Files refused for t0.plugin-zig@0123456789ab",
+      }),
+    ).getAllByRole("listitem");
+    await expect(refused.map((item) => item.textContent)).toEqual([
+      "lib/m.zig: not covered, the plugin emitted a fact the host does not accept",
+      "src/z.zig: not covered, the plugin exceeded its fuel, memory or table bound",
+      "1 more refused files are counted but not listed",
+    ]);
+    // The refused files are listed with their plugin, not as a capability
+    // no producer covers.
+    await expect(inventory).not.toHaveTextContent("plugin-malformed-fact");
+    await expect(inventory).toHaveTextContent("Ruby ×2, first at lib/a.rb:1");
   },
 };
 
