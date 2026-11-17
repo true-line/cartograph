@@ -154,6 +154,32 @@ fn predecessor(
     Ok(returned.into_iter().find(|id| !succeeded.contains(id)))
 }
 
+/// The draft already stored for the drafting job `job_id`, if any. A job
+/// produces at most one draft, so a reread must return it rather than
+/// recompute a predecessor, which changes with later reviews.
+fn existing_draft(
+    store: &agents::draft_store::DraftStore,
+    job_id: i64,
+) -> Result<Option<String>, DraftStoreError> {
+    let mut before = None;
+    let mut read = 0;
+    loop {
+        let page = store.list(MAX_DRAFT_PAGE_ITEMS, before)?;
+        read += page.items.len();
+        if let Some(item) = page
+            .items
+            .into_iter()
+            .find(|item| item.origin.job_id == job_id)
+        {
+            return Ok(Some(item.draft_id));
+        }
+        before = page.next_before;
+        if before.is_none() || read >= MAX_PREDECESSOR_SCAN {
+            return Ok(None);
+        }
+    }
+}
+
 /// Stage the draft of the completed drafting run `id`, or say why it staged
 /// none. `Err` is an operational failure (a store or the graph could not be
 /// read); the run's result is unchanged and a later call retries.
@@ -171,6 +197,15 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         let ledger = jobs.investigation_ledger(id).map_err(|e| e.to_string())?;
         (summary, result, ledger)
     };
+    // A run that already staged a draft returns it, whatever has been
+    // reviewed since.
+    let stored = {
+        let store = state.drafts.lock().map_err(|e| e.to_string())?;
+        existing_draft(&store, summary.job_id).map_err(|e| e.to_string())?
+    };
+    if let Some(draft_id) = stored {
+        return Ok(DraftingOutcome::Staged { draft_id });
+    }
     let Some(result) = result else {
         return Ok(DraftingOutcome::none("run_not_completed"));
     };
@@ -311,6 +346,74 @@ mod tests {
             ),
             Err("question_not_an_address")
         );
+    }
+
+    fn draft(section: &str, statement: &str) -> agents::section_draft::SectionDraft {
+        use agents::section_draft::{Claim, ClaimKind, SYSTEM_SCOPE};
+        agents::section_draft::SectionDraft {
+            address: SectionAddress {
+                catalogue_version: "1.0".into(),
+                document: "D1".into(),
+                section: section.into(),
+                scope: SYSTEM_SCOPE.into(),
+            },
+            claims: vec![Claim {
+                statement: statement.into(),
+                kind: ClaimKind::Implemented,
+                citations: vec!["F-0000000000000001".into()],
+            }],
+            cited_hashes: std::collections::BTreeMap::from([(
+                "F-0000000000000001".to_owned(),
+                "hash-1".to_owned(),
+            )]),
+        }
+    }
+
+    fn origin(job_id: i64) -> DraftOrigin {
+        DraftOrigin {
+            role: SECTION_WRITER_ROLE.to_owned(),
+            role_definition: "definition-1".into(),
+            job_id,
+            graph_content_hash: "graph-1".into(),
+        }
+    }
+
+    // Rereading a run's outcome returns the draft the run produced: after a
+    // reviewer returned it (it must not become its own predecessor), and for
+    // a run that produced a successor (it must not store another draft).
+    #[test]
+    fn rereading_a_run_returns_the_draft_it_produced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = agents::draft_store::DraftStore::open(dir.path().join("d.sqlite")).unwrap();
+        assert_eq!(existing_draft(&store, 1).unwrap(), None);
+
+        let first = store.store(&draft("1.3", "A"), &origin(1), None).unwrap();
+        assert_eq!(
+            existing_draft(&store, 1).unwrap(),
+            Some(first.draft_id.clone())
+        );
+        store
+            .review(&first.draft_id, 0, DraftDecision::Returned, None)
+            .unwrap();
+        // Returned: the run still maps to its own draft, and no second
+        // draft exists for it.
+        assert_eq!(
+            existing_draft(&store, 1).unwrap(),
+            Some(first.draft_id.clone())
+        );
+        assert_eq!(
+            predecessor(&store, &draft("1.3", "A").address).unwrap(),
+            Some(first.draft_id.clone())
+        );
+
+        let second = store
+            .store(&draft("1.3", "B"), &origin(2), Some(&first.draft_id))
+            .unwrap();
+        // The successor's run maps to the successor, where recomputing
+        // would now find no predecessor and store a duplicate.
+        assert_eq!(existing_draft(&store, 2).unwrap(), Some(second.draft_id));
+        assert_eq!(existing_draft(&store, 1).unwrap(), Some(first.draft_id));
+        assert_eq!(existing_draft(&store, 3).unwrap(), None);
     }
 
     // AC-0668: only the drafting role's start is checked.
