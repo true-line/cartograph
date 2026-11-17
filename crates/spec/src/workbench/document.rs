@@ -21,8 +21,10 @@
 //! export that hold the statements; they are not repeated here.
 //!
 //! **Header.** The catalogue version and the export mode always. The graph
-//! content hash and the curated revision are the supplied curated
-//! projection's; a compile that is supplied none says so.
+//! content hash is the one the host supplies, or the supplied curated
+//! projection's; the curated revision is that projection's. A compile that
+//! is supplied neither says so, and one whose projection could not be
+//! computed still states the graph hash and gives the reason code.
 //!
 //! **Cost.** One pass over the nodes per node frame and one over the flows.
 //! Nothing is indexed or walked.
@@ -150,7 +152,7 @@ pub(super) fn d1(
     nodes: &[&Node],
     flows: &[Flow],
     gaps: usize,
-    curated: Curated<'_>,
+    (curated, graph_content_hash): (Curated<'_>, Option<&str>),
     mode: ExportMode,
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
@@ -163,17 +165,28 @@ pub(super) fn d1(
          - Export mode: `{}`",
         mode_name(mode)
     )?;
-    match curated.projection() {
-        Some(projection) => writeln!(
+    // The host's own hash first: it is known even when no projection is.
+    let graph_hash = graph_content_hash.or(curated
+        .projection()
+        .map(|projection| projection.graph_basis.as_str()));
+    match graph_hash {
+        Some(hash) => writeln!(content, "- Graph content hash: {}", Literal(hash))?,
+        None => content.push_str("- Graph content hash: not supplied to this compilation\n")?,
+    }
+    match curated {
+        Curated::Computed(projection) => writeln!(
             content,
-            "- Graph content hash: {}\n- Curated revision: {}",
-            Literal(&projection.graph_basis),
+            "- Curated revision: {}",
             Literal(&projection.revision)
         )?,
-        None => content.push_str(
-            "- Graph content hash: not supplied to this compilation\n\
-             - Curated revision: not supplied to this compilation\n",
+        Curated::NotComputed(failure) => writeln!(
+            content,
+            "- Curated revision: not computed (`{}`); see `curated.md`",
+            failure.code()
         )?,
+        Curated::NotSupplied => {
+            content.push_str("- Curated revision: not supplied to this compilation\n")?;
+        }
     }
     content.push_str(
         "\nSection kinds: **P** is compiled from recovered facts. **A** is drafted by an agent \

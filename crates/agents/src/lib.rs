@@ -24,6 +24,7 @@ pub use decision_selection::{
     SelectedAssertionDecision,
 };
 pub mod curated;
+pub mod draft_store;
 pub mod investigation;
 pub mod prepared;
 pub mod section_draft;

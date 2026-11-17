@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 and 2 are implemented; the rest is not.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 4 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -74,6 +74,17 @@ the same address; the successor names it, and cannot be returned. Reviews
 never change a draft's content or provenance. Drafts and reviews reopen
 unchanged after a restart.
 
+As built (`agents::draft_store`): the table is `staged_section_drafts`, in
+the review store's file beside the staged proposals. The identity also
+covers the author role's name and the returned draft a successor replaces,
+so a successor is never the same record as a first draft. Storing identical
+content returns the stored record with its current review. The store
+re-applies the admission rule to what it is given and refuses a draft that
+records a hash for a fact no claim cites. A review note is at most 4 KiB.
+A trigger refuses any update of the content columns, and a unique index
+holds the one-successor rule. Whether an address is in the section table is
+checked by the host that requests the run (slice 6), not by the store.
+
 ## Curated projection
 
 `context_hub::curated::project` takes accepted drafts as a second record
@@ -93,6 +104,16 @@ accepted or rejected draft. A pending or returned draft does not enter. The
 DR-4 fields are carried per draft as they are per proposal; `source_support`
 counts cited facts.
 
+As built (`context_hub::curated`): `ProjectionInput` takes the stored
+drafts and, per cited id, the current content hash of the fact it resolves
+to; an id that resolves to nothing is absent. The projection reports every
+accepted draft with its state and reason, and the totals. `superseded` and
+`conflicted` look only at accepted drafts of the same address, whatever
+their own state. The policy version is `curated-policy-v2`. The host
+supplies no drafts yet, so the revision of an existing project changes once
+and its content does not; the host reads the draft store and resolves cited
+ids from slice 5.
+
 ## Compiled documents
 
 The compiler emits D1 as `product-specification.md` (artifact id
@@ -107,9 +128,10 @@ Each printed claim shows its citation ids, `T3 / InferredWeak`, the author
 role and `human-reviewed: accepted`. A section with no eligible draft says it
 is not drafted and, if a draft is listed, gives its state and reason. The
 header carries the catalogue version, the graph content hash, the curated
-revision and the export mode. The hash and the revision are those of the
-curated projection the host supplies; a compile that is supplied none states
-that. The document closes with its count of cited statements by tier.
+revision and the export mode. The host supplies the graph content hash on
+its own, so the header states it even when the curated projection could not
+be computed; it then gives the reason code in place of the revision. A
+compile that is supplied neither states that. The document closes with its count of cited statements by tier.
 
 In version 1 of the table a frame is one of four things: every admitted
 non-Gap node of a label, each with its tier, confidence and citation id
