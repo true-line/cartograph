@@ -90,6 +90,9 @@ test('CI enforces the governed lifecycle without draft jobs', () => {
   assert.match(workflow, /\[ "\$head_tree" = "\$tree" \] \|\| continue/u);
   assert.match(workflow, /\.head\.ref != "changeset-release\/main"/u);
   assert.match(workflow, /event=pull_request&head_sha=\$head/u);
+  // Actions runs bash with errexit; a failed lookup must fall back to the
+  // complete suite, not fail the main push.
+  assert.match(workflow, /run: \|\n\s+set \+e\n\s+run_id=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/actions\/runs\?event=merge_group/u);
 });
 
 test('required Advanced CodeQL contexts report on every non-draft PR run, even on the evidence path (#440)', () => {

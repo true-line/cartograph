@@ -73,9 +73,11 @@ jobs:
         name: Find successful merge-group or identical-tree PR CI for this commit
         env:
           GH_TOKEN: ${{ github.token }}
-        # No errexit: any lookup failure leaves validated false, which runs the
-        # complete suite fail-safe instead of failing main.
+        # The default Actions bash shell runs with errexit; turn it off so any
+        # lookup failure leaves validated false, which runs the complete suite
+        # fail-safe instead of failing main.
         run: |
+          set +e
           run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=merge_group&head_sha=$GITHUB_SHA&per_page=100" \
             --jq 'first(.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | .id) // empty')
           validated=false
