@@ -152,7 +152,7 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
     let selectable = schema["inputSchema"]["properties"]["artifact_id"]["enum"]
         .as_array()
         .expect("closed artifact id enum");
-    for id in ["fact-index", "fact-index-json"] {
+    for id in ["fact-index", "fact-index-json", "d1-product-specification"] {
         assert!(official.contains(&id), "{id} is an official artifact");
         assert!(!advertised.contains(&id), "{id} is not advertised");
         assert!(!selectable.iter().any(|value| value == id));
@@ -165,9 +165,9 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
             Err(ReadError::InvalidRequest)
         ));
     }
-    // The two fact-index ids are withheld and `curated-json`, which is not
-    // an export artifact, is added (AC-0654).
-    assert_eq!(advertised.len(), official.len() - 2 + 1);
+    // The two fact-index ids and the D1 document (AC-0663) are withheld and
+    // `curated-json`, which is not an export artifact, is added (AC-0654).
+    assert_eq!(advertised.len(), official.len() - 3 + 1);
     assert_eq!(selectable.len(), advertised.len());
     for id in advertised {
         assert!(

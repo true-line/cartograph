@@ -329,7 +329,8 @@ fn no_accepted_record_is_stated_and_changes_no_other_artifact() {
         for (before, after) in bare.artifacts.iter().zip(&with.artifacts) {
             assert_eq!(
                 before == after,
-                before.id != "curated",
+                // D1 prints the supplied revision in its header (AC-0663).
+                !matches!(before.id.as_str(), "curated" | "d1-product-specification"),
                 "{} in {mode:?}",
                 before.id
             );

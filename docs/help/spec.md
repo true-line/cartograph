@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, external services, environments, curated items, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -280,6 +280,26 @@ Not covered today: Kubernetes manifests, kustomize files, Helm charts and
 Helm values files (the coverage document lists each kind it found as present
 and not read); Terraform resources per environment; the combined result of
 several Compose files; which environment is production; and live state.
+
+## Product specification
+
+Every export includes **product-specification.md**. It is the first document
+arranged as the document catalogue describes it: one file with every section
+of the product specification, in order, each marked with its kind.
+
+- **P** sections are compiled from recovered facts. Actors and capabilities
+  are listed with their tier, confidence and citation id; each id has a row
+  in **fact-index.md**. Flows are summarized and the Gap findings are
+  counted, with the detail in **flow_dossiers.md** and **gap_register.md**.
+- **P+A** sections show the compiled part, then say **Not drafted**. Business
+  rules and acceptance criteria point to **rule-evidence.md** and
+  **test_arrangements.md** and are not repeated.
+- **A** sections say **Not drafted**. No agent writes a section yet.
+- **H** sections are left blank for your team. Cartograph never fills them.
+
+The header shows the catalogue version, the export mode, the graph content
+hash and the curated revision. No model is involved in writing this document,
+and the other exported files are unchanged. It is not yet readable over MCP.
 
 ## Curated items
 

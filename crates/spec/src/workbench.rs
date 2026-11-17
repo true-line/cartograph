@@ -7,6 +7,11 @@ pub use accounting::{
     logical_capability_compile_bound, logical_compile_bound,
 };
 mod capabilities;
+mod catalogue;
+pub use catalogue::{
+    CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
+    catalogue_sections,
+};
 mod configuration;
 pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
@@ -16,6 +21,7 @@ pub use curated::{
     Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_reason_sentence,
 };
 pub(crate) mod diagrams;
+mod document;
 mod endpoint_permissions;
 mod environments;
 mod external;
@@ -992,13 +998,14 @@ mod tests {
     /// (#1791), the curated items, which list a projection the host supplies
     /// (#1746), the two coverage artifacts, which project stored inventories
     /// instead of the graph (#1786), and the two fact-index artifacts, which
-    /// list what the others cite (#1785). The ten close the official order;
+    /// list what the others cite (#1785), and the D1 document (#1748), which
+    /// cites the facts its frames list. The eleven close the official order;
     /// the fixture has no endpoint, no pipeline, no environment file, no
     /// configuration read, no outbound call, no observed client, no channel
     /// and no Compose file, and a bare compile has no curated projection, so
     /// none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 10);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 11);
         assert_eq!(
             appended
                 .iter()
@@ -1011,17 +1018,26 @@ mod tests {
                 "external",
                 "environments",
                 "curated",
+                "d1-product-specification",
                 "coverage",
                 "coverage-index",
                 "fact-index",
                 "fact-index-json"
             ]
         );
+        // The D1 document cites the facts its frames list (AC-0663).
         assert!(
             appended
                 .iter()
+                .filter(|artifact| artifact.id != "d1-product-specification")
                 .all(|artifact| artifact.assertions.is_empty())
         );
+        // Its assertions are counted apart, so the frozen bytes still prove
+        // the graph artifacts and their count are unchanged.
+        bundle.assertion_count -= appended
+            .iter()
+            .map(|artifact| artifact.assertions.len())
+            .sum::<usize>();
         bundle
     }
 
@@ -1156,6 +1172,7 @@ mod tests {
                 "external.md",
                 "environments.md",
                 "curated.md",
+                "product-specification.md",
                 "coverage.md",
                 "coverage.json",
                 "fact-index.md",
@@ -2523,7 +2540,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 26);
+                assert_eq!(full.artifacts.len(), 27);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,
