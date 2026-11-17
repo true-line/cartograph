@@ -80,6 +80,8 @@ fn projection() -> CuratedProjection {
         assessments: &BTreeMap::new(),
         assertion_decisions: &[],
         current_assertion_hashes: &BTreeSet::new(),
+        drafts: &[],
+        cited_fact_hashes: &std::collections::BTreeMap::new(),
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()
@@ -96,6 +98,7 @@ fn compile(mode: ExportMode, curated: Option<&CuratedProjection>) -> SpecBundle 
             coverage: &[],
             stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
+            graph_content_hash: None,
         },
     )
     .unwrap()
@@ -267,6 +270,54 @@ fn header_carries_the_catalogue_version_mode_graph_hash_and_curated_revision() {
                 before.id
             );
         }
+    }
+}
+
+/// The host knows the graph hash even when it could not compute the curated
+/// projection; the header states the hash and why there is no revision.
+#[test]
+fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
+    for mode in MODES {
+        let bundle = try_compile_spec_supplied(
+            &nodes(),
+            &[],
+            &flows(),
+            mode,
+            &BTreeSet::new(),
+            Supplied {
+                coverage: &[],
+                stale_coverage: &[],
+                curated: Curated::NotComputed(crate::CuratedFailure::ReviewsUnavailable),
+                graph_content_hash: Some(GRAPH_HASH),
+            },
+        )
+        .unwrap();
+        let header = section(&d1(&bundle).content, "# Product specification");
+        assert!(header.contains(&format!("- Graph content hash: {GRAPH_HASH}\n")));
+        assert!(header.contains(
+            "- Curated revision: not computed (`reviews_unavailable`); see `curated.md`\n"
+        ));
+        assert!(!header.contains("not supplied"));
+
+        // The host's hash is the one printed when both are supplied.
+        let projection = projection();
+        let both = try_compile_spec_supplied(
+            &nodes(),
+            &[],
+            &flows(),
+            mode,
+            &BTreeSet::new(),
+            Supplied {
+                coverage: &[],
+                stale_coverage: &[],
+                curated: Curated::Computed(&projection),
+                graph_content_hash: Some("host-hash"),
+            },
+        )
+        .unwrap();
+        let header = section(&d1(&both).content, "# Product specification");
+        assert!(header.contains("- Graph content hash: host-hash\n"));
+        assert!(header.contains(&format!("- Curated revision: {}\n", projection.revision)));
     }
 }
 
