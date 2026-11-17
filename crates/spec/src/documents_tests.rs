@@ -239,3 +239,194 @@ fn a_title_or_heading_holding_a_secret_is_stored_redacted() {
         "Deploy with password=[REDACTED]"
     );
 }
+
+// AC-0678 (T-0678): exact references and `MENTIONS`.
+
+fn fact(id: &str, label: &str, props: serde_json::Value) -> Node {
+    Node {
+        id: id.into(),
+        label: label.into(),
+        props,
+    }
+}
+
+fn system() -> Vec<Node> {
+    use serde_json::json;
+    vec![
+        fact("file:local/shop@src/orders.ts", "File", json!({})),
+        fact("file:local/shop@docs/schema.sql", "File", json!({})),
+        fact("file:local/other@src/orders.ts", "File", json!({})),
+        fact(
+            "ep:orders:list",
+            "Endpoint",
+            json!({"method": "get", "path": "/orders/:id"}),
+        ),
+        fact(
+            "ep:users:a",
+            "Endpoint",
+            json!({"method": "GET", "path": "/users"}),
+        ),
+        fact(
+            "ep:users:b",
+            "Endpoint",
+            json!({"method": "GET", "path": "/users/"}),
+        ),
+        fact(
+            "ep:graphql",
+            "Endpoint",
+            json!({"method": "POST", "path": "/graphql", "protocol": "graphql"}),
+        ),
+        fact("chan:orders", "Channel", json!({"name": "orders-events"})),
+        fact("res:a", "Resource", json!({"name": "queue"})),
+        fact("res:b", "Resource", json!({"name": "queue"})),
+        fact("sym:orders", "Symbol", json!({"name": "listOrders"})),
+        fact("gap:x", "Gap", json!({})),
+        fact("doc:local/shop@README.md", "Document", json!({})),
+    ]
+}
+
+fn linked(markdown: &str, path: &str) -> Vec<(String, String, String, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(path);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(file, markdown).unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    let nodes = system();
+    link_references(
+        "local/shop",
+        "c1",
+        &facts.references,
+        &ReferenceIndex::new(&nodes),
+    )
+    .into_iter()
+    .map(|edge| {
+        assert_eq!(edge.label, "MENTIONS");
+        let prov = prov(&edge.props);
+        assert_eq!(prov.tier, Tier::Deterministic);
+        assert_eq!(prov.confidence_tier, ConfidenceTier::Confirmed);
+        // The first cited span is the reference as written; each other
+        // one is another reference to the same fact.
+        let first = &prov.evidence[0];
+        assert_eq!(
+            &markdown[first.byte_start as usize..first.byte_end as usize],
+            edge.props["reference"].as_str().unwrap()
+        );
+        assert_eq!(edge.props["occurrences"], prov.evidence.len());
+        for span in &prov.evidence {
+            assert_eq!(span.path, path);
+            assert!(span.byte_end as usize <= markdown.len());
+        }
+        (
+            edge.src,
+            edge.dst,
+            edge.props["rule"].as_str().unwrap().to_string(),
+            edge.props["reference"].as_str().unwrap().to_string(),
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn an_exact_reference_is_linked_to_the_one_fact_it_names_by_its_rule() {
+    let markdown = "# Shop\n\nSee `chan:orders` and `src/orders.ts:12`.\n\n\
+        ## Routes\n\n`GET /orders/{orderId}?page=2` lists. Events go to `orders-events`.\n\
+        The schema is [here](docs/schema.sql#L4 \"Schema\") and `./docs/schema.sql`.\n";
+    let section = |ordinal: usize| format!("docsec:local/shop@README.md#{ordinal}");
+    let row = |ordinal: usize, target: &str, rule: &str, text: &str| {
+        (
+            section(ordinal),
+            target.to_string(),
+            rule.to_string(),
+            text.to_string(),
+        )
+    };
+    assert_eq!(
+        linked(markdown, "README.md"),
+        [
+            row(0, "chan:orders", "fact_id", "chan:orders"),
+            row(
+                0,
+                "file:local/shop@src/orders.ts",
+                "file_path",
+                "src/orders.ts:12"
+            ),
+            row(1, "chan:orders", "name", "orders-events"),
+            row(1, "ep:orders:list", "route", "GET /orders/{orderId}?page=2"),
+            row(
+                1,
+                "file:local/shop@docs/schema.sql",
+                "file_path",
+                "docs/schema.sql#L4"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_link_target_resolves_against_the_documents_directory() {
+    let markdown = "# Guide\n\n[code](../src/orders.ts) [abs](/src/orders.ts) \
+        [schema](<schema.sql>) ![img](./schema.sql) [out](../../x.ts) \
+        [web](https://example.com/src/orders.ts) [top](#guide)\n";
+    let found = linked(markdown, "docs/guide.md");
+    let targets: Vec<(&str, &str)> = found
+        .iter()
+        .map(|row| (row.1.as_str(), row.3.as_str()))
+        .collect();
+    // Two links to one file from one section are one edge, as are the two
+    // to the schema; the first text is kept.
+    assert_eq!(
+        targets,
+        [
+            ("file:local/shop@docs/schema.sql", "schema.sql"),
+            ("file:local/shop@src/orders.ts", "../src/orders.ts"),
+        ]
+    );
+}
+
+#[test]
+fn an_ambiguous_unmatched_or_fenced_reference_is_not_linked() {
+    let markdown = "# Shop\n\n\
+        `GET /users` is served twice. `queue` names two resources.\n\
+        `POST /orders/1` has another method. `listOrders` is a symbol name.\n\
+        `gap:x` and `doc:local/shop@README.md` are not linked. `POST /graphql` is not HTTP.\n\
+        `get /orders/1` is not a method. `src/missing.ts` is no file.\n\
+        Unclosed `chan:orders and ``chan:orders` do not close.\n\n\
+        ```\n`chan:orders`\n[x](src/orders.ts)\n```\n";
+    assert_eq!(linked(markdown, "README.md"), []);
+
+    // A reference in another repository's document does not reach this
+    // repository's files.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "`docs/schema.sql`\n").unwrap();
+    let facts = extract_documents(dir.path(), "local/other", "c1").unwrap();
+    let nodes = system();
+    assert!(
+        link_references(
+            "local/other",
+            "c1",
+            &facts.references,
+            &ReferenceIndex::new(&nodes)
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn references_are_read_in_offset_order_with_their_spans() {
+    let text = "a ``x ` y`` b [t](u v) `c`\n~~~\n`no`\n~~~\n[only text] (x) `` `\n";
+    let found: Vec<(String, bool)> = markdown_references(text)
+        .into_iter()
+        .map(|(reference, link, start, end)| {
+            assert_eq!(&text[start..end], reference);
+            (reference, link)
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("x ` y".to_string(), false),
+            ("u".to_string(), true),
+            ("c".to_string(), false),
+        ]
+    );
+}

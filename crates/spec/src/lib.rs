@@ -12,8 +12,9 @@ mod adr;
 mod contract;
 mod documents;
 pub use documents::{
-    DOCUMENT_EXTRACTOR_ID, DocumentCounts, DocumentFacts, DocumentSkip, MAX_DOCUMENT_BYTES,
-    MAX_DOCUMENTS_PER_REPO, MAX_SECTIONS_PER_DOCUMENT, document_id, extract_documents, section_id,
+    DOCUMENT_EXTRACTOR_ID, DocumentCounts, DocumentFacts, DocumentReference, DocumentSkip,
+    MAX_DOCUMENT_BYTES, MAX_DOCUMENTS_PER_REPO, MAX_SECTIONS_PER_DOCUMENT, ReferenceIndex,
+    ReferenceRule, document_id, extract_documents, link_references, section_id,
 };
 mod graph_basis;
 pub use graph_basis::{

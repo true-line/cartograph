@@ -3168,11 +3168,13 @@ fn document_coverage(
     })
 }
 
-/// Read the documentation files of every repository in the graph.
+/// Read the documentation files of every repository in the graph, and link
+/// each exact reference to the one fact of the system it names (AC-0678).
 fn collect_documents<'a>(
     nodes: &[Node],
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
+    let index = spec::ReferenceIndex::new(nodes);
     nodes
         .iter()
         .filter(|node| node.label == "Repo")
@@ -3182,17 +3184,19 @@ fn collect_documents<'a>(
                 .strip_prefix("repo:")
                 .ok_or("invalid repository fact identity")?;
             let commit = node.props["commit"].as_str().unwrap_or("workdir");
-            let facts = spec::extract_documents(root_for(repo)?, repo, commit)
+            let mut facts = spec::extract_documents(root_for(repo)?, repo, commit)
                 .map_err(|e| e.to_string())?;
+            let mentions = spec::link_references(repo, commit, &facts.references, &index);
+            facts.edges.extend(mentions);
             Ok((repo.to_owned(), facts))
         })
         .collect()
 }
 
 /// Add each repository's documentation facts to `patch`, and remove the
-/// documents, sections and `HAS_SECTION` edges of that repository that the
-/// read no longer yields, so a re-ingest keeps no fact of a deleted file or
-/// section.
+/// documents, sections and `HAS_SECTION` and `MENTIONS` edges of that
+/// repository that the read no longer yields, so a re-ingest keeps no fact
+/// of a deleted file, section or reference.
 fn document_patch(
     nodes: &[Node],
     edges: &[Edge],
@@ -3225,7 +3229,9 @@ fn document_patch(
         patch.delete_edges.extend(
             edges
                 .iter()
-                .filter(|edge| edge.label == "HAS_SECTION" && owned(&edge.src))
+                .filter(|edge| {
+                    matches!(edge.label.as_str(), "HAS_SECTION" | "MENTIONS") && owned(&edge.src)
+                })
                 .map(edge_key)
                 .filter(|key| !current_edges.contains(key)),
         );
@@ -8225,10 +8231,16 @@ resource "aws_sqs_queue" "orders" {
         // AC-0676 (T-0676): the ingest pass stores each documentation file
         // as a Document with its DocSection facts; the same tree yields the
         // same graph content hash; a removed file or section leaves no fact.
+        // AC-0678 (T-0678): a reference to a recovered file is one MENTIONS
+        // edge, and it goes when the reference does.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("app.ts"), "export function handle() {}\n").unwrap();
-        std::fs::write(root.join("README.md"), "# Shop\n\n## Routes\n\n## Deploy\n").unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "# Shop\n\nSee `app.ts`.\n\n## Routes\n\n## Deploy\n",
+        )
+        .unwrap();
         std::fs::write(root.join("NOTES.txt"), "notes\n").unwrap();
         let mut store = SqliteGraphStore::open_in_memory().unwrap();
         let extraction = crate::extract_tree(
@@ -8263,7 +8275,16 @@ resource "aws_sqs_queue" "orders" {
                 .iter()
                 .filter(|edge| edge.label == "HAS_SECTION")
                 .count();
-            (ids, sections, spec::graph_content_hash(&nodes, &edges))
+            let mentions: Vec<(String, String)> = edges
+                .iter()
+                .filter(|edge| edge.label == "MENTIONS")
+                .map(|edge| (edge.src.clone(), edge.dst.clone()))
+                .collect();
+            (
+                ids,
+                (sections, mentions),
+                spec::graph_content_hash(&nodes, &edges),
+            )
         };
 
         let (ids, sections, hash) = read(&mut store);
@@ -8278,7 +8299,16 @@ resource "aws_sqs_queue" "orders" {
                 "docsec:local/shop@README.md#2",
             ]
         );
-        assert_eq!(sections, 4);
+        assert_eq!(
+            sections,
+            (
+                4,
+                vec![(
+                    "docsec:local/shop@README.md#0".to_string(),
+                    "file:local/shop@app.ts".to_string()
+                )]
+            )
+        );
         // The same tree again: the same facts and the same content hash.
         assert_eq!(read(&mut store), (ids, sections, hash));
 
@@ -8293,7 +8323,7 @@ resource "aws_sqs_queue" "orders" {
                 "docsec:local/shop@README.md#1",
             ]
         );
-        assert_eq!(sections, 2);
+        assert_eq!(sections, (2, Vec::new()));
     }
 
     #[test]
