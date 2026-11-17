@@ -54,13 +54,15 @@ pub(crate) struct ArtifactPage<'a> {
 /// it compiles every citing artifact and holds the rows, which the reserved
 /// `spec::logical_compile_bound` workspace does not model. The desktop export
 /// and single-artifact read still produce it. A `curated` read therefore
-/// prints citation ids that this surface cannot look up.
-///
-/// The D1 document (#1748, AC-0663) is not readable here yet: its header
-/// carries the curated revision, and the read that returns the export's
-/// bytes for it is SPEC-15 slice 5 (AC-0667). The desktop export and
-/// single-artifact read produce it.
-const NOT_READABLE: [&str; 3] = ["fact-index", "fact-index-json", "d1-product-specification"];
+/// prints citation ids that this surface cannot look up, and so does a read
+/// of the D1 document.
+const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
+
+/// The D1 document (#1748, SPEC-15 slice 5, AC-0667). It reads the session's
+/// curated projection, which carries the accepted section drafts, and the
+/// session's graph content hash; for the same inputs and export mode its
+/// bytes are the desktop export's.
+const D1_ID: &str = "d1-product-specification";
 
 /// The two projections of the stored coverage inventories (AC-0592).
 const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];
@@ -169,10 +171,11 @@ impl ReadSession {
                 },
             )
             .map_err(|_| ReadError::Storage)?
-        } else if id == curated_read::ARTIFACT_ID || COVERAGE_IDS.contains(&id) {
+        } else if id == curated_read::ARTIFACT_ID || id == D1_ID || COVERAGE_IDS.contains(&id) {
             // The selected compiler the desktop single-artifact read uses,
-            // supplied as the export supplies it. `curated.md` reads the
-            // projection this session computed and no coverage inventory.
+            // supplied as the export supplies it. `curated.md` and the D1
+            // document read the projection this session computed and no
+            // coverage inventory.
             // The coverage artifacts (#1814, AC-0657) read the inventories
             // of this session's own bounded read, borrowed, and no
             // projection. Neither reads a security projection.
@@ -198,9 +201,8 @@ impl ReadSession {
                     } else {
                         self.curated.supplied()
                     },
-                    // No readable artifact prints it: D1 is not in this
-                    // catalogue until its read is built (AC-0667).
-                    graph_content_hash: None,
+                    // The D1 header states it, computed or not (AC-0663).
+                    graph_content_hash: (!coverage).then_some(self.graph_content_hash.as_str()),
                 },
             )
             .map_err(|_| ReadError::InvalidRequest)?
