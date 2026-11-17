@@ -198,6 +198,9 @@ impl ReadSession {
                     } else {
                         self.curated.supplied()
                     },
+                    // No readable artifact prints it: D1 is not in this
+                    // catalogue until its read is built (AC-0667).
+                    graph_content_hash: None,
                 },
             )
             .map_err(|_| ReadError::InvalidRequest)?

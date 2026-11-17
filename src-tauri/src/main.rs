@@ -6200,6 +6200,10 @@ struct SpecInputs {
 }
 
 /// The curated projection of one compilation (SPEC-12, AC-0653).
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per compilation or session; boxing would touch every reader"
+)]
 enum CuratedInput {
     /// A single artifact whose bytes do not depend on it.
     NotRead,
@@ -6220,6 +6224,12 @@ impl SpecInputs {
                 CuratedInput::NotComputed(failure) => spec::Curated::NotComputed(*failure),
                 CuratedInput::Computed(projection) => spec::Curated::Computed(projection),
             },
+            // Known whenever the review store was read, whether or not the
+            // projection could be computed.
+            graph_content_hash: self
+                .graph_basis
+                .as_ref()
+                .map(|basis| basis.content_hash.as_str()),
         }
     }
 

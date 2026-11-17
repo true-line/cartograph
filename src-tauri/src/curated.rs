@@ -588,6 +588,8 @@ pub(crate) fn project(
         assessments: &assessments,
         assertion_decisions: &decided,
         current_assertion_hashes: &current,
+        drafts: &[],
+        cited_fact_hashes: &std::collections::BTreeMap::new(),
         policy_version: core::CURATED_POLICY_VERSION,
     })
     .map_err(|error| match error {
