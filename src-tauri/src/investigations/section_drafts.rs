@@ -161,23 +161,7 @@ fn existing_draft(
     store: &agents::draft_store::DraftStore,
     job_id: i64,
 ) -> Result<Option<String>, DraftStoreError> {
-    let mut before = None;
-    let mut read = 0;
-    loop {
-        let page = store.list(MAX_DRAFT_PAGE_ITEMS, before)?;
-        read += page.items.len();
-        if let Some(item) = page
-            .items
-            .into_iter()
-            .find(|item| item.origin.job_id == job_id)
-        {
-            return Ok(Some(item.draft_id));
-        }
-        before = page.next_before;
-        if before.is_none() || read >= MAX_PREDECESSOR_SCAN {
-            return Ok(None);
-        }
-    }
+    Ok(store.for_job(job_id)?.map(|item| item.draft_id))
 }
 
 /// Stage the draft of the completed drafting run `id`, or say why it staged
