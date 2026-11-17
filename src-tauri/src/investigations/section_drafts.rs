@@ -1,0 +1,328 @@
+//! The host side of a drafting run (#1748, SPEC-15 slice 6, ADR-0064
+//! decisions 3 and 4, AC-0668).
+//!
+//! A drafting run is an ordinary `section-writer@1` investigation task. This
+//! module adds the two things the task loop does not know about:
+//!
+//! - [`validate_start`] refuses a start whose question does not name one
+//!   drafted section of the catalogue table, before anything durable.
+//! - [`stage`] turns a completed run into a staged draft, or into a closed
+//!   reason why there is none. It reads the saved result and ledger, takes
+//!   the citation set of the address from the current graph, applies the
+//!   pure admission rule and stores the draft. It calls no model and is
+//!   idempotent: storing identical content returns the stored record.
+//!
+//! The worker calls [`stage`] once when a drafting run ends. The
+//! `section_draft_outcome` command calls it again on request, so a draft
+//! that could not be stored (a locked store, a crash between the run's
+//! completion and the store) is staged by the next read.
+
+use crate::AppState;
+use agents::draft_store::{DraftDecision, DraftOrigin, DraftStoreError, MAX_DRAFT_PAGE_ITEMS};
+use agents::investigation::{InvestigationStatus, KnowledgeCompleteness, SpecialistId};
+use agents::section_draft::{SectionAddress, admit};
+use agents::section_run::{SECTION_WRITER_ROLE, finish_of, question, requested_address};
+use agents::source_basis::TaskFactKey;
+use core_graph::FactKey;
+use serde::Serialize;
+use std::collections::BTreeSet;
+use tauri::Manager;
+
+/// Most stored drafts read to find the returned draft a new one succeeds.
+const MAX_PREDECESSOR_SCAN: usize = 2_000;
+
+/// What a drafting run produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum DraftingOutcome {
+    /// The run's finish was admitted and the draft is stored for review.
+    Staged {
+        /// The stored draft.
+        draft_id: String,
+    },
+    /// The run staged no draft.
+    NoDraft {
+        /// A closed reason code; never text from the run.
+        reason: &'static str,
+    },
+}
+
+impl DraftingOutcome {
+    fn none(reason: &'static str) -> Self {
+        Self::NoDraft { reason }
+    }
+}
+
+/// The address a drafting run's `question` names, checked against the
+/// section table: a drafted section of this catalogue version, under its
+/// catalogue title, for the system or (where the section is written per
+/// subject) for one subject.
+pub(crate) fn drafting_address(text: &str) -> Result<SectionAddress, &'static str> {
+    let (address, title) = requested_address(text).ok_or("question_not_an_address")?;
+    let section = spec::drafted_section(
+        &address.catalogue_version,
+        &address.document,
+        &address.section,
+    )
+    .map_err(spec::SectionScopeError::code)?;
+    if title != section.title {
+        return Err("question_not_an_address");
+    }
+    if address.scope != spec::SYSTEM_SCOPE && section.subject.is_none() {
+        return Err(spec::SectionScopeError::NotPerSubject.code());
+    }
+    Ok(address)
+}
+
+/// The question that starts a drafting run for the address, or the closed
+/// reason the address cannot be drafted.
+pub(crate) fn drafting_question(
+    catalogue_version: &str,
+    document: &str,
+    section: &str,
+    scope: &str,
+) -> Result<String, &'static str> {
+    let entry = spec::drafted_section(catalogue_version, document, section)
+        .map_err(spec::SectionScopeError::code)?;
+    let text = question(
+        &SectionAddress {
+            catalogue_version: catalogue_version.to_owned(),
+            document: document.to_owned(),
+            section: section.to_owned(),
+            scope: scope.to_owned(),
+        },
+        entry.title,
+    );
+    drafting_address(&text).map(|_| text)
+}
+
+/// Refuse a `section-writer@1` start whose question is not a drafting
+/// request. Every other role is untouched.
+pub(crate) fn validate_start(specialist_id: &str, text: &str) -> Result<(), String> {
+    if specialist_id != SECTION_WRITER_ROLE {
+        return Ok(());
+    }
+    drafting_address(text).map(|_| ()).map_err(|reason| {
+        format!("A drafting run must name one drafted catalogue section ({reason}).")
+    })
+}
+
+fn fact_key(fact: &TaskFactKey) -> FactKey {
+    match fact {
+        TaskFactKey::Node { id } => FactKey::Node { id: id.clone() },
+        TaskFactKey::Edge {
+            source,
+            label,
+            destination,
+        } => FactKey::Edge {
+            source: source.clone(),
+            label: label.clone(),
+            destination: destination.clone(),
+        },
+    }
+}
+
+/// The newest returned draft for `address` that no draft has succeeded yet.
+fn predecessor(
+    store: &agents::draft_store::DraftStore,
+    address: &SectionAddress,
+) -> Result<Option<String>, DraftStoreError> {
+    let mut succeeded = BTreeSet::new();
+    let mut returned = Vec::new();
+    let mut before = None;
+    let mut read = 0;
+    loop {
+        let page = store.list(MAX_DRAFT_PAGE_ITEMS, before)?;
+        read += page.items.len();
+        for item in page.items {
+            if item.draft.address != *address {
+                continue;
+            }
+            if let Some(replaced) = item.replaces {
+                succeeded.insert(replaced);
+            }
+            if item.review_decision == Some(DraftDecision::Returned) {
+                returned.push(item.draft_id);
+            }
+        }
+        before = page.next_before;
+        if before.is_none() || read >= MAX_PREDECESSOR_SCAN {
+            break;
+        }
+    }
+    // Pages are newest first, so the first unsucceeded one is the newest.
+    Ok(returned.into_iter().find(|id| !succeeded.contains(id)))
+}
+
+/// Stage the draft of the completed drafting run `id`, or say why it staged
+/// none. `Err` is an operational failure (a store or the graph could not be
+/// read); the run's result is unchanged and a later call retries.
+pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, String> {
+    let (summary, result, ledger) = {
+        let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let summary = jobs.investigation(id).map_err(|e| e.to_string())?.summary;
+        if summary.specialist_id != SpecialistId::SectionWriterV1 {
+            return Ok(DraftingOutcome::none("not_a_drafting_run"));
+        }
+        if summary.status != InvestigationStatus::Completed {
+            return Ok(DraftingOutcome::none("run_not_completed"));
+        }
+        let result = jobs.investigation_result(id).map_err(|e| e.to_string())?;
+        let ledger = jobs.investigation_ledger(id).map_err(|e| e.to_string())?;
+        (summary, result, ledger)
+    };
+    let Some(result) = result else {
+        return Ok(DraftingOutcome::none("run_not_completed"));
+    };
+    if result.findings.is_empty()
+        || result.knowledge_completeness == KnowledgeCompleteness::InsufficientEvidence
+    {
+        return Ok(DraftingOutcome::none("insufficient_evidence"));
+    }
+    let address = match drafting_address(&summary.question) {
+        Ok(address) => address,
+        Err(reason) => return Ok(DraftingOutcome::none(reason)),
+    };
+    let citations = ledger.map(|ledger| ledger.citations).unwrap_or_default();
+    let finish = match finish_of(&address, &result.findings, &citations, |fact| {
+        spec::citation_id(&fact_key(fact))
+    }) {
+        Ok(finish) => finish,
+        Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
+    };
+    let cited: BTreeSet<String> = finish
+        .claims
+        .iter()
+        .flat_map(|claim| claim.citations.iter().cloned())
+        .collect();
+    let (citation_set, graph_content_hash) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let (_, ((nodes, edges), _)) = crate::curated::read_graph(&graph)?;
+        // The table held the section when the address was checked above.
+        let section = spec::drafted_section(
+            &address.catalogue_version,
+            &address.document,
+            &address.section,
+        )
+        .map_err(|error| error.code().to_owned())?;
+        match spec::section_citation_set(section, &address.scope, &nodes, &edges, &cited) {
+            Ok(set) => (set, spec::graph_content_hash(&nodes, &edges)),
+            Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
+        }
+    };
+    let draft = match admit(&address, &citation_set, finish) {
+        Ok(draft) => draft,
+        Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
+    };
+    let origin = DraftOrigin {
+        role: SECTION_WRITER_ROLE.to_owned(),
+        role_definition: SpecialistId::SectionWriterV1
+            .definition()
+            .map_err(|e| e.to_string())?
+            .prompt_fingerprint,
+        job_id: summary.job_id,
+        graph_content_hash,
+    };
+    let mut store = state.drafts.lock().map_err(|e| e.to_string())?;
+    let replaces = predecessor(&store, &address).map_err(|e| e.to_string())?;
+    match store.store(&draft, &origin, replaces.as_deref()) {
+        Ok(stored) => Ok(DraftingOutcome::Staged {
+            draft_id: stored.draft_id,
+        }),
+        Err(DraftStoreError::Storage(error)) => Err(error.to_string()),
+        Err(_) => Ok(DraftingOutcome::none("draft_not_storable")),
+    }
+}
+
+/// Called by the worker when a drafting run ends. A failure is logged and
+/// left for the next `section_draft_outcome` read; it never fails the run.
+pub(crate) fn stage_after_run<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str) {
+    let state = app.state::<AppState>();
+    if let Err(error) = stage(&state, id) {
+        eprintln!("section draft of investigation {id} was not staged: {error}");
+    }
+}
+
+/// The question that starts a drafting run for one address.
+#[tauri::command]
+pub(crate) async fn section_draft_question(
+    catalogue_version: String,
+    document: String,
+    section: String,
+    scope: String,
+) -> Result<String, String> {
+    drafting_question(&catalogue_version, &document, &section, &scope).map_err(str::to_owned)
+}
+
+/// What the drafting run `investigation_id` produced. Stages the draft of a
+/// completed run that has none stored yet.
+#[tauri::command]
+pub(crate) async fn section_draft_outcome(
+    investigation_id: String,
+    app: tauri::AppHandle,
+) -> Result<DraftingOutcome, String> {
+    crate::off_ui_thread(move || stage(&app.state::<AppState>(), &investigation_id)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AC-0668: a drafting run names one drafted section of the table, under
+    // its catalogue title, and a subject only where the section has one.
+    #[test]
+    fn a_drafting_question_names_one_drafted_section() {
+        let text = drafting_question("1.0", "D1", "1.3", spec::SYSTEM_SCOPE).unwrap();
+        assert_eq!(
+            text,
+            "Draft section 1.3 \"Capabilities\" of document D1 (catalogue 1.0) for scope system."
+        );
+        let address = drafting_address(&text).unwrap();
+        assert_eq!(
+            (address.document.as_str(), address.section.as_str()),
+            ("D1", "1.3")
+        );
+        assert!(drafting_question("1.0", "D1", "1.3", "F-0123456789abcdef").is_ok());
+
+        for (version, document, section, scope, reason) in [
+            ("1.0", "D1", "1.6", "system", "section_not_drafted"),
+            ("1.0", "D1", "1.7", "system", "section_not_drafted"),
+            ("1.0", "D2", "2.1", "system", "section_not_drafted"),
+            ("0.9", "D1", "1.3", "system", "section_not_drafted"),
+            (
+                "1.0",
+                "D1",
+                "1.1",
+                "F-0123456789abcdef",
+                "section_not_per_subject",
+            ),
+            ("1.0", "D1", "1.3", "everything", "question_not_an_address"),
+        ] {
+            assert_eq!(
+                drafting_question(version, document, section, scope),
+                Err(reason),
+                "{document} {section} {scope}"
+            );
+        }
+        // The catalogue title is part of the one spelling.
+        assert_eq!(
+            drafting_address(
+                "Draft section 1.3 \"Anything\" of document D1 (catalogue 1.0) for scope system."
+            ),
+            Err("question_not_an_address")
+        );
+    }
+
+    // AC-0668: only the drafting role's start is checked.
+    #[test]
+    fn only_a_drafting_start_is_checked() {
+        let text = drafting_question("1.0", "D1", "1.3", spec::SYSTEM_SCOPE).unwrap();
+        assert!(validate_start("section-writer@1", &text).is_ok());
+        let refused = validate_start("section-writer@1", "What does checkout do?").unwrap_err();
+        assert!(refused.contains("question_not_an_address"));
+        assert!(!refused.contains("checkout"));
+        for role in ["spec-writer@1", "gap-triager@2", "domain-analyst@7"] {
+            assert!(validate_start(role, "What does checkout do?").is_ok());
+        }
+    }
+}
