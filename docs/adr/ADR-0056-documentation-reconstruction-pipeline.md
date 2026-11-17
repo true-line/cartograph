@@ -102,7 +102,7 @@ restatement are recorded nowhere:
 - The base graph hash is unaffected by drafting, review or curation.
 - v1.0.0 carries reconstruction criteria. The owner decided on 2026-11-17
   (#1853) that v1.0.0 is the whole pipeline: the criteria on #1610 are joined
-  by the exit gates of W5, W14, W13, W15 and W17 (ROADMAP §11). Until then the
+  by the exit gates of W5, W14, W13, W15, W16 and W17 (ROADMAP §11). Until then the
   v1.0 criteria proved only the context hub mode and the deterministic
   foundation.
 

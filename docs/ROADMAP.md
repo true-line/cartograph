@@ -419,10 +419,10 @@ milestones.
 
 | Milestone | Exit | Holds |
 |-----------|------|-------|
-| R1 — v1.0 GA: foundation and context hub | The foundation and context hub criteria of #1610 pass on a release build. No v1.0.0 tag: see section 11 | Release-blocking defects, the acceptance track (#598, #1710), pilot findings, the readiness report |
+| R1 — Foundation and context hub (release candidate) | The foundation and context hub criteria of #1610 pass on a release build. No v1.0.0 tag: see section 11 | Release-blocking defects, the acceptance track (#598, #1710), pilot findings, the readiness report |
 | R2 — Curated projection and document catalogue | An accepted proposal is visible in the Workbench, the export and an MCP read under one curated revision; the catalogue is approved | W5, W14, #1751, #1761, #1765 |
 | R3 — Agent-authored documents | One SimpleLogin document with authored sections scored against an independent expected set | W13, W16, the knowledge and semantic layer, W10 and W11 inputs |
-| R4 — Living documentation and rebuild handoff | Stale marking is exact and repeatable on a fixture; one handoff bundle passes its review | W15, W17 |
+| R4 — Living documentation and rebuild handoff; v1.0 GA | Stale marking is exact and repeatable on a fixture; one handoff bundle passes its review | W15, W17 |
 | Engineering health | Continuous | CI, tests, release mechanics, internal scale |
 | Later | Not scheduled | Experiments and platform work off the path |
 
@@ -458,16 +458,20 @@ The criteria are the existing ones on #1610 plus the exit gates that section
 | 5 | The document catalogue is approved by the owner | Stage 3 knows what to write | W14, #1747 |
 | 6 | One SimpleLogin document with authored sections, scored claim by claim against an expected set written before the run | Stage 3 as authorship (reconstruction mode) | W13, #1748 |
 | 7 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run | Stage 4 | W15, #1749 |
-| 8 | One SimpleLogin handoff bundle reviewed against the sufficiency checklist by someone who did not produce it | Stage 5, enabled | W17, #1752 |
-| 9 | Owner-approved readiness report covering 1 to 8 | All of the above | #1610 |
-| 10 | v1.0.0 tagged | The release decision | #1610 |
+| 8 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited | Stage 2 reads existing documentation as evidence | W16, #1750 |
+| 9 | One SimpleLogin handoff bundle reviewed against the sufficiency checklist by someone who did not produce it | Stage 5, enabled | W17, #1752 |
+| 10 | Owner-approved readiness report covering 1 to 9 | All of the above | #1610 |
+| 11 | v1.0.0 tagged | The release decision | #1610 |
 
 ### What changes in section 10
 
 - **The tag moves.** v1.0.0 is tagged when R4 exits, not R1. R1 to R4 are
   the four stages of one release. R1's exit is its criteria passing on a
   release build, which makes that build a release candidate for the
-  foundation and context hub.
+  foundation and context hub. The milestone table in section 10 names R1
+  and R4 accordingly. The GitHub milestone still titled "R1 — v1.0 GA:
+  foundation and context hub" is renamed to match, and R4 becomes the v1.0
+  GA milestone; until the owner renames them, this section governs.
 - **The order does not change.** W5 and W14 first and in parallel, then W13,
   then W15 and W17, with W16 alongside. The integrity and privacy defects of
   #1775 that bear on a release build stay release-blocking.
