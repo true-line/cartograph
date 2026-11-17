@@ -55,7 +55,12 @@ pub(crate) struct ArtifactPage<'a> {
 /// `spec::logical_compile_bound` workspace does not model. The desktop export
 /// and single-artifact read still produce it. A `curated` read therefore
 /// prints citation ids that this surface cannot look up.
-const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
+///
+/// The D1 document (#1748, AC-0663) is not readable here yet: its header
+/// carries the curated revision, and the read that returns the export's
+/// bytes for it is SPEC-15 slice 5 (AC-0667). The desktop export and
+/// single-artifact read produce it.
+const NOT_READABLE: [&str; 3] = ["fact-index", "fact-index-json", "d1-product-specification"];
 
 /// The two projections of the stored coverage inventories (AC-0592).
 const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];

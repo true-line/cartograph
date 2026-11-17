@@ -671,7 +671,8 @@ mod tests {
         );
         // AC-0653 (SPEC-12 slice 2): acceptance now reaches the export, and
         // only as a listed state. This record has no captured evidence, so it
-        // is not a curated item: `curated.md` and the curated basis change,
+        // is not a curated item: `curated.md`, the revision in the D1 header and
+        // the curated basis change,
         // and every other artifact, the fact index and the graph basis are
         // byte-identical in both modes.
         let review = crate::curated::read_records(&restored);
@@ -688,7 +689,8 @@ mod tests {
             for (before, after) in before.artifacts.iter().zip(&after.artifacts) {
                 assert_eq!(
                     before == after,
-                    before.id != "curated",
+                    // The D1 header carries the curated revision (AC-0663).
+                    !matches!(before.id.as_str(), "curated" | "d1-product-specification"),
                     "{} in {mode:?}",
                     before.id
                 );

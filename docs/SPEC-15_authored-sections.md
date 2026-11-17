@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Nothing here is implemented.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 and 2 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -107,7 +107,17 @@ Each printed claim shows its citation ids, `T3 / InferredWeak`, the author
 role and `human-reviewed: accepted`. A section with no eligible draft says it
 is not drafted and, if a draft is listed, gives its state and reason. The
 header carries the catalogue version, the graph content hash, the curated
-revision and the export mode. `verified-only` prints no claim and states per
+revision and the export mode. The hash and the revision are those of the
+curated projection the host supplies; a compile that is supplied none states
+that. The document closes with its count of cited statements by tier.
+
+In version 1 of the table a frame is one of four things: every admitted
+non-Gap node of a label, each with its tier, confidence and citation id
+(§1.2 `Actor`, §1.3 `Capability`); a summary of the traced flows (§1.6); the
+count of Gap findings (§1.8); or a reference to the artifacts of the same
+export that hold the statements (§1.4, §1.5). A business rule is rendered
+only by the rule inventory, under its disclosure policy, and is never
+repeated in the document. `verified-only` prints no claim and states per
 section how many were left out. Existing artifacts are byte-identical.
 
 ## Surfaces
@@ -118,7 +128,8 @@ section how many were left out. Existing artifacts are byte-identical.
   claims and their annotations; each citation opens its evidence. A section
   offers "Draft this section" and the review actions.
 - **MCP.** The artifact is readable as the export's bytes for the same
-  inputs and mode. Drafting and review are not exposed over MCP.
+  inputs and mode, from slice 5; until then it is not in the MCP catalogue.
+  Drafting and review are not exposed over MCP.
 
 ## Slices
 
@@ -153,7 +164,19 @@ are committed whatever they are.
 
 ## Open items
 
+- The export compiles the base graph. `Capability`, `Actor` and
+  `BusinessFlow` facts that live only in the knowledge overlay (ADR-0051)
+  are not in it, so §1.2 and §1.3 list only base-graph facts, and a draft
+  citing an overlay fact could not resolve. Slices 4 and 5 must resolve
+  citations and compare hashes over the base and overlay facts together.
+- The D1 header does not yet carry the system name or the source revisions
+  the catalogue asks of every document; the bundle holds them as
+  `graph_basis`. §1.4 and §1.5 are not yet arranged per capability or rule.
+
 - A statement is checked for citation membership only.
+- The pure check of slice 2 bounds a statement, refuses control characters
+  and recognized secrets, and checks membership. The run-bound replay check
+  joins it when the drafting run is wired (slice 6).
 - Version 1 of the section table holds D1; each further document is a table
   change and, where a frame is missing, a projection.
 - A draft whose scope exceeds the role's limits is refused, not split.
