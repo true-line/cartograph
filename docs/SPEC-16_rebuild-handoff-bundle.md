@@ -81,8 +81,19 @@ Work packets are not in it, because the export does not write them.
 6. **Rationale is not invented.** Why a decision was made is written only
    where a target document states it (catalogue default 2).
 
-Rule 3 is checked by review today. A deterministic check that a drafted
-statement contains no path or symbol of the cited source is an open item.
+Rule 3 has one deterministic check (AC-0683). When a drafting run ends, a
+draft is not staged if any statement spells out, as a whole token, an
+identifier of a fact that statement cites: a path of the fact's evidence,
+the file name of that path, or the name of a cited code declaration when
+the name is shaped like code (it holds `_`, `::`, `.`, `#` or `(`, or a
+lower-case letter directly followed by an upper-case one). The run reports
+`statement_names_source` and nothing is stored. A documentation file a
+claim reports on is not an implementation identifier.
+
+The check decides only what a rule can decide. A single plain word is not
+told apart from a domain term, framework terms are not listed, and an
+identifier of a fact the statement does not cite is not compared. Those
+remain for the reviewer, under question 15.
 
 ## Sufficiency checklist
 
@@ -138,6 +149,8 @@ sections. Question 4 is asked of the alias lifecycle capability set.
   questions 7 to 11 are answered from those files.
 - Work packets are exported one at a time; nothing collects the packets
   that belong to one bundle.
-- Rule 3 has no deterministic check.
+- The rule 3 check covers paths and code-shaped symbol names of cited
+  facts only. Plain-word symbol names and framework terms are left to
+  review.
 - The D1 header does not yet carry the system name or source revisions
   (SPEC-15 open items); the complete as-of is in `bundle-manifest.md`.

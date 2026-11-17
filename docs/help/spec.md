@@ -386,6 +386,11 @@ product specification is listed with its kind and every draft stored for it.
   the same consent and limits as any investigation.
 - A draft shows its claims, each marked **T3 / InferredWeak** with its
   citation ids. Selecting a citation id opens the fact index.
+- A run stores no draft when one of its statements spells out a file path
+  or a code name (such as `create_order` or `OrderService`) of a fact that
+  statement cites. A requirement says what the system does, not where the
+  code is; the code stays in the citation. Run the draft again. Routes,
+  field names and message names may be stated.
 - **Accept**, **Reject** and **Return** record your decision with an
   optional note. A decision changes no claim. If the draft changed since the
   view was read, the decision is refused and the view is read again.

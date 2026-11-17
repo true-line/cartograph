@@ -90,7 +90,9 @@ fingerprint. No other role's definition changes.
   content hash. The newest returned draft of the same address that has no
   successor is recorded as replaced. An insufficient-evidence finish, a run
   that did not complete, a scope that names no subject and a claim citing a
-  fact outside the scope stage nothing. `section_draft_outcome` reports
+  fact outside the scope stage nothing. Neither does a draft with a
+  statement that spells out a file path or a code symbol of a fact it cites
+  (`statement_names_source`; SPEC-16 rule 3, AC-0683). `section_draft_outcome` reports
   `staged` with the draft id or `no_draft` with a closed reason code, and
   stages the draft of a completed run that has none stored; it calls no
   model and storing identical content twice returns the stored record.

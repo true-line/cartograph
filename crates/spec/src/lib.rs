@@ -111,8 +111,8 @@ pub use workbench::{
     try_compile_spec_with_coverage,
 };
 pub use workbench::{
-    CATALOGUE_VERSION, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
-    SectionScopeError, catalogue_section, catalogue_sections, drafted_section,
+    CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
+    SectionScopeError, SourceIdentifiers, catalogue_section, catalogue_sections, drafted_section,
     section_citation_set,
 };
 
