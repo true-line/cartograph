@@ -38,7 +38,8 @@ reach the exports, and documents are not updated when the code drifts. The plan
 for those stages is [ROADMAP §10](docs/ROADMAP.md#10-realignment-2026-11-09);
 the direction is [ADR-0056](docs/adr/ADR-0056-documentation-reconstruction-pipeline.md).
 Planned capabilities have separate delivery gates and are not shipped until
-those pass.
+those pass. v1.0.0 is the whole pipeline: its criteria are in
+[ROADMAP §11](docs/ROADMAP.md#11-v100-scope-2026-11-17).
 
 ```sh
 # prerequisites: Node (see .nvmrc) and Rust via rustup — https://rustup.rs
