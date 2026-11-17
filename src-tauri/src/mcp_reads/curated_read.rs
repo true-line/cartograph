@@ -60,6 +60,10 @@ impl CuratedBasis {
 
 /// What a session holds of the curated projection.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per compilation or session; boxing would touch every reader"
+)]
 pub(crate) enum CuratedRead {
     /// The projection over the session's snapshot.
     Computed(CuratedProjection),

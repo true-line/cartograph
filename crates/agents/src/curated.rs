@@ -114,6 +114,8 @@ mod tests {
             assessments: &BTreeMap::<String, BasisAssessment>::new(),
             assertion_decisions: &[],
             current_assertion_hashes: &BTreeSet::new(),
+            drafts: &[],
+            cited_fact_hashes: &std::collections::BTreeMap::new(),
             policy_version: CURATED_POLICY_VERSION,
         })
         .unwrap()

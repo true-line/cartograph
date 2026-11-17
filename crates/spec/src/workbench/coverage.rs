@@ -1292,6 +1292,7 @@ mod tests {
                     coverage: &records,
                     stale_coverage: stale,
                     curated: crate::Curated::NotSupplied,
+                    graph_content_hash: None,
                 },
             )
             .unwrap()

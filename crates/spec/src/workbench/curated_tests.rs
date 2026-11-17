@@ -113,6 +113,8 @@ fn projection(records: &[ReviewedProposal]) -> CuratedProjection {
         assessments: &assessments,
         assertion_decisions: if records.is_empty() { &[] } else { &stale },
         current_assertion_hashes: &BTreeSet::new(),
+        drafts: &[],
+        cited_fact_hashes: &std::collections::BTreeMap::new(),
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()
@@ -144,6 +146,7 @@ fn compile(
             coverage: &[],
             stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
+            graph_content_hash: None,
         },
     )
     .unwrap()
@@ -241,6 +244,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             coverage: &[],
             stale_coverage: &[],
             curated: Curated::NotComputed(failure),
+            graph_content_hash: None,
         };
         for mode in MODES {
             let bare = compile(mode, &BTreeSet::new(), None);
@@ -252,7 +256,8 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             for (before, after) in bare.artifacts.iter().zip(&failed.artifacts) {
                 assert_eq!(
                     before == after,
-                    before.id != "curated",
+                    // The D1 header gives the reason code too (AC-0663).
+                    !matches!(before.id.as_str(), "curated" | "d1-product-specification"),
                     "{} in {mode:?}",
                     before.id
                 );
@@ -306,6 +311,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
                 coverage: &[],
                 stale_coverage: &[],
                 curated: Curated::NotComputed(CuratedFailure::TooManyAccepted { limit: 256 }),
+                graph_content_hash: None,
             },
         )
         .unwrap(),
@@ -554,6 +560,7 @@ fn curated_is_deterministic_selected_alone_and_bounded() {
                     coverage: &[],
                     stale_coverage: &[],
                     curated: Curated::Computed(&projection),
+                    graph_content_hash: None,
                 },
             )
             .unwrap()

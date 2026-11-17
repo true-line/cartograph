@@ -77,6 +77,10 @@ pub struct Supplied<'a> {
     /// The curated projection the host computed for this graph, or why it
     /// computed none (SPEC-12, AC-0653).
     pub curated: Curated<'a>,
+    /// The content hash of the graph being compiled, when the host has
+    /// it. It is supplied apart from `curated`, so a document header can
+    /// state it when no projection was computed (AC-0663).
+    pub graph_content_hash: Option<&'a str>,
 }
 
 /// One stored inventory the host compared with the repository's current
@@ -108,6 +112,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) environments_withheld: usize,
     /// The curated projection, or why there is none.
     pub(crate) curated: Curated<'a>,
+    /// The graph content hash the host supplied, if any.
+    pub(crate) graph_content_hash: Option<&'a str>,
 }
 
 impl<'a> Beside<'a> {
@@ -128,6 +134,7 @@ impl<'a> Beside<'a> {
             external_withheld: external::withheld(nodes, edges, mode, rejected),
             environments_withheld: environments::withheld(nodes, edges, mode, rejected),
             curated: supplied.curated,
+            graph_content_hash: supplied.graph_content_hash,
         }
     }
 }
@@ -550,7 +557,14 @@ fn produce(
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
         // The catalogue's D1 over the admitted nodes and flows, the gap
         // count and the supplied projection's revision (AC-0663).
-        document::D1_ARTIFACT_ID => document::d1(nodes, flows, gaps, beside.curated, mode, max)?,
+        document::D1_ARTIFACT_ID => document::d1(
+            nodes,
+            flows,
+            gaps,
+            (beside.curated, beside.graph_content_hash),
+            mode,
+            max,
+        )?,
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => {
             coverage::output(coverage, beside.stale_coverage, a.id == "coverage", max)?
@@ -666,6 +680,7 @@ pub fn compile_spec_selected_with_coverage(
             coverage,
             stale_coverage: &[],
             curated: Curated::NotSupplied,
+            graph_content_hash: None,
         },
     )
 }
