@@ -294,8 +294,10 @@ of the product specification, in order, each marked with its kind.
 - **P+A** sections show the compiled part, then the accepted draft for the
   section, or **Not drafted**. Business rules and acceptance criteria point
   to **rule-evidence.md** and **test_arrangements.md** and are not repeated.
-- **A** sections show the accepted draft, or **Not drafted**. No agent
-  writes a section yet, so there is no draft to accept.
+- **A** sections show the accepted draft, or **Not drafted**. The Section
+  Writer role drafts one section per investigation run and its draft is
+  stored for review. Review is not in the app yet, so no draft is accepted
+  and exports still show **Not drafted**.
 - **H** sections are left blank for your team. Cartograph never fills them.
 
 The header shows the catalogue version, the export mode, the graph content

@@ -343,3 +343,87 @@ fn cited_fact_hashes_reads_only_the_cited_facts() {
     assert!(hashes.contains_key(&edge_id));
     assert!(cited_fact_hashes(&nodes(), &[edge()], &BTreeSet::new()).is_empty());
 }
+
+// AC-0668 (T-0668): only a drafted section of this catalogue version can be
+// the target of a drafting run.
+#[test]
+fn only_a_drafted_section_of_this_catalogue_version_is_addressable() {
+    for number in ["1.1", "1.2", "1.3", "1.4", "1.5"] {
+        assert_eq!(
+            drafted_section(CATALOGUE_VERSION, "D1", number).map(|section| section.number),
+            Ok(number)
+        );
+    }
+    for (version, document, number) in [
+        (CATALOGUE_VERSION, "D1", "1.6"),
+        (CATALOGUE_VERSION, "D1", "1.7"),
+        (CATALOGUE_VERSION, "D1", "1.8"),
+        (CATALOGUE_VERSION, "D1", "9.9"),
+        (CATALOGUE_VERSION, "D2", "2.1"),
+        ("0.9", "D1", "1.3"),
+    ] {
+        let refused = drafted_section(version, document, number).unwrap_err();
+        assert_eq!(refused, SectionScopeError::NotDrafted);
+        assert_eq!(refused.code(), "section_not_drafted");
+    }
+}
+
+// AC-0668 (T-0668): the citation set is the facts of the declared scope, by
+// citation id with the current content hash.
+#[test]
+fn the_citation_set_is_the_scope_by_citation_id_with_current_hashes() {
+    let nodes = nodes();
+    let edges = [edge()];
+    let edge_id = citation_id(&edge_key(&edges[0]));
+    let all: BTreeSet<String> = [
+        id("cap:checkout"),
+        id("actor:admin"),
+        id("rule:limit"),
+        edge_id.clone(),
+        id("not:there"),
+    ]
+    .into();
+    let capabilities = drafted_section(CATALOGUE_VERSION, "D1", "1.3").unwrap();
+
+    // The system scope admits every fact of the graph and nothing else.
+    let system = section_citation_set(capabilities, SYSTEM_SCOPE, &nodes, &edges, &all).unwrap();
+    assert_eq!(system, cited_fact_hashes(&nodes, &edges, &all));
+    assert_eq!(system.len(), 4);
+    assert!(!system.contains_key(&id("not:there")));
+
+    // A subject scope admits the subject, the edges that touch it and the
+    // nodes at their other ends; a fact elsewhere is not admitted.
+    let subject =
+        section_citation_set(capabilities, &id("cap:checkout"), &nodes, &edges, &all).unwrap();
+    let admitted: BTreeSet<&str> = subject.keys().map(String::as_str).collect();
+    let expected = [id("cap:checkout"), id("actor:admin"), edge_id];
+    assert_eq!(
+        admitted,
+        expected.iter().map(String::as_str).collect::<BTreeSet<_>>()
+    );
+    for (fact, hash) in &subject {
+        assert_eq!(system.get(fact), Some(hash));
+    }
+
+    // Only the ids asked for are hashed.
+    let one: BTreeSet<String> = [id("actor:admin")].into();
+    let only = section_citation_set(capabilities, SYSTEM_SCOPE, &nodes, &edges, &one).unwrap();
+    assert_eq!(only.keys().collect::<Vec<_>>(), [&id("actor:admin")]);
+
+    // The subject must be a node of the section's subject label.
+    for scope in [
+        id("actor:admin"),
+        id("not:there"),
+        "F-0000000000000000".into(),
+    ] {
+        let refused = section_citation_set(capabilities, &scope, &nodes, &edges, &all).unwrap_err();
+        assert_eq!(refused, SectionScopeError::SubjectNotFound);
+        assert_eq!(refused.code(), "subject_not_found");
+    }
+    // A section written once has the system scope only.
+    let purpose = drafted_section(CATALOGUE_VERSION, "D1", "1.1").unwrap();
+    let refused =
+        section_citation_set(purpose, &id("cap:checkout"), &nodes, &edges, &all).unwrap_err();
+    assert_eq!(refused, SectionScopeError::NotPerSubject);
+    assert_eq!(refused.code(), "section_not_per_subject");
+}
