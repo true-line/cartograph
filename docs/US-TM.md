@@ -134,7 +134,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (accepted 2026-11-06, #1678) |
 | ADR-0055 | Bounded, independently bound refusal diagnostic sidecars outside workspace capacity accounting (#1707) |
-| ADR-0056 | Documentation reconstruction pipeline, two modes and the rebuild boundary (proposed; #1745, owner review) |
+| ADR-0056 | Documentation reconstruction pipeline, two modes and the rebuild boundary (accepted 2026-11-17, #1853; proposed in #1745) |
 | ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review); amended 2026-11-10 for the consent-free, recorded connection check (#1795) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal

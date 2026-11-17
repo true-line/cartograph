@@ -1,6 +1,6 @@
 # ADR-0056 — Documentation reconstruction pipeline, two modes and the rebuild boundary
 
-- **Status:** Proposed in #1745 (owner review)
+- **Status:** Accepted by the owner on 2026-11-17 (#1853); proposed in #1745
 - **Date:** 2026-11-09
 - **Deciders:** Cartograph owner (goal restated 2026-11-09); drafted by Claude
 - **Related:** #1745; ADR-0019, ADR-0036; VISION V10–V13; ROADMAP §10
@@ -100,9 +100,11 @@ restatement are recorded nowhere:
   citation membership and the refusal protocol. A draft is a new finish
   payload, not a new loop.
 - The base graph hash is unaffected by drafting, review or curation.
-- The v1.0 criteria prove the context hub mode and the deterministic
-  foundation. Whether v1.0 also carries a reconstruction criterion is an
-  owner decision recorded on #1610.
+- v1.0.0 carries reconstruction criteria. The owner decided on 2026-11-17
+  (#1853) that v1.0.0 is the whole pipeline: the criteria on #1610 are joined
+  by the exit gates of W5, W14, W13, W15 and W17 (ROADMAP §11). Until then the
+  v1.0 criteria proved only the context hub mode and the deterministic
+  foundation.
 
 ## Alternatives
 
