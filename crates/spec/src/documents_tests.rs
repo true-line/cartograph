@@ -653,3 +653,147 @@ fn the_drift_register_lists_documentation_drift_with_what_it_was_compared_with()
     // A register without such a finding does not have the section.
     assert!(!register(&[], &[], crate::ExportMode::BestEffort).contains("Documentation drift"));
 }
+
+// AC-0680 (T-0680): the stated-intent boundary and redaction.
+
+/// Every fact the documentation pass yields for one README over [`system`].
+fn pass(markdown: &str) -> (Vec<Node>, Vec<Edge>) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), markdown).unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    let nodes = system();
+    let index = ReferenceIndex::new(&nodes);
+    let mut out_nodes = facts.nodes;
+    let mut out_edges = facts.edges;
+    out_edges.extend(link_references(
+        "local/shop",
+        "c1",
+        &facts.references,
+        &index,
+    ));
+    let (drift, compared) =
+        documentation_drift("local/shop", "c1", &facts.references, &index, &|_| false);
+    out_nodes.extend(drift);
+    out_edges.extend(compared);
+    (out_nodes, out_edges)
+}
+
+#[test]
+fn documentation_that_contradicts_a_recovered_fact_yields_only_its_own_facts() {
+    // The README states another method for a served path and names a route
+    // that is not served. Each fact of the pass is a document, a section or
+    // a drift entry, each edge starts at one, and no fact of the system is
+    // yielded again with other content.
+    let markdown = "# Shop\n\n`DELETE /orders/{id}` is how an order is listed. \
+        `GET /refunds/{id}` returns a refund. `GET /orders/{id}` too.\n";
+    let (nodes, edges) = pass(markdown);
+    let own = |id: &str| {
+        id.starts_with("doc:local/shop@")
+            || id.starts_with("docsec:local/shop@")
+            || id.starts_with("drift:documentation:local/shop@")
+    };
+    let recovered: BTreeSet<String> = system()
+        .into_iter()
+        .map(|node| node.id)
+        .filter(|id| !own(id))
+        .collect();
+    assert!(nodes.iter().any(|node| node.label == "Drift"));
+    for node in &nodes {
+        assert!(
+            own(&node.id) && !recovered.contains(&node.id),
+            "{}",
+            node.id
+        );
+        assert!(
+            matches!(node.label.as_str(), "Document" | "DocSection" | "Drift"),
+            "{}",
+            node.label
+        );
+    }
+    for edge in &edges {
+        assert!(own(&edge.src), "{} {}", edge.src, edge.label);
+        assert!(
+            matches!(
+                edge.label.as_str(),
+                "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
+            ),
+            "{}",
+            edge.label
+        );
+    }
+    // A statement in documentation is never a confirmed fact about the
+    // system: a drift entry is below Confirmed.
+    for node in nodes.iter().filter(|node| node.label == "Drift") {
+        assert_eq!(
+            prov(&node.props).confidence_tier,
+            ConfidenceTier::InferredStrong
+        );
+    }
+}
+
+#[test]
+fn no_section_text_is_in_a_fact_or_in_an_export() {
+    let markdown = "# Shop\n\nRefunds are settled nightly by the ledger job. See \
+        `GET /orders/{id}` and `GET /refunds/{id}`.\n\n## Deploy\n\n\
+        Operators rotate the signing key every quarter.\n";
+    let (nodes, edges) = pass(markdown);
+    let held = |text: &str| text.contains("settled nightly") || text.contains("rotate the signing");
+    for node in &nodes {
+        assert!(!held(&node.props.to_string()), "{}", node.id);
+    }
+    for edge in &edges {
+        assert!(!held(&edge.props.to_string()), "{}", edge.label);
+    }
+    // The heading, the span and the hash are what a section holds.
+    let section = nodes
+        .iter()
+        .find(|node| node.id == "docsec:local/shop@README.md#1")
+        .unwrap();
+    assert_eq!(section.props["heading"], "Deploy");
+    let cited = &prov(&section.props).evidence[0];
+    assert_eq!(
+        &markdown[cited.byte_start as usize..cited.byte_end as usize],
+        "## Deploy\n\nOperators rotate the signing key every quarter.\n"
+    );
+    let mut all = system();
+    all.extend(nodes);
+    for mode in [
+        crate::ExportMode::BestEffort,
+        crate::ExportMode::VerifiedOnly,
+    ] {
+        let compiled = crate::compile_spec(&all, &edges, &[], mode, &BTreeSet::new());
+        assert!(!compiled.artifacts.is_empty());
+        for artifact in &compiled.artifacts {
+            assert!(!held(&artifact.content), "{}", artifact.id);
+        }
+    }
+}
+
+#[test]
+fn a_reference_holding_a_secret_is_stored_redacted() {
+    let markdown = "# Shop\n\n[key](keys/password=hunter2secret.md) and \
+        `GET /hooks/password=hunter2secret`\n";
+    let (nodes, edges) = pass(markdown);
+    let drift: Vec<&Node> = nodes.iter().filter(|node| node.label == "Drift").collect();
+    assert_eq!(drift.len(), 2);
+    for node in &nodes {
+        assert!(!node.id.contains("hunter2secret"), "{}", node.id);
+        assert!(
+            !node.props.to_string().contains("hunter2secret"),
+            "{}",
+            node.id
+        );
+    }
+    for edge in &edges {
+        assert!(!edge.src.contains("hunter2secret"), "{}", edge.src);
+        assert!(
+            !edge.props.to_string().contains("hunter2secret"),
+            "{}",
+            edge.label
+        );
+    }
+    assert!(drift.iter().all(|node| {
+        node.props["key"].as_str().unwrap().contains("[REDACTED]")
+            && node.id.ends_with(node.props["key"].as_str().unwrap())
+    }));
+}
