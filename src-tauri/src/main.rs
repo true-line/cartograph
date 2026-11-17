@@ -7124,6 +7124,8 @@ fn main() {
             manifest_draft::save_system_manifest,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
+            investigations::section_drafts::section_draft_question,
+            investigations::section_drafts::section_draft_outcome,
             investigations::commands::list_investigations,
             investigations::commands::list_specialist_task_activity,
             investigations::commands::check_local_ollama,
