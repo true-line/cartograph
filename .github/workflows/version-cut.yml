@@ -29,7 +29,7 @@ permissions:
 jobs:
   policy:
     name: Action Policy
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # The organisation's Linux runner does not carry Node on its default PATH.
@@ -48,7 +48,7 @@ jobs:
     name: Version packages PR
     needs: policy
     if: github.event_name != 'workflow_run'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
       has-releases: ${{ steps.version.outputs.has-releases }}
@@ -201,7 +201,7 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       actions: read
