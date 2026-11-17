@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const GRAPH_HASH: &str = "graph-hash-1";
 const MODES: [ExportMode; 2] = [ExportMode::VerifiedOnly, ExportMode::BestEffort];
 
-fn node(id: &str, label: &str, tier: Tier, confidence: ConfidenceTier) -> Node {
+pub(super) fn node(id: &str, label: &str, tier: Tier, confidence: ConfidenceTier) -> Node {
     let prov = Provenance::new(
         tier,
         confidence,
@@ -42,7 +42,7 @@ fn node(id: &str, label: &str, tier: Tier, confidence: ConfidenceTier) -> Node {
 
 /// Two capabilities (one a T2 inference), one actor, one rule, one Gap and
 /// a Gap-tier capability that no frame may list.
-fn nodes() -> Vec<Node> {
+pub(super) fn nodes() -> Vec<Node> {
     use ConfidenceTier::{Confirmed, Gap, InferredStrong};
     vec![
         node("cap:checkout", "Capability", Tier::Deterministic, Confirmed),
@@ -59,7 +59,7 @@ fn nodes() -> Vec<Node> {
     ]
 }
 
-fn flows() -> Vec<Flow> {
+pub(super) fn flows() -> Vec<Flow> {
     vec![Flow {
         trigger: "cap:checkout".into(),
         trigger_kind: "Endpoint".into(),
@@ -104,7 +104,7 @@ fn compile(mode: ExportMode, curated: Option<&CuratedProjection>) -> SpecBundle 
     .unwrap()
 }
 
-fn d1(bundle: &SpecBundle) -> &SpecArtifact {
+pub(super) fn d1(bundle: &SpecBundle) -> &SpecArtifact {
     bundle
         .artifacts
         .iter()
@@ -113,13 +113,13 @@ fn d1(bundle: &SpecBundle) -> &SpecArtifact {
 }
 
 /// The part of the document under one `## ` heading.
-fn section<'a>(content: &'a str, heading: &str) -> &'a str {
+pub(super) fn section<'a>(content: &'a str, heading: &str) -> &'a str {
     let start = content.find(heading).unwrap() + heading.len();
     let rest = &content[start..];
     &rest[..rest.find("\n## ").unwrap_or(rest.len())]
 }
 
-fn printed_citations(text: &str) -> Vec<&str> {
+pub(super) fn printed_citations(text: &str) -> Vec<&str> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .filter(|word| word.len() == 18 && word.starts_with("F-"))
         .collect()
@@ -230,6 +230,16 @@ fn frames_list_the_admitted_facts_and_their_citations_resolve() {
         )
         .unwrap();
         check_citations(&index, printed.iter().copied()).unwrap();
+        // The index names this document among the artifacts citing each
+        // fact, which is the one change to an existing file (AC-0663).
+        for citation in &printed {
+            let row = index
+                .rows
+                .iter()
+                .find(|row| row.citation_id == *citation)
+                .unwrap();
+            assert!(row.cited_by.iter().any(|by| by == D1_ARTIFACT_ID));
+        }
     }
 }
 

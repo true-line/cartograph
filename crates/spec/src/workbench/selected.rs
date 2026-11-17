@@ -558,7 +558,7 @@ fn produce(
         // The catalogue's D1 over the admitted nodes and flows, the gap
         // count and the supplied projection's revision (AC-0663).
         document::D1_ARTIFACT_ID => document::d1(
-            nodes,
+            (nodes, edges),
             flows,
             gaps,
             (beside.curated, beside.graph_content_hash),
