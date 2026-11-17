@@ -12,7 +12,8 @@ use crate::{
     AssertionDecision, AssertionDecisionRecord, ProposalDecision, StagedProposal, TaskEvidenceKind,
 };
 use context_hub::curated::{
-    AssertionDecisionEntry, AssertionReview, RecordEvidence, ReviewDecision, ReviewedProposal,
+    AssertionDecisionEntry, AssertionReview, DraftAddress, DraftClaim, DraftReview, RecordEvidence,
+    ReviewDecision, ReviewedDraft, ReviewedProposal,
 };
 use std::collections::BTreeMap;
 
@@ -57,6 +58,47 @@ pub fn curated_record(staged: &StagedProposal) -> ReviewedProposal {
                 captured: captured.unwrap_or(false),
             })
             .collect(),
+    }
+}
+
+/// One stored section draft as projection input (SPEC-15 slice 5, AC-0667).
+/// Nothing is derived: the address, role, claims, recorded hashes and review
+/// are the stored ones.
+pub fn reviewed_draft(stored: &crate::draft_store::StoredDraft) -> ReviewedDraft {
+    use crate::draft_store::DraftDecision;
+    use crate::section_draft::ClaimKind;
+    let address = &stored.draft.address;
+    ReviewedDraft {
+        draft_id: stored.draft_id.clone(),
+        address: DraftAddress {
+            catalogue_version: address.catalogue_version.clone(),
+            document: address.document.clone(),
+            section: address.section.clone(),
+            scope: address.scope.clone(),
+        },
+        role: stored.origin.role.clone(),
+        claims: stored
+            .draft
+            .claims
+            .iter()
+            .map(|claim| DraftClaim {
+                statement: claim.statement.clone(),
+                kind: match claim.kind {
+                    ClaimKind::Implemented => "implemented",
+                    ClaimKind::DocumentedIntent => "documented_intent",
+                    ClaimKind::Interpretation => "interpretation",
+                }
+                .into(),
+                citations: claim.citations.clone(),
+            })
+            .collect(),
+        cited_hashes: stored.draft.cited_hashes.clone(),
+        replaces: stored.replaces.clone(),
+        decision: stored.review_decision.map(|decision| match decision {
+            DraftDecision::Accepted => DraftReview::Accepted,
+            DraftDecision::Rejected => DraftReview::Rejected,
+            DraftDecision::Returned => DraftReview::Returned,
+        }),
     }
 }
 

@@ -53,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod drafts;
 pub use drafts::{
-    CuratedDraft, DraftAddress, DraftCounts, DraftReview, DraftState, DraftStateReason,
+    CuratedDraft, DraftAddress, DraftClaim, DraftCounts, DraftReview, DraftState, DraftStateReason,
     ReviewedDraft,
 };
 
