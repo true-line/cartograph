@@ -172,11 +172,17 @@ impl DerivedSettlements {
 
 /// Whether one artifact's bytes depend on the curated projection: the
 /// document itself, the D1 document, whose header carries the curated
-/// revision (AC-0663), and the fact index that lists what they cite.
+/// revision (AC-0663), the fact index that lists what they cite, and the
+/// bundle manifest, which states the curated revision and the graph basis
+/// the review read gives (AC-0682).
 pub(crate) fn artifact_reads_projection(artifact_id: &str) -> bool {
     matches!(
         artifact_id,
-        "curated" | "d1-product-specification" | "fact-index" | "fact-index-json"
+        "curated"
+            | "d1-product-specification"
+            | "fact-index"
+            | "fact-index-json"
+            | "bundle-manifest"
     )
 }
 

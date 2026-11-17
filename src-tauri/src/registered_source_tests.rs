@@ -3892,6 +3892,42 @@ fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
         "the export payload carries the same basis in every mode"
     );
 
+    // The bundle manifest states that basis, and read alone it is the file
+    // the export holds (AC-0682).
+    {
+        let graph = state.graph.lock().unwrap();
+        let decisions = state.decisions.lock().unwrap();
+        let review = crate::curated::CuratedReview::default();
+        let mode = spec::ExportMode::BestEffort;
+        let bundle = crate::build_spec_bundle(&graph, &decisions, &review, mode).unwrap();
+        let manifest = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "bundle-manifest")
+            .unwrap();
+        assert!(
+            manifest
+                .content
+                .contains(&format!("- Graph content hash: {}\n", basis.content_hash))
+        );
+        assert!(
+            manifest
+                .content
+                .contains(&format!("- Source revisions: {}\n", basis.sources.len()))
+        );
+        for source in &basis.sources {
+            assert!(
+                manifest
+                    .content
+                    .contains(&format!("| `{}` | `{}` |\n", source.repo, source.commit))
+            );
+        }
+        let alone =
+            crate::build_spec_artifact(&graph, &decisions, Some(&review), mode, "bundle-manifest")
+                .unwrap();
+        assert_eq!(&alone, manifest);
+    }
+
     // Curation is not a graph fact: a recorded decision changes no hash.
     state
         .decisions

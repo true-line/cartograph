@@ -1073,6 +1073,18 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
         .collect()
 }
 
+/// The source registrations `nodes` cite and the revision of each, ordered
+/// by registry key: the `sources` of a graph basis (AC-0593).
+fn source_revisions_of(nodes: &[Node]) -> Vec<spec::SourceRevision> {
+    system_contents_of(nodes)
+        .into_iter()
+        .map(|entry| spec::SourceRevision {
+            repo: entry.repo,
+            commit: entry.commit,
+        })
+        .collect()
+}
+
 /// What an export was compiled from (#1765, AC-0593): the content hash of
 /// the whole base graph and the source revisions it holds, both taken from
 /// the snapshot the export itself read. Curation decisions and overlay facts
@@ -1080,13 +1092,7 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
 fn graph_basis_of(nodes: &[Node], edges: &[Edge]) -> spec::GraphBasis {
     spec::GraphBasis {
         content_hash: spec::graph_content_hash(nodes, edges),
-        sources: system_contents_of(nodes)
-            .into_iter()
-            .map(|entry| spec::SourceRevision {
-                repo: entry.repo,
-                commit: entry.commit,
-            })
-            .collect(),
+        sources: source_revisions_of(nodes),
     }
 }
 
@@ -6356,6 +6362,10 @@ impl SpecInputs {
                 .graph_basis
                 .as_ref()
                 .map(|basis| basis.content_hash.as_str()),
+            source_revisions: self
+                .graph_basis
+                .as_ref()
+                .map(|basis| basis.sources.as_slice()),
         }
     }
 

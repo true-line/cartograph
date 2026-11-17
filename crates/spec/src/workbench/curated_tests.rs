@@ -147,6 +147,7 @@ fn compile(
             stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
             graph_content_hash: None,
+            source_revisions: None,
         },
     )
     .unwrap()
@@ -245,6 +246,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             stale_coverage: &[],
             curated: Curated::NotComputed(failure),
             graph_content_hash: None,
+            source_revisions: None,
         };
         for mode in MODES {
             let bare = compile(mode, &BTreeSet::new(), None);
@@ -256,8 +258,12 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             for (before, after) in bare.artifacts.iter().zip(&failed.artifacts) {
                 assert_eq!(
                     before == after,
-                    // The D1 header gives the reason code too (AC-0663).
-                    !matches!(before.id.as_str(), "curated" | "d1-product-specification"),
+                    // The D1 header gives the reason code too (AC-0663), and
+                    // so does the bundle manifest (AC-0682).
+                    !matches!(
+                        before.id.as_str(),
+                        "curated" | "d1-product-specification" | "bundle-manifest"
+                    ),
                     "{} in {mode:?}",
                     before.id
                 );
@@ -312,6 +318,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
                 stale_coverage: &[],
                 curated: Curated::NotComputed(CuratedFailure::TooManyAccepted { limit: 256 }),
                 graph_content_hash: None,
+                source_revisions: None,
             },
         )
         .unwrap(),
@@ -335,8 +342,12 @@ fn no_accepted_record_is_stated_and_changes_no_other_artifact() {
         for (before, after) in bare.artifacts.iter().zip(&with.artifacts) {
             assert_eq!(
                 before == after,
-                // D1 prints the supplied revision in its header (AC-0663).
-                !matches!(before.id.as_str(), "curated" | "d1-product-specification"),
+                // D1 prints the supplied revision in its header (AC-0663),
+                // and the bundle manifest states it (AC-0682).
+                !matches!(
+                    before.id.as_str(),
+                    "curated" | "d1-product-specification" | "bundle-manifest"
+                ),
                 "{} in {mode:?}",
                 before.id
             );
@@ -561,6 +572,7 @@ fn curated_is_deterministic_selected_alone_and_bounded() {
                     stale_coverage: &[],
                     curated: Curated::Computed(&projection),
                     graph_content_hash: None,
+                    source_revisions: None,
                 },
             )
             .unwrap()

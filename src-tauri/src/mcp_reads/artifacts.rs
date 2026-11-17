@@ -203,6 +203,8 @@ impl ReadSession {
                     },
                     // The D1 header states it, computed or not (AC-0663).
                     graph_content_hash: (!coverage).then_some(self.graph_content_hash.as_str()),
+                    // The bundle manifest states them (AC-0682).
+                    source_revisions: (!coverage).then_some(self.source_revisions.as_slice()),
                 },
             )
             .map_err(|_| ReadError::InvalidRequest)?

@@ -97,6 +97,7 @@ fn compile(
             stale_coverage: &[],
             curated: Curated::Computed(projection),
             graph_content_hash: None,
+            source_revisions: None,
         },
     )
     .unwrap()
@@ -378,6 +379,7 @@ fn one_changed_fact_marks_exactly_the_citing_drafts_twice_the_same() {
                         stale_coverage: &[],
                         curated: Curated::Computed(&projection),
                         graph_content_hash: None,
+                        source_revisions: None,
                     },
                 )
                 .unwrap();

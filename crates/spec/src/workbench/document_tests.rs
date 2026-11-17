@@ -99,6 +99,7 @@ fn compile(mode: ExportMode, curated: Option<&CuratedProjection>) -> SpecBundle 
             stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
             graph_content_hash: None,
+            source_revisions: None,
         },
     )
     .unwrap()
@@ -270,12 +271,16 @@ fn header_carries_the_catalogue_version_mode_graph_hash_and_curated_revision() {
         assert!(header.contains(&format!("- Graph content hash: {GRAPH_HASH}\n")));
         assert!(header.contains(&format!("- Curated revision: {}\n", projection.revision)));
 
-        // Only this document reads the projection's revision; with no
-        // accepted record nothing else differs, `curated.md` apart.
+        // Only this document and the bundle manifest (AC-0682) read the
+        // projection's revision; with no accepted record nothing else
+        // differs, `curated.md` apart.
         for (before, after) in bare.artifacts.iter().zip(&supplied.artifacts) {
             assert_eq!(
                 before == after,
-                !matches!(before.id.as_str(), "curated" | D1_ARTIFACT_ID),
+                !matches!(
+                    before.id.as_str(),
+                    "curated" | D1_ARTIFACT_ID | "bundle-manifest"
+                ),
                 "{} in {mode:?}",
                 before.id
             );
@@ -299,6 +304,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
                 stale_coverage: &[],
                 curated: Curated::NotComputed(crate::CuratedFailure::ReviewsUnavailable),
                 graph_content_hash: Some(GRAPH_HASH),
+                source_revisions: None,
             },
         )
         .unwrap();
@@ -322,6 +328,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
                 stale_coverage: &[],
                 curated: Curated::Computed(&projection),
                 graph_content_hash: Some("host-hash"),
+                source_revisions: None,
             },
         )
         .unwrap();

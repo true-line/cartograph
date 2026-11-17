@@ -23,6 +23,7 @@ pub use curated::{
 pub(crate) mod diagrams;
 mod document;
 mod documentation;
+mod manifest;
 pub use document::{
     SYSTEM_SCOPE, SectionScopeError, cited_fact_hashes, drafted_section, section_citation_set,
 };
@@ -729,6 +730,7 @@ pub fn try_compile_spec_with_coverage(
             stale_coverage: &[],
             curated: crate::Curated::NotSupplied,
             graph_content_hash: None,
+            source_revisions: None,
         },
     )
 }
@@ -1005,13 +1007,13 @@ mod tests {
     /// coverage artifacts, which project stored inventories
     /// instead of the graph (#1786), and the two fact-index artifacts, which
     /// list what the others cite (#1785), and the D1 document (#1748), which
-    /// cites the facts its frames list. The twelve close the official order;
+    /// cites the facts its frames list. The thirteen close the official order;
     /// the fixture has no endpoint, no pipeline, no environment file, no
     /// configuration read, no outbound call, no observed client, no channel,
     /// no Compose file and no documentation file, and a bare compile has no curated projection, so
     /// none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 12);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 13);
         assert_eq!(
             appended
                 .iter()
@@ -1028,6 +1030,7 @@ mod tests {
                 "d1-product-specification",
                 "coverage",
                 "coverage-index",
+                "bundle-manifest",
                 "fact-index",
                 "fact-index-json"
             ]
@@ -1183,6 +1186,7 @@ mod tests {
                 "product-specification.md",
                 "coverage.md",
                 "coverage.json",
+                "bundle-manifest.md",
                 "fact-index.md",
                 "fact-index.json",
             ]
@@ -2548,7 +2552,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 28);
+                assert_eq!(full.artifacts.len(), 29);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,

@@ -81,6 +81,10 @@ pub struct Supplied<'a> {
     /// it. It is supplied apart from `curated`, so a document header can
     /// state it when no projection was computed (AC-0663).
     pub graph_content_hash: Option<&'a str>,
+    /// The source registrations in the graph and the revision each was
+    /// recovered at, when the host has them. The bundle manifest states
+    /// them (AC-0682); no other artifact reads them.
+    pub source_revisions: Option<&'a [crate::SourceRevision]>,
 }
 
 /// One stored inventory the host compared with the repository's current
@@ -114,6 +118,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) curated: Curated<'a>,
     /// The graph content hash the host supplied, if any.
     pub(crate) graph_content_hash: Option<&'a str>,
+    /// The source revisions the host supplied, if any.
+    pub(crate) source_revisions: Option<&'a [crate::SourceRevision]>,
 }
 
 impl<'a> Beside<'a> {
@@ -135,6 +141,7 @@ impl<'a> Beside<'a> {
             environments_withheld: environments::withheld(nodes, edges, mode, rejected),
             curated: supplied.curated,
             graph_content_hash: supplied.graph_content_hash,
+            source_revisions: supplied.source_revisions,
         }
     }
 }
@@ -310,6 +317,14 @@ const ARTIFACTS: &[Artifact] = &[
         file: "coverage.json",
         title: "Coverage index",
         format: "json",
+    },
+    // What the export was compiled from and which file holds each part of
+    // the handoff bundle (AC-0682). It reads no fact and cites none.
+    Artifact {
+        id: manifest::ARTIFACT_ID,
+        file: "bundle-manifest.md",
+        title: "Bundle manifest",
+        format: "markdown",
     },
     // Last: the index lists what the artifacts before it cite (ADR-0058).
     Artifact {
@@ -576,6 +591,21 @@ fn produce(
             mode,
             max,
         )?,
+        // The official file list and what the host supplied as the as-of
+        // (AC-0682). No fact is read.
+        manifest::ARTIFACT_ID => {
+            let files: Vec<_> = ARTIFACTS.iter().map(|a| (a.id, a.file)).collect();
+            manifest::output(
+                &files,
+                manifest::AsOf {
+                    mode,
+                    curated: beside.curated,
+                    graph_content_hash: beside.graph_content_hash,
+                    source_revisions: beside.source_revisions,
+                },
+                max,
+            )?
+        }
         // The stored inventories only: no graph fact, mode or rejection applies.
         "coverage" | "coverage-index" => {
             coverage::output(coverage, beside.stale_coverage, a.id == "coverage", max)?
@@ -692,6 +722,7 @@ pub fn compile_spec_selected_with_coverage(
             stale_coverage: &[],
             curated: Curated::NotSupplied,
             graph_content_hash: None,
+            source_revisions: None,
         },
     )
 }
