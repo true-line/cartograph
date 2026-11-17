@@ -1,6 +1,6 @@
 # SPEC-18 — Target documentation as evidence
 
-- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Not implemented.
+- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slice 1 is implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0049 / AC-0676..0681; ROADMAP W16; v1.0.0 criterion 8.
 - **Decision:** [ADR-0065](adr/ADR-0065-target-documentation-as-evidence.md).

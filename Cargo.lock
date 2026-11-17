@@ -4652,6 +4652,7 @@ dependencies = [
  "context-hub",
  "core-graph",
  "core-prov",
+ "core-redact",
  "flowtracer",
  "rusqlite",
  "serde",
