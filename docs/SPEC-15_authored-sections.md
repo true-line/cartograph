@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 5 are implemented; the rest is not.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 6 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -59,6 +59,41 @@ names one address. The host:
    draft.
 
 The host does not check that a cited fact supports a statement.
+
+**As built (slice 6).** `section-writer@1` is a generation-four completion
+role beside `spec-writer@1`: the same request, obligations, limits, consent,
+cancellation, journal and history, with its own definition and prompt
+fingerprint. No other role's definition changes.
+
+- *Request.* The run's question is the address, in one spelling:
+  `Draft section 1.3 "Capabilities" of document D1 (catalogue 1.0) for scope
+  system.` The `section_draft_question` command writes it. A start for the
+  role is refused before anything durable unless the question names a
+  drafted (A or P+A) section of the table under its catalogue title, for
+  `system` or, where the section is written per subject, for one citation
+  id. The role is not startable over MCP.
+- *Claims.* The role returns one finding per claim. The existing finish
+  admission applies unchanged (shape, bounds, citation membership in the
+  run's ledger, replay and privacy checks) and additionally refuses a
+  `proposed_design` finding for this role; such a finish goes through the
+  existing refusal journal.
+- *Citation set.* The system scope is every fact of the graph, which holds
+  the section's frame. A subject scope is the subject node (it must carry the
+  section's subject label), every edge that touches it and the node at the
+  other end of each. Each fact is admitted by citation id with its current
+  content hash.
+- *Staging.* When the run ends completed with findings, the host maps each
+  finding to a claim (the statement; `implemented`, `documented_intent` or
+  `interpretation`; the citation id of each fact its citations rest on, once
+  each), applies the slice 2 admission against the citation set and stores
+  the draft with the role, its definition fingerprint, the job and the graph
+  content hash. The newest returned draft of the same address that has no
+  successor is recorded as replaced. An insufficient-evidence finish, a run
+  that did not complete, a scope that names no subject and a claim citing a
+  fact outside the scope stage nothing. `section_draft_outcome` reports
+  `staged` with the draft id or `no_draft` with a closed reason code, and
+  stages the draft of a completed run that has none stored; it calls no
+  model and storing identical content twice returns the stored record.
 
 ## Storage and review
 
@@ -219,10 +254,19 @@ are committed whatever they are.
   the catalogue asks of every document; the bundle holds them as
   `graph_basis`. §1.4 and §1.5 are not yet arranged per capability or rule.
 
+- A refusal at staging (a scope that names no subject, a claim citing a fact
+  outside the scope) is reported by `section_draft_outcome` as a closed
+  reason code. It is not written to the run's refusal journal, because the
+  run has already completed; the run's result keeps the findings.
+- The citation set is not disclosed to the role as a list. The role reads
+  through the existing queries, and a claim that cites a fact outside the
+  set is refused at staging.
+- The recorded hashes are those of the graph when the run ends. A fact that
+  changed between a read and the finish is recorded with its new hash.
 - A statement is checked for citation membership only.
 - The pure check of slice 2 bounds a statement, refuses control characters
-  and recognized secrets, and checks membership. The run-bound replay check
-  joins it when the drafting run is wired (slice 6).
+  and recognized secrets, and checks membership. The run-bound replay and
+  privacy checks are the existing finish admission of the run (slice 6).
 - Version 1 of the section table holds D1; each further document is a table
   change and, where a frame is missing, a projection.
 - A draft whose scope exceeds the role's limits is refused, not split.

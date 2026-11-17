@@ -104,8 +104,9 @@ pub use workbench::{
     try_compile_spec_with_coverage,
 };
 pub use workbench::{
-    CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
-    catalogue_sections,
+    CATALOGUE_VERSION, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
+    SectionScopeError, catalogue_section, catalogue_sections, drafted_section,
+    section_citation_set,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query
