@@ -455,7 +455,7 @@ The criteria are the existing ones on #1610 plus the exit gates that section
 | 2 | SimpleLogin pilot passes on a release build | Stages 1 and 2 on a real application; context hub end to end | #1610 |
 | 3 | Frozen rubric and a real-model acceptance run | Context hub mode | #598, #1710 |
 | 4 | An accepted proposal appears in the Workbench, a `best-effort` export and an MCP read under one curated revision; the base graph hash is unchanged | Stage 3 has a place to land | W5, #1746 |
-| 5 | The document catalogue is approved by the owner | Stage 3 knows what to write | W14, #1747 |
+| 5 | A versioned document catalogue approved by the owner: each document's reader, sections, deterministic inputs, authorable sections and acceptance. Met by catalogue version 1.0, approved 2026-11-17 | Stage 3 knows what to write | W14, #1747, #1856 |
 | 6 | One SimpleLogin document with authored sections, scored claim by claim against an expected set written before the run | Stage 3 as authorship (reconstruction mode) | W13, #1748 |
 | 7 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run | Stage 4 | W15, #1749 |
 | 8 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited | Stage 2 reads existing documentation as evidence | W16, #1750 |
