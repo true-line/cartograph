@@ -101,13 +101,13 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
             .iter()
             .any(|metadata| metadata.id == official.id && metadata.schema == official.schema)
     );
-    // The curated artifacts read the session's projection, which a bare
-    // compile is not supplied with; `curated_read::tests` compares them
-    // with the host export (AC-0654).
-    for descriptor in catalog
-        .into_iter()
-        .filter(|descriptor| !descriptor.id.starts_with("curated"))
-    {
+    // The curated artifacts and the D1 document read the session's
+    // projection, which a bare compile is not supplied with;
+    // `curated_read::tests` and `curated::drafts_tests` compare them with
+    // the host export (AC-0654, AC-0667).
+    for descriptor in catalog.into_iter().filter(|descriptor| {
+        !descriptor.id.starts_with("curated") && descriptor.id != "d1-product-specification"
+    }) {
         let ArtifactCompilation::Produced(actual) = session
             .compile_artifact(descriptor.id, trace_limits(), compile_limits())
             .unwrap()
@@ -152,7 +152,7 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
     let selectable = schema["inputSchema"]["properties"]["artifact_id"]["enum"]
         .as_array()
         .expect("closed artifact id enum");
-    for id in ["fact-index", "fact-index-json", "d1-product-specification"] {
+    for id in ["fact-index", "fact-index-json"] {
         assert!(official.contains(&id), "{id} is an official artifact");
         assert!(!advertised.contains(&id), "{id} is not advertised");
         assert!(!selectable.iter().any(|value| value == id));
@@ -165,9 +165,11 @@ fn mcp_read_refuses_the_fact_index_without_compiling() {
             Err(ReadError::InvalidRequest)
         ));
     }
-    // The two fact-index ids and the D1 document (AC-0663) are withheld and
-    // `curated-json`, which is not an export artifact, is added (AC-0654).
-    assert_eq!(advertised.len(), official.len() - 3 + 1);
+    // The two fact-index ids are withheld and `curated-json`, which is not
+    // an export artifact, is added (AC-0654). The D1 document is readable
+    // (AC-0667).
+    assert!(advertised.contains(&"d1-product-specification"));
+    assert_eq!(advertised.len(), official.len() - 2 + 1);
     assert_eq!(selectable.len(), advertised.len());
     for id in advertised {
         assert!(

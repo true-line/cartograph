@@ -19,6 +19,11 @@ fn draft(id: &str) -> ReviewedDraft {
         draft_id: id.into(),
         address: address("1.3"),
         role: "section-writer@1".into(),
+        claims: vec![DraftClaim {
+            statement: "Checkout takes a cart to an order.".into(),
+            kind: "implemented".into(),
+            citations: vec!["F-1".into(), "F-2".into()],
+        }],
         cited_hashes: BTreeMap::from([
             ("F-1".to_owned(), "hash-1".to_owned()),
             ("F-2".to_owned(), "hash-2".to_owned()),
@@ -80,6 +85,8 @@ fn an_accepted_draft_whose_cited_facts_are_unchanged_is_eligible_and_stays_t3() 
     assert_eq!(entry.cited_facts, 2);
     assert_eq!(entry.address, address("1.3"));
     assert_eq!(entry.role, "section-writer@1");
+    // The claims are carried as stored, for the document that prints them.
+    assert_eq!(entry.claims, draft("d1").claims);
     assert_eq!(
         projection.draft_counts,
         DraftCounts {

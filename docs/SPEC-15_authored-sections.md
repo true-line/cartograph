@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 4 are implemented; the rest is not.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 5 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -109,10 +109,19 @@ drafts and, per cited id, the current content hash of the fact it resolves
 to; an id that resolves to nothing is absent. The projection reports every
 accepted draft with its state and reason, and the totals. `superseded` and
 `conflicted` look only at accepted drafts of the same address, whatever
-their own state. The policy version is `curated-policy-v2`. The host
-supplies no drafts yet, so the revision of an existing project changes once
-and its content does not; the host reads the draft store and resolves cited
-ids from slice 5.
+their own state. The policy version is `curated-policy-v2`. The revision of
+an existing project changes once and its content does not. Each accepted
+draft carries its claims, which are what a document prints.
+
+As built (host, slice 5): the application keeps the draft store in
+`section-drafts.sqlite` beside the staging store. The curated read takes
+every reviewed draft in one bounded read (the bounds of the staged records)
+before any graph lock, and a store that cannot be read leaves the projection
+not computed, as for the staging store. The current hash of each cited fact
+is read from the nodes and edges of the snapshot being compiled
+(`spec::cited_fact_hashes`), in one pass and only when a draft is accepted.
+An MCP read session takes the same read and is refused as stale when a
+draft is reviewed while it is acquired.
 
 ## Compiled documents
 
@@ -133,6 +142,19 @@ its own, so the header states it even when the curated projection could not
 be computed; it then gives the reason code in place of the revision. A
 compile that is supplied neither states that. The document closes with its count of cited statements by tier.
 
+As built (slice 5): a section's drafts are the accepted drafts the curated
+projection lists for the document, the catalogue version and the section
+number, in scope and then identity order. An eligible draft is printed as a
+numbered list, one claim per line, each ending with its kind, `T3 /
+InferredWeak`, the role, `human-reviewed: accepted` and its citation ids.
+Every cited fact is an assertion of the document, once, so the export's fact
+index check covers it. An eligible draft that cites a fact the export does
+not admit (an inference the reviewer rejected, for one) is not printed, and
+the section says so; no claim is shown beside a citation that does not
+resolve. A draft in another state is named with its state and reason code in
+both modes. A scoped draft is printed under its section with its scope; the
+section is not yet repeated per subject.
+
 In version 1 of the table a frame is one of four things: every admitted
 non-Gap node of a label, each with its tier, confidence and citation id
 (§1.2 `Actor`, §1.3 `Capability`); a summary of the traced flows (§1.6); the
@@ -140,7 +162,9 @@ count of Gap findings (§1.8); or a reference to the artifacts of the same
 export that hold the statements (§1.4, §1.5). A business rule is rendered
 only by the rule inventory, under its disclosure policy, and is never
 repeated in the document. `verified-only` prints no claim and states per
-section how many were left out. Existing artifacts are byte-identical.
+section how many were left out. Existing artifacts are byte-identical,
+except the fact index: `fact-index.md` and `fact-index.json` name the
+document among the artifacts citing each fact its frames print.
 
 ## Surfaces
 
@@ -150,8 +174,7 @@ section how many were left out. Existing artifacts are byte-identical.
   claims and their annotations; each citation opens its evidence. A section
   offers "Draft this section" and the review actions.
 - **MCP.** The artifact is readable as the export's bytes for the same
-  inputs and mode, from slice 5; until then it is not in the MCP catalogue.
-  Drafting and review are not exposed over MCP.
+  inputs and mode. Drafting and review are not exposed over MCP.
 
 ## Slices
 
@@ -188,9 +211,10 @@ are committed whatever they are.
 
 - The export compiles the base graph. `Capability`, `Actor` and
   `BusinessFlow` facts that live only in the knowledge overlay (ADR-0051)
-  are not in it, so §1.2 and §1.3 list only base-graph facts, and a draft
-  citing an overlay fact could not resolve. Slices 4 and 5 must resolve
-  citations and compare hashes over the base and overlay facts together.
+  are not in it, so §1.2 and §1.3 list only base-graph facts. A draft that
+  cites an overlay fact is `unresolvable` and is not printed: its citation
+  would have no row in the export's fact index. Printing it needs the export
+  to compile the overlay facts, which is not built.
 - The D1 header does not yet carry the system name or the source revisions
   the catalogue asks of every document; the bundle holds them as
   `graph_basis`. §1.4 and §1.5 are not yet arranged per capability or rule.

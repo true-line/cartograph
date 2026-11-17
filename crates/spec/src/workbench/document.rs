@@ -7,10 +7,21 @@
 //!
 //! **Sections.** Every section of the table is printed, in order, with its
 //! kind. A P section is its frame. A P+A section is its frame followed by
-//! the statement that it is not drafted. An A section is that statement
-//! alone. An H section is a labelled blank. No draft exists before the draft
-//! store (slice 3), so no claim is printed in either mode and the omitted
-//! count of a `verified-only` export is zero for every section.
+//! its drafts. An A section is its drafts alone. An H section is a labelled
+//! blank.
+//!
+//! **Drafts** (slice 5, AC-0667). The drafts of a section are the accepted
+//! drafts the supplied curated projection lists for its address, in scope
+//! and then identity order. An `eligible` draft is printed in a
+//! `best-effort` export: each claim with its kind, `T3 / InferredWeak`, the
+//! author role, `human-reviewed: accepted` and its citation ids. Each cited
+//! fact becomes an assertion of this artifact, so the fact index has a row
+//! for every printed id. A draft citing a fact this export does not admit
+//! (a rejected inference, say) is not printed, and the section says so: no
+//! claim is shown with a citation that does not resolve. A `verified-only`
+//! export prints no claim and counts the claims left out. A draft in any
+//! other state is named with its state and reason in both modes. A section
+//! with no printed draft says it is not drafted.
 //!
 //! **Frames.** A node frame lists every admitted non-Gap node of its label
 //! with its tier, confidence and citation id, and cites each as an assertion
@@ -27,7 +38,9 @@
 //! computed still states the graph hash and gives the reason code.
 //!
 //! **Cost.** One pass over the nodes per node frame and one over the flows.
-//! Nothing is indexed or walked.
+//! When an eligible draft is to be printed, one more pass over the admitted
+//! nodes and edges finds the cited facts; with no such draft nothing is
+//! indexed or walked.
 
 use super::catalogue::{
     CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_sections,
@@ -36,15 +49,19 @@ use super::curated::Curated;
 use super::producers::Output;
 use super::render::{Assertions, Budget, Literal, NodeName, RenderLimit, Text};
 use super::{ExportMode, citation_id, provenance};
-use core_graph::{FactKey, Node};
+use context_hub::curated::{CuratedDraft, DraftState, DraftStateReason};
+use core_graph::{Edge, FactKey, Node};
 use core_prov::ConfidenceTier;
 use flowtracer::Flow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Artifact id of `product-specification.md`.
 pub(super) const D1_ARTIFACT_ID: &str = "d1-product-specification";
 
 const NOT_DRAFTED: &str = "_Not drafted._ No accepted draft is recorded for this section.\n";
+
+const NO_ELIGIBLE_DRAFT: &str = "_Not drafted._ No eligible draft is recorded for this section.\n";
 
 const HUMAN_BLANK: &str = "_Left blank for the team._ The code cannot show this, and nothing is \
                            written here from it.\n";
@@ -72,7 +89,7 @@ fn frame(
     section: &CatalogueSection,
     source: SectionFrame,
     (nodes, flows, gaps): (&[&Node], &[Flow], usize),
-    assertions: &mut Assertions,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
     match source {
@@ -84,17 +101,20 @@ fn frame(
             }
             out.push_str("| Name | Tier | Confidence | Citation |\n|---|---|---|---|\n")?;
             for (node, prov) in &rows {
-                assertions.node(node, None)?;
+                let id = citation_id(&FactKey::Node {
+                    id: node.id.clone(),
+                });
                 writeln!(
                     out,
-                    "| {} | {:?} | {:?} | {} |",
+                    "| {} | {:?} | {:?} | {id} |",
                     Literal(NodeName(node)),
                     prov.tier,
                     prov.confidence_tier,
-                    citation_id(&FactKey::Node {
-                        id: node.id.clone()
-                    })
                 )?;
+                // Once per fact: a draft above may already cite it.
+                if asserted.insert(id) {
+                    assertions.node(node, None)?;
+                }
             }
             Ok(rows.len())
         }
@@ -148,8 +168,232 @@ fn frame(
     }
 }
 
+fn state_name(state: DraftState) -> &'static str {
+    match state {
+        DraftState::Superseded => "superseded",
+        DraftState::Unresolvable => "unresolvable",
+        DraftState::Stale => "stale",
+        DraftState::Conflicted => "conflicted",
+        DraftState::Eligible => "eligible",
+    }
+}
+
+fn reason_name(reason: DraftStateReason) -> &'static str {
+    match reason {
+        DraftStateReason::ReplacedByAcceptedDraft => "replaced_by_accepted_draft",
+        DraftStateReason::CitedFactMissing => "cited_fact_missing",
+        DraftStateReason::CitedFactChanged => "cited_fact_changed",
+        DraftStateReason::AnotherDraftAccepted => "another_draft_accepted",
+        DraftStateReason::AllConditionsHold => "all_conditions_hold",
+    }
+}
+
+fn edge_key(edge: &Edge) -> FactKey {
+    FactKey::Edge {
+        source: edge.src.clone(),
+        label: edge.label.clone(),
+        destination: edge.dst.clone(),
+    }
+}
+
+/// The current content hash of each fact `cited` names, by citation id: the
+/// hash a drafting run records and the curated projection later compares
+/// (ADR-0064 decision 8). An id that names no fact of `nodes` and `edges`
+/// is absent. One pass over both; nothing is kept beyond the cited ids.
+pub fn cited_fact_hashes(
+    nodes: &[Node],
+    edges: &[Edge],
+    cited: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut hashes = BTreeMap::new();
+    if cited.is_empty() {
+        return hashes;
+    }
+    for node in nodes {
+        let id = citation_id(&FactKey::Node {
+            id: node.id.clone(),
+        });
+        if cited.contains(&id) {
+            let hash = provenance(&node.props, &format!("node:{}", node.id)).content_hash;
+            hashes.insert(id, hash);
+        }
+    }
+    for edge in edges {
+        let id = citation_id(&edge_key(edge));
+        if cited.contains(&id) {
+            let identity = format!("edge:{} {} {}", edge.src, edge.label, edge.dst);
+            hashes.insert(id, provenance(&edge.props, &identity).content_hash);
+        }
+    }
+    hashes
+}
+
+#[derive(Clone, Copy)]
+enum Fact<'a> {
+    Node(&'a Node),
+    Edge(&'a Edge),
+}
+
+/// The accepted D1 drafts of the supplied projection, by section number,
+/// each section's in scope and then identity order.
+fn drafts_by_section<'a>(curated: Curated<'a>) -> BTreeMap<&'a str, Vec<&'a CuratedDraft>> {
+    let mut sections: BTreeMap<&str, Vec<&CuratedDraft>> = BTreeMap::new();
+    for draft in curated
+        .projection()
+        .map_or(&[][..], |projection| projection.drafts.as_slice())
+    {
+        if draft.address.document == "D1" && draft.address.catalogue_version == CATALOGUE_VERSION {
+            sections
+                .entry(draft.address.section.as_str())
+                .or_default()
+                .push(draft);
+        }
+    }
+    for drafts in sections.values_mut() {
+        drafts.sort_by(|left, right| {
+            (&left.address.scope, &left.draft_id).cmp(&(&right.address.scope, &right.draft_id))
+        });
+    }
+    sections
+}
+
+/// The admitted facts the eligible drafts cite, by citation id.
+fn cited_facts<'a>(
+    drafts: &BTreeMap<&str, Vec<&CuratedDraft>>,
+    nodes: &[&'a Node],
+    edges: &[&'a Edge],
+) -> BTreeMap<String, Fact<'a>> {
+    let wanted: BTreeSet<&str> = drafts
+        .values()
+        .flatten()
+        .filter(|draft| draft.state == DraftState::Eligible)
+        .flat_map(|draft| &draft.claims)
+        .flat_map(|claim| &claim.citations)
+        .map(String::as_str)
+        .collect();
+    let mut facts = BTreeMap::new();
+    if wanted.is_empty() {
+        return facts;
+    }
+    for node in nodes {
+        let id = citation_id(&FactKey::Node {
+            id: node.id.clone(),
+        });
+        if wanted.contains(id.as_str()) {
+            facts.insert(id, Fact::Node(node));
+        }
+    }
+    for edge in edges {
+        let id = citation_id(&edge_key(edge));
+        if wanted.contains(id.as_str()) {
+            facts.insert(id, Fact::Edge(edge));
+        }
+    }
+    facts
+}
+
+struct Drafted<'a, 'b> {
+    facts: &'b BTreeMap<String, Fact<'a>>,
+    /// Citation ids already asserted by this artifact.
+    asserted: BTreeSet<String>,
+    /// Claims printed in the document.
+    printed: usize,
+}
+
+impl Drafted<'_, '_> {
+    /// The drafts of one section. Returns the number of claims a
+    /// `verified-only` export left out.
+    fn section(
+        &mut self,
+        drafts: &[&CuratedDraft],
+        mode: ExportMode,
+        assertions: &mut Assertions,
+        out: &mut Text,
+    ) -> Result<usize, RenderLimit> {
+        let mut shown = false;
+        let mut omitted = 0usize;
+        let mut notes: Vec<String> = Vec::new();
+        for draft in drafts {
+            if draft.state != DraftState::Eligible {
+                notes.push(format!(
+                    "- Draft `{}` for scope `{}` is listed as `{}` (`{}`).",
+                    Literal(&draft.draft_id),
+                    Literal(&draft.address.scope),
+                    state_name(draft.state),
+                    reason_name(draft.reason)
+                ));
+                continue;
+            }
+            if mode == ExportMode::VerifiedOnly {
+                omitted += draft.claims.len();
+                shown = true;
+                continue;
+            }
+            let resolves = draft
+                .claims
+                .iter()
+                .flat_map(|claim| &claim.citations)
+                .all(|id| self.facts.contains_key(id));
+            if !resolves {
+                notes.push(format!(
+                    "- Draft `{}` for scope `{}` is eligible and is not printed: it cites a \
+                     fact this export does not list.",
+                    Literal(&draft.draft_id),
+                    Literal(&draft.address.scope)
+                ));
+                continue;
+            }
+            if shown {
+                out.push_str("\n")?;
+            }
+            shown = true;
+            writeln!(
+                out,
+                "Drafted for scope `{}` (draft `{}`):\n",
+                Literal(&draft.address.scope),
+                Literal(&draft.draft_id)
+            )?;
+            for (index, claim) in draft.claims.iter().enumerate() {
+                write!(
+                    out,
+                    "{}. {} ({}; T3 / InferredWeak; role `{}`; human-reviewed: accepted; cites ",
+                    index + 1,
+                    Literal(&claim.statement),
+                    Literal(&claim.kind),
+                    Literal(&draft.role)
+                )?;
+                for (position, id) in claim.citations.iter().enumerate() {
+                    if position > 0 {
+                        out.push_str(", ")?;
+                    }
+                    out.push_str(id)?;
+                    if self.asserted.insert(id.clone()) {
+                        match self.facts[id] {
+                            Fact::Node(node) => assertions.node(node, None)?,
+                            Fact::Edge(edge) => assertions.edge(edge)?,
+                        }
+                    }
+                }
+                out.push_str(")\n")?;
+                self.printed += 1;
+            }
+        }
+        if !shown {
+            out.push_str(if drafts.is_empty() {
+                NOT_DRAFTED
+            } else {
+                NO_ELIGIBLE_DRAFT
+            })?;
+        }
+        for note in &notes {
+            writeln!(out, "{note}")?;
+        }
+        Ok(omitted)
+    }
+}
+
 pub(super) fn d1(
-    nodes: &[&Node],
+    (nodes, edges): (&[&Node], &[&Edge]),
     flows: &[Flow],
     gaps: usize,
     (curated, graph_content_hash): (Curated<'_>, Option<&str>),
@@ -195,6 +439,17 @@ pub(super) fn d1(
          for the team. A citation id resolves in `fact-index.md`.\n",
     )?;
 
+    let drafts = drafts_by_section(curated);
+    let facts = match mode {
+        ExportMode::BestEffort => cited_facts(&drafts, nodes, edges),
+        // No claim is printed, so no cited fact is looked for.
+        ExportMode::VerifiedOnly => BTreeMap::new(),
+    };
+    let mut drafted = Drafted {
+        facts: &facts,
+        asserted: BTreeSet::new(),
+        printed: 0,
+    };
     let mut cited = 0usize;
     for section in catalogue_sections("D1") {
         writeln!(
@@ -209,27 +464,32 @@ pub(super) fn d1(
                 section,
                 source,
                 (nodes, flows, gaps),
-                &mut assertions,
+                (&mut assertions, &mut drafted.asserted),
                 &mut content,
             )?;
         }
         match section.kind {
             SectionKind::Projected => {}
-            SectionKind::Framed => {
-                content.push_str("\n")?;
-                content.push_str(NOT_DRAFTED)?;
-            }
-            SectionKind::Authored => content.push_str(NOT_DRAFTED)?,
+            SectionKind::Framed => content.push_str("\n")?,
+            SectionKind::Authored => {}
             SectionKind::Human => content.push_str(HUMAN_BLANK)?,
         }
-        if section.kind.drafted() && mode == ExportMode::VerifiedOnly {
-            content.push_str("Drafted claims left out of this `verified-only` export: 0.\n")?;
+        if section.kind.drafted() {
+            let listed = drafts.get(section.number).map_or(&[][..], Vec::as_slice);
+            let omitted = drafted.section(listed, mode, &mut assertions, &mut content)?;
+            if mode == ExportMode::VerifiedOnly {
+                writeln!(
+                    content,
+                    "Drafted claims left out of this `verified-only` export: {omitted}."
+                )?;
+            }
         }
     }
     writeln!(
         content,
         "\n## Statements in this document\n\n\
-         Cited facts printed in the frames above: {cited}. Drafted claims printed: 0."
+         Cited facts printed in the frames above: {cited}. Drafted claims printed: {}.",
+        drafted.printed
     )?;
     // Counted by tier, as the catalogue asks of every document.
     let mut tiers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -252,3 +512,7 @@ pub(super) fn d1(
 #[cfg(test)]
 #[path = "document_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "document_draft_tests.rs"]
+mod draft_tests;

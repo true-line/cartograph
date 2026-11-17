@@ -81,6 +81,8 @@ struct AppState {
     settings: Mutex<settings::SettingsStore>,
     decisions: Mutex<agents::DecisionLog>,
     proposals: Mutex<agents::ProposalStore>,
+    /// Section drafts and their reviews (SPEC-15, #1748).
+    drafts: Mutex<agents::draft_store::DraftStore>,
     work_packets: work_packets::PacketRuntime,
     extraction_caches: Mutex<ExtractionCaches>,
     embedding_cache: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
@@ -7078,6 +7080,9 @@ fn main() {
             ));
             let decisions = agents::DecisionLog::open(&state_path)?;
             let staged_proposals = agents::ProposalStore::open(data_dir.join("proposals.sqlite"))?;
+            let section_drafts =
+                agents::draft_store::DraftStore::open(data_dir.join("section-drafts.sqlite"))
+                    .map_err(std::io::Error::other)?;
             let recovery_metrics = metrics::MetricsStore::open(&state_path)?;
             app.manage(PreflightRuns::default());
             #[cfg(unix)]
@@ -7091,6 +7096,7 @@ fn main() {
                 settings: Mutex::new(tier_settings),
                 decisions: Mutex::new(decisions),
                 proposals: Mutex::new(staged_proposals),
+                drafts: Mutex::new(section_drafts),
                 work_packets,
                 extraction_caches: Mutex::new(ExtractionCaches::default()),
                 embedding_cache: Some(embedding_cache),
@@ -11598,6 +11604,12 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            drafts: std::sync::Mutex::new(
+                agents::draft_store::DraftStore::open(
+                    state_path.with_file_name("section-drafts.sqlite"),
+                )
+                .unwrap(),
+            ),
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
@@ -12589,6 +12601,12 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            drafts: std::sync::Mutex::new(
+                agents::draft_store::DraftStore::open(
+                    state_path.with_file_name("section-drafts.sqlite"),
+                )
+                .unwrap(),
+            ),
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
@@ -13296,6 +13314,12 @@ export function App() {
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
             ),
+            drafts: std::sync::Mutex::new(
+                agents::draft_store::DraftStore::open(
+                    state_path.with_file_name("section-drafts.sqlite"),
+                )
+                .unwrap(),
+            ),
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
             embedding_cache: None,
@@ -13557,6 +13581,12 @@ export function App() {
             decisions: std::sync::Mutex::new(agents::DecisionLog::open(&state_path).unwrap()),
             proposals: std::sync::Mutex::new(
                 agents::ProposalStore::open(state_path.with_file_name("proposals.sqlite")).unwrap(),
+            ),
+            drafts: std::sync::Mutex::new(
+                agents::draft_store::DraftStore::open(
+                    state_path.with_file_name("section-drafts.sqlite"),
+                )
+                .unwrap(),
             ),
             work_packets: super::work_packets::PacketRuntime::open(&state_path).unwrap(),
             extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),

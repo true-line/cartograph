@@ -13,6 +13,8 @@ use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
+const D1_ID: &str = "d1-product-specification";
+
 fn evidence() -> Vec<EvidenceRef> {
     vec![EvidenceRef {
         repo: "fixture/repo".into(),
@@ -235,9 +237,10 @@ fn uncomputed_curated_projection_fails_no_mcp_read_and_states_its_reason() {
         assert_ne!(session.basis_id().unwrap(), computed.basis_id().unwrap());
         for descriptor in crate::mcp_reads::artifacts::readable_catalog() {
             let id = descriptor.id;
+            // The D1 header gives the reason in place of the revision.
             assert_eq!(
                 read(&session, id) == read(&computed, id),
-                id != ARTIFACT_ID && id != JSON_ARTIFACT_ID,
+                !matches!(id, ARTIFACT_ID | JSON_ARTIFACT_ID | D1_ID),
                 "{id}"
             );
         }
@@ -247,6 +250,19 @@ fn uncomputed_curated_projection_fails_no_mcp_read_and_states_its_reason() {
         assert!(bundle.curated_basis.is_none());
         let document = read(&session, ARTIFACT_ID);
         assert_eq!(&document, curated_of(&bundle), "{mode:?}");
+        // The D1 read is the export's too, with the graph hash stated.
+        let d1 = read(&session, D1_ID);
+        assert_eq!(
+            Some(&d1),
+            bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == D1_ID)
+        );
+        assert!(d1.content.contains(&format!(
+            "- Graph content hash: {}\n- Curated revision: not computed (`reviews_unavailable`)",
+            bundle.graph_basis.as_ref().unwrap().content_hash
+        )));
         assert!(document.content.contains("reviews_unavailable"));
         let data: Value = serde_json::from_str(&read(&session, JSON_ARTIFACT_ID).content).unwrap();
         assert_eq!(data["status"], "not_computed");

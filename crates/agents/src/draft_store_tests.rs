@@ -455,3 +455,53 @@ fn drafts_are_listed_newest_first_in_bounded_pages() {
         ));
     }
 }
+
+/// AC-0667: a stored draft becomes projection input with nothing derived.
+#[test]
+fn stored_draft_converts_to_projection_input_as_stored() {
+    use context_hub::curated::{DraftReview, ReviewedDraft};
+    let (_dir, mut store) = store();
+    let stored = store
+        .store(&draft("1.3", "A user can check out."), &origin(), None)
+        .unwrap();
+    let pending: ReviewedDraft = crate::curated::reviewed_draft(&stored);
+    assert_eq!(pending.draft_id, stored.draft_id);
+    assert_eq!(pending.address.document, "D1");
+    assert_eq!(pending.address.section, "1.3");
+    assert_eq!(pending.address.scope, SYSTEM_SCOPE);
+    assert_eq!(pending.address.catalogue_version, "1.0");
+    assert_eq!(pending.role, "section-writer@1");
+    assert_eq!(pending.cited_hashes, stored.draft.cited_hashes);
+    assert_eq!(pending.replaces, None);
+    assert_eq!(pending.decision, None);
+    let [claim] = pending.claims.as_slice() else {
+        panic!("one claim");
+    };
+    assert_eq!(claim.statement, "A user can check out.");
+    assert_eq!(claim.kind, "implemented");
+    assert_eq!(claim.citations, stored.draft.claims[0].citations);
+
+    for (decision, review) in [
+        (DraftDecision::Accepted, DraftReview::Accepted),
+        (DraftDecision::Rejected, DraftReview::Rejected),
+        (DraftDecision::Returned, DraftReview::Returned),
+    ] {
+        let (_dir, mut store) = self::store();
+        let stored = store
+            .store(&draft("1.3", "A user can check out."), &origin(), None)
+            .unwrap();
+        let reviewed = store
+            .review(&stored.draft_id, 0, decision, Some("a note"))
+            .unwrap();
+        let converted = crate::curated::reviewed_draft(&reviewed);
+        assert_eq!(converted.decision, Some(review));
+        // The note, the times and the review counter are not copied.
+        assert_eq!(
+            ReviewedDraft {
+                decision: None,
+                ..converted
+            },
+            pending
+        );
+    }
+}

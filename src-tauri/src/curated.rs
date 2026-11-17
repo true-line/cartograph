@@ -6,8 +6,9 @@
 //! while an export holds the graph:
 //!
 //! 1. [`gather`], with no graph or decision lock held: one bounded read of
-//!    the staging store, then one assessment for each accepted record that
-//!    could be eligible. Nothing is persisted.
+//!    the staging store and one of the section draft store (SPEC-15 slice 5,
+//!    AC-0667), then one assessment for each accepted record that could be
+//!    eligible. Nothing is persisted.
 //! 2. [`project`], over the snapshot the export read under its own graph and
 //!    decision locks: the assessments are checked against the store revision
 //!    of that snapshot, and the pure projection is computed over it. It takes
@@ -22,7 +23,7 @@ use agents::ProposalDecision;
 use agents::staging::{MAX_STAGED_PAGE_ITEMS, MAX_STAGED_REFERENCE_SCAN};
 use context_hub::curated::{
     self as core, BasisAssessment, BasisDimensions, CuratedProjection, EvidenceAvailability,
-    EvidenceStatus, ProjectionInput, ReviewedProposal,
+    EvidenceStatus, ProjectionInput, ReviewedDraft, ReviewedProposal,
 };
 use core_graph::{Edge, Node, SqliteGraphStore, StoreRevision};
 use core_prov::{ConfidenceTier, Provenance, Tier};
@@ -55,6 +56,9 @@ pub(crate) const MAX_CURATED_ACCEPTED: usize = 256;
 pub(crate) struct CuratedReview {
     failure: Option<CuratedFailure>,
     proposals: Vec<ReviewedProposal>,
+    /// Every reviewed section draft (SPEC-15). A pending draft is not kept:
+    /// the projection reads none.
+    drafts: Vec<ReviewedDraft>,
     /// By record identity, with the store revision the assessment's graph
     /// read observed (`None` when that read failed).
     assessments: BTreeMap<String, (BasisAssessment, Option<StoreRevision>)>,
@@ -275,6 +279,49 @@ fn reviewed_records(
     }
 }
 
+/// Every reviewed draft of `store`, in pages of
+/// [`agents::draft_store::MAX_DRAFT_PAGE_ITEMS`], newest first; the caller
+/// holds the draft store lock across all of them. The bounds are those of
+/// the staged records: more drafts, or more accepted ones, fail the read.
+fn reviewed_drafts(
+    store: &agents::draft_store::DraftStore,
+) -> Result<Vec<ReviewedDraft>, CuratedFailure> {
+    use agents::draft_store::{DraftDecision, MAX_DRAFT_PAGE_ITEMS};
+    let mut drafts = Vec::new();
+    let (mut scanned, mut accepted) = (0usize, 0usize);
+    let mut before: Option<u64> = None;
+    loop {
+        let page = store
+            .list(MAX_DRAFT_PAGE_ITEMS, before)
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        scanned += page.items.len();
+        if scanned > MAX_CURATED_RECORD_SCAN {
+            return Err(CuratedFailure::TooManyRecords {
+                limit: MAX_CURATED_RECORD_SCAN,
+            });
+        }
+        for stored in &page.items {
+            match stored.review_decision {
+                None => continue,
+                Some(DraftDecision::Accepted) => {
+                    accepted += 1;
+                    if accepted > MAX_CURATED_ACCEPTED {
+                        return Err(CuratedFailure::TooManyAccepted {
+                            limit: MAX_CURATED_ACCEPTED,
+                        });
+                    }
+                }
+                Some(DraftDecision::Rejected | DraftDecision::Returned) => {}
+            }
+            drafts.push(agents::curated::reviewed_draft(stored));
+        }
+        match page.next_before {
+            Some(next) => before = Some(next),
+            None => return Ok(drafts),
+        }
+    }
+}
+
 impl CuratedReview {
     /// A review that read no record, with the reason.
     pub(crate) fn failed(failure: CuratedFailure) -> Self {
@@ -282,6 +329,22 @@ impl CuratedReview {
             failure: Some(failure),
             ..Self::default()
         }
+    }
+}
+
+/// The reviewed records of `store` and the reviewed drafts of `drafts`,
+/// with no assessment made.
+#[cfg(test)]
+pub(crate) fn read_records_and_drafts(
+    store: &agents::ProposalStore,
+    drafts: &agents::draft_store::DraftStore,
+) -> CuratedReview {
+    match reviewed_drafts(drafts) {
+        Ok(drafts) => CuratedReview {
+            drafts,
+            ..read_records(store)
+        },
+        Err(failure) => CuratedReview::failed(failure),
     }
 }
 
@@ -311,10 +374,10 @@ impl CuratedReview {
 }
 
 impl CuratedReview {
-    /// Whether `records`, read later, are the records this review read. A
-    /// review that failed read none, so nothing is compared for it.
-    fn same_records(&self, records: &[ReviewedProposal]) -> bool {
-        self.failure.is_some() || self.proposals == records
+    /// Whether `records` and `drafts`, read later, are the ones this review
+    /// read. A review that failed read none, so nothing is compared for it.
+    fn same_records(&self, records: &[ReviewedProposal], drafts: &[ReviewedDraft]) -> bool {
+        self.failure.is_some() || (self.proposals == records && self.drafts == drafts)
     }
 }
 
@@ -324,8 +387,9 @@ impl CuratedReview {
 pub(crate) trait ReviewSource {
     /// [`gather`]. Called with no graph or decision lock held.
     fn gather(&self) -> CuratedReview;
-    /// Whether the reviewed records are still the ones `review` read. Takes
-    /// the staging lock alone; call it with no other lock held. An `Err` is
+    /// Whether the reviewed records and drafts are still the ones `review`
+    /// read. Takes the staging lock and then the draft store lock, one at a
+    /// time; call it with no other lock held. An `Err` is
     /// a record read that did not finish.
     fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure>;
 }
@@ -336,11 +400,21 @@ impl ReviewSource for AppState {
     }
 
     fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
-        let store = self
-            .proposals
-            .lock()
-            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-        Ok(review.same_records(&reviewed_records(&store)?))
+        let records = {
+            let store = self
+                .proposals
+                .lock()
+                .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+            reviewed_records(&store)?
+        };
+        let drafts = {
+            let store = self
+                .drafts
+                .lock()
+                .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+            reviewed_drafts(&store)?
+        };
+        Ok(review.same_records(&records, &drafts))
     }
 }
 
@@ -389,12 +463,42 @@ impl ReviewSource for std::sync::Mutex<agents::ProposalStore> {
         let store = self
             .lock()
             .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-        Ok(review.same_records(&reviewed_records(&store)?))
+        Ok(review.same_records(&reviewed_records(&store)?, &[]))
+    }
+}
+
+/// A staging store and a section draft store, read with no assessment made.
+#[cfg(test)]
+pub(crate) struct StoredReviews {
+    pub proposals: std::sync::Mutex<agents::ProposalStore>,
+    pub drafts: std::sync::Mutex<agents::draft_store::DraftStore>,
+}
+
+#[cfg(test)]
+impl ReviewSource for StoredReviews {
+    fn gather(&self) -> CuratedReview {
+        match (self.proposals.lock(), self.drafts.lock()) {
+            (Ok(proposals), Ok(drafts)) => read_records_and_drafts(&proposals, &drafts),
+            _ => CuratedReview::failed(CuratedFailure::ReviewsUnavailable),
+        }
+    }
+
+    fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
+        let proposals = self
+            .proposals
+            .lock()
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        let drafts = self
+            .drafts
+            .lock()
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        Ok(review.same_records(&reviewed_records(&proposals)?, &reviewed_drafts(&drafts)?))
     }
 }
 
 /// Step 1. Call it with no graph or decision lock held. The staging lock is
-/// held for the record read alone and released before any assessment. Each
+/// held for the record read alone and released before any assessment; the
+/// draft store lock is then held for the draft read alone. Each
 /// assessment then takes the staging lock, the source registry, the
 /// retention leases and the graph lock in its own order, one record at a
 /// time; none is held between records. The assessments share one copy of
@@ -413,6 +517,15 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         Ok(proposals) => proposals,
         Err(failure) => return CuratedReview::failed(failure),
     };
+    let read = state
+        .drafts
+        .lock()
+        .map_err(|_| CuratedFailure::ReviewsUnavailable)
+        .and_then(|store| reviewed_drafts(&store));
+    let drafts = match read {
+        Ok(drafts) => drafts,
+        Err(failure) => return CuratedReview::failed(failure),
+    };
     let mut assessments = BTreeMap::new();
     // One graph copy and one snapshot identity for all of them (#1834).
     let mut observed = assessment::SharedObservation::default();
@@ -427,6 +540,7 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
     CuratedReview {
         failure: None,
         proposals,
+        drafts,
         assessments,
         settled: Arc::clone(&state.curated_settled),
     }
@@ -580,6 +694,18 @@ pub(crate) fn project(
         .map(agents::curated::curated_assertion_decision)
         .collect();
     let current = current_assertion_hashes(snapshot, &decided, &review.settled)?;
+    // The current hash of each fact an accepted draft cites, over the
+    // snapshot's nodes and edges (ADR-0064 decision 8). One pass, and none
+    // when no draft is accepted. A fact that lives only in the knowledge
+    // overlay is not in the snapshot the export compiles, so a draft citing
+    // one is `unresolvable` (SPEC-15 open items).
+    let cited: BTreeSet<String> = review
+        .drafts
+        .iter()
+        .filter(|draft| draft.decision == Some(core::DraftReview::Accepted))
+        .flat_map(|draft| draft.cited_hashes.keys().cloned())
+        .collect();
+    let cited_hashes = spec::cited_fact_hashes(snapshot.nodes, snapshot.edges, &cited);
     core::project(&ProjectionInput {
         nodes: snapshot.nodes,
         edges: snapshot.edges,
@@ -588,8 +714,8 @@ pub(crate) fn project(
         assessments: &assessments,
         assertion_decisions: &decided,
         current_assertion_hashes: &current,
-        drafts: &[],
-        cited_fact_hashes: &std::collections::BTreeMap::new(),
+        drafts: &review.drafts,
+        cited_fact_hashes: &cited_hashes,
         policy_version: core::CURATED_POLICY_VERSION,
     })
     .map_err(|error| match error {
@@ -611,3 +737,7 @@ pub(crate) fn read_graph(
         .read_snapshot_with_coverage_and_revision()
         .map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+#[path = "curated_drafts_tests.rs"]
+mod drafts_tests;

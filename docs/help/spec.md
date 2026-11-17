@@ -291,15 +291,27 @@ of the product specification, in order, each marked with its kind.
   are listed with their tier, confidence and citation id; each id has a row
   in **fact-index.md**. Flows are summarized and the Gap findings are
   counted, with the detail in **flow_dossiers.md** and **gap_register.md**.
-- **P+A** sections show the compiled part, then say **Not drafted**. Business
-  rules and acceptance criteria point to **rule-evidence.md** and
-  **test_arrangements.md** and are not repeated.
-- **A** sections say **Not drafted**. No agent writes a section yet.
+- **P+A** sections show the compiled part, then the accepted draft for the
+  section, or **Not drafted**. Business rules and acceptance criteria point
+  to **rule-evidence.md** and **test_arrangements.md** and are not repeated.
+- **A** sections show the accepted draft, or **Not drafted**. No agent
+  writes a section yet, so there is no draft to accept.
 - **H** sections are left blank for your team. Cartograph never fills them.
 
 The header shows the catalogue version, the export mode, the graph content
 hash and the curated revision. No model is involved in writing this document,
-and the other exported files are unchanged. It is not yet readable over MCP.
+and the other exported files are unchanged, except that the fact index now
+lists this document beside each fact it cites. An MCP client reads the same
+document with `cartograph_read_artifact`.
+
+A draft is shown only after a person accepts it, and only while every fact
+it cites is unchanged. Each claim is printed with its citation ids and marked
+**T3 / InferredWeak**, with the role that wrote it and **human-reviewed:
+accepted**. Accepting a draft never raises its tier. A **verified-only**
+export prints no drafted claim and says how many it left out of each
+section. A draft that is stale, replaced, in conflict with another accepted
+draft, or citing a fact that is no longer in the graph is named with that
+reason and not printed.
 
 ## Curated items
 
