@@ -48,6 +48,15 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.match(workflow, /git diff-tree -p HEAD \| git patch-id --stable/u);
   assert.match(workflow, /git diff-tree -p "\$open_sha" \| git patch-id --stable/u);
   assert.match(workflow, /skipping the force-push/u);
+  // Draft PR events start no Actions jobs: the version PR is opened as draft
+  // and a ready one returns to draft before its head is refreshed, so the
+  // complete suite runs once, when the owner marks the cut ready.
+  assert.match(workflow, /gh pr create --draft --base main --head "\$BRANCH"/u);
+  assert.match(workflow, /gh pr ready "\$open_ready" --undo/u);
+  assert.ok(
+    workflow.indexOf('gh pr ready "$open_ready" --undo') < workflow.indexOf('node scripts/version-commit.mjs publish'),
+    'the version PR returns to draft before the new head is published',
+  );
   // checkout removes its credentials, so the open-PR fetch must authenticate
   // per command and never wait on a prompt (#667).
   assert.match(workflow, /GIT_TERMINAL_PROMPT: "0"/u);
@@ -74,6 +83,16 @@ test('CI enforces the governed lifecycle without draft jobs', () => {
   assert.match(workflow, /head_sha=\$GITHUB_SHA/u);
   assert.match(workflow, /name: Complete suite/u);
   assert.match(workflow, /name: CI/u);
+  // Without a merge queue, a main push reuses the merged PR's passing ready
+  // run only when the trees are byte-identical, and never for the Version
+  // packages PR, whose cut commit needs its own complete-suite evidence.
+  assert.match(workflow, /commits\/\$GITHUB_SHA\/pulls/u);
+  assert.match(workflow, /\[ "\$head_tree" = "\$tree" \] \|\| continue/u);
+  assert.match(workflow, /\.head\.ref != "changeset-release\/main"/u);
+  assert.match(workflow, /event=pull_request&head_sha=\$head/u);
+  // Actions runs bash with errexit; a failed lookup must fall back to the
+  // complete suite, not fail the main push.
+  assert.match(workflow, /run: \|\n\s+set \+e\n\s+run_id=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/actions\/runs\?event=merge_group/u);
 });
 
 test('required Advanced CodeQL contexts report on every non-draft PR run, even on the evidence path (#440)', () => {

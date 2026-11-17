@@ -70,16 +70,40 @@ jobs:
       validated: ${{ steps.evidence.outputs.validated }}
     steps:
       - id: evidence
-        name: Find successful merge-group CI for this exact commit
+        name: Find successful merge-group or identical-tree PR CI for this commit
         env:
           GH_TOKEN: ${{ github.token }}
+        # The default Actions bash shell runs with errexit; turn it off so any
+        # lookup failure leaves validated false, which runs the complete suite
+        # fail-safe instead of failing main.
         run: |
+          set +e
           run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=merge_group&head_sha=$GITHUB_SHA&per_page=100" \
             --jq 'first(.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | .id) // empty')
           validated=false
           if [ -n "$run_id" ]; then
             validated=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
               --jq 'any(.jobs[]; .name == "CI" and .conclusion == "success")')
+          fi
+          # Without a merge queue, a merged PR whose head tree is byte-identical
+          # to this commit's tree already passed the ready-PR suite on exactly
+          # these files; re-running it on main only duplicates that run. The
+          # Version packages PR is excluded: tag and release require
+          # complete-suite evidence on the exact cut commit itself.
+          if [ "$validated" != true ]; then
+            tree=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq .commit.tree.sha)
+            heads=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+              --jq '.[] | select(.merged_at != null and .base.ref == "main" and .head.ref != "changeset-release/main" and .head.repo.full_name == .base.repo.full_name) | .head.sha')
+            for head in $heads; do
+              head_tree=$(gh api "repos/$GITHUB_REPOSITORY/commits/$head" --jq .commit.tree.sha)
+              [ "$head_tree" = "$tree" ] || continue
+              pr_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$head&per_page=100" \
+                --jq 'first(.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .conclusion == "success") | .id) // empty')
+              [ -n "$pr_run" ] || continue
+              validated=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$pr_run/jobs?filter=latest&per_page=100" \
+                --jq 'any(.jobs[]; .name == "CI" and .conclusion == "success")')
+              if [ "$validated" = true ]; then break; fi
+            done
           fi
           echo "validated=$validated" >> "$GITHUB_OUTPUT"
 

@@ -106,7 +106,9 @@ the agreed suite runs; it does not reduce the gate list below.
 - The merge queue runs the complete suite on its exact `merge_group` candidate.
   A `main` push with successful evidence for that exact SHA runs only Advanced
   CodeQL plus the short repository-integrity smoke; missing evidence runs the
-  complete suite fail-safe.
+  complete suite fail-safe. Until the queue is enabled, a passing ready-PR run
+  counts as that evidence only when the merged PR's head tree is identical to
+  the pushed commit's tree; the Version packages PR never borrows it.
 - Manual CI dispatch is limited to exact-SHA preflight, diagnostics, release
   recovery, workflow testing, and explicit reruns. Public-fork workflows are
   never approved or run.
@@ -146,7 +148,9 @@ enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
   handoff is recovered by manually dispatching the version-cut workflow; tags
   are immutable and are never moved.
 - A Version packages PR receives the normal ready/queue complete suite once;
-  version-cut never dispatches a duplicate suite. Tag and release automation
+  version-cut never dispatches a duplicate suite. It opens the PR as draft and
+  returns a ready one to draft before refreshing its head, so only the owner
+  marking the cut ready starts the suite. Tag and release automation
   require exact-commit CI and reviewed-PR evidence before release-specific work.
 - macOS production bundles are universal Intel + Apple Silicon `.app` and `.dmg`
   artifacts. Signing is all-or-nothing across the five repository secrets
