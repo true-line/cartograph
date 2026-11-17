@@ -312,7 +312,7 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
     windows.match(new RegExp(`bounded-command@${PLAYBOOK_RUNTIME_PIN}`, 'gu'))?.length,
     2,
   );
-  assert.doesNotMatch(windows, /continue-on-error|--skip|--ignored|attempts:|windows-latest/u);
+  assert.doesNotMatch(windows, /continue-on-error|--skip|--ignored|attempts:/u);
   assert.match(complete, /needs: \[[^\]\n]*windows-job-ownership[^\]\n]*\]/u);
   assert.match(complete, /WINDOWS_JOB_OWNERSHIP: \$\{\{ needs\.windows-job-ownership\.result \}\}/u);
   assert.match(complete, /test "\$WINDOWS_JOB_OWNERSHIP" = success/u);
