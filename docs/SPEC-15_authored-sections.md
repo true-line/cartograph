@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 7 are implemented; the pilot is not.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 7 are implemented. The pilot's expected set is committed; its scored run is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -255,6 +255,13 @@ SimpleLogin repository before any drafting run and committed under
 read it. A reviewer who did not produce the drafts scores each printed claim
 as supported, unsupported or missing against its cited sources. The scores
 are committed whatever they are.
+
+As committed (slice 8): `docs/acceptance/w13/` holds the expected set for the
+alias lifecycle over the API at the pinned SimpleLogin commit, 26 statements
+across 1.2, 1.3 and 1.5 with their source lines, the scoring protocol and
+`score.py`, which tabulates a reviewer's `scores.json`. No run has been
+scored, so AC-0670 is open and T-0670 stays reserved until a result is
+committed there.
 
 ## Open items
 
