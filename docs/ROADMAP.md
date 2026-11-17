@@ -356,7 +356,7 @@ authorship. Stages 4 and 5 have their inputs and no product path.
 |----|------------|-------|-----------|
 | W5 | Curated projection (unchanged from section 4; now first) | #1746 | An accepted proposal appears in the Workbench, a `best-effort` export and an MCP read under one curated revision; the base graph hash is unchanged |
 | W14 | Enterprise document catalogue | #1747 | A versioned catalogue approved by the owner: each document's reader, sections, deterministic inputs, authorable sections and acceptance |
-| W13 | Agent-authored document sections | #1748 | One SimpleLogin document with authored sections scored claim by claim against an expected set written before the run |
+| W13 | Agent-authored document sections | #1748; contract proposed in [SPEC-15](SPEC-15_authored-sections.md), ADR-0064 | One SimpleLogin document with authored sections scored claim by claim against an expected set written before the run |
 | W15 | Living documentation | #1749 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run |
 | W16 | Existing documentation as evidence | #1750 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited |
 | W17 | Rebuild handoff bundle | #1752 | One SimpleLogin bundle reviewed against the sufficiency checklist by someone who did not produce it |
