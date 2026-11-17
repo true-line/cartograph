@@ -1,6 +1,6 @@
 # SPEC-18 — Target documentation as evidence
 
-- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 to 3 are implemented; the rest is not.
+- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 to 4 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0049 / AC-0676..0681; ROADMAP W16; v1.0.0 criterion 8.
 - **Decision:** [ADR-0065](adr/ADR-0065-target-documentation-as-evidence.md).
@@ -78,13 +78,24 @@ No link is made to a `Gap`, a `Drift`, a `Document` or a `DocSection`.
 |---|---|---|
 | `doc-route-method-differs` | a `route` reference whose path is served, with no endpoint of its method | the reference span and the endpoints of that path |
 | `doc-route-not-served` | a `route` reference whose path no endpoint of the system serves | the reference span; the entry states how many endpoints were compared |
-| `doc-file-missing` | a relative link target or a code span with a path separator and a file extension that names no file of the repository at the commit | the reference span; the entry states the path looked for |
+| `doc-file-missing` | a relative link target, or a code span shaped like a path to a file, that names nothing in the repository's tree at the commit | the reference span; the entry states the path looked for |
 
 Each is a `Drift` node, Deterministic and InferredStrong, with
-`kind: "documentation-drift"`, in `drift_register.md` beside contract drift.
-One reference yields at most one entry. A route is checked only when the
-system has at least one recovered endpoint: with none, the comparison says
-nothing and no entry is made.
+`kind: "documentation-drift"`, identified by
+`drift:documentation:{repo}@{document}:{kind}:{route or path}`, in its own
+section of `drift_register.md`. One document, kind and route or path are
+one entry citing each occurrence, with a `DOCUMENTED_AS` edge to each
+section that holds one and, for `doc-route-method-differs`, a `SERVED_AS`
+edge to the endpoints of the path. A reference that is linked yields no
+entry. A route is checked only when the system has at least one recovered
+endpoint: with none, the comparison says nothing and no entry is made.
+
+A code span is checked as a file path only when it has a directory and a
+file extension, holds no glob, placeholder or id character, and its
+directory is in the tree, read from the repository root or from the
+document's directory. The tree is asked whether a path exists and nothing
+else: no file is read for this, and a missing directory is no finding.
+A re-ingest removes the entry of a reference that matches again.
 
 ## Coverage
 
