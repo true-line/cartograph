@@ -106,7 +106,9 @@ the agreed suite runs; it does not reduce the gate list below.
 - The merge queue runs the complete suite on its exact `merge_group` candidate.
   A `main` push with successful evidence for that exact SHA runs only Advanced
   CodeQL plus the short repository-integrity smoke; missing evidence runs the
-  complete suite fail-safe.
+  complete suite fail-safe. Until the queue is enabled, a passing ready-PR run
+  counts as that evidence only when the merged PR's head tree is identical to
+  the pushed commit's tree; the Version packages PR never borrows it.
 - Manual CI dispatch is limited to exact-SHA preflight, diagnostics, release
   recovery, workflow testing, and explicit reruns. Public-fork workflows are
   never approved or run.

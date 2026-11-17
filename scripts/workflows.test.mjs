@@ -83,6 +83,13 @@ test('CI enforces the governed lifecycle without draft jobs', () => {
   assert.match(workflow, /head_sha=\$GITHUB_SHA/u);
   assert.match(workflow, /name: Complete suite/u);
   assert.match(workflow, /name: CI/u);
+  // Without a merge queue, a main push reuses the merged PR's passing ready
+  // run only when the trees are byte-identical, and never for the Version
+  // packages PR, whose cut commit needs its own complete-suite evidence.
+  assert.match(workflow, /commits\/\$GITHUB_SHA\/pulls/u);
+  assert.match(workflow, /\[ "\$head_tree" = "\$tree" \] \|\| continue/u);
+  assert.match(workflow, /\.head\.ref != "changeset-release\/main"/u);
+  assert.match(workflow, /event=pull_request&head_sha=\$head/u);
 });
 
 test('required Advanced CodeQL contexts report on every non-draft PR run, even on the evidence path (#440)', () => {
