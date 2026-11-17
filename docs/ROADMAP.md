@@ -478,8 +478,9 @@ The criteria are the existing ones on #1610 plus the exit gates that section
 - **Providers.** Reconstruction runs on local open-source models and, where
   the user opts in with their own key, on cloud providers. In-app provider
   setup is #1763 (ADR-0057). Whether the cloud lanes use the providers'
-  agent SDKs is an open decision that needs its own ADR before W13's
-  drafting acceptance is run on a cloud model.
+  agent SDKs is proposed in ADR-0066 (owner review): the direct lanes stay
+  the in-app path and W13's drafting acceptance may run on one; an agent
+  SDK is an external client over MCP.
 
 ### Tracking
 
