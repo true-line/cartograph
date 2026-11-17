@@ -245,7 +245,7 @@ fn a_draft_is_stale_once_a_fact_it_cites_changes_and_says_so_in_the_document() {
             .content
             .contains("takes a cart")
     );
-    // The cited fact changing does not.
+    // The cited fact changing makes it stale.
     fixture
         .graph
         .lock()
@@ -255,11 +255,26 @@ fn a_draft_is_stale_once_a_fact_it_cites_changes_and_says_so_in_the_document() {
     for mode in MODES {
         let bundle = fixture.export(mode);
         let content = &artifact(&bundle, D1).content;
-        assert!(!content.contains("takes a cart"), "{mode:?}");
-        assert!(content.contains(&format!(
-            "- Draft `{}` for scope `system` is listed as `stale` (`cited_fact_changed`).\n",
-            draft.draft_id
-        )));
+        // SPEC-17 slice 2 (AC-0672): best-effort keeps the stale draft in
+        // place, marked; verified-only prints no claim and names it.
+        assert!(content.contains("- Stale sections: 1.1 (scope `system`, `stale`)\n"));
+        match mode {
+            ExportMode::BestEffort => {
+                assert!(content.contains("takes a cart"));
+                assert!(
+                    content.contains("Stale: cited facts changed since this text was accepted: F-")
+                );
+                assert!(content.contains("; cites a changed fact)\n"));
+            }
+            ExportMode::VerifiedOnly => {
+                assert!(!content.contains("takes a cart"));
+                assert!(content.contains(&format!(
+                    "- Draft `{}` for scope `system` is listed as `stale` \
+                     (`cited_fact_changed`).\n",
+                    draft.draft_id
+                )));
+            }
+        }
         assert_eq!(
             &read(&fixture.acquire(mode).unwrap()),
             artifact(&bundle, D1)
