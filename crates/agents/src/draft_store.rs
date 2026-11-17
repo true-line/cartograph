@@ -158,13 +158,13 @@ pub enum DraftStoreError {
         actual: u64,
     },
     /// The draft named as replaced is not currently returned.
-    #[error("the replaced draft is not returned")]
+    #[error("the replaced draft is neither returned nor accepted")]
     PredecessorNotReturned,
     /// The draft named as replaced is for another address.
     #[error("the replaced draft is for another address")]
     PredecessorAddress,
     /// The returned draft already has its one successor.
-    #[error("the returned draft already has a successor")]
+    #[error("the replaced draft already has a successor")]
     SuccessorExists,
     /// A successor cannot be returned.
     #[error("a successor draft cannot be returned")]
@@ -329,18 +329,62 @@ fn get_on(conn: &Connection, draft_id: &str) -> Result<Option<StoredDraft>, Draf
     .transpose()
 }
 
+const SUCCESSOR_COLUMNS: &str = "sequence, draft_id, immutable_json, replaces, review_revision, \
+     review_decision, review_note, created_at, reviewed_at";
+
+/// Rebuild a draft table created when `replaces` was unique for every
+/// successor (before ADR-0045), keeping every row and its sequence. The
+/// partial index created on open then holds the one-successor rule.
+fn widen_successors(conn: &mut Connection) -> Result<(), DraftStoreError> {
+    let created: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'staged_section_drafts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !created.is_some_and(|sql| sql.contains("replaces TEXT UNIQUE")) {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS staged_section_drafts_immutable;
+         ALTER TABLE staged_section_drafts RENAME TO staged_section_drafts_before_adr_0045;
+         CREATE TABLE staged_section_drafts (
+             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+             draft_id TEXT NOT NULL UNIQUE,
+             immutable_json TEXT NOT NULL CHECK (length(CAST(immutable_json AS BLOB)) <= 262144),
+             replaces TEXT,
+             review_revision INTEGER NOT NULL DEFAULT 0 CHECK (review_revision >= 0),
+             review_decision TEXT CHECK (review_decision IN ('accepted', 'rejected', 'returned')),
+             review_note TEXT CHECK (review_note IS NULL OR length(CAST(review_note AS BLOB)) <= 4096),
+             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+             reviewed_at TEXT,
+             CHECK ((review_revision = 0 AND review_decision IS NULL AND review_note IS NULL AND reviewed_at IS NULL)
+                 OR (review_revision > 0 AND review_decision IS NOT NULL AND reviewed_at IS NOT NULL)),
+             CHECK (replaces IS NULL OR review_decision IS NULL OR review_decision <> 'returned')
+         ) STRICT;
+         INSERT INTO staged_section_drafts ({SUCCESSOR_COLUMNS})
+             SELECT {SUCCESSOR_COLUMNS} FROM staged_section_drafts_before_adr_0045 ORDER BY sequence;
+         DROP TABLE staged_section_drafts_before_adr_0045;"
+    ))?;
+    tx.commit()?;
+    Ok(())
+}
+
 impl DraftStore {
     /// Open the draft table in the review store at `path`, creating it when
     /// absent. Other tables of the file are not read or changed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DraftStoreError> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        widen_successors(&mut conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS staged_section_drafts (
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  draft_id TEXT NOT NULL UNIQUE,
                  immutable_json TEXT NOT NULL CHECK (length(CAST(immutable_json AS BLOB)) <= 262144),
-                 replaces TEXT UNIQUE,
+                 replaces TEXT,
                  review_revision INTEGER NOT NULL DEFAULT 0 CHECK (review_revision >= 0),
                  review_decision TEXT CHECK (review_decision IN ('accepted', 'rejected', 'returned')),
                  review_note TEXT CHECK (review_note IS NULL OR length(CAST(review_note AS BLOB)) <= 4096),
@@ -350,6 +394,10 @@ impl DraftStore {
                      OR (review_revision > 0 AND review_decision IS NOT NULL AND reviewed_at IS NOT NULL)),
                  CHECK (replaces IS NULL OR review_decision IS NULL OR review_decision <> 'returned')
              ) STRICT;
+             CREATE UNIQUE INDEX IF NOT EXISTS staged_section_drafts_one_successor
+             ON staged_section_drafts (replaces)
+             WHERE replaces IS NOT NULL
+                 AND (review_decision IS NULL OR review_decision <> 'rejected');
              CREATE TRIGGER IF NOT EXISTS staged_section_drafts_immutable
              BEFORE UPDATE OF sequence, draft_id, immutable_json, replaces, created_at ON staged_section_drafts
              BEGIN SELECT RAISE(ABORT, 'section draft content is immutable'); END;",
@@ -359,8 +407,11 @@ impl DraftStore {
 
     /// Store an admitted draft before reporting it as staged.
     ///
-    /// `replaces` names the returned draft this one succeeds. Identical
-    /// content returns the stored record with its current review.
+    /// `replaces` names the draft this one succeeds: a returned draft
+    /// (ADR-0064), which admits one successor ever, or an accepted draft
+    /// being re-drafted (ADR-0045), which admits one successor that is not
+    /// rejected. Identical content returns the stored record with its
+    /// current review.
     pub fn store(
         &mut self,
         draft: &SectionDraft,
@@ -390,14 +441,21 @@ impl DraftStore {
             if predecessor.draft.address != draft.address {
                 return Err(DraftStoreError::PredecessorAddress);
             }
-            if predecessor.review_decision != Some(DraftDecision::Returned) {
-                return Err(DraftStoreError::PredecessorNotReturned);
-            }
-            let taken: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM staged_section_drafts WHERE replaces = ?1)",
-                [replaced],
-                |row| row.get(0),
-            )?;
+            let taken = match predecessor.review_decision {
+                Some(DraftDecision::Returned) => {
+                    "SELECT EXISTS (SELECT 1 FROM staged_section_drafts WHERE replaces = ?1)"
+                }
+                // A rejected re-draft leaves the accepted draft free for
+                // another one.
+                Some(DraftDecision::Accepted) => {
+                    "SELECT EXISTS (SELECT 1 FROM staged_section_drafts WHERE replaces = ?1
+                         AND (review_decision IS NULL OR review_decision <> 'rejected'))"
+                }
+                Some(DraftDecision::Rejected) | None => {
+                    return Err(DraftStoreError::PredecessorNotReturned);
+                }
+            };
+            let taken: bool = tx.query_row(taken, [replaced], |row| row.get(0))?;
             if taken {
                 return Err(DraftStoreError::SuccessorExists);
             }
@@ -441,6 +499,23 @@ impl DraftStore {
         }
         if current.replaces.is_some() && decision == DraftDecision::Returned {
             return Err(DraftStoreError::SuccessorCannotBeReturned);
+        }
+        // A rejected successor may not come back while another successor
+        // of the same draft stands.
+        if let Some(replaced) = current.replaces.as_deref()
+            && current.review_decision == Some(DraftDecision::Rejected)
+            && decision != DraftDecision::Rejected
+        {
+            let taken: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM staged_section_drafts WHERE replaces = ?1
+                     AND draft_id <> ?2
+                     AND (review_decision IS NULL OR review_decision <> 'rejected'))",
+                params![replaced, draft_id],
+                |row| row.get(0),
+            )?;
+            if taken {
+                return Err(DraftStoreError::SuccessorExists);
+            }
         }
         let next = i64::try_from(expected_revision)
             .ok()
