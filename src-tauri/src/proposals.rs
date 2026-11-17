@@ -337,8 +337,29 @@ mod tests {
             assert!(bundle.graph_basis.is_some());
             let bare = spec::compile_spec(&nodes, &edges, &[], mode, &Default::default());
             for (bare, failed) in bare.artifacts.iter().zip(&bundle.artifacts) {
-                assert_eq!(bare == failed, bare.id != "curated", "{}", bare.id);
+                assert_eq!(
+                    bare == failed,
+                    !matches!(bare.id.as_str(), "curated" | "d1-product-specification"),
+                    "{}",
+                    bare.id
+                );
             }
+            // The D1 header states the hash the bundle is stamped with,
+            // and why it has no curated revision (AC-0663).
+            let d1 = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "d1-product-specification")
+                .unwrap();
+            let hash = &bundle.graph_basis.as_ref().unwrap().content_hash;
+            assert!(
+                d1.content
+                    .contains(&format!("- Graph content hash: {hash}\n"))
+            );
+            assert!(
+                d1.content
+                    .contains("- Curated revision: not computed (`too_many_accepted`)")
+            );
             let curated = bundle
                 .artifacts
                 .iter()

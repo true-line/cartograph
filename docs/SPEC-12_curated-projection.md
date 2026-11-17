@@ -76,9 +76,11 @@ A proposal that is pending or rejected has no state and is not listed.
 
 ### Curated revision
 
-`revision = digest("curated-revision-v1", policy_version, graph_content_hash,
-[(record_id, review_decision, state, reason)…], assertion_decision_digest)`,
-with the record list in record-identity order. A rejected record enters with
+`revision = digest("curated-revision-v2", policy_version, graph_content_hash,
+[(record_id, review_decision, state, reason)…], [(draft_id, review_decision,
+state, reason)…], assertion_decision_digest)`, with the record list and the
+draft list each in identity order. Version 2 adds the section drafts of
+SPEC-15 (ADR-0064 decision 7); the policy version is `curated-policy-v2`. A rejected record enters with
 its decision and no state, so any review gives a new revision; a pending
 record does not enter. The assertion-decision digest covers the rejections
 applied and the decisions that match no current assertion. Review notes,
