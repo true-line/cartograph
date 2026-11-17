@@ -40,6 +40,11 @@ function stored(
 export const PENDING_DRAFT = stored('a1', '1.3', 'system', 'An administrator can check out an order.', null);
 export const ELIGIBLE_DRAFT = stored('b2', '1.2', 'system', 'The administrator is the only recovered actor.', 'accepted');
 export const STALE_DRAFT = stored('c3', '1.3', SUBJECT_SCOPE, 'Checkout validates the cart before payment.', 'accepted');
+/** A re-draft of the stale accepted draft, awaiting review. Not in the
+ *  default document: a story adds it. */
+export const REDRAFT_DRAFT = stored('a7', '1.3', SUBJECT_SCOPE, 'Checkout validates the cart and the stock.', null, {
+  replaces: STALE_DRAFT.draft_id,
+});
 export const MISSING_FACT = 'F-00000000000000d4';
 /** Accepted, and one cited fact is gone from the graph. Not in the default
  *  document: a story adds it. */

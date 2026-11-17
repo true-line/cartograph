@@ -4,8 +4,8 @@ import { SectionDocumentView } from './SectionDocumentView';
 import { NOT_COMPUTED_READ } from '../curatedFixtures';
 import {
   ACTOR_FACT, CAPABILITY_FACT, ELIGIBLE_DRAFT, ELIGIBLE_ROW, MISSING_FACT, PENDING_DRAFT,
-  RETURNED_DRAFT, STALE_DRAFT, STALE_ROW, SUBJECT_SCOPE, SUCCESSOR_DRAFT, UNRESOLVABLE_DRAFT,
-  UNRESOLVABLE_ROW, curatedReadWithDrafts, sectionDocumentFixture,
+  REDRAFT_DRAFT, RETURNED_DRAFT, STALE_DRAFT, STALE_ROW, SUBJECT_SCOPE, SUCCESSOR_DRAFT,
+  UNRESOLVABLE_DRAFT, UNRESOLVABLE_ROW, curatedReadWithDrafts, sectionDocumentFixture,
 } from '../sectionDocumentFixtures';
 
 // SPEC-15 slice 7 (ADR-0064), AC-0669: the Workbench shows each section of
@@ -23,6 +23,7 @@ const meta = {
     canReview: true,
     onReload: fn(),
     onDraft: fn(),
+    onRedraft: fn(),
     onReview: fn(),
     onOpenCitation: fn(),
   },
@@ -125,7 +126,7 @@ export const StaleDraftNamesItsChangedAndMissingFacts: Story = {
     await userEvent.click(stale.getByRole('button', { name: `Open changed fact ${CAPABILITY_FACT}` }));
     await expect(args.onOpenCitation).toHaveBeenLastCalledWith(CAPABILITY_FACT);
     await userEvent.click(stale.getByRole('button', { name: 'Re-draft this section' }));
-    await expect(args.onDraft).toHaveBeenLastCalledWith(STALE_DRAFT.draft.address);
+    await expect(args.onRedraft).toHaveBeenLastCalledWith(STALE_DRAFT);
 
     const gone = within(canvas.getByRole('article', { name: `Draft ${UNRESOLVABLE_DRAFT.draft_id.slice(0, 12)}` }));
     await expect(gone.getByTestId('draft-state')).toHaveTextContent('State: unresolvable.');
@@ -136,7 +137,7 @@ export const StaleDraftNamesItsChangedAndMissingFacts: Story = {
     // Only the claim citing the changed actor fact is marked.
     await expect(gone.getAllByText('Cites a changed fact.')).toHaveLength(1);
     await userEvent.click(gone.getByRole('button', { name: 'Re-draft this section' }));
-    await expect(args.onDraft).toHaveBeenLastCalledWith(UNRESOLVABLE_DRAFT.draft.address);
+    await expect(args.onRedraft).toHaveBeenLastCalledWith(UNRESOLVABLE_DRAFT);
 
     // An eligible or unreviewed draft names no fact and offers no re-draft.
     for (const draft of [ELIGIBLE_DRAFT, PENDING_DRAFT]) {
@@ -146,6 +147,30 @@ export const StaleDraftNamesItsChangedAndMissingFacts: Story = {
       await expect(card.queryByText('Cites a changed fact.')).not.toBeInTheDocument();
       await expect(card.queryByRole('button', { name: 'Re-draft this section' })).not.toBeInTheDocument();
     }
+  },
+};
+
+export const ReDraftIsShownBesideTheAcceptedDraftItReplaces: Story = {
+  // SPEC-17 slice 4 (ADR-0045), AC-0674: a re-draft names the accepted
+  // draft it replaces, which stays in place until the re-draft is accepted;
+  // like any successor it is accepted or rejected, never returned.
+  args: {
+    document: sectionDocumentFixture([STALE_DRAFT, REDRAFT_DRAFT]),
+    curated: curatedReadWithDrafts([STALE_ROW]),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = await open(canvasElement);
+    const redraft = within(canvas.getByRole('article', { name: `Draft ${REDRAFT_DRAFT.draft_id.slice(0, 12)}` }));
+    await expect(redraft.getByTestId('draft-redraft-of')).toHaveTextContent(
+      `Re-draft of accepted draft ${STALE_DRAFT.draft_id.slice(0, 12)}. That draft stays in place until this one is accepted.`,
+    );
+    await expect(redraft.queryByText(/Replaces returned draft/)).not.toBeInTheDocument();
+    await expect(redraft.queryByRole('button', { name: 'Return' })).not.toBeInTheDocument();
+    await userEvent.click(redraft.getByRole('button', { name: 'Accept' }));
+    await expect(args.onReview).toHaveBeenLastCalledWith(REDRAFT_DRAFT, 'accepted', null);
+    // The accepted draft is still shown with its state.
+    const stale = within(canvas.getByRole('article', { name: `Draft ${STALE_DRAFT.draft_id.slice(0, 12)}` }));
+    await expect(stale.getByTestId('draft-state')).toHaveTextContent('State: stale.');
   },
 };
 

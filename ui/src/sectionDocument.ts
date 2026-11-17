@@ -143,6 +143,31 @@ export async function sectionDraftQuestion(address: SectionAddress): Promise<str
   return question;
 }
 
+/** Why the host refuses a re-draft, by its closed code (SPEC-17). */
+export const REDRAFT_REFUSAL: Record<string, string> = {
+  unknown_draft: 'This draft is no longer stored. Reload the sections.',
+  draft_not_accepted: 'Only an accepted draft is re-drafted.',
+  draft_not_stale: 'Every fact this draft cites is unchanged, so there is nothing to re-draft.',
+  successor_pending: 'A re-draft of this draft is already stored. Review it first.',
+};
+
+/** The question that starts a re-draft of one stale or unresolvable
+ *  accepted draft. The host checks the state; a refusal is its closed code
+ *  put into words. */
+export async function sectionRedraftQuestion(draft: StoredSectionDraft): Promise<string> {
+  let question: string | null;
+  try {
+    question = await invokeOr<string | null>('section_redraft_question', null, {
+      draftId: draft.draft_id,
+    });
+  } catch (error) {
+    const code = message(error);
+    throw new Error(REDRAFT_REFUSAL[code] ?? code, { cause: error });
+  }
+  if (!question) throw new Error('The core did not return a drafting request.');
+  return question;
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

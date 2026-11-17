@@ -3,6 +3,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { NOT_COMPUTED_READ, curatedReadFixture } from './curatedFixtures';
 import {
   curatedDraftStates, curatedReadStatesDrafts, scopeLabel, sectionDraftQuestion,
+  sectionRedraftQuestion,
   useSectionDocumentStore,
 } from './sectionDocument';
 import {
@@ -131,5 +132,27 @@ describe('document view store (AC-0669)', () => {
     expect(commands).toEqual([['section_draft_question', {
       catalogueVersion: '1.0', document: 'D1', section: '1.3', scope: 'system',
     }]]);
+  });
+
+  // AC-0674: the re-draft request names the draft; the host decides.
+  it('asks the host for the re-draft question of one accepted draft', async () => {
+    const commands: [string, unknown][] = [];
+    mockIPC((command, args) => {
+      commands.push([command, args]);
+      return 'Draft section 1.3 "Capabilities" of document D1 (catalogue 1.0) for scope system.';
+    });
+    expect(await sectionRedraftQuestion(STALE_DRAFT)).toContain('Draft section 1.3');
+    expect(commands).toEqual([['section_redraft_question', { draftId: STALE_DRAFT.draft_id }]]);
+  });
+
+  it('puts a refused re-draft into words and keeps an unknown reason as sent', async () => {
+    mockIPC(() => { throw 'successor_pending'; });
+    await expect(sectionRedraftQuestion(STALE_DRAFT)).rejects.toThrow(
+      'A re-draft of this draft is already stored. Review it first.',
+    );
+    mockIPC(() => { throw 'draft_not_stale'; });
+    await expect(sectionRedraftQuestion(STALE_DRAFT)).rejects.toThrow('nothing to re-draft');
+    mockIPC(() => { throw 'store is locked'; });
+    await expect(sectionRedraftQuestion(STALE_DRAFT)).rejects.toThrow('store is locked');
   });
 });
