@@ -133,6 +133,11 @@ impl CuratedFailure {
         self.text().1
     }
 
+    /// The reason code, as serialized.
+    pub fn code(self) -> &'static str {
+        self.text().0
+    }
+
     /// The reason code, as serialized, and a plain sentence.
     fn text(self) -> (&'static str, String) {
         match self {
