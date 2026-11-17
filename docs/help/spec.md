@@ -281,6 +281,24 @@ Helm values files (the coverage document lists each kind it found as present
 and not read); Terraform resources per environment; the combined result of
 several Compose files; which environment is production; and live state.
 
+## Bundle manifest
+
+Every export includes **bundle-manifest.md**. Open it first when you hand an
+export to someone else. No model is involved.
+
+- **As-of** says what the export was made from: the document catalogue
+  version, the export mode, the graph content hash, the curated revision,
+  and each source with the revision it was read at. Two exports with the
+  same as-of hold the same files.
+- **Parts** lists every file of the export once, under the part of the
+  handoff bundle it belongs to: documents, rules, the traceability matrix,
+  the gap register, the fact index and the as-of.
+
+The manifest says nothing about your system and cites no fact. Work packets
+are not listed, because you generate and export each one on its own. When
+the app reads one file on its own without the review store, a value it did
+not read is shown as "not supplied".
+
 ## Documentation evidence
 
 Every export includes **documentation-evidence.md**. It lists the

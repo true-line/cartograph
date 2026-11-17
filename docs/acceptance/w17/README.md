@@ -36,7 +36,7 @@ index, writes them down, then follows each citation.
 
 - Reviewer:
 - Date:
-- Bundle as-of: graph content hash, curated revision, catalogue version, export mode
+- Bundle as-of, copied from `bundle-manifest.md`: graph content hash, curated revision, catalogue version, export mode, source revisions
 - Result: sufficient | not sufficient
 - Answered / stated unknown / silent: N / N / N
 
