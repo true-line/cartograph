@@ -218,18 +218,31 @@ fn a_draft_in_any_other_state_is_named_with_its_reason_in_both_modes() {
     for mode in MODES {
         let bundle = compile(mode, &projection, &BTreeSet::new());
         let content = &d1(&bundle).content;
-        for statement in ["Stale.", "Gone.", "One.", "Two."] {
+        // AC-0672: a stale draft is the only one of these a best-effort
+        // export prints; verified-only prints no claim.
+        for statement in ["Gone.", "One.", "Two."] {
             assert!(!content.contains(statement), "{statement}");
         }
-        let purpose = section(content, "## 1.1 ");
-        assert!(purpose.contains("_Not drafted._ No eligible draft is recorded"));
-        assert!(purpose.contains(
-            "- Draft `draft-s` for scope `system` is listed as `stale` (`cited_fact_changed`).\n"
+        assert_eq!(
+            content.contains("Stale."),
+            mode == ExportMode::BestEffort,
+            "{mode:?}"
+        );
+        // The header names the stale and the unresolvable address.
+        assert!(content.contains(
+            "- Stale sections: 1.1 (scope `system`, `stale`), 1.2 (scope `system`, \
+             `unresolvable`)\n"
         ));
-        assert!(section(content, "## 1.2 ").contains(
+        // An unresolvable draft is not printed and its ids are not: every
+        // id this document prints resolves in the fact index.
+        let actors = section(content, "## 1.2 ");
+        assert!(actors.contains("_Not drafted._ No eligible draft is recorded"));
+        assert!(actors.contains(
             "- Draft `draft-u` for scope `system` is listed as `unresolvable` \
-             (`cited_fact_missing`).\n"
+             (`cited_fact_missing`) and is not printed: 1 of the facts it cites is no longer \
+             in the graph. `curated.md` names them.\n"
         ));
+        assert!(!content.contains("F-0000000000000000"));
         let capabilities = section(content, "## 1.3 ");
         for draft in ["draft-c1", "draft-c2"] {
             assert!(capabilities.contains(&format!(
@@ -237,9 +250,161 @@ fn a_draft_in_any_other_state_is_named_with_its_reason_in_both_modes() {
                  (`another_draft_accepted`).\n"
             )));
         }
-        assert!(content.contains("Drafted claims printed: 0."));
         check_citations(&index(&bundle), printed_citations(content)).unwrap();
     }
+}
+
+/// AC-0672 (T-0672): a stale accepted draft stays in place in a
+/// `best-effort` export, marked, with the changed ids; `verified-only`
+/// prints no claim and counts it.
+#[test]
+fn a_stale_draft_is_printed_in_place_and_marked() {
+    let checkout = id("cap:checkout");
+    let admin = id("actor:admin");
+    let mut stale = draft(
+        "draft-s",
+        "1.1",
+        "Checkout exists.",
+        std::slice::from_ref(&checkout),
+    );
+    stale.claims.push(DraftClaim {
+        statement: "An administrator exists.".into(),
+        kind: "implemented".into(),
+        citations: vec![admin.clone()],
+    });
+    stale.cited_hashes = cited_fact_hashes(
+        &nodes(),
+        &[edge()],
+        &BTreeSet::from([checkout.clone(), admin.clone()]),
+    );
+    stale
+        .cited_hashes
+        .insert(checkout.clone(), "another-hash".into());
+    let projection = projection(&[stale], &nodes());
+    assert_eq!(projection.draft_counts.eligible, 0);
+
+    let bundle = compile(ExportMode::BestEffort, &projection, &BTreeSet::new());
+    let document = d1(&bundle);
+    let content = &document.content;
+    assert!(content.contains("- Stale sections: 1.1 (scope `system`, `stale`)\n"));
+    let purpose = section(content, "## 1.1 ");
+    assert!(!purpose.contains("_Not drafted._"));
+    assert!(purpose.contains(&format!(
+        "Drafted for scope `system` (draft `draft-s`):\n\n\
+         Stale: cited facts changed since this text was accepted: {checkout}.\n\n\
+         1. Checkout exists. (implemented; T3 / InferredWeak; role `section-writer@1`; \
+         human-reviewed: accepted; cites {checkout}; cites a changed fact)\n\
+         2. An administrator exists. (implemented; T3 / InferredWeak; role \
+         `section-writer@1`; human-reviewed: accepted; cites {admin})\n"
+    )));
+    assert!(content.contains("Drafted claims printed: 2."));
+    check_citations(&index(&bundle), printed_citations(content)).unwrap();
+
+    let bundle = compile(ExportMode::VerifiedOnly, &projection, &BTreeSet::new());
+    let content = &d1(&bundle).content;
+    assert!(content.contains("- Stale sections: 1.1 (scope `system`, `stale`)\n"));
+    let purpose = section(content, "## 1.1 ");
+    assert!(!purpose.contains("Checkout exists."));
+    assert!(!purpose.contains("Stale: cited facts changed"));
+    assert!(purpose.contains(
+        "- Draft `draft-s` for scope `system` is listed as `stale` (`cited_fact_changed`).\n"
+    ));
+    assert!(purpose.contains("Drafted claims left out of this `verified-only` export: 2."));
+    check_citations(&index(&bundle), printed_citations(content)).unwrap();
+}
+
+/// AC-0672 (T-0672): one changed fact marks exactly the accepted drafts
+/// that cite it, and a second run over the same inputs is byte-identical.
+#[test]
+fn one_changed_fact_marks_exactly_the_citing_drafts_twice_the_same() {
+    let checkout = id("cap:checkout");
+    let drafts = [
+        draft(
+            "draft-a",
+            "1.1",
+            "Purpose.",
+            std::slice::from_ref(&checkout),
+        ),
+        draft("draft-b", "1.2", "Actors.", &[id("actor:admin")]),
+        draft(
+            "draft-c",
+            "1.3",
+            "Capabilities.",
+            &[checkout.clone(), id("actor:admin")],
+        ),
+        draft("draft-d", "1.5", "Rules.", &[id("rule:limit")]),
+    ];
+    // Before the change nothing is stale.
+    let before = projection(&drafts, &nodes());
+    assert_eq!(before.draft_counts.eligible, 4);
+    assert!(
+        d1(&compile(ExportMode::BestEffort, &before, &BTreeSet::new()))
+            .content
+            .contains("- Stale sections: none\n")
+    );
+
+    // The handler behind the capability changes: its content hash moves.
+    let mut changed = nodes();
+    let node = changed
+        .iter_mut()
+        .find(|node| node.id == "cap:checkout")
+        .unwrap();
+    let recorded = node.props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let moved: String = recorded.chars().rev().collect();
+    assert_ne!(moved, recorded);
+    node.props["prov"]["content_hash"] = serde_json::json!(moved);
+    let run = || {
+        let projection = projection(&drafts, &changed);
+        let stale: Vec<(String, Vec<String>)> = projection
+            .drafts
+            .iter()
+            .filter(|draft| draft.state == DraftState::Stale)
+            .map(|draft| (draft.draft_id.clone(), draft.changed.clone()))
+            .collect();
+        let documents: Vec<String> = MODES
+            .iter()
+            .map(|mode| {
+                let bundle = try_compile_spec_supplied(
+                    &changed,
+                    &[edge()],
+                    &flows(),
+                    *mode,
+                    &BTreeSet::new(),
+                    Supplied {
+                        coverage: &[],
+                        stale_coverage: &[],
+                        curated: Curated::Computed(&projection),
+                        graph_content_hash: None,
+                    },
+                )
+                .unwrap();
+                d1(&bundle).content.clone()
+            })
+            .collect();
+        (stale, documents)
+    };
+    let (stale, documents) = run();
+    assert_eq!(
+        stale,
+        vec![
+            ("draft-a".to_owned(), vec![checkout.clone()]),
+            ("draft-c".to_owned(), vec![checkout.clone()]),
+        ]
+    );
+    for document in &documents {
+        assert!(document.contains(
+            "- Stale sections: 1.1 (scope `system`, `stale`), 1.3 (scope `system`, `stale`)\n"
+        ));
+    }
+    // The untouched drafts print as before, unmarked.
+    let best_effort = &documents[1];
+    assert!(!section(best_effort, "## 1.2 ").contains("Stale:"));
+    assert!(!section(best_effort, "## 1.5 ").contains("Stale:"));
+    assert!(section(best_effort, "## 1.3 ").contains("cites a changed fact"));
+    assert_eq!(run(), (stale, documents));
 }
 
 #[test]
