@@ -95,6 +95,11 @@ test('CI enforces the governed lifecycle without draft jobs', () => {
   assert.match(workflow, /run: \|\n\s+set \+e\n\s+run_id=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/actions\/runs\?event=merge_group/u);
 });
 
+test('Advanced CodeQL runs the security-and-quality suite', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
+  assert.match(workflow, /^\s+queries: security-and-quality$/mu);
+});
+
 test('required Advanced CodeQL contexts report on every non-draft PR run, even on the evidence path (#440)', () => {
   // The main ruleset requires the three `Advanced CodeQL / Analyze (…)` contexts
   // and evaluates them on the PR's own check rollup. Contexts from the

@@ -84,6 +84,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          # Quality queries ride on the same analysis, so maintainability
+          # findings need no separate GitHub Code Quality scan per push.
+          queries: security-and-quality
           # Several runners share one host's memory; CodeQL otherwise sizes
           # itself to the whole machine and fails finalizing the Rust database.
           ram: 6144
