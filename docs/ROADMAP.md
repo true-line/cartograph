@@ -477,9 +477,12 @@ The criteria are the existing ones on #1610 plus the exit gates that section
   #1775 that bear on a release build stay release-blocking.
 - **Providers.** Reconstruction runs on local open-source models and, where
   the user opts in with their own key, on cloud providers. In-app provider
-  setup is #1763 (ADR-0057). Whether the cloud lanes use the providers'
-  agent SDKs is an open decision that needs its own ADR before W13's
-  drafting acceptance is run on a cloud model.
+  setup is #1763 (ADR-0057). How the agent team runs on those providers is
+  proposed in ADR-0066 (owner review): a role runs in the app on a local
+  model, the Claude Agent SDK or the OpenAI Agents SDK, the app hosts the
+  SDK runtimes with the user's key, every output passes the same
+  admission and review, and outside agents such as Codex and Claude Code
+  work with the in-app agents through MCP.
 
 ### Tracking
 
