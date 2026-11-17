@@ -94,7 +94,7 @@ export const ELIGIBLE_ROW = row(
 );
 export const STALE_ROW = row(
   STALE_DRAFT, 'stale', 'cited_fact_changed',
-  'A fact this draft cites changed after the draft was written.',
+  'A fact this draft cites changed after the draft was written; a best-effort export prints it marked stale.',
 );
 
 /** The curated read that goes with [`sectionDocumentFixture`]. */

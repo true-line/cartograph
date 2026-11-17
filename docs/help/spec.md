@@ -300,19 +300,27 @@ of the product specification, in order, each marked with its kind.
 - **H** sections are left blank for your team. Cartograph never fills them.
 
 The header shows the catalogue version, the export mode, the graph content
-hash and the curated revision. No model is involved in writing this document,
+hash, the curated revision and the **Stale sections**: each section whose
+accepted draft cites a fact that changed or is gone, or **none**. No model is involved in writing this document,
 and the other exported files are unchanged, except that the fact index now
 lists this document beside each fact it cites. An MCP client reads the same
 document with `cartograph_read_artifact`.
 
-A draft is shown only after a person accepts it, and only while every fact
-it cites is unchanged. Each claim is printed with its citation ids and marked
+A draft is shown only after a person accepts it. Each claim is printed with its citation ids and marked
 **T3 / InferredWeak**, with the role that wrote it and **human-reviewed:
 accepted**. Accepting a draft never raises its tier. A **verified-only**
 export prints no drafted claim and says how many it left out of each
-section. A draft that is stale, replaced, in conflict with another accepted
-draft, or citing a fact that is no longer in the graph is named with that
-reason and not printed.
+section.
+
+When a fact an accepted draft cites changes, the draft is **stale**. A
+**best-effort** export keeps it in its section under **Stale: cited facts
+changed since this text was accepted**, with the changed citation ids, and
+each claim that cites one ends with **cites a changed fact**. Read a stale
+section as what was true when it was accepted. A draft citing a fact that
+is no longer in the graph is not printed; the section says how many are
+missing and **curated.md** names them. A draft that is replaced or in
+conflict with another accepted draft is named with that reason and not
+printed.
 
 ### Drafting and reviewing sections
 
