@@ -3,8 +3,9 @@ import { expect, fn, userEvent, within } from 'storybook/test';
 import { SectionDocumentView } from './SectionDocumentView';
 import { NOT_COMPUTED_READ } from '../curatedFixtures';
 import {
-  ACTOR_FACT, CAPABILITY_FACT, ELIGIBLE_DRAFT, PENDING_DRAFT, RETURNED_DRAFT, STALE_DRAFT,
-  SUBJECT_SCOPE, SUCCESSOR_DRAFT, curatedReadWithDrafts, sectionDocumentFixture,
+  ACTOR_FACT, CAPABILITY_FACT, ELIGIBLE_DRAFT, ELIGIBLE_ROW, MISSING_FACT, PENDING_DRAFT,
+  RETURNED_DRAFT, STALE_DRAFT, STALE_ROW, SUBJECT_SCOPE, SUCCESSOR_DRAFT, UNRESOLVABLE_DRAFT,
+  UNRESOLVABLE_ROW, curatedReadWithDrafts, sectionDocumentFixture,
 } from '../sectionDocumentFixtures';
 
 // SPEC-15 slice 7 (ADR-0064), AC-0669: the Workbench shows each section of
@@ -101,6 +102,50 @@ export const AcceptedDraftShowsTheHostStateAndReason: Story = {
     await expect(stale.getByTestId('draft-state')).toHaveTextContent(
       'State: stale. A fact this draft cites changed after the draft was written; a best-effort export prints it marked stale. (cited_fact_changed)',
     );
+  },
+};
+
+export const StaleDraftNamesItsChangedAndMissingFacts: Story = {
+  // SPEC-17 slice 3 (ADR-0045), AC-0673: a stale or unresolvable accepted
+  // draft shows the host's changed and missing ids under its state, marks
+  // the claims that cite a changed fact, and offers a re-draft.
+  args: {
+    document: sectionDocumentFixture([ELIGIBLE_DRAFT, STALE_DRAFT, UNRESOLVABLE_DRAFT, PENDING_DRAFT]),
+    curated: curatedReadWithDrafts([ELIGIBLE_ROW, STALE_ROW, UNRESOLVABLE_ROW]),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = await open(canvasElement);
+    const stale = within(canvas.getByRole('article', { name: `Draft ${STALE_DRAFT.draft_id.slice(0, 12)}` }));
+    await expect(stale.getByTestId('draft-changed')).toHaveTextContent(
+      `Changed since this draft was accepted: ${CAPABILITY_FACT}`,
+    );
+    await expect(stale.queryByTestId('draft-missing')).not.toBeInTheDocument();
+    // Both claims cite the changed capability fact.
+    await expect(stale.getAllByText('Cites a changed fact.')).toHaveLength(2);
+    await userEvent.click(stale.getByRole('button', { name: `Open changed fact ${CAPABILITY_FACT}` }));
+    await expect(args.onOpenCitation).toHaveBeenLastCalledWith(CAPABILITY_FACT);
+    await userEvent.click(stale.getByRole('button', { name: 'Re-draft this section' }));
+    await expect(args.onDraft).toHaveBeenLastCalledWith(STALE_DRAFT.draft.address);
+
+    const gone = within(canvas.getByRole('article', { name: `Draft ${UNRESOLVABLE_DRAFT.draft_id.slice(0, 12)}` }));
+    await expect(gone.getByTestId('draft-state')).toHaveTextContent('State: unresolvable.');
+    await expect(gone.getByTestId('draft-changed')).toHaveTextContent(ACTOR_FACT);
+    await expect(gone.getByTestId('draft-missing')).toHaveTextContent(`No longer in the graph: ${MISSING_FACT}`);
+    // A missing fact has no evidence to open.
+    await expect(gone.queryByRole('button', { name: new RegExp(MISSING_FACT) })).not.toBeInTheDocument();
+    // Only the claim citing the changed actor fact is marked.
+    await expect(gone.getAllByText('Cites a changed fact.')).toHaveLength(1);
+    await userEvent.click(gone.getByRole('button', { name: 'Re-draft this section' }));
+    await expect(args.onDraft).toHaveBeenLastCalledWith(UNRESOLVABLE_DRAFT.draft.address);
+
+    // An eligible or unreviewed draft names no fact and offers no re-draft.
+    for (const draft of [ELIGIBLE_DRAFT, PENDING_DRAFT]) {
+      const card = within(canvas.getByRole('article', { name: `Draft ${draft.draft_id.slice(0, 12)}` }));
+      await expect(card.queryByTestId('draft-changed')).not.toBeInTheDocument();
+      await expect(card.queryByTestId('draft-missing')).not.toBeInTheDocument();
+      await expect(card.queryByText('Cites a changed fact.')).not.toBeInTheDocument();
+      await expect(card.queryByRole('button', { name: 'Re-draft this section' })).not.toBeInTheDocument();
+    }
   },
 };
 

@@ -4797,6 +4797,20 @@ details.investigation-section { display: block; }
   color: var(--text);
 }
 
+.document-claim-changed,
+.document-draft-facts {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.document-draft-facts {
+  margin: 0;
+}
+
+.document-missing-fact {
+  margin-right: 0.3rem;
+}
+
 .citation-link {
   margin: 0 0.3rem 0 0;
   padding: 0 0.3rem;
