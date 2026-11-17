@@ -4811,6 +4811,32 @@ details.investigation-section { display: block; }
   margin-right: 0.3rem;
 }
 
+.document-draft-change {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.document-draft-change summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.document-change-label {
+  margin: 0.4rem 0 0.1rem;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.document-change-claims {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.document-change-facts {
+  margin: 0.4rem 0 0;
+}
+
 .citation-link {
   margin: 0 0.3rem 0 0;
   padding: 0 0.3rem;
