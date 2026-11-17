@@ -1,6 +1,6 @@
 # SPEC-15 — Authored document sections
 
-- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 and 2 are implemented; the rest is not.
+- **Status:** Proposed for [#1748](https://github.com/true-line/cartograph/issues/1748). Slices 1 to 3 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0047 / AC-0663..0670; ROADMAP W13; v1.0.0 criterion 6.
 - **Decision:** [ADR-0064](adr/ADR-0064-authored-document-sections.md).
@@ -73,6 +73,17 @@ increments the revision. A `returned` draft admits exactly one successor for
 the same address; the successor names it, and cannot be returned. Reviews
 never change a draft's content or provenance. Drafts and reviews reopen
 unchanged after a restart.
+
+As built (`agents::draft_store`): the table is `staged_section_drafts`, in
+the review store's file beside the staged proposals. The identity also
+covers the author role's name and the returned draft a successor replaces,
+so a successor is never the same record as a first draft. Storing identical
+content returns the stored record with its current review. The store
+re-applies the admission rule to what it is given and refuses a draft that
+records a hash for a fact no claim cites. A review note is at most 4 KiB.
+A trigger refuses any update of the content columns, and a unique index
+holds the one-successor rule. Whether an address is in the section table is
+checked by the host that requests the run (slice 6), not by the store.
 
 ## Curated projection
 
