@@ -1,7 +1,7 @@
 # Document catalogue
 
-- **Status:** Draft 0.2 for owner mark-up (#1747). Not yet approved.
-- **Date:** 2026-11-09
+- **Status:** Version 1.0. Approved by the owner on 2026-11-17 (#1856), as drafted in 0.2 (#1747) with no mark-up. A change to this catalogue is a new version and needs the owner's approval.
+- **Date:** 2026-11-17 (drafted 2026-11-09)
 - **Direction:** [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md) decision 3, [VISION](VISION.md) V10, [ROADMAP](ROADMAP.md) §10 (W14)
 
 This is the list of documents Cartograph produces for an ingested system: the
@@ -268,10 +268,10 @@ row names the issue that tracks it.
 | Every header | The graph content hash is not available outside tests (#1765) |
 | Every A and P+A section | Section drafting (#1748) on the curated projection (#1746) |
 
-## 5. Defaults chosen in this draft
+## 5. Defaults chosen in version 1.0
 
-Each is a choice made to get a complete first version. Strike or change any
-of them.
+Each is a choice made to get a complete first version. The owner approved
+them as written; changing one is a new catalogue version.
 
 1. **Eleven documents.** Ten reader-facing documents and one set of evidence
    appendices. Candidates left out: release notes and changelog, cost and

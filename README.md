@@ -59,7 +59,7 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 | [docs/SPEC-01_context-hub.md](docs/SPEC-01_context-hub.md) | Domain context, MCP/ACP architecture, and delivery gates |
 | [docs/SPEC-02_rule-evidence.md](docs/SPEC-02_rule-evidence.md) | Scoped rule evidence, redaction, and interpretation boundaries |
 | [docs/cartograph_project_brief.md](docs/cartograph_project_brief.md) | Short project brief |
-| [docs/DOCUMENT-CATALOGUE.md](docs/DOCUMENT-CATALOGUE.md) | Draft catalogue of the documents Cartograph produces (#1747) |
+| [docs/DOCUMENT-CATALOGUE.md](docs/DOCUMENT-CATALOGUE.md) | Catalogue of the documents Cartograph produces (version 1.0, owner-approved; #1747, #1856) |
 | [docs/user_stories.md](docs/user_stories.md) | User stories + acceptance criteria (US/AC schema) |
 | [docs/US-TM.md](docs/US-TM.md) | Traceability matrix: US ↔ AC ↔ crate ↔ milestone ↔ ADR ↔ test |
 | [docs/adr/](docs/adr/) | Architecture decision records |
