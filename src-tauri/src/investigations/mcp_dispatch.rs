@@ -113,8 +113,23 @@ impl TaskDispatcher {
                 #[derive(Serialize)]
                 struct ResultReply<'a, T> {
                     result: &'a Option<T>,
+                    /// Present for a drafting run only (ADR-0066): whether
+                    /// the run staged a draft for review, by closed code.
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    drafting: Option<super::section_drafts::DraftingOutcome>,
                 }
-                response(id, &ResultReply { result: &result }, cap)
+                // The read above admitted this session to the task. Staging
+                // is idempotent and takes the jobs lock itself.
+                let drafting = super::section_drafts::outcome_of_drafting_run(&state, &task_id)
+                    .map_err(|_| ReadError::Storage)?;
+                response(
+                    id,
+                    &ResultReply {
+                        result: &result,
+                        drafting,
+                    },
+                    cap,
+                )
             }
             TaskArguments::Cancel { task_id } => {
                 let detail = state

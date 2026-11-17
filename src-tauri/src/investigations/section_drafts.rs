@@ -247,6 +247,25 @@ pub(crate) fn redraft_question(state: &AppState, draft_id: &str) -> Result<Strin
     .map_err(str::to_owned)
 }
 
+/// The outcome of a task when it is a drafting run, and none for a task of
+/// any other role. The MCP result read reports it to the session that
+/// started the run.
+pub(crate) fn outcome_of_drafting_run(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<DraftingOutcome>, String> {
+    let drafting = {
+        let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let summary = jobs.investigation(id).map_err(|e| e.to_string())?.summary;
+        summary.specialist_id == SpecialistId::SectionWriterV1
+    };
+    if drafting {
+        stage(state, id).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Stage the draft of the completed drafting run `id`, or say why it staged
 /// none. `Err` is an operational failure (a store or the graph could not be
 /// read); the run's result is unchanged and a later call retries.
