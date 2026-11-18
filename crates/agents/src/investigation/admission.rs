@@ -1,5 +1,9 @@
 //! Validate complete immutable metadata and result identities independently of
 //! the current graph. Raw source remains necessary only for first admission.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::{TaskFactKey, TaskRangeRole};
 use core_prov::{ConfidenceTier, Tier};
@@ -766,6 +770,7 @@ impl InvestigationResult {
                 SpecialistId::DomainAnalystV25
                     | SpecialistId::DomainAnalystV26
                     | SpecialistId::DomainAnalystV27
+                    | SpecialistId::DomainAnalystV28
             )
         {
             return Err(InvestigationError::InvalidInput);

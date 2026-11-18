@@ -114,6 +114,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) external_withheld: usize,
     /// Environment facts withheld the same way (`environments::withheld`).
     pub(crate) environments_withheld: usize,
+    /// Endpoint facts withheld the same way (`endpoint_inventory::withheld`).
+    pub(crate) endpoints_withheld: usize,
     /// The curated projection, or why there is none.
     pub(crate) curated: Curated<'a>,
     /// The graph content hash the host supplied, if any.
@@ -139,6 +141,7 @@ impl<'a> Beside<'a> {
             configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
             external_withheld: external::withheld(nodes, edges, mode, rejected),
             environments_withheld: environments::withheld(nodes, edges, mode, rejected),
+            endpoints_withheld: endpoint_inventory::withheld(nodes, mode, rejected),
             curated: supplied.curated,
             graph_content_hash: supplied.graph_content_hash,
             source_revisions: supplied.source_revisions,
@@ -289,6 +292,13 @@ const ARTIFACTS: &[Artifact] = &[
         id: documentation::ARTIFACT_ID,
         file: "documentation-evidence.md",
         title: "Documentation evidence",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1658).
+    Artifact {
+        id: "endpoint-inventory",
+        file: "endpoint-inventory.md",
+        title: "Endpoint inventory",
         format: "markdown",
     },
     // After it, for the same reason (#1746).
@@ -578,6 +588,11 @@ fn produce(
         // their exact references name, and the documentation drift counts
         // (AC-0681). No stored inventory is read.
         documentation::ARTIFACT_ID => documentation::output(nodes, edges, mode, max)?,
+        // Endpoint facts in the admitted graph and the count the mode and
+        // the rejections withheld. No stored inventory is read (AC-0694).
+        "endpoint-inventory" => {
+            endpoint_inventory::output(nodes, (mode, beside.endpoints_withheld), max)?
+        }
         // The curated projection the host supplied, and the admitted nodes
         // its items cite (AC-0653). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
