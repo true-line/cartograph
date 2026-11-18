@@ -225,10 +225,11 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: flock
-          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
           # A slow hosted mirror timed out three Rust lanes in 20 minutes
-          # (#1924). Downloaded archives stay in apt's cache, so a retry resumes.
+          # (#1924). Downloaded archives stay in apt's cache, so a retry resumes;
+          # DPkg::Lock::Timeout lets it wait for a timed-out attempt's apt-get.
           attempts: '2'
           retry-delay-seconds: '5'
 
