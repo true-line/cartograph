@@ -227,6 +227,8 @@ mod draft_tests {
                 "F-0000000000000001".to_owned(),
                 "current".to_owned(),
             )]),
+            findings: &[],
+            cited_fact_digests: &std::collections::BTreeMap::new(),
             policy_version: CURATED_POLICY_VERSION,
         })
         .unwrap();

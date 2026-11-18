@@ -26,5 +26,7 @@ adapters-lang-ts = { workspace = true }
 adapters-lang-java = { workspace = true }
 adapters-lang-kotlin = { workspace = true }
 adapters-lang-python = { workspace = true }
+adapters-lang-go = { workspace = true }
+adapters-lang-rust = { workspace = true }
 source-capture = { workspace = true }
 tempfile = "3"
