@@ -1705,6 +1705,22 @@ button.flow-hop-card:hover {
   white-space: nowrap;
 }
 
+.curated-findings {
+  margin-top: 1rem;
+}
+
+.curated-finding-list {
+  padding-left: 1.25rem;
+}
+
+.curated-finding-list > li + li {
+  margin-top: 0.75rem;
+}
+
+.curated-finding-list p {
+  margin: 0.15rem 0;
+}
+
 .curated-tier {
   display: block;
   margin-bottom: 0.25rem;

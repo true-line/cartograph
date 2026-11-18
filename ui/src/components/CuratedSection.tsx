@@ -1,4 +1,6 @@
-import type { CuratedRecord, CuratedRecordState, CuratedRead } from '../store';
+import type {
+  ComputedCuratedRead, CuratedFindingListing, CuratedRecord, CuratedRecordState, CuratedRead,
+} from '../store';
 import { TierBadge } from './TierBadge';
 
 export interface CuratedSectionProps {
@@ -79,6 +81,120 @@ function RecordTable({ caption, lastHeading, records, last }: {
         </tbody>
       </table>
     </div>
+  );
+}
+
+const idList = (ids: string[]) => (ids.length === 0 ? '—' : ids.join(', '));
+
+function FindingListingTable({ rows }: { rows: CuratedFindingListing[] }) {
+  const caption = `Accepted findings that are not eligible (${rows.length})`;
+  return (
+    <div className="md-table-wrap" role="region" aria-label={caption} tabIndex={0}>
+      <table className="curated-table">
+        <caption>
+          {caption}. These findings assert nothing and their statements are not shown. The list
+          is the same in both export modes.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Finding</th>
+            <th scope="col">Investigation</th>
+            <th scope="col">Role</th>
+            <th scope="col">State</th>
+            <th scope="col">Reason</th>
+            <th scope="col">Changed facts</th>
+            <th scope="col">Missing facts</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.finding_ref}>
+              <th scope="row">
+                <code title={row.finding_ref}>{row.finding_id}</code>
+              </th>
+              <td><code>{row.investigation_id}</code></td>
+              <td><code>{row.role}</code></td>
+              <td className="curated-state"><code>{row.state}</code></td>
+              <td>{row.reason_sentence} ({row.reason})</td>
+              <td>{idList(row.changed)}</td>
+              <td>{idList(row.missing)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/**
+ * Findings accepted as curated (ADR-0074 decision 11, AC-0846). Every
+ * state, reason sentence and count is the host's, and so is the split by
+ * export mode: this draws what the read returned. Nothing is drawn for a
+ * host that sends no finding fields.
+ */
+function CuratedFindings({ read }: { read: ComputedCuratedRead }) {
+  const counts = read.finding_counts;
+  if (!counts) return null;
+  const shown = read.findings ?? [];
+  const listed = read.findings_listed ?? [];
+  return (
+    <section className="curated-findings" aria-labelledby="curated-findings-title">
+      <h4 id="curated-findings-title">Findings accepted as curated</h4>
+      <p className="muted">
+        Investigation findings a person accepted as curated. A finding is one statement an agent
+        produced, with the facts it cites. It is T3 / InferredWeak and is not a recovered fact.
+      </p>
+      <dl className="curated-counts" aria-label="Curated finding counts">
+        <div><dt>Accepted</dt><dd>{counts.accepted}</dd></div>
+        <div><dt>Eligible</dt><dd>{counts.eligible}</dd></div>
+        <div><dt>Stale</dt><dd>{counts.stale}</dd></div>
+        <div><dt>Unresolvable</dt><dd>{counts.unresolvable}</dd></div>
+      </dl>
+      {counts.accepted === 0 && (
+        <p className="muted" data-testid="curated-findings-empty">
+          No finding is accepted as curated. Accept one in its investigation to list it here.
+        </p>
+      )}
+      {read.export_mode === 'verified-only' && counts.accepted > 0 && (
+        <p className="curated-notice" role="note" data-testid="curated-findings-omitted">
+          No finding is shown: this is a <code>verified-only</code> read, and every finding is
+          InferredWeak. Eligible findings left out: {read.findings_omitted ?? 0}.
+        </p>
+      )}
+      {shown.length > 0 && (
+        <ol className="curated-finding-list" aria-label={`Curated findings (${shown.length})`}>
+          {shown.map((finding) => (
+            <li key={finding.finding_ref}>
+              <p>
+                <strong>{finding.title}</strong>{' '}
+                <span className="curated-tier">{finding.tier}</span>{' '}
+                <TierBadge tier={finding.confidence} />
+              </p>
+              <p>{finding.statement}</p>
+              <p className="muted">
+                {finding.kind} · T3 / InferredWeak · role <code>{finding.role}</code> · human-reviewed: accepted as
+                curated · source support: captured {finding.source_support.captured}, unverified{' '}
+                {finding.source_support.unverified} · finding{' '}
+                <code title={finding.finding_ref}>{finding.finding_id}</code> of{' '}
+                <code>{finding.investigation_id}</code>
+              </p>
+              <p>
+                Cites{' '}
+                {finding.citations.map((id, index) => (
+                  <span key={id}>{index > 0 && ', '}<code>{id}</code></span>
+                ))}
+              </p>
+              {finding.limitations.length > 0 && (
+                <ul>
+                  {finding.limitations.map((item, index) => <li key={index}>{`Limitation: ${item}`}</li>)}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {listed.length > 0 && <FindingListingTable rows={listed} />}
+    </section>
   );
 }
 
@@ -175,6 +291,8 @@ export function CuratedSection({ read, busy, onRefresh }: CuratedSectionProps) {
               <code>best-effort</code> export includes them, each marked.
             </p>
           )}
+
+          <CuratedFindings read={read} />
 
           {/* Closed until asked for, so the records do not push the
               documents off the screen; the counts above stay in view. */}
