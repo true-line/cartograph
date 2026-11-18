@@ -1,6 +1,6 @@
 # ADR-0044 — App-owned read-only MCP with a separate local relay
 
-- **Status:** Proposed — #718; owner review required
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment); proposed in #718
 - **Date:** 2026-10-21
 - **Deciders:** Cartograph owner; Codex implements, Claude cross-reviews shared semantics
 
@@ -135,3 +135,19 @@ installed/native packaging, independent-client/provider acceptance and Windows
 support remain pending under their prior gates. AC-0288..0290 and their manual
 evidence denominator are unchanged. Neither this addendum nor the partition
 fixture claims complete #731 delivery or owner approval.
+
+## Amendment — 2026-11-18: accepted for the read surface only
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment.
+
+- This ADR decides the read surface only: the app-owned service, the relay and
+  the typed read tools.
+- The app now also exposes owner-granted durable task tools
+  (`cartograph_task_*`, `TaskTool` in `crates/mcp-wire/src/tools.rs`). Their
+  authority and grant model is outside this decision. It is specified in
+  US-0043 (AC-0320..0322) and SPEC-10, and its decision record is owed as a
+  sibling ADR (or a follow-up to
+  [ADR-0048](ADR-0048-mcp-investigation-authority.md), which covers storage
+  only).
+- H3 curated reads move under
+  [ADR-0061](ADR-0061-curated-read-contract.md).

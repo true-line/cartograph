@@ -1,6 +1,6 @@
 # ADR-0036 — Lifecycle reconstruction as the product direction
 
-- **Status:** Proposed in #572 (owner review)
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment); proposed in #572
 - **Date:** 2026-10-19
 - **Deciders:** Cartograph owner; implementation agents (Claude, Codex)
 
@@ -184,3 +184,20 @@ Alternative 5 changes accordingly. A general chat, roster or pool can be
 built now under this boundary, and the named specialists stay as its first
 members.
 
+### Amendment — 2026-11-18: accepted; ADR-0056 extends decisions 2 and 7, ADR-0061 defines decision 4
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment. The
+2026-10-21 amendment of decision 7 above stands.
+
+- [ADR-0056](ADR-0056-documentation-reconstruction-pipeline.md) (accepted
+  2026-11-17) extends decision 2: agents author document sections, laid over
+  the deterministic projection, which stays the frame of every document and
+  is never replaced by an authored statement.
+- ADR-0056 extends decision 7: a section draft is a kind of staged proposal,
+  behind the same review boundary. Review changes its review status, never its
+  tier.
+- [ADR-0061](ADR-0061-curated-read-contract.md) defines decision 4's field
+  list (the curated read contract, DR-4).
+- The Context describes the code on 2026-10-19 and is kept as that record.
+  Product code has since gained MCP servers (`crates/mcp-local`,
+  `crates/mcp-relay`, `crates/mcp-wire`).
