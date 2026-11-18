@@ -159,6 +159,17 @@ impl Fixture {
         }
     }
 
+    /// What `events::http_binding` records on a Gap it keeps since #1843,
+    /// and on its Gap edge: the binding state of the call's origin, and on
+    /// the Gap the citations of the bindings that name that origin.
+    fn recorded(&mut self, gap: &str, state: &str, cited: Option<Value>) {
+        self.fact(gap).props[BINDING_STATE] = state.into();
+        if let Some(cited) = cited {
+            self.fact(gap).props["binding"] = cited;
+        }
+        self.relation("FETCHES", gap).props[BINDING_STATE] = state.into();
+    }
+
     /// An observed client resource and one use of it.
     fn observed(
         &mut self,
@@ -432,6 +443,37 @@ fn the_predicate_decides_every_row_of_the_classification_table() {
     assert_eq!(
         decide(&any_method, &none),
         Unclassified(Unknown::MethodNotKnown)
+    );
+
+    // #1843: the binding pass records what the declared bindings say about
+    // the origin of every Gap it keeps, and the predicate reads that field,
+    // never the sentence. `none` is outside only from a literal host.
+    for mut evaluated in [kept.clone(), any_method.clone()] {
+        evaluated.props[BINDING_STATE] = STATE_NONE.into();
+        assert_eq!(decide(&evaluated, &none), Outside);
+        for inside in STATES_INSIDE {
+            evaluated.props[BINDING_STATE] = inside.into();
+            assert_eq!(
+                decide(&evaluated, &none),
+                NotACrossing(NotCrossing::InsideUnresolved),
+                "{inside}"
+            );
+        }
+    }
+    let mut configured = fetch(request("GET", "https://api.stripe.com/v1", "config:.env"));
+    configured.props[BINDING_STATE] = STATE_NONE.into();
+    assert_eq!(
+        decide(&configured, &none),
+        Unclassified(Unknown::HostNotInSource)
+    );
+    // The words `events::http_binding` records (pinned there as well).
+    assert_eq!(
+        (BINDING_STATE, STATE_NONE, STATES_INSIDE),
+        (
+            "binding_state",
+            "none",
+            ["origin_declared", "names_repository", "ambiguous"]
+        )
     );
     assert_eq!(
         Unknown::HostNotInSource.reason(),
@@ -754,11 +796,13 @@ fn system() -> Fixture {
 // repository is counted and not listed; an in-process channel, browser
 // storage and an inbound channel are not listed.
 //
-// One clause of the acceptance evidence does not hold on this graph: the
-// third-party calls are unclassified, not outside. The binding pass kept
-// their Gaps, and whether it found no binding is recorded as a sentence
-// only (`events::http_binding`). The clause holds on a graph no binding pass
-// has touched (`a_third_party_origin_is_outside_with_its_sites_flows_and_entities`).
+// This graph is in the shape stored before the binding pass recorded its
+// outcome as a field (#1843): the third-party calls are unclassified, not
+// outside, because whether the pass found no binding is a sentence only.
+// On a graph with the recorded state they are outside
+// (`a_recorded_binding_state_lists_third_party_calls_as_outside`), as on a
+// graph no binding pass has touched
+// (`a_third_party_origin_is_outside_with_its_sites_flows_and_entities`).
 #[test]
 fn two_repositories_with_a_declared_binding_are_classified_by_the_one_predicate() {
     let f = system();
@@ -864,6 +908,128 @@ fn two_repositories_with_a_declared_binding_are_classified_by_the_one_predicate(
         .unwrap();
     assert_eq!(refund.status, FlowStatus::Partial);
     assert!(content.contains("**A declared binding is known here only through the graph.**"));
+}
+
+// AC-0660 (#1843, SPEC-13 "Binding outcome"): the same two repositories on
+// a graph whose binding pass recorded its outcome. The literal third-party
+// calls are outside, each with its flow and span; the call a binding places
+// in the other repository is still counted as inside, unresolved; a call
+// with a computed method is classified by its origin; and an observed
+// client of a declared host that no call names is not listed as outside.
+#[test]
+fn a_recorded_binding_state_lists_third_party_calls_as_outside() {
+    let mut f = system();
+    let orders = (WEB, "src/orders.ts");
+    for (path, byte) in [("src/pay.ts", 120), ("src/refund.ts", 300)] {
+        f.recorded(&gap_id(WEB, path, byte), "none", None);
+    }
+    f.recorded(
+        &gap_id(WEB, "src/orders.ts", 400),
+        "names_repository",
+        Some(binding("orders", API, "https://orders.internal")),
+    );
+    // Computed methods: one to the provider, one to a declared gateway.
+    for (byte, caller, url, state, cited) in [
+        (
+            1000,
+            "send",
+            "https://api.stripe.com/v1/events",
+            "none",
+            None,
+        ),
+        (
+            1100,
+            "proxy",
+            "https://gw.internal/any",
+            "origin_declared",
+            Some(binding("orders", API, "https://gw.internal")),
+        ),
+    ] {
+        let gap = f.call(Call {
+            at: orders,
+            byte,
+            caller,
+            request: Some(("?", url, "literal")),
+            reason: "runtime-computed HTTP method",
+        });
+        f.recorded(&gap, state, cited);
+    }
+    // An observed client of a declared host, at no outbound call's site.
+    let admin = f.http(orders, "https://admin.internal", ("audit", 1200));
+    f.fact(&admin).props["binding"] = binding("admin", API, "https://admin.internal");
+    // And one of an undeclared host: still outside.
+    f.http(orders, "https://hooks.example.com", ("notify", 1300));
+
+    let content = f.content();
+    assert_eq!(
+        counts(&content),
+        "Export mode: `verified-only`. Outside targets: 2. Unclassified targets: 5. Calls that \
+         binding evidence places in a registered repository and that matched no one endpoint \
+         there (inside, unresolved): 2. Calls to the caller's own origin that matched no \
+         endpoint: 0. Published channels with a recovered subscriber or backing resource: 2."
+    );
+    let services: Vec<Vec<&str>> = table(&content, "External services")
+        .into_iter()
+        .map(cells)
+        .collect();
+    let origins: Vec<&str> = services.iter().map(|row| row[0]).collect();
+    assert_eq!(
+        origins,
+        ["https://api.stripe.com", "https://hooks.example.com"]
+    );
+    // Both recorded calls and the computed-method call are sites of the one
+    // provider target, each with its span.
+    let sites = table(&content, "Sites of each external service");
+    let stripe: Vec<&&str> = sites
+        .iter()
+        .filter(|row| row.contains("api.stripe.com"))
+        .collect();
+    assert_eq!(stripe.len(), 3, "{sites:?}");
+    for span in [
+        "acme/web:src/pay.ts bytes 120..150 @ 0123abc",
+        "acme/web:src/refund.ts bytes 300..330 @ 0123abc",
+        "acme/web:src/orders.ts bytes 1000..1030 @ 0123abc",
+    ] {
+        assert!(
+            stripe.iter().any(|row| row.contains(span)),
+            "{span}: {stripe:?}"
+        );
+    }
+    // The flow that reaches the charge is listed with the target.
+    let flows = table(&content, "External data flows");
+    assert!(
+        flows
+            .iter()
+            .any(|row| row.contains("api.stripe.com") && row.contains("GET /checkout")),
+        "{flows:?}"
+    );
+    // No declared host is a target or an unclassified row.
+    for heading in [
+        "External services",
+        "Sites of each external service",
+        "External data flows",
+        "Unclassified",
+    ] {
+        for row in table(&content, heading) {
+            for inside in ["orders.internal", "gw.internal", "admin.internal"] {
+                assert!(!row.contains(inside), "{inside} in {heading}: {row}");
+            }
+        }
+    }
+    let unclassified = table(&content, "Unclassified");
+    assert_eq!(unclassified.len(), 5);
+    assert!(
+        unclassified
+            .iter()
+            .all(|row| !row.contains("api.stripe.com")),
+        "{unclassified:?}"
+    );
+
+    // A graph stored before the state was recorded keeps its result: the
+    // same facts without the field are unclassified, with the reason.
+    let before = system().content();
+    assert!(before.contains(Unknown::BindingNotRecorded.reason()));
+    assert!(!content.contains(Unknown::BindingNotRecorded.reason()));
 }
 
 // AC-0660: one origin is one target. Two call sites of it are two sites; an

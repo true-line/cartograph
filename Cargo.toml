@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "src-tauri"]
 
 [workspace.package]
-version = "0.70.0"
+version = "0.71.0"
 edition = "2024"
 publish = false
 # Source-available under PolyForm Noncommercial 1.0.0 (see LICENSE.md at the
@@ -30,6 +30,13 @@ strip = "symbols"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Tests run optimized. The app suite's replay and acceptance tests spend
+# their time in serialization, hashing and SQLite, and ran about ten times
+# slower unoptimized (#1924). Debug assertions and overflow checks stay on:
+# they come from the dev profile this one inherits.
+[profile.test]
+opt-level = 1
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -231,6 +231,7 @@ pub(crate) fn sites(
             .rsplit_once('#')
             .map(|(_, member)| member.split('(').next().unwrap_or(member).to_string());
         out.push(FetchSite {
+            straight_line: None,
             method: http_method,
             url: match literal {
                 Some(literal) => IdentityExpr::Literal(literal),

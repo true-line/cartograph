@@ -1,5 +1,9 @@
 //! Transient input ownership. Stored manifests contain only the fingerprints of
 //! these exact query/source/history inputs, never their raw text.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 #[path = "diagnostic_sidecar_input.rs"]
 mod diagnostic_sidecar_input;
@@ -125,18 +129,16 @@ impl InvestigationInput {
                 .filter(|span| finding.citation_ids.contains(&span.id))
                 .map(|span| (span.path.as_str(), span.text.as_str()))
                 .collect::<Vec<_>>();
-            if let Some((title, sentence, reason)) =
-                if self.specialist == SpecialistId::DomainAnalystV27 {
-                    enumeration_claims::finding_with_grammar(
-                        &finding.title,
-                        &finding.statement,
-                        &spans,
-                        true,
-                    )
-                } else {
-                    enumeration_claims::finding(&finding.title, &finding.statement, &spans)
-                }
-            {
+            if let Some((title, sentence, reason)) = if self.specialist.uses_finish_patch() {
+                enumeration_claims::finding_with_grammar(
+                    &finding.title,
+                    &finding.statement,
+                    &spans,
+                    true,
+                )
+            } else {
+                enumeration_claims::finding(&finding.title, &finding.statement, &spans)
+            } {
                 let finding =
                     u32::try_from(index).map_err(|_| InvestigationError::LimitExceeded)?;
                 let position = ProsePosition {
@@ -195,7 +197,7 @@ impl InvestigationInput {
                 &finding.title,
                 &finding.statement,
                 &spans,
-                self.specialist == SpecialistId::DomainAnalystV27,
+                self.specialist.uses_finish_patch(),
                 |title, sentence, reason| {
                     let Ok(sentence) = u32::try_from(sentence) else {
                         error = Some(InvestigationError::LimitExceeded);

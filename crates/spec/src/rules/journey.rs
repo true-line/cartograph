@@ -92,7 +92,8 @@ impl GoalBasis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JourneyResult {
-    /// Unconditional navigation site in the same `Symbol` and file path at or after the fetch's `byte_end`.
+    /// Unconditional navigation site in the same `Symbol` and file path at or after the
+    /// `byte_end` of a fetch that is straight-line in that Symbol's body.
     Ordered,
     /// No post-goal navigation with proven ordering.
     Unordered,
@@ -169,6 +170,12 @@ pub struct StepCall {
     pub source: String,
     /// Fetch site evidence from `edge.props.prov.evidence[0]`.
     pub evidence: Option<EvidenceRef>,
+    /// The relation's `straight_line`: whether every pass through `source`'s
+    /// body that gets past the call evaluates it. `None` when the fact does
+    /// not record it. Read for the result-step proof only; not serialized,
+    /// because the relation is among the candidate's support facts.
+    #[serde(skip)]
+    pub straight_line: Option<bool>,
 }
 
 /// Kind of unresolved edge (`Gap` target) reached from a screen's closure.
@@ -1066,6 +1073,7 @@ fn build_screen_closure<'a>(
                                     method,
                                     source: sym_id.to_owned(),
                                     evidence,
+                                    straight_line: edge.props["straight_line"].as_bool(),
                                 },
                                 edge,
                             ));
@@ -2166,11 +2174,17 @@ fn finalize_candidate<'a>(
 /// Ordering is proven in `journey-candidate@1` (v1) only when:
 /// - the goal's fetch site and a `NAVIGATES_TO` site (from `props.sites`) are in
 ///   the same source `Symbol` and the same file `path`,
+/// - the fetch relation records `straight_line: true`, so no pass through
+///   that Symbol's body reaches a later position without making the call
+///   (a call under a branch, loop, `try` or callback, or a relation that
+///   does not record this, proves nothing about a later navigation),
 /// - the navigation site's `byte_start` is at or after the fetch's `byte_end`, and
 /// - that site has `conditional == false`.
 ///
 /// A conditional navigation after the call is also `"unordered"` in v1, because
-/// a branch specifically on the call's result is not proven yet.
+/// a branch specifically on the call's result is not proven yet. `"ordered"`
+/// says the navigation follows the call being made; it does not say the
+/// call completed or succeeded first, since an unawaited call is still made.
 #[expect(clippy::too_many_arguments)]
 fn find_ordered_result_step<'a>(
     goal_screen_id: &str,
@@ -2186,6 +2200,9 @@ fn find_ordered_result_step<'a>(
     let Some(fetch_ev) = &goal_call.evidence else {
         return (JourneyResult::Unordered, None, None);
     };
+    if goal_call.straight_line != Some(true) {
+        return (JourneyResult::Unordered, None, None);
+    }
     let Some(closure) = closures.get(goal_screen_id) else {
         return (JourneyResult::Unordered, None, None);
     };

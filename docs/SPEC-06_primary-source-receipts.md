@@ -104,8 +104,8 @@ and fail unsupported access operations explicitly. No raw source enters proposal
 SQLite, graph properties, default logs, context responses or spec exports. Retention
 does not permit model disclosure or egress.
 
-Short SQLite/WAL transactions bound receipt persistence (64 MiB logical metadata,
-100,000 receipts initially); capture storage retains SPEC-04's 2 GiB/10,000-capture
+Short SQLite/WAL transactions bound receipt persistence (128 MiB logical metadata,
+200,000 receipts; raised from 64 MiB / 100,000 for REA, ADR-0046 decision 7); capture storage retains SPEC-04's 2 GiB/10,000-capture
 logical limits. Within one extraction, rule, owner and GOVERNS receipts are admitted
 first under those ceilings exactly as before; declaration receipts only use the
 remaining budget, admitted greedily in manifest order, so they never turn an

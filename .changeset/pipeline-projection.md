@@ -1,5 +1,0 @@
----
-"cartograph": minor
----
-
-Every export now includes `pipelines.md`. For each GitHub Actions workflow and Dockerfile it lists the triggers, the jobs in dependency order and each job's steps in declared order, each with tier, confidence and source span. A job whose needs could not be resolved or form a cycle is listed with the reason and is never given a place in the order. Files that are present and were not read (GitLab CI, Jenkins, CircleCI, Azure Pipelines, and workflows or Dockerfiles that could not be read exactly) are listed with the recorded reason, and a closing note says what is not covered. A `verified-only` export leaves out InferredWeak rows and states how many; a `best-effort` export marks them. The pipeline reader now also reads `Containerfile` and `*.dockerfile` names and treats a `RUN --mount=…,from=<stage>` as a dependency on that stage, so re-ingesting a repository with such files adds facts. Dockerfiles with heredocs and workflows with YAML anchors are still listed as not read.

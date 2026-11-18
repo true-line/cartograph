@@ -9,14 +9,10 @@ fn desktop_generation_policy(
     specialist: agents::investigation::SpecialistId,
     mode: agents::investigation::InvestigationProviderMode,
 ) -> Option<agents::investigation::GenerationPolicy> {
-    use agents::investigation::{GenerationPolicy, InvestigationProviderMode, SpecialistId};
+    use agents::investigation::{GenerationPolicy, InvestigationProviderMode};
     const LOCAL_ANALYST_POLICY: GenerationPolicy = GenerationPolicy::LocalFinish4096V1;
-    (mode == InvestigationProviderMode::Local
-        && matches!(
-            specialist,
-            SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
-        ))
-    .then_some(LOCAL_ANALYST_POLICY)
+    (mode == InvestigationProviderMode::Local && super::uses_local_finish_generation(specialist))
+        .then_some(LOCAL_ANALYST_POLICY)
 }
 
 #[path = "withholding_authority.rs"]
@@ -2199,7 +2195,7 @@ pub(super) fn refused(
     let entries = raw_refusals(tx, task)?;
     let entry = entries.last().ok_or(InvestigationStoreError::Invalid)?;
     task.pending_correction = None;
-    if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27
+    if task.detail.summary.specialist_id.uses_finish_patch()
         && entry.record.refusal_count == 1
         && !task.detail.summary.cancel_requested
     {
