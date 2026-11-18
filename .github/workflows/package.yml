@@ -114,7 +114,9 @@ jobs:
     name: macOS universal bundle
     needs: evidence
     runs-on: macos-latest
-    timeout-minutes: 90
+    # A GitHub-hosted macOS runner needs well over 90 minutes for the
+    # universal (two-target) release compile; v0.71.0 was cancelled at 90.
+    timeout-minutes: 240
     outputs:
       signing_mode: ${{ steps.signing.outputs.mode }}
       artifact_name: ${{ steps.metadata.outputs.artifact_name }}

@@ -640,3 +640,12 @@ test('release symbols persist with versioned assets and short-lived Actions copi
     }
   }
 });
+
+test('the hosted macOS packaging job has room for the universal release compile', () => {
+  // v0.71.0's Release was cancelled at the old 90-minute limit mid-compile on
+  // macos-latest; the two-target release build needs more than that.
+  const workflow = readFileSync(path.join(root, '.github/workflows/package.yml'), 'utf8');
+  const job = workflow.split(/\n(?= {2}[a-z][\w-]*:\n)/u).find((block) => block.startsWith('  package:')) ?? '';
+  assert.match(job, /^ {4}runs-on: macos-latest$/mu);
+  assert.match(job, /^ {4}timeout-minutes: 240$/mu);
+});
