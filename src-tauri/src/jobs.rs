@@ -501,6 +501,18 @@ fn eval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvalResult> {
 mod tests {
     use super::*;
 
+    // AC-0823: the job store waits 5 s for a competing writer (#1653).
+    #[test]
+    fn job_store_waits_five_seconds_for_a_busy_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path().join("state.db")).unwrap();
+        let timeout: i64 = store
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5_000);
+    }
+
     #[test]
     fn jobs_survive_reopen() {
         // M0 exit gate: "job table durable".

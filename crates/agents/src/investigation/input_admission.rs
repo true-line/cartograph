@@ -390,6 +390,12 @@ impl InvestigationInput {
                     &prompt,
                 )?;
             }
+            // @28 reserves charge the visible copy in both modes.
+            action.payload.response_schema = response_schema::attach_visible(
+                self.frozen_specialist()?,
+                &mut prompt,
+                action.payload.response_schema.take(),
+            )?;
             #[cfg(test)]
             assert!(
                 context_hub::logical::count(&prompt).unwrap()
@@ -804,6 +810,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV25,
             SpecialistId::DomainAnalystV26,
             SpecialistId::DomainAnalystV27,
+            SpecialistId::DomainAnalystV28,
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::EvidenceAuditorV12,
             SpecialistId::EvidenceAuditorV13,
@@ -850,24 +857,33 @@ impl InvestigationInput {
                 "capacity_refusal_count",
                 "capacity_feedback",
             ],
-            if role == SpecialistId::DomainAnalystV27 && self.finish_patch.is_some() {
-                &[
-                    "acquisition_choices",
-                    "action_feedback",
-                    "citation_correction",
-                    "finish_patch",
-                ]
-            } else if role.uses_typed_citation_correction() {
-                &[
-                    "acquisition_choices",
-                    "action_feedback",
-                    "citation_correction",
-                ]
-            } else if role.uses_acquisition_choices() {
-                &["acquisition_choices", "action_feedback"]
-            } else {
-                &[]
-            },
+            &[
+                if role.uses_finish_patch() && self.finish_patch.is_some() {
+                    &[
+                        "acquisition_choices",
+                        "action_feedback",
+                        "citation_correction",
+                        "finish_patch",
+                    ][..]
+                } else if role.uses_typed_citation_correction() {
+                    &[
+                        "acquisition_choices",
+                        "action_feedback",
+                        "citation_correction",
+                    ][..]
+                } else if role.uses_acquisition_choices() {
+                    &["acquisition_choices", "action_feedback"][..]
+                } else {
+                    &[][..]
+                },
+                // @28 requires its model-visible selected schema.
+                if role.uses_visible_action_schema() {
+                    &["response_schema"][..]
+                } else {
+                    &[][..]
+                },
+            ]
+            .concat(),
         )?;
         exact_admission_fields(
             &prompt["completion_metadata"],
@@ -980,6 +996,7 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
     sum(&[
         MAX_INPUT_BYTES.checked_mul(20)?,
         MAX_ACTION_BYTES, // future source choices can expose a larger bounded prefix
+        MAX_INPUT_BYTES,  // @28 visible selected schema (bounded transport encoding)
         count(&metadata)?,
         progress_bytes,
         staged_finish::RefusalFeedback::max_bytes_with_policy(policy).ok()?,
@@ -1104,6 +1121,7 @@ impl InvestigationInput {
                 | SpecialistId::DomainAnalystV25
                 | SpecialistId::DomainAnalystV26
                 | SpecialistId::DomainAnalystV27
+                | SpecialistId::DomainAnalystV28
         ) && self
             .acquisition_choices
             .as_ref()
@@ -1207,6 +1225,7 @@ impl InvestigationInput {
                     | SpecialistId::DomainAnalystV25
                     | SpecialistId::DomainAnalystV26
                     | SpecialistId::DomainAnalystV27
+                    | SpecialistId::DomainAnalystV28
             ) && choices.capacity_exhausted())
             || self
                 .action_feedback
@@ -1239,6 +1258,11 @@ impl InvestigationInput {
                 &self.ledger,
             )?;
         }
+        self.payload.response_schema = response_schema::attach_visible(
+            self.frozen_specialist()?,
+            &mut prompt,
+            self.payload.response_schema.take(),
+        )?;
         self.acquisition_choices = Some(choices);
         self.acquisition_mode = Some(mode);
         wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
@@ -1251,7 +1275,7 @@ impl InvestigationInput {
         mut self,
         basis: &finish_patch::PatchBasis,
     ) -> Result<Self, InvestigationError> {
-        if self.frozen_specialist()? != SpecialistId::DomainAnalystV27
+        if !self.frozen_specialist()?.uses_finish_patch()
             || self.acquisition_choices.is_none()
             || self.finish_patch.is_some()
         {
@@ -1277,11 +1301,15 @@ impl InvestigationInput {
                 .map_err(|_| InvestigationError::InvalidInput)?;
         prompt["turn_progress"]["phase"] = "finish_only".into();
         prompt["turn_progress"]["admission_instructions"] = PATCH_INSTRUCTIONS.into();
-        self.payload.response_schema = Some(
-            basis
-                .response_schema(&self.ledger)
-                .map_err(|_| InvestigationError::InvalidInput)?,
-        );
+        self.payload.response_schema = response_schema::attach_visible(
+            self.frozen_specialist()?,
+            &mut prompt,
+            Some(
+                basis
+                    .response_schema(&self.ledger)
+                    .map_err(|_| InvestigationError::InvalidInput)?,
+            ),
+        )?;
         self.finish_patch = Some(basis.clone());
         self.acquisition_mode = Some(CompletionCallMode::FinishOnly);
         wire::replace_prompt(&mut self.payload, &prompt, MAX_INPUT_BYTES)?;
@@ -1301,7 +1329,7 @@ impl InvestigationInput {
         basis
             .validate()
             .map_err(|_| InvestigationError::InvalidInput)?;
-        if self.frozen_specialist()? != SpecialistId::DomainAnalystV27
+        if !self.frozen_specialist()?.uses_finish_patch()
             || self.acquisition_mode != Some(CompletionCallMode::FinishOnly)
             || metadata.refusal_count != 1
             || metadata.last_refusal_id.as_ref() != Some(&basis.refusal_hash)
@@ -1494,7 +1522,10 @@ impl InvestigationInput {
         } else {
             ordinary_schema
         };
+        let (expected_schema, visible) =
+            response_schema::visible_projection(self.frozen_specialist()?, expected_schema)?;
         if self.acquisition_mode != Some(mode)
+            || prompt["turn_progress"].get("response_schema") != visible.as_ref()
             || prompt["turn_progress"]["acquisition_choices"]
                 != serde_json::to_value(&**choices).map_err(|_| InvestigationError::InvalidInput)?
             || prompt["turn_progress"].get("action_feedback")

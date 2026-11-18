@@ -167,6 +167,7 @@ impl RefusalRecord {
                     | "domain-analyst@25"
                     | "domain-analyst@26"
                     | "domain-analyst@27"
+                    | "domain-analyst@28"
             ))
             || (matches!(
                 request.specialist_id.as_str(),
@@ -174,6 +175,7 @@ impl RefusalRecord {
                     | "domain-analyst@25"
                     | "domain-analyst@26"
                     | "domain-analyst@27"
+                    | "domain-analyst@28"
             ) && self.feedback.prose_correction.is_some()
                 && !combined)
         {
@@ -217,6 +219,7 @@ impl RefusalRecord {
                     | "domain-analyst@25"
                     | "domain-analyst@26"
                     | "domain-analyst@27"
+                    | "domain-analyst@28"
             ))
             || request.limit_profile != policy.profile()
             || ((self.feedback.citation_correction.is_some()
@@ -233,6 +236,7 @@ impl RefusalRecord {
                         | "domain-analyst@25"
                         | "domain-analyst@26"
                         | "domain-analyst@27"
+                        | "domain-analyst@28"
                 ))
         {
             return Err(InvestigationError::InvalidInput);
