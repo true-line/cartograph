@@ -352,6 +352,58 @@ fn receipt_omissions_are_a_named_limitation() {
     assert!(store.ends_with("a tool limitation, not a system gap"));
 }
 
+// AC-0677 (T-0677): the documentation reader's counts are recorded with the
+// inventory; a skipped or partly read file limits it; a repository with no
+// documentation file keeps the inventory it had.
+#[test]
+fn documentation_counts_are_recorded_and_a_skip_limits_the_inventory() {
+    let facts = CoverageFacts {
+        repo: "local/app",
+        commit: "workdir",
+        commit_note: None,
+        layer_hints: &[],
+        deterministic: vec![("t0.adapter-ts", count(3))],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let full = RepoCoverage::from_facts(&facts).with_unsupported(&PreflightReport::default());
+    assert!(!full.limited);
+    let before = serde_json::to_string(&full).unwrap();
+    assert!(!before.contains("documents"));
+    assert_eq!(
+        full.clone().with_documents(DocumentCoverage::default()),
+        full
+    );
+
+    let read = DocumentCoverage {
+        found: 2,
+        read: 2,
+        skipped: BTreeMap::new(),
+        sections: 5,
+        sections_truncated: 0,
+    };
+    let complete = full.clone().with_documents(read.clone());
+    assert!(!complete.limited);
+    assert_eq!(complete.documents.as_ref(), Some(&read));
+    let stored: RepoCoverage =
+        serde_json::from_str(&serde_json::to_string(&complete).unwrap()).unwrap();
+    assert_eq!(stored, complete);
+    // An inventory recorded before the field existed still reads.
+    assert_eq!(serde_json::from_str::<RepoCoverage>(&before).unwrap(), full);
+
+    let skipped = DocumentCoverage {
+        found: 3,
+        skipped: BTreeMap::from([("too_large".to_string(), 1)]),
+        ..read.clone()
+    };
+    assert!(full.clone().with_documents(skipped).limited);
+    let truncated = DocumentCoverage {
+        sections_truncated: 1,
+        ..read
+    };
+    assert!(full.with_documents(truncated).limited);
+}
+
 // AC-0148 (#1229): symlinks the captured selection skipped are one named,
 // bounded limitation (count and first path), never silent coverage.
 #[test]

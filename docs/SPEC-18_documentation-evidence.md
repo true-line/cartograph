@@ -1,6 +1,6 @@
 # SPEC-18 — Target documentation as evidence
 
-- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slice 1 is implemented; the rest is not.
+- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 and 2 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0049 / AC-0676..0681; ROADMAP W16; v1.0.0 criterion 8.
 - **Decision:** [ADR-0065](adr/ADR-0065-target-documentation-as-evidence.md).
@@ -86,10 +86,16 @@ nothing and no entry is made.
 ## Coverage
 
 The coverage inventory of a repository gains `documents`: files found,
-read, skipped by reason, sections, references linked by rule, and drift
-entries by kind. The coverage document prints them. A count is of the
-declared repository and commit, never a statement that the documentation
-is complete.
+read, skipped by reason, sections, and files read to the section bound. It
+is absent when the repository has no documentation file. A skipped or
+partly read file makes the inventory limited. The coverage document prints
+the counts. A count is of the declared repository and commit, never a
+statement that the documentation is complete.
+
+References linked by rule and drift entries by kind are not in the
+inventory: an inventory is recorded with one repository's facts, and links
+are made by the system-wide pass that follows. They are counted in
+`documentation-evidence.md` (slice 6).
 
 ## Surfaces
 
@@ -119,7 +125,8 @@ Each slice is one PR with its acceptance criterion.
 5. **Stated intent boundary and redaction** (AC-0680). No other fact
    changes; no section text in the graph or an export; headings redacted.
 6. **Compiled artifact and drafting** (AC-0681). `documentation-evidence.md`
-   and `DocSection` facts in a draft's citation set.
+   with the counts of links by rule and drift entries by kind, and
+   `DocSection` facts in a draft's citation set.
 
 No slice uses a model.
 

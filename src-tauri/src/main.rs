@@ -3089,12 +3089,18 @@ fn stitch_http_bindings(
 /// the relinked edge count and republished with the patch, so a cross-repo
 /// decision is never counted as linking nothing (#1847). Returns each
 /// rescanned repo's found-ADR edge count.
+///
+/// Documentation is read only for `documented`, the repositories this
+/// operation publishes: a document is a fact about one repository's own
+/// files, so another repository's documents stay as its own publication
+/// read them, matching the counts its stored inventory carries.
 fn relink_found_adrs(
     state: &AppState,
     operation: &SourceOperation,
     execution: &JobExecution,
     facts: &mut OperationFacts,
     recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
+    documented: &std::collections::BTreeSet<String>,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
     let snapshot = state
@@ -3112,7 +3118,19 @@ fn relink_found_adrs(
     let (mut patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
     // The same pass reads each repository's documentation files as
     // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1).
-    let documents = collect_documents(&snapshot.0, |repo| {
+    let published_repos = snapshot
+        .0
+        .iter()
+        .filter(|node| {
+            node.label == "Repo"
+                && node
+                    .id
+                    .strip_prefix("repo:")
+                    .is_some_and(|repo| documented.contains(repo))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let documents = collect_documents(&published_repos, |repo| {
         ensure_running_job(state, execution)?;
         operation.root(repo)
     })?;
@@ -3228,6 +3246,31 @@ fn found_adr_patch(
         patch.upsert_edges.extend(facts.edges);
     }
     (patch, linked)
+}
+
+/// What the documentation reader finds in one repository, for the coverage
+/// inventory published with that repository's facts (AC-0677). It is the
+/// read [`collect_documents`] makes once the system is in, over the same
+/// guarded tree.
+fn document_coverage(
+    root: &std::path::Path,
+    repo: &str,
+    commit: &str,
+) -> Result<ingest::coverage::DocumentCoverage, String> {
+    let counts = spec::extract_documents(root, repo, commit)
+        .map_err(|e| e.to_string())?
+        .counts;
+    Ok(ingest::coverage::DocumentCoverage {
+        found: counts.found,
+        read: counts.read,
+        skipped: counts
+            .skipped
+            .into_iter()
+            .map(|(reason, files)| (reason.to_owned(), files))
+            .collect(),
+        sections: counts.sections,
+        sections_truncated: counts.sections_truncated,
+    })
 }
 
 /// Read the documentation files of every repository in the graph.
@@ -5092,7 +5135,8 @@ fn run_ingest<R: tauri::Runtime>(
         &reads.omitted_stored_receipts,
     )
     .with_unfollowed_links(&reads.unfollowed_links)
-    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
+    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8)
+    .with_documents(document_coverage(root, &repo, commit).map_err(&fail)?);
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5140,6 +5184,7 @@ fn run_ingest<R: tauri::Runtime>(
         execution,
         &mut published,
         &mut Default::default(),
+        &std::collections::BTreeSet::from([repo.clone()]),
     )
     .map_err(&fail)?;
 
@@ -5546,7 +5591,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &reads.omitted_stored_receipts,
     )
     .with_unfollowed_links(&reads.unfollowed_links)
-    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
+    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8)
+    .with_documents(document_coverage(root, &source.repo_key, &cloned.commit_sha).map_err(&fail)?);
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5588,6 +5634,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &execution,
         &mut published,
         &mut Default::default(),
+        &std::collections::BTreeSet::from([source.repo_key.clone()]),
     )
     .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -5864,7 +5911,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             &reads.omitted_stored_receipts,
         )
         .with_unfollowed_links(&reads.unfollowed_links)
-        .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
+        .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8)
+        .with_documents(document_coverage(root, &repo, &commit).map_err(&fail)?);
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         let omission_records = reads.source_omissions();
@@ -5931,12 +5979,14 @@ fn add_system_blocking<R: tauri::Runtime>(
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
     }
+    let documented = recorded.keys().cloned().collect();
     let relinked = relink_found_adrs(
         &state,
         &operation,
         &execution,
         &mut published,
         &mut recorded,
+        &documented,
     )
     .map_err(&fail)?;
     for (_, coverage) in &mut proofs {
@@ -8689,6 +8739,39 @@ resource "aws_sqs_queue" "orders" {
             ]
         );
         assert_eq!(sections, 2);
+    }
+
+    #[test]
+    fn the_coverage_inventory_counts_the_documentation_the_reader_stores() {
+        // AC-0677 (T-0677): the counts recorded with a repository's
+        // inventory are those of the read that stores its documents.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("README.md"), "# Shop\n\n## Routes\n").unwrap();
+        std::fs::write(root.join("binary.txt"), [0xff, 0xfe]).unwrap();
+        let counted = crate::document_coverage(root, "local/shop", "workdir").unwrap();
+        assert_eq!(
+            counted,
+            ingest::coverage::DocumentCoverage {
+                found: 2,
+                read: 1,
+                skipped: std::collections::BTreeMap::from([("not_utf8".to_string(), 1)]),
+                sections: 2,
+                sections_truncated: 0,
+            }
+        );
+        let stored = spec::extract_documents(root, "local/shop", "workdir").unwrap();
+        let labelled = |label: &str| {
+            stored
+                .nodes
+                .iter()
+                .filter(|node| node.label == label)
+                .count() as u64
+        };
+        assert_eq!(
+            (labelled("Document"), labelled("DocSection")),
+            (counted.read, counted.sections)
+        );
     }
 
     #[test]
@@ -12745,6 +12828,56 @@ export function App() {
             serde_json::from_str(&stored.record.inventory_json).unwrap();
         assert_eq!(adr_row(&inventory), (1, 1, 1));
         assert_eq!(inventory, summary.coverage[0]);
+    }
+
+    #[test]
+    fn another_systems_recovery_leaves_a_repos_documents_as_its_inventory_counts() {
+        // AC-0677 (T-0677): ingesting one system re-reads only its own
+        // repositories' documentation, so a repository published earlier keeps
+        // the documents its stored inventory counts, even after its files change.
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        for (root, name) in [(&first, "a"), (&second, "b")] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("README.md"), "# Readme\n").unwrap();
+            std::fs::write(
+                root.join("cartograph.system.toml"),
+                format!("[[repos]]\nurl = \"{name}\"\n"),
+            )
+            .unwrap();
+        }
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        let manifest = |root: &std::path::Path| {
+            root.join("cartograph.system.toml")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let summary = super::add_system_blocking(manifest(&first), handle.clone()).unwrap();
+        let repo = summary.coverage[0].repo.clone();
+        std::fs::write(first.join("a/GUIDE.md"), "# Guide\n").unwrap();
+
+        super::add_system_blocking(manifest(&second), handle.clone()).unwrap();
+
+        let graph = state.graph.lock().unwrap();
+        let (nodes, _) = graph.read_snapshot().unwrap();
+        let documents = nodes
+            .iter()
+            .filter(|node| node.label == "Document" && node.id.starts_with(&format!("doc:{repo}@")))
+            .count();
+        let stored = graph
+            .coverage_records()
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.record.repo_key == repo)
+            .unwrap();
+        let inventory: ingest::coverage::RepoCoverage =
+            serde_json::from_str(&stored.record.inventory_json).unwrap();
+        assert_eq!(documents, 1);
+        assert_eq!(inventory.documents.map(|counted| counted.read), Some(1));
     }
 
     #[test]
