@@ -65,8 +65,9 @@ pub use security::{
 mod views;
 mod workbench;
 pub use adr::{
-    AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, derive_adr_facts, derive_adr_facts_bounded,
-    extract_found_adrs, extract_found_adrs_among,
+    AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, FOUND_ADR_EXTRACTOR_ID, FoundAdrRead,
+    MAX_FOUND_ADR_BYTES, UnreadAdr, UnreadAdrReason, derive_adr_facts, derive_adr_facts_bounded,
+    extract_found_adrs, extract_found_adrs_among, read_found_adrs_among,
 };
 pub use contract::{
     CONTRACT_DRIFT_EXTRACTOR_ID, CONTRACT_EXTRACTOR_ID, CONTRACT_METHODS, ContractFacts,
@@ -104,8 +105,9 @@ pub use workbench::{
     try_compile_spec_with_coverage,
 };
 pub use workbench::{
-    CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
-    catalogue_sections,
+    CATALOGUE_VERSION, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
+    SectionScopeError, catalogue_section, catalogue_sections, drafted_section,
+    section_citation_set,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query

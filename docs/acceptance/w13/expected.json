@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "catalogue_version": "1.0",
+  "document": "D1",
+  "target": {
+    "repository": "https://github.com/simple-login/app",
+    "commit": "4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798"
+  },
+  "capability_set": "Alias lifecycle over the API: create a random alias, create a custom alias (v2), enable or disable, delete, update.",
+  "sections": [
+    "1.2",
+    "1.3",
+    "1.5"
+  ],
+  "expected": [
+    {
+      "id": "A1",
+      "section": "1.2",
+      "statement": "An API client acts as the SimpleLogin user who owns the API key sent in the Authentication header.",
+      "sources": [
+        "app/api/base.py:19-36"
+      ]
+    },
+    {
+      "id": "A2",
+      "section": "1.2",
+      "statement": "A signed-in browser session can act as its user on the API when the request carries the X-Sl-Allowcookies header.",
+      "sources": [
+        "app/api/base.py:22-27",
+        "app/constants.py:3"
+      ]
+    },
+    {
+      "id": "A3",
+      "section": "1.2",
+      "statement": "A disabled account is refused with 403, and an account whose deletion was requested is refused with 401.",
+      "sources": [
+        "app/api/base.py:38-42",
+        "app/models.py:876-879"
+      ]
+    },
+    {
+      "id": "A4",
+      "section": "1.2",
+      "statement": "A user is either on the free plan or holds a lifetime licence or an active subscription; only the free plan has an alias quota.",
+      "sources": [
+        "app/models.py:984-999",
+        "app/models.py:856-863"
+      ]
+    },
+    {
+      "id": "C1",
+      "section": "1.3",
+      "statement": "A user can create a random alias with POST /api/alias/random/new, with an optional note, and receives the alias with 201.",
+      "sources": [
+        "app/api/views/new_random_alias.py:21-48",
+        "app/api/views/new_random_alias.py:110-122"
+      ]
+    },
+    {
+      "id": "C2",
+      "section": "1.3",
+      "statement": "A user can create a custom alias from a prefix and a signed suffix with POST /api/v2/alias/custom/new, with an optional note, and receives the alias with 201.",
+      "sources": [
+        "app/api/views/new_custom_alias.py:30-34",
+        "app/api/views/new_custom_alias.py:67-81",
+        "app/api/views/new_custom_alias.py:120-141"
+      ]
+    },
+    {
+      "id": "C3",
+      "section": "1.3",
+      "statement": "A user can enable or disable an alias with POST /api/aliases/<alias_id>/toggle and receives the new status.",
+      "sources": [
+        "app/api/views/alias.py:176-204"
+      ]
+    },
+    {
+      "id": "C4",
+      "section": "1.3",
+      "statement": "A user can delete an alias with DELETE /api/aliases/<alias_id>.",
+      "sources": [
+        "app/api/views/alias.py:153-173"
+      ]
+    },
+    {
+      "id": "C5",
+      "section": "1.3",
+      "statement": "A user can update an alias with PUT or PATCH /api/aliases/<alias_id>: its note, name, mailbox or mailboxes, PGP setting and pinned flag.",
+      "sources": [
+        "app/api/views/alias.py:264-357"
+      ]
+    },
+    {
+      "id": "C6",
+      "section": "1.3",
+      "statement": "When a hostname is given, the created alias is recorded as used on that website.",
+      "sources": [
+        "app/api/views/new_random_alias.py:114-117",
+        "app/api/views/new_custom_alias.py:134-136"
+      ]
+    },
+    {
+      "id": "R1",
+      "section": "1.5",
+      "statement": "A user can delete, toggle or update only an alias they own; any other alias id is answered 403 Forbidden.",
+      "sources": [
+        "app/api/views/alias.py:167-168",
+        "app/api/views/alias.py:193-194",
+        "app/api/views/alias.py:285-286"
+      ]
+    },
+    {
+      "id": "R2",
+      "section": "1.5",
+      "statement": "A free-plan user cannot create an alias once their aliases not pending deletion would exceed the free limit (5 by default, 15 for accounts flagged with the old limit); the request is answered 400.",
+      "sources": [
+        "app/models.py:968-999",
+        "app/config.py:134-139",
+        "app/api/views/new_random_alias.py:35-43",
+        "app/api/views/new_custom_alias.py:50-58"
+      ]
+    },
+    {
+      "id": "R3",
+      "section": "1.5",
+      "statement": "A user with a lifetime licence or an active subscription has no alias count limit.",
+      "sources": [
+        "app/models.py:991-992"
+      ]
+    },
+    {
+      "id": "R4",
+      "section": "1.5",
+      "statement": "Alias creation is rate limited, by default to 100 a day, 50 an hour and 5 a minute.",
+      "sources": [
+        "app/config.py:477",
+        "app/api/views/new_random_alias.py:23",
+        "app/api/views/new_custom_alias.py:32"
+      ]
+    },
+    {
+      "id": "R5",
+      "section": "1.5",
+      "statement": "Toggling an alias is limited to 100 requests an hour.",
+      "sources": [
+        "app/api/views/alias.py:178"
+      ]
+    },
+    {
+      "id": "R6",
+      "section": "1.5",
+      "statement": "A custom alias suffix must carry a valid signature no older than 600 seconds; an invalid or expired signature is answered 412.",
+      "sources": [
+        "app/api/views/new_custom_alias.py:83-87",
+        "app/alias_suffix.py:37-42"
+      ],
+      "notes": "The 400 'Tampered suffix' branch is reached only when unsigning raises something other than a bad signature. A claim that a tampered suffix is answered 400 is not supported by the cited code."
+    },
+    {
+      "id": "R7",
+      "section": "1.5",
+      "statement": "The suffix domain must be one of the alias domains available to the user; otherwise the request is answered 400.",
+      "sources": [
+        "app/api/views/new_custom_alias.py:92-94",
+        "app/alias_suffix.py:59-62"
+      ]
+    },
+    {
+      "id": "R8",
+      "section": "1.5",
+      "statement": "An address that is already an alias, or was an alias and has been deleted, cannot be created again; the request is answered 409.",
+      "sources": [
+        "app/api/views/new_custom_alias.py:96-103"
+      ]
+    },
+    {
+      "id": "R9",
+      "section": "1.5",
+      "statement": "An alias address may not contain two consecutive dots; the request is answered 400.",
+      "sources": [
+        "app/api/views/new_custom_alias.py:105-110"
+      ]
+    },
+    {
+      "id": "R10",
+      "section": "1.5",
+      "statement": "Deleting an alias moves it to the trash, disabled, for 30 days by default; an alias already in the trash, or any alias of a user who chose immediate deletion, is deleted and its address is recorded so that it cannot be reused.",
+      "sources": [
+        "app/alias_delete.py:77-86",
+        "app/alias_delete.py:101-108",
+        "app/alias_delete.py:123-125",
+        "app/config.py:716"
+      ]
+    },
+    {
+      "id": "R11",
+      "section": "1.5",
+      "statement": "An alias on a custom domain is not moved to the user's trash: it is deleted and its address is recorded in that domain's deleted aliases.",
+      "sources": [
+        "app/alias_delete.py:40-62",
+        "app/alias_delete.py:117-121"
+      ]
+    },
+    {
+      "id": "R12",
+      "section": "1.5",
+      "statement": "An alias can be reassigned only to a mailbox that belongs to the user and is verified; otherwise the request is answered 400.",
+      "sources": [
+        "app/api/views/alias.py:296-304"
+      ]
+    },
+    {
+      "id": "R13",
+      "section": "1.5",
+      "statement": "An alias name is at most 128 characters and line breaks are removed from it.",
+      "sources": [
+        "app/api/views/alias.py:326-334"
+      ]
+    },
+    {
+      "id": "R14",
+      "section": "1.5",
+      "statement": "With a hostname and the user's website setting on, a random alias request suggests an address from the website's domain name, reuses the user's own alias for that website, and never returns an alias that belongs to another user.",
+      "sources": [
+        "app/api/views/new_random_alias.py:53-80"
+      ]
+    },
+    {
+      "id": "R15",
+      "section": "1.5",
+      "statement": "The mode of a random alias, when given, must be word or uuid; otherwise the request is answered 400.",
+      "sources": [
+        "app/api/views/new_random_alias.py:97-108"
+      ]
+    },
+    {
+      "id": "R16",
+      "section": "1.5",
+      "statement": "A status change and an update of an alias are written to the alias audit log.",
+      "sources": [
+        "app/alias_utils.py:583-588",
+        "app/api/views/alias.py:348-354"
+      ]
+    }
+  ]
+}

@@ -39,6 +39,8 @@ pub(crate) enum ReviewCommandError {
         current: Box<FindingReviewObservation>,
     },
     Capacity,
+    /// The store stayed locked by another writer; nothing was saved.
+    Busy,
     StorageUnavailable,
 }
 impl From<FindingReviewError> for ReviewCommandError {
@@ -46,6 +48,7 @@ impl From<FindingReviewError> for ReviewCommandError {
         match error {
             FindingReviewError::SubjectChanged => Self::SubjectChanged,
             FindingReviewError::Conflict(current) => Self::Conflict { current },
+            FindingReviewError::Busy => Self::Busy,
             FindingReviewError::Store(error) => match error {
                 InvestigationStoreError::Invalid => Self::InvalidRecord,
                 InvestigationStoreError::Missing => Self::NotFound,
