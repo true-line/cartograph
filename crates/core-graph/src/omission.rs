@@ -381,29 +381,18 @@ pub fn classified_detail_bytes(reason_bytes: usize) -> Option<usize> {
 
 /// Peak temporary owners of one [`Omission::classify`] call over a
 /// `reason_bytes` reason, excluding the retained detail. Template matching
-/// holds one pattern's parts. `prose_words` holds, in one expression, the
-/// unquoted copy (at most the reason), its whitespace tokens (each nonempty
-/// and followed by whitespace or the end, so at most half the bytes plus
-/// one), their joined copy (at most the unquoted copy) and its lowercase:
-/// ASCII lowercases to one byte, and any other char (two or more bytes)
-/// lowercases to at most three chars of four bytes, so at most six times.
+/// holds one pattern's parts. `prose_words` holds, in one expression, its
+/// joined plain words (at most the reason: every separator replaces at least
+/// one whitespace byte) and their lowercase. No char lowercases to more than
+/// one and a half times its UTF-8 length, which a test checks for every char.
 pub fn classification_workspace_bytes(reason_bytes: usize) -> Option<usize> {
     let parts = TEMPLATES
         .iter()
         .map(|(template, _, _)| template.split('*').count())
         .max()?
         .checked_mul(std::mem::size_of::<&str>())?;
-    let tokens = (reason_bytes / 2)
-        .checked_add(1)?
-        .checked_mul(std::mem::size_of::<&str>())?;
-    let prose = [
-        reason_bytes,
-        tokens,
-        reason_bytes,
-        reason_bytes.checked_mul(6)?,
-    ]
-    .into_iter()
-    .try_fold(0usize, |total, role| total.checked_add(role))?;
+    let lowercase = reason_bytes.checked_mul(3)?.div_ceil(2);
+    let prose = reason_bytes.checked_add(lowercase)?;
     Some(parts.max(prose))
 }
 
@@ -432,30 +421,56 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
 /// URLs, numbers or quoted values are dropped, so a variable such as
 /// `STALE_API_URL` or `src/conflict.ts` cannot select a class.
 fn prose_words(reason: &str) -> String {
+    // One owned buffer: a token is appended as it is read and cut off again
+    // when it turns out to be identifier-like or shouty. There is no unquoted
+    // copy and no token list, so the peak is this buffer plus its lowercase.
+    struct Token {
+        separator: usize,
+        text: usize,
+        identifier_like: bool,
+        no_lowercase: bool,
+    }
+    fn close(words: &mut String, token: Option<Token>) {
+        let Some(token) = token else { return };
+        let shouty = words.len() - token.text > 1 && token.no_lowercase;
+        if token.identifier_like || shouty {
+            words.truncate(token.separator);
+        }
+    }
     let mut quoted = false;
-    let unquoted: String = reason
-        .chars()
-        .filter(|ch| {
-            if matches!(ch, '`' | '"' | '\'') {
-                quoted = !quoted;
-                return false;
+    let mut words = String::new();
+    let mut token: Option<Token> = None;
+    for ch in reason.chars() {
+        if matches!(ch, '`' | '"' | '\'') {
+            quoted = !quoted;
+            continue;
+        }
+        if quoted {
+            continue;
+        }
+        if ch.is_whitespace() {
+            close(&mut words, token.take());
+            continue;
+        }
+        let current = token.get_or_insert_with(|| {
+            let separator = words.len();
+            if separator > 0 {
+                words.push(' ');
             }
-            !quoted
-        })
-        .collect();
-    unquoted
-        .split_whitespace()
-        .filter(|token| {
-            let identifier_like = token.chars().any(|ch| {
-                ch.is_ascii_digit()
-                    || matches!(ch, '_' | '/' | '.' | ':' | '@' | '#' | '$' | '{' | '}')
-            });
-            let shouty = token.len() > 1 && token.chars().all(|ch| !ch.is_ascii_lowercase());
-            !identifier_like && !shouty
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+            Token {
+                separator,
+                text: words.len(),
+                identifier_like: false,
+                no_lowercase: true,
+            }
+        });
+        current.identifier_like |= ch.is_ascii_digit()
+            || matches!(ch, '_' | '/' | '.' | ':' | '@' | '#' | '$' | '{' | '}');
+        current.no_lowercase &= !ch.is_ascii_lowercase();
+        words.push(ch);
+    }
+    close(&mut words, token);
+    words.to_lowercase()
 }
 
 impl Omission {
@@ -591,30 +606,111 @@ pub fn gap_query(props: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn classification_workspace_covers_tokens_and_lowercase_expansion() {
-        // AC-0522: one-letter words maximize token slots, and U+0130
-        // lowercases to more bytes than it takes; neither exceeds the bound.
-        let size = std::mem::size_of::<&str>();
-        for reason in [
+    /// The historical three-copy form, kept as the reference behavior.
+    fn reference_prose_words(reason: &str) -> String {
+        let mut quoted = false;
+        let unquoted: String = reason
+            .chars()
+            .filter(|ch| {
+                if matches!(ch, '`' | '"' | '\'') {
+                    quoted = !quoted;
+                    return false;
+                }
+                !quoted
+            })
+            .collect();
+        unquoted
+            .split_whitespace()
+            .filter(|token| {
+                let identifier_like = token.chars().any(|ch| {
+                    ch.is_ascii_digit()
+                        || matches!(ch, '_' | '/' | '.' | ':' | '@' | '#' | '$' | '{' | '}')
+                });
+                let shouty = token.len() > 1 && token.chars().all(|ch| !ch.is_ascii_lowercase());
+                !identifier_like && !shouty
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+
+    fn adversarial_reasons() -> Vec<String> {
+        let mut reasons = vec![
             "a ".repeat(500),
             "a".repeat(999),
             "\u{130} ".repeat(300),
             "\u{130}".repeat(400),
+            "\u{23a}\u{23e} x ".repeat(100),
             "`quoted` \"x\" 'y' a".repeat(50),
             String::new(),
-        ] {
+            " ".into(),
+            "  lead  and\ttrail\u{a0}\u{2003}\n ".into(),
+            "A I be SHOUTY É ÉÉ x1 a_b src/a.ts v1.2 a:b @x #y $z {q} ok".into(),
+            "un`quo ted`quoted mid\"dle\"word 'open never closes a b".into(),
+            "`a` `B` '' \"\" x`y z`w".into(),
+            "ΟΔΟΣ ΟΔΟΣ. οδοΣ Σ aΣ Σa aΣ'b' aΣ `x` Σ".into(),
+            "stale\u{301} CAFÉ café \u{1e9e} ǅ ǆ".into(),
+        ];
+        // Every pair of a small alphabet covers quote, space, case and filter
+        // transitions at token boundaries.
+        let alphabet = ['a', 'B', ' ', '`', '_', 'Σ', '\u{130}', '\n'];
+        for a in alphabet {
+            for b in alphabet {
+                for c in alphabet {
+                    reasons.push([a, b, c, 'x', ' ', a, b].iter().collect());
+                }
+            }
+        }
+        reasons
+    }
+
+    #[test]
+    fn prose_words_keep_the_reference_words_in_one_buffer() {
+        // AC-0731: the single-buffer form selects exactly the historical words.
+        for reason in adversarial_reasons() {
+            assert_eq!(prose_words(&reason), reference_prose_words(&reason));
+        }
+    }
+
+    #[test]
+    fn no_char_lowercases_past_one_and_a_half_times_its_length() {
+        // AC-0731: the lowercase factor, checked for every Unicode scalar
+        // value. U+0130 and the two-to-three-byte mappings reach it exactly.
+        let mut reached = false;
+        for ch in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            let lower: usize = ch.to_lowercase().map(char::len_utf8).sum();
+            assert!(lower * 2 <= ch.len_utf8() * 3, "{ch:?}");
+            reached |= lower * 2 == ch.len_utf8() * 3;
+        }
+        assert!(reached);
+    }
+
+    #[test]
+    fn classification_workspace_covers_joined_words_and_lowercase_expansion() {
+        // AC-0522, AC-0731: the joined words never exceed the reason, and
+        // their lowercase never exceeds one and a half times that.
+        for reason in adversarial_reasons() {
             let r = reason.len();
-            let tokens = reason.split_whitespace().count();
             let words = prose_words(&reason);
-            let lower = reason.to_lowercase().len();
-            let peak = r + tokens * size + r + words.len().max(lower);
-            assert!(tokens <= r / 2 + 1);
-            assert!(lower <= 6 * r.max(1));
+            // The joined buffer is at most the reason, so the peak is at most
+            // the reason plus the lowercase of whichever is larger.
+            let peak = r + words.len().max(reason.to_lowercase().len());
+            assert!(reason.to_lowercase().len() * 2 <= r * 3);
             assert!(peak <= classification_workspace_bytes(r).unwrap());
             let detail = Omission::classify(&reason).detail.len();
             assert!(detail <= classified_detail_bytes(r).unwrap());
         }
+        // A kept token needs one ASCII lowercase letter, so the closest kept
+        // reason is that letter followed by U+0130 only: one byte under the
+        // bound, and over the bound of a reason one byte shorter.
+        let closest = format!("a{}", "\u{130}".repeat(400));
+        let peak = closest.len() + prose_words(&closest).len();
+        assert_eq!(
+            peak + 1,
+            classification_workspace_bytes(closest.len()).unwrap()
+        );
+        assert!(peak > classification_workspace_bytes(closest.len() - 1).unwrap());
+        assert!(classification_workspace_bytes(usize::MAX).is_none());
     }
 
     #[test]

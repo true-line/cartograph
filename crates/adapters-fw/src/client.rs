@@ -49,6 +49,11 @@ pub struct FetchSite {
     /// Declared client entry the call comes from (`API_ROUTE.LOGIN`,
     /// `ApiService.stats`), named in the Gap when the call stays unresolved.
     pub entry: Option<String>,
+    /// Whether every pass through the body of `symbol` that gets past this
+    /// call's position evaluates it: the call is under no branch, loop,
+    /// `try`, short-circuit or nested callable of that body (#1012). `None`
+    /// when the adapter does not determine it.
+    pub straight_line: Option<bool>,
 }
 
 /// How a client library joins a request path to its base URL.
@@ -414,6 +419,7 @@ mod tests {
 
     fn site(path: &str) -> FetchSite {
         FetchSite {
+            straight_line: None,
             method: "GET".into(),
             url: IdentityExpr::Literal("api/x".into()),
             symbol: None,

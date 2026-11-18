@@ -1040,7 +1040,11 @@ pub(super) fn append_for_task_with_merge(
         && request.specialist_id != "domain-analyst@23"
         && !matches!(
             request.specialist_id.as_str(),
-            "domain-analyst@24" | "domain-analyst@25" | "domain-analyst@26" | "domain-analyst@27"
+            "domain-analyst@24"
+                | "domain-analyst@25"
+                | "domain-analyst@26"
+                | "domain-analyst@27"
+                | "domain-analyst@28"
         )
     {
         return Err(InvestigationStoreError::Invalid);

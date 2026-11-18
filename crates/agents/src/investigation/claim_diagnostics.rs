@@ -1,4 +1,8 @@
 //! Versioned host-only diagnostics. No type can retain an arbitrary prose token.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::MAX_MANIFEST_BYTES;
 use serde::{Deserialize, Serialize};
 pub(super) mod configuration;
