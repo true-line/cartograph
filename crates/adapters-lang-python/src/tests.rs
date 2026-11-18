@@ -7192,6 +7192,15 @@ admin.add_view(Reports(endpoint="reports"))
             "if not current_user.is_authenticated and not current_user.is_admin:",
         ),
         (check, "if current_user.is_authenticated:"),
+        // Calling a helper without its required argument raises before the check.
+        (
+            "def _redirect_if_user_is_not_allowed():",
+            "def _redirect_if_user_is_not_allowed(request):",
+        ),
+        (
+            "def _redirect_if_user_is_not_allowed():",
+            "def _redirect_if_user_is_not_allowed(user=None):",
+        ),
         // The view may drop the helper's answer.
         (
             returned,

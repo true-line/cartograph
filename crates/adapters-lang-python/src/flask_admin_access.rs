@@ -451,7 +451,7 @@ fn returned_helper<'t>(
 ) -> Option<(TsNode<'t>, String, Vec<EvidenceRef>)> {
     let statements = statements(view);
     let first = *statements.first()?;
-    // `helper()`, with no argument to evaluate first.
+    // `helper()`, with no argument to evaluate first, of a helper that takes none.
     let helper = |call: TsNode<'_>| {
         let call = unparenthesize(call);
         let callee = (call.kind() == "call")
@@ -463,7 +463,12 @@ fn returned_helper<'t>(
             .is_some_and(|arguments| named(arguments).is_empty());
         let name = cx.text(&callee);
         let function = module_function(cx, root, view, name)?;
-        empty.then(|| (function, name.to_string()))
+        // A helper that declares any parameter is not proven callable with
+        // none: a missing required argument raises before its body runs.
+        let parameterless = function
+            .child_by_field_name("parameters")
+            .is_some_and(|parameters| named(parameters).is_empty());
+        (empty && parameterless).then(|| (function, name.to_string()))
     };
     // `<value>` or `<value> or …`.
     let or_left = |value: TsNode<'t>| {
