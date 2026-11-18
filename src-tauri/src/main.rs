@@ -2952,8 +2952,9 @@ fn manifest_http_bindings(
 
 /// After every repo is in, join client calls to endpoints in other repos
 /// only on binding evidence (#589, AC-0240/AC-0241). A joined Gap and its
-/// Gap edge are replaced by one cited `FETCHES` edge; every other covered
-/// call keeps its Gap with a cross-repo reason. Runs once per system.
+/// Gap edge are replaced by one cited `FETCHES` edge; every other evaluated
+/// call keeps its Gap with a cross-repo reason and the binding state of
+/// its origin (#1843). Runs once per system.
 fn stitch_http_bindings(
     graph: &mut SqliteGraphStore,
     bindings: &[events::HttpBinding],
@@ -3028,6 +3029,15 @@ fn stitch_http_bindings(
     }
     for edge in &outcome.kept_edges {
         graph.put_edge(edge).map_err(|e| e.to_string())?;
+    }
+    // #1843: an observed HTTP client of a declared host cites the bindings
+    // that name its origin, so the boundary projection does not list it as
+    // leaving the system.
+    let resources = graph
+        .nodes_with_label("Resource")
+        .map_err(|e| e.to_string())?;
+    for node in events::bind_observed_clients(&resources, bindings) {
+        graph.put_node(&node).map_err(|e| e.to_string())?;
     }
     Ok(outcome.joined.len() as u64)
 }
@@ -9059,6 +9069,24 @@ export function queue() {
         assert_eq!(
             kept.props["t0_reason"],
             "no recovered endpoint matches POST /v1/orders"
+        );
+        // #1843 / AC-0660: the stored Gap and its Gap edge record that no
+        // declared binding names the origin, so the boundary projection
+        // lists the call as outside without reading the sentence.
+        assert_eq!(
+            kept.props[events::BINDING_STATE],
+            events::BINDING_STATE_NONE
+        );
+        assert!(kept.props.get("binding").is_none());
+        let kept_edge = store
+            .edges_with_labels(&["FETCHES"])
+            .unwrap()
+            .into_iter()
+            .find(|edge| edge.dst == kept.id)
+            .unwrap();
+        assert_eq!(
+            kept_edge.props[events::BINDING_STATE],
+            events::BINDING_STATE_NONE
         );
         // The operation's facts follow the store exactly.
         assert_eq!(

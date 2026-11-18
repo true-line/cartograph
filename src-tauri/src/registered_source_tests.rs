@@ -3591,13 +3591,12 @@ fn export_lists_ingested_third_party_calls_as_outside() {
     }
 }
 
-// AC-0660 (#1788): through the production `add_system` path, with a declared
-// service binding, the call the binding pass joins to the other repository's
-// endpoint is not listed in `external.md`, as a call or as an observed
-// client, and is not counted as outside. The third-party calls the binding
-// pass evaluated are listed as unclassified with the sentence it recorded:
-// the kept Gap does not record, other than in that sentence, that no
-// declared binding covers its host.
+// AC-0660 (#1788, #1843): through the production `add_system` path, with a
+// declared service binding, the call the binding pass joins to the other
+// repository's endpoint is not listed in `external.md`, as a call or as an
+// observed client, and is not counted as outside. The third-party calls the
+// binding pass evaluated are listed as outside, each with its site and
+// span: their Gaps record that no declared binding names their origin.
 #[test]
 fn export_does_not_list_a_call_bound_into_another_repository() {
     let dir = tempfile::tempdir().unwrap();
@@ -3669,35 +3668,57 @@ fn export_does_not_list_a_call_bound_into_another_repository() {
         }
     }
     assert!(
-        content.contains("Outside targets: 0. Unclassified targets: 2."),
+        content.contains("Outside targets: 2. Unclassified targets: 0."),
         "{content}"
     );
-    let unclassified: Vec<(String, String, String)> = external_rows(content, "Unclassified")
+    let origins: Vec<String> = external_rows(content, "External services")
         .into_iter()
-        .map(|row| (row[0].clone(), row[4].clone(), row[5].clone()))
+        .map(|row| format!("{} {} {}", row[0], row[1], row[2]))
         .collect();
-    let unrecorded = "binding evidence was evaluated for this call, and the fact does not record \
-                      whether a declared binding covers its host";
     assert_eq!(
-        unclassified,
+        origins,
         [
-            (
-                "POST https://api.stripe.com/v1/charges".to_string(),
-                unrecorded.to_string(),
-                "no binding evidence: no declared service or gateway route covers \
-                 https://api.stripe.com/v1/charges"
-                    .to_string()
-            ),
-            (
-                "GET https://api.tax.example/v2/rates".to_string(),
-                unrecorded.to_string(),
-                "no binding evidence: no declared service or gateway route covers \
-                 https://api.tax.example/v2/rates"
-                    .to_string()
-            ),
+            "https://api.stripe.com outside 1",
+            "https://api.tax.example outside 1",
         ],
         "{content}"
     );
+    let sites = external_rows(content, "Sites of each external service");
+    let site = |origin: &str| {
+        sites
+            .iter()
+            .find(|row| row[0] == origin)
+            .unwrap_or_else(|| panic!("no site of {origin} in:\n{content}"))
+    };
+    let charge = EXTERNAL_CLIENT
+        .find("fetch('https://api.stripe.com")
+        .unwrap();
+    let rates = EXTERNAL_WORKER.find("requests.get").unwrap();
+    let stripe = site("https://api.stripe.com");
+    assert_eq!(stripe[2..4], ["POST", "/v1/charges"]);
+    assert_eq!(stripe[5..7], ["Deterministic", "Gap"]);
+    assert!(
+        stripe[7].contains(&format!("client.tsx bytes {charge}..")),
+        "{stripe:?}"
+    );
+    let tax = site("https://api.tax.example");
+    assert_eq!(tax[1..4], ["rates", "GET", "/v2/rates"]);
+    assert!(
+        tax[7].contains(&format!("worker.py bytes {rates}..")),
+        "{tax:?}"
+    );
+    assert!(
+        external_rows(content, "Unclassified")[0][1] == "None in this export",
+        "{content}"
+    );
+    // The stored facts carry the outcome; the sentence is not what decided.
+    let (nodes, _) = graph.read_snapshot().unwrap();
+    let states: Vec<&str> = nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:fetch:"))
+        .filter_map(|node| node.props[events::BINDING_STATE].as_str())
+        .collect();
+    assert_eq!(states, [events::BINDING_STATE_NONE; 2], "{nodes:?}");
 }
 
 // AC-0314: when receipt store capacity omits receipts during recovery,
