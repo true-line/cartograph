@@ -77,7 +77,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0003 | tree-sitter deterministic extraction + adapter SPI |
 | ADR-0004 | Pluggable LLM, local-first, per-tier cloud opt-in |
 | ADR-0005 | GitHub App auth + git2 clone + system topology manifest |
-| ADR-0006 | Kuzu graph store + SQLite/WAL spine + content-addressed determinism |
+| ADR-0006 | Kuzu graph store + SQLite/WAL spine + content-addressed determinism (graph-store choice superseded by ADR-0008) |
 | ADR-0007 | Strict agentic SDLC from inception; dogfood v1, expand scope later |
 | ADR-0008 | SQLite recursive-CTE as primary graph store (Kuzu archived upstream) |
 | ADR-0009 | v1 GitHub auth ladder: env token → gh CLI; GitHub App deferred |
