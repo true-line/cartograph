@@ -1,6 +1,6 @@
 # ADR-0046 — Compact receipts, positive absence records and reclaimable retention
 
-- **Status:** Proposed. Design r2 agreed with Codex (20261022T033000Z). Decisions 1 (receipt contract v3), 2 (per-fact omission records and lookup; see the implementation note under decision 2) and 3 (forget reclaim and pins) implemented; decision 4 is partially implemented for complete-mode MCP exact-binding forgotten and current-fact positive omission classification (#727). Decision 5 supersession reclaim implemented (see its implementation note); per-source shares and numbers remain the owner's. Broader end-to-end absence acceptance and decision 6 remain pending. Decision 7 (normalized receipt storage) slice 1 is implemented (see its implementation note); the later extraction slice is not. Decision 3 adds three indexes so the store's integrity checks stay linear in tombstones and reclaims, and binds each capture-forgotten receipt to the exact tombstone that marked it; saved work packets also pin their cited receipts (#749).
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment); design r2 agreed with Codex (20261022T033000Z); implementation status is recorded under "Implementation status" below
 - **Date:** 2026-10-22
 - **Deciders:** Cartograph maintainers; Claude implementation, Codex cross-review
 - **Issue:** #725 (follows #722/#726; serves AC-0288 in #727)
@@ -65,7 +65,7 @@ Read-only MCP must distinguish *forgotten*, *omitted* and *missing* evidence. To
    - The `receipt-store-capacity` reason points at forget/supersession only once reclamation demonstrably frees space.
    - *Implementation note (#725).* Supersession runs after a recovery's graph publish. The job first releases its prepared input, then tries the source's exclusive retention guard, so no other recovery of that source can be holding receipts it has persisted but not yet bound. A busy source is skipped and settles on its next publish. Under that guard the kept set is the pins that forget uses plus the receipts of this source that the current graph binds. Every other unmarked row of the source is reclaimed into the ledger under a tombstone whose new `cause` is `superseded` (schema v3; existing tombstones are backfilled as `forgotten`). Superseded reclaims never mark pinned rows and leave capture-forgotten rows untouched. `ReceiptStatus::Superseded` is not "forgotten": an exact binding to it reads as unavailable or stale, so the MCP contract is unchanged. Capture bytes are not reclaimed by supersession.
    - *Supersession inventory scope (#1233; decided by the owner 2026-11-18).* Supersession reads only its own source's receipt rows: `ids(source)` selects `WHERE source_id = ?1` and rebuilds and decodes only those rows, failing closed if a decoded payload names another source. Before, it rebuilt and decoded every row of every source to filter by payload, so a small source's recovery paid for the whole store. Acceptance is stated in three parts. (a) *Materialization:* one decoded receipt is live at a time, plus the source's id list. (b) *Scan work:* full rebuild and decode is proportional to the source's own rows. The SQL row selection and the bounded store-wide checks of decision 7, which `receipt_storage` runs before every read, still visit each row's small fixed-width columns. No `receipts(source_id)` index is added, because that would be a store schema change (v5 migration) and the decode, not the column scan, was the measured cost. If the scan shows up later, the index is a separate, migrated change. (c) *Semantic coverage:* the bounded SQL type, length, tombstone and header-ownership checks still run store-wide, so a normalized row whose column disagrees with its header fails every read. Full reconstruction, `Receipt::from_json`, identity matching and canonical re-serialization run only on the source's own rows. A corrupt or foreign-owned row of another source is detected when that row is read (`get`, a pinned read) or when the source its column names takes its inventory, never during another source's supersession (AC-0836, AC-0837). Receipt bytes, ids and the supersession result are unchanged.
-6. **Extraction memory.** Receipts are admitted per file as they are produced, with no whole-repo intermediate vectors. The REA peak is a measured acceptance item.
+6. **Extraction memory** (pending; accepted, not implemented). Receipts are admitted per file as they are produced, with no whole-repo intermediate vectors. The REA peak is a measured acceptance item.
 7. **Normalized receipt storage** (proposed r1 for #725; Codex source review 6411550381 folded in). On REA at `258a1dd`, 37,025 kept receipts fill the 64 MiB extraction budget, but they share only 1,663 distinct per-file headers. Storing each header once, with compact bodies, measures 19.4 MiB instead of 64 MiB.
    - **Wire and identity are unchanged.** The store keeps a header row per distinct header and a body row per receipt. Canonical receipt bytes are rebuilt exactly from the two, so `receipt_id`, the hash domain and every existing verification check stay as they are. Nothing new is hashed.
    - **The header is the whole shared identity.** It holds every field the receipts of one file share: source id, repo key, capture id, path, digest, byte length, commit, producer contract, grammar and parser packages. Its key is the digest of its canonical bytes. The body holds the remaining fields plus the fact id with the `repo_key@path` prefix removed. A body is stored this way only if prefixing it again reproduces the fact id exactly; otherwise it is not normalized.
@@ -80,6 +80,26 @@ Read-only MCP must distinguish *forgotten*, *omitted* and *missing* evidence. To
 
 MCP keeps `evidence_absence_reason_available=false` until steps 2–5 pass end-to-end.
 
+## Implementation status
+
+Moved here from the Status line on 2026-11-18.
+
+- Decision 1 (receipt contract v3): implemented.
+- Decision 2 (per-fact omission records and lookup): implemented; see the
+  implementation note under decision 2.
+- Decision 3 (forget reclaim and pins): implemented. It adds three indexes so
+  the store's integrity checks stay linear in tombstones and reclaims, and
+  binds each capture-forgotten receipt to the exact tombstone that marked it;
+  saved work packets also pin their cited receipts (#749).
+- Decision 4 (absence resolution): partially implemented, for complete-mode
+  MCP exact-binding forgotten and current-fact positive omission
+  classification (#727). Broader end-to-end absence acceptance is pending.
+- Decision 5 (reclaimable retention): supersession reclaim implemented; see its
+  implementation note.
+- Decision 6 (extraction memory): pending.
+- Decision 7 (normalized receipt storage): slice 1 implemented (see its
+  implementation note); the later extraction slice is pending.
+
 ## Consequences
 
 - Expected receipt size is 5–6× smaller, so the REA citable fraction should rise from ~20% toward the majority under unchanged ceilings. To be measured before claiming.
@@ -92,3 +112,18 @@ MCP keeps `evidence_absence_reason_available=false` until steps 2–5 pass end-t
 - **Compress the receipt column.** It saves bytes, but each range would still repeat the identity, decode would still be heavy, and nothing about absence reasons improves.
 - **Raise the global ceiling.** That defers exhaustion and doesn't fix forget.
 - **Infer omission from a missing binding.** Rejected. That is the false certainty AC-0288 forbids.
+
+## Amendment — 2026-11-18: accepted, with decision 6 and the extraction slice pending
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment.
+
+- Decisions 1 to 5 and decision 7 are accepted.
+- Decision 6 and decision 7's later extraction slice are accepted as
+  direction but remain pending; neither is claimed as implemented.
+- Every numeric ceiling stays the owner's call: the global receipt ceiling
+  (100,000 receipts / 64 MiB), the 100,000 count ceilings
+  (`MAX_EXTRACTION_RECEIPTS`, `MAX_RECEIPTS`), the 262,144 omission records per
+  repo, per-source shares, and any raise toward full REA coverage. This
+  acceptance changes none of them.
+- The implementation progress that the Status line carried now sits under
+  "Implementation status".

@@ -167,6 +167,11 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run test && npm --prefix ui run build
 ```
 
+CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
+every package except `app`, and four "Rust app tests" shards run the `app`
+test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
+run does not account for exactly the tests it selected.
+
 The complete CI suite also requires native job ownership tests on Windows:
 `cargo test --locked -p job-execution-tests --test ownership`. Every run uses
 the GitHub-hosted `windows-latest` runner, a native Windows host, never WSL.
