@@ -31,9 +31,9 @@ pub const MAX_DIRECTORY_DEPTH: usize = 64;
 /// Maximum receipt memory retained in one adapter result, before host
 /// persistence, measured by [`MintedReceipt::retained_bytes`] plus each shared
 /// file header once (#725).
-pub const MAX_EXTRACTION_RECEIPT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_EXTRACTION_RECEIPT_BYTES: usize = 128 * 1024 * 1024;
 /// Maximum receipts returned by one captured directory extraction.
-pub const MAX_EXTRACTION_RECEIPTS: usize = 100_000;
+pub const MAX_EXTRACTION_RECEIPTS: usize = 200_000;
 /// Maximum declaration receipts minted for one file (#691). Bounds what one
 /// parsed file and the ordered worker queue retain before directory admission.
 pub const MAX_FILE_DECLARATION_RECEIPTS: usize = 1024;

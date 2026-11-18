@@ -103,6 +103,7 @@ pub(crate) fn sites(
                 format!("{}.{name}", chain.join("."))
             };
             out.push(FetchSite {
+                straight_line: None,
                 method: http_method,
                 url,
                 symbol: Some(symbol.clone()),

@@ -218,8 +218,11 @@ fn present_source_basis<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StagedReceiptReference {
+    /// Staged proposal the receipt belongs to.
     pub proposal_id: String,
+    /// Evidence item the receipt covers.
     pub evidence_id: String,
+    /// Receipt identifier.
     pub receipt_id: String,
 }
 

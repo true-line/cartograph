@@ -700,4 +700,5 @@ mod tests {
 mod workspace;
 pub use workspace::{
     TRACE_WORKSPACE_MODEL, TraceGraphBound, TraceWorkspaceBound, logical_workspace_bound,
+    output_evidence_bound,
 };

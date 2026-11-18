@@ -77,6 +77,10 @@ investigation finding is deliberately kept out of curation (ADR-0061 decision
    that it is not drafted, with the state of any listed draft. An H section
    is a labelled blank. A projected statement is never replaced or removed by
    a draft. The twenty-six existing artifacts are unchanged.
+   *Amended by ADR-0045 decision 4:* in a `best-effort` document a `stale`
+   draft is printed in place under a stale mark that names the changed ids,
+   instead of being named and not printed. Every other non-eligible state,
+   `unresolvable` included, is still named and not printed.
 10. **Export modes.** Every claim is InferredWeak. `verified-only` prints no
     claim and states, per section, how many it left out. `best-effort` prints
     them annotated (R-INT-5). The fact index check of ADR-0058 decision 6

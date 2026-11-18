@@ -16,7 +16,7 @@ pub use eval_report::EvalReport;
 #[path = "../../../crates/semantic/src/family.rs"]
 mod family;
 pub use family::{FamilyKey, HopKind};
-#[allow(missing_docs)]
+// report.rs carries its own inner missing_docs allow (#1764).
 #[path = "../../../crates/semantic/src/evaluation/report.rs"]
 pub mod evaluation_report;
 /// Preserve the production type path without linking the ANN resolver.

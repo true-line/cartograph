@@ -2,8 +2,10 @@
 
 > Restated by the owner on 2026-10-19 and again on 2026-11-09. The plan to
 > reach it is [ROADMAP.md](ROADMAP.md); the direction decisions it rests on are
-> proposed in [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md) and
-> [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md). SPEC-00 and
+> [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md) (accepted
+> 2026-11-18) and
+> [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md) (accepted
+> 2026-11-17). SPEC-00 and
 > SPEC-01 remain the contracts for what is built; this file says where the
 > product is going and what must stay true on the way. The earlier staged
 > roadmap (ADR-0007) is kept at the end for the record.
