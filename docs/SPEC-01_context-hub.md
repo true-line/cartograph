@@ -265,3 +265,14 @@ unchanged. Runtime activation requires the ledger, evidence and replay integrati
 All investigation traversal uses a host-owned, non-deserializable cursor with fixed narrowed page and aggregate limits. It binds every node and edge window to the same acquisition basis/revision. Successful pages charge actual decoded JSON values (including duplicate input property values) and both raw and canonical bytes. A failed acquisition terminates this cursor; outer task admission still accounts for attempted reads and validation. Nodes exhausted does not mean graph exhausted: the edge phase must also finish. Runtime and durable-ledger activation remain separate work.
 
 At an exactly exhausted aggregate allowance, All traversal may prove an empty final edge phase with a revision-checked existence probe that copies no graph payload. Any present edge still refuses; a revision change never turns the probe into completion.
+
+The complete-graph `context-v1` identity can also be streamed (AC-0735): the
+store delivers nodes by id then edges by (src, label, dst) under the same
+admission as the materialized bounded read, and an incremental builder hashes
+them to exactly the id `ContextSnapshot::new` assigns. Edges are walked through
+the additive `idx_edges_src_label_dst` index (the primary key orders them
+(src, dst, label)), so no in-memory sort runs. Retained memory is one
+row, not the graph; time still tracks the whole graph. Inside a scoped reader the
+stream shares the scoped acquisition's pinned revision, so a scoped preparation
+can keep today's `graph_snapshot_id` while retaining only its scope. Investigation
+preparation does not use it yet.

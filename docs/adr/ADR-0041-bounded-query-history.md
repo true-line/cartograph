@@ -1,6 +1,6 @@
 # ADR-0041 — Bounded query history with explicit runtime families
 
-- **Status:** Proposed
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment)
 - **Date:** 2026-10-21
 - **Deciders:** Cartograph maintainers; Codex implementation, Claude cross-review
 
@@ -24,7 +24,9 @@ Introduce an explicit @9/request6/prompt8 family under the unchanged V2 numeric
 policy. Select a runtime by its complete admitted role/request/policy tuple;
 never infer a prompt generation from the numeric profile alone. Preserve @8
 and earlier wires, hashes, behavior and saved-task interpretation. The current
-catalog advertises @9 for new expanded selections. Old catalog snapshots remain
+catalog advertises the newest families for new expanded selections, and older
+families stay readable (amended 2026-11-18; this sentence first named @9 as
+current). Old catalog snapshots remain
 valid, and a previously selected unavailable role requires explicit replacement;
 an uncertain retry retains its frozen original request.
 
@@ -70,3 +72,10 @@ change nor a passing deterministic test authorizes provider execution.
    addressing cumulative growth or proving the next limit sufficient.
 3. Silently shorten history or evidence: loses usable provenance and can imply
    unsupported completeness; explicit references and counted replay avoid that.
+
+## Amendment — 2026-11-18: accepted; the catalog sentence states the rule
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment. The
+Decision no longer names @9 as the current advertised family, because later
+families have shipped since. The rule is unchanged: newer families are
+advertised, and older ones stay readable and keep their meaning.

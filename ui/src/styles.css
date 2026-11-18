@@ -4801,3 +4801,127 @@ details.investigation-section { display: block; }
 .configure-actions { display: flex; gap: 8px; margin-top: 8px; }
 .configure-section { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 8px; }
 .configure-field select { max-width: 280px; }
+
+/* The Workbench document view (SPEC-15 slice 7, AC-0669). It reuses the
+   curated section's frame; these are the section and draft blocks. */
+.document-sections {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.6rem;
+  font-size: 0.75rem;
+}
+
+.document-sections > summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.document-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+  padding: 0.6rem 0 0.2rem;
+  border-top: 1px solid var(--border);
+}
+
+.document-kind {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-body);
+}
+
+.document-draft {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.35rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-body);
+}
+
+.document-draft-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  align-items: baseline;
+  color: var(--text);
+}
+
+.document-draft-review {
+  font-weight: 600;
+}
+
+.document-claims {
+  margin: 0;
+  padding-left: 1.3rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.document-claim-statement {
+  color: var(--text);
+}
+
+.citation-link {
+  margin: 0 0.3rem 0 0;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--control);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.document-draft-actions,
+.document-draft-request {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.3rem;
+  justify-items: start;
+}
+
+.document-draft-actions textarea,
+.document-draft-request input {
+  width: min(100%, 32rem);
+  font: inherit;
+}
+
+.document-draft-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+
+/* System manifest preview (#1655): one section per declared repository. */
+.preflight-system {
+  display: grid;
+  gap: 1.2rem;
+}
+
+.preflight-member {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.preflight-member-title {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.preflight-member-title .muted {
+  font-weight: normal;
+  font-size: 0.8rem;
+}
+
+.preflight-preview-note {
+  margin: 0;
+  font-size: 0.85rem;
+}

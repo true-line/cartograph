@@ -626,6 +626,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
             } catch { /* Inconsistent observations require a read. */ }
           }
         }
+        if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'busy') {
+          set({ reviewBusy: false, reviewError: 'Review storage was busy and this decision was not saved. Refresh reviews, then choose again. No automatic retry was made.' });
+          return;
+        }
         set({ reviewBusy: false, reviewError: 'The review outcome could not be confirmed. Refresh reviews to recover the saved decision before choosing again. No automatic retry was made.' });
       }
     },
