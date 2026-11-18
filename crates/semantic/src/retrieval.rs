@@ -6,6 +6,10 @@
 //! similarity when unit vectors and a provider are present. Every hit cites
 //! base facts and carries the T2 tier; nothing is written back to the base.
 //! Without a provider the lexical leg alone answers.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::knowledge_ingest::{self, KnowledgeUnit};
 use core_graph::overlay::BaseRef;
 use core_graph::{Edge, Node};

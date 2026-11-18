@@ -1,6 +1,10 @@
 //! SPEC-10 bounded, separately authorized completions. These APIs do not change
 //! legacy completion wire formats or consent hashes. Prepared inputs are transient;
 //! the host journals consent consumption and invocation start before dispatch.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 
 use crate::{
     AnalysisTier, CompletionAction, CompletionPayload, ConsentGrant, EgressFirewall, EgressPreview,
