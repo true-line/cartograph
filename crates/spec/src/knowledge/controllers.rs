@@ -24,7 +24,7 @@ fn controller_shape(endpoint: &serde_json::Value) -> Option<ControllerShape> {
             handler_kind: "Method",
             class_symbol: false,
         }),
-        ("spring", Some("java")) => Some(ControllerShape {
+        ("spring" | "jax-rs", Some("java")) => Some(ControllerShape {
             extractor: "t0.adapter-java",
             handler_kind: "method",
             class_symbol: true,
@@ -63,8 +63,9 @@ fn handler_class<'a>(handler: &'a Node, shape: &ControllerShape) -> Option<&'a s
 /// Derive Capability candidates from import-proven controller routes: one per
 /// controller class, citing each of its HTTP endpoints, the method that
 /// handles it and the relation between them, and the class's own Symbol where
-/// the adapter emits one. Covered are NestJS controllers (TypeScript) and
-/// Spring MVC controllers (Java and Kotlin). The rule reads only what the
+/// the adapter emits one. Covered are NestJS controllers (TypeScript), Spring
+/// MVC controllers (Java and Kotlin) and JAX-RS resource classes (Java). The
+/// rule reads only what the
 /// adapter proved: an endpoint with exactly one handler, a member of a named
 /// class, every fact from one file and from that language's own adapter. A
 /// route two classes declare, a handler that is not a class member, an
