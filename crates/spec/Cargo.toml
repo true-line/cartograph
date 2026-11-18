@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 core-graph = { workspace = true }
 core-prov = { workspace = true }
+core-redact = { workspace = true }
 context-hub = { workspace = true }
 source-walk = { workspace = true }
 flowtracer = { workspace = true }
@@ -23,5 +24,6 @@ blake3 = { workspace = true }
 rusqlite = { workspace = true }
 adapters-lang-ts = { workspace = true }
 adapters-lang-java = { workspace = true }
+adapters-lang-kotlin = { workspace = true }
 source-capture = { workspace = true }
 tempfile = "3"

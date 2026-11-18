@@ -70,7 +70,9 @@ impl RefusalFeedback {
             if prose::has_placeholder(finish)
                 || (matches!(
                     input.frozen_specialist()?,
-                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
+                    SpecialistId::DomainAnalystV26
+                        | SpecialistId::DomainAnalystV27
+                        | SpecialistId::DomainAnalystV28
                 ) && prose::has_bare_finish_field(finish))
             {
                 emit(CombinedCorrection::RewriteSchemaPlaceholders)?;

@@ -1,4 +1,8 @@
 //! Logical HTTP payload ownership, not a process or allocator memory ceiling.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::response_wire::{
     AnthropicBlock, AnthropicResponse, OllamaResponse, OpenAiChoice, OpenAiResponse,
 };

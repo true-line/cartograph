@@ -269,8 +269,8 @@ no recovered test arrangements or journeys. The order changes as follows.
 Identifiers reserved for this realignment: US-0041 and AC-0288..0290 for
 W8a, plus ADR-0044 (Codex). AC-0291 and ADR-0043, first reserved for #691,
 are retired unused because #691 landed under AC-0280. AC-0292 is #722, and
-ADR-0045, reserved for the living-wiki design (#724), is written for #1749. The next free
-identifiers are US-0042, AC-0293 and ADR-0046.
+ADR-0045, reserved for the living-wiki design (#724), is written for #1749.
+The next free identifiers are US-0042, AC-0293 and ADR-0046.
 
 
 ## 9. Next: test arrangements, then journeys (2026-10-24)
