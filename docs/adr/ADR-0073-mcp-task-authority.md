@@ -170,6 +170,7 @@ These are not decided by this ADR. Each records what main does today.
    Which of T-0320..T-0329 (in particular a real-provider or installed-client
    run) must pass before this ADR is accepted, and should US-0043's status and
    Trace be updated now?
-7. **Placement.** ADR-0044's and ADR-0048's 2026-11-18 amendments (#1761) say
-   this record is owed as a sibling ADR or as an ADR-0048 follow-up. This draft
+7. **Placement.** The 2026-11-18 amendments to ADR-0044 and ADR-0048 proposed
+   in open PR #1921 (#1761, not yet on main) say this record is owed as a
+   sibling ADR or as an ADR-0048 follow-up. This draft
    is a sibling. Should it instead become an amendment to ADR-0048?
