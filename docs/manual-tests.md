@@ -1564,8 +1564,10 @@ debug build).
    T0 identity list are equal across the three.
 4. Record the printed line (node count, edge count, worker count, graph hash)
    and the machine's operating system and CPU architecture on the task issue.
-5. **Fail:** any difference. Keep the output and open an issue; a milestone is
-   not closed over a failed run.
+5. **Fail:** any difference. The failure names which run differed (repeat or
+   one worker) and the first differing fact in identity order, with both
+   versions when it is in both (AC-0770, T-0770). Keep the output and open an
+   issue; a milestone is not closed over a failed run.
 
 The run covers extraction, load and name stitching. It does not cover the
 Tauri job path or the store on disk, and one machine does not establish
