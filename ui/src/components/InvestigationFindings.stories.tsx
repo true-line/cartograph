@@ -198,6 +198,9 @@ export const CurationUnavailable: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
     await expect(canvas.getByText(/Curation reviews are unavailable/)).toBeVisible();
+    // A failed read does not establish that a finding has no review.
+    await expect(canvas.getAllByText('Curation review state unavailable')).toHaveLength(2);
+    await expect(canvas.queryByText('No curation review')).not.toBeInTheDocument();
     for (const button of canvas.getAllByRole('button', { name: /as curated$/ })) await expect(button).toBeDisabled();
     // Follow-up review is a separate store and stays usable.
     await expect(canvas.getAllByRole('button', { name: 'Use for follow-up' })[0]).toBeEnabled();

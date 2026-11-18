@@ -121,7 +121,7 @@ export function InvestigationFindings({ advisoryAudit, result, citations, citati
             const subject = reviews.find((row) => row.subject.finding_id === finding.finding_id);
             const blocked = !subject || curationLoading || curationBusy || !!curationError;
             return <div aria-label={`Curation review for ${finding.title}`}>
-              <p role="status">{curation ? curation.review_decision === 'accepted' ? 'Accepted as curated' : 'Rejected as curated' : 'No curation review'}</p>
+              <p role="status">{curation ? curation.review_decision === 'accepted' ? 'Accepted as curated' : 'Rejected as curated' : curationLoading ? 'Loading curation review' : curationError ? 'Curation review state unavailable' : 'No curation review'}</p>
               {curation && <p>Curation revision {curation.review_revision} · <time>{curation.reviewed_at}</time></p>}
               <button type="button" disabled={blocked || curation?.review_decision === 'accepted'} onClick={() => onCurate(finding.finding_id, 'accepted')}>Accept as curated</button>
               <button type="button" className="secondary-button" disabled={blocked || curation?.review_decision === 'rejected'} onClick={() => onCurate(finding.finding_id, 'rejected')}>Reject as curated</button>
