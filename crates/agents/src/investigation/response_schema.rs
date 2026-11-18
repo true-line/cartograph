@@ -77,6 +77,48 @@ pub(super) fn select_admitted(
         .map_err(|_| InvestigationError::InvalidInput)
 }
 
+/// @28 (#1335): one selection owns both the transport schema and its
+/// model-visible copy. The transport becomes the canonical encoding of that
+/// copy, so the prompt shows exactly the bytes the provider receives. Every
+/// other role returns its selection unchanged and gains no prompt field.
+pub(super) fn visible_projection(
+    role: SpecialistId,
+    selected: Option<String>,
+) -> Result<(Option<String>, Option<Value>), InvestigationError> {
+    if !role.uses_visible_action_schema() {
+        return Ok((selected, None));
+    }
+    let visible: Value = serde_json::from_str(
+        selected
+            .as_deref()
+            .ok_or(InvestigationError::InvalidInput)?,
+    )
+    .map_err(|_| InvestigationError::InvalidInput)?;
+    drop(selected);
+    let transport = String::from_utf8(bounded_bytes(&visible, MAX_INPUT_BYTES)?)
+        .map_err(|_| InvestigationError::InvalidInput)?;
+    Ok((Some(transport), Some(visible)))
+}
+
+/// Install the @28 copy at `turn_progress.response_schema`, after the stable
+/// prefix, and return the transport schema for the same call.
+pub(super) fn attach_visible(
+    role: SpecialistId,
+    prompt: &mut Value,
+    selected: Option<String>,
+) -> Result<Option<String>, InvestigationError> {
+    let (transport, visible) = visible_projection(role, selected)?;
+    if let Some(visible) = visible {
+        prompt["turn_progress"]
+            .as_object_mut()
+            .ok_or(InvestigationError::InvalidInput)?
+            .insert("response_schema".into(), visible);
+    } else if prompt["turn_progress"].get("response_schema").is_some() {
+        return Err(InvestigationError::InvalidInput);
+    }
+    Ok(transport)
+}
+
 pub(super) fn schema_role(system: &str) -> Option<SpecialistId> {
     [
         SpecialistId::DomainAnalystV13,
@@ -109,7 +151,11 @@ pub(super) fn workspace_bytes(policy: &InvestigationPolicy) -> Option<usize> {
         json_bytes((policy.limits().tool_actions as usize).checked_mul(1024)?)?,
         slots::<QueryHistoryReference>(1)?.checked_add(64)?,
         MAX_INPUT_BYTES, // bounded schema encoding (also on rejection)
-        slots::<Vec<u8>>(2)?,
+        // @28 visible copy: decoded tree plus its canonical transport encoding,
+        // both retained while the selection lives (also on rejection).
+        json_bytes(MAX_INPUT_BYTES)?,
+        MAX_INPUT_BYTES,
+        slots::<Vec<u8>>(3)?,
     ])
 }
 

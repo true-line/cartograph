@@ -101,6 +101,7 @@ pub(crate) fn sites(
             .rsplit_once('#')
             .map(|(_, member)| member.split('(').next().unwrap_or(member).to_string());
         out.push(FetchSite {
+            straight_line: None,
             method: verb.to_string(),
             url,
             symbol: Some(symbol),

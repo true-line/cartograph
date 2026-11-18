@@ -1321,6 +1321,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
     let external = super::external::logical_index_bytes(rows, values)?;
     let environments = super::environments::logical_index_bytes(rows, values)?;
     let curated = super::curated::logical_index_bytes(rows)?;
+    let inventory = super::endpoint_inventory::logical_index_bytes(rows)?;
     Some(
         data.max(tools)
             .max(tests)
@@ -1330,6 +1331,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
             .max(configuration)
             .max(external)
             .max(environments)
-            .max(curated),
+            .max(curated)
+            .max(inventory),
     )
 }

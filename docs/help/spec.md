@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, endpoint inventory, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -13,6 +13,17 @@ shown in **Workspace**.
 
 Beside it, `curated_basis` records the curated revision and the counts of
 accepted proposals by state. See **Curated items** below.
+
+## Endpoint inventory
+
+Every export includes **endpoint-inventory.md**. It lists every recovered
+endpoint once, including endpoints that no test references. Each row shows the
+method, path, framework and language as they were recovered, and `unknown`
+where nothing was recovered, with the endpoint's tier, confidence and source
+span. It does not state parameters, responses or authentication. An endpoint
+recorded as a Gap is counted and listed in the gap register instead. A
+`verified-only` export leaves out InferredWeak endpoints and says how many; a
+`best-effort` export marks them.
 
 ## Endpoints and permission sites
 

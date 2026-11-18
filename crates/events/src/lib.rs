@@ -525,6 +525,12 @@ pub fn stitch_fetches(
     )
 }
 
+/// Property of a `FETCHES` relation, and of a fetch Gap awaiting a system
+/// join: whether the call is straight-line in its source Symbol's body
+/// (`adapters_fw::client::FetchSite::straight_line`, #1012). Absent when
+/// the adapter does not determine it.
+pub const STRAIGHT_LINE: &str = "straight_line";
+
 /// [`stitch_fetches`], where each id in `get_serves_head` is a GET route
 /// its framework also serves for HEAD (Go's `ServeMux`, AC-0434), and
 /// `prefix_kinds` ([`prefix_kinds`]) says how each prefix route matches.
@@ -625,6 +631,9 @@ pub fn stitch_fetches_with(
                 if let Some(join) = &join {
                     props["join"] = join.clone();
                 }
+                if let Some(straight_line) = site.straight_line {
+                    props[STRAIGHT_LINE] = straight_line.into();
+                }
                 out.edges.push(Edge {
                     src,
                     dst: ep_id.to_string(),
@@ -641,6 +650,10 @@ pub fn stitch_fetches_with(
                 });
                 if let Some(join) = &join {
                     props["join"] = join.clone();
+                }
+                // Kept on the Gap so a system-wide join carries it (#1012).
+                if let Some(straight_line) = site.straight_line {
+                    props[STRAIGHT_LINE] = straight_line.into();
                 }
                 // The resolved request, for system-wide binding (#589).
                 if let (Some(url), Some(source)) = (resolved_url.as_ref(), url_source.as_ref()) {
