@@ -7,9 +7,10 @@
 //! - [`validate_start`] refuses a start whose question does not name one
 //!   drafted section of the catalogue table, before anything durable.
 //! - [`stage`] turns a completed run into a staged draft, or into a closed
-//!   reason why there is none. It reads the saved result and ledger, takes
-//!   the citation set of the address from the current graph, applies the
-//!   pure admission rule and stores the draft. It calls no model and is
+//!   reason why there is none. It reads the saved result and ledger, refuses
+//!   when the current graph is no longer the snapshot the run froze, takes
+//!   the citation set of the address from that graph, applies the pure
+//!   admission rule and stores the draft. It calls no model and is
 //!   idempotent: storing identical content returns the stored record.
 //!
 //! The worker calls [`stage`] once when a drafting run ends. The
@@ -202,8 +203,13 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         Ok(address) => address,
         Err(reason) => return Ok(DraftingOutcome::none(reason)),
     };
-    let citations = ledger.map(|ledger| ledger.citations).unwrap_or_default();
-    let finish = match finish_of(&address, &result.findings, &citations, |fact| {
+    // The draft is recorded as written against the current graph, so that
+    // graph must be the one the run's evidence was frozen from. A completed
+    // run without its ledger has no frozen snapshot to compare.
+    let Some(ledger) = ledger else {
+        return Ok(DraftingOutcome::none("graph_changed"));
+    };
+    let finish = match finish_of(&address, &result.findings, &ledger.citations, |fact| {
         spec::citation_id(&fact_key(fact))
     }) {
         Ok(finish) => finish,
@@ -214,21 +220,33 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         .iter()
         .flat_map(|claim| claim.citations.iter().cloned())
         .collect();
-    let (citation_set, graph_content_hash) = {
+    let (_, ((nodes, edges), _)) = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let (_, ((nodes, edges), _)) = crate::curated::read_graph(&graph)?;
-        // The table held the section when the address was checked above.
-        let section = spec::drafted_section(
-            &address.catalogue_version,
-            &address.document,
-            &address.section,
-        )
-        .map_err(|error| error.code().to_owned())?;
-        match spec::section_citation_set(section, &address.scope, &nodes, &edges, &cited) {
-            Ok(set) => (set, spec::graph_content_hash(&nodes, &edges)),
-            Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
-        }
+        crate::curated::read_graph(&graph)?
     };
+    // A re-ingest since the run (or a retry after a failed store) may keep a
+    // cited fact's id and change its content: the snapshot identity covers
+    // every fact's content, so any change refuses rather than staging the
+    // draft against a graph it was not written from.
+    let current = context_hub::ContextSnapshot::new(nodes.clone(), edges.clone())
+        .ok()
+        .map(|snapshot| snapshot.id().to_owned());
+    if current.as_deref() != Some(ledger.graph_snapshot_id.as_str()) {
+        return Ok(DraftingOutcome::none("graph_changed"));
+    }
+    // The table held the section when the address was checked above.
+    let section = spec::drafted_section(
+        &address.catalogue_version,
+        &address.document,
+        &address.section,
+    )
+    .map_err(|error| error.code().to_owned())?;
+    let citation_set =
+        match spec::section_citation_set(section, &address.scope, &nodes, &edges, &cited) {
+            Ok(set) => set,
+            Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
+        };
+    let graph_content_hash = spec::graph_content_hash(&nodes, &edges);
     let draft = match admit(&address, &citation_set, finish) {
         Ok(draft) => draft,
         Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
