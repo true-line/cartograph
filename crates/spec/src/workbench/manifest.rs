@@ -62,6 +62,7 @@ const PARTS: &[Part] = &[
             "external",
             "environments",
             "documentation-evidence",
+            "endpoint-inventory",
             "curated",
         ],
     },
