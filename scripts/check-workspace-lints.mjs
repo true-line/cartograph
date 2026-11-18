@@ -67,17 +67,24 @@ function rustFiles(dir, out = []) {
   return out;
 }
 
+// rustfmt splits a long attribute over several lines, so match across whitespace.
+const MISSING_DOCS_ALLOW = /allow\(\s*missing_docs\b/u;
+
 /** Files under the workspace members carrying a ratcheted missing_docs allow. */
 export function ratchetedAllows(root) {
   const files = [];
+  let scanned = 0;
   for (const manifest of memberManifests(root)) {
     for (const file of rustFiles(path.join(root, path.dirname(manifest)))) {
+      scanned += 1;
       const text = readFileSync(file, 'utf8');
-      if (text.includes('allow(missing_docs') && text.includes(RATCHET_MARKER)) {
+      if (MISSING_DOCS_ALLOW.test(text) && text.includes(RATCHET_MARKER)) {
         files.push(path.relative(root, file));
       }
     }
   }
+  // Never pass on a tree without sources (e.g. a sparse checkout).
+  if (scanned === 0) throw new Error('no Rust sources found under the workspace members');
   return files.sort();
 }
 
@@ -96,7 +103,12 @@ export function check(root, max = MAX_MISSING_DOCS_ALLOWS) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const errors = check(root);
+  let errors;
+  try {
+    errors = check(root);
+  } catch (error) {
+    errors = [error.message];
+  }
   for (const error of errors) console.error(error);
   if (errors.length > 0) process.exit(1);
   console.log('workspace lints: every member inherits [workspace.lints]');
