@@ -638,7 +638,7 @@ impl<'a> ReferenceIndex<'a> {
                 .map(|(id, _)| (ReferenceRule::FilePath, *id))
         };
         if reference.link {
-            return file(link_path(&reference.path, text)?);
+            return file(local_link_path(&reference.path, text)?);
         }
         if let Some((id, _)) = self.labels.get_key_value(text) {
             return Some((ReferenceRule::FactId, *id));
@@ -686,6 +686,42 @@ fn code_path(text: &str) -> Option<String> {
 /// The repo-relative path a link target names, resolved against the
 /// directory of the document at `document`. `None` for an absolute URL, a
 /// bare fragment, or a target that leaves the repository.
+/// The repository path a Markdown link target names: as [`link_path`],
+/// after percent-decoding, so `setup%20guide.md` names `setup guide.md`. A
+/// target whose escapes do not decode to UTF-8 is taken as written.
+fn local_link_path(document: &str, target: &str) -> Option<String> {
+    link_path(document, &percent_decoded(target))
+}
+
+/// `text` with each `%XX` escape decoded, or `text` itself when the result
+/// is not UTF-8.
+fn percent_decoded(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('%') {
+        return text.into();
+    }
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escape = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escape {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_or(text.into(), Into::into)
+}
+
 fn link_path(document: &str, target: &str) -> Option<String> {
     if target.contains("://") || target.starts_with("mailto:") || target.starts_with("//") {
         return None;
@@ -872,7 +908,7 @@ pub fn documentation_drift(
         }
         let text = reference.text.as_str();
         let found = if reference.link {
-            link_path(&reference.path, text)
+            local_link_path(&reference.path, text)
                 .filter(|path| !exists(path))
                 .map(|path| (DocumentationDrift::FileMissing, path))
         } else if let Some(route) = route_key(text) {

@@ -3296,7 +3296,7 @@ fn collect_documents<'a>(
             facts.edges.extend(mentions);
             // Whether a repo-relative path is in the tree: an existence
             // check only, and a link is never followed out of it.
-            let exists = |path: &str| root.join(path).symlink_metadata().is_ok();
+            let exists = |path: &str| tree_has_path(root, path);
             let (drift, compared) =
                 spec::documentation_drift(repo, commit, &facts.references, &index, &exists);
             facts.nodes.extend(drift);
@@ -3304,6 +3304,26 @@ fn collect_documents<'a>(
             Ok((repo.to_owned(), facts))
         })
         .collect()
+}
+
+/// Whether `path` names an entry of the tree under `root`, read component
+/// by component without following a symbolic link. A link on the way is
+/// itself the entry the tree holds: what it points at, possibly outside the
+/// repository, never decides the answer.
+fn tree_has_path(root: &std::path::Path, path: &str) -> bool {
+    let mut at = root.to_path_buf();
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        if part == ".." {
+            return false;
+        }
+        at.push(part);
+        match at.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Add each repository's documentation facts to `patch`, and remove the
@@ -8685,6 +8705,26 @@ resource "aws_sqs_queue" "orders" {
                     .any(|edge| edge.src == importer && edge.dst == "mod:foo")
             );
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_documented_path_is_checked_in_the_tree_without_following_a_link() {
+        // AC-0679 (T-0679): what a symlink points at, possibly outside the
+        // repository, never decides whether a documented path exists.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("docs/guide.md"), "# Guide\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        assert!(crate::tree_has_path(&root, "docs/guide.md"));
+        assert!(!crate::tree_has_path(&root, "docs/gone.md"));
+        assert!(!crate::tree_has_path(&root, "../outside"));
+        let before = crate::tree_has_path(&root, "linked/guide.md");
+        std::fs::write(outside.join("guide.md"), "# Elsewhere\n").unwrap();
+        assert_eq!(crate::tree_has_path(&root, "linked/guide.md"), before);
     }
 
     #[test]

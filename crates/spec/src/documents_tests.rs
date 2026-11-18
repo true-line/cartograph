@@ -600,10 +600,17 @@ fn with_no_recovered_endpoint_a_route_reference_is_no_finding() {
 #[test]
 fn a_reference_to_a_file_that_does_not_exist_is_drift_with_the_path_looked_for() {
     let markdown = "# Shop\n\n[guide](docs/guide.md) [gone](docs/gone.md#setup) \
-        [web](https://example.com/x.md) [top](#shop)\n\n\
+        [web](https://example.com/x.md) [top](#shop) [setup](docs/setup%20guide.md)\n\n\
         `src/orders.ts` `src/missing.ts:10` `docs/guide.md` `lib/absent.ts` \
         `application/json` `src/*.ts` `src/<name>.ts` `sym:src/a.ts` `v1.2` `Makefile`\n";
-    let present = ["src", "docs", "src/orders.ts", "docs/guide.md"];
+    // A link target is percent-decoded before it is looked for.
+    let present = [
+        "src",
+        "docs",
+        "src/orders.ts",
+        "docs/guide.md",
+        "docs/setup guide.md",
+    ];
     let (drift, edges) = drifted(markdown, &present);
     assert_eq!(
         rows(&drift),
