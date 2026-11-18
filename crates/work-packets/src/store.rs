@@ -444,6 +444,10 @@ fn admit_schema(connection: &mut Connection) -> PacketResult<()> {
     Ok(())
 }
 
+/// How long a packet-store connection waits for a competing writer's lock;
+/// every Cartograph SQLite store uses the same 5 s (AC-0823, #1653).
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct PacketStore {
     connection: Connection,
 }
@@ -456,7 +460,7 @@ impl PacketStore {
         Self::initialize(Connection::open_in_memory()?)
     }
     fn initialize(mut connection: Connection) -> PacketResult<Self> {
-        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.execute_batch("PRAGMA foreign_keys=ON;")?;
         admit_schema(&mut connection)?;
         Ok(Self { connection })

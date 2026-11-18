@@ -66,15 +66,42 @@ fn sum(parts: &[usize]) -> Option<usize> {
         .try_fold(0usize, |total, part| total.checked_add(*part))
 }
 
+/// Most evidence elements that `output_bytes` of compact flow JSON can hold.
+/// Flow output always writes an evidence element as the full five-field
+/// object, so none is shorter than that object with empty strings and
+/// one-digit offsets. Measured from the real serializer, not restated.
+pub fn output_evidence_bound(output_bytes: usize) -> Option<usize> {
+    let smallest = serde_json::to_vec(&EvidenceRef {
+        repo: String::new(),
+        path: String::new(),
+        byte_start: 0,
+        byte_end: 0,
+        commit_sha: String::new(),
+    })
+    .ok()?
+    .len();
+    output_bytes.checked_div(smallest)
+}
+
+/// Most attempted-tier elements that `output_bytes` of compact flow JSON can
+/// hold. Each is a JSON string of at least its two quotes, and `k` of them in
+/// one array need `k - 1` commas and the two brackets: more than three bytes
+/// each.
+fn output_attempted_tier_bound(output_bytes: usize) -> usize {
+    output_bytes / MINIMUM_ATTEMPTED_TIER_BYTES
+}
+const MINIMUM_ATTEMPTED_TIER_BYTES: usize = 3;
+
 /// Derive the bounded tracer's logical peak workspace with checked arithmetic.
 /// Returns `None` if any role/count cannot be represented; zero trace limits
 /// retain their existing meaning and are not silently widened.
 ///
 /// The existing tracer owns output only after whole-flow admission. Its UTF-8
-/// payload is therefore bounded by `max_output_bytes`; each flow/hop/nested
-/// element also consumes at least one serialized byte. Evidence/attempted-tier
-/// arrays can copy input values into every admitted hop, so their element count
-/// is bounded by both output bytes and admitted hops times input values.
+/// payload is therefore bounded by `max_output_bytes`; each flow/hop also
+/// consumes at least one serialized byte. Evidence/attempted-tier arrays can
+/// copy input values into every admitted hop, so their element count is
+/// bounded by admitted hops times input values, and by the output bytes
+/// divided by the smallest serialized form of one such element.
 ///
 /// The graph bytes ceiling is accepted as part of the explicit admitted graph
 /// contract, but is not added: indexes/views borrow its strings and native output
@@ -88,14 +115,16 @@ pub fn logical_workspace_bound(
     let rows = graph.rows;
     let flows = limits.max_flows.min(rows).min(limits.max_output_bytes);
     let hops = limits.max_hops.min(limits.max_output_bytes);
-    let nested = hops.checked_mul(graph.values)?.min(limits.max_output_bytes);
+    let nested = hops.checked_mul(graph.values)?;
+    let evidence = nested.min(output_evidence_bound(limits.max_output_bytes)?);
+    let attempted_tiers = nested.min(output_attempted_tier_bound(limits.max_output_bytes));
     let retained_output_bytes = sum(&[
         limits.max_output_bytes,
         size_of::<Vec<Flow>>(),
         slots::<Flow>(flows)?,
         slots::<Hop>(hops)?,
-        slots::<EvidenceRef>(nested)?,
-        slots::<String>(nested)?, // attempted_tiers element headers
+        slots::<EvidenceRef>(evidence)?,
+        slots::<String>(attempted_tiers)?, // attempted_tiers element headers
     ])?;
     // Each edge enters at most one of the three adjacency maps. Their combined
     // key count and combined Vec<&Edge> element count are each <= graph rows.
@@ -258,6 +287,97 @@ mod tests {
                 logical_workspace_bound(graph(), wider).unwrap().peak_bytes >= baseline.peak_bytes
             );
         }
+    }
+
+    fn hop(evidence: usize, tiers: usize) -> Hop {
+        let mut provenance = Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+            vec![
+                EvidenceRef {
+                    repo: String::new(),
+                    path: String::new(),
+                    byte_start: 0,
+                    byte_end: 0,
+                    commit_sha: String::new(),
+                };
+                evidence
+            ],
+            "",
+            b"",
+        )
+        .unwrap();
+        provenance.content_hash.clear();
+        Hop {
+            label: String::new(),
+            src: String::new(),
+            dst: String::new(),
+            src_name: String::new(),
+            dst_name: String::new(),
+            tier: String::new(),
+            confidence: String::new(),
+            evidence: None,
+            provenance,
+            gap_reason: None,
+            attempted_tiers: vec![String::new(); tiers],
+        }
+    }
+
+    #[test]
+    fn nested_output_slots_follow_the_smallest_serialized_elements() {
+        // AC-0732: the densest evidence and attempted-tier arrays (empty
+        // strings, one-digit offsets) meet their element bounds exactly, and
+        // one byte less admits one element fewer.
+        let wire = |value: &Hop| serde_json::to_vec(value).unwrap().len();
+        for count in [1usize, 2, 7, 500] {
+            let evidence = wire(&hop(count, 0)) - wire(&hop(0, 0));
+            // `count` objects and the commas between them.
+            let smallest = (evidence + 1) / count - 1;
+            assert_eq!(evidence, count * smallest + count - 1);
+            assert_eq!(output_evidence_bound(count * smallest), Some(count));
+            assert_eq!(output_evidence_bound(count * smallest - 1), Some(count - 1));
+            assert!(output_evidence_bound(evidence).unwrap() >= count);
+            let tiers = wire(&hop(0, count)) - wire(&hop(0, 0));
+            assert_eq!(tiers, count * MINIMUM_ATTEMPTED_TIER_BYTES - 1);
+            assert_eq!(output_attempted_tier_bound(tiers + 1), count);
+            assert_eq!(output_attempted_tier_bound(tiers), count - 1);
+        }
+        // A whole admitted output of the densest hop stays inside the role.
+        let dense = vec![Flow {
+            trigger: String::new(),
+            trigger_kind: String::new(),
+            trigger_name: String::new(),
+            hops: vec![hop(300, 0), hop(0, 300)],
+            status: FlowStatus::Inferred,
+            score: 0.0,
+            depth_limited: false,
+        }];
+        let output = serde_json::to_vec(&dense).unwrap().len();
+        let bound = |output| {
+            logical_workspace_bound(
+                TraceGraphBound {
+                    bytes: 0,
+                    rows: 2,
+                    values: 300,
+                },
+                TraceLimits {
+                    max_flows: 1,
+                    max_hops: 2,
+                    max_output_bytes: output,
+                },
+            )
+            .unwrap()
+            .retained_output_bytes
+        };
+        let owned = output
+            + size_of::<Vec<Flow>>()
+            + size_of::<Flow>()
+            + 2 * size_of::<Hop>()
+            + 300 * size_of::<EvidenceRef>()
+            + 300 * size_of::<String>();
+        assert!(owned <= bound(output));
+        // The element roles no longer grow by one slot per output byte.
+        assert!(bound(2 * output) - bound(output) < size_of::<String>() * output);
     }
 
     #[test]

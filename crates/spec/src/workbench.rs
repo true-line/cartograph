@@ -26,6 +26,7 @@ mod documentation;
 pub use document::{
     SYSTEM_SCOPE, SectionScopeError, cited_fact_hashes, drafted_section, section_citation_set,
 };
+mod endpoint_inventory;
 mod endpoint_permissions;
 mod environments;
 mod external;
@@ -759,6 +760,7 @@ pub(crate) fn resolved<T>(compiled: Result<T, FactIndexError>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_graph::FactKey;
     use core_prov::EvidenceRef;
 
     fn prov(tier: Tier, confidence: ConfidenceTier, hash: &str) -> serde_json::Value {
@@ -963,11 +965,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "fbcfe1e3ce4f10b4c67068563724b8afbcc3a2b3494a5edd45cd478b802aac51",
+                "b2aa1b6bea244020ce6c60c8c59dba463d29329a3b39317dcbd415e9dbff4818",
             ),
             (
                 ExportMode::BestEffort,
-                "18647678ef108c4ee9a0eb0110f74eb137d20071f014a6b5c59a1b36ea0b85e6",
+                "9e2e3f47eab29167c58693ee6600dc9cc2eb65937363bbbba5d7bfb79b19dd56",
             ),
         ] {
             let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
@@ -985,7 +987,10 @@ mod tests {
             // stories render recovered names, ids and provenance as literal text
             // (#1453), which intentionally changes those bytes, as does
             // security.md stating "no authentication check recovered" and its
-            // coverage limit (#1820). The endpoint
+            // coverage limit (#1820). data_model.md prints the citation id of
+            // each fact it asserts (#1785, ADR-0058 decision 8): a node table,
+            // and Confidence and Citation columns on its relation tables. That
+            // changes only the data-model artifact's bytes. The endpoint
             // permission projection (#1787), the pipeline projection (#1818),
             // the configuration key projection (#1821), the boundary
             // projection (#1788), the environments projection (#1791), the
@@ -1000,18 +1005,19 @@ mod tests {
     /// The bundle without the endpoint permission projection (#1787), the
     /// pipeline projection (#1818), the configuration key projection
     /// (#1821), the boundary projection (#1788), the environments projection
-    /// (#1791), the documentation evidence projection (#1750), the curated
-    /// items, which list a projection the host supplies (#1746), the two
-    /// coverage artifacts, which project stored inventories
+    /// (#1791), the documentation evidence projection (#1750), the endpoint
+    /// inventory (#1658), the curated items, which list a projection the host
+    /// supplies (#1746), the two coverage artifacts, which project stored
+    /// inventories
     /// instead of the graph (#1786), and the two fact-index artifacts, which
     /// list what the others cite (#1785), and the D1 document (#1748), which
-    /// cites the facts its frames list. The twelve close the official order;
+    /// cites the facts its frames list. The thirteen close the official order;
     /// the fixture has no endpoint, no pipeline, no environment file, no
     /// configuration read, no outbound call, no observed client, no channel,
     /// no Compose file and no documentation file, and a bare compile has no curated projection, so
     /// none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 12);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 13);
         assert_eq!(
             appended
                 .iter()
@@ -1024,6 +1030,7 @@ mod tests {
                 "external",
                 "environments",
                 "documentation-evidence",
+                "endpoint-inventory",
                 "curated",
                 "d1-product-specification",
                 "coverage",
@@ -1179,6 +1186,7 @@ mod tests {
                 "external.md",
                 "environments.md",
                 "documentation-evidence.md",
+                "endpoint-inventory.md",
                 "curated.md",
                 "product-specification.md",
                 "coverage.md",
@@ -1382,6 +1390,180 @@ mod tests {
         ] {
             assert!(data.content.contains(field), "{field}: {}", data.content);
         }
+    }
+
+    /// The citation ids `text` prints: `F-` and 16 hex characters.
+    fn printed_citation_ids(text: &str) -> BTreeSet<&str> {
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|word| word.len() == 18 && word.starts_with("F-"))
+            .collect()
+    }
+
+    fn data_model_fixture() -> (Vec<Node>, Vec<Edge>) {
+        use ConfidenceTier as C;
+        let nodes = vec![
+            node(
+                "data:owner",
+                "DataEntity",
+                Tier::Deterministic,
+                C::Confirmed,
+            ),
+            node("data:pet", "DataEntity", Tier::Deterministic, C::Confirmed),
+            node("data:guess", "DataEntity", Tier::Semantic, C::InferredWeak),
+            node("sym:save-pet", "Symbol", Tier::Deterministic, C::Confirmed),
+        ];
+        let mut relation = edge(
+            "data:owner",
+            "data:pet",
+            "REFERENCES",
+            Tier::Deterministic,
+            C::Confirmed,
+        );
+        relation.props["relations"] = serde_json::json!([{
+            "field": "pets",
+            "relation": "OneToMany",
+            "cardinality": "one-to-many",
+            "owning": false,
+        }]);
+        let mut weak_relation = edge(
+            "data:owner",
+            "data:guess",
+            "REFERENCES",
+            Tier::Semantic,
+            C::InferredWeak,
+        );
+        weak_relation.props["relations"] = serde_json::json!([{
+            "field": "guess",
+            "relation": "ManyToOne",
+            "cardinality": "many-to-one",
+            "owning": true,
+        }]);
+        let edges = vec![
+            relation,
+            edge(
+                "sym:save-pet",
+                "data:pet",
+                "WRITES",
+                Tier::Deterministic,
+                C::Confirmed,
+            ),
+            edge(
+                "sym:save-pet",
+                "data:guess",
+                "WRITES",
+                Tier::Semantic,
+                C::InferredWeak,
+            ),
+            weak_relation,
+        ];
+        (nodes, edges)
+    }
+
+    // AC-0760 (#1785, ADR-0058 decision 8): data_model.md prints the
+    // citation id of every fact it asserts, the ids it prints are exactly
+    // those facts, each resolves in the export's fact index, and a relation
+    // field cites its relation edge.
+    #[test]
+    fn data_model_prints_a_resolving_citation_for_each_statement() {
+        let (nodes, edges) = data_model_fixture();
+        for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+            let bundle = compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
+            let data = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "data-model")
+                .unwrap();
+            let index: FactIndex = serde_json::from_str(
+                &bundle
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.id == "fact-index-json")
+                    .unwrap()
+                    .content,
+            )
+            .unwrap();
+            let cited: BTreeSet<String> = index
+                .rows
+                .iter()
+                .filter(|row| row.cited_by.iter().any(|by| by == "data-model"))
+                .map(|row| row.citation_id.clone())
+                .collect();
+            assert_eq!(cited.len(), data.assertions.len(), "{mode:?}");
+            let printed = printed_citation_ids(&data.content);
+            assert_eq!(
+                printed,
+                cited.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+                "{mode:?}: {}",
+                data.content
+            );
+            check_citations(&index, printed.iter().copied()).expect("every id resolves");
+
+            let relation = citation_id(&FactKey::Edge {
+                source: "data:owner".into(),
+                label: "REFERENCES".into(),
+                destination: "data:pet".into(),
+            });
+            assert!(data.content.contains(&format!(
+                "| `data:owner` | REFERENCES | `data:pet` | Confirmed | {relation} |"
+            )));
+            assert!(data.content.contains(&format!(
+                "| `data:owner` | `pets` | OneToMany | one-to-many | false | `data:pet` | Confirmed | {relation} |"
+            )));
+            let pet = citation_id(&FactKey::Node {
+                id: "data:pet".into(),
+            });
+            assert!(data.content.contains(&format!(
+                "| `data:pet` | DataEntity | Deterministic | Confirmed | {pet} |"
+            )));
+        }
+    }
+
+    // AC-0760 (#1785, R-INT-5): a verified-only data_model.md prints no
+    // citation of an InferredWeak fact and its index has no row for one; a
+    // best-effort one prints them with their confidence, and both resolve.
+    #[test]
+    fn data_model_citations_follow_the_export_mode() {
+        let (nodes, edges) = data_model_fixture();
+        let weak_entity = citation_id(&FactKey::Node {
+            id: "data:guess".into(),
+        });
+        let weak_write = citation_id(&FactKey::Edge {
+            source: "sym:save-pet".into(),
+            label: "WRITES".into(),
+            destination: "data:guess".into(),
+        });
+        let content = |mode| {
+            compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new())
+                .artifacts
+                .into_iter()
+                .find(|artifact| artifact.id == "data-model")
+                .unwrap()
+                .content
+        };
+        let verified = content(ExportMode::VerifiedOnly);
+        assert!(!verified.contains(&weak_entity));
+        assert!(!verified.contains(&weak_write));
+        assert!(!verified.contains("InferredWeak"));
+        let best = content(ExportMode::BestEffort);
+        assert!(best.contains(&format!(
+            "| `data:guess` | DataEntity | Semantic | InferredWeak | {weak_entity} |"
+        )));
+        assert!(best.contains(&format!(
+            "| `sym:save-pet` | WRITES | `data:guess` | InferredWeak | {weak_write} |"
+        )));
+        // A relation field prints its relation edge's confidence and citation.
+        let weak_relation = citation_id(&FactKey::Edge {
+            source: "data:owner".into(),
+            label: "REFERENCES".into(),
+            destination: "data:guess".into(),
+        });
+        assert!(!verified.contains(&weak_relation));
+        assert!(best.contains(&format!(
+            "| `data:owner` | `guess` | ManyToOne | many-to-one | true | `data:guess` | InferredWeak | {weak_relation} |"
+        )));
+        // Deterministic: the same graph prints the same bytes.
+        assert_eq!(best, content(ExportMode::BestEffort));
+        assert_eq!(verified, content(ExportMode::VerifiedOnly));
     }
 
     #[test]
@@ -2548,7 +2730,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 28);
+                assert_eq!(full.artifacts.len(), 29);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,
