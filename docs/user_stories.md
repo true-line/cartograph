@@ -1003,6 +1003,14 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **AC-0769** Given the @27 finish-patch correction on @28, then the patch schema bytes are unchanged and the same schema is shown in the prompt and sealed. Host start, catalog opt-in, UI selection and frozen captured acceptance remain separate follow-up slices; no query-loop fix for #598 is claimed.
 - **Trace:** H4 · `agents` · — · T-0765..0769
 
+- **AC-0830** Given the desktop catalog with the expanded profile registered (#1335), then domain-analyst@28 is offered next to domain-analyst@27, in the same `investigation-v2` policy entry and the same saved-run-limit list, and in no other profile. @27 stays offered with its definition unchanged. This replaces the "not yet offered" clause of AC-0765; UI families, types and fixtures for @28 are a later slice.
+- **AC-0831** Given any host lifecycle rule that admits domain-analyst@27, then @28 is admitted by the same shared predicate: the volatile finish-patch rules use `uses_finish_patch`, and the local finish generation lane (@26–@28) and host-only finding withholding (@25–@28) each use one host predicate. Every identity outside those sets is refused exactly as before.
+- **AC-0832** Given a saved @28 task, then a volatile patch marker, finish telemetry, the one-correction pending patch, saved metadata history and the merged-result witness are accepted under @27's phase and intent rules, and a lost holder fails closed; @26 and older roles still cannot carry a marker.
+- **AC-0833** Given a new desktop or MCP-granted completion start for @28, then a Local start saves `LocalFinish4096V1` like @27, a Cloud start saves none, and saved recovery replays the started task unchanged.
+- **AC-0834** Given the public desktop start command with domain-analyst@28, then it creates the task with @28's saved identity and @27's local finish limits, and a replay of the same nonce returns the saved summary without another model call.
+- **AC-0835** Given captured acceptance preparation, then a frozen @28 definition is accepted with @27's local finish lane rule, and its receipt family is `request7-specialist28-prompt14-disclosure6-result7`, with any mismatch between the frozen and saved identity or role refused. @27's family and the #598 negative cases pinned to @27 are unchanged. No captured @28 run is claimed.
+- **Trace:** H4 · `app` · — · T-0830..0835
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

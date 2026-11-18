@@ -46,6 +46,7 @@ fn available_specialists() -> Vec<SpecialistId> {
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
             SpecialistId::DomainAnalystV27,
+            SpecialistId::DomainAnalystV28,
         ]);
     }
     specialists
@@ -96,6 +97,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                         SpecialistId::DomainAnalystV22,
                         SpecialistId::DomainAnalystV23,
                         SpecialistId::DomainAnalystV27,
+                        SpecialistId::DomainAnalystV28,
                     ]
                 } else {
                     vec![
@@ -871,6 +873,7 @@ mod policy_catalog_tests {
                 SpecialistId::DomainAnalystV22,
                 SpecialistId::DomainAnalystV23,
                 SpecialistId::DomainAnalystV27,
+                SpecialistId::DomainAnalystV28,
             ] {
                 assert!(named.contains(&id), "{id:?}");
             }
@@ -908,6 +911,47 @@ mod policy_catalog_tests {
             assert!(!available_specialists().contains(&role));
             assert!(!expanded.specialist_ids.contains(&role));
         }
+    }
+
+    // AC-0830 (#1335): @28 is offered beside @27, in @27's expanded profile
+    // only, and @27's catalog entry and definition are unchanged.
+    #[test]
+    fn desktop_catalog_advertises_analyst28_under_analyst27_profile() {
+        if InvestigationPolicy::for_profile("investigation-v2").is_none() {
+            assert!(!available_specialists().contains(&SpecialistId::DomainAnalystV28));
+            return;
+        }
+        let catalog = policy_catalog();
+        for entry in &catalog {
+            assert_eq!(
+                entry
+                    .specialist_ids
+                    .contains(&SpecialistId::DomainAnalystV28),
+                entry
+                    .specialist_ids
+                    .contains(&SpecialistId::DomainAnalystV27),
+                "{}",
+                entry.limits.profile
+            );
+        }
+        let expanded = catalog
+            .iter()
+            .find(|entry| entry.limits.profile == "investigation-v2")
+            .unwrap();
+        let at = |id| expanded.specialist_ids.iter().position(|x| *x == id);
+        assert_eq!(
+            at(SpecialistId::DomainAnalystV28),
+            at(SpecialistId::DomainAnalystV27).map(|i| i + 1)
+        );
+        let offered = available_specialists();
+        assert!(offered.contains(&SpecialistId::DomainAnalystV27));
+        assert!(offered.contains(&SpecialistId::DomainAnalystV28));
+        assert!(configured_limit_specialists().contains(&SpecialistId::DomainAnalystV28));
+        let v27 = SpecialistId::DomainAnalystV27.definition().unwrap();
+        let v28 = SpecialistId::DomainAnalystV28.definition().unwrap();
+        assert_eq!(v27.version, 27);
+        assert_eq!(v28.version, 28);
+        assert_ne!(v27.prompt_fingerprint, v28.prompt_fingerprint);
     }
 
     #[test]
@@ -989,6 +1033,7 @@ mod policy_catalog_tests {
             SpecialistId::DomainAnalystV22,
             SpecialistId::DomainAnalystV23,
             SpecialistId::DomainAnalystV27,
+            SpecialistId::DomainAnalystV28,
         ] {
             assert_eq!(
                 available_specialists().contains(&role),
