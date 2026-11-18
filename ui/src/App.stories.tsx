@@ -957,6 +957,26 @@ function installFakeCore(options: {
           ],
           detector: 'preflight@1',
         };
+      case 'preflight_system':
+        // A manifest preview (#1655): a local member's own report, and a
+        // remote member deferred to recovery.
+        return {
+          members: [
+            {
+              kind: 'local',
+              entry: 'infra',
+              path: '/fake/system-checkout/infra',
+              report: {
+                languages: [{ language: 'Terraform', files: 2, adapter: 't0.iac-terraform' }],
+                frameworks: [],
+                potential_gaps: [],
+                unsupported: [],
+                detector: 'preflight@1',
+              },
+            },
+            { kind: 'deferred', entry: 'https://github.com/acme/shop' },
+          ],
+        };
       case 'ingest_path':
         return {
           job_id: 1,
@@ -1245,8 +1265,14 @@ export const ManifestDirectoryUsesAddSystem: Story = {
     await userEvent.click(canvas.getByRole('radio', { name: 'System manifest' }));
     await userEvent.type(canvas.getByRole('textbox'), '/fake/system-checkout');
     await userEvent.click(canvas.getByRole('button', { name: /preflight/i }));
-    // Manifest detection defers to recovery rather than inventing a report.
-    await expect(canvas.getByText('Detection deferred')).toBeInTheDocument();
+    // The manifest preview scans its local member and defers the remote one
+    // to recovery rather than inventing a report (#1655).
+    await waitFor(() =>
+      expect(canvas.getByRole('region', { name: 'Repository infra' })).toBeInTheDocument(),
+    );
+    await expect(canvas.getByText('t0.iac-terraform')).toBeInTheDocument();
+    const remote = canvas.getByRole('region', { name: 'Repository https://github.com/acme/shop' });
+    await expect(within(remote).getByText('Detection deferred')).toBeInTheDocument();
 
     await userEvent.click(canvas.getByRole('button', { name: /run full recovery/i }));
     // add_system's summary lists every declared repo — the landing titles

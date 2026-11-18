@@ -399,6 +399,30 @@ describe('system manifest preflight preview', () => {
     expect(useAppStore.getState().preflightBusy).toBe(false);
   });
 
+  it("ignores a preview that settles after a source switch it already won (Codex P2)", async () => {
+    useAppStore.setState(manifestState);
+    const commands: string[] = [];
+    let resolve: (value: SystemPreflight) => void = () => {};
+    mockIPC((command) => {
+      commands.push(command);
+      // The worker already claimed its commit: the cancel loses the race.
+      if (command === 'cancel_preflight') return null;
+      return new Promise<SystemPreflight>((done) => { resolve = done; });
+    });
+    const running = useAppStore.getState().runPreflight();
+    useAppStore.getState().setIngestSource('local');
+    expect(commands).toEqual(['preflight_system', 'cancel_preflight']);
+    expect(useAppStore.getState().preflightBusy).toBe(false);
+
+    resolve(system);
+    await running;
+    const state = useAppStore.getState();
+    expect(state.systemPreflight).toBeNull();
+    expect(state.preflightError).toBeNull();
+    expect(state.preflightBusy).toBe(false);
+    expect(state.ingestSource).toBe('local');
+  });
+
   it('runs no preview for a GitHub target', async () => {
     useAppStore.setState({ ...reset, ingestSource: 'github', ingestTarget: 'https://github.com/o/r' });
     const commands: string[] = [];

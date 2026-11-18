@@ -1640,8 +1640,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setIngestSource: (ingestSource) => {
     // A local scan still running on the backend would otherwise finish and
     // persist findings for a target the user has left (#434 review).
-    // A manifest preview is abandoned the same way (#1655).
-    if (ingestSource !== get().ingestSource && get().preflightBusy) void get().cancelPreflight();
+    // A manifest preview is abandoned the same way (#1655). Retire the run
+    // id too, as a path change does: a scan whose commit claim already won
+    // the race with this cancel still settles, and its result must not
+    // reach the store (AC-0198, AC-0707).
+    if (ingestSource !== get().ingestSource && get().preflightBusy) {
+      preflightRun += 1;
+      set({ ingestSource, preflightBusy: false, preflightProgress: null });
+      void get().cancelPreflight();
+      return;
+    }
     set({ ingestSource });
   },
 
