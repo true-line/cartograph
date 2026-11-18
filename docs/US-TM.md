@@ -145,6 +145,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0063 | The system boundary: registered sources are inside, outside is claimed only from a literal host no binding covers, everything else is unclassified (proposed; #1788, owner review) |
 | ADR-0064 | Authored document sections: a draft is a list of cited claims for one catalogue section address, its own record kind, reviewed by compare-and-set and admitted to the curated projection as a second record kind; catalogue documents are compiled over the existing projections (proposed; #1748, owner review) |
 | ADR-0070 | Environments as declared deployable sets, never as names: `Environment`, `Workload`, `DECLARES`; a name-only environment is a Gap (proposed; #1791, owner review) |
+| ADR-0071 | Producer input closure as a typed content-addressed input set, append-only reconciliation results for staged proposals, and own source/capture identities for manifest-supplied external evidence (proposed; #385, owner review) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression
