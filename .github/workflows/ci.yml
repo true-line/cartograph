@@ -210,6 +210,18 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # The image's mirror list starts with the region's EC2 mirror, which
+      # stalled for minutes on single archives and timed out the apt step on
+      # most lanes (#1924). apt only moves down the list on errors, never on
+      # slowness, so put the Azure and primary archives first and keep the
+      # image's own entries as fallbacks.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
@@ -436,6 +448,14 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
@@ -512,6 +532,14 @@ jobs:
 
       # The organisation's Linux runner has no Rust toolchain; rustup from apt
       # resolves the exact one from rust-toolchain.toml, as in the Rust lane.
+      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
