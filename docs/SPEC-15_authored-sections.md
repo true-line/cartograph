@@ -133,7 +133,7 @@ kind. Each gets the first state that applies:
 | `superseded` | Another accepted draft for the same address names this one as the draft it replaces |
 | `unresolvable` | A cited id resolves to no fact in the current graph |
 | `stale` | A cited fact's current content hash differs from the hash the draft recorded |
-| `conflicted` | Another accepted draft has the same address and neither supersedes the other |
+| `conflicted` | Another accepted draft has the same address and no accepted draft supersedes either; in a replacement chain only the last draft is left to conflict |
 | `eligible` | None of the above |
 
 The curated revision moves to `curated-revision-v2` and adds, in record
@@ -147,7 +147,7 @@ drafts and, per cited id, the current content hash of the fact it resolves
 to; an id that resolves to nothing is absent. The projection reports every
 accepted draft with its state and reason, and the totals. `superseded` and
 `conflicted` look only at accepted drafts of the same address, whatever
-their own state. The policy version is `curated-policy-v2`. The revision of
+their own state, and a superseded draft never counts toward a conflict. The policy version is `curated-policy-v2`. The revision of
 an existing project changes once and its content does not. Each accepted
 draft carries its claims, which are what a document prints.
 
