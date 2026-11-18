@@ -212,6 +212,42 @@ pub fn cited_fact_hashes(
     hashes_of(nodes.iter(), edges.iter(), cited)
 }
 
+/// The current digest of each fact `cited` names, by citation id: the
+/// canonical digest of every field of the node or edge, which an
+/// investigation records for each fact it reads and the curated projection
+/// compares for a finding (ADR-0074 decision 5). An id that names no fact
+/// of `nodes` and `edges` is absent, and so is a fact whose digest cannot
+/// be computed. One pass over both; nothing is kept beyond the cited ids.
+pub fn cited_fact_digests(
+    nodes: &[Node],
+    edges: &[Edge],
+    cited: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut digests = BTreeMap::new();
+    if cited.is_empty() {
+        return digests;
+    }
+    for node in nodes {
+        let id = citation_id(&FactKey::Node {
+            id: node.id.clone(),
+        });
+        if cited.contains(&id)
+            && let Ok(digest) = core_graph::source::node_digest(node)
+        {
+            digests.insert(id, digest);
+        }
+    }
+    for edge in edges {
+        let id = citation_id(&edge_key(edge));
+        if cited.contains(&id)
+            && let Ok(digest) = core_graph::source::edge_digest(edge)
+        {
+            digests.insert(id, digest);
+        }
+    }
+    digests
+}
+
 fn hashes_of<'a>(
     nodes: impl Iterator<Item = &'a Node>,
     edges: impl Iterator<Item = &'a Edge>,

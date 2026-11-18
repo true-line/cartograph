@@ -60,8 +60,7 @@ pub struct ReviewedFinding {
     pub finding_id: String,
     /// The specialist that produced it, as `role@version`.
     pub role: String,
-    /// What it asserts about: `implemented`, `documented_intent` or
-    /// `interpretation`.
+    /// The finding's claim kind as saved, such as `implemented_behavior`.
     pub kind: String,
     /// The finding's title.
     pub title: String,
