@@ -49,6 +49,7 @@ mod settings;
 mod showcase_tests;
 mod source_access;
 mod sources;
+mod spec_bundle_file;
 mod task_evidence;
 mod work_packets;
 
@@ -6544,6 +6545,7 @@ fn truncate_utf8_in_place(content: &mut String, max_bytes: usize) -> bool {
 /// The Workbench renders this preview and fetches the full artifact (content
 /// and assertions) via `read_spec_artifact` for copy/export.
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(PartialEq, serde::Deserialize))]
 struct SpecArtifactPreview {
     id: String,
     file_name: String,
@@ -7120,6 +7122,7 @@ fn main() {
             work_packets::export_work_packet,
             work_packets::draft_adapter_work_packets,
             export_save::save_export_file,
+            spec_bundle_file::save_spec_bundle_export,
             manifest_draft::preview_system_manifest,
             manifest_draft::save_system_manifest,
             investigations::commands::investigation_specialists,

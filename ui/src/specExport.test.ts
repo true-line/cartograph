@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vitest';
-import { isSameArtifact, resolveArtifactForCopy, withFullArtifacts } from './specExport';
-import type { SpecArtifact } from './store';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import {
+  exportSpecBundle,
+  isSameArtifact,
+  resolveArtifactForCopy,
+  specBundleFileContent,
+  withFullArtifacts,
+} from './specExport';
+import type { SpecArtifact, SpecBundle } from './store';
+import bundleFileInput from './fixtures/spec-bundle-file.input.json';
+import bundleFileExpected from './fixtures/spec-bundle-file.expected.json?raw';
 
 const artifact = (id: string, overrides: Partial<SpecArtifact> = {}): SpecArtifact => ({
   id, file_name: `${id}.md`, title: id, format: 'markdown', schema: `cartograph.spec/${id}@1`,
@@ -91,5 +100,93 @@ describe('artifact identity guards copy and export (AC-0242)', () => {
     });
     expect(isSameArtifact(capped, newer)).toBe(false);
     expect(await withFullArtifacts([capped], async () => newer)).toBeNull();
+  });
+});
+
+// AC-0740 (#1582): the shared fixture's expected file is what the Workbench
+// built before the host streamed it; `app::spec_bundle_file` tests assert the
+// host writes these same bytes.
+describe('Export bundle file (#1582, AC-0740)', () => {
+  const preview = bundleFileInput.preview as SpecBundle;
+  const fullArtifacts = bundleFileInput.full_artifacts as SpecArtifact[];
+  const readFull = async (id: string) => fullArtifacts.find((full) => full.id === id) ?? null;
+
+  beforeEach(() => {
+    vi.stubGlobal('window', {});
+  });
+
+  afterEach(() => {
+    clearMocks();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('the fixture expected file is the pre-#1582 Workbench JSON for its preview', async () => {
+    expect(preview.artifacts.some((a) => a.content_truncated)).toBe(true);
+    const artifacts = await withFullArtifacts(preview.artifacts, readFull);
+    expect(artifacts).not.toBeNull();
+    const legacyFiles = Object.fromEntries(artifacts!.map((a) => [a.file_name, a.content]));
+    const legacy = JSON.stringify({ ...preview, artifacts, files: legacyFiles }, null, 2);
+    expect(legacy).toBe(bundleFileExpected);
+    expect(specBundleFileContent(preview, artifacts!)).toBe(bundleFileExpected);
+  });
+
+  it('in the desktop app sends only artifact identities and builds no bundle string', async () => {
+    const calls: { command: string; args: unknown }[] = [];
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      return true;
+    });
+    const reads: string[] = [];
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const errors: string[] = [];
+    await exportSpecBundle(
+      preview,
+      async (id) => {
+        reads.push(id);
+        return readFull(id);
+      },
+      (message) => errors.push(message),
+    );
+    const ownStringify = stringify.mock.calls.filter(([value]) => value && typeof value === 'object' && 'files' in value);
+    stringify.mockRestore();
+    expect(ownStringify).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      command: 'save_spec_bundle_export',
+      args: {
+        suggestedName: 'cartograph-spec-best-effort.json',
+        expected: {
+          mode: preview.mode,
+          artifacts: preview.artifacts.map(({ id, file_name, schema, content_id }) => ({
+            id,
+            file_name,
+            schema,
+            content_id,
+          })),
+          assertion_count: preview.assertion_count,
+          gap_count: preview.gap_count,
+          drift_count: preview.drift_count,
+          security_count: preview.security_count,
+          graph_basis: preview.graph_basis,
+          curated_basis: preview.curated_basis,
+        },
+      },
+    });
+    const sent = JSON.stringify(calls[0].args);
+    for (const artifact of fullArtifacts) expect(sent).not.toContain(JSON.stringify(artifact.content));
+  });
+
+  it('shows the host refusal of a changed selection in the Workbench error banner', async () => {
+    mockIPC(() => {
+      throw 'gap_register.json changed since this preview was compiled. Refresh the Spec Workbench and try again.';
+    });
+    const errors: string[] = [];
+    await exportSpecBundle(preview, readFull, (message) => errors.push(message));
+    expect(errors).toEqual([
+      'gap_register.json changed since this preview was compiled. Refresh the Spec Workbench and try again.',
+    ]);
   });
 });
