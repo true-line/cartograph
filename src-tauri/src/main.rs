@@ -6260,10 +6260,23 @@ struct SpecRead {
     assertion_decisions: Vec<agents::AssertionDecisionRecord>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SPEC_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many snapshot preparations ([`read_spec`]) this thread made (#1662).
+#[cfg(test)]
+fn spec_reads() -> usize {
+    SPEC_READS.with(std::cell::Cell::get)
+}
+
 fn read_spec(
     graph: &SqliteGraphStore,
     decisions: &agents::DecisionLog,
 ) -> Result<SpecRead, String> {
+    #[cfg(test)]
+    SPEC_READS.with(|count| count.set(count.get() + 1));
     let (revision, ((nodes, edges), coverage)) = curated::read_graph(graph)?;
     let assertion_decisions = decisions
         .list_assertions()
@@ -6418,6 +6431,27 @@ fn compile_spec_artifact(
     mode: spec::ExportMode,
     artifact_id: &str,
 ) -> Result<spec::SpecArtifact, String> {
+    compile_spec_artifacts(inputs, mode, &[artifact_id])?
+        .pop()
+        .ok_or_else(|| format!("unknown spec artifact id: {artifact_id}"))
+}
+
+/// Several official artifacts compiled together through the selected
+/// compiler from one set of inputs: one snapshot, flow trace and projection
+/// (#1662, AC-0720). Each produced artifact has the same bytes, content id
+/// and assertions as that artifact in `compile_spec_bundle`. The result
+/// follows `artifact_ids` one for one; an unknown or repeated id, an
+/// artifact that could not be compiled, or a result that is missing or not
+/// requested refuses the whole read.
+fn compile_spec_artifacts(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+    artifact_ids: &[&str],
+) -> Result<Vec<spec::SpecArtifact>, String> {
+    let mut requested = std::collections::BTreeSet::new();
+    if let Some(repeated) = artifact_ids.iter().find(|id| !requested.insert(**id)) {
+        return Err(format!("spec artifact {repeated} was requested twice"));
+    }
     let unbounded = spec::SelectedCompileLimits {
         max_bytes: usize::MAX,
         adr: spec::AdrLimits {
@@ -6425,25 +6459,76 @@ fn compile_spec_artifact(
             max_output_bytes: usize::MAX,
         },
     };
-    let unknown = || format!("unknown spec artifact id: {artifact_id}");
-    let outcome = spec::compile_spec_selected_supplied(
+    let outcomes = spec::compile_spec_selected_supplied(
         &inputs.nodes,
         &inputs.edges,
         &inputs.flows,
         mode,
         &inputs.rejected_hashes,
-        &[artifact_id],
+        artifact_ids,
         unbounded,
         inputs.supplied(),
     )
-    .map_err(|_| unknown())?
-    .pop()
-    .ok_or_else(unknown)?;
-    match outcome {
-        spec::SelectedArtifactOutcome::Produced(artifact) => Ok(artifact),
-        spec::SelectedArtifactOutcome::Limited { artifact_id, limit } => Err(format!(
-            "spec artifact {artifact_id} could not be compiled: {limit:?}"
-        )),
+    .map_err(|spec::ArtifactSelectionError::UnknownArtifact { index }| {
+        format!("unknown spec artifact id: {}", artifact_ids[index])
+    })?;
+    let mut produced = std::collections::BTreeMap::new();
+    for outcome in outcomes {
+        match outcome {
+            spec::SelectedArtifactOutcome::Produced(artifact) => {
+                if !requested.contains(artifact.id.as_str()) {
+                    return Err(format!(
+                        "spec artifact {} was compiled but not requested",
+                        artifact.id
+                    ));
+                }
+                if let Some(artifact) = produced.insert(artifact.id.clone(), artifact) {
+                    return Err(format!("spec artifact {} was compiled twice", artifact.id));
+                }
+            }
+            spec::SelectedArtifactOutcome::Limited { artifact_id, limit } => {
+                return Err(format!(
+                    "spec artifact {artifact_id} could not be compiled: {limit:?}"
+                ));
+            }
+        }
+    }
+    artifact_ids
+        .iter()
+        .map(|id| {
+            produced
+                .remove(*id)
+                .ok_or_else(|| format!("unknown spec artifact id: {id}"))
+        })
+        .collect()
+}
+
+/// `read_spec_artifacts` over stores the caller holds (#1662).
+#[cfg(test)]
+fn build_spec_artifacts(
+    graph: &SqliteGraphStore,
+    decisions: &agents::DecisionLog,
+    review: Option<&curated::CuratedReview>,
+    mode: spec::ExportMode,
+    artifact_ids: &[&str],
+) -> Result<Vec<spec::SpecArtifact>, String> {
+    let review = artifacts_review(review, artifact_ids)?;
+    compile_spec_artifacts(spec_inputs(graph, decisions, review)?, mode, artifact_ids)
+}
+
+/// [`artifact_review`] for several artifacts compiled together: `review`
+/// when any of them reads the projection. An artifact that does not read it
+/// has the same bytes either way.
+fn artifacts_review<'a>(
+    review: Option<&'a curated::CuratedReview>,
+    artifact_ids: &[&str],
+) -> Result<Option<&'a curated::CuratedReview>, String> {
+    match artifact_ids
+        .iter()
+        .find(|id| curated::artifact_reads_projection(id))
+    {
+        Some(id) => artifact_review(review, id),
+        None => Ok(None),
     }
 }
 
@@ -6754,6 +6839,46 @@ fn read_spec_artifact_blocking(
     let review = artifact_review(review.as_ref(), artifact_id)?;
     let inputs = read_spec_locked(state)?.inputs(review);
     compile_spec_artifact(inputs, mode, artifact_id).map(full_artifact_preview)
+}
+
+/// Several official spec artifacts' complete content and assertions,
+/// fetched together for Export bundle after `export_spec`'s IPC-capped
+/// preview (#1662, AC-0720): one review read, one snapshot under the graph
+/// lock and one selected compilation, however many artifacts were capped.
+/// The result follows `artifact_ids` one for one.
+#[tauri::command]
+async fn read_spec_artifacts<R: tauri::Runtime>(
+    mode: spec::ExportMode,
+    artifact_ids: Vec<String>,
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<SpecArtifactPreview>, String> {
+    off_ui_thread(move || {
+        read_spec_artifacts_blocking(mode, &artifact_ids, &app.state::<AppState>())
+    })
+    .await
+}
+
+fn read_spec_artifacts_blocking(
+    mode: spec::ExportMode,
+    artifact_ids: &[String],
+    state: &AppState,
+) -> Result<Vec<SpecArtifactPreview>, String> {
+    let artifact_ids: Vec<&str> = artifact_ids.iter().map(String::as_str).collect();
+    if artifact_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // As `read_spec_artifact`: the review only when an artifact's bytes
+    // depend on the projection, and before the graph lock.
+    let review = artifact_ids
+        .iter()
+        .any(|id| curated::artifact_reads_projection(id))
+        .then(|| curated::gather(state));
+    let review = artifacts_review(review.as_ref(), &artifact_ids)?;
+    let inputs = read_spec_locked(state)?.inputs(review);
+    Ok(compile_spec_artifacts(inputs, mode, &artifact_ids)?
+        .into_iter()
+        .map(full_artifact_preview)
+        .collect())
 }
 
 /// Selected flow diagram, bound to the preview's full dossier identity (#1669).
@@ -7232,6 +7357,7 @@ fn main() {
             export_spec_views,
             export_spec_with_views,
             read_spec_artifact,
+            read_spec_artifacts,
             read_selected_flow_view,
             semantic_preview,
             add_repo,
@@ -7516,6 +7642,71 @@ mod tests {
             )
             .unwrap_err(),
             "unknown spec artifact id: nope"
+        );
+        // AC-0720 (#1662): the artifacts read together come from one
+        // snapshot preparation, where one read per artifact made one each,
+        // and each equals its bundle entry, in the requested order.
+        let review = crate::curated::CuratedReview::default();
+        let mode = spec::ExportMode::BestEffort;
+        let ids: Vec<&str> = bundle
+            .artifacts
+            .iter()
+            .rev()
+            .map(|a| a.id.as_str())
+            .collect();
+        let before = super::spec_reads();
+        for id in &ids {
+            super::build_spec_artifact(&graph, &decisions, Some(&review), mode, id).unwrap();
+        }
+        let one_each = super::spec_reads() - before;
+        let before = super::spec_reads();
+        let together =
+            super::build_spec_artifacts(&graph, &decisions, Some(&review), mode, &ids).unwrap();
+        let shared = super::spec_reads() - before;
+        eprintln!(
+            "#1662 preparations for {} artifacts: {one_each} -> {shared}",
+            ids.len()
+        );
+        assert_eq!((one_each, shared), (ids.len(), 1));
+        assert_eq!(together.len(), ids.len());
+        for (artifact, id) in together.iter().zip(&ids) {
+            let expected = bundle.artifacts.iter().find(|a| a.id == *id).unwrap();
+            assert_eq!(artifact, expected, "{id}");
+        }
+        // Neither of these reads the projection: no review is needed, and
+        // they still equal their bundle entries.
+        let unreviewed = super::build_spec_artifacts(
+            &graph,
+            &decisions,
+            None,
+            mode,
+            &["topology", "data-model"],
+        )
+        .unwrap();
+        for artifact in &unreviewed {
+            let expected = bundle.artifacts.iter().find(|a| a.id == artifact.id);
+            assert_eq!(Some(artifact), expected, "{}", artifact.id);
+        }
+        assert_eq!(
+            unreviewed.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["topology", "data-model"]
+        );
+        // An unknown or repeated id, or a projection artifact without the
+        // review, refuses the whole read.
+        let refused = |ids: &[&str], review| {
+            super::build_spec_artifacts(&graph, &decisions, review, mode, ids).unwrap_err()
+        };
+        assert_eq!(
+            refused(&["topology", "nope"], Some(&review)),
+            "unknown spec artifact id: nope"
+        );
+        assert_eq!(
+            refused(&["topology", "topology"], Some(&review)),
+            "spec artifact topology was requested twice"
+        );
+        assert_eq!(
+            refused(&["topology", "curated"], None),
+            "The curated projection was not read for this artifact."
         );
         let topology_art = bundle
             .artifacts
