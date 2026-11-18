@@ -74,7 +74,7 @@ A new immutable metadata-only record holds the closure:
 ```rust
 struct InputClosureV1 {
     schema_version: u32,              // exactly 1
-    closure_id: String,               // "closure-v1:" + BLAKE3(domain, canonical content)
+    closure_id: String,               // "closure-v1:" + BLAKE3; excluded from its own preimage
     producer_contract: String,        // e.g. "t0.adapter-ts/direct-lexical-v4"
     producer_packages: Vec<String>,   // exact pins, as receipts record them
     parameters: ClosureParameters,    // typed host inputs; no roots, no timestamps
@@ -101,6 +101,19 @@ enum ClosureInput {
 
 enum ClosureRef { Established { closure_id: String }, NotEstablished }
 ```
+
+**Canonical encoding.** Both identifiers in this ADR, `closure_id` and
+`result_id` (decision 2), use the encoding SPEC-06 already uses for receipt
+IDs. The preimage is a fixed versioned domain prefix
+(`cartograph:input-closure:v1\0` or `cartograph:reconciliation-result:v1\0`),
+followed by compact UTF-8 JSON of the complete record. Object keys are sorted
+recursively by byte order; arrays keep their specified order; enum variants
+use their `snake_case` tag; integers are plain decimal; there is no
+whitespace and no optional-field omission. **The id field is excluded from its
+own preimage:** the record is serialized without `closure_id` (or
+`result_id`), hashed with BLAKE3, and the id is the prefix (`closure-v1:` or
+`reconcile-v1:`) plus the lowercase hex digest. A decoder recomputes the id
+and rejects a record whose stored id does not match.
 
 `ClosureParameters` holds the registered `repo_key`, the source-walk policy
 version, the layer hints in effect and the grammar selection rule version.
@@ -172,7 +185,7 @@ holds metadata only, no source text.
 ```rust
 struct ReconciliationResultV1 {
     schema_version: u32,               // exactly 1
-    result_id: String,                 // "reconcile-v1:" + BLAKE3 over canonical content
+    result_id: String,                 // "reconcile-v1:" + BLAKE3; excluded from its own preimage
     proposal_id: String,               // binds the complete original content
     proposal_schema_version: u32,      // 1, 2 or 3
     recovery: RecoveryBasis,           // job id, graph_snapshot_id, sorted (source_id, capture_id)
@@ -231,13 +244,18 @@ The comparisons are exact. No fuzzy or relocated match is ever made.
   `Reconciled`. Every item outcome is always reported.
 
 **State.** A record's reconciliation state is derived, never stored on the
-record. It is the latest result whose recovery basis is still current. The
-SPEC-09 comparisons are run against the *result's* `RecoveryBasis`, not the
-original snapshot.
+record. It is the outcome of its latest result while that result's
+`RecoveryBasis` is still current, and `reconciliation_stale` once it is not.
+This applies to every outcome, not only `reconciled`: a `changed`, `missing`
+or `unverifiable` result is also a claim about one recovery, and it goes
+stale when that recovery stops being current. The SPEC-09 comparisons are run
+against the *result's* `RecoveryBasis`, not the original snapshot.
 
 ```
 awaiting_reconciliation --reconcile--> reconciled | changed | missing | unverifiable
-reconciled   --graph, association or retained-byte change--> reconciliation_stale
+reconciled | changed | missing | unverifiable
+    --RecoveryBasis no longer current (graph, association or retained-byte change)-->
+    reconciliation_stale
 any state    --reconcile again--> the new result's outcome
 ```
 
@@ -276,12 +294,20 @@ curated revision.
 - **What identifies it.** Bytes, kind and source only. A Terraform `serial`
   or `lineage` and trace timestamps are content. They may be reported, but
   they are never capture identity or a freshness claim.
-- **Limits.** SPEC-04's limits apply unchanged: 16 MiB per file, 128 MiB per
-  capture. A file over the limit is not captured. Its enrichment still runs
-  as today, `not_established` with `limit_exceeded`, and is visibly
-  unverified.
+- **Limits and no capture.** SPEC-04's limits apply unchanged: 16 MiB per
+  file, 128 MiB per capture. **No capture means no enrichment.** When an
+  external file is over a limit, missing, unreadable or otherwise not
+  captured, the producer does not run T1 enrichment from it. The ingest
+  result records a typed outcome instead, `ExternalEvidenceOutcome::
+  NotCaptured { declared_by, media, reason }`, where `declared_by` names the
+  manifest field and `reason` is one of `limit_exceeded`, `missing`,
+  `unreadable` or `unsupported_path`. This is shown in coverage like any other
+  skipped input. No T1 fact or property is emitted from uncaptured bytes, and
+  no provenance shape without a `CaptureFileRef` is introduced. The T0 facts
+  it would have enriched stay as they are.
 - **Provenance.** In slice 7, T1 facts and properties from external evidence
   cite the external repo key and a `CaptureFileRef`, with `commit_sha` unset.
+  Every such fact has one, because of the rule above.
   This changes those facts' bytes, so the graph fact schema is bumped and the
   existing rebuild contract applies. The T0 fact being enriched is unchanged
   (R-INT-1).
@@ -311,8 +337,10 @@ later producer slice must extend.
 
 ### Implementation slices, in order
 
-Each slice is one PR with `Refs #385`, its own AC/T ids reserved at the time,
-and SPEC and traceability rows.
+Each slice gets its own sub-issue of #385, opened when the slice starts. Its
+PR uses `Closes #<slice issue>` plus `Refs #385`, so merging a slice closes
+only that slice and #385 stays open until the last one. Each PR reserves its
+own AC/T ids at the time and carries its SPEC and traceability rows.
 
 1. **Pure reconciliation types** (`agents`). `ReconciliationResultV1`,
    canonical identity, a strict decoder, outcome derivation from supplied
@@ -351,8 +379,9 @@ and SPEC and traceability rows.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
-   manifest; same bytes as two media give two capture IDs; over-limit traces
-   stay unverified; graph rebuild clears old T1 facts; no network.
+   manifest; same bytes as two media give two capture IDs; an over-limit
+   trace gives `NotCaptured { limit_exceeded }` and emits no T1 fact; graph
+   rebuild clears old T1 facts; no network.
 8. **T1 enrichment receipts** (`iac`, `dynamic`). Receipts with `External`
    and `UpstreamFact` inputs. *Tests:* changing the state file changes the
    closure; an unestablished upstream gives `upstream_closure_incomplete`;
