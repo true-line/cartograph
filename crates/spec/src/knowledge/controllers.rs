@@ -1,7 +1,7 @@
 //! Capability candidates from controller classes and their HTTP routes.
 use super::*;
 
-mod blueprints;
+mod route_groups;
 
 /// The base-fact shape one adapter gives a controller class and its handlers.
 struct ControllerShape {
@@ -73,8 +73,9 @@ fn handler_class<'a>(handler: &'a Node, shape: &ControllerShape) -> Option<&'a s
 /// route two classes declare, a handler that is not a class member, an
 /// interface or object in place of a class and support that is not
 /// source-backed are omitted, never guessed. The title names the class and
-/// makes no claim about what the operations do or who may call them. A Flask
-/// Blueprint's routes give a candidate of their own (see `blueprints`). The
+/// makes no claim about what the operations do or who may call them. Route
+/// groups with a name and no class (Flask Blueprints, Go packages, Rust
+/// modules) give candidates of their own (see `route_groups`). The
 /// borrowed base is unchanged.
 pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityReport {
     let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
@@ -202,7 +203,7 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
         );
         retain_sized_fact(&mut report, fact);
     }
-    blueprints::derive(&nodes, &handles, &mut report);
+    route_groups::derive(&nodes, &handles, &mut report);
     report
 }
 
