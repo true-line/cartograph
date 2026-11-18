@@ -210,6 +210,18 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # The image's mirror list starts with the region's EC2 mirror, which
+      # stalled for minutes on single archives and timed out the apt step on
+      # most lanes (#1924). apt only moves down the list on errors, never on
+      # slowness, so put the Azure and primary archives first and keep the
+      # image's own entries as fallbacks.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
@@ -225,8 +237,13 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: flock
-          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
+          # A slow hosted mirror timed out three Rust lanes in 20 minutes
+          # (#1924). Downloaded archives stay in apt's cache, so a retry resumes;
+          # DPkg::Lock::Timeout lets it wait for a timed-out attempt's apt-get.
+          attempts: '2'
+          retry-delay-seconds: '5'
 
       # The runners share one user's home. rust-cache's post-job cleanup
       # prunes registry sources under CARGO_HOME, which deleted crates out
@@ -310,7 +327,7 @@ jobs:
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -380,7 +397,8 @@ jobs:
           task: Test native Windows job ownership and process exit
           executable: cargo.exe
           arguments-json: '["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"]'
-          timeout-seconds: '600'
+          # A cold optimized-dependency build alone takes ~7 minutes (#1924).
+          timeout-seconds: '900'
 
       # Report what the tests left behind so the leaking holder can be found
       # (#1307 follow-up). Read-only: runner.temp is emptied after the job.
@@ -429,6 +447,14 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
+
+      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
 
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
@@ -506,6 +532,14 @@ jobs:
 
       # The organisation's Linux runner has no Rust toolchain; rustup from apt
       # resolves the exact one from rust-toolchain.toml, as in the Rust lane.
+      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
