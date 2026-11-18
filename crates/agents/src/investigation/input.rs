@@ -1,5 +1,9 @@
 //! Transient input ownership. Stored manifests contain only the fingerprints of
 //! these exact query/source/history inputs, never their raw text.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 #[path = "diagnostic_sidecar_input.rs"]
 mod diagnostic_sidecar_input;

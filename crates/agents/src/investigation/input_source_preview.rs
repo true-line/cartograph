@@ -21,12 +21,15 @@ pub struct UnreadSourcePreviewBound {
     disclosure_upper_bytes: usize,
 }
 impl UnreadSourcePreviewBound {
+    /// Hash of the captured-source basis this bound covers.
     pub fn basis_hash(&self) -> &str {
         &self.basis_hash
     }
+    /// Reserve measurements for the pre-read continuation.
     pub fn continuation(&self) -> AdmissionReserveMeasurements {
         self.continuation
     }
+    /// Upper bound on the bytes this read may disclose.
     pub fn disclosure_upper_bytes(&self) -> usize {
         self.disclosure_upper_bytes
     }

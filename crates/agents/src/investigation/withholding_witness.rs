@@ -1,4 +1,8 @@
 //! Text-free host transformation binding. Shape validation is not authentication.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use serde::{Deserialize, Serialize};
 

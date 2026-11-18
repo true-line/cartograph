@@ -328,7 +328,7 @@ fn simplelogin_fixture(shift: u64) -> (Vec<Node>, Vec<Edge>, Vec<Flow>) {
             "sym:simplelogin/extension@src/popup/components/Main.vue#Main",
             "ep:simplelogin/app@POST:/api/v2/alias/custom/new",
             "FETCHES",
-            json!({"method": "POST"}),
+            json!({"method": "POST", "straight_line": true}),
             vec![ev(
                 repo,
                 "src/popup/components/Main.vue",
@@ -602,6 +602,38 @@ fn journey_candidates_enforce_ordering_cycle_budget_and_identity_contracts() {
     let cond_cand = &candidates(&node_refs, &cond_refs, &flows, JourneyBudget::default())[0];
     assert_eq!(cond_cand.result, JourneyResult::Unordered);
     assert!(cond_cand.result_step.is_none());
+
+    // 5c. (#1012 review) The same unconditional navigation after a call that
+    // is not straight-line in the Symbol (`if (flag) await post(…)` and then
+    // `router.push(…)`): the navigation can run without the call, so the
+    // result is "unordered". A relation that does not record whether the
+    // call is straight-line proves no more.
+    for straight_line in [Some(false), None] {
+        let mut edges_optional = edges.clone();
+        for e in &mut edges_optional {
+            if e.label == "FETCHES" && e.dst == "ep:simplelogin/app@POST:/api/v2/alias/custom/new" {
+                match straight_line {
+                    Some(value) => e.props["straight_line"] = json!(value),
+                    None => {
+                        e.props.as_object_mut().unwrap().remove("straight_line");
+                    }
+                }
+            }
+        }
+        let (_, optional_refs) = refs(&nodes, &edges_optional);
+        let optional = &candidates(&node_refs, &optional_refs, &flows, JourneyBudget::default())[0];
+        assert_eq!(
+            optional.result,
+            JourneyResult::Unordered,
+            "{straight_line:?}"
+        );
+        assert!(optional.result_step.is_none());
+        assert_eq!(optional.label, "Main → POST /api/v2/alias/custom/new");
+        // The path is the same journey; only its support differs.
+        assert_eq!(optional.goal, baseline.goal);
+        assert_ne!(optional.support_fingerprint, baseline.support_fingerprint);
+    }
+    assert_eq!(baseline.result, JourneyResult::Ordered);
 
     // 6. A cycle `/main` -> `/` is not revisited.
     let mut edges_with_cycle = edges.clone();

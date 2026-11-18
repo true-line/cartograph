@@ -1,4 +1,8 @@
 //! Actual model-visible admission state. Shape is not journal authority.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use staged_refusal::{CompletionCallMode, ProtectedCompletionMetadata};
 

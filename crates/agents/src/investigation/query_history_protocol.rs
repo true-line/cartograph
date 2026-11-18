@@ -1,4 +1,8 @@
 //! @9-only replay decoding. Resolving an identity is pure and spends no budget.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use serde::{Deserialize, Serialize};
 

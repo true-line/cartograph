@@ -8,11 +8,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub struct McpClientId(String);
 
 impl McpClientId {
+    /// Encodes 16 host-generated random bytes as lowercase hex.
     pub fn from_host_bytes(bytes: [u8; 16]) -> Self {
         let value = bytes.iter().map(|b| format!("{b:02x}")).collect();
         Self(value)
     }
 
+    /// The identifier's hex text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
