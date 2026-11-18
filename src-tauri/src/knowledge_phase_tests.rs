@@ -620,6 +620,11 @@ fn the_recipe_names_every_producer_rule_within_the_name_bound() {
     )));
     assert!(name.contains(&format!(
         "{}@{}",
+        spec::CAPABILITY_CONTROLLER_RULE,
+        spec::CAPABILITY_CONTROLLER_RULE_VERSION
+    )));
+    assert!(name.contains(&format!(
+        "{}@{}",
         spec::BUSINESS_FLOW_RULE,
         spec::BUSINESS_FLOW_RULE_VERSION
     )));

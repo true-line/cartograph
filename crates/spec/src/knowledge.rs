@@ -21,6 +21,11 @@ pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver
 /// Changed grouping, support or naming semantics require a new recipe version.
 pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
 
+/// Deterministic recipe naming a NestJS controller's HTTP operations.
+pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.nestjs-controller";
+/// Changed grouping, support or naming semantics require a new recipe version.
+pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "1";
+
 /// Deterministic recipe projecting a persistence model to a weak domain candidate.
 pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";
 /// Changed eligibility, identity or projection semantics require a new version.
@@ -388,33 +393,168 @@ pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> Capabi
             &resolver,
         ))
         .expect("string tuple serialization");
-        let id = format!(
-            "capability:graphql-resolver-group:{}",
-            core_prov::content_hash(&key)
-        );
         let title = format!("{api} GraphQL operations in {}", group.class);
-        let content = serde_json::to_vec(&serde_json::json!({"title":&title,"cites":&group.cites}))
-            .expect("string and citation serialization");
-        let prov = Provenance::new(
-            Tier::Semantic,
-            ConfidenceTier::InferredWeak,
-            group.evidence.into_values().collect(),
-            "t2.knowledge.capability.graphql-resolver-group",
-            &content,
-        )
-        .expect("semantic weak is within the confidence ceiling")
-        .with_method(ProducingMethod::Rule {
-            rule: CAPABILITY_GRAPHQL_RULE.into(),
-            version: CAPABILITY_GRAPHQL_RULE_VERSION.into(),
-        });
-        let fact = OverlayFact {
-            item: OverlayItem::Node(Node {
-                id,
-                label: "Capability".into(),
-                props: serde_json::json!({"title":title,"prov":prov}),
-            }),
-            cites: group.cites,
+        let fact = capability_fact(
+            (CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION),
+            "graphql-resolver-group",
+            &key,
+            title,
+            group,
+        );
+        retain_sized_fact(&mut report, fact);
+    }
+    report
+}
+
+/// One Capability candidate for a group: weak semantic, named by its rule,
+/// carrying every evidence span of the facts it cites. `kind` names the
+/// candidate family in the node id and extractor id; `key` is its identity.
+fn capability_fact(
+    (rule, version): (&str, &str),
+    kind: &str,
+    key: &[u8],
+    title: String,
+    group: Group,
+) -> OverlayFact {
+    let id = format!("capability:{kind}:{}", core_prov::content_hash(key));
+    let content = serde_json::to_vec(&serde_json::json!({"title":&title,"cites":&group.cites}))
+        .expect("string and citation serialization");
+    let prov = Provenance::new(
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+        group.evidence.into_values().collect(),
+        format!("t2.knowledge.capability.{kind}"),
+        &content,
+    )
+    .expect("semantic weak is within the confidence ceiling")
+    .with_method(ProducingMethod::Rule {
+        rule: rule.into(),
+        version: version.into(),
+    });
+    OverlayFact {
+        item: OverlayItem::Node(Node {
+            id,
+            label: "Capability".into(),
+            props: serde_json::json!({"title":title,"prov":prov}),
+        }),
+        cites: group.cites,
+    }
+}
+
+/// Derive Capability candidates from import-proven NestJS controller routes:
+/// one per controller class, citing each of its HTTP endpoints, the method
+/// that handles it and the relation between them. The rule reads only what
+/// the TypeScript adapter proved: an endpoint with exactly one handler, a
+/// method of a named class, all three facts from one file. A route two
+/// classes declare, a handler that is not a class method and support that is
+/// not source-backed are omitted, never guessed. The title names the class
+/// and makes no claim about what the operations do or who may call them.
+/// The borrowed base is unchanged.
+pub fn derive_nestjs_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityReport {
+    let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
+    for node in &base.graph.0 {
+        nodes
+            .entry(&node.id)
+            .and_modify(|v| *v = None)
+            .or_insert(Some(node));
+    }
+    let mut handles: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+    for edge in base.graph.1.iter().filter(|e| e.label == "HANDLES") {
+        handles.entry(&edge.src).or_default().push(edge);
+    }
+    let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    for endpoint in nodes.values().filter_map(|n| *n) {
+        let props = &endpoint.props;
+        if endpoint.label != "Endpoint" || props["framework"] != "nestjs" {
+            continue;
+        }
+        let (Some(method), Some(path)) = (props["method"].as_str(), props["path"].as_str()) else {
+            continue;
         };
+        let Some(links) = handles.get(endpoint.id.as_str()) else {
+            continue;
+        };
+        let [edge] = links.as_slice() else { continue }; // several handlers are ambiguous
+        let Some(Some(handler)) = nodes.get(edge.dst.as_str()) else {
+            continue;
+        };
+        let (Some(class), Some(name)) = (
+            handler.props["class"].as_str(),
+            handler.props["name"].as_str(),
+        ) else {
+            continue;
+        };
+        let Some((owner_class, member)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if handler.label != "Symbol"
+            || handler.props["kind"] != "Method"
+            || owner_class != class
+            || class.is_empty()
+            || member.is_empty()
+        {
+            continue;
+        }
+        let (Some(endpoint_prov), Some(edge_prov), Some(handler_prov)) = (
+            support(props),
+            support(&edge.props),
+            support(&handler.props),
+        ) else {
+            continue;
+        };
+        let owner = &handler_prov.evidence[0];
+        if !same_owner(&handler_prov, owner)
+            || !same_owner(&endpoint_prov, owner)
+            || !same_owner(&edge_prov, owner)
+            || handler.id != format!("sym:{}@{}#{name}", owner.repo, owner.path)
+            || endpoint.id != format!("ep:{}@{method}:{path}", owner.repo)
+        {
+            continue;
+        }
+        let controller = format!("sym:{}@{}#{class}", owner.repo, owner.path);
+        let group = groups.entry(controller).or_insert_with(|| Group {
+            class: class.to_owned(),
+            ..Group::default()
+        });
+        group.cites.extend([
+            BaseRef::Node(endpoint.id.clone()),
+            BaseRef::Node(handler.id.clone()),
+            BaseRef::Edge(edge.src.clone(), edge.dst.clone(), edge.label.clone()),
+        ]);
+        for prov in [&endpoint_prov, &edge_prov, &handler_prov] {
+            for e in &prov.evidence {
+                group
+                    .evidence
+                    .entry((
+                        e.repo.clone(),
+                        e.path.clone(),
+                        e.byte_start,
+                        e.byte_end,
+                        e.commit_sha.clone(),
+                    ))
+                    .or_insert_with(|| e.clone());
+            }
+        }
+    }
+    let mut report = CapabilityReport::default();
+    for (controller, group) in groups {
+        let key = serde_json::to_vec(&(
+            CAPABILITY_CONTROLLER_RULE,
+            CAPABILITY_CONTROLLER_RULE_VERSION,
+            &controller,
+        ))
+        .expect("string tuple serialization");
+        let title = format!("HTTP operations in {}", group.class);
+        let fact = capability_fact(
+            (
+                CAPABILITY_CONTROLLER_RULE,
+                CAPABILITY_CONTROLLER_RULE_VERSION,
+            ),
+            "nestjs-controller",
+            &key,
+            title,
+            group,
+        );
         retain_sized_fact(&mut report, fact);
     }
     report
