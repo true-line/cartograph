@@ -156,11 +156,15 @@ These are not decided by this ADR. Each records what main does today.
 3. **One principal per endpoint.** Every connection on a task-granted endpoint
    acts as the same principal. Are several clients sharing one principal under
    one grant intended, or should each client get its own principal at once?
-4. **Identity cap semantics.** `maximum_identities` is chosen by the owner for
-   each grant, with no documented default or upper bound. It counts all stored
-   task rows for the principal, terminal ones included, so its effect depends on
-   how many tasks the store retains. Is it meant as a lifetime quota or a live
-   limit, and what bound should Settings enforce?
+4. **Identity cap semantics (owner direction, 2026-11-18).** `maximum_identities`
+   is meant as a local setting, sized to the machine's hardware, that limits
+   live (non-terminal) tasks. It is not a lifetime quota. **Code mismatch:**
+   main counts every stored task row for the principal, terminal ones included
+   (`SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1` in
+   `src-tauri/src/jobs/investigations.rs`), so today it behaves as a lifetime
+   quota for as long as rows are kept. A follow-up slice counts only live tasks
+   and gives the setting a hardware-derived default and bound. Still open: the
+   exact default and bound.
 5. **Fixed MCP limits.** MCP tasks ignore the desktop Run Limits (ADR-0053) and
    local-model settings and use the shipped defaults. Should either setting, or a
    separate MCP setting, apply to them?
