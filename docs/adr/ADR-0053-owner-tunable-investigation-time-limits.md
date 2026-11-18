@@ -1,8 +1,9 @@
 # ADR-0053 — Owner-tunable investigation time limits
 
-- **Status:** Proposed — #1633; owner decisions 2026-11-02 ("Menubar Configure… window", "Time limits only, before v1", "60 min task / 10 min per call")
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #1633 with owner decisions of 2026-11-02 ("Menubar Configure… window", "Time limits only, before v1", "60 min task / 10 min per call")
 - **Date:** 2026-11-02
 - **Deciders:** Cartograph owner; Claude implements the host and window, Codex implements the policy validation and cross-reviews
+- **Relations:** amends [ADR-0040](ADR-0040-investigation-policy-profiles.md)'s time-cap clause
 
 ## Context
 

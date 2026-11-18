@@ -1,6 +1,6 @@
 # ADR-0050 — Journey identity and tier
 
-- **Status:** Proposed for W11 (owner review; design review by Codex)
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment); proposed for W11 (design review by Codex)
 - **Date:** 2026-10-25
 - **Deciders:** Cartograph owner; implementation agents (Claude, Codex)
 
@@ -159,6 +159,13 @@ read:
      the implementation dominates. Any other component, a qualifier, a
      multibinding, a generic key or a second binding for the same interface
      records no hop.
+   - **Startup navigation is an assumption.** A back-stack navigation made
+     while an initial screen's owner class is constructed (its init phase) is
+     crossed only as a `startup` assumption naming the owner, with the
+     limitation "startup navigation runs at owner construction; order after
+     the initial screen not proven". The candidate is then at most
+     InferredWeak (added 2026-11-18; `AssumptionKind::Startup` in
+     `crates/spec/src/rules/journey.rs`).
    - **Limits.** Paths are simple (no revisited screen) and at most six
      screens long. The search admits a fixed work budget per entry screen:
      expanded states, client calls read per screen, and retained
@@ -251,3 +258,10 @@ read:
    curation of one path silently apply to a different path to the same
    goal. UI strings such as button labels may later be recorded as evidence
    on a step, but a name stays a separate claim.
+
+## Amendment — 2026-11-18: accepted; the startup assumption is listed
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment. The
+journey rule records three assumption kinds, `entry_callback`, `startup` and
+`hilt_dispatch`; decision 4 now lists the `startup` assumption next to the
+other two.

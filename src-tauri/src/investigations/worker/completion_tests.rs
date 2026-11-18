@@ -213,6 +213,40 @@ impl CompletionFixture {
         original: &str,
         padding_nodes: usize,
     ) -> Self {
+        Self::build(
+            provider,
+            specialist,
+            (source, inventory),
+            original,
+            padding_nodes,
+            None,
+        )
+    }
+    /// The same genuine request4 task, asked `question`.
+    fn with_question(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        source: bool,
+        inventory: bool,
+        question: &str,
+    ) -> Self {
+        Self::build(
+            provider,
+            specialist,
+            (source, inventory),
+            ORIGINAL,
+            0,
+            Some(question),
+        )
+    }
+    fn build(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        (source, inventory): (bool, bool),
+        original: &str,
+        padding_nodes: usize,
+        question: Option<&str>,
+    ) -> Self {
         // Reuse real parser/receipt/context setup, then retire its unused legacy
         // task before creating the genuine request4 task under test.
         let base = Fixture::with_padded_contract(
@@ -314,7 +348,7 @@ impl CompletionFixture {
             .normalized_with_policy(policy)
             .unwrap(),
             inspection_requirements: None,
-            question: base.request.question.clone(),
+            question: question.map_or_else(|| base.request.question.clone(), str::to_owned),
             scope: base.request.scope.clone(),
             provider_mode: base.request.provider_mode,
             limit_profile: policy.profile().into(),
@@ -366,6 +400,9 @@ impl CompletionFixture {
 
 #[path = "progressive_tests.rs"]
 mod progressive_tests;
+
+#[path = "section_draft_tests.rs"]
+mod section_draft_tests;
 
 #[path = "next_prompt_tests.rs"]
 mod next_prompt_tests;
