@@ -91,13 +91,16 @@ fingerprint. No other role's definition changes.
   the draft with the role, its definition fingerprint, the job and the graph
   content hash. The newest returned draft of the same address that has no
   successor is recorded as replaced. An insufficient-evidence finish, a run
-  that did not complete, a scope that names no subject and a claim citing a
-  fact outside the scope stage nothing. Neither does a draft with a
-  statement that spells out a file path or a code symbol of a fact it cites
-  (`statement_names_source`; SPEC-16 rule 3, AC-0683). `section_draft_outcome` reports
-  `staged` with the draft id or `no_draft` with a closed reason code, and
-  stages the draft of a completed run that has none stored; it calls no
-  model and storing identical content twice returns the stored record.
+  that did not complete, a scope that names no subject, a claim citing a
+  fact outside the scope and a graph that is no longer the snapshot the
+  run's evidence was frozen from (`graph_changed`, so a cited fact that kept
+  its id but changed content is never staged as current) stage nothing.
+  Neither does a draft with a statement that spells out a file path or a
+  code symbol of a fact it cites (`statement_names_source`; SPEC-16 rule 3,
+  AC-0683). `section_draft_outcome` reports `staged` with the draft id or
+  `no_draft` with a closed reason code, and stages the draft of a completed
+  run that has none stored; it calls no model and storing identical content
+  twice returns the stored record.
 
 ## Storage and review
 
