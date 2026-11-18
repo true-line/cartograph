@@ -830,3 +830,4 @@ corrections into one schema-6 envelope, proving replay does not suppress claims.
 | T-0668 | AC-0668 | reserved | — | the drafting run (SPEC-15 slice 6) |
 | T-0669 | AC-0669 | reserved | — | Workbench document view (SPEC-15 slice 7) |
 | T-0670 | AC-0670 | reserved | — | SimpleLogin content-acceptance pilot (SPEC-15 slice 8) |
+| T-0689 | AC-0689 | rust | iac::same_address_in_two_root_modules_emits_a_gap, iac::child_module_reads_are_not_root_module_collisions, iac::root_module_collision_gap_is_deterministic | envs/prod and envs/staging both declaring aws_sqs_queue.orders yield one Gap citing both spans with ids unchanged; child-module directories read unprefixed never count; cold, repeated and warm-cache runs are identical (#1844) |
