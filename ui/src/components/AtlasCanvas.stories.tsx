@@ -685,3 +685,108 @@ export const RecordedScreenRouteSelection: Story = {
     await expect(args.onSelect).toHaveBeenCalledWith(args.snapshot.nodes[0]);
   },
 };
+
+export const FindRevealsEntityInsideCollapsedGroup: Story = {
+  // AC-0715 (#1666): Find searches the whole loaded snapshot, so an entity
+  // far past the 24-entry visible index and folded inside a collapsed range
+  // group is found by its stable id; choosing it opens the evidence drawer
+  // with the exact original node and opens the groups and cluster around it.
+  args: {
+    snapshot: { nodes: ESTATE_NODES, edges: [] },
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const target = ESTATE_NODES[601];
+    await expect(canvas.getByText(/\+976 more on canvas/)).toBeInTheDocument();
+    await expect(canvas.getByText(/Searches all 1000 entities in the loaded Atlas/)).toBeInTheDocument();
+
+    const find = canvas.getByRole('searchbox', { name: 'Find entity' });
+    await userEvent.type(find, '  D300/M.TS#F1 ');
+    const results = within(canvas.getByLabelText('Find results'));
+    await expect(results.getByText('1 match')).toBeInTheDocument();
+    // While a query is active the ordinary indexes step aside.
+    await expect(canvas.queryByLabelText('Collapsed groups')).not.toBeInTheDocument();
+
+    await userEvent.click(results.getByRole('button', { name: /sym:local\/estate@d300\/m\.ts#f1/ }));
+    await expect(args.onSelect).toHaveBeenCalledTimes(1);
+    await expect(args.onSelect).toHaveBeenCalledWith(target);
+    await waitFor(() =>
+      expect(canvas.getByRole('status')).toHaveTextContent('499 of 500 clusters collapsed'),
+    );
+
+    // Clearing restores the ordinary controls; the selection stays.
+    await userEvent.click(canvas.getByRole('button', { name: 'Clear' }));
+    await expect(find).toHaveValue('');
+    await expect(canvas.queryByLabelText('Find results')).not.toBeInTheDocument();
+    const trail = within(canvas.getByLabelText('Open groups'));
+    await expect(trail.getByRole('button', { name: /d280 … d335/ })).toBeInTheDocument();
+    await expect(canvas.getByText(/f1 selected — press Enter to focus/)).toBeInTheDocument();
+    await expect(args.onSelect).toHaveBeenCalledTimes(1);
+  },
+};
+
+export const FindRevealsAcrossLayerAndFocus: Story = {
+  // AC-0715 (#1666): a result outside the active layer widens it to All
+  // layers; a result outside the current focus backs out only the levels
+  // that hide it. Name, kind and stable id all match.
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const find = canvas.getByRole('searchbox', { name: 'Find entity' });
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Infrastructure' }));
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('1 nodes · 0 edges'));
+    await userEvent.type(find, 'checkout');
+    let results = within(canvas.getByLabelText('Find results'));
+    await userEvent.click(results.getByRole('button', { name: /component:local\/shop@Checkout/ }));
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('5 nodes · 4 edges'));
+    await expect(canvas.getByRole('button', { name: 'All layers' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(args.onLayerChange).toHaveBeenLastCalledWith('All layers');
+    await expect(args.onSelect).toHaveBeenLastCalledWith(atlasNodes[3]);
+
+    // Focus two levels deep: POST /orders, then its channel.
+    await userEvent.clear(find);
+    await userEvent.click(canvas.getByRole('button', { name: 'POST /orders' }));
+    await userEvent.click(canvas.getByRole('button', { name: /Focus on POST \/orders/ }));
+    await userEvent.click(canvas.getByRole('button', { name: 'orders queue' }));
+    await userEvent.click(canvas.getByRole('button', { name: /Focus on orders queue/ }));
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('2 nodes · 1 edges'));
+
+    // Kind match: Checkout is one level up, so exactly one level pops.
+    await userEvent.type(find, 'COMPONENT');
+    results = within(canvas.getByLabelText('Find results'));
+    await userEvent.click(results.getByRole('button', { name: /Checkout/ }));
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('4 nodes · 3 edges'));
+    const path = canvas.getByRole('navigation', { name: 'Focus path' });
+    await expect(within(path).getByText('▸ POST /orders')).toBeInTheDocument();
+    await expect(within(path).queryByText('▸ orders queue')).not.toBeInTheDocument();
+    await expect(args.onSelect).toHaveBeenLastCalledWith(atlasNodes[3]);
+  },
+};
+
+export const FindNoMatchAndClearKeepsSelection: Story = {
+  // AC-0715 (#1666): an explicit no-match state; Esc in the field clears the
+  // query and restores the ordinary controls without changing the selection.
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'POST /orders' }));
+    await expect(args.onSelect).toHaveBeenCalledTimes(1);
+
+    const find = canvas.getByRole('searchbox', { name: 'Find entity' });
+    await userEvent.type(find, 'no-such-entity');
+    await expect(canvas.getByText('No entities match “no-such-entity”')).toBeInTheDocument();
+    await expect(canvas.queryByText('Visible entities')).not.toBeInTheDocument();
+
+    // A blank (whitespace) query is not a search.
+    await userEvent.clear(find);
+    await userEvent.type(find, '   ');
+    await expect(canvas.queryByLabelText('Find results')).not.toBeInTheDocument();
+
+    await userEvent.clear(find);
+    await userEvent.type(find, 'zzz');
+    await userEvent.keyboard('{Escape}');
+    await expect(find).toHaveValue('');
+    await expect(canvas.getByText('Visible entities')).toBeInTheDocument();
+    await expect(canvas.getByText(/POST \/orders selected — press Enter to focus/)).toBeInTheDocument();
+    await expect(args.onSelect).toHaveBeenCalledTimes(1);
+  },
+};
