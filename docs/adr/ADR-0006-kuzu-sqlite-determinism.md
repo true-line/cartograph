@@ -1,6 +1,6 @@
 # ADR-0006 — Kuzu graph store + SQLite/WAL spine + content-addressed determinism
 
-- **Status:** Accepted (Kuzu pending M0 verification)
+- **Status:** Accepted; the graph-store choice is superseded by [ADR-0008](ADR-0008-sqlite-graph-store-kuzu-archived.md) (2026-07-05), which settled the store on SQLite/WAL with recursive-CTE traversal after the M0 check found Kuzu archived upstream. The SQLite/WAL spine and content-addressed determinism decisions stand.
 - **Date:** 2026-06-21
 - **Deciders:** Chris Kane
 
