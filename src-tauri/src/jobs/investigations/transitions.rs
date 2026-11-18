@@ -1303,6 +1303,14 @@ pub(super) fn stop(
                 budget,
             },
         ),
+        // AC-0725: already-classified closed causes become machine-readable;
+        // the rejected response and the refused input are never retained.
+        InvestigationStopReason::ActionDecode(failure) => Some(failure.into()),
+        InvestigationStopReason::PreparationAt(phase) => Some(
+            agents::investigation::InvestigationTerminalDiagnostic::Preparation {
+                phase: phase.diagnostic_phase(),
+            },
+        ),
         _ => query_cap,
     };
     task.detail.error = Some(reason.message().into());
