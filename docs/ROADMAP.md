@@ -358,7 +358,7 @@ authorship. Stages 4 and 5 have their inputs and no product path.
 | W14 | Enterprise document catalogue | #1747 | A versioned catalogue approved by the owner: each document's reader, sections, deterministic inputs, authorable sections and acceptance |
 | W13 | Agent-authored document sections | #1748; contract proposed in [SPEC-15](SPEC-15_authored-sections.md), ADR-0064 | One SimpleLogin document with authored sections scored claim by claim against an expected set written before the run |
 | W15 | Living documentation | #1749; contract proposed in [SPEC-17](SPEC-17_living-documentation.md), ADR-0045 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run |
-| W16 | Existing documentation as evidence | #1750 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited |
+| W16 | Existing documentation as evidence | #1750; contract proposed in [SPEC-18](SPEC-18_documentation-evidence.md), ADR-0065 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited |
 | W17 | Rebuild handoff bundle | #1752; defined in [SPEC-16](SPEC-16_rebuild-handoff-bundle.md) | One SimpleLogin bundle reviewed against the sufficiency checklist by someone who did not produce it |
 
 ### Order
