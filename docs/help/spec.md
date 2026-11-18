@@ -424,6 +424,17 @@ Limits today:
 - A work packet cannot select this document. A complete-session MCP client
   can read it (see **Read-only MCP** in Settings).
 
+### Accepted section drafts
+
+When you have accepted a draft of a document section, **curated.md** also
+lists each accepted draft with its section, its state and two lists:
+**Changed**, the facts it cites whose content differs from what the draft
+recorded, and **Missing**, the cited ids that no longer resolve to a fact.
+A draft with a changed fact is **stale**; one with a missing fact is
+**unresolvable**. The lists are computed by comparing recorded and current
+content hashes. No model is involved, and no drafted claim is repeated in
+this file.
+
 ### Curated items in the Workbench
 
 The Workbench shows the same projection above the document list, under

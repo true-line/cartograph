@@ -1,6 +1,6 @@
 # SPEC-17 — Living documentation
 
-- **Status:** Proposed for [#1749](https://github.com/true-line/cartograph/issues/1749). Nothing in this specification is implemented yet.
+- **Status:** Proposed for [#1749](https://github.com/true-line/cartograph/issues/1749). Slice 1 is implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0048 / AC-0671..0675; ROADMAP W15; v1.0.0 criterion 7.
 - **Decision:** [ADR-0045](adr/ADR-0045-living-documentation.md).
@@ -38,6 +38,16 @@ empty `missing` and a non-empty `changed`. A draft that is `superseded` or
 `conflicted` reports the lists too, so a reader sees them whichever state
 won. The curated revision is unchanged: it identifies the reviews, and the
 graph basis identifies the facts.
+
+As built (slice 1): `CuratedDraft` carries `changed` and `missing`, filled
+in one pass over the draft's recorded hashes, which are ordered by id. The
+curated Workbench read returns both lists on each draft row. `curated.md`
+gains the section "Accepted section drafts", one row per accepted draft
+with its document, section, scope, state, reason code and the two lists,
+in both export modes and with no claim text. The section is written only
+when a draft is accepted, so a project without one keeps its bytes. The
+ids are printed as text and are not citations of the artifact: a missing id
+has no row in the fact index by definition.
 
 ## Surfaces
 

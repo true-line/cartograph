@@ -150,6 +150,13 @@ pub struct CuratedDraft {
     pub state: DraftState,
     /// Why that state applies.
     pub reason: DraftStateReason,
+    /// Cited ids whose current content hash differs from the recorded one,
+    /// sorted (ADR-0045 decision 2). Reported whatever the state.
+    #[serde(default)]
+    pub changed: Vec<String>,
+    /// Cited ids that resolve to no fact in the current graph, sorted.
+    #[serde(default)]
+    pub missing: Vec<String>,
 }
 
 /// Draft totals. `accepted` is the sum of every state.
@@ -214,6 +221,23 @@ fn assign(
     } else {
         (DraftState::Eligible, DraftStateReason::AllConditionsHold)
     }
+}
+
+/// The cited ids of `draft` whose fact changed and those whose fact is gone,
+/// each in id order (ADR-0045 decision 2). A set comparison of the recorded
+/// hashes with `current`: the same inputs always give the same lists.
+fn drift(draft: &ReviewedDraft, current: &BTreeMap<String, String>) -> (Vec<String>, Vec<String>) {
+    let mut changed = Vec::new();
+    let mut missing = Vec::new();
+    // `cited_hashes` is ordered by id, so both lists are.
+    for (id, recorded) in &draft.cited_hashes {
+        match current.get(id) {
+            None => missing.push(id.clone()),
+            Some(hash) if hash != recorded => changed.push(id.clone()),
+            Some(_) => {}
+        }
+    }
+    (changed, missing)
 }
 
 /// Assign every accepted draft its state. `current` holds the current
@@ -287,6 +311,7 @@ pub(super) fn project_drafts<'a>(
             DraftState::Conflicted => &mut counts.conflicted,
             DraftState::Eligible => &mut counts.eligible,
         } += 1;
+        let (changed, missing) = drift(draft, current);
         listed.push(CuratedDraft {
             draft_id: draft.draft_id.clone(),
             address: draft.address.clone(),
@@ -299,6 +324,8 @@ pub(super) fn project_drafts<'a>(
             cited_facts: draft.cited_hashes.len(),
             state,
             reason,
+            changed,
+            missing,
         });
     }
     Ok(DraftProjection {
