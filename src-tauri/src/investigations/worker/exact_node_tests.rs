@@ -103,7 +103,7 @@ fn exact_node_worker_acquires_seven_mixed_targets_inventory_finishes_and_reopens
     scripted.exact_targets = true;
     let provider = Arc::new(scripted);
     let (base, request) = seven_target_base(provider.as_ref());
-    let fixture = NextFixture::from_completion_base(
+    let fixture = NextFixture::from_completion_base_with_wall_bounded_active(
         provider.as_ref(),
         SpecialistId::DomainAnalystV17,
         base,
@@ -325,8 +325,11 @@ fn gated_exact_node_worker_selects_seven_offered_targets_and_reopens() {
         .unwrap();
     assert_eq!(before.summary.specialist_id, SpecialistId::DomainAnalystV18);
     assert_eq!(before.usage.model_invocations, 0);
-    // Real active and wall clocks: no fixture-only frozen-clock shortcut.
-    fixture.run_gated_inner(provider.as_ref());
+    // Real wall clock, synthetic active time (AC-0287). The gated rewrite
+    // keeps the 600 s default allowance, and 16 debug-build host turns on a
+    // slow shared runner spend all of it (#1896); the real active clock stays
+    // covered by the @17 and @20 runs above and below on a wider allowance.
+    fixture.run_gated_inner_frozen_active(provider.as_ref());
     assert_seven_completed(&fixture, provider.as_ref());
     let prompts = provider.observed.prompts.lock().unwrap();
     let payloads = provider.received_payloads.lock().unwrap();
@@ -386,7 +389,7 @@ fn analyst20_worker_eight_obligations_offer_acquisition_then_finish() {
     scripted.gated_flow = Some(GatedFlow::OfferedTargets);
     let provider = Arc::new(scripted);
     let (base, request) = seven_target_base(provider.as_ref());
-    let fixture = NextFixture::from_completion_base(
+    let fixture = NextFixture::from_completion_base_with_wall_bounded_active(
         provider.as_ref(),
         SpecialistId::DomainAnalystV20,
         base,

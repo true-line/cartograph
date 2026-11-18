@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { baseLayers, displayName, filterAtlasGraph, UNNAMED_CONFIG_KEY } from './AtlasCanvas';
+import {
+  baseLayers,
+  displayName,
+  filterAtlasGraph,
+  searchAtlasEntities,
+  UNNAMED_CONFIG_KEY,
+} from './AtlasCanvas';
 import type { AtlasSnapshot, GraphNode } from '../store';
 
 function node(id: string, label: string, props: GraphNode['props'] = {}): GraphNode {
@@ -93,5 +99,38 @@ describe('recorded screen route labels', () => {
     expect(displayName(node('screen:r@/main', 'Screen', { route: '  ' }))).toBe('screen:r@/main');
     expect(displayName(node('screen:r@/main', 'Screen'))).toBe('screen:r@/main');
     expect(displayName(node('other', 'Symbol', { route: '/main' }))).toBe('other');
+  });
+});
+
+// AC-0715 (#1666): literal Find over the loaded snapshot.
+describe('searchAtlasEntities', () => {
+  const snapshot: AtlasSnapshot = {
+    nodes: [
+      node('ep:r@POST:/orders', 'Endpoint', { method: 'POST', path: '/orders' }),
+      node('component:r@Checkout', 'Component', { name: 'Checkout' }),
+      node('res:r@aws_sqs_queue.orders', 'Resource', { logical_id: 'orders' }),
+      node('sym:r@a.ts#b', 'Symbol', { name: 'Alpha' }),
+    ],
+    edges: [],
+  };
+  const ids = (query: string) => searchAtlasEntities(snapshot, query).map((n) => n.id);
+
+  it('matches display name, kind and stable id, trimmed and case-insensitive', () => {
+    expect(ids('  CHECKOUT ')).toEqual(['component:r@Checkout']);
+    expect(ids('endpoint')).toEqual(['ep:r@POST:/orders']);
+    expect(ids('aws_sqs')).toEqual(['res:r@aws_sqs_queue.orders']);
+    expect(ids('a.ts#b')).toEqual(['sym:r@a.ts#b']);
+  });
+
+  it('orders by display name then id, independent of input order', () => {
+    expect(ids('orders')).toEqual(['res:r@aws_sqs_queue.orders', 'ep:r@POST:/orders']);
+    const reversed = { nodes: [...snapshot.nodes].reverse(), edges: [] };
+    expect(searchAtlasEntities(reversed, 'r@').map((n) => n.id)).toEqual(ids('r@'));
+  });
+
+  it('returns the original node objects and nothing for a blank query', () => {
+    expect(searchAtlasEntities(snapshot, 'alpha')[0]).toBe(snapshot.nodes[3]);
+    expect(ids('   ')).toEqual([]);
+    expect(ids('no-such')).toEqual([]);
   });
 });
