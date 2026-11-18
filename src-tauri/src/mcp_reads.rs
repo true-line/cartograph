@@ -544,6 +544,8 @@ fn graph_error(error: GraphError) -> ReadError {
             | SnapshotBoundsError::CanonicalByteLimit
             | SnapshotBoundsError::JsonDepthLimit
             | SnapshotBoundsError::JsonValueLimit
+            | SnapshotBoundsError::SingleRowByteLimit
+            | SnapshotBoundsError::SingleRowValueLimit
             | SnapshotBoundsError::CoverageRecordLimit
             | SnapshotBoundsError::CoverageByteLimit,
         ) => ReadError::Limit,

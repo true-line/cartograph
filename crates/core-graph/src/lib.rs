@@ -18,7 +18,9 @@ pub mod rules;
 pub mod scoped;
 pub mod source;
 
-pub use bounded::{SnapshotBoundsError, SnapshotReadLimits};
+pub use bounded::{
+    IdentityPassLimits, SnapshotBoundsError, SnapshotReadLimits, SnapshotRow, StreamedSnapshot,
+};
 pub use generation::{GenerationError, RevisionedSnapshot, StoreRevision};
 pub use source::{
     FactKey, OmissionLookup, ReceiptOmissionKind, SourceBinding, SourceOmission, SourceOmissions,
@@ -583,6 +585,9 @@ impl SqliteGraphStore {
         let transaction = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
         generation::validate_optional(&conn)?;
         let had_fact_schema: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name IN ('nodes','edges'))", [], |r| r.get(0))?;
+        // `idx_edges_src_label_dst` is additive: an existing store gains it on
+        // its next open with its facts and graph identity unchanged. It gives
+        // the streamed complete snapshot (#1602) identity order without a sort.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS nodes (
                  id    TEXT PRIMARY KEY,
@@ -597,7 +602,8 @@ impl SqliteGraphStore {
                  PRIMARY KEY (src, dst, label)
              ) STRICT;
              CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
-             CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);",
+             CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
+             CREATE INDEX IF NOT EXISTS idx_edges_src_label_dst ON edges(src, label, dst);",
         )?;
         // Private association metadata has its own schema version. Validate it
         // before any legacy fact-schema rebuild can remove existing facts.

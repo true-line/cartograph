@@ -1,6 +1,10 @@
 //! Pure, bounded source-selection metadata (SPEC-09). These values establish
 //! consistency of a host-supplied task, never authority to read source or a claim
 //! of complete producer input closure.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 
 use crate::{AgentError, TaskBasisManifest};
 use core_prov::content_hash;

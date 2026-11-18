@@ -1,4 +1,8 @@
 //! Descriptive evaluation metadata for persistence and display, never admission authority.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::FamilyKey;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

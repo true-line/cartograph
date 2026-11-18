@@ -19,7 +19,9 @@ use llm::bounded::{
 };
 use llm::{ConsentGrant, EgressFirewall, LlmProvider, Locality};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 use tauri::Manager;
 
 #[path = "worker/next_metadata.rs"]
@@ -320,7 +322,7 @@ fn run_inner<R: tauri::Runtime>(
             .lock()
             .map_err(|_| HostError::Operational)?
             .investigation_owned_runtime(&execution, &id)?;
-        clock.set_active_limit(detail.limits.active_seconds);
+        clock.apply_saved_limits(&detail.limits);
         let mut worker = Worker {
             pending_patch: None,
             app: &app,
@@ -1303,7 +1305,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         input: &InvestigationInput,
         context: &FrozenContext,
     ) -> Result<ConsentGrant, Failure> {
-        let remaining = self.clock.remaining_wall().min(Duration::from_secs(900));
+        let remaining = self.clock.consent_wait_remaining();
         if remaining.is_zero() {
             return Err(Failure::Stop(InvestigationStopReason::ConsentExpired));
         }

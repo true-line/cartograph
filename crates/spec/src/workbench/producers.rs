@@ -1,6 +1,7 @@
 //! Shared native artifact renderers with per-occurrence output admission.
 use super::render::{Assertions, Budget, Join, Json, NodeName, RenderLimit, Replace, Safe, Text};
 use super::*;
+use core_graph::FactKey;
 use std::fmt::{self, Write};
 
 pub(super) struct Output {
@@ -253,6 +254,28 @@ impl fmt::Display for ModelName<'_> {
 /// Producer-owned incident labels used by both rendering and partition closure.
 pub const DATA_PARTITION_EDGE_LABELS: &[&str] = DATA_EDGE_LABELS;
 
+/// The citation id of a node fact (ADR-0058).
+fn node_citation(node: &Node) -> String {
+    citation_id(&FactKey::Node {
+        id: node.id.clone(),
+    })
+}
+/// The citation id of an edge fact (ADR-0058).
+fn edge_citation(edge: &Edge) -> String {
+    citation_id(&FactKey::Edge {
+        source: edge.src.clone(),
+        label: edge.label.clone(),
+        destination: edge.dst.clone(),
+    })
+}
+/// An edge's confidence, decoded as its assertion decodes it.
+fn edge_confidence(edge: &Edge) -> ConfidenceTier {
+    provenance(&edge.props, &edge_identity(edge)).confidence_tier
+}
+const DATA_CITATIONS: &str = "\nEvery statement below prints its citation id. `fact-index.md` \
+lists the tier, confidence, method and evidence spans of each id. The diagram draws the same \
+facts and carries no ids.\n";
+
 pub(super) fn data(
     nodes: &[&Node],
     edges: &[&Edge],
@@ -322,17 +345,37 @@ pub(super) fn data(
     if entities.is_empty() {
         content.push_str("\nNo DataEntity facts have been recovered yet.\n")?;
     }
+    if !model_nodes.is_empty() {
+        content.push_str(DATA_CITATIONS)?;
+        content.push_str(
+            "\n## Entities and related nodes\n\n| Node | Kind | Tier | Confidence | Citation |\n|---|---|---|---|---|\n",
+        )?;
+        for n in &model_nodes {
+            let prov = provenance(&n.props, &n.id);
+            writeln!(
+                content,
+                "| `{}` | {} | {:?} | {:?} | {} |",
+                Safe(&n.id),
+                Safe(&n.label),
+                prov.tier,
+                prov.confidence_tier,
+                node_citation(n)
+            )?;
+        }
+    }
     if !mappings.is_empty() {
         content.push_str(
-            "\n## Access and mapping relations\n\n| Source | Relation | Target |\n|---|---|---|\n",
+            "\n## Access and mapping relations\n\n| Source | Relation | Target | Confidence | Citation |\n|---|---|---|---|---|\n",
         )?;
         for e in &mappings {
             writeln!(
                 content,
-                "| `{}` | {} | `{}` |",
+                "| `{}` | {} | `{}` | {:?} | {} |",
                 Safe(&e.src),
                 e.label,
-                Safe(&e.dst)
+                Safe(&e.dst),
+                edge_confidence(e),
+                edge_citation(e)
             )?;
         }
     }
@@ -347,13 +390,15 @@ pub(super) fn data(
         .collect();
     if !relation_fields.is_empty() {
         content.push_str(
-            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target |\n|---|---|---|---|---|---|\n",
+            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target | Confidence | Citation |\n|---|---|---|---|---|---|---|---|\n",
         )?;
         for (e, relations) in relation_fields {
+            // A field is a property of its relation edge, so it cites that edge.
+            let (confidence, cite) = (edge_confidence(e), edge_citation(e));
             for relation in relations {
                 writeln!(
                     content,
-                    "| `{}` | `{}` | {} | {} | {} | `{}` |",
+                    "| `{}` | `{}` | {} | {} | {} | `{}` | {confidence:?} | {cite} |",
                     Safe(&e.src),
                     Safe(relation_value(&relation["field"])),
                     Safe(relation_value(&relation["relation"])),
@@ -1317,6 +1362,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
     let external = super::external::logical_index_bytes(rows, values)?;
     let environments = super::environments::logical_index_bytes(rows, values)?;
     let curated = super::curated::logical_index_bytes(rows)?;
+    let inventory = super::endpoint_inventory::logical_index_bytes(rows)?;
     Some(
         data.max(tools)
             .max(tests)
@@ -1326,6 +1372,7 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
             .max(configuration)
             .max(external)
             .max(environments)
-            .max(curated),
+            .max(curated)
+            .max(inventory),
     )
 }

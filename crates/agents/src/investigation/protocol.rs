@@ -1,3 +1,7 @@
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{
     ActionDecodeFailure, ActionDecodeStage, ActionSemanticRule, InvestigationError,
     MAX_ACTION_BYTES, MAX_QUERY_BYTES, MAX_QUERY_FACTS, bounded_bytes, reject_prose_replay, strict,

@@ -190,7 +190,8 @@ index check covers it. An eligible draft that cites a fact the export does
 not admit (an inference the reviewer rejected, for one) is not printed, and
 the section says so; no claim is shown beside a citation that does not
 resolve. A draft in another state is named with its state and reason code in
-both modes. A scoped draft is printed under its section with its scope; the
+both modes; a `stale` draft is the exception, printed in place under a stale
+mark in `best-effort` (ADR-0045 decision 4, SPEC-17). A scoped draft is printed under its section with its scope; the
 section is not yet repeated per subject.
 
 In version 1 of the table a frame is one of four things: every admitted
