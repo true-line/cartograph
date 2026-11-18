@@ -399,6 +399,28 @@ pub(crate) enum PreparationPhase {
     SourceReservation,
 }
 
+impl PreparationPhase {
+    /// The closed, text-free diagnostic boundary for this phase (AC-0725).
+    pub(crate) fn diagnostic_phase(self) -> agents::investigation::InvestigationFailurePhase {
+        use agents::investigation::InvestigationFailurePhase as Phase;
+        match self {
+            Self::Continuation => Phase::Continuation,
+            Self::Finish => Phase::Finish,
+            Self::Metadata => Phase::Metadata,
+            Self::Query => Phase::Query,
+            Self::Inventory => Phase::Inventory,
+            Self::Candidate => Phase::Candidate,
+            Self::Certification => Phase::Certification,
+            Self::Seal => Phase::Seal,
+            Self::Publication => Phase::Publication,
+            Self::Source => Phase::Source,
+            Self::SourcePrepare => Phase::SourcePrepare,
+            Self::SourceCertification => Phase::SourceCertification,
+            Self::SourceReservation => Phase::SourceReservation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostLimitKind {
     Unspecified,

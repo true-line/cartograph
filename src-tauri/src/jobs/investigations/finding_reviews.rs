@@ -17,6 +17,19 @@ pub(crate) enum FindingReviewError {
     Store(InvestigationStoreError),
     SubjectChanged,
     Conflict(Box<FindingReviewObservation>),
+    /// Another connection held the write lock for the whole busy timeout.
+    /// Raised only while taking the lock, so nothing was written (#1246).
+    Busy,
+}
+impl FindingReviewError {
+    /// Classify a failure to take the write lock: lock contention is a
+    /// retryable outcome, anything else is a storage failure.
+    fn write_lock(error: rusqlite::Error) -> Self {
+        match error.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy) => Self::Busy,
+            _ => error.into(),
+        }
+    }
 }
 impl From<InvestigationStoreError> for FindingReviewError {
     fn from(value: InvestigationStoreError) -> Self {
@@ -234,7 +247,8 @@ impl JobStore {
         request.validate()?;
         let tx = self
             .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(FindingReviewError::write_lock)?;
         let id = &request.subject.investigation_id;
         let (response, hash) = load(&tx, &self.namespace, id, &request.subject.result_id)?;
         let current = response

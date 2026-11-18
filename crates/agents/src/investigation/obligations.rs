@@ -373,7 +373,7 @@ fn request_family(
             "investigation-v1",
             4,
             "domain-analyst@7" | "evidence-auditor@7" | "spec-writer@1" | "spec-writer@2"
-            | "gap-triager@1" | "gap-triager@2",
+            | "gap-triager@1" | "gap-triager@2" | "section-writer@1",
         ) => Ok((
             4,
             &[
@@ -383,6 +383,7 @@ fn request_family(
                 "spec-writer@2",
                 "gap-triager@1",
                 "gap-triager@2",
+                "section-writer@1",
             ],
             b"cartograph:investigation-client-intent:v4\0",
         )),
