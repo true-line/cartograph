@@ -42,7 +42,8 @@ fn group_name(
             // an application route may spell a dotted endpoint name itself.
             endpoint["mount"].as_str()?;
             let (blueprint, own) = endpoint["endpoint_name"].as_str()?.rsplit_once('.')?;
-            (part(own) && blueprint.split('.').all(part)).then(|| {
+            // Flask allows any non-empty name, spaces included.
+            (!own.is_empty() && blueprint.split('.').all(|name| !name.is_empty())).then(|| {
                 (
                     "flask-blueprint",
                     blueprint.to_owned(),

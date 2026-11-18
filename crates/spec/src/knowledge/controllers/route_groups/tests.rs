@@ -35,6 +35,32 @@ def everyone():
     return []
 ";
 
+// AC-0801: a Blueprint name is whatever non-empty literal Flask accepts.
+#[test]
+fn controller_capability_keeps_a_flask_blueprint_name_with_a_space() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("admin.py"),
+        "from flask import Blueprint
+bp = Blueprint('user admin', __name__)
+@bp.get('/all')
+def everyone():
+    return []
+",
+    )
+    .unwrap();
+    let facts = adapters_lang_python::extract_dir(
+        dir.path(),
+        &adapters_lang_python::SourceId {
+            repo: REPO,
+            commit: COMMIT,
+        },
+    )
+    .unwrap();
+    let report = derive_controller_capabilities(&revisioned(facts.nodes, facts.edges));
+    assert_eq!(titles(&report), ["HTTP operations in blueprint user admin"]);
+}
+
 fn snapshot() -> RevisionedSnapshot {
     let dir = tempfile::tempdir().unwrap();
     for (name, source) in [("app.py", APP), ("users.py", USERS), ("legacy.py", LEGACY)] {
