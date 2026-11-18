@@ -146,6 +146,8 @@ export default function App() {
     specError,
     ingestBusy,
     ingestSummary,
+    recordedCoverage,
+    recordedCoverageError,
     ingestError,
     ingestSource,
     ingestTarget,
@@ -633,6 +635,8 @@ export default function App() {
             <WorkspaceSurface
               systemContents={systemContents}
               summary={ingestSummary}
+              recordedCoverage={recordedCoverage}
+              recordedCoverageError={recordedCoverageError}
               findings={findings}
               distribution={tierDistribution(atlas)}
               bundle={specBundle}

@@ -7203,6 +7203,7 @@ fn main() {
             atlas_snapshot,
             context::query_context,
             context::query_qualified_context,
+            context::recorded_coverage,
             read_evidence,
             primary_source::describe_captured_source,
             mcp_reads::commands::mcp_reads_status,

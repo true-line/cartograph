@@ -1842,6 +1842,71 @@ fn captured_ingest_skips_symlinks_and_names_them_in_coverage() {
     assert!(inventory.limited);
 }
 
+// AC-0700 (#1656): after a relaunch over the same on-disk stores, the
+// inventory a real ingest published is restored as current from the coverage
+// table alone, equal to the stored body. Clear removes it permanently: a
+// later relaunch restores nothing although the registration and the job
+// history remain.
+#[test]
+fn recorded_coverage_survives_relaunch_and_clear_removes_it_for_good() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
+    let launch = || {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(app_state(&app_data));
+        app.manage(crate::PreflightRuns::default());
+        app
+    };
+    let restored = |app: &tauri::App<tauri::test::MockRuntime>| {
+        let state = tauri::Manager::state::<AppState>(app);
+        crate::context::restored_coverage(&state.graph, || {
+            crate::context::coverage_scope(app.handle(), &state)
+        })
+        .unwrap()
+    };
+    let stored = {
+        let app = launch();
+        let state = tauri::Manager::state::<AppState>(&app);
+        let registered = register_local_source(&state, &root).unwrap();
+        let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+        let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+        run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+        let stored = state.graph.lock().unwrap().coverage_records().unwrap();
+        assert_eq!(stored.len(), 1);
+        stored[0].clone()
+    };
+
+    let app = launch();
+    let reopened = restored(&app);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(
+        reopened[0].status,
+        context_hub::coverage::CoverageStatus::Recorded
+    );
+    assert_eq!(reopened[0].repo, stored.record.repo_key);
+    assert_eq!(reopened[0].inventory_hash, stored.inventory_hash);
+    assert_eq!(
+        reopened[0].inventory,
+        Some(serde_json::from_str(&stored.record.inventory_json).unwrap())
+    );
+    {
+        let state = tauri::Manager::state::<AppState>(&app);
+        crate::clear_graph_store(&mut state.graph.lock().unwrap()).unwrap();
+        assert!(restored(&app).is_empty());
+    }
+    drop(app);
+
+    let app = launch();
+    let state = tauri::Manager::state::<AppState>(&app);
+    assert_eq!(state.sources.lock().unwrap().list().unwrap().len(), 1);
+    assert!(!state.jobs.lock().unwrap().list().unwrap().is_empty());
+    assert!(restored(&app).is_empty());
+}
+
 // AC-0592 (#1786): the export of a real ingest carries the coverage
 // artifacts. A tree with one file left unread (a symlink) and one language no
 // producer covers lists both with their recorded reasons, carries the stored

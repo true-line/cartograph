@@ -1,7 +1,7 @@
 //! Shared recovered-context reads for the desktop transport (SPEC-01, H1).
 
 use context_hub::coverage::{
-    CoverageQualification, QualifiedRequest, QualifiedResponse, ScopedRepo,
+    CoverageQualification, CoverageStatus, QualifiedRequest, QualifiedResponse, ScopedRepo,
 };
 use context_hub::{ContextSnapshot, QueryRequest, QueryResponse};
 use core_graph::coverage::CoverageReadLimits;
@@ -144,6 +144,82 @@ pub(crate) async fn query_qualified_context(
     .await
 }
 
+/// One repo's recorded coverage inventory as restored after relaunch
+/// (AC-0700, #1656). Only the coverage table is read; no fact is materialized
+/// and no ingest runs.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct RestoredCoverage {
+    /// Repo identity.
+    pub repo: String,
+    /// `recorded` or `stale`; a repo with no stored inventory is not listed.
+    pub status: CoverageStatus,
+    /// Content hash of the stored inventory.
+    pub inventory_hash: String,
+    /// What was compared with the current registration at read time. Anything
+    /// else in the inventory, declared inputs included, is as recorded.
+    pub compared: Vec<String>,
+    /// The stored body, only while it is current: nothing is read from a
+    /// stale inventory.
+    pub inventory: Option<serde_json::Value>,
+}
+
+/// Qualify the stored inventories with the registration and plugin basis that
+/// held across a bounded coverage-only read. A corrupt or over-limit store is
+/// an error, never an empty or partial list.
+pub(crate) fn restored_coverage(
+    graph: &Mutex<SqliteGraphStore>,
+    mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, String>,
+) -> Result<Vec<RestoredCoverage>, String> {
+    let before = scope()?;
+    let (_, recorded) = graph
+        .lock()
+        .map_err(|error| error.to_string())?
+        .read_coverage_records_with_revision_bounded(CoverageReadLimits::default())
+        .map_err(|error| error.to_string())?;
+    let scope = stable_scope(&before, scope()?);
+    let coverage =
+        CoverageQualification::new(&scope, &recorded).map_err(|error| error.to_string())?;
+    coverage
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            let hash = repo.inventory_hash.clone()?;
+            let inventory = match repo.status {
+                CoverageStatus::Recorded => Some(
+                    coverage
+                        .inventory(&repo.repo, &hash)
+                        .and_then(|body| {
+                            serde_json::from_str(body).map_err(|_| {
+                                context_hub::ContextError::InvalidCoverage(repo.repo.clone())
+                            })
+                        })
+                        .map_err(|error| error.to_string()),
+                ),
+                _ => None,
+            };
+            Some(inventory.transpose().map(|inventory| RestoredCoverage {
+                repo: repo.repo.clone(),
+                status: repo.status,
+                inventory_hash: hash,
+                compared: repo.compared.clone(),
+                inventory,
+            }))
+        })
+        .collect()
+}
+
+/// The recorded coverage inventories Workspace shows after relaunch (AC-0700).
+#[tauri::command]
+pub(crate) async fn recorded_coverage(
+    app: tauri::AppHandle,
+) -> Result<Vec<RestoredCoverage>, String> {
+    crate::off_ui_thread(move || {
+        let state = app.state::<crate::AppState>();
+        restored_coverage(&state.graph, || coverage_scope(&app, &state))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +357,104 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page.response.facts.len(), 1);
+    }
+
+    fn store_with_inventory(inventory: serde_json::Value) -> Mutex<SqliteGraphStore> {
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        let record = core_graph::coverage::CoverageRecord {
+            repo_key: "acme/api".into(),
+            registered_source_id: Some("src:api".into()),
+            ingest_id: "job:1".into(),
+            config_hash: "config".into(),
+            inventory_json: inventory.to_string(),
+        };
+        let expected = graph.read_snapshot().unwrap();
+        assert!(
+            graph
+                .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
+                    &expected,
+                    &core_graph::GraphPatch::default(),
+                    "acme/api",
+                    &[],
+                    Some(&record),
+                    core_graph::source::SourceOmissions::NONE,
+                )
+                .unwrap()
+        );
+        Mutex::new(graph)
+    }
+
+    fn inventory() -> serde_json::Value {
+        serde_json::json!({
+            "inventory": "coverage@1", "repo": "acme/api", "commit": "a".repeat(40),
+            "layer_hints": [], "producers": [{"id": "t0.adapter-ts", "state": "ran"}],
+            "missing_inputs": [], "unsupported": [], "limited": false,
+        })
+    }
+
+    fn api_scope(config_hash: &str) -> Vec<ScopedRepo> {
+        vec![ScopedRepo {
+            repo_key: "acme/api".into(),
+            registered_source_id: Some("src:api".into()),
+            config_hash: config_hash.into(),
+            layer_hints: None,
+        }]
+    }
+
+    #[test]
+    fn restored_coverage_reads_current_inventories_and_states_stale_ones() {
+        // AC-0700 (#1656): a current inventory is restored with its stored
+        // body; a changed plugin basis, a registration that moves during the
+        // read or a repo no longer registered is stale and nothing is read
+        // from it; a repo without an inventory is not listed. (T-0700)
+        let graph = store_with_inventory(inventory());
+        let current = restored_coverage(&graph, || Ok(api_scope("config"))).unwrap();
+        assert_eq!(
+            current,
+            [RestoredCoverage {
+                repo: "acme/api".into(),
+                status: CoverageStatus::Recorded,
+                inventory_hash: core_prov::content_hash(inventory().to_string().as_bytes()),
+                compared: vec!["registration".into(), "plugins".into()],
+                inventory: Some(inventory()),
+            }]
+        );
+        let mut reads = 0;
+        let moved = || {
+            reads += 1;
+            Ok(api_scope(if reads == 1 { "config" } else { "config:next" }))
+        };
+        for stale in [
+            restored_coverage(&graph, || Ok(api_scope("config:next"))).unwrap(),
+            restored_coverage(&graph, moved).unwrap(),
+            restored_coverage(&graph, || Ok(Vec::new())).unwrap(),
+        ] {
+            assert_eq!(stale.len(), 1);
+            assert_eq!(stale[0].status, CoverageStatus::Stale);
+            assert_eq!(stale[0].inventory_hash, current[0].inventory_hash);
+            assert_eq!(stale[0].inventory, None);
+        }
+        let mut web = api_scope("config");
+        web[0].repo_key = "acme/web".into();
+        let unrecorded =
+            restored_coverage(&SqliteGraphStore::open_in_memory().unwrap().into(), || {
+                Ok(web.clone())
+            })
+            .unwrap();
+        assert!(unrecorded.is_empty());
+    }
+
+    #[test]
+    fn restored_coverage_refuses_a_corrupt_inventory_and_a_failed_scope() {
+        // AC-0700: an inventory whose recorded flag disagrees with its counts
+        // is an error, not an empty or partial list; so is a scope read that
+        // fails. (T-0700)
+        let mut corrupt = inventory();
+        corrupt["limited"] = serde_json::json!(true);
+        let graph = store_with_inventory(corrupt);
+        assert!(restored_coverage(&graph, || Ok(api_scope("config"))).is_err());
+        let graph = store_with_inventory(inventory());
+        assert!(restored_coverage(&graph, || Err("registry unavailable".to_string())).is_err());
     }
 
     #[test]
