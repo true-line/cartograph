@@ -1,7 +1,8 @@
 //! Knowledge phase after ingest (ADR-0051 decision 3, #1441).
 //!
 //! Once an ingest has committed the deterministic base, the knowledge units
-//! of that base are embedded through the local provider and the knowledge
+//! of that base, and of the flows traced from it, are embedded through the
+//! local provider and the knowledge
 //! overlay is republished for the same base revision, recording in its
 //! recipe whether the provider phase ran and which embedding namespace it
 //! used. The phase never fails or delays the ingest: every outcome,
@@ -185,25 +186,43 @@ fn run_within(
             .map_err(|e| e.to_string())?;
         (snapshot, lease)
     };
-    // Provider work runs without the graph lock; the revision check at
-    // publication keeps a moved base from receiving this overlay.
-    let (recipe, mut report) =
-        match knowledge_ingest::run(&snapshot.graph.0, provider, Arc::clone(cache), lease) {
-            Ok(PhaseOutcome::Embedded {
-                binding,
-                units,
-                omitted,
-                ..
-            }) => (
-                recipe(binding.map(|b| b.namespace().to_owned()), true),
-                report(units.len(), omitted, None),
-            ),
-            Ok(PhaseOutcome::Skipped { omission }) => {
-                (recipe(None, false), report(0, 0, Some(omission)))
-            }
-            Err(_) => (recipe(None, false), report(0, 0, Some(PROVIDER_FAILED))),
-        };
+    // Producers and provider work run without the graph lock; the revision
+    // check at publication keeps a moved base from receiving this overlay.
     let derived = derive(&snapshot);
+    // The traced flows are units too. Their vectors are cache rows keyed by
+    // text, so a derived set the overlay later refuses leaves nothing behind
+    // that anything reads as a fact.
+    let flows: Vec<&core_graph::Node> = derived
+        .facts
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            core_graph::overlay::OverlayItem::Node(node) if node.label == "BusinessFlow" => {
+                Some(node)
+            }
+            _ => None,
+        })
+        .collect();
+    let (recipe, mut report) = match knowledge_ingest::run(
+        &snapshot.graph.0,
+        &flows,
+        provider,
+        Arc::clone(cache),
+        lease,
+    ) {
+        Ok(PhaseOutcome::Embedded {
+            binding,
+            units,
+            omitted,
+            ..
+        }) => (
+            recipe(binding.map(|b| b.namespace().to_owned()), true),
+            report(units.len(), omitted, None),
+        ),
+        Ok(PhaseOutcome::Skipped { omission }) => {
+            (recipe(None, false), report(0, 0, Some(omission)))
+        }
+        Err(_) => (recipe(None, false), report(0, 0, Some(PROVIDER_FAILED))),
+    };
     report.oversized = derived.oversized;
     report.producer_omissions = derived.omissions;
     // Count the already-held vector before publication consumes it; expose the
