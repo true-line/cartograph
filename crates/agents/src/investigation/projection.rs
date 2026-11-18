@@ -11,6 +11,7 @@ const MAX_QUERY_DEPTH: usize = 32;
 const MAX_QUERY_VALUES: usize = 16384;
 const MAX_QUERY_ARRAY_ITEMS: usize = 16384;
 
+/// Compacted, model-facing view of verified query pages.
 #[derive(Debug, Serialize)]
 pub struct CompactInvestigationContext {
     /// Complete fact objects, including all original provenance and properties.
@@ -22,12 +23,14 @@ pub struct CompactInvestigationContext {
 }
 
 impl CompactInvestigationContext {
+    /// Compacts `raw_pages` under the v1 investigation policy.
     pub fn prepare(
         ledger: &InvestigationInputLedger,
         raw_pages: &[String],
     ) -> Result<Self, InvestigationError> {
         Self::prepare_with_policy(ledger, raw_pages, &INVESTIGATION_V1_POLICY)
     }
+    /// Compacts `raw_pages` under an explicit policy.
     pub fn prepare_with_policy(
         ledger: &InvestigationInputLedger,
         raw_pages: &[String],

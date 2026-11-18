@@ -2695,11 +2695,13 @@ fn extract_source_recording(
         };
         let push_fetch =
             |out: &mut Extraction, method: String, url: IdentityExpr, site: &TsNode| {
+                let symbol =
+                    enclosing_component(&cx, *site).or_else(|| enclosing_symbol(&cx, *site));
                 out.fetch_sites.push(FetchSite {
+                    straight_line: Some(callable::straight_line(&cx, *site, symbol.as_deref())),
                     method,
                     url,
-                    symbol: enclosing_component(&cx, *site)
-                        .or_else(|| enclosing_symbol(&cx, *site)),
+                    symbol,
                     path: path.into(),
                     byte_start: site.start_byte() as u64,
                     byte_end: site.end_byte() as u64,

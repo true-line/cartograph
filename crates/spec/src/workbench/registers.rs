@@ -984,7 +984,11 @@ pub(super) fn logical_workspace_bytes(
         slots::<Candidate<'_>>(candidates)?, // rows + stable-sort scratch
         slots::<Cow<'_, str>>(candidates.checked_mul(parts)?)?,
         slots::<Provenance>(rows)?,
-        slots::<core_prov::EvidenceRef>(values.checked_add(flow_bytes)?)?,
+        // Graph evidence by admitted values; copied hop evidence by the
+        // smallest serialized evidence element of the flow output.
+        slots::<core_prov::EvidenceRef>(
+            values.checked_add(flowtracer::output_evidence_bound(flow_bytes)?)?,
+        )?,
         slots::<Omission>(candidates)?,
         super::render::logical_origin_bytes(rows)?,
         map_slots::<&str, &str>(rows)?, // gap edge labels by destination
