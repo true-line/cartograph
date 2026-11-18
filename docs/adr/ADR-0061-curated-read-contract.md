@@ -91,6 +91,9 @@ curation. SPEC-09 says the basis assessment must not be stored as a single
 10. **Finding reviews are not curation.** SPEC-03 stands: a finding accepted
     for follow-up has no fact shape and does not enter the projection. Legacy
     `agent_decisions` stay historical and do not enter it either.
+    *Amended by ADR-0074:* a follow-up review is still not curation, but a
+    finding accepted under the separate curation review of that ADR enters
+    the projection as a third record kind.
 11. **`h3_curated_available` is true only on a read that computed the
     projection** and returned the DR-4 fields.
 

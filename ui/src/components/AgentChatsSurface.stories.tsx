@@ -577,7 +577,7 @@ export const LoadedConversationBranches: Story = {
       };
       if (command === 'read_investigation_citation') return { investigation_id: args.investigationId,
         citation_id: args.citationId, citation: investigationCitations[0], status: 'available', text: `Exact source ${args.investigationId}` };
-      if (command === 'investigation_consent' || command === 'get_investigation_finding_reviews') return null;
+      if (command === 'investigation_consent' || command === 'get_investigation_finding_reviews' || command === 'get_investigation_finding_curations') return null;
       throw new Error(`Unexpected branch fixture command ${command}`);
     });
     useInvestigationStore.setState(state({ history: details }), true);

@@ -25,6 +25,16 @@
 //! facts this compilation was given, is not cited: the row says so and the
 //! document counts them. No citation id is printed for a node without a row.
 //!
+//! **Findings.** An investigation finding accepted as curated (ADR-0074,
+//! AC-0845) is one statement with the facts it cites. A `best-effort`
+//! export prints each eligible finding, marked InferredWeak, and cites the
+//! facts it names as assertions of this artifact, each once. A finding that
+//! cites a fact this export does not admit is not printed and is named. A
+//! `verified-only` export prints none and states how many it left out.
+//! Stale and unresolvable findings are listed with their state in both
+//! modes and their statements are not repeated. The section is written only
+//! when a finding is accepted.
+//!
 //! **No projection.** A bare compile and the work-packet host supply none.
 //! The document then says that none was supplied and lists nothing; an empty
 //! list would not mean that no proposal was accepted. An MCP read session
@@ -32,16 +42,20 @@
 //!
 //! **Cost.** One pass over the items and one over the listed records. When
 //! a `best-effort` export has items, one index of the admitted nodes by id;
-//! otherwise no index. Nothing is walked.
+//! otherwise no index. When it has an eligible finding, one pass over the
+//! admitted nodes and edges that keeps only the cited ones. Nothing is
+//! walked.
 
+use super::document::{Fact, facts_named};
 use super::producers::Output;
 use super::render::{Assertions, Budget, Literal, RenderLimit, Text};
 use super::{ExportMode, citation_id};
 use context_hub::curated::{
-    AssertionReview, BasisComparison, BasisReport, CuratedCounts, CuratedProjection, CuratedRecord,
-    CuratedView, RecordState, ReviewDecision, StateReason,
+    AssertionReview, BasisComparison, BasisReport, CuratedCounts, CuratedFinding,
+    CuratedProjection, CuratedRecord, CuratedView, FindingState, FindingStateReason, RecordState,
+    ReviewDecision, StateReason,
 };
-use core_graph::{FactKey, Node};
+use core_graph::{Edge, FactKey, Node};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -591,10 +605,208 @@ fn drafts(projection: &CuratedProjection, out: &mut Text) -> fmt::Result {
     Ok(())
 }
 
-/// `curated.md` over the projection the host supplied and the nodes the
-/// export mode admitted.
+/// The state of a finding as the projection serializes it.
+fn finding_state_name(state: FindingState) -> &'static str {
+    match state {
+        FindingState::Unresolvable => "unresolvable",
+        FindingState::Stale => "stale",
+        FindingState::Eligible => "eligible",
+    }
+}
+
+/// The reason code of a finding's state as the projection serializes it,
+/// and what it means.
+fn finding_reason_text(reason: FindingStateReason) -> (&'static str, &'static str) {
+    match reason {
+        FindingStateReason::NoCitedFact => ("no_cited_fact", "The finding cites no fact."),
+        FindingStateReason::CitedFactMissing => (
+            "cited_fact_missing",
+            "A fact the finding cites is not in the current graph.",
+        ),
+        FindingStateReason::CitedFactChanged => (
+            "cited_fact_changed",
+            "A fact the finding cites changed after the investigation read it.",
+        ),
+        FindingStateReason::AllConditionsHold => (
+            "all_conditions_hold",
+            "Every fact the finding cites is as the investigation read it.",
+        ),
+    }
+}
+
+/// What a finding state reason means, in the sentence `curated.md` prints.
+/// The Workbench shows the same sentence (AC-0845).
+pub fn curated_finding_reason_sentence(reason: FindingStateReason) -> &'static str {
+    finding_reason_text(reason).1
+}
+
+/// Whether an export in `mode` shows `finding` as curated content: only an
+/// eligible finding, and only in `best-effort`, since every finding is
+/// InferredWeak (R-INT-5, ADR-0074 decision 11). Every curated read uses
+/// this one rule.
+pub fn curated_finding_shown(finding: &CuratedFinding, mode: ExportMode) -> bool {
+    mode == ExportMode::BestEffort && finding.state == FindingState::Eligible
+}
+
+const FINDINGS_INTRO: &str = "\n## Findings accepted as curated\n\n\
+Each investigation finding that a person accepted as curated. A finding is one statement an \
+agent produced, with the graph facts it cites. Accepting it wrote nothing to the graph and \
+changed no tier: it is T3 / InferredWeak and is not a recovered fact. A finding has the first \
+state that applies: `unresolvable` when it cites no fact or a cited fact is not in the graph, \
+`stale` when a cited fact changed after the investigation read it, and `eligible` otherwise. \
+Source support counts the cited facts that rest on captured primary-source evidence and the \
+ones that nothing verified; it does not decide the state.\n\n";
+
+/// The findings accepted as curated (ADR-0074 decision 11, AC-0845). A
+/// `best-effort` export prints the eligible ones with their citation ids
+/// and asserts each cited fact once; `asserted` holds the node ids this
+/// artifact already cites. The other accepted findings are listed with
+/// their state in both modes and their statements are not repeated. The
+/// section is written only when a finding is accepted, so a project without
+/// one keeps its bytes.
+fn findings<'a>(
+    projection: &CuratedProjection,
+    (nodes, edges): (&[&'a Node], &[&'a Edge]),
+    mode: ExportMode,
+    asserted: &mut BTreeSet<&'a str>,
+    assertions: &mut Assertions,
+    out: &mut Text,
+) -> Result<(), RenderLimit> {
+    let counts = projection.finding_counts;
+    if counts.accepted == 0 {
+        return Ok(());
+    }
+    out.push_str(FINDINGS_INTRO)?;
+    writeln!(
+        out,
+        "- Accepted findings: {}. Eligible: {}. Stale: {}. Unresolvable: {}.\n",
+        counts.accepted, counts.eligible, counts.stale, counts.unresolvable
+    )?;
+    let shown: Vec<&CuratedFinding> = projection
+        .findings
+        .iter()
+        .filter(|finding| curated_finding_shown(finding, mode))
+        .collect();
+    let wanted: BTreeSet<&str> = shown
+        .iter()
+        .flat_map(|finding| &finding.citations)
+        .map(String::as_str)
+        .collect();
+    let facts = facts_named(&wanted, nodes, edges);
+    let mut edges_asserted: BTreeSet<&str> = BTreeSet::new();
+    let mut printed = 0usize;
+    let mut not_printed: Vec<&CuratedFinding> = Vec::new();
+    match mode {
+        ExportMode::VerifiedOnly => writeln!(
+            out,
+            "No finding is shown: this is a `verified-only` export. Eligible findings left \
+             out: {}.",
+            counts.eligible
+        )?,
+        ExportMode::BestEffort => {
+            for finding in shown {
+                // Every id this document prints resolves in the fact index.
+                if !finding
+                    .citations
+                    .iter()
+                    .all(|id| facts.contains_key(id.as_str()))
+                {
+                    not_printed.push(finding);
+                    continue;
+                }
+                printed += 1;
+                write!(
+                    out,
+                    "{printed}. **{}** {} ({}; T3 / InferredWeak; role `{}`; human-reviewed: \
+                     accepted as curated; source support: {} captured, {} unverified; finding \
+                     `{}`; cites ",
+                    Literal(&finding.title),
+                    Literal(&finding.statement),
+                    Literal(&finding.kind),
+                    Literal(&finding.role),
+                    finding.source_support.captured,
+                    finding.source_support.unverified,
+                    Literal(&finding.finding_ref),
+                )?;
+                for (position, id) in finding.citations.iter().enumerate() {
+                    if position > 0 {
+                        out.push_str(", ")?;
+                    }
+                    out.push_str(id)?;
+                    match facts[id.as_str()] {
+                        Fact::Node(node) => {
+                            if asserted.insert(node.id.as_str()) {
+                                assertions.node(node, None)?;
+                            }
+                        }
+                        Fact::Edge(edge) => {
+                            if edges_asserted.insert(id.as_str()) {
+                                assertions.edge(edge)?;
+                            }
+                        }
+                    }
+                }
+                out.push_str(")\n")?;
+                for limitation in &finding.limitations {
+                    writeln!(out, "   - Limitation: {}", Literal(limitation))?;
+                }
+            }
+            if printed == 0 {
+                out.push_str("No eligible finding is printed in this export.\n")?;
+            }
+            for finding in &not_printed {
+                writeln!(
+                    out,
+                    "- Finding `{}` is eligible and is not printed: it cites a fact this export \
+                     does not list.",
+                    Literal(&finding.finding_ref)
+                )?;
+            }
+        }
+    }
+
+    if counts.accepted == counts.eligible {
+        return Ok(());
+    }
+    out.push_str(
+        "\n### Accepted findings that are not eligible\n\n\
+         These findings assert nothing in this export and their statements are not repeated. \
+         `Changed` lists the cited facts that differ from what the investigation read; \
+         `Missing` lists the cited ids that resolve to no fact in this graph. The list is the \
+         same in both export modes.\n\n\
+         | Finding | Investigation | Result | State | Reason | Changed | Missing |\n\
+         |---|---|---|---|---|---|---|\n",
+    )?;
+    let ids = |ids: &[String]| {
+        if ids.is_empty() {
+            "—".to_owned()
+        } else {
+            ids.join(", ")
+        }
+    };
+    for finding in &projection.findings {
+        if finding.state == FindingState::Eligible {
+            continue;
+        }
+        let (code, sentence) = finding_reason_text(finding.reason);
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {sentence} (`{code}`) | {} | {} |",
+            Literal(&finding.finding_ref),
+            Literal(&finding.investigation_id),
+            Literal(&finding.result_id),
+            finding_state_name(finding.state),
+            Literal(ids(&finding.changed)),
+            Literal(ids(&finding.missing)),
+        )?;
+    }
+    Ok(())
+}
+
+/// `curated.md` over the projection the host supplied and the nodes and
+/// edges the export mode admitted.
 pub(super) fn output(
-    nodes: &[&Node],
+    (nodes, edges): (&[&Node], &[&Edge]),
     curated: Curated<'_>,
     mode: ExportMode,
     max: Option<usize>,
@@ -730,6 +942,14 @@ pub(super) fn output(
     }
 
     drafts(projection, &mut content)?;
+    findings(
+        projection,
+        (nodes, edges),
+        mode,
+        &mut once,
+        &mut assertions,
+        &mut content,
+    )?;
     decisions(projection, &mut content)?;
     counts(totals, &mut content)?;
     finish(content, assertions)
@@ -760,3 +980,7 @@ pub(super) fn logical_index_bytes(rows: usize) -> Option<usize> {
 #[cfg(test)]
 #[path = "curated_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "curated_finding_tests.rs"]
+mod finding_tests;
