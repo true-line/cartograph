@@ -76,6 +76,60 @@ impl SnapshotReadLimits {
     }
 }
 
+/// Caps for the streamed complete-graph identity pass (#1602; ADR-0052
+/// amendment 2026-11-18).
+///
+/// The pass retains one row at a time, so its aggregate admission is decoupled
+/// from what preparation keeps in memory. `complete` bounds the whole streamed
+/// graph (rows, raw and canonical bytes, depth and values, exactly as
+/// [`SqliteGraphStore::read_snapshot_bounded`] would). `row` bounds the one row
+/// held at a time: its raw stored bytes against `row.max_bytes`, its property
+/// values against `row.max_values` and its depth against `row.max_depth`;
+/// `row.max_rows` is unused. A single-row refusal is
+/// [`SnapshotBoundsError::SingleRowByteLimit`] or
+/// [`SnapshotBoundsError::SingleRowValueLimit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityPassLimits {
+    /// Aggregate admission of the complete streamed graph.
+    pub complete: SnapshotReadLimits,
+    /// Admission of the single row retained at a time.
+    pub row: SnapshotReadLimits,
+}
+
+impl IdentityPassLimits {
+    /// The owner-decided preparation caps: the identity pass streams under the
+    /// ADR-0052 ceilings ([`SnapshotReadLimits::investigation`]) whatever the
+    /// task's own limits, while the one retained row stays within `retained`,
+    /// the limits a task's retained scope (and any memory reservation sized
+    /// from them) already uses.
+    pub const fn for_retained(retained: SnapshotReadLimits) -> Self {
+        Self {
+            complete: SnapshotReadLimits::investigation(),
+            row: retained,
+        }
+    }
+
+    /// The same limits for the whole graph and for each row, so admission is
+    /// exactly that of [`SqliteGraphStore::read_snapshot_bounded`].
+    pub const fn uniform(limits: SnapshotReadLimits) -> Self {
+        Self {
+            complete: limits,
+            row: limits,
+        }
+    }
+
+    pub(crate) fn validate(self) -> Result<(), GraphError> {
+        self.complete.validate()?;
+        self.row.validate()
+    }
+}
+
+impl From<SnapshotReadLimits> for IdentityPassLimits {
+    fn from(limits: SnapshotReadLimits) -> Self {
+        Self::uniform(limits)
+    }
+}
+
 impl Default for SnapshotReadLimits {
     fn default() -> Self {
         Self {
@@ -117,6 +171,14 @@ pub enum SnapshotBoundsError {
     /// A property body was not one complete valid JSON value.
     #[error("invalid graph property JSON")]
     InvalidJson,
+    /// One streamed identity-pass row's raw stored bytes exceeded the
+    /// retained-row limit ([`IdentityPassLimits::row`]).
+    #[error("single graph row byte limit exceeded")]
+    SingleRowByteLimit,
+    /// One streamed identity-pass row's property values exceeded the
+    /// retained-row limit ([`IdentityPassLimits::row`]).
+    #[error("single graph row value limit exceeded")]
+    SingleRowValueLimit,
     /// Recorded coverage inventories exceeded the record limit.
     #[error("coverage record limit exceeded")]
     CoverageRecordLimit,
