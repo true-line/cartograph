@@ -763,6 +763,29 @@ export const FindRevealsAcrossLayerAndFocus: Story = {
   },
 };
 
+export const FindWideningLayerKeepsFocusThatShowsResult: Story = {
+  // AC-0715 (#1666): widening to All layers does not drop focus levels that
+  // still show the result there — only levels that hide it back out.
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Infrastructure' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'orders' }));
+    await userEvent.click(canvas.getByRole('button', { name: /Focus on orders/ }));
+    const path = canvas.getByRole('navigation', { name: 'Focus path' });
+    await waitFor(() => expect(within(path).getByText('▸ orders')).toBeInTheDocument());
+
+    // The channel is outside Infrastructure but one edge from the focused
+    // queue resource in All layers, so the focus level stays.
+    await userEvent.type(canvas.getByRole('searchbox', { name: 'Find entity' }), 'chan:sqs');
+    const results = within(canvas.getByLabelText('Find results'));
+    await userEvent.click(results.getByRole('button', { name: /chan:sqs-queue:orders/ }));
+    await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('2 nodes · 1 edges'));
+    await expect(canvas.getByRole('button', { name: 'All layers' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(within(path).getByText('▸ orders')).toBeInTheDocument();
+    await expect(args.onSelect).toHaveBeenLastCalledWith(atlasNodes[1]);
+  },
+};
+
 export const FindNoMatchAndClearKeepsSelection: Story = {
   // AC-0715 (#1666): an explicit no-match state; Esc in the field clears the
   // query and restores the ordinary controls without changing the selection.

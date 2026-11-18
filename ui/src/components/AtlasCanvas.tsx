@@ -523,14 +523,16 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
 
   // Choosing a Find result reveals the entity through the existing
   // mechanisms (#1666): the layer widens to All layers only when the active
-  // layer does not hold it, focus backs out only as many levels as hide it,
-  // and the groups/cluster around it open. The exact original node goes to
-  // the evidence drawer.
+  // layer does not hold it, focus backs out only as many levels as still
+  // hide it there (a widened layer keeps every focus level that now shows
+  // it), and the groups/cluster around it open. The exact original node
+  // goes to the evidence drawer.
   const reveal = (node: GraphNode) => {
     const inLayer = layered.nodes.some((candidate) => candidate.id === node.id);
     const nextLayer: AtlasLayer = inLayer ? layer : 'all';
     const base = inLayer ? layered : withoutPlaceholders;
-    let stack = inLayer ? focusStack : [];
+    // Every focus root is in the active layer, so it is in All layers too.
+    let stack = focusStack;
     let projected = base;
     for (; stack.length > 0; stack = stack.slice(0, -1)) {
       projected = stack.reduce((snap, root) => focusAtlasGraph(snap, root), base);
