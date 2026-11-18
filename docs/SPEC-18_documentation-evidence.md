@@ -1,6 +1,6 @@
 # SPEC-18 — Target documentation as evidence
 
-- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 and 2 are implemented; the rest is not.
+- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 to 3 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0049 / AC-0676..0681; ROADMAP W16; v1.0.0 criterion 8.
 - **Decision:** [ADR-0065](adr/ADR-0065-target-documentation-as-evidence.md).
@@ -37,7 +37,7 @@ target file is written (NG1).
 | `Document` node | `doc:{repo}@{path}` | `path`, `format` (`markdown` or `text`), `title` (the first level-1 heading, else the file name), `sections`, `bytes` |
 | `DocSection` node | `docsec:{repo}@{path}#{ordinal}` | `ordinal` (from 0, in file order), `level` (0 for text before the first heading and for a plain-text file), `heading`, `path` |
 | `HAS_SECTION` edge | document to section | none |
-| `MENTIONS` edge | section to the fact a reference resolves to | `reference` (the text as written), `rule` |
+| `MENTIONS` edge | section to the fact a reference resolves to | `reference` (the first text as written), `rule`, `occurrences` |
 
 All four are Deterministic and Confirmed. A document cites the whole file;
 a section cites its byte span, from its heading line to the next heading of
@@ -52,7 +52,10 @@ blocks. Setext headings and HTML are not structure.
 ## Exact references
 
 A reference is the text of an inline code span, or the target of an inline
-link, outside fenced code blocks. One reference yields at most one link.
+link or image, outside fenced code blocks. It belongs to the innermost
+section that holds it. One reference yields at most one link, and the
+references of one section that name the same fact are one edge citing up
+to 32 of their spans. A link target is tried by the `file_path` rule only.
 The rules, in order:
 
 1. `fact_id`: the text equals the id of a fact.
