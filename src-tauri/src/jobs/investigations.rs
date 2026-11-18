@@ -1123,9 +1123,12 @@ impl JobStore {
             Some(intent) => intent.request_hash.clone(),
             None => request.intent_hash()?,
         };
+        // AC-0840: the principal cap limits live work, not lifetime history.
+        // `live` is the store's terminal-state column (phase != Terminal),
+        // the same one the global live ceiling counts. Retry ran above.
         if let Some(identity) = mcp {
             let count: i64 = tx.query_row(
-                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1",
+                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1 AND live=1",
                 [&request_namespace],
                 |r| r.get(0),
             )?;

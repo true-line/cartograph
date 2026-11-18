@@ -174,6 +174,7 @@ impl<'a> Proof<'a> {
     pub(super) fn fetch_site(&self, call: TsNode<'_>, symbol: Option<String>) -> Option<FetchSite> {
         let (method, url) = self.site(call)?;
         Some(FetchSite {
+            straight_line: None,
             method,
             url,
             symbol,

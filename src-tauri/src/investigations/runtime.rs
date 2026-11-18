@@ -207,15 +207,18 @@ impl LiveTask {
     }
 }
 
-const WALL_LIMIT: Duration = Duration::from_secs(3600);
-
-/// The default active allowance; saved task limits replace it at run start.
+/// Registry defaults (`InvestigationLimits::default()`) used only until the
+/// task's saved limits are applied at run start (AC-0562, AC-0710).
+const DEFAULT_WALL_LIMIT: Duration = Duration::from_secs(3600);
 const DEFAULT_ACTIVE_LIMIT: Duration = Duration::from_secs(600);
+const DEFAULT_CONSENT_WAIT_LIMIT: Duration = Duration::from_secs(900);
 
 pub(super) struct RunClock {
     started: Instant,
     consent_waiting: Duration,
     active_limit: Duration,
+    wall_limit: Duration,
+    consent_wait_limit: Duration,
     #[cfg(test)]
     active_elapsed_override: Option<Duration>,
     #[cfg(test)]
@@ -228,15 +231,25 @@ impl RunClock {
             started,
             consent_waiting: Duration::ZERO,
             active_limit: DEFAULT_ACTIVE_LIMIT,
+            wall_limit: DEFAULT_WALL_LIMIT,
+            consent_wait_limit: DEFAULT_CONSENT_WAIT_LIMIT,
             #[cfg(test)]
             active_elapsed_override: None,
             #[cfg(test)]
             expire_at_invocation: None,
         }
     }
-    /// Apply the task's saved active-time allowance (AC-0562).
-    pub(super) fn set_active_limit(&mut self, active_seconds: u64) {
-        self.active_limit = Duration::from_secs(active_seconds);
+    /// Apply the task's saved time limits, so the stored `limits` are the one
+    /// source of truth for when a run ends (AC-0562, AC-0710).
+    pub(super) fn apply_saved_limits(&mut self, limits: &InvestigationLimits) {
+        self.active_limit = Duration::from_secs(limits.active_seconds);
+        self.wall_limit = Duration::from_secs(limits.wall_seconds);
+        self.consent_wait_limit = Duration::from_secs(limits.consent_wait_seconds);
+    }
+    /// The longest one consent wait may last: the saved consent budget,
+    /// never past the wall-clock cap.
+    pub(super) fn consent_wait_remaining(&self) -> Duration {
+        self.remaining_wall().min(self.consent_wait_limit)
     }
     #[cfg(test)]
     pub(super) fn frozen_active(started: Instant) -> Self {
@@ -244,6 +257,8 @@ impl RunClock {
             started,
             consent_waiting: Duration::ZERO,
             active_limit: DEFAULT_ACTIVE_LIMIT,
+            wall_limit: DEFAULT_WALL_LIMIT,
+            consent_wait_limit: DEFAULT_CONSENT_WAIT_LIMIT,
             active_elapsed_override: Some(Duration::ZERO),
             expire_at_invocation: None,
         }
@@ -280,7 +295,8 @@ impl RunClock {
         self.consent_waiting = self.consent_waiting.saturating_add(elapsed);
     }
     fn remaining_wall_at(&self, now: Instant) -> Duration {
-        WALL_LIMIT.saturating_sub(now.saturating_duration_since(self.started))
+        self.wall_limit
+            .saturating_sub(now.saturating_duration_since(self.started))
     }
     pub(super) fn remaining_wall(&self) -> Duration {
         self.remaining_wall_at(Instant::now())
@@ -359,7 +375,10 @@ mod run_clock_tests {
             clock.remaining_deadline_at(started),
             Err(HostError::LimitExceeded)
         ));
-        clock.set_active_limit(3600);
+        clock.apply_saved_limits(&InvestigationLimits {
+            active_seconds: 3600,
+            ..InvestigationLimits::default()
+        });
         assert_eq!(
             clock.remaining_deadline_at(started).unwrap(),
             Duration::from_secs(2900)
@@ -369,7 +388,7 @@ mod run_clock_tests {
     #[test]
     fn frozen_active_time_keeps_real_wall_deadline() {
         let started = Instant::now();
-        let expired = started.checked_add(WALL_LIMIT).unwrap();
+        let expired = started.checked_add(DEFAULT_WALL_LIMIT).unwrap();
         let frozen = RunClock::frozen_active(started);
         assert_eq!(frozen.active_milliseconds_at(expired), 0);
         assert_eq!(frozen.remaining_wall_at(expired), Duration::ZERO);
@@ -381,7 +400,57 @@ mod run_clock_tests {
         let real = RunClock::new(started);
         assert_eq!(
             real.active_milliseconds_at(expired),
-            WALL_LIMIT.as_millis() as u64
+            DEFAULT_WALL_LIMIT.as_millis() as u64
         );
+    }
+    // AC-0710: the pre-start clock matches the registry defaults, and the
+    // saved wall-clock and consent-wait budgets, not constants, bound the run.
+    #[test]
+    fn saved_wall_and_consent_limits_replace_constants() {
+        let defaults = InvestigationLimits::default();
+        assert_eq!(DEFAULT_ACTIVE_LIMIT.as_secs(), defaults.active_seconds);
+        assert_eq!(DEFAULT_WALL_LIMIT.as_secs(), defaults.wall_seconds);
+        assert_eq!(
+            DEFAULT_CONSENT_WAIT_LIMIT.as_secs(),
+            defaults.consent_wait_seconds
+        );
+        assert_eq!(defaults.active_seconds, 600);
+        for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+            let started = Instant::now();
+            let mut applied = RunClock::frozen_active(started);
+            applied.apply_saved_limits(&policy.limits());
+            let unapplied = RunClock::frozen_active(started);
+            assert_eq!(
+                applied.remaining_wall_at(started),
+                unapplied.remaining_wall_at(started)
+            );
+            assert_eq!(applied.consent_wait_limit, unapplied.consent_wait_limit);
+            assert_eq!(
+                applied.remaining_deadline_at(started),
+                unapplied.remaining_deadline_at(started)
+            );
+        }
+
+        let started = Instant::now();
+        let mut clock = RunClock::frozen_active(started);
+        let mut limits = InvestigationLimits {
+            wall_seconds: 120,
+            consent_wait_seconds: 30,
+            ..InvestigationLimits::default()
+        };
+        clock.apply_saved_limits(&limits);
+        assert_eq!(clock.remaining_wall_at(started), Duration::from_secs(120));
+        assert!(clock.consent_wait_remaining() <= Duration::from_secs(30));
+        assert!(clock.consent_wait_remaining() > Duration::from_secs(29));
+        // The wall cap ends a run even with active time left.
+        let later = started.checked_add(Duration::from_secs(120)).unwrap();
+        assert_eq!(
+            clock.remaining_deadline_at(later),
+            Err(HostError::LimitExceeded)
+        );
+        // A consent budget longer than the wall cap is cut at the wall cap.
+        limits.consent_wait_seconds = 900;
+        clock.apply_saved_limits(&limits);
+        assert!(clock.consent_wait_remaining() <= Duration::from_secs(120));
     }
 }

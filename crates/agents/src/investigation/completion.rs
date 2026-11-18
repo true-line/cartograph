@@ -1,4 +1,8 @@
 //! Versioned completion projections. Execution status is a separate state axis.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{
     obligations::ObligationEnvelope,
     staged_finish::{CompletionOutcome, ObligationObservation},
