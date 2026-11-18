@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 #[path = "investigations/admission_contract.rs"]
 mod admission_contract;
+#[path = "investigations/analyst_lineage.rs"]
+mod analyst_lineage;
+use analyst_lineage::{uses_finding_withholding, uses_local_finish_generation};
 #[path = "investigations/admission_journal.rs"]
 mod admission_journal;
 pub(crate) use admission_journal::RefusalReason as NextPromptRefusalReason;
@@ -31,6 +34,11 @@ mod next_prompt_invocation;
 pub(crate) use next_prompt_invocation::NextPromptInvocation;
 #[path = "investigations/coverage.rs"]
 mod coverage;
+// Constructed once scoped preparation is wired (#1602); until then only tests.
+#[cfg_attr(not(test), allow(dead_code))]
+#[path = "investigations/graph_snapshot_limit.rs"]
+mod graph_snapshot_limit;
+pub(crate) use graph_snapshot_limit::GraphSnapshotLimit;
 #[cfg(test)]
 #[path = "investigations/coverage_tests.rs"]
 mod coverage_tests;
@@ -449,6 +457,9 @@ pub(crate) enum InvestigationStopReason {
         phase: PreparationPhase,
         limit: HostLimitKind,
     },
+    /// A scoped-preparation snapshot read stopped at a named limit (#1602).
+    #[cfg_attr(not(test), allow(dead_code))]
+    GraphSnapshotLimit(GraphSnapshotLimit),
     StoreCapacity,
     OutcomeUnknown,
     ConsentExpired,
@@ -483,6 +494,7 @@ impl InvestigationStopReason {
             Self::PreparationAt(_) => Self::PreparationFailed,
             Self::HostLimit
             | Self::HostLimitAt { .. }
+            | Self::GraphSnapshotLimit(_)
             | Self::StoreCapacity
             | Self::BudgetCap(_) => Self::LimitExceeded,
             Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
@@ -512,6 +524,7 @@ impl InvestigationStopReason {
             Phase::SourceReservation,
         ];
         message == Self::HostLimit.message()
+            || GraphSnapshotLimit::all().any(|limit| limit.message() == message)
             || phases.into_iter().any(|phase| {
                 Self::HostLimitAt {
                     phase,
@@ -737,6 +750,7 @@ impl InvestigationStopReason {
                     "Investigation limit reached: host_limit; phase=source_reservation; limit=unspecified."
                 }
             },
+            Self::GraphSnapshotLimit(limit) => limit.message(),
             Self::StoreCapacity => "Investigation limit reached: store_capacity.",
             Self::BoundedProvider(error) => {
                 use llm::bounded::{FailureCode as Code, InvocationOutcome};
@@ -905,10 +919,7 @@ pub(crate) fn policy_for_detail(
     }
     if policy.local_finish_generation()
         && !(detail.origin == InvestigationOrigin::App
-            && matches!(
-                detail.summary.specialist_id,
-                SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
-            )
+            && uses_local_finish_generation(detail.summary.specialist_id)
             && detail.summary.provider_mode == InvestigationProviderMode::Local
             && detail.provider.mode == InvestigationProviderMode::Local)
     {
@@ -1008,10 +1019,7 @@ impl JobStore {
         {
             if !next_prompt
                 || mcp.is_some()
-                || !matches!(
-                    request.specialist_id,
-                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
-                )
+                || !uses_local_finish_generation(request.specialist_id)
                 || request.provider_mode != InvestigationProviderMode::Local
                 || provider.is_none_or(|p| p.mode != InvestigationProviderMode::Local)
             {
@@ -1112,9 +1120,12 @@ impl JobStore {
             Some(intent) => intent.request_hash.clone(),
             None => request.intent_hash()?,
         };
+        // AC-0840: the principal cap limits live work, not lifetime history.
+        // `live` is the store's terminal-state column (phase != Terminal),
+        // the same one the global live ceiling counts. Retry ran above.
         if let Some(identity) = mcp {
             let count: i64 = tx.query_row(
-                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1",
+                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1 AND live=1",
                 [&request_namespace],
                 |r| r.get(0),
             )?;

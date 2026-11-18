@@ -13,12 +13,7 @@ pub(super) fn validate(
     else {
         return Ok(());
     };
-    if !matches!(
-        task.detail.summary.specialist_id,
-        SpecialistId::DomainAnalystV25
-            | SpecialistId::DomainAnalystV26
-            | SpecialistId::DomainAnalystV27
-    ) {
+    if !uses_finding_withholding(task.detail.summary.specialist_id) {
         return Err(InvestigationStoreError::Invalid);
     }
     witness.validate_shape()?;

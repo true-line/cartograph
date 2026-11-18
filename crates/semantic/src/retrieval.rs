@@ -11,6 +11,10 @@
 //! unit vectors each time they are embedded (ADR-0051 decision 3, #1441).
 //! The index is a cache, never authority: every candidate is scored again
 //! from its stored vector, and without an index every vector is scored.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::knowledge_ingest::{self, KnowledgeUnit};
 use core_graph::overlay::BaseRef;
 use core_graph::{Edge, Node};

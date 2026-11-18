@@ -1,4 +1,8 @@
 //! Score sealed visible-fixture predictions. No receipt here authorizes model quality.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{
     fixtures::{CaseLabel, LoadedFixtureBundle, Split, Truth},
     policy::{self, DatasetBinding, PredictionChoice, SealedPredictions},

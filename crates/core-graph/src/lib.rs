@@ -18,7 +18,9 @@ pub mod rules;
 pub mod scoped;
 pub mod source;
 
-pub use bounded::{SnapshotBoundsError, SnapshotReadLimits, SnapshotRow, StreamedSnapshot};
+pub use bounded::{
+    IdentityPassLimits, SnapshotBoundsError, SnapshotReadLimits, SnapshotRow, StreamedSnapshot,
+};
 pub use generation::{GenerationError, RevisionedSnapshot, StoreRevision};
 pub use source::{
     FactKey, OmissionLookup, ReceiptOmissionKind, SourceBinding, SourceOmission, SourceOmissions,
