@@ -7030,6 +7030,270 @@ admin.add_view(Reports(endpoint="reports"))
     );
 }
 
+#[test]
+fn flask_admin_in_body_login_check_proves_auth_required() {
+    // AC-0421 (#1320): a view no `is_accessible` guards, whose body answers
+    // an anonymous request before anything else, directly or through the
+    // helper it returns, is `required` on the body's own basis. Any other
+    // shape stays `unknown` and names the function holding the check.
+    let app = r#"
+from flask import Flask, abort, redirect, render_template, request, url_for
+from flask_admin import Admin, AdminIndexView, BaseView, expose
+from flask_login import current_user
+
+def _redirect_if_user_is_not_allowed():
+    """Send anonymous users to the login page."""
+    if not current_user.is_authenticated or not current_user.is_admin:
+        return redirect(url_for("auth.login", next=request.url))
+    return None
+
+def load():
+    return "data"
+
+def cached(view):
+    return view
+
+class Index(AdminIndexView):
+    @expose("/")
+    def index(self):
+        redirect_destination = _redirect_if_user_is_not_allowed()
+        return redirect_destination or redirect(url_for("reports.index"))
+
+class Reports(BaseView):
+    @expose("/")
+    def index(self):
+        """Admins only."""
+        if not (current_user.is_authenticated and current_user.is_admin):
+            abort(403)
+        return "ok"
+
+    @expose("/open")
+    def open(self):
+        return load()
+
+    @expose("/late")
+    def late(self):
+        data = load()
+        if not current_user.is_authenticated:
+            return redirect(url_for("auth.login"))
+        return data
+
+app = Flask(__name__)
+admin = Admin(app, url="/back", index_view=Index(url="/back"))
+admin.add_view(Reports(endpoint="reports"))
+"#;
+    let lock = "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n\n[[package]]\nname = \"flask-login\"\nversion = \"0.5.0\"\n";
+    let rows = |app: &str, lock: Option<&str>| {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app.py", app);
+        if let Some(lock) = lock {
+            write(dir.path(), "uv.lock", lock);
+        }
+        let extraction = extract_dir(dir.path(), &id()).unwrap();
+        let mut rows = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .map(|node| {
+                let auth = &node.props["auth"];
+                let detail = match auth["state"].as_str().unwrap() {
+                    "required" => {
+                        assert_eq!(auth["authenticated"], true);
+                        assert_eq!(auth["prov"]["confidence_tier"], "InferredStrong");
+                        let paths = auth["prov"]["evidence"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|evidence| evidence["path"].as_str().unwrap())
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(paths, BTreeSet::from(["app.py", "uv.lock"]));
+                        format!(
+                            "{} {} {}",
+                            auth["guards"][0].as_str().unwrap(),
+                            auth["basis"][0].as_str().unwrap(),
+                            auth["assumptions"].as_array().unwrap().len(),
+                        )
+                    }
+                    _ => auth["reasons"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|reason| reason.as_str().unwrap())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                };
+                format!(
+                    "{} {} {detail}",
+                    node.props["path"].as_str().unwrap(),
+                    auth["state"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+    let sym = "sym:local/python-service@app.py#";
+    let basis = "flask_view_body_denies_anonymous";
+    let open = "flask_admin_default_allows_all";
+    let helper = "_redirect_if_user_is_not_allowed";
+    let proven = format!("/back/ required {sym}{helper} {basis} 2");
+    let rest = [
+        format!("/back/reports/ required {sym}Reports.index {basis} 1"),
+        format!("/back/reports/late unknown {open},in_body_auth_check:Reports.late"),
+        format!("/back/reports/open unknown {open}"),
+    ];
+    let with = |index: String| {
+        let mut rows = vec![index];
+        rows.extend(rest.iter().cloned());
+        rows
+    };
+    assert_eq!(rows(app, Some(lock)), with(proven.clone()));
+
+    let assign = "redirect_destination = _redirect_if_user_is_not_allowed()";
+    let returned = "return redirect_destination or redirect(url_for(\"reports.index\"))";
+    let check = "if not current_user.is_authenticated or not current_user.is_admin:";
+    let answer = "return redirect(url_for(\"auth.login\", next=request.url))";
+    // Other proven spellings of the same check.
+    for (from, to) in [
+        (
+            returned,
+            "if redirect_destination:\n            return redirect_destination\n        return \"ok\"",
+        ),
+        (
+            check,
+            "if not current_user.is_admin or (not current_user.is_authenticated):",
+        ),
+        (
+            check,
+            "if not (current_user.is_authenticated and current_user.is_admin):",
+        ),
+        (answer, "abort(401)"),
+        (answer, "load()\n        return abort(403)"),
+    ] {
+        assert!(app.contains(from), "{from}");
+        assert_eq!(
+            rows(&app.replace(from, to), Some(lock)),
+            with(proven.clone()),
+            "{to}"
+        );
+    }
+    let direct = app.replace(&format!("{assign}\n        "), "").replace(
+        returned,
+        "return _redirect_if_user_is_not_allowed() or redirect(url_for(\"reports.index\"))",
+    );
+    assert_eq!(rows(&direct, Some(lock)), with(proven.clone()));
+
+    // Shapes that are not proven keep `unknown`, naming where the check is.
+    let seen = format!("/back/ unknown {open},in_body_auth_check:{helper}");
+    for (from, to) in [
+        // An anonymous user who is not an admin passes an `and` condition.
+        (
+            check,
+            "if not current_user.is_authenticated and not current_user.is_admin:",
+        ),
+        (check, "if current_user.is_authenticated:"),
+        // The view may drop the helper's answer.
+        (
+            returned,
+            "return redirect_destination and redirect(url_for(\"reports.index\"))",
+        ),
+        (
+            returned,
+            "return redirect(url_for(\"reports.index\")) or redirect_destination",
+        ),
+        (
+            returned,
+            "load()\n        return redirect_destination or \"ok\"",
+        ),
+        // A page is content, not a denial; 404 is not an authentication answer.
+        (answer, "return render_template(\"login.html\")"),
+        (answer, "abort(404)"),
+        (answer, "redirect(url_for(\"auth.login\"))"),
+        (
+            answer,
+            "if request.args:\n            return \"ok\"\n        return redirect(\"/\")",
+        ),
+        // The check is not the first thing the helper does.
+        (
+            check,
+            "data = load()\n    if not current_user.is_authenticated:",
+        ),
+        // An argument is evaluated before the helper runs.
+        (
+            assign,
+            "redirect_destination = _redirect_if_user_is_not_allowed(load())",
+        ),
+        // Another decorator may answer without calling the view.
+        (
+            "    @expose(\"/\")\n    def index(self):\n        redirect_destination",
+            "    @expose(\"/\")\n    @cached\n    def index(self):\n        redirect_destination",
+        ),
+        // A generator or coroutine helper runs nothing when called.
+        ("    return None\n\ndef load", "    yield None\n\ndef load"),
+        (
+            "def _redirect_if_user_is_not_allowed",
+            "async def _redirect_if_user_is_not_allowed",
+        ),
+    ] {
+        assert!(app.contains(from), "{from}");
+        assert_eq!(
+            rows(&app.replace(from, to), Some(lock)),
+            with(seen.clone()),
+            "{to}"
+        );
+    }
+    // `redirect` rebound in the helper is not Flask's.
+    let rebound = app.replace(check, &format!("redirect = load\n    {check}"));
+    assert_eq!(rows(&rebound, Some(lock)), with(seen.clone()));
+    // A second binding of the helper's name: which one runs is not known,
+    // so nothing is said about the body.
+    let twice = format!("{app}\n_redirect_if_user_is_not_allowed = load\n");
+    assert_eq!(
+        rows(&twice, Some(lock)),
+        with(format!("/back/ unknown {open}"))
+    );
+
+    // The proven body still needs every condition outside the view.
+    let unpinned: Vec<String> = rows(app, None);
+    assert_eq!(
+        unpinned[0],
+        format!("/back/ unknown {open},in_body_auth_check:{helper},flask_admin_version_not_pinned")
+    );
+    assert_eq!(
+        unpinned[1],
+        format!(
+            "/back/reports/ unknown {open},in_body_auth_check:Reports.index,flask_admin_version_not_pinned"
+        )
+    );
+    let overridden = app.replace(
+        "class Index(AdminIndexView):",
+        "class Index(AdminIndexView):\n    def _handle_view(self, name, **kwargs):\n        return None\n",
+    );
+    assert_eq!(
+        rows(&overridden, Some(lock))[0],
+        format!(
+            "/back/ unknown {open},in_body_auth_check:{helper},flask_admin_view_overrides:_handle_view:Index"
+        )
+    );
+    let anonymous = format!("{app}\napp.login_manager.anonymous_user = object\n");
+    assert_eq!(
+        rows(&anonymous, Some(lock))[0],
+        format!(
+            "/back/ unknown {open},in_body_auth_check:{helper},flask_login_anonymous_user_replaced"
+        )
+    );
+
+    // A class that defines `is_accessible` is judged by it, as before.
+    let guarded = app.replace(
+        "class Index(AdminIndexView):",
+        "class Index(AdminIndexView):\n    def is_accessible(self):\n        return True\n",
+    );
+    assert_eq!(
+        rows(&guarded, Some(lock))[0],
+        "/back/ unknown flask_admin_access_check:Index,flask_admin_is_accessible_not_login_check:Index"
+    );
+}
+
 /// SimpleLogin's class-based concurrency lock (#1173), as one module.
 const PARALLEL_LIMITER: &str = r#"import uuid
 from datetime import timedelta
