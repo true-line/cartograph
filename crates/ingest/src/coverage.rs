@@ -217,7 +217,9 @@ impl ReceiptOmission {
             ),
             Self::StoreCapacity => format!(
                 "{occurrences} receipts in {files} files did not fit the retained \
-                 receipt store, which cannot yet reclaim space"
+                 receipt store (forgetting a retained source, or recovering it again \
+                 so its superseded receipts are reclaimed, frees the space of \
+                 receipts nothing pins)"
             ),
         };
         format!(

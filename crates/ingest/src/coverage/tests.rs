@@ -339,10 +339,15 @@ fn receipt_omissions_are_a_named_limitation() {
             .reason
             .starts_with("5 TypeScript rule facts in 2 files")
     );
-    // Forgetting sources frees no receipt rows yet (#725), so the reason
-    // offers no remediation that cannot work.
+    // AC-0839: forget and supersession reclaim unpinned receipts (AC-0838),
+    // so the reason points at both as the way to free space (#725).
     let store = &both.unsupported[1].reason;
-    assert!(store.contains("cannot yet reclaim space") && !store.contains("forget"));
+    assert!(store.starts_with("5 receipts in 2 files did not fit the retained receipt store"));
+    assert!(store.contains("forgetting a retained source"));
+    assert!(store.contains("superseded receipts are reclaimed"));
+    assert!(store.contains("receipts nothing pins"));
+    assert!(!store.contains("cannot yet reclaim"));
+    assert!(store.ends_with("a tool limitation, not a system gap"));
 }
 
 // AC-0148 (#1229): symlinks the captured selection skipped are one named,
