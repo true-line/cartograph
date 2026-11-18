@@ -69,7 +69,11 @@ fn auditor12_refusal_recovers_without_credit_and_caps_without_retry() {
             calls: AtomicUsize::new(0),
             prompts: std::sync::Mutex::new(vec![]),
         });
-        let f = NextFixture::new(provider.as_ref(), SpecialistId::EvidenceAuditorV12);
+        // The tool-action cap, not the running active clock, must end the run.
+        let f = NextFixture::new_with_wall_bounded_active(
+            provider.as_ref(),
+            SpecialistId::EvidenceAuditorV12,
+        );
         f.run(provider.clone());
         let state = f.base.base.app.state::<AppState>();
         let jobs = state.jobs.lock().unwrap();
