@@ -12,6 +12,13 @@ realization. `kind` is one of:
 automated reference names a test that does not exist. New ACs land with their
 rows in the same PR (see AGENTS.md).
 
+A `rust` reference to an `#[ignore]`d test exists but CI never runs it. The
+gate lists every T id with ignored tests, and fails a T id whose every bound
+test is ignored unless its note names where and when the test runs: a
+`manual:MT-...` procedure or a `ci:<job>` workflow job that runs ignored tests
+(`--ignored`). Ids that violated this when the check landed (#1758) sit in a
+baseline in the script that may only shrink.
+
 The full H2–H7 acceptance procedures below remain **UNEXECUTED** and their
 capabilities remain **PLANNED**. MT-H2-03 separately records the narrower
 source-only local-definition assessment. A reference proves that a procedure
