@@ -1245,6 +1245,14 @@ struct ProducerReads {
     captured_ts_ran: bool,
     /// Symlinks the captured TypeScript selection did not follow (#1229).
     unfollowed_links: Vec<String>,
+    /// What the found ADR/RFC reader read and published (#1847).
+    adrs: ingest::coverage::ProducerCount,
+    /// Found ADR/RFC files over the size bound, in path order (#1847).
+    adr_too_large: Vec<String>,
+    /// Found ADR/RFC files that are not UTF-8, in path order (#1847).
+    adr_not_utf8: Vec<String>,
+    /// What the declared API contract reader read and published (#1847).
+    contracts: ingest::coverage::ProducerCount,
 }
 
 impl Default for ProducerReads {
@@ -1259,6 +1267,10 @@ impl Default for ProducerReads {
             omitted_receipt_facts_complete: true,
             captured_ts_ran: false,
             unfollowed_links: Vec::new(),
+            adrs: ingest::coverage::ProducerCount::default(),
+            adr_too_large: Vec::new(),
+            adr_not_utf8: Vec::new(),
+            contracts: ingest::coverage::ProducerCount::default(),
         }
     }
 }
@@ -1404,6 +1416,8 @@ fn repo_coverage(
                 count(&layers.environments),
             ),
             (events::STITCH_EXTRACTOR_ID, count(&layers.events)),
+            (spec::FOUND_ADR_EXTRACTOR_ID, reads.adrs),
+            (spec::CONTRACT_EXTRACTOR_ID, reads.contracts),
         ],
         plugins: reads.plugins.clone(),
         observations: vec![
@@ -2070,16 +2084,35 @@ fn extract_tree_packed(
     drop(gaps);
     // Found ADR/RFC files are T0 facts. They are parsed after all code/infra
     // layers so explicit `Governs:` ids can link to existing graph targets.
-    let adr_facts = {
+    // A file too large or not UTF-8 is skipped and named in coverage, never
+    // fatal to the other decisions (#1847).
+    let adr_read = {
         let ids: std::collections::BTreeSet<&str> =
             facts.nodes().iter().map(|node| node.id.as_str()).collect();
-        spec::extract_found_adrs_among(root, repo, commit, |id| ids.contains(id))
+        spec::read_found_adrs_among(root, repo, commit, |id| ids.contains(id))
             .map_err(|error| error.to_string())?
     };
+    reads.adrs = ingest::coverage::ProducerCount {
+        files: adr_read.files,
+        nodes: distinct_node_count(&adr_read.facts.nodes),
+        edges: distinct_edge_count(&adr_read.facts.edges),
+    };
+    for unread in adr_read.unread {
+        match unread.reason {
+            spec::UnreadAdrReason::TooLarge => reads.adr_too_large.push(unread.path),
+            spec::UnreadAdrReason::NotUtf8 => reads.adr_not_utf8.push(unread.path),
+        }
+    }
     facts
-        .extend(adr_facts.nodes, adr_facts.edges)
+        .extend(adr_read.facts.nodes, adr_read.facts.edges)
         .map_err(pack_err)?;
-    let contract_facts = extract_repo_contracts(root, repo, commit, api_docs, &facts)?;
+    let (contract_facts, contract_files) =
+        extract_repo_contracts(root, repo, commit, api_docs, &facts)?;
+    reads.contracts = ingest::coverage::ProducerCount {
+        files: contract_files,
+        nodes: distinct_node_count(&contract_facts.nodes),
+        edges: distinct_edge_count(&contract_facts.edges),
+    };
     facts
         .extend(contract_facts.nodes, contract_facts.edges)
         .map_err(pack_err)?;
@@ -2321,10 +2354,10 @@ fn extract_repo_contracts(
     commit: &str,
     manifest_api_docs: &[ingest::api_docs::ApiDocDeclaration],
     facts: &FactStore,
-) -> Result<spec::ContractFacts, String> {
+) -> Result<(spec::ContractFacts, u64), String> {
     let loaded = ingest::api_docs::load_api_docs(root, manifest_api_docs);
     if !loaded.declared {
-        return Ok(spec::ContractFacts::default());
+        return Ok((spec::ContractFacts::default(), 0));
     }
     // Declared API docs match recovered facts by id and Endpoint attributes:
     // only Endpoint nodes are decoded, and only for a repository that
@@ -2349,13 +2382,12 @@ fn extract_repo_contracts(
             reason: gap.reason,
         })
         .collect();
-    Ok(spec::extract_contract_facts_among(
-        repo,
-        commit,
-        &docs,
-        &gaps,
-        &endpoints,
-        |id| ids.contains(id),
+    let files = docs.len() as u64;
+    Ok((
+        spec::extract_contract_facts_among(repo, commit, &docs, &gaps, &endpoints, |id| {
+            ids.contains(id)
+        }),
+        files,
     ))
 }
 
@@ -4930,7 +4962,8 @@ fn run_ingest<R: tauri::Runtime>(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
     )
-    .with_unfollowed_links(&reads.unfollowed_links);
+    .with_unfollowed_links(&reads.unfollowed_links)
+    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5376,7 +5409,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
     )
-    .with_unfollowed_links(&reads.unfollowed_links);
+    .with_unfollowed_links(&reads.unfollowed_links)
+    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5685,7 +5719,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             ingest::coverage::ReceiptOmission::StoreCapacity,
             &reads.omitted_stored_receipts,
         )
-        .with_unfollowed_links(&reads.unfollowed_links);
+        .with_unfollowed_links(&reads.unfollowed_links)
+        .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         let omission_records = reads.source_omissions();
@@ -8056,6 +8091,107 @@ resource "aws_sqs_queue" "orders" {
         assert_eq!(decides.src, adr.id);
         assert_eq!(decides.dst, "sym:local/shop@orders.ts#placeOrder");
         assert_eq!(decides.props["prov"]["confidence_tier"], "Confirmed");
+    }
+
+    #[test]
+    fn ingest_redacts_found_adr_text_and_names_unread_adrs_in_coverage() {
+        // AC-0685 (T-0685, #1847): a secret in a found ADR never reaches the
+        // graph; a non-UTF-8 or oversized ADR no longer fails the ingest and
+        // is named on the reader's coverage row and in the not-covered list.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("orders.ts"),
+            "export function placeOrder() {}\n",
+        )
+        .unwrap();
+        let adr = dir.path().join("docs/adr");
+        std::fs::create_dir_all(&adr).unwrap();
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        std::fs::write(
+            adr.join("ADR-0001-orders.md"),
+            format!("# Orders\n\n- **Governs:** `sym:local/shop@orders.ts#placeOrder`\n\npassword: {secret}\n"),
+        )
+        .unwrap();
+        std::fs::write(adr.join("ADR-0002-latin1.md"), b"# Caf\xe9\n").unwrap();
+        std::fs::write(
+            adr.join("ADR-0003-huge.md"),
+            "x".repeat(spec::MAX_FOUND_ADR_BYTES as usize + 1),
+        )
+        .unwrap();
+
+        let mut reads = super::ProducerReads::default();
+        let (extraction, layers, _) = super::extract_tree_with_primary(
+            dir.path(),
+            "local/shop",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+            None,
+            None,
+            &[],
+            &mut super::RepoExtractionCache::default(),
+            &[],
+            &mut |_| {},
+            None,
+            &mut Vec::new(),
+            &mut reads,
+        )
+        .unwrap();
+        let adrs: Vec<_> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "ADR")
+            .collect();
+        assert_eq!(adrs.len(), 1);
+        let stored = serde_json::to_string(&adrs[0].props).unwrap();
+        assert!(!stored.contains(secret), "secret stored: {stored}");
+        assert!(
+            extraction
+                .edges
+                .iter()
+                .any(|edge| edge.label == "DECIDES" && edge.src == adrs[0].id)
+        );
+
+        let coverage = super::repo_coverage(
+            "local/shop",
+            "workdir",
+            None,
+            &[],
+            &layers,
+            &extraction,
+            &super::DeclaredInputs::default(),
+            &reads,
+        )
+        .with_unsupported(&ingest::preflight::PreflightReport::default())
+        .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
+        let row = coverage
+            .producers
+            .iter()
+            .find(|producer| producer.id == spec::FOUND_ADR_EXTRACTOR_ID)
+            .expect("found-ADR reader row");
+        assert_eq!((row.files, row.nodes, row.edges), (1, 1, 1));
+        assert!(row.stopping_reason.starts_with("read 1 of the 3 ADR"));
+        assert!(
+            coverage
+                .producers
+                .iter()
+                .any(|producer| producer.id == spec::CONTRACT_EXTRACTOR_ID)
+        );
+        let named: Vec<_> = coverage
+            .unsupported
+            .iter()
+            .map(|entry| (entry.capability.as_str(), entry.first_site.as_str()))
+            .collect();
+        assert!(named.contains(&(
+            ingest::coverage::ADR_TOO_LARGE_CAPABILITY,
+            "docs/adr/ADR-0003-huge.md"
+        )));
+        assert!(named.contains(&(
+            ingest::coverage::ADR_NOT_UTF8_CAPABILITY,
+            "docs/adr/ADR-0002-latin1.md"
+        )));
+        assert!(coverage.limited);
     }
 
     #[test]
