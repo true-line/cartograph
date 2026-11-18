@@ -31,12 +31,12 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 
-# Dev and test builds compile third-party dependencies (SQLite, serde_json,
-# hashing, wasmtime) optimized: the app test suite spends most of CI's Rust
-# job inside them (#1924). Workspace crates keep the dev profile, so debug
-# assertions, overflow checks and debuginfo for our own code are unchanged.
-[profile.dev.package."*"]
-opt-level = 2
+# Tests run optimized. The app suite's replay and acceptance tests spend
+# their time in serialization, hashing and SQLite, and ran about ten times
+# slower unoptimized (#1924). Debug assertions and overflow checks stay on:
+# they come from the dev profile this one inherits.
+[profile.test]
+opt-level = 1
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
