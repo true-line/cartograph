@@ -43,11 +43,15 @@ through a curated acceptance of their own, not through section drafts.
    supplied by a caller: the host resolves all of it from the immutable
    saved result.
 3. **A curation review has its own store.** It is a table of its own in the
-   investigation store, keyed by the SPEC-03 finding review subject, which
-   binds the immutable result, its producing configuration and the
-   result-local finding id. Decisions are `accepted` and `rejected`. A change
-   is a compare-and-set on a review revision. Rows are never deleted. It
-   does not reuse the follow-up table or its decision type.
+   review store, beside the section drafts. The first review of a finding
+   records the finding there as the host resolved it from the immutable
+   saved result: its content, its cited facts and their recorded digests.
+   The record is keyed by the SPEC-03 finding review subject, which binds
+   the result, its producing configuration and the result-local finding
+   id, and its content never changes. Decisions are `accepted` and
+   `rejected`. A change is a compare-and-set on a review revision. Rows are
+   never deleted. It does not reuse the follow-up table or its decision
+   type, and the investigation store is unchanged.
 4. **Accepted findings enter the curated projection as a third record
    kind.** The projection assigns each accepted finding exactly one state at
    read time, the first that applies:
@@ -114,6 +118,9 @@ curation; a curation review under this ADR is.
   both. Merging them would need an address, which a finding does not have.
 - One more review store joins the revision. A session that gathers reviews
   reads it under the same rules as the others.
+- A curated finding is read from its own record, not from the
+  investigation, so it does not depend on the investigation still being
+  stored.
 
 ## Alternatives
 
