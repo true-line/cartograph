@@ -70,6 +70,17 @@ export interface RepoCoverage {
   limited: boolean;
 }
 
+/** One repo's recorded inventory read back from the store (AC-0700). A
+ *  stale one carries no body: nothing is read from it. */
+export interface RestoredCoverage {
+  repo: string;
+  status: "recorded" | "stale";
+  inventory_hash: string;
+  /** What was compared with the current state at read time. */
+  compared: string[];
+  inventory: RepoCoverage | null;
+}
+
 /** The one-line verdict for a repo. A limited inventory names what limits
  *  it, and none ever reads as exhaustive: "complete" means only the
  *  declared repo, revision, layer hints and inputs. */
