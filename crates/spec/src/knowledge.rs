@@ -4,6 +4,8 @@ pub use business_flows::{
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
     derive_business_flows,
 };
+mod controllers;
+pub use controllers::derive_controller_capabilities;
 pub(crate) mod actors;
 pub use actors::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
@@ -21,8 +23,8 @@ pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver
 /// Changed grouping, support or naming semantics require a new recipe version.
 pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
 
-/// Deterministic recipe naming a NestJS controller's HTTP operations.
-pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.nestjs-controller";
+/// Deterministic recipe naming a controller class's HTTP operations.
+pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.http-controller";
 /// Changed grouping, support or naming semantics require a new recipe version.
 pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "1";
 
@@ -208,10 +210,14 @@ fn identifier(value: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 fn support(props: &serde_json::Value) -> Option<Provenance> {
+    support_from(props, "t0.adapter-ts")
+}
+/// Source-backed, confident deterministic support from one named adapter.
+fn support_from(props: &serde_json::Value, extractor: &str) -> Option<Provenance> {
     let prov: Provenance = serde_json::from_value(props.get("prov")?.clone()).ok()?;
     (prov.validate().is_ok()
         && prov.tier == Tier::Deterministic
-        && prov.extractor_id == "t0.adapter-ts"
+        && prov.extractor_id == extractor
         && matches!(
             prov.confidence_tier,
             ConfidenceTier::Confirmed | ConfidenceTier::InferredStrong
@@ -439,126 +445,6 @@ fn capability_fact(
         }),
         cites: group.cites,
     }
-}
-
-/// Derive Capability candidates from import-proven NestJS controller routes:
-/// one per controller class, citing each of its HTTP endpoints, the method
-/// that handles it and the relation between them. The rule reads only what
-/// the TypeScript adapter proved: an endpoint with exactly one handler, a
-/// method of a named class, all three facts from one file. A route two
-/// classes declare, a handler that is not a class method and support that is
-/// not source-backed are omitted, never guessed. The title names the class
-/// and makes no claim about what the operations do or who may call them.
-/// The borrowed base is unchanged.
-pub fn derive_nestjs_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityReport {
-    let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
-    for node in &base.graph.0 {
-        nodes
-            .entry(&node.id)
-            .and_modify(|v| *v = None)
-            .or_insert(Some(node));
-    }
-    let mut handles: BTreeMap<&str, Vec<_>> = BTreeMap::new();
-    for edge in base.graph.1.iter().filter(|e| e.label == "HANDLES") {
-        handles.entry(&edge.src).or_default().push(edge);
-    }
-    let mut groups: BTreeMap<String, Group> = BTreeMap::new();
-    for endpoint in nodes.values().filter_map(|n| *n) {
-        let props = &endpoint.props;
-        if endpoint.label != "Endpoint" || props["framework"] != "nestjs" {
-            continue;
-        }
-        let (Some(method), Some(path)) = (props["method"].as_str(), props["path"].as_str()) else {
-            continue;
-        };
-        let Some(links) = handles.get(endpoint.id.as_str()) else {
-            continue;
-        };
-        let [edge] = links.as_slice() else { continue }; // several handlers are ambiguous
-        let Some(Some(handler)) = nodes.get(edge.dst.as_str()) else {
-            continue;
-        };
-        let (Some(class), Some(name)) = (
-            handler.props["class"].as_str(),
-            handler.props["name"].as_str(),
-        ) else {
-            continue;
-        };
-        let Some((owner_class, member)) = name.rsplit_once('.') else {
-            continue;
-        };
-        if handler.label != "Symbol"
-            || handler.props["kind"] != "Method"
-            || owner_class != class
-            || class.is_empty()
-            || class.contains('@') // an adapter-made name for an anonymous class
-            || member.is_empty()
-        {
-            continue;
-        }
-        let (Some(endpoint_prov), Some(edge_prov), Some(handler_prov)) = (
-            support(props),
-            support(&edge.props),
-            support(&handler.props),
-        ) else {
-            continue;
-        };
-        let owner = &handler_prov.evidence[0];
-        if !same_owner(&handler_prov, owner)
-            || !same_owner(&endpoint_prov, owner)
-            || !same_owner(&edge_prov, owner)
-            || handler.id != format!("sym:{}@{}#{name}", owner.repo, owner.path)
-            || endpoint.id != format!("ep:{}@{method}:{path}", owner.repo)
-        {
-            continue;
-        }
-        let controller = format!("sym:{}@{}#{class}", owner.repo, owner.path);
-        let group = groups.entry(controller).or_insert_with(|| Group {
-            class: class.to_owned(),
-            ..Group::default()
-        });
-        group.cites.extend([
-            BaseRef::Node(endpoint.id.clone()),
-            BaseRef::Node(handler.id.clone()),
-            BaseRef::Edge(edge.src.clone(), edge.dst.clone(), edge.label.clone()),
-        ]);
-        for prov in [&endpoint_prov, &edge_prov, &handler_prov] {
-            for e in &prov.evidence {
-                group
-                    .evidence
-                    .entry((
-                        e.repo.clone(),
-                        e.path.clone(),
-                        e.byte_start,
-                        e.byte_end,
-                        e.commit_sha.clone(),
-                    ))
-                    .or_insert_with(|| e.clone());
-            }
-        }
-    }
-    let mut report = CapabilityReport::default();
-    for (controller, group) in groups {
-        let key = serde_json::to_vec(&(
-            CAPABILITY_CONTROLLER_RULE,
-            CAPABILITY_CONTROLLER_RULE_VERSION,
-            &controller,
-        ))
-        .expect("string tuple serialization");
-        let title = format!("HTTP operations in {}", group.class);
-        let fact = capability_fact(
-            (
-                CAPABILITY_CONTROLLER_RULE,
-                CAPABILITY_CONTROLLER_RULE_VERSION,
-            ),
-            "nestjs-controller",
-            &key,
-            title,
-            group,
-        );
-        retain_sized_fact(&mut report, fact);
-    }
-    report
 }
 
 #[cfg(test)]

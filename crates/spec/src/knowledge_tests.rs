@@ -1375,13 +1375,13 @@ export class Plain {
 }
 "#;
 
-// AC-0801: one Capability per NestJS controller, citing every endpoint,
+// AC-0801: one Capability per controller class, citing every endpoint,
 // handler and relation it groups; the base is unchanged.
 #[test]
 fn controller_capability_groups_real_adapter_routes_by_class() {
     let base = fixture_source(CONTROLLER_SOURCE, CONTROLLER_PATH, REPO);
     let before = base.clone();
-    let report = derive_nestjs_controller_capabilities(&base);
+    let report = derive_controller_capabilities(&base);
     assert_eq!(base, before);
     assert_eq!(report.oversized_groups, 0);
     let mut titles: Vec<_> = report
@@ -1404,7 +1404,7 @@ fn controller_capability_groups_real_adapter_routes_by_class() {
         .unwrap();
     let node = capability(orders);
     assert_eq!(node.label, "Capability");
-    assert!(node.id.starts_with("capability:nestjs-controller:"));
+    assert!(node.id.starts_with("capability:http-controller:"));
     assert_eq!(node.props.as_object().unwrap().len(), 2); // no auth/business assertions
     let list = format!("ep:{REPO}@GET:/orders");
     let cancel = format!("ep:{REPO}@POST:/orders/:id/cancel");
@@ -1425,10 +1425,7 @@ fn controller_capability_groups_real_adapter_routes_by_class() {
     assert!(prov.validate().is_ok());
     assert_eq!(prov.tier, Tier::Semantic);
     assert_eq!(prov.confidence_tier, ConfidenceTier::InferredWeak);
-    assert_eq!(
-        prov.extractor_id,
-        "t2.knowledge.capability.nestjs-controller"
-    );
+    assert_eq!(prov.extractor_id, "t2.knowledge.capability.http-controller");
     assert_eq!(
         prov.method,
         ProducingMethod::Rule {
@@ -1443,11 +1440,11 @@ fn controller_capability_groups_real_adapter_routes_by_class() {
     let mut reversed = base.clone();
     reversed.graph.0.reverse();
     reversed.graph.1.reverse();
-    assert_eq!(derive_nestjs_controller_capabilities(&reversed), report);
+    assert_eq!(derive_controller_capabilities(&reversed), report);
     // GraphQL resolvers are another rule's subject, and the reverse.
     assert!(derive_graphql_resolver_capabilities(&base).facts.is_empty());
     assert!(
-        derive_nestjs_controller_capabilities(&fixture(PATH, REPO))
+        derive_controller_capabilities(&fixture(PATH, REPO))
             .facts
             .is_empty()
     );
@@ -1460,7 +1457,7 @@ fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
     let base = fixture_source(CONTROLLER_SOURCE, CONTROLLER_PATH, REPO);
     let health = format!("ep:{REPO}@GET:/health");
     let titles = |snapshot: &RevisionedSnapshot| -> Vec<String> {
-        let mut titles: Vec<_> = derive_nestjs_controller_capabilities(snapshot)
+        let mut titles: Vec<_> = derive_controller_capabilities(snapshot)
             .facts
             .iter()
             .map(|fact| capability(fact).props["title"].as_str().unwrap().to_owned())

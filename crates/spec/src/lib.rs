@@ -21,7 +21,7 @@ pub use knowledge::{
     CAPABILITY_CONTROLLER_RULE, CAPABILITY_CONTROLLER_RULE_VERSION, CAPABILITY_GRAPHQL_RULE,
     CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport, DOMAIN_ENTITY_ORM_RULE,
     DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport, derive_business_flows,
-    derive_graphql_resolver_capabilities, derive_nestjs_controller_capabilities,
+    derive_controller_capabilities, derive_graphql_resolver_capabilities,
     derive_orm_domain_entities, derive_permission_actors,
 };
 

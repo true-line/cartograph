@@ -4647,6 +4647,7 @@ name = "spec"
 version = "0.70.0"
 dependencies = [
  "adapters-lang-java",
+ "adapters-lang-kotlin",
  "adapters-lang-ts",
  "blake3",
  "context-hub",
