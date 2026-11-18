@@ -345,7 +345,7 @@ fn receipt_omissions_are_a_named_limitation() {
     assert!(store.starts_with("5 receipts in 2 files did not fit the retained receipt store"));
     assert!(store.contains("forgetting a retained source"));
     assert!(store.contains("superseded receipts are reclaimed"));
-    assert!(store.contains("receipts nothing pins"));
+    assert!(store.contains("receipts that nothing pins"));
     assert!(store.contains("a recovery of an unchanged source frees nothing"));
     assert!(store.contains("share limit"));
     assert!(!store.contains("cannot yet reclaim"));
