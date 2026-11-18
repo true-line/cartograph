@@ -567,9 +567,10 @@ fn produce(
         "endpoint-inventory" => {
             endpoint_inventory::output(nodes, (mode, beside.endpoints_withheld), max)?
         }
-        // The curated projection the host supplied, and the admitted nodes
-        // its items cite (AC-0653). No stored inventory is read.
-        curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
+        // The curated projection the host supplied, the admitted nodes its
+        // items cite and the admitted facts its findings cite (AC-0653,
+        // AC-0845). No stored inventory is read.
+        curated::ARTIFACT_ID => curated::output((nodes, edges), beside.curated, mode, max)?,
         // The catalogue's D1 over the admitted nodes and flows, the gap
         // count and the supplied projection's revision (AC-0663).
         document::D1_ARTIFACT_ID => document::d1(

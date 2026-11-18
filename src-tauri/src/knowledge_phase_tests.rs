@@ -261,6 +261,33 @@ fn published_facts(host: &Host) -> Vec<OverlayFact> {
     }
 }
 
+// AC-0506: the flows the producers trace from the base are embedded with
+// the base's own units, and a rerun finds every one of them cached.
+#[test]
+fn traced_flows_are_embedded_with_the_base_units() {
+    let host = host();
+    put_resolver(&host.graph);
+    let base_units = {
+        let snapshot = host.graph.lock().unwrap().read_snapshot().unwrap();
+        knowledge_ingest::units(&snapshot.0).0.len()
+    };
+    let provider = Fixture { fail: false };
+    let report = run(&host.graph, &host.cache, &host.overlay, Some(&provider)).unwrap();
+    assert_eq!(report.published_producer_nodes.business_flows, 2);
+    assert_eq!(
+        (report.embedded, report.omitted, report.omission),
+        (base_units + 2, 0, None)
+    );
+    let again = run(&host.graph, &host.cache, &host.overlay, Some(&provider)).unwrap();
+    assert_eq!(again.embedded, base_units + 2);
+    // Without a provider the flows still publish and nothing is embedded.
+    let none = run(&host.graph, &host.cache, &host.overlay, None).unwrap();
+    assert_eq!(
+        (none.embedded, none.published_producer_nodes.business_flows),
+        (0, 2)
+    );
+}
+
 // AC-0514: deterministic producer facts publish with the phase, without a
 // provider, and the base is unchanged.
 #[test]

@@ -7,6 +7,7 @@ mod context;
 pub(crate) use context::{inventory_admission_workspace, preparation_workspace};
 mod events;
 mod evidence;
+pub(crate) mod finding_curation_commands;
 pub(crate) mod finding_review_commands;
 mod history;
 pub(crate) mod inspection;

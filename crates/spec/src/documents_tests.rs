@@ -178,6 +178,15 @@ fn fenced_code_and_malformed_headings_are_not_sections() {
         .map(|section| (section.level, section.heading.as_str()))
         .collect();
     assert_eq!(headings, [(0, ""), (1, ""), (1, "Real")]);
+    // Inline code that starts with three backticks opens no fence.
+    let inline: Vec<(u8, String)> = markdown_sections("```literal```\n\n# Real heading\ntext\n")
+        .into_iter()
+        .map(|section| (section.level, section.heading))
+        .collect();
+    assert_eq!(
+        inline,
+        [(0, String::new()), (1, "Real heading".to_string())]
+    );
     // An unclosed fence runs to the end of the file.
     assert!(
         markdown_sections("```\n# a\n# b\n")

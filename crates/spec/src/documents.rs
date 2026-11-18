@@ -157,7 +157,9 @@ impl Format {
     }
 }
 
-/// The fence a line opens: its character and length.
+/// The fence a line opens: its character and length. A backtick fence's
+/// info string cannot contain a backtick, so a line such as
+/// ```` ```code``` ```` is inline code, not a fence.
 fn fence(line: &str) -> Option<(char, usize)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
@@ -166,6 +168,9 @@ fn fence(line: &str) -> Option<(char, usize)> {
     let rest = &line[indent..];
     let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let run = rest.chars().take_while(|c| *c == mark).count();
+    if mark == '`' && rest[run..].contains('`') {
+        return None;
+    }
     (run >= 3).then_some((mark, run))
 }
 
