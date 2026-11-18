@@ -782,6 +782,10 @@ impl Drop for RetentionGuard {
     }
 }
 
+/// How long a receipt-store connection waits for a competing writer's lock;
+/// every Cartograph SQLite store uses the same 5 s (AC-0822, #1653).
+const RECEIPT_STORE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) struct ReceiptStore {
     conn: Connection,
     /// Retained receipt count (and reclaim ledger bound) and payload bytes; tests narrow them.
@@ -1197,7 +1201,7 @@ impl ReceiptStore {
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(storage_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(1))
+        conn.busy_timeout(RECEIPT_STORE_BUSY_TIMEOUT)
             .map_err(storage_error)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(storage_error)?;
@@ -2612,6 +2616,19 @@ mod tests {
         .unwrap();
         assert!(!receipts.is_empty());
         (directory, source, capture, extraction, receipts)
+    }
+
+    // AC-0822: the receipt store waits 5 s for a competing writer, the same
+    // busy timeout as every other Cartograph store (#1653).
+    #[test]
+    fn receipt_store_waits_five_seconds_for_a_busy_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        let timeout: i64 = store
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5_000);
     }
 
     // AC-0292: a full receipt store keeps what fits in order, names the rest

@@ -274,9 +274,13 @@ pub enum ProviderError {
 /// Observed local embedding artifact identity; not execution attestation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingIdentity {
+    /// Endpoint the embeddings were requested from.
     pub endpoint: String,
+    /// Model name as configured.
     pub model: String,
+    /// Model digest reported by the endpoint.
     pub digest: String,
+    /// Versioned request recipe used to produce the embeddings.
     pub recipe: String,
 }
 

@@ -278,6 +278,7 @@ use adapters_fw::client::{BaseJoin, FetchBase, FetchSite};
 
 fn fetch_site(method: &str, url: IdentityExpr) -> FetchSite {
     FetchSite {
+        straight_line: None,
         method: method.into(),
         url,
         symbol: Some("sym:test@app.tsx#Orders".into()),
@@ -291,6 +292,81 @@ fn fetch_site(method: &str, url: IdentityExpr) -> FetchSite {
 
 fn eps(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|s| s.to_string()).collect()
+}
+
+// AC-0352 (#1012): what the adapter records about a call being
+// straight-line in its Symbol is kept on the FETCHES relation, on the Gap
+// of an unmatched call, and on the relation a system join makes of that
+// Gap. A site whose adapter does not determine it adds no property.
+#[test]
+fn fetch_relations_keep_whether_the_call_is_straight_line() {
+    let id = SourceId {
+        repo: "test",
+        commit: "deadbeef",
+    };
+    let site = |url: &str, byte_start, straight_line| FetchSite {
+        byte_start,
+        straight_line,
+        ..fetch_site("GET", IdentityExpr::Literal(url.into()))
+    };
+    let sites = [
+        site("/api/a", 10, Some(true)),
+        site("/api/b", 50, Some(false)),
+        site("/api/c", 90, None),
+        site("https://orders.example.com/v1/orders/7", 130, Some(true)),
+        site("https://orders.example.com/v1/orders/8", 170, None),
+    ];
+    let out = stitch_fetches(
+        &sites,
+        &eps(&[
+            "ep:test@GET:/api/a",
+            "ep:test@GET:/api/b",
+            "ep:test@GET:/api/c",
+        ]),
+        &ConfigIndex::default(),
+        &id,
+    );
+    let recorded = |endpoint: &str| {
+        let edge = out.edges.iter().find(|edge| edge.dst == endpoint).unwrap();
+        edge.props.get(STRAIGHT_LINE).cloned()
+    };
+    assert_eq!(recorded("ep:test@GET:/api/a"), Some(true.into()));
+    assert_eq!(recorded("ep:test@GET:/api/b"), Some(false.into()));
+    assert_eq!(recorded("ep:test@GET:/api/c"), None);
+
+    let gaps: Vec<Node> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap")
+        .cloned()
+        .collect();
+    let gap_edges: Vec<Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.dst.starts_with("gap:fetch:"))
+        .cloned()
+        .collect();
+    assert_eq!(gaps.len(), 2);
+    let joined = stitch_cross_repo(
+        &gaps,
+        &gap_edges,
+        &eps(&["ep:api@GET:/v1/orders/:id"]),
+        &[service("orders", "api", "https://orders.example.com")],
+    );
+    assert_eq!(joined.joined.len(), 2);
+    let by_url = |url: &str| {
+        let fetch = joined
+            .joined
+            .iter()
+            .find(|fetch| fetch.edge.props["url"] == url)
+            .unwrap();
+        fetch.edge.props.get(STRAIGHT_LINE).cloned()
+    };
+    assert_eq!(
+        by_url("https://orders.example.com/v1/orders/7"),
+        Some(true.into())
+    );
+    assert_eq!(by_url("https://orders.example.com/v1/orders/8"), None);
 }
 
 // AC-0014: a resolvable fetch URL matching one endpoint is a Confirmed

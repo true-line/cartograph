@@ -3,6 +3,7 @@ use super::*;
 use serde_json::json;
 
 impl InvestigationInput {
+    /// Builds the @9 query-history input under an explicit policy.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_v8_with_policy(
         question: &str,
