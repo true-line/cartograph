@@ -1,4 +1,4 @@
-# ADR-0071 — Producer input closure, reconciliation results and external evidence captures
+# ADR-0072 — Producer input closure, reconciliation results and external evidence captures
 
 - **Status:** Proposed; owner review
 - **Date:** 2026-11-18
