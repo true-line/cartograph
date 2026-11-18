@@ -1,4 +1,8 @@
 //! Text-free positions in rejected authored prose; never an admission authority.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{InvestigationError, MAX_INPUT_BYTES, privacy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

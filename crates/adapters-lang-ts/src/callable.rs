@@ -71,6 +71,77 @@ fn executes_child(function: TsNode<'_>, child: TsNode<'_>) -> bool {
         .any(|field| function.child_by_field_name(field) == Some(child))
 }
 
+/// Whether every pass through the body of the callable `symbol` names that
+/// gets past `site` evaluates it (#1012): the nearest callable around `site`
+/// is that one, with `site` in its body, and nothing between them makes the
+/// site optional: an `if` or conditional branch, a `switch` case, a loop, a
+/// `try` statement, the right of `&&`, `||` or `??` (also as an assignment),
+/// a parameter default, or an optional call or member chain.
+pub(super) fn straight_line(cx: &FileCx<'_>, site: TsNode<'_>, symbol: Option<&str>) -> bool {
+    let Some(symbol) = symbol else {
+        return false;
+    };
+    // `fetch?.(url)`, `api?.client.get(url)`: the site itself may be skipped.
+    if optional_chain(site) {
+        return false;
+    }
+    let mut child = site;
+    while let Some(parent) = child.parent() {
+        if is_callable(parent) {
+            return parent.child_by_field_name("body") == Some(child) && id(cx, parent) == symbol;
+        }
+        let short_circuit = |parent: TsNode<'_>, operators: &[&str]| {
+            parent.child_by_field_name("right") == Some(child)
+                && parent
+                    .child_by_field_name("operator")
+                    .is_some_and(|operator| operators.contains(&operator.kind()))
+        };
+        let optional = match parent.kind() {
+            "if_statement" | "ternary_expression" => {
+                parent.child_by_field_name("condition") != Some(child)
+            }
+            "switch_case" | "switch_default" | "catch_clause" | "try_statement"
+            | "finally_clause" | "for_statement" | "for_in_statement" | "while_statement"
+            | "do_statement" | "assignment_pattern" => true,
+            "binary_expression" => short_circuit(parent, &["&&", "||", "??"]),
+            "augmented_assignment_expression" => short_circuit(parent, &["&&=", "||=", "??="]),
+            // `a?.b(site)`, `a?.[site]`: skipped when the chain short-circuits.
+            "call_expression" => {
+                parent.child_by_field_name("function") != Some(child) && optional_chain(parent)
+            }
+            "subscript_expression" => {
+                parent.child_by_field_name("object") != Some(child) && optional_chain(parent)
+            }
+            _ => false,
+        };
+        if optional {
+            return false;
+        }
+        child = parent;
+    }
+    false
+}
+
+/// Whether the call or member chain `node` holds a `?.` anywhere in it.
+fn optional_chain(node: TsNode<'_>) -> bool {
+    let mut cursor = node.walk();
+    if node
+        .children(&mut cursor)
+        .any(|part| matches!(part.kind(), "optional_chain" | "?."))
+    {
+        return true;
+    }
+    ["function", "object"]
+        .into_iter()
+        .filter_map(|field| node.child_by_field_name(field))
+        .any(|inner| {
+            matches!(
+                inner.kind(),
+                "call_expression" | "member_expression" | "subscript_expression"
+            ) && optional_chain(inner)
+        })
+}
+
 pub(super) fn member_kind(method: TsNode<'_>) -> &'static str {
     let mut cursor = method.walk();
     let tokens: Vec<_> = method

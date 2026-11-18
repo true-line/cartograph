@@ -104,9 +104,10 @@ test shows that the stale set is exact and repeatable.
 1. Keep stale text out of the document. Rejected: #1749 requires the
    accepted text to stay in place until its successor is accepted, and a
    section that silently empties reads as never drafted.
-2. Regenerate a stale section automatically. Rejected: every agent-written
-   statement is reviewed before a document prints it (ADR-0064 decision 5).
+2. Let a model act on staleness, either by regenerating a stale section
+   automatically or by judging whether a change matters. Rejected: every
+   agent-written statement is reviewed before a document prints it
+   (ADR-0064 decision 5), and stale marking must be deterministic
+   (ADR-0056 decision 4).
 3. Mark staleness per claim only. Rejected: a section's prose is reviewed as
    a whole, and a partial section would be printed as if it had been.
-4. Let a model judge whether a change matters. Rejected: stale marking must
-   be deterministic (ADR-0056 decision 4).

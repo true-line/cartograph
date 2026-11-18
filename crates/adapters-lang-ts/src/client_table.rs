@@ -69,6 +69,8 @@ struct PendingCall {
     key: String,
     method: Method,
     symbol: Option<String>,
+    /// Whether the call is straight-line in `symbol`'s body (#1012).
+    straight_line: bool,
     byte_start: u64,
     byte_end: u64,
 }
@@ -868,6 +870,8 @@ fn extract_file(
                     continue;
                 };
                 let args = call_args(*node);
+                let symbol = enclosing_symbol(&cx, *node);
+                let straight_line = crate::callable::straight_line(&cx, *node, symbol.as_deref());
                 let site = |wrapper, join, (table, key): (String, String), method| PendingCall {
                     file: path.to_string(),
                     wrapper,
@@ -875,7 +879,8 @@ fn extract_file(
                     table,
                     key,
                     method,
-                    symbol: enclosing_symbol(&cx, *node),
+                    symbol: symbol.clone(),
+                    straight_line,
                     byte_start: node.start_byte() as u64,
                     byte_end: node.end_byte() as u64,
                 };
@@ -997,6 +1002,7 @@ fn joined_sites(index: &RepoIndex) -> Vec<FetchSite> {
             Method::Computed => "?".into(),
         };
         out.push(FetchSite {
+            straight_line: Some(call.straight_line),
             method,
             url: IdentityExpr::Literal(route.path.clone()),
             symbol: call.symbol.clone(),

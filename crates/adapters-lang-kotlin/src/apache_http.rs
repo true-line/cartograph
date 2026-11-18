@@ -128,6 +128,7 @@ pub(crate) fn sites(
             .and_then(|symbol| symbol.rsplit_once('#'))
             .map(|(_, member)| member.to_string());
         out.push(FetchSite {
+            straight_line: None,
             method: verb.to_string(),
             url: match pure_string_literal(cx, url) {
                 Some(literal) => IdentityExpr::Literal(literal),

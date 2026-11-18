@@ -1,4 +1,8 @@
 //! Validated, immutable task input copied by the host before any provider call.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::source_basis::{domain_hash, invalid, text};
 use crate::{
     AgentBroker, AgentError, AgentTask, CandidateBasis, EvidenceBasis, TaskBasisManifest,

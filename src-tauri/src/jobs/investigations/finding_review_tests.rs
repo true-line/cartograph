@@ -222,23 +222,33 @@ fn finding_review_two_connections_cas_returns_one_durable_winner() {
     let first_request = review_request(&initial, FindingReviewDecision::AcceptedForFollowUp);
     let second_request = review_request(&initial, FindingReviewDecision::RejectedForFollowUp);
     let mut other = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
-    // The contract is the CAS outcome, not lock-wait timing: a loaded runner
-    // may hold the winner's write lock past the store's 1 s busy timeout
-    // (#1246), so the race waits for the lock instead of failing on it.
-    for store in [&fixture.store, &other] {
-        store
-            .conn
-            .busy_timeout(std::time::Duration::from_secs(60))
-            .unwrap();
+    // The race is ordered, not timed (#1246): the first writer holds its write
+    // lock until the second connection has reported waiting on that lock, so
+    // the outcome cannot depend on how long a loaded runner takes to commit.
+    static WAITING: (std::sync::Mutex<bool>, std::sync::Condvar) =
+        (std::sync::Mutex::new(false), std::sync::Condvar::new());
+    fn report_waiting(_: i32) -> bool {
+        *WAITING.0.lock().unwrap() = true;
+        WAITING.1.notify_all();
+        std::thread::yield_now();
+        true
     }
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let second_barrier = barrier.clone();
+    other.conn.busy_handler(Some(report_waiting)).unwrap();
+    let (start, started) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
-        second_barrier.wait();
+        started.recv().unwrap();
         other.review_investigation_finding(&second_request)
     });
-    barrier.wait();
-    let first = fixture.store.review_investigation_finding(&first_request);
+    let first = fixture
+        .store
+        .review_investigation_finding_with_hook(&first_request, || {
+            start.send(()).unwrap();
+            let mut waiting = WAITING.0.lock().unwrap();
+            while !*waiting {
+                waiting = WAITING.1.wait(waiting).unwrap();
+            }
+            Ok(())
+        });
     let second = thread.join().unwrap();
     let (winner, loser) = match (first, second) {
         (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
@@ -279,6 +289,45 @@ fn finding_review_two_connections_cas_returns_one_durable_winner() {
             .reviews[0]
             .revision,
         2
+    );
+}
+
+// AC-0733: a writer that cannot take the lock within the busy timeout gets
+// the typed retryable outcome, and its decision is not written.
+#[test]
+fn finding_review_lock_wait_exhaustion_is_busy_and_writes_nothing() {
+    let mut fixture = Fixture::new();
+    let (id, result) = completed_review_fixture(&mut fixture, "review-busy");
+    let initial = fixture
+        .store
+        .investigation_finding_reviews(&id, &result.result_id)
+        .unwrap()
+        .reviews
+        .remove(0);
+    let held = review_request(&initial, FindingReviewDecision::AcceptedForFollowUp);
+    let blocked = review_request(&initial, FindingReviewDecision::RejectedForFollowUp);
+    let mut other = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+    other.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let mut outcome = None;
+    let winner = fixture
+        .store
+        .review_investigation_finding_with_hook(&held, || {
+            outcome = Some(other.review_investigation_finding(&blocked));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(outcome, Some(Err(FindingReviewError::Busy)));
+    assert_eq!(
+        other
+            .investigation_finding_reviews(&id, &result.result_id)
+            .unwrap()
+            .reviews[0],
+        winner
+    );
+    // The same request, retried once the lock is free, meets the saved winner.
+    assert_eq!(
+        other.review_investigation_finding(&blocked),
+        Err(FindingReviewError::Conflict(Box::new(winner)))
     );
 }
 

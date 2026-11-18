@@ -31,21 +31,26 @@ const MAX_KEY_BYTES: usize = 512;
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ProviderId {
     Anthropic,
+    /// Hosted OpenAI, the GPT side of the frontier track (#1709).
+    #[serde(rename = "openai")]
+    OpenAi,
 }
 
 impl ProviderId {
-    pub(crate) const ALL: &'static [Self] = &[Self::Anthropic];
+    pub(crate) const ALL: &'static [Self] = &[Self::Anthropic, Self::OpenAi];
 
     /// Stable id: the account name in the credential store and the wire id.
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
         }
     }
 
@@ -53,6 +58,7 @@ impl ProviderId {
     pub(crate) fn env_var(self) -> &'static str {
         match self {
             Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
         }
     }
 
@@ -374,7 +380,7 @@ mod tests {
         // The refusal does not echo what was typed.
         assert!(!error.contains("kkkk"));
         assert!(!credentials.status(provider).stored);
-        assert!(ProviderId::parse("openai").is_err());
+        assert!(ProviderId::parse("open-ai").is_err());
         assert_eq!(ProviderId::parse("anthropic").unwrap(), provider);
     }
 
@@ -399,5 +405,48 @@ mod tests {
         assert_eq!(status.store_error.as_deref(), Some("locked"));
         assert!(credentials.resolve(ProviderId::Anthropic).is_err());
         assert!(credentials.save(ProviderId::Anthropic, KEY).is_err());
+    }
+
+    // AC-0751 (#1709): the OpenAI key is its own entry under its own
+    // variable; saving or removing it leaves the Anthropic key untouched.
+    #[test]
+    fn the_openai_key_is_held_apart_from_the_anthropic_key() {
+        assert_eq!(ProviderId::parse("openai").unwrap(), ProviderId::OpenAi);
+        assert_eq!(ProviderId::OpenAi.env_var(), "OPENAI_API_KEY");
+        let credentials = ProviderCredentials::new(
+            Box::new(MemoryStore::default()),
+            Box::new(|name| (name == "OPENAI_API_KEY").then(|| "sk-proj-env".to_owned())),
+        );
+        assert_eq!(
+            credentials.status(ProviderId::OpenAi).source,
+            KeySource::Environment
+        );
+        assert_eq!(
+            credentials.status(ProviderId::Anthropic).source,
+            KeySource::None
+        );
+        credentials.save(ProviderId::Anthropic, KEY).unwrap();
+        credentials
+            .save(ProviderId::OpenAi, "sk-proj-stored")
+            .unwrap();
+        assert_eq!(
+            credentials.resolve(ProviderId::OpenAi).unwrap().as_deref(),
+            Some("sk-proj-env")
+        );
+        credentials.remove(ProviderId::OpenAi).unwrap();
+        assert!(!credentials.status(ProviderId::OpenAi).stored);
+        assert_eq!(
+            credentials
+                .resolve(ProviderId::Anthropic)
+                .unwrap()
+                .as_deref(),
+            Some(KEY)
+        );
+
+        let wire = serde_json::to_string(&credentials.statuses()).unwrap();
+        assert!(wire.contains(r#""provider":"anthropic""#), "{wire}");
+        assert!(wire.contains(r#""provider":"openai""#), "{wire}");
+        assert!(wire.contains(r#""label":"OpenAI""#), "{wire}");
+        assert!(!wire.contains("sk-"), "{wire}");
     }
 }
