@@ -76,6 +76,8 @@ fn projection(drafts: &[ReviewedDraft], nodes: &[Node]) -> CuratedProjection {
         current_assertion_hashes: &BTreeSet::new(),
         drafts,
         cited_fact_hashes: &cited_fact_hashes(nodes, &[edge()], &cited),
+        findings: &[],
+        cited_fact_digests: &std::collections::BTreeMap::new(),
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()
