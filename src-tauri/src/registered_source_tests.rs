@@ -79,6 +79,7 @@ fn recover(state: &AppState, source: &RegisteredSource) -> (DeltaSummary, Reconc
         &operation,
         &execution,
         &mut crate::OperationFacts::default(),
+        &mut Default::default(),
     )
     .unwrap();
     record_ingest_metrics(
