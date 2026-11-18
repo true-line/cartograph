@@ -8,7 +8,8 @@
 **Status rule:** a status describes `main`, not a plan. `Done` means every AC
 of the story has a `rust`/`story` binding in [`test-map.md`](test-map.md) that
 is not marked PARTIAL and runs in CI, or a recorded manual result, and no
-manual procedure bound to its ACs is still UNEXECUTED. `In-Progress` means some
+manual procedure bound to its ACs is still UNEXECUTED, pending, not run or
+without a recorded result. `In-Progress` means some
 ACs have that evidence, or only PARTIAL evidence, and the rest do not. `Draft`
 and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` for #1759.
 
@@ -338,7 +339,7 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 ### US-0014 — Determinism and re-ingest idempotency
 - **Actor:** Engine
 - **As a** engineer **I want** re-ingesting the same commit under the same source registration to yield an identical graph **so that** outputs are reproducible.
-- **Priority:** Must · **Status:** Done
+- **Priority:** Must · **Status:** In-Progress
 - **AC-0039** Given the same commit and inputs, when re-ingested, then the ordered T0 node/edge identity plus content-hash snapshot is identical and unchanged graph facts are not rewritten; every ingest or evidence path is canonicalized through one shared helper that never stores a platform-specific verbatim prefix (the Windows `\\?\` extended-length form), so the stored path form for the same tree does not vary by platform.
 - **AC-0223** Given a tree recovered through any lane (local, managed clone, or manifest), when its Terraform root, local-module ancestors, and module sources are resolved, or a cloned repo's root is reserved as the key for its plugin settings and evidence reads, then each path takes the same verbatim-prefix-free canonical form as the shared helper in AC-0039 — Terraform extraction canonicalizes the same way, and a managed clone root derives from the canonicalized app data directory even when that directory is reached through a symlink — so containment checks and settings keys compare one path form.
 - **AC-0040** Given a changed or deleted TS/TSX/Terraform file, when re-ingested in the same process, then only new or byte-changed per-file extraction contexts are reparsed, unchanged contexts are reused by source hash, deterministic repository-wide joins are refreshed, and stale facts are removed.

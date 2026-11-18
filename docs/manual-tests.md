@@ -11,9 +11,9 @@ PR — per-PR verification is CI's job.
 
 ## Unexecuted procedures: owner and milestone
 
-Every procedure below that is still marked **UNEXECUTED** is listed here with
-the person who runs it and records its result, and the GitHub milestone at
-whose boundary it runs (#1759). A procedure leaves this table in the PR that
+Every procedure below that is still marked **UNEXECUTED**, pending or not run,
+or that has no recorded result, is listed here with the person who runs it and
+records its result, and the GitHub milestone at whose boundary it runs (#1759). A procedure leaves this table in the PR that
 records its PASS or FAIL. The milestone follows the open issue that tracks the
 work the procedure verifies; `Later` means no open issue in R1–R4 schedules it.
 
@@ -41,6 +41,11 @@ work the procedure verifies; `Later` means no open issue in R1–R4 schedules it
 | MT-W8B-02 | AC-0294 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
 | MT-W8B-03 | AC-0295 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
 | MT-W8B-04 | AC-0296 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
+| MT-M10-04 | AC-0423 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 criterion 1 (the measurements in `docs/showcases/scale.md` are not a recorded same-commit `--compare` run) |
+| MT-1618-01 | AC-0559, AC-0561 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 release pilot (#1618 is closed) |
+| MT-1624-01 | AC-0560 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 release pilot (#1624 is closed) |
+| MT-1633-01 | AC-0562 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1633 |
+| MT-1812-01 | AC-0593 | `qwts` | R2 — Curated projection and document catalogue | #1812 |
 
 ---
 
