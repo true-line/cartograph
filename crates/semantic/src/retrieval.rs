@@ -6,6 +6,11 @@
 //! similarity when unit vectors and a provider are present. Every hit cites
 //! base facts and carries the T2 tier; nothing is written back to the base.
 //! Without a provider the lexical leg alone answers.
+//!
+//! The vector leg takes its candidates from a usearch index rebuilt from the
+//! unit vectors each time they are embedded (ADR-0051 decision 3, #1441).
+//! The index is a cache, never authority: every candidate is scored again
+//! from its stored vector, and without an index every vector is scored.
 use crate::knowledge_ingest::{self, KnowledgeUnit};
 use core_graph::overlay::BaseRef;
 use core_graph::{Edge, Node};
@@ -14,6 +19,7 @@ use llm::{EmbeddingIdentity, LlmProvider, ProviderError};
 use rusqlite::Connection;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 /// Reciprocal-rank-fusion constant.
 pub const FUSION_K: f64 = 60.0;
@@ -21,6 +27,9 @@ pub const FUSION_K: f64 = 60.0;
 pub const MAX_HITS: usize = 200;
 /// Query bytes accepted; longer queries are refused, not truncated.
 pub const MAX_QUERY_BYTES: usize = 512;
+/// Candidates the vector index is asked for per query. A base with at most
+/// this many units is scored whole, so the index cannot change its answer.
+pub const VECTOR_CANDIDATES: usize = 4 * MAX_HITS;
 /// Lexical terms taken from a query.
 const MAX_TERMS: usize = 32;
 /// Unit texts handed to the provider per call.
@@ -75,6 +84,10 @@ pub struct Retrieval {
     /// Unit-normalized vectors, parallel to `units`, once embedded, with
     /// the space they were embedded in.
     vectors: Option<(Space, Vec<Vec<f32>>)>,
+    /// usearch index over `vectors`, keyed by unit row. Rebuilt whenever the
+    /// units are embedded; `None` when it could not be built, and then every
+    /// vector is scored.
+    vector_index: Option<Index>,
     names: BTreeMap<String, BTreeSet<String>>,
     edges: Vec<Edge>,
 }
@@ -124,6 +137,7 @@ impl Retrieval {
             units,
             omitted,
             vectors: None,
+            vector_index: None,
             names,
             edges,
         })
@@ -146,12 +160,18 @@ impl Retrieval {
             vectors.extend(embedded);
         }
         let dims = vectors.first().map_or(0, Vec::len);
-        let vectors = vectors
+        let vectors: Vec<Vec<f32>> = vectors
             .into_iter()
             .map(|v| normalized(v, dims).ok_or(RetrievalError::Query("invalid unit vector")))
             .collect::<Result<_, _>>()?;
+        self.vector_index = vector_index(&vectors, dims);
         self.vectors = Some((space, vectors));
         Ok(())
+    }
+
+    /// Units held by the vector index, when one was built.
+    pub fn indexed_vectors(&self) -> Option<usize> {
+        self.vector_index.as_ref().map(Index::size)
     }
 
     /// Anchors, then their neighbours, then fused ranked hits, at most
@@ -283,11 +303,31 @@ impl Retrieval {
             .next()
             .and_then(|v| normalized(v, dims))
             .ok_or(RetrievalError::Query("invalid query vector"))?;
-        let mut rows: Vec<(usize, f32)> = vectors
-            .iter()
-            .enumerate()
-            .map(|(row, v)| (row, v.iter().zip(&query).map(|(a, b)| a * b).sum()))
-            .collect();
+        let score =
+            |row: usize| -> f32 { vectors[row].iter().zip(&query).map(|(a, b)| a * b).sum() };
+        // The index only proposes rows. Scores and order come from the stored
+        // vectors, so a row the index returns twice or out of range is
+        // harmless and a failed lookup falls back to scoring every vector.
+        let candidates: Option<BTreeSet<usize>> = self
+            .vector_index
+            .as_ref()
+            .filter(|_| vectors.len() > VECTOR_CANDIDATES)
+            .and_then(|index| index.search(&query, VECTOR_CANDIDATES).ok())
+            .map(|matches| {
+                matches
+                    .keys
+                    .iter()
+                    .filter_map(|key| usize::try_from(*key).ok())
+                    .filter(|row| *row < vectors.len())
+                    .collect()
+            });
+        let mut rows: Vec<(usize, f32)> = match candidates {
+            Some(candidates) => candidates
+                .into_iter()
+                .map(|row| (row, score(row)))
+                .collect(),
+            None => (0..vectors.len()).map(|row| (row, score(row))).collect(),
+        };
         rows.sort_by(|(a, x), (b, y)| {
             y.partial_cmp(x)
                 .unwrap_or(Ordering::Equal)
@@ -321,6 +361,27 @@ fn hit(id: &str, reason: Reason, score: f64, cites: Vec<BaseRef>) -> Hit {
         cites,
         tier: Tier::Semantic,
     }
+}
+
+/// A cosine index over unit-normalized `vectors`, keyed by row and filled in
+/// row order from one thread. `None` when usearch refuses any step: the
+/// caller then scores every vector.
+fn vector_index(vectors: &[Vec<f32>], dims: usize) -> Option<Index> {
+    if vectors.is_empty() || dims == 0 {
+        return None;
+    }
+    let index = Index::new(&IndexOptions {
+        dimensions: dims,
+        metric: MetricKind::Cos,
+        quantization: ScalarKind::F32,
+        ..IndexOptions::default()
+    })
+    .ok()?;
+    index.reserve(vectors.len()).ok()?;
+    for (row, vector) in vectors.iter().enumerate() {
+        index.add(row as u64, vector).ok()?;
+    }
+    Some(index)
 }
 
 /// A non-zero vector of `dims` scaled to unit length; a non-finite
