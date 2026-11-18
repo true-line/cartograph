@@ -71,6 +71,17 @@ impl ScopedGraphReader<'_> {
     }
 }
 
+/// Walks the primary-key index; no sort.
+const NODES_IN_IDENTITY_ORDER: &str =
+    "SELECT id, label, props FROM nodes ORDER BY id COLLATE BINARY";
+/// The primary key orders edges (src, dst, label), so identity order would
+/// otherwise sort in a temp b-tree, held in memory under `temp_store=MEMORY`
+/// and as large as the biggest source's fan-out. `INDEXED BY` walks the
+/// (src, label, dst) index instead and fails closed if it is missing.
+const EDGES_IN_IDENTITY_ORDER: &str = "SELECT src, dst, label, props FROM edges \
+     INDEXED BY idx_edges_src_label_dst \
+     ORDER BY src COLLATE BINARY, label COLLATE BINARY, dst COLLATE BINARY";
+
 fn visit_rows<E: From<GraphError>>(
     connection: &Connection,
     limits: SnapshotReadLimits,
@@ -97,7 +108,7 @@ fn visit_rows<E: From<GraphError>>(
     let mut streamed = StreamedSnapshot { nodes: 0, edges: 0 };
     {
         let mut statement = connection
-            .prepare("SELECT id, label, props FROM nodes ORDER BY id COLLATE BINARY")
+            .prepare(NODES_IN_IDENTITY_ORDER)
             .map_err(GraphError::from)
             .map_err(E::from)?;
         let mut rows = statement
@@ -122,10 +133,7 @@ fn visit_rows<E: From<GraphError>>(
     }
     {
         let mut statement = connection
-            .prepare(
-                "SELECT src, dst, label, props FROM edges \
-                 ORDER BY src COLLATE BINARY, label COLLATE BINARY, dst COLLATE BINARY",
-            )
+            .prepare(EDGES_IN_IDENTITY_ORDER)
             .map_err(GraphError::from)
             .map_err(E::from)?;
         let mut rows = statement
@@ -291,6 +299,68 @@ mod tests {
                 SnapshotBoundsError::CanonicalByteLimit
             ))
         ));
+    }
+
+    fn plan(connection: &Connection, sql: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    // T-0735 (#1602): both stream queries walk an index in identity order;
+    // neither sorts in a temp b-tree, so memory stays one row per fact.
+    #[test]
+    fn stream_queries_use_indexes_without_a_temp_b_tree() {
+        let store = store();
+        for (sql, index) in [
+            (NODES_IN_IDENTITY_ORDER, "sqlite_autoindex_nodes_1"),
+            (EDGES_IN_IDENTITY_ORDER, "idx_edges_src_label_dst"),
+        ] {
+            let plan = plan(&store.conn, sql);
+            assert!(
+                plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+            assert!(plan.iter().any(|step| step.contains(index)), "{plan:?}");
+        }
+    }
+
+    // T-0735 (#1602): a store created before the index gains it on open with
+    // the same facts; without it the stream refuses instead of sorting.
+    #[test]
+    fn existing_stores_gain_the_identity_order_index_and_keep_their_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        let before = {
+            let mut store = SqliteGraphStore::open(&path).unwrap();
+            let fresh = self::store();
+            let (nodes, edges) = fresh.read_snapshot().unwrap();
+            for node in &nodes {
+                store.put_node(node).unwrap();
+            }
+            for edge in &edges {
+                store.put_edge(edge).unwrap();
+            }
+            store
+                .conn
+                .execute_batch("DROP INDEX idx_edges_src_label_dst")
+                .unwrap();
+            assert!(collect(&store, SnapshotReadLimits::default()).is_err());
+            store.read_snapshot().unwrap()
+        };
+        let reopened = SqliteGraphStore::open(&path).unwrap();
+        assert_eq!(reopened.read_snapshot().unwrap(), before);
+        assert_eq!(
+            collect(&reopened, SnapshotReadLimits::default())
+                .unwrap()
+                .len(),
+            before.0.len() + before.1.len()
+        );
     }
 
     // T-0735 (#1602): inside a scoped reader the stream shares its revision

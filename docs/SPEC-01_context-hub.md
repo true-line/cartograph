@@ -269,7 +269,9 @@ At an exactly exhausted aggregate allowance, All traversal may prove an empty fi
 The complete-graph `context-v1` identity can also be streamed (AC-0735): the
 store delivers nodes by id then edges by (src, label, dst) under the same
 admission as the materialized bounded read, and an incremental builder hashes
-them to exactly the id `ContextSnapshot::new` assigns. Retained memory is one
+them to exactly the id `ContextSnapshot::new` assigns. Edges are walked through
+the additive `idx_edges_src_label_dst` index (the primary key orders them
+(src, dst, label)), so no in-memory sort runs. Retained memory is one
 row, not the graph; time still tracks the whole graph. Inside a scoped reader the
 stream shares the scoped acquisition's pinned revision, so a scoped preparation
 can keep today's `graph_snapshot_id` while retaining only its scope. Investigation
