@@ -276,3 +276,10 @@ row, not the graph; time still tracks the whole graph. Inside a scoped reader th
 stream shares the scoped acquisition's pinned revision, so a scoped preparation
 can keep today's `graph_snapshot_id` while retaining only its scope. Investigation
 preparation does not use it yet.
+
+Preparation streams that identity under its own caps (AC-0775, ADR-0052
+amendment 2026-11-18): `IdentityPassLimits::for_retained` admits the whole
+stream under the ADR-0052 ceilings and holds the one decoded row to the task's
+retained limits, which also bound the scoped facts it keeps. A refused
+preparation read names its phase (`graph_identity` or `graph_scope`) and limit
+(`snapshot_rows`, `snapshot_bytes`, ...) in the `host_limit` message (AC-0776).
