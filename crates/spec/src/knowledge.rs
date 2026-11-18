@@ -491,6 +491,7 @@ pub fn derive_nestjs_controller_capabilities(base: &RevisionedSnapshot) -> Capab
             || handler.props["kind"] != "Method"
             || owner_class != class
             || class.is_empty()
+            || class.contains('@') // an adapter-made name for an anonymous class
             || member.is_empty()
         {
             continue;

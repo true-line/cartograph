@@ -1375,7 +1375,7 @@ export class Plain {
 }
 "#;
 
-// AC-0735: one Capability per NestJS controller, citing every endpoint,
+// AC-0766: one Capability per NestJS controller, citing every endpoint,
 // handler and relation it groups; the base is unchanged.
 #[test]
 fn controller_capability_groups_real_adapter_routes_by_class() {
@@ -1453,7 +1453,7 @@ fn controller_capability_groups_real_adapter_routes_by_class() {
     );
 }
 
-// AC-0735: support that is ambiguous, not a class method, from another file
+// AC-0766: support that is ambiguous, not a class method, from another file
 // or not source-backed yields no candidate for that route.
 #[test]
 fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
@@ -1510,6 +1510,21 @@ fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
         })),
         orders_only
     );
+    // The class has no name of its own: the adapter's `class@<offset>`
+    // placeholder is not something to title a Capability with.
+    let mut anonymous = edit(&|node| {
+        if node.id == handler {
+            node.id = format!("sym:{REPO}@{CONTROLLER_PATH}#class@42.check");
+            node.props["class"] = "class@42".into();
+            node.props["name"] = "class@42.check".into();
+        }
+    });
+    for edge in &mut anonymous.graph.1 {
+        if edge.dst == handler {
+            edge.dst = format!("sym:{REPO}@{CONTROLLER_PATH}#class@42.check");
+        }
+    }
+    assert_eq!(titles(&anonymous), orders_only);
     // Another framework's endpoint.
     assert_eq!(
         titles(&edit(&|node| if node.id == health {
