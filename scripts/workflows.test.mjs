@@ -133,7 +133,7 @@ test('queued PR lanes never cancel each other, and package installs serialize on
   ];
   for (const [, wait, , step] of calls) assert.ok(Number(wait) < Number(step));
   const locked = calls.map(([, , command]) => command);
-  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 5);
+  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 7);
   assert.equal(locked.filter((command) => command.includes('"--with-deps"')).length, 1);
   assert.equal([...workflow.matchAll(/arguments-json: .*(?:"apt-get"|"--with-deps")/gu)].length, calls.length);
 });
@@ -265,7 +265,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 10);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 11);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -316,6 +316,49 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
   assert.match(complete, /needs: \[[^\]\n]*windows-job-ownership[^\]\n]*\]/u);
   assert.match(complete, /WINDOWS_JOB_OWNERSHIP: \$\{\{ needs\.windows-job-ownership\.result \}\}/u);
   assert.match(complete, /test "\$WINDOWS_JOB_OWNERSHIP" = success/u);
+});
+
+test('app unit tests run in required shards that jointly cover the binary (#1924)', () => {
+  // The Rust job excludes only the app package; the shards run its one test
+  // binary. Dropping a shard, or the gate on them, would silently drop tests.
+  const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const job = (name) => workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
+  const condition = (contents) =>
+    contents
+      .match(/    if: >-\n([\s\S]*?)    runs-on:/u)?.[1]
+      .replace(/^ *#.*\n/gmu, '')
+      .trim();
+  const rust = job('rust');
+  const shards = job('rust-app-tests');
+  const complete = job('complete');
+  assert.match(rust, /run: cargo test --workspace --exclude app\n/u);
+  assert.equal([...rust.matchAll(/--exclude/gu)].length, 1);
+  assert.ok(condition(shards));
+  assert.equal(condition(shards), condition(rust));
+  assert.match(shards, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
+  assert.match(shards, /runs-on: ubuntu-latest$/mu);
+  assert.match(shards, /^ {4}timeout-minutes: 60$/mu);
+  assert.match(shards, /fail-fast: false/u);
+  const [, list] = shards.match(/matrix:\n +shard: \[([\d, ]+)\]\n/u) ?? [];
+  const indexes = (list ?? '').split(', ').map(Number);
+  const [, count, target] =
+    shards.match(/run: node scripts\/rust-test-shard\.mjs "\$SHARD\/(\d+)" -- (.*)\n/u) ?? [];
+  assert.equal(target, '-p app --bin app');
+  assert.deepEqual(indexes, Array.from({ length: Number(count) }, (_, index) => index + 1));
+  assert.match(shards, new RegExp(`name: Rust app tests \\(\\$\\{\\{ matrix\\.shard \\}\\}/${count}\\)`, 'u'));
+  assert.match(shards, /SHARD: \$\{\{ matrix\.shard \}\}/u);
+  assert.match(shards, /ref: \$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/u);
+  assert.doesNotMatch(shards, /continue-on-error/u);
+  assert.match(complete, /needs: \[.*\brust-app-tests\b.*\]/u);
+  assert.match(complete, /RUST_APP_TESTS: \$\{\{ needs\.rust-app-tests\.result \}\}/u);
+  assert.match(complete, /test "\$RUST_APP_TESTS" = success/u);
+  // `app` has no library, integration-test or doc-test target the exclusion
+  // could drop: its tests are the binary's unit tests.
+  const manifest = readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8');
+  assert.match(manifest, /^name = "app"$/mu);
+  assert.doesNotMatch(manifest, /^\[lib\]|^\[\[(?:test|bin|example|bench)\]\]/mu);
+  assert.deepEqual(readdirSync(path.join(root, 'src-tauri')).filter((entry) => ['tests', 'examples', 'benches'].includes(entry)), []);
+  assert.deepEqual(readdirSync(path.join(root, 'src-tauri/src')).filter((entry) => entry === 'lib.rs' || entry === 'bin'), []);
 });
 
 test('real-model acceptance is explicit, bounded, and retains evidence after failures', () => {
