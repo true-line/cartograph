@@ -1593,6 +1593,7 @@ fn extract_file(
                 && !patched(&scope, &receiver.constructor, verb, &receiver.spelling)
             {
                 fetches.sites.push(FetchSite {
+                    straight_line: None,
                     method,
                     url: url.map_or_else(
                         || IdentityExpr::Computed(cx.text(&node).to_string()),
@@ -1618,6 +1619,7 @@ fn extract_file(
                 continue;
             }
             fetches.sites.push(FetchSite {
+                straight_line: None,
                 method,
                 url: url.map_or_else(
                     || IdentityExpr::Computed(cx.text(&node).to_string()),

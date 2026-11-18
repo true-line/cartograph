@@ -15,6 +15,10 @@
 //!   false positive degrades gracefully instead of failing the escalation.
 //! - [`disclosure`] renders exactly what the Settings consent panel must
 //!   show before consent (provider/model, endpoint, pricing, retention).
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 
 use crate::{
     Completion, LlmProvider, Locality, ProviderCaps, ProviderCompletionRequest, ProviderError,

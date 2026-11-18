@@ -1,4 +1,8 @@
 //! Actual model-visible admission state. Shape is not journal authority.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use staged_refusal::{CompletionCallMode, ProtectedCompletionMetadata};
 
@@ -136,7 +140,7 @@ impl DisclosedAdmissionState {
         }
         if let Some(acquisition) = &self.acquisition {
             acquisition.validate()?;
-            if acquisition.finish_patch.is_some() && role != SpecialistId::DomainAnalystV27 {
+            if acquisition.finish_patch.is_some() && !role.uses_finish_patch() {
                 return Err(InvestigationError::InvalidInput);
             }
             if acquisition.finish_policy_complete && !policy.local_finish_generation() {

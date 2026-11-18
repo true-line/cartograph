@@ -277,6 +277,9 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
         oversized: capabilities.oversized_groups,
         omissions: Vec::new(),
     };
+    let controllers = spec::derive_nestjs_controller_capabilities(snapshot);
+    derived.facts.extend(controllers.facts);
+    derived.oversized += controllers.oversized_groups;
     match spec::derive_business_flows(snapshot, flow_limits) {
         Ok(flows) => {
             derived.facts.extend(flows.facts);
@@ -297,9 +300,11 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
 /// changes the overlay identity.
 pub(crate) fn recipe_name() -> String {
     format!(
-        "{RECIPE};{}@{};{}@{};{}@{};{}@{}",
+        "{RECIPE};{}@{};{}@{};{}@{};{}@{};{}@{}",
         spec::CAPABILITY_GRAPHQL_RULE,
         spec::CAPABILITY_GRAPHQL_RULE_VERSION,
+        spec::CAPABILITY_CONTROLLER_RULE,
+        spec::CAPABILITY_CONTROLLER_RULE_VERSION,
         spec::BUSINESS_FLOW_RULE,
         spec::BUSINESS_FLOW_RULE_VERSION,
         spec::DOMAIN_ENTITY_ORM_RULE,

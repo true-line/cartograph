@@ -1,4 +1,8 @@
 //! Text-free refusal diagnostics retained separately from admission accounting.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{InvestigationError, ReplayLocation, bounded_bytes, claim_diagnostics::*};
 use serde::{Deserialize, Serialize};
 
