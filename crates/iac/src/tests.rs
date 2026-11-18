@@ -993,3 +993,114 @@ fn extraction_through_a_symlinked_root_still_expands_local_modules() {
     assert_eq!(ids(&via_link), ids(&direct));
     assert_eq!(terraform_file_count(&link).unwrap(), 2);
 }
+
+fn collision_fixture() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tf-address-collision")
+}
+
+fn collision_gaps(ex: &Extraction) -> Vec<&Node> {
+    ex.nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:tf-address-collision:"))
+        .collect()
+}
+
+#[test]
+fn same_address_in_two_root_modules_emits_a_gap() {
+    // AC-0689 (T-0689, #1844): ids are not scoped by root module, so
+    // envs/prod and envs/staging both declaring aws_sqs_queue.orders name one
+    // node. The collision is an explicit Gap citing both declarations.
+    let root = collision_fixture();
+    let ex = extract_dir(&root, &id()).unwrap();
+    let gaps = collision_gaps(&ex);
+    assert_eq!(gaps.len(), 1, "only the root-module collision is a Gap");
+    let gap = gaps[0];
+    assert_eq!(
+        gap.id,
+        "gap:tf-address-collision:qwtm/infra@aws_sqs_queue.orders"
+    );
+    assert_eq!(gap.label, "Gap");
+    assert_eq!(gap.props["address"], "aws_sqs_queue.orders");
+    assert_eq!(gap.props["resource"], "res:qwtm/infra@aws_sqs_queue.orders");
+    assert_eq!(
+        gap.props["root_modules"],
+        serde_json::json!(["envs/prod", "envs/staging"])
+    );
+    let prov: Provenance = serde_json::from_value(gap.props["prov"].clone()).unwrap();
+    assert_eq!(prov.tier, Tier::Deterministic);
+    assert_eq!(prov.confidence_tier, ConfidenceTier::Gap);
+    let paths: Vec<&str> = prov.evidence.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, vec!["envs/prod/main.tf", "envs/staging/main.tf"]);
+    let declarations = gap.props["declarations"].as_array().unwrap();
+    assert_eq!(declarations.len(), 2);
+    for (declaration, evidence) in declarations.iter().zip(&prov.evidence) {
+        assert_eq!(declaration["path"], evidence.path.as_str());
+        assert_eq!(declaration["byte_start"], evidence.byte_start);
+        assert_eq!(declaration["byte_end"], evidence.byte_end);
+        let source = std::fs::read_to_string(root.join(&evidence.path)).unwrap();
+        let span = &source[evidence.byte_start as usize..evidence.byte_end as usize];
+        assert!(span.starts_with(r#"resource "aws_sqs_queue" "orders""#));
+    }
+    // The resource id is unchanged; the Gap sits beside it.
+    assert!(
+        ex.nodes
+            .iter()
+            .any(|node| node.id == "res:qwtm/infra@aws_sqs_queue.orders")
+    );
+}
+
+#[test]
+fn child_module_reads_are_not_root_module_collisions() {
+    // AC-0689: the plain walk also reads local child modules unprefixed, so
+    // modules/prod_dlq and modules/staging_dlq both yield aws_sqs_queue.dlq;
+    // they are module sources, not root modules, and get no Gap. A tree
+    // with a root module and its child sharing an address gets none either.
+    let ex = extract_dir(&collision_fixture(), &id()).unwrap();
+    assert!(
+        !collision_gaps(&ex)
+            .iter()
+            .any(|gap| gap.props["address"] == "aws_sqs_queue.dlq")
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("modules/queue")).unwrap();
+    std::fs::write(
+        dir.path().join("main.tf"),
+        r#"resource "aws_sqs_queue" "q" {}
+module "orders" { source = "./modules/queue" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("modules/queue/main.tf"),
+        r#"resource "aws_sqs_queue" "q" {}"#,
+    )
+    .unwrap();
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    assert!(collision_gaps(&ex).is_empty());
+    assert!(!ex.nodes.iter().any(|node| node.label == "Gap"));
+}
+
+#[test]
+fn root_module_collision_gap_is_deterministic() {
+    // AC-0689: two runs over the same tree produce identical facts.
+    let root = collision_fixture();
+    let a = extract_dir(&root, &id()).unwrap();
+    let b = extract_dir(&root, &id()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&a.nodes).unwrap(),
+        serde_json::to_string(&b.nodes).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&a.edges).unwrap(),
+        serde_json::to_string(&b.edges).unwrap()
+    );
+    // A warm incremental cache yields the same Gap as a cold run.
+    let mut cache = IncrementalCache::default();
+    let _ = extract_dir_incremental(&root, &id(), &mut cache).unwrap();
+    let (warm, _) = extract_dir_incremental(&root, &id(), &mut cache).unwrap();
+    assert_eq!(
+        serde_json::to_string(&warm.nodes).unwrap(),
+        serde_json::to_string(&a.nodes).unwrap()
+    );
+}
