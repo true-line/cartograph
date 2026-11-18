@@ -16,6 +16,7 @@ pub(crate) mod provider_workspace;
 pub(crate) mod query_workspace;
 mod recovery;
 mod runtime;
+pub(crate) mod section_drafts;
 #[cfg(unix)]
 pub(crate) mod source_candidate_workspace;
 #[cfg(unix)]

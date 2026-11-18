@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 
 /// Deterministic extractor id for Markdown ADR/RFC files.
 pub const FOUND_ADR_EXTRACTOR_ID: &str = "t0.adr-markdown";
+/// Largest found ADR/RFC file the reader stores, in bytes. A larger file is
+/// not read and is reported as [`UnreadAdrReason::TooLarge`] (#1847).
+pub const MAX_FOUND_ADR_BYTES: u64 = 1024 * 1024;
 /// Local semantic projection id for recovered decision drafts.
 pub const RECOVERED_ADR_EXTRACTOR_ID: &str = "t2.adr-recovery";
 
@@ -26,6 +29,37 @@ pub struct AdrFacts {
     pub nodes: Vec<Node>,
     /// DECIDES/CONFLICTS/DRIFTS_FROM edges.
     pub edges: Vec<Edge>,
+}
+
+/// Why a found ADR/RFC file was not read (#1847). No fact from it joined the
+/// graph, and the coverage inventory names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnreadAdrReason {
+    /// Larger than [`MAX_FOUND_ADR_BYTES`].
+    TooLarge,
+    /// Not valid UTF-8.
+    NotUtf8,
+}
+
+/// One found ADR/RFC file the reader did not read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct UnreadAdr {
+    /// Repo-relative path.
+    pub path: String,
+    /// Why it was not read.
+    pub reason: UnreadAdrReason,
+}
+
+/// What one found-ADR read recovered and what it could not read (#1847).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct FoundAdrRead {
+    /// ADR nodes and DECIDES edges.
+    pub facts: AdrFacts,
+    /// ADR files read.
+    pub files: u64,
+    /// ADR files not read, in path order.
+    pub unread: Vec<UnreadAdr>,
 }
 
 fn collect_adr_files(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -163,26 +197,61 @@ pub fn extract_found_adrs_among(
     commit: &str,
     is_candidate: impl Fn(&str) -> bool,
 ) -> std::io::Result<AdrFacts> {
+    read_found_adrs_among(root, repo, commit, is_candidate).map(|read| read.facts)
+}
+
+/// [`extract_found_adrs_among`] that also reports how many ADR files it read
+/// and which it skipped, so the coverage inventory can name them (#1847).
+///
+/// The stored `body`, `title` and `status` pass the shared free-text
+/// redaction ([`core_redact::redact_text`]) before they enter the graph, as
+/// every other reader that stores target text does; a node whose text was
+/// redacted carries the replacement count as `redactions`. Evidence spans
+/// still cite the file's own bytes.
+pub fn read_found_adrs_among(
+    root: &Path,
+    repo: &str,
+    commit: &str,
+    is_candidate: impl Fn(&str) -> bool,
+) -> std::io::Result<FoundAdrRead> {
     let mut files = Vec::new();
     collect_adr_files(root, &mut files)?;
     files.sort();
-    let mut facts = AdrFacts::default();
+    let mut read = FoundAdrRead::default();
+    let facts = &mut read.facts;
     for file in files {
-        if file.metadata()?.len() > 1024 * 1024 {
-            continue;
-        }
-        let markdown = std::fs::read_to_string(&file)?;
         let relative = file
             .strip_prefix(root)
             .expect("ADR file remains under root")
             .to_string_lossy()
             .replace('\\', "/");
-        let title = heading(
+        let mut skip = |reason| {
+            read.unread.push(UnreadAdr {
+                path: relative.clone(),
+                reason,
+            })
+        };
+        if file.metadata()?.len() > MAX_FOUND_ADR_BYTES {
+            skip(UnreadAdrReason::TooLarge);
+            continue;
+        }
+        let Ok(markdown) = String::from_utf8(std::fs::read(&file)?) else {
+            skip(UnreadAdrReason::NotUtf8);
+            continue;
+        };
+        read.files += 1;
+        // Stored text is redacted; identity, spans and governed ids are read
+        // from the file as written.
+        let (body, mut redactions) = core_redact::redact_text(&markdown);
+        let (title, title_redactions) = core_redact::redact_text(&heading(
             &markdown,
             file.file_stem()
                 .and_then(|value| value.to_str())
                 .unwrap_or("Untitled decision"),
-        );
+        ));
+        let (status, status_redactions) =
+            core_redact::redact_text(&field(&markdown, "Status").unwrap_or_else(|| "Found".into()));
+        redactions += title_redactions + status_redactions;
         let adr_id = format!("adr:{repo}@{relative}");
         let file_evidence = evidence(repo, &relative, commit, 0, markdown.len());
         let provenance = Provenance::new(
@@ -204,19 +273,25 @@ pub fn extract_found_adrs_among(
                     .all(|character| character.is_ascii_uppercase() || character == '_')
             })
             .collect::<Vec<_>>();
+        let mut props = serde_json::json!({
+            "title": title,
+            "status": status,
+            "body": body,
+            "path": relative,
+            "origin": "found",
+            "recovered": false,
+            "forbids": forbids,
+            "prov": provenance,
+        });
+        // Present only when something was replaced, so an ADR without a
+        // recognized secret keeps the fact it had before #1847.
+        if redactions > 0 {
+            props["redactions"] = redactions.into();
+        }
         facts.nodes.push(Node {
             id: adr_id.clone(),
             label: "ADR".into(),
-            props: serde_json::json!({
-                "title": title,
-                "status": field(&markdown, "Status").unwrap_or_else(|| "Found".into()),
-                "body": markdown,
-                "path": relative,
-                "origin": "found",
-                "recovered": false,
-                "forbids": forbids,
-                "prov": provenance,
-            }),
+            props,
         });
 
         let mut mentions: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -254,7 +329,8 @@ pub fn extract_found_adrs_among(
     facts.edges.sort_by(|left, right| {
         (&left.src, &left.dst, &left.label).cmp(&(&right.src, &right.dst, &right.label))
     });
-    Ok(facts)
+    read.unread.sort();
+    Ok(read)
 }
 
 fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {
@@ -701,6 +777,70 @@ mod tests {
             facts.edges[0].props["prov"]["evidence"][0]["byte_start"],
             expected_start as u64
         );
+    }
+
+    #[test]
+    fn found_adr_text_is_redacted_and_unreadable_files_are_reported() {
+        // AC-0685 (T-0685, #1847): stored ADR text passes the shared
+        // redaction; a too-large or non-UTF-8 file is skipped and reported,
+        // and the other ADRs are still read.
+        let dir = tempfile::tempdir().unwrap();
+        let adr = dir.path().join("docs/adr");
+        std::fs::create_dir_all(&adr).unwrap();
+        let secret = "sk-abcdefghijklmnop1234";
+        std::fs::write(
+            adr.join("ADR-0001-keys.md"),
+            format!(
+                "# Rotate keys\n\n- **Status:** Accepted\n- **Governs:** `chan:orders`\n\nUse api_key={secret} until rotation.\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            adr.join("ADR-0002-clean.md"),
+            "# Clean\n\nNothing secret.\n",
+        )
+        .unwrap();
+        std::fs::write(adr.join("ADR-0003-latin1.md"), b"# Caf\xe9\n").unwrap();
+        std::fs::write(
+            adr.join("ADR-0004-huge.md"),
+            "x".repeat(MAX_FOUND_ADR_BYTES as usize + 1),
+        )
+        .unwrap();
+        let read =
+            read_found_adrs_among(dir.path(), "local/shop", "abc123", |id| id == "chan:orders")
+                .unwrap();
+        assert_eq!(read.files, 2);
+        assert_eq!(
+            read.unread,
+            vec![
+                UnreadAdr {
+                    path: "docs/adr/ADR-0003-latin1.md".into(),
+                    reason: UnreadAdrReason::NotUtf8,
+                },
+                UnreadAdr {
+                    path: "docs/adr/ADR-0004-huge.md".into(),
+                    reason: UnreadAdrReason::TooLarge,
+                },
+            ]
+        );
+        assert_eq!(read.facts.nodes.len(), 2);
+        let keys = &read.facts.nodes[0];
+        let stored = serde_json::to_string(&keys.props).unwrap();
+        assert!(!stored.contains(secret), "secret stored: {stored}");
+        assert!(keys.props["body"].as_str().unwrap().contains("[REDACTED"));
+        assert!(keys.props["redactions"].as_u64().unwrap() >= 1);
+        // Spans and governed links still cite the file's own bytes.
+        let raw = std::fs::read_to_string(adr.join("ADR-0001-keys.md")).unwrap();
+        assert_eq!(
+            keys.props["prov"]["evidence"][0]["byte_end"],
+            raw.len() as u64
+        );
+        assert_eq!(read.facts.edges.len(), 1);
+        assert_eq!(read.facts.edges[0].dst, "chan:orders");
+        // An ADR with nothing to redact keeps the props it had before.
+        let clean = &read.facts.nodes[1];
+        assert_eq!(clean.props["body"], "# Clean\n\nNothing secret.\n");
+        assert!(clean.props.get("redactions").is_none());
     }
 
     #[test]

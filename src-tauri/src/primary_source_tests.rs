@@ -3188,3 +3188,77 @@ fn receipt_share_follows_each_sources_captured_bytes() {
     assert_eq!(kept, 3);
     assert!(omitted.is_empty());
 }
+
+// AC-0838: reclamation demonstrably frees receipt store capacity. A recovery
+// that a full store left with store-capacity omissions keeps every receipt
+// once forget or supersession has reclaimed the rows nothing pins (#725).
+#[test]
+fn ac0838_forget_and_supersession_free_room_for_omitted_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let forgotten_root = directory(dir.path(), "forgotten");
+    let waiting_root = directory(dir.path(), "waiting");
+    std::fs::write(forgotten_root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(waiting_root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let forgotten = register_local_source(&state, &forgotten_root).unwrap();
+    let waiting = register_local_source(&state, &waiting_root).unwrap();
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 3;
+
+    // Persist, publish the retained receipts' bindings, and report what was
+    // kept, what the store named as omitted, and the capture id.
+    let recover = |source: &RegisteredSource| {
+        let parsed = parse(&state, source, || {});
+        let mut kept = parsed.receipts.clone();
+        let (omitted, _) = state
+            .primary_sources
+            .persist(&parsed.input, source, &parsed.receipts)
+            .unwrap()
+            .keep_retained(&mut kept);
+        let bindings = primary_source::matching_bindings(&parsed.extraction, &kept);
+        load_into_graph_with_bindings(
+            &mut state.graph.lock().unwrap(),
+            &parsed.extraction,
+            &source.repo_key,
+            source.root(),
+            "workdir",
+            &bindings,
+            None,
+        )
+        .unwrap();
+        let capture_id = parsed.input.capture.as_ref().unwrap().id().to_owned();
+        (parsed.receipts.len(), kept.len(), omitted, capture_id)
+    };
+    let all_omitted = BTreeMap::from([("source.ts".to_string(), 3)]);
+
+    // Forget: the first source fills the store, so the second keeps nothing.
+    assert_eq!(recover(&forgotten).1, 3);
+    let (total, kept, omitted, _) = recover(&waiting);
+    assert_eq!((total, kept), (3, 0));
+    assert_eq!(omitted, all_omitted);
+    let preview = primary_source::preview(&state, &forgotten.source_id).unwrap();
+    primary_source::forget(&state, &forgotten.source_id, &preview.fingerprint).unwrap();
+    assert_eq!(receipt_store_accounting(&app_data).0, 0);
+    let (total, kept, omitted, capture_id) = recover(&waiting);
+    assert_eq!((total, kept), (3, 3));
+    assert!(omitted.is_empty());
+    assert_eq!(
+        primary_source::reclaim_superseded(&state, &waiting, &capture_id).unwrap(),
+        0
+    );
+
+    // Supersession: a changed capture finds the store full of its own
+    // earlier receipts, which its publish no longer binds.
+    std::fs::write(waiting_root.join("source.ts"), STABLE_B).unwrap();
+    let (total, kept, omitted, capture_id) = recover(&waiting);
+    assert_eq!((total, kept), (3, 0));
+    assert_eq!(omitted, all_omitted);
+    assert_eq!(
+        primary_source::reclaim_superseded(&state, &waiting, &capture_id).unwrap(),
+        3
+    );
+    assert_eq!(receipt_store_accounting(&app_data).0, 0);
+    let (total, kept, omitted, _) = recover(&waiting);
+    assert_eq!((total, kept), (3, 3));
+    assert!(omitted.is_empty());
+}
