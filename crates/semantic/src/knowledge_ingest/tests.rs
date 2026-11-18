@@ -94,7 +94,7 @@ fn run_with(
     cache: &Arc<Mutex<EmbeddingCache>>,
 ) -> PhaseOutcome {
     let lease = cache.lock().unwrap().lease().unwrap();
-    run(nodes, provider, Arc::clone(cache), lease).unwrap()
+    run(nodes, &[], provider, Arc::clone(cache), lease).unwrap()
 }
 
 #[test]
@@ -269,4 +269,126 @@ fn unit_keys_hash_the_exact_text_the_cache_embeds() {
     }
     .key();
     assert_eq!(units, [("res:k".to_owned(), key)]);
+}
+
+fn flow(id: &str, trigger: &str, hops: &[(&str, &str, &str)]) -> Node {
+    let hops: Vec<_> = hops
+        .iter()
+        .map(|(src, label, dst)| {
+            serde_json::json!({"label": label, "src": "s", "dst": "d", "src_name": src, "dst_name": dst})
+        })
+        .collect();
+    node(
+        id,
+        "BusinessFlow",
+        serde_json::json!({
+            "name": format!("Traced flow from {trigger}"),
+            "trace": {"trigger": "ep", "trigger_kind": "Endpoint", "trigger_name": trigger, "hops": hops, "status": "Verified", "score": 1.0},
+            "prov": {"tier": "T2"},
+        }),
+    )
+}
+
+// AC-0499: a derived flow is a unit after the base's rules and before its
+// modules and symbols, rendered by its trigger, status and hops.
+#[test]
+fn derived_flows_are_units_rendered_by_their_hops() {
+    let mut nodes = base();
+    nodes.push(node("mod:m", "Module", serde_json::json!({"name": "m"})));
+    // A base node cannot pose as a flow, and only flows count as flows.
+    nodes.push(flow("business-flow:base", "GET /base", &[]));
+    let pay = flow(
+        "business-flow:b",
+        "POST /pay",
+        &[
+            ("POST /pay", "HANDLES", "PayController.pay"),
+            ("PayController.pay", "CALLS", "charge"),
+        ],
+    );
+    let refund = flow("business-flow:a", "POST /refund", &[]);
+    let stray = node("sym:stray", "Symbol", serde_json::json!({}));
+    let (units, omitted) = units_with_flows(&nodes, &[&pay, &refund, &stray, &pay]);
+    assert_eq!(omitted, 0);
+    let ids: Vec<_> = units.iter().map(|u| u.node_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "zz:ep",
+            "business-flow:a",
+            "business-flow:b",
+            "mod:m",
+            "sym:a",
+            "sym:b"
+        ]
+    );
+    assert_eq!(
+        units[2].text,
+        "BusinessFlow\nname: Traced flow from POST /pay\ntrigger: Endpoint POST /pay\nstatus: Verified\nhop: POST /pay HANDLES PayController.pay\nhop: PayController.pay CALLS charge"
+    );
+    // Without flows the units are the base units, as retrieval builds them.
+    assert_eq!(super::units(&nodes).0.len(), 4);
+}
+
+// AC-0499: flows past their share are counted and take no symbol's place
+// beyond it.
+#[test]
+fn flows_past_their_share_are_counted_as_omitted() {
+    let flows: Vec<_> = (0..MAX_FLOW_UNITS + 3)
+        .map(|i| flow(&format!("business-flow:{i:06}"), "GET /x", &[]))
+        .collect();
+    let refs: Vec<_> = flows.iter().collect();
+    let symbols: Vec<_> = (0..MAX_UNITS)
+        .map(|i| node(&format!("sym:{i:06}"), "Symbol", serde_json::json!({})))
+        .collect();
+    let (units, omitted) = units_with_flows(&symbols, &refs);
+    assert_eq!(units.len(), MAX_UNITS);
+    assert_eq!(omitted, 3 + MAX_FLOW_UNITS);
+    assert_eq!(
+        units
+            .iter()
+            .filter(|u| u.node_id.starts_with("business-flow:"))
+            .count(),
+        MAX_FLOW_UNITS
+    );
+    assert_eq!(
+        units[MAX_FLOW_UNITS - 1].node_id,
+        format!("business-flow:{:06}", MAX_FLOW_UNITS - 1)
+    );
+    assert_eq!(units[MAX_FLOW_UNITS].node_id, "sym:000000");
+}
+
+// AC-0499: a flow's text is redacted before the provider sees it, and an
+// unchanged flow is a cache hit.
+#[test]
+fn flow_units_are_redacted_and_reuse_cached_vectors() {
+    let canary = "AKIAIOSFODNN7EXAMPLE";
+    let (_dir, cache) = cache();
+    let provider = Recording::new(true);
+    let leaky = flow(
+        "business-flow:a",
+        "GET /keys",
+        &[("GET /keys", "CALLS", &format!("load password={canary}"))],
+    );
+    let embed = |flows: &[&Node]| {
+        let lease = cache.lock().unwrap().lease().unwrap();
+        run(&base(), flows, Some(&provider), Arc::clone(&cache), lease).unwrap()
+    };
+    let PhaseOutcome::Embedded { units, stats, .. } = embed(&[&leaky]) else {
+        panic!("phase skipped");
+    };
+    assert_eq!((units.len(), stats.unique_misses), (4, 4));
+    assert_eq!(units[1].0, "business-flow:a");
+    {
+        let sent = provider.sent.lock().unwrap();
+        assert!(sent.iter().all(|text| !text.contains(canary)));
+        assert!(
+            sent.iter()
+                .any(|text| text.starts_with("BusinessFlow\n") && text.contains("[REDACTED"))
+        );
+    }
+    let PhaseOutcome::Embedded { stats, .. } = embed(&[&leaky]) else {
+        panic!("phase skipped");
+    };
+    assert_eq!((stats.calls, stats.unique_misses, stats.hits), (0, 0, 4));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
