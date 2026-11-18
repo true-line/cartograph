@@ -828,3 +828,44 @@ fn auditor14_capacity_terminal_diagnostic_is_closed() {
         assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
     }
 }
+
+// AC-0725: rejected-action and preparation failure records are closed, text-free wire.
+#[test]
+fn failure_record_terminal_diagnostics_are_closed() {
+    let rejected = InvestigationTerminalDiagnostic::from(ActionDecodeFailure {
+        stage: ActionDecodeStage::SemanticRule(ActionSemanticRule::FindingCitations),
+        error: InvestigationError::InvalidCitation,
+    });
+    let preparation = InvestigationTerminalDiagnostic::Preparation {
+        phase: InvestigationFailurePhase::Query,
+    };
+    for (diagnostic, expected) in [
+        (
+            rejected,
+            json!({"schema":"investigation-terminal-diagnostic@5","stage":"finding_citations","reason":"invalid_citation"}),
+        ),
+        (
+            InvestigationTerminalDiagnostic::from(ActionDecodeFailure {
+                stage: ActionDecodeStage::Preflight,
+                error: InvestigationError::LimitExceeded,
+            }),
+            json!({"schema":"investigation-terminal-diagnostic@5","stage":"preflight","reason":"limit_exceeded"}),
+        ),
+        (
+            preparation,
+            json!({"schema":"investigation-terminal-diagnostic@6","phase":"query"}),
+        ),
+    ] {
+        let value = serde_json::to_value(diagnostic).unwrap();
+        assert_eq!(value, expected);
+        assert_eq!(
+            serde_json::from_value::<InvestigationTerminalDiagnostic>(value.clone()).unwrap(),
+            diagnostic
+        );
+        for field in ["stage", "reason", "phase", "response_text", "schema"] {
+            let mut changed = value.clone();
+            changed[field] = json!("provider prose");
+            assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
+        }
+    }
+}

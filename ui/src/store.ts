@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import type { RepoCoverage, RestoredCoverage } from './coverage';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
+import type { CuratedDraftCounts, CuratedDraftRow } from './sectionDocument';
 import type { SurfaceView } from './views';
 import type { EgressPreview } from './components/EgressConsentDialog';
 
@@ -510,6 +511,10 @@ export type CuratedRead =
       items: CuratedRecord[];
       items_omitted: number;
       listed: CuratedRecord[];
+      /** Every accepted section draft with its state (SPEC-15 slice 7,
+       *  AC-0669); absent from a host that predates it. No claim. */
+      drafts?: CuratedDraftRow[];
+      draft_counts?: CuratedDraftCounts;
       assertion_decisions: {
         digest: string;
         rejections_applied: number;
