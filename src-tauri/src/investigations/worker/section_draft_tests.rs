@@ -332,3 +332,73 @@ fn a_stale_accepted_draft_is_re_drafted_as_its_successor() {
     assert!(redraft_question(&state, &staged.draft_id).is_ok());
     assert_eq!(replaced(&state), Some(staged.draft_id.clone()));
 }
+
+// AC-0668: a draft is staged only against the graph snapshot its run froze.
+// A cited fact that keeps its id but changes content after the run (a
+// re-ingest, or a retry after the store failed) stages nothing.
+#[test]
+fn a_cited_fact_changed_after_the_run_stages_no_draft() {
+    let (_provider, fixture) = drafting(Mode::CompletionSupported, "1.5", spec::SYSTEM_SCOPE);
+    let state = fixture.base.app.state::<AppState>();
+    assert_eq!(status(&state, &fixture.id), InvestigationStatus::Completed);
+    // The store lost the draft the worker staged, so the next read stages
+    // again; against the unchanged graph it does.
+    let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let fresh = |state: &AppState, dir: &tempfile::TempDir| {
+        *state.drafts.lock().unwrap() =
+            agents::draft_store::DraftStore::open(dir.path().join("drafts.sqlite")).unwrap();
+    };
+    fresh(&state, &dirs[0]);
+    assert!(matches!(
+        stage(&state, &fixture.id),
+        Ok(DraftingOutcome::Staged { .. })
+    ));
+    fresh(&state, &dirs[1]);
+
+    // Change the content of a fact the finish cites, keeping its id.
+    let cited = {
+        let jobs = state.jobs.lock().unwrap();
+        let detail = jobs.investigation(&fixture.id).unwrap();
+        let result = jobs.investigation_result(&fixture.id).unwrap().unwrap();
+        detail
+            .citations
+            .iter()
+            .filter(|citation| {
+                result.findings[0]
+                    .citation_ids
+                    .contains(&citation.citation_id)
+            })
+            .find_map(|citation| match &citation.fact {
+                agents::TaskFactKey::Node { id } => Some(id.clone()),
+                agents::TaskFactKey::Edge { .. } => None,
+            })
+            .unwrap()
+    };
+    {
+        let mut graph = state.graph.lock().unwrap();
+        let expected = graph.read_snapshot().unwrap();
+        let mut node = expected
+            .0
+            .iter()
+            .find(|node| node.id == cited)
+            .unwrap()
+            .clone();
+        node.props["changed_after_run"] = serde_json::json!(true);
+        let patch = core_graph::GraphPatch {
+            upsert_nodes: vec![node],
+            ..Default::default()
+        };
+        assert!(
+            graph
+                .apply_patch_if_snapshot_matches(&expected, &patch)
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        stage(&state, &fixture.id),
+        Ok(DraftingOutcome::NoDraft {
+            reason: "graph_changed"
+        })
+    );
+    assert!(stored(&state).is_empty());
+}

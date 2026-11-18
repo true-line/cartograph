@@ -43,7 +43,7 @@ jobs:
   policy:
     name: Action Policy
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       mode: ${{ steps.policy.outputs.mode }}
@@ -64,7 +64,7 @@ jobs:
     name: Verify merged commit evidence
     needs: policy
     if: needs.policy.outputs.run_post_merge == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       validated: ${{ steps.evidence.outputs.validated }}
@@ -111,7 +111,7 @@ jobs:
     name: Verify preflight evidence
     needs: policy
     if: github.event_name == 'pull_request' && needs.policy.outputs.run_full == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       validated: ${{ steps.evidence.outputs.validated }}
@@ -140,7 +140,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout exact validation commit
@@ -180,7 +180,7 @@ jobs:
     # The organisation's Linux runner has passwordless sudo, so this lane
     # installs the Tauri system libraries and rustup from apt itself. rustup
     # then resolves the exact toolchain from rust-toolchain.toml.
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     # A hung mirror must fail the job in minutes, never hold its runner
     # slot to the 6-hour kill (#343; cold cargo builds finish well inside).
     # The budget is the heavy-slot wait (40 minutes) plus 49 of work: a
@@ -307,7 +307,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - name: Checkout exact validation commit
@@ -401,7 +401,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout exact validation commit
@@ -486,7 +486,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout exact validation commit
@@ -523,7 +523,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     # Playwright's --with-deps runs apt + a CDN download — same hang risk
     # as the Tauri dependency step (#343).
     timeout-minutes: 30
@@ -602,7 +602,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout exact validation commit
@@ -637,7 +637,7 @@ jobs:
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Verify every agreed complete-suite gate
@@ -664,7 +664,7 @@ jobs:
     name: Post-merge smoke
     needs: [policy, merge-evidence]
     if: needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout exact merged commit
@@ -686,7 +686,7 @@ jobs:
     # A superseded run must release its per-PR
     # concurrency slot instead of waiting for a runner (#1230).
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Enforce the selected lifecycle lane

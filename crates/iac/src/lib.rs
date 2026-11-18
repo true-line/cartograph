@@ -836,9 +836,17 @@ pub fn extract_dir_incremental_with_progress(
             &mut run,
         )?);
     }
-    expand_local_modules(&root, id, &mut out, &mut run)?;
+    // Declarations the plain walk read without a module prefix, captured
+    // before module expansion adds prefixed child contexts.
+    let unprefixed = unprefixed_declarations(&out.nodes);
+    let child_module_dirs = expand_local_modules(&root, id, &mut out, &mut run)?;
     out.resolve_policy_document_grants();
     out.close_over_endpoints();
+    out.nodes.extend(root_module_collision_gaps(
+        id,
+        unprefixed,
+        &child_module_dirs,
+    ));
     run.stats.deleted_files = old_keys.difference(&run.active).count() as u64;
     run.stats.distinct_files = run.paths.len() as u64;
     run.cache.files.retain(|key, _| run.active.contains(key));
@@ -854,14 +862,129 @@ pub fn terraform_file_count(root: &Path) -> Result<u64, ExtractError> {
     Ok(files.len() as u64)
 }
 
+/// One unprefixed `Resource` declaration read by the plain directory walk.
+struct UnprefixedDeclaration {
+    address: String,
+    evidence: EvidenceRef,
+}
+
+fn unprefixed_declarations(nodes: &[Node]) -> Vec<UnprefixedDeclaration> {
+    nodes
+        .iter()
+        .filter(|node| node.label == "Resource")
+        .filter_map(|node| {
+            let address = node.props.get("logical_id")?.as_str()?.to_string();
+            let provenance =
+                serde_json::from_value::<Provenance>(node.props.get("prov")?.clone()).ok()?;
+            let evidence = provenance.evidence.into_iter().next()?;
+            Some(UnprefixedDeclaration { address, evidence })
+        })
+        .collect()
+}
+
+/// Repo-relative directory of a repo-relative file path (`""` = the root).
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// Gap id for a Terraform address declared by more than one root module.
+fn root_module_collision_gap_id(repo: &str, address: &str) -> String {
+    format!("gap:tf-address-collision:{repo}@{address}")
+}
+
+/// Resource ids are `res:{repo}@{address}` with no root-module scope, so the
+/// same address declared in two root-module directories (`envs/prod`,
+/// `envs/staging`) names one node and the store keeps only one declaration
+/// (#1844). Until ids are scoped by root module, each such address gets an
+/// explicit Gap citing every declaring span (R-INT-4) instead of a silent
+/// loss. Directories that are the resolved source of a local module call are
+/// child modules, not root modules: the plain walk reads them unprefixed as
+/// well, and those reads never count as a collision. A repository with no
+/// collision gets no Gap, so its graph is unchanged.
+fn root_module_collision_gaps(
+    id: &SourceId,
+    declarations: Vec<UnprefixedDeclaration>,
+    child_module_dirs: &BTreeSet<String>,
+) -> Vec<Node> {
+    let mut by_address = BTreeMap::<String, BTreeMap<String, Vec<EvidenceRef>>>::new();
+    for declaration in declarations {
+        let dir = parent_dir(&declaration.evidence.path).to_string();
+        if child_module_dirs.contains(&dir) {
+            continue;
+        }
+        by_address
+            .entry(declaration.address)
+            .or_default()
+            .entry(dir)
+            .or_default()
+            .push(declaration.evidence);
+    }
+
+    let mut gaps = Vec::new();
+    for (address, mut by_root) in by_address {
+        if by_root.len() < 2 {
+            continue;
+        }
+        let gap_id = root_module_collision_gap_id(id.repo, &address);
+        let mut evidence = Vec::new();
+        let mut cited = Vec::new();
+        for (dir, spans) in &mut by_root {
+            spans.sort_by(|a, b| {
+                (&a.path, a.byte_start, a.byte_end).cmp(&(&b.path, b.byte_start, b.byte_end))
+            });
+            let root_module = if dir.is_empty() { "." } else { dir.as_str() };
+            for span in spans.iter() {
+                cited.push(serde_json::json!({
+                    "root_module": root_module,
+                    "path": span.path,
+                    "byte_start": span.byte_start,
+                    "byte_end": span.byte_end,
+                }));
+                evidence.push(span.clone());
+            }
+        }
+        let root_modules: Vec<&str> = by_root
+            .keys()
+            .map(|dir| if dir.is_empty() { "." } else { dir.as_str() })
+            .collect();
+        let provenance = Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Gap,
+            evidence,
+            EXTRACTOR_ID,
+            format!("Gap {gap_id} {}", serde_json::json!(cited)).as_bytes(),
+        )
+        .expect("Deterministic/Gap is always within ceiling");
+        gaps.push(Node {
+            id: gap_id,
+            label: "Gap".into(),
+            props: serde_json::json!({
+                "address": address,
+                "resource": resource_id(id.repo, &address),
+                "root_modules": root_modules,
+                "declarations": cited,
+                "reason": "Terraform address declared in more than one root module; \
+                    resource ids are not scoped by root module, so only one \
+                    declaration is kept",
+                "attempted_tiers": ["T0"],
+                "prov": provenance,
+            }),
+        });
+    }
+    gaps
+}
+
+/// Expand local module calls; returns the repo-relative directories resolved
+/// as local module sources (child modules, never root modules).
 fn expand_local_modules(
     root: &Path,
     id: &SourceId,
     out: &mut Extraction,
     run: &mut CacheRun<'_>,
-) -> Result<(), ExtractError> {
+) -> Result<BTreeSet<String>, ExtractError> {
     let mut pending = std::mem::take(&mut out.module_declarations);
     let mut expanded = BTreeSet::new();
+    let mut child_module_dirs = BTreeSet::new();
 
     while !pending.is_empty() {
         pending.sort_by(|a, b| {
@@ -875,6 +998,9 @@ fn expand_local_modules(
         let Some(source_dir) = resolve_local_module_source(root, &declaration) else {
             continue;
         };
+        if let Ok(rel) = source_dir.strip_prefix(root) {
+            child_module_dirs.insert(rel.to_string_lossy().replace('\\', "/"));
+        }
 
         let mut ancestors = declaration.ancestors.clone();
         if ancestors.is_empty()
@@ -937,7 +1063,7 @@ fn expand_local_modules(
         out.absorb(module_extraction);
     }
 
-    Ok(())
+    Ok(child_module_dirs)
 }
 
 fn resolve_local_module_source(root: &Path, declaration: &ModuleDeclaration) -> Option<PathBuf> {
