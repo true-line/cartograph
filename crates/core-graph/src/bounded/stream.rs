@@ -6,8 +6,12 @@ use super::{
     preflight_schema,
 };
 use crate::scoped::ScopedGraphReader;
-use crate::{Edge, GraphError, Node, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore};
+use crate::{
+    Edge, GraphError, IdentityPassLimits, Node, SnapshotBoundsError, SnapshotReadLimits,
+    SqliteGraphStore,
+};
 use rusqlite::Connection;
+use serde_json::Value;
 
 /// One complete-graph row, delivered in context identity order: every node
 /// by `id`, then every edge by `(src, label, dst)`, all in SQLite BINARY order.
@@ -31,17 +35,22 @@ pub struct StreamedSnapshot {
 impl SqliteGraphStore {
     /// Stream the complete graph in one SQLite revision under `limits`.
     ///
-    /// It admits exactly the graphs [`Self::read_snapshot_bounded`] admits:
-    /// the same row, raw byte, depth, value and canonical byte limits. It
-    /// retains one row at a time. The visitor may already have seen rows when
+    /// Under [`IdentityPassLimits::uniform`] (what a plain
+    /// [`SnapshotReadLimits`] converts to) it admits exactly the graphs
+    /// [`Self::read_snapshot_bounded`] admits: the same row, raw byte, depth,
+    /// value and canonical byte limits. `limits.complete` is that aggregate
+    /// admission and `limits.row` additionally caps the one row retained at a
+    /// time (raw bytes before its body is copied, property values and depth
+    /// while it decodes). The visitor may already have seen rows when
     /// a later row or the final canonical byte total is refused, so a caller
     /// must discard what it built on any error. A graph refused for more than
     /// one reason may report a different one of those reasons.
     pub fn visit_snapshot_bounded<E: From<GraphError>>(
         &self,
-        limits: SnapshotReadLimits,
+        limits: impl Into<IdentityPassLimits>,
         visit: impl FnMut(SnapshotRow) -> Result<(), E>,
     ) -> Result<StreamedSnapshot, E> {
+        let limits = limits.into();
         limits.validate().map_err(E::from)?;
         let transaction = self
             .conn
@@ -60,33 +69,44 @@ impl SqliteGraphStore {
 impl ScopedGraphReader<'_> {
     /// Stream the complete graph inside this reader's pinned transaction, so a
     /// scoped acquisition and a complete-graph identity share one revision.
-    /// `limits` apply to this stream alone and do not charge the scoped budgets.
+    /// `limits` apply to this stream alone and do not charge the scoped budgets;
+    /// [`IdentityPassLimits::for_retained`] with [`Self::limits`] is the
+    /// preparation choice (ADR-0052 amendment 2026-11-18).
     pub fn visit_complete_snapshot<E: From<GraphError>>(
         &self,
-        limits: SnapshotReadLimits,
+        limits: impl Into<IdentityPassLimits>,
         visit: impl FnMut(SnapshotRow) -> Result<(), E>,
     ) -> Result<StreamedSnapshot, E> {
+        let limits = limits.into();
         limits.validate().map_err(E::from)?;
         visit_rows(self.connection(), limits, visit)
     }
 }
 
-/// Walks the primary-key index; no sort.
-const NODES_IN_IDENTITY_ORDER: &str =
-    "SELECT id, label, props FROM nodes ORDER BY id COLLATE BINARY";
+/// Walks the primary-key index; no sort. The last column is the row's raw
+/// stored bytes, checked against the retained-row cap before any body is copied.
+const NODES_IN_IDENTITY_ORDER: &str = "SELECT id, label, props, \
+     length(CAST(id AS BLOB)) + length(CAST(label AS BLOB)) + length(CAST(props AS BLOB)) \
+     FROM nodes ORDER BY id COLLATE BINARY";
 /// The primary key orders edges (src, dst, label), so identity order would
 /// otherwise sort in a temp b-tree, held in memory under `temp_store=MEMORY`
 /// and as large as the biggest source's fan-out. `INDEXED BY` walks the
 /// (src, label, dst) index instead and fails closed if it is missing.
-const EDGES_IN_IDENTITY_ORDER: &str = "SELECT src, dst, label, props FROM edges \
+const EDGES_IN_IDENTITY_ORDER: &str = "SELECT src, dst, label, props, \
+     length(CAST(src AS BLOB)) + length(CAST(dst AS BLOB)) + length(CAST(label AS BLOB)) \
+     + length(CAST(props AS BLOB)) FROM edges \
      INDEXED BY idx_edges_src_label_dst \
      ORDER BY src COLLATE BINARY, label COLLATE BINARY, dst COLLATE BINARY";
 
 fn visit_rows<E: From<GraphError>>(
     connection: &Connection,
-    limits: SnapshotReadLimits,
+    limits: IdentityPassLimits,
     mut visit: impl FnMut(SnapshotRow) -> Result<(), E>,
 ) -> Result<StreamedSnapshot, E> {
+    let IdentityPassLimits {
+        complete: limits,
+        row: row_limits,
+    } = limits;
     preflight_schema(connection).map_err(E::from)?;
     preflight_rows(connection, limits).map_err(E::from)?;
     let mut budget = JsonBudget::new(limits);
@@ -119,10 +139,12 @@ fn visit_rows<E: From<GraphError>>(
             enter(&mut budget, 3)?;
             enter(&mut budget, 4)?; // id
             enter(&mut budget, 4)?; // label
+            admit_row(row, 3, row_limits).map_err(E::from)?;
             let id = field(row, 0).map_err(E::from)?;
             let label = field(row, 1).map_err(E::from)?;
             let props =
-                parse_properties(&field(row, 2).map_err(E::from)?, &mut budget).map_err(E::from)?;
+                decode_row_properties(&field(row, 2).map_err(E::from)?, &mut budget, row_limits)
+                    .map_err(E::from)?;
             let node = Node { id, label, props };
             canonical_ok = canonical_ok
                 && (streamed.nodes == 0 || count(&mut canonical, b","))
@@ -145,11 +167,13 @@ fn visit_rows<E: From<GraphError>>(
             enter(&mut budget, 4)?; // src
             enter(&mut budget, 4)?; // dst
             enter(&mut budget, 4)?; // label
+            admit_row(row, 4, row_limits).map_err(E::from)?;
             let src = field(row, 0).map_err(E::from)?;
             let dst = field(row, 1).map_err(E::from)?;
             let label = field(row, 2).map_err(E::from)?;
             let props =
-                parse_properties(&field(row, 3).map_err(E::from)?, &mut budget).map_err(E::from)?;
+                decode_row_properties(&field(row, 3).map_err(E::from)?, &mut budget, row_limits)
+                    .map_err(E::from)?;
             let edge = Edge {
                 src,
                 dst,
@@ -167,6 +191,56 @@ fn visit_rows<E: From<GraphError>>(
         return Err(E::from(SnapshotBoundsError::CanonicalByteLimit.into()));
     }
     Ok(streamed)
+}
+
+/// Refuse a row whose raw stored bytes exceed the retained-row cap, before
+/// its body is copied out of SQLite.
+fn admit_row(
+    row: &rusqlite::Row<'_>,
+    length_column: usize,
+    row_limits: SnapshotReadLimits,
+) -> Result<(), GraphError> {
+    let length = row
+        .get::<_, Option<i64>>(length_column)
+        .map_err(|_| SnapshotBoundsError::InvalidRow)?
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or(SnapshotBoundsError::InvalidRow)?;
+    if length > row_limits.max_bytes {
+        return Err(SnapshotBoundsError::SingleRowByteLimit.into());
+    }
+    Ok(())
+}
+
+/// Decode one row's properties against the smaller of the aggregate values
+/// left and the retained-row value cap, then charge the aggregate. A refusal
+/// is reported as the aggregate limit unless the row cap was the binding one,
+/// so uniform limits keep exactly the materialized read's errors.
+fn decode_row_properties(
+    raw: &str,
+    budget: &mut JsonBudget,
+    row_limits: SnapshotReadLimits,
+) -> Result<Value, GraphError> {
+    let available = budget.remaining;
+    let cap = row_limits.max_values.min(available);
+    let mut row_budget = JsonBudget {
+        limits: SnapshotReadLimits {
+            max_values: cap,
+            max_depth: row_limits.max_depth.min(budget.limits.max_depth),
+            ..budget.limits
+        },
+        remaining: cap,
+        failure: None,
+    };
+    match parse_properties(raw, &mut row_budget) {
+        Ok(value) => {
+            budget.remaining -= row_budget.consumed_values();
+            Ok(value)
+        }
+        Err(GraphError::SnapshotBounds(SnapshotBoundsError::JsonValueLimit)) if cap < available => {
+            Err(SnapshotBoundsError::SingleRowValueLimit.into())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn count(counter: &mut ByteCounter, bytes: &[u8]) -> bool {
@@ -297,6 +371,124 @@ mod tests {
             ),
             Err(GraphError::SnapshotBounds(
                 SnapshotBoundsError::CanonicalByteLimit
+            ))
+        ));
+    }
+
+    // T-0775 (#1602, ADR-0052 amendment 2026-11-18): the identity pass has
+    // its own aggregate caps; the retained-row limits cap only the one row
+    // held at a time, and each refusal names the cap that was hit.
+    #[test]
+    fn identity_pass_caps_are_separate_from_the_retained_row_caps() {
+        let store = store();
+        let expected = collect(&store, SnapshotReadLimits::default()).unwrap();
+        let retained = SnapshotReadLimits {
+            max_rows: 1,
+            max_bytes: 64,
+            max_values: 16,
+            ..SnapshotReadLimits::default()
+        };
+        let stream = |limits: IdentityPassLimits| {
+            let mut rows = Vec::new();
+            store
+                .visit_snapshot_bounded(limits, |row| {
+                    rows.push(row);
+                    Ok::<_, GraphError>(())
+                })
+                .map(|_| rows)
+        };
+        // Six rows exceed the retained row count, yet the pass admits them.
+        assert!(matches!(
+            store.read_snapshot_bounded(retained),
+            Err(GraphError::SnapshotBounds(SnapshotBoundsError::RowLimit))
+        ));
+        let preparation = IdentityPassLimits::for_retained(retained);
+        assert_eq!(preparation.complete, SnapshotReadLimits::investigation());
+        assert_eq!(preparation.complete.max_rows, 10_000_000);
+        assert_eq!(preparation.complete.max_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(stream(preparation).unwrap(), expected);
+        // One row over the retained byte or value cap is refused as that row.
+        for (row, refusal) in [
+            (
+                SnapshotReadLimits {
+                    max_bytes: 1,
+                    ..retained
+                },
+                SnapshotBoundsError::SingleRowByteLimit,
+            ),
+            (
+                SnapshotReadLimits {
+                    max_values: 1,
+                    ..retained
+                },
+                SnapshotBoundsError::SingleRowValueLimit,
+            ),
+            (
+                SnapshotReadLimits {
+                    max_depth: 4,
+                    ..retained
+                },
+                SnapshotBoundsError::JsonDepthLimit,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    stream(IdentityPassLimits::for_retained(row)),
+                    Err(GraphError::SnapshotBounds(error)) if error == refusal
+                ),
+                "{refusal:?}"
+            );
+        }
+        // The aggregate caps still apply to the whole stream and keep their
+        // own errors, even when the row cap is looser.
+        let total_values = (1..200)
+            .find(|&max_values| {
+                stream(
+                    SnapshotReadLimits {
+                        max_values,
+                        ..SnapshotReadLimits::default()
+                    }
+                    .into(),
+                )
+                .is_ok()
+            })
+            .unwrap();
+        for (complete, refusal) in [
+            (
+                SnapshotReadLimits {
+                    max_rows: 5,
+                    ..SnapshotReadLimits::default()
+                },
+                SnapshotBoundsError::RowLimit,
+            ),
+            (
+                SnapshotReadLimits {
+                    max_values: total_values - 1,
+                    ..SnapshotReadLimits::default()
+                },
+                SnapshotBoundsError::JsonValueLimit,
+            ),
+        ] {
+            let limits = IdentityPassLimits {
+                complete,
+                row: SnapshotReadLimits::default(),
+            };
+            assert!(
+                matches!(
+                    stream(limits),
+                    Err(GraphError::SnapshotBounds(error)) if error == refusal
+                ),
+                "{refusal:?}"
+            );
+        }
+        // Invalid row limits are refused like invalid aggregate limits.
+        assert!(matches!(
+            stream(IdentityPassLimits::for_retained(SnapshotReadLimits {
+                max_values: 0,
+                ..retained
+            })),
+            Err(GraphError::SnapshotBounds(
+                SnapshotBoundsError::InvalidLimits
             ))
         ));
     }

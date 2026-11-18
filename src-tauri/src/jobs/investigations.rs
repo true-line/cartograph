@@ -31,6 +31,11 @@ mod next_prompt_invocation;
 pub(crate) use next_prompt_invocation::NextPromptInvocation;
 #[path = "investigations/coverage.rs"]
 mod coverage;
+// Constructed once scoped preparation is wired (#1602); until then only tests.
+#[cfg_attr(not(test), allow(dead_code))]
+#[path = "investigations/graph_snapshot_limit.rs"]
+mod graph_snapshot_limit;
+pub(crate) use graph_snapshot_limit::GraphSnapshotLimit;
 #[cfg(test)]
 #[path = "investigations/coverage_tests.rs"]
 mod coverage_tests;
@@ -427,6 +432,9 @@ pub(crate) enum InvestigationStopReason {
         phase: PreparationPhase,
         limit: HostLimitKind,
     },
+    /// A scoped-preparation snapshot read stopped at a named limit (#1602).
+    #[cfg_attr(not(test), allow(dead_code))]
+    GraphSnapshotLimit(GraphSnapshotLimit),
     StoreCapacity,
     OutcomeUnknown,
     ConsentExpired,
@@ -461,6 +469,7 @@ impl InvestigationStopReason {
             Self::PreparationAt(_) => Self::PreparationFailed,
             Self::HostLimit
             | Self::HostLimitAt { .. }
+            | Self::GraphSnapshotLimit(_)
             | Self::StoreCapacity
             | Self::BudgetCap(_) => Self::LimitExceeded,
             Self::ActionDecode(failure) => Self::InvalidNextAction(failure.error),
@@ -490,6 +499,7 @@ impl InvestigationStopReason {
             Phase::SourceReservation,
         ];
         message == Self::HostLimit.message()
+            || GraphSnapshotLimit::all().any(|limit| limit.message() == message)
             || phases.into_iter().any(|phase| {
                 Self::HostLimitAt {
                     phase,
@@ -715,6 +725,7 @@ impl InvestigationStopReason {
                     "Investigation limit reached: host_limit; phase=source_reservation; limit=unspecified."
                 }
             },
+            Self::GraphSnapshotLimit(limit) => limit.message(),
             Self::StoreCapacity => "Investigation limit reached: store_capacity.",
             Self::BoundedProvider(error) => {
                 use llm::bounded::{FailureCode as Code, InvocationOutcome};

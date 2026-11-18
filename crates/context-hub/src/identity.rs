@@ -7,7 +7,7 @@
 //! drafting staging compare while retaining only its own scope.
 use crate::{ContextError, ContextSnapshot, canonicalize, edge_reference};
 use core_graph::{
-    Edge, GraphError, Node, SnapshotReadLimits, SnapshotRow, SqliteGraphStore,
+    Edge, GraphError, IdentityPassLimits, Node, SnapshotRow, SqliteGraphStore,
     scoped::ScopedGraphReader,
 };
 
@@ -123,11 +123,14 @@ pub enum CompleteIdentityError {
 
 impl ContextSnapshot {
     /// The id [`ContextSnapshot::new`] would assign to the complete stored
-    /// graph, read in one revision under the same admission as
-    /// [`SqliteGraphStore::read_snapshot_bounded`], retaining one row at a time.
+    /// graph, read in one revision, retaining one row at a time. A plain
+    /// [`core_graph::SnapshotReadLimits`] gives the same admission as
+    /// [`SqliteGraphStore::read_snapshot_bounded`];
+    /// [`IdentityPassLimits::for_retained`] gives the preparation caps
+    /// (ADR-0052 amendment 2026-11-18).
     pub fn complete_id_bounded(
         store: &SqliteGraphStore,
-        limits: SnapshotReadLimits,
+        limits: impl Into<IdentityPassLimits>,
     ) -> Result<String, CompleteIdentityError> {
         let mut builder = ContextIdentityBuilder::new();
         store.visit_snapshot_bounded(limits, |row| {
@@ -140,7 +143,7 @@ impl ContextSnapshot {
     /// transaction, so the id and the scoped facts describe one revision.
     pub fn complete_id_in(
         reader: &ScopedGraphReader<'_>,
-        limits: SnapshotReadLimits,
+        limits: impl Into<IdentityPassLimits>,
     ) -> Result<String, CompleteIdentityError> {
         let mut builder = ContextIdentityBuilder::new();
         reader.visit_complete_snapshot(limits, |row| {
@@ -153,7 +156,7 @@ impl ContextSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_graph::GraphStore;
+    use core_graph::{GraphStore, SnapshotReadLimits};
     use serde_json::json;
 
     fn node(id: &str, props: serde_json::Value) -> Node {
@@ -274,6 +277,52 @@ mod tests {
             ContextSnapshot::complete_id_bounded(&store, tight),
             Err(CompleteIdentityError::Graph(
                 core_graph::GraphError::SnapshotBounds(core_graph::SnapshotBoundsError::RowLimit)
+            ))
+        ));
+    }
+
+    // T-0775 (#1602, ADR-0052 amendment 2026-11-18): under the preparation
+    // caps the complete id is computed for a graph past the retained limits,
+    // inside a scoped reader held to those limits, and it is still exactly
+    // the materialized snapshot id.
+    #[test]
+    fn preparation_caps_keep_the_complete_id_past_the_retained_limits() {
+        let graph = graph();
+        let store = store(&graph);
+        let expected = snapshot_id(&store);
+        let retained = SnapshotReadLimits {
+            max_rows: 2,
+            ..SnapshotReadLimits::default()
+        };
+        assert!(store.read_snapshot_bounded(retained).is_err());
+        let caps = IdentityPassLimits::for_retained(retained);
+        assert_eq!(
+            ContextSnapshot::complete_id_bounded(&store, caps).unwrap(),
+            expected
+        );
+        let revision = store.read_revision().unwrap();
+        let inside = store
+            .with_scoped_reader(&revision, retained, |reader| {
+                ContextSnapshot::complete_id_in(
+                    reader,
+                    IdentityPassLimits::for_retained(reader.limits()),
+                )
+            })
+            .unwrap();
+        assert_eq!(inside, expected);
+        // A single row past the retained bytes is refused, never hashed.
+        assert!(matches!(
+            ContextSnapshot::complete_id_bounded(
+                &store,
+                IdentityPassLimits::for_retained(SnapshotReadLimits {
+                    max_bytes: 8,
+                    ..retained
+                })
+            ),
+            Err(CompleteIdentityError::Graph(
+                core_graph::GraphError::SnapshotBounds(
+                    core_graph::SnapshotBoundsError::SingleRowByteLimit
+                )
             ))
         ));
     }
