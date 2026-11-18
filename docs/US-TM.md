@@ -147,6 +147,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0070 | Environments as declared deployable sets, never as names: `Environment`, `Workload`, `DECLARES`; a name-only environment is a Gap (proposed; #1791, owner review) |
 | ADR-0071 | Specialist roles: one current version per role (analyst@27, auditor@14, spec-writer@2, gap-triager@2, section-writer@1), retired versions reopen read-only with their original id, and one capability table replaces the `uses_*` predicates (proposed; #1751, owner review) |
 | ADR-0072 | Producer input closure as a typed content-addressed input set, append-only reconciliation results for staged proposals, and own source/capture identities for manifest-supplied external evidence (proposed; #385, owner review) |
+| ADR-0073 | Authority and grants for MCP-started investigation tasks: host-assigned durable principal, runtime-only owner grant checked at every durable operation, own-task visibility, no consent over MCP (proposed; #1761, owner review) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression
