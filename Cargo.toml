@@ -31,6 +31,13 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 
+# Dev and test builds compile third-party dependencies (SQLite, serde_json,
+# hashing, wasmtime) optimized: the app test suite spends most of CI's Rust
+# job inside them (#1924). Workspace crates keep the dev profile, so debug
+# assertions, overflow checks and debuginfo for our own code are unchanged.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: parse floats correctly rounded, so a value serialized
