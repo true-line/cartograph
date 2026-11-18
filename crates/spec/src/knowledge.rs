@@ -4,6 +4,8 @@ pub use business_flows::{
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
     derive_business_flows,
 };
+mod controllers;
+pub use controllers::derive_controller_capabilities;
 pub(crate) mod actors;
 pub use actors::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
@@ -20,6 +22,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver-group";
 /// Changed grouping, support or naming semantics require a new recipe version.
 pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
+
+/// Deterministic recipe naming a controller class's HTTP operations.
+pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.http-controller";
+/// Changed grouping, support or naming semantics require a new recipe version.
+pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "1";
 
 /// Deterministic recipe projecting a persistence model to a weak domain candidate.
 pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";
@@ -203,10 +210,14 @@ fn identifier(value: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 fn support(props: &serde_json::Value) -> Option<Provenance> {
+    support_from(props, "t0.adapter-ts")
+}
+/// Source-backed, confident deterministic support from one named adapter.
+fn support_from(props: &serde_json::Value, extractor: &str) -> Option<Provenance> {
     let prov: Provenance = serde_json::from_value(props.get("prov")?.clone()).ok()?;
     (prov.validate().is_ok()
         && prov.tier == Tier::Deterministic
-        && prov.extractor_id == "t0.adapter-ts"
+        && prov.extractor_id == extractor
         && matches!(
             prov.confidence_tier,
             ConfidenceTier::Confirmed | ConfidenceTier::InferredStrong
@@ -388,36 +399,52 @@ pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> Capabi
             &resolver,
         ))
         .expect("string tuple serialization");
-        let id = format!(
-            "capability:graphql-resolver-group:{}",
-            core_prov::content_hash(&key)
-        );
         let title = format!("{api} GraphQL operations in {}", group.class);
-        let content = serde_json::to_vec(&serde_json::json!({"title":&title,"cites":&group.cites}))
-            .expect("string and citation serialization");
-        let prov = Provenance::new(
-            Tier::Semantic,
-            ConfidenceTier::InferredWeak,
-            group.evidence.into_values().collect(),
-            "t2.knowledge.capability.graphql-resolver-group",
-            &content,
-        )
-        .expect("semantic weak is within the confidence ceiling")
-        .with_method(ProducingMethod::Rule {
-            rule: CAPABILITY_GRAPHQL_RULE.into(),
-            version: CAPABILITY_GRAPHQL_RULE_VERSION.into(),
-        });
-        let fact = OverlayFact {
-            item: OverlayItem::Node(Node {
-                id,
-                label: "Capability".into(),
-                props: serde_json::json!({"title":title,"prov":prov}),
-            }),
-            cites: group.cites,
-        };
+        let fact = capability_fact(
+            (CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION),
+            "graphql-resolver-group",
+            &key,
+            title,
+            group,
+        );
         retain_sized_fact(&mut report, fact);
     }
     report
+}
+
+/// One Capability candidate for a group: weak semantic, named by its rule,
+/// carrying every evidence span of the facts it cites. `kind` names the
+/// candidate family in the node id and extractor id; `key` is its identity.
+fn capability_fact(
+    (rule, version): (&str, &str),
+    kind: &str,
+    key: &[u8],
+    title: String,
+    group: Group,
+) -> OverlayFact {
+    let id = format!("capability:{kind}:{}", core_prov::content_hash(key));
+    let content = serde_json::to_vec(&serde_json::json!({"title":&title,"cites":&group.cites}))
+        .expect("string and citation serialization");
+    let prov = Provenance::new(
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+        group.evidence.into_values().collect(),
+        format!("t2.knowledge.capability.{kind}"),
+        &content,
+    )
+    .expect("semantic weak is within the confidence ceiling")
+    .with_method(ProducingMethod::Rule {
+        rule: rule.into(),
+        version: version.into(),
+    });
+    OverlayFact {
+        item: OverlayItem::Node(Node {
+            id,
+            label: "Capability".into(),
+            props: serde_json::json!({"title":title,"prov":prov}),
+        }),
+        cites: group.cites,
+    }
 }
 
 #[cfg(test)]

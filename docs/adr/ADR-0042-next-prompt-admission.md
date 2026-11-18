@@ -1,6 +1,6 @@
 # ADR-0042 — Prove continuation capacity before tool admission
 
-- **Status:** Proposed; component implementation only
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment); proposed as component implementation only
 - **Date:** 2026-10-21
 - **Deciders:** Cartograph maintainers; Codex implementation, Claude cross-review
 
@@ -98,3 +98,18 @@ shipped-feature or provider-acceptance claim.
    the chosen pre-action guarantee without truthful pre-read charges.
 3. Increase limits or omit required evidence: changes owner-approved policy or
    weakens the requested evidence contract rather than proving fit.
+
+## Amendment — 2026-11-18: accepted; the invariant applies to @10 and later families
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment. The
+owner amendment of 2026-10-27 (#716) above stands.
+
+The @10/request7/prompt9 family named in the Decision has shipped and is now
+a legacy family: when `investigation-v2` exists, `available_specialists()` and
+`policy_catalog()` in `src-tauri/src/investigations/commands.rs` advertise
+`domain-analyst@10` and `evidence-auditor@10`. Later families @11 and up have
+shipped since. The invariant this ADR decides applies to every family that
+`SpecialistRole::uses_next_prompt_admission` in
+`crates/agents/src/investigation/specialists.rs` admits: `domain-analyst@10`
+and later and `evidence-auditor@10` and later. The Consequences paragraph on
+the scope of the implementation describes the code on 2026-10-21.

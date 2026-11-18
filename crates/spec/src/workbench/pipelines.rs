@@ -34,9 +34,9 @@
 
 use super::producers::Output;
 use super::render::{Assertions, Budget, Literal, RenderLimit, Text};
-use super::{ExportMode, included, provenance};
+use super::{ExportMode, citation_id, included, provenance};
 use core_graph::coverage::StoredCoverage;
-use core_graph::{Edge, Node};
+use core_graph::{Edge, FactKey, Node};
 use core_prov::{ConfidenceTier, Provenance};
 use serde::Deserialize;
 use std::borrow::Borrow;
@@ -434,6 +434,52 @@ impl fmt::Display for Position<'_> {
     }
 }
 
+/// The citation id of a pipeline fact (ADR-0058).
+struct NodeCite<'a>(&'a Node);
+impl fmt::Display for NodeCite<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&citation_id(&FactKey::Node {
+            id: self.0.id.clone(),
+        }))
+    }
+}
+
+/// The citation id of a relation with its confidence, decoded as its
+/// assertion decodes it (ADR-0058, R-INT-2).
+struct EdgeCite<'a>(&'a Edge);
+impl fmt::Display for EdgeCite<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = citation_id(&FactKey::Edge {
+            source: self.0.src.clone(),
+            label: self.0.label.clone(),
+            destination: self.0.dst.clone(),
+        });
+        let confidence = provenance(&self.0.props, &edge_identity(self.0)).confidence_tier;
+        write!(f, "{id} ({confidence:?})")
+    }
+}
+
+/// The Citation cell of a trigger, job or step row: the fact, the relation
+/// that places it and, for a job, each `NEEDS` relation in the order of the
+/// Needs cell. Exactly the facts the row asserts.
+struct Cites<'p, 'a>(&'p Member<'a>, &'p [Need<'a>]);
+impl fmt::Display for Cites<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(member, needs) = self;
+        write!(
+            f,
+            "{}; placed by {}",
+            NodeCite(member.node),
+            EdgeCite(member.part_of)
+        )?;
+        for (index, need) in needs.iter().enumerate() {
+            f.write_str(if index == 0 { "; needs " } else { ", " })?;
+            write!(f, "{}", EdgeCite(need.edge))?;
+        }
+        Ok(())
+    }
+}
+
 /// The properties of a fact that say what it declares, as stored: `label:
 /// value` for each one present, in the order given. Stored text is literal.
 struct Declares<'a>(&'a Node, &'static [(&'static str, &'static str)]);
@@ -673,6 +719,10 @@ jobs, each with the reason, in declared order.\n\
 - **Declared position** is the position the file gives a trigger, job or step, counted from 0.\n\
 - Every row carries the tier, confidence and source span of its fact. The fact index lists \
 every span.\n\
+- **Citation** gives the fact-index citation id of each fact a row states: the fact itself; \
+for a trigger, job or step the relation that places it, with its confidence; and for a job each \
+need, with its confidence, in the order of the Needs cell. `fact-index.md` lists the tier, \
+confidence, method and evidence spans of each id.\n\
 - **Files present and not read** are listed from the stored coverage inventory. The last \
 section lists what the reader does not cover.\n\n";
 
@@ -767,12 +817,12 @@ pub(super) fn output(
     content.push_str(
         "## Pipelines\n\n\
          | Pipeline | Format | Declares | Triggers | Jobs | Steps | Tier | Confidence | Span | \
-         Note |\n|---|---|---|---|---|---|---|---|---|---|\n",
+         Citation | Note |\n|---|---|---|---|---|---|---|---|---|---|---|\n",
     )?;
     for pipeline in &pipelines {
         writeln!(
             content,
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             Literal(key(&pipeline.node.id)),
             Literal(prop(pipeline.node, "format")),
             Declares(pipeline.node, PIPELINE_PROPS),
@@ -780,11 +830,12 @@ pub(super) fn output(
             pipeline.jobs.len(),
             steps(pipeline),
             Evidence(pipeline.node),
+            NodeCite(pipeline.node),
             note(weak(&pipeline.node.props))
         )?;
     }
     if pipelines.is_empty() {
-        content.push_str("| — | — | None in this export | 0 | 0 | 0 | — | — | — | — |\n")?;
+        content.push_str("| — | — | None in this export | 0 | 0 | 0 | — | — | — | — | — |\n")?;
     }
 
     for pipeline in &pipelines {
@@ -809,34 +860,35 @@ pub(super) fn output(
 
         content.push_str(
             "\n### Triggers\n\n\
-             | Declared position | Event | Declares | Tier | Confidence | Span | Note |\n\
-             |---|---|---|---|---|---|---|\n",
+             | Declared position | Event | Declares | Tier | Confidence | Span | Citation | \
+             Note |\n|---|---|---|---|---|---|---|---|\n",
         )?;
         for trigger in &pipeline.triggers {
             writeln!(
                 content,
-                "| {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} |",
                 Position(trigger.part_of),
                 Literal(key(&trigger.node.id)),
                 Declares(trigger.node, TRIGGER_PROPS),
                 Evidence(trigger.node),
+                Cites(trigger, &[]),
                 trigger.note()
             )?;
         }
         if pipeline.triggers.is_empty() {
-            content.push_str("| — | None recovered | — | — | — | — | — |\n")?;
+            content.push_str("| — | None recovered | — | — | — | — | — | — |\n")?;
         }
 
         content.push_str(
             "\n### Jobs in dependency order\n\n\
              | Order | Job | Kind | Declared position | Needs | Declares | Tier | Confidence | \
-             Span | Note |\n|---|---|---|---|---|---|---|---|---|---|\n",
+             Span | Citation | Note |\n|---|---|---|---|---|---|---|---|---|---|---|\n",
         )?;
         let jobs = || pipeline.sequence.iter().map(|index| &pipeline.jobs[*index]);
         for job in jobs() {
             writeln!(
                 content,
-                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 job.order,
                 Literal(key(&job.member.node.id)),
                 Literal(prop(job.member.node, "kind")),
@@ -844,35 +896,37 @@ pub(super) fn output(
                 Needs(job, &graph),
                 Declares(job.member.node, JOB_PROPS),
                 Evidence(job.member.node),
+                Cites(&job.member, &job.needs),
                 job.member.note()
             )?;
         }
         if pipeline.jobs.is_empty() {
-            content.push_str("| — | None recovered | — | — | — | — | — | — | — | — |\n")?;
+            content.push_str("| — | None recovered | — | — | — | — | — | — | — | — | — |\n")?;
         }
 
         content.push_str(
             "\n### Steps in declared order\n\n\
              Jobs are in the order of the table above.\n\n\
-             | Job | Declared position | Kind | Declares | Tier | Confidence | Span | Note |\n\
-             |---|---|---|---|---|---|---|---|\n",
+             | Job | Declared position | Kind | Declares | Tier | Confidence | Span | Citation | \
+             Note |\n|---|---|---|---|---|---|---|---|---|\n",
         )?;
         for job in jobs() {
             for step in &job.steps {
                 writeln!(
                     content,
-                    "| {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} | {} |",
                     Literal(key(&job.member.node.id)),
                     Position(step.part_of),
                     Literal(prop(step.node, "kind")),
                     Declares(step.node, STEP_PROPS),
                     Evidence(step.node),
+                    Cites(step, &[]),
                     step.note()
                 )?;
             }
         }
         if steps(pipeline) == 0 {
-            content.push_str("| — | — | — | None recovered | — | — | — | — |\n")?;
+            content.push_str("| — | — | — | None recovered | — | — | — | — | — |\n")?;
         }
     }
 

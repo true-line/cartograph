@@ -12,6 +12,12 @@
 //   6. Every T-XXXX reserved in US-TM has a row in docs/test-map.md, and every
 //      automated reference there names a test/story that actually exists;
 //      manual references name a procedure in docs/manual-tests.md.
+//   7. Every story's Status is a value of the Status enum in user_stories.md.
+//   8. A T-id whose every `rust:` test is #[ignore]d fails unless its note
+//      names where and when the test runs (a `manual:MT-...` procedure or a
+//      `ci:<job>` lane that runs ignored tests); a T-id with some ignored
+//      tests is listed. Pre-existing violations live in an only-shrinking
+//      baseline (#1758).
 
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,14 +33,26 @@ const storiesSrc = await readFile(path.join(ROOT, 'docs/user_stories.md'), 'utf8
 const storyAcs = new Map();
 let currentUs = null;
 const seenAcs = new Map(); // AC id -> owning US
+const statusEnumLine = storiesSrc.match(/^\*\*Status enum:\*\*\s*`([^`]+)`/mu);
+const statusEnum = new Set(
+  (statusEnumLine?.[1] ?? '')
+    .split('·')
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+if (statusEnum.size === 0) fail('user_stories.md has no "**Status enum:** `...`" line');
+const storyStatuses = new Map(); // US id -> [status values]
 for (const line of storiesSrc.split('\n')) {
   const usHeading = line.match(/^###\s+(US-\d{4})\s+—/u);
   if (usHeading) {
     currentUs = usHeading[1];
     if (storyAcs.has(currentUs)) fail(`Duplicate story heading ${currentUs} in user_stories.md`);
     storyAcs.set(currentUs, new Set());
+    storyStatuses.set(currentUs, []);
     continue;
   }
+  const status = currentUs && line.match(/^-\s.*\*\*Status:\*\*\s*([^\s·]+)/u);
+  if (status) storyStatuses.get(currentUs).push(status[1]);
   for (const ac of line.matchAll(/\*\*(AC-\d{4})\*\*/gu) ?? []) {
     if (!currentUs) {
       fail(`${ac[1]} appears before any US heading in user_stories.md`);
@@ -47,6 +65,15 @@ for (const line of storiesSrc.split('\n')) {
 }
 for (const [us, acs] of storyAcs) {
   if (acs.size === 0) fail(`${us} defines no acceptance criteria`);
+}
+for (const [us, statuses] of storyStatuses) {
+  if (statuses.length !== 1) {
+    fail(`${us} has ${statuses.length} "**Status:**" values; expected exactly one`);
+  } else if (!statusEnum.has(statuses[0])) {
+    fail(
+      `${us} has Status "${statuses[0]}", which is not in the Status enum (${[...statusEnum].join(' · ')})`,
+    );
+  }
 }
 
 // --- US-TM.md ----------------------------------------------------------------
@@ -170,24 +197,32 @@ async function collectFiles(dir, suffix, out) {
 
 // Only #[test]-annotated functions count as realized coverage — a `rust:`
 // ref pointing at a production/helper fn must NOT satisfy the gate.
-const rustFns = new Map(); // crate name -> Set of #[test] fn names
+// Each name maps to whether it is #[ignore]d: true only when every
+// same-named #[test] fn in the crate carries #[ignore] (CI skips it).
+const rustFns = new Map(); // crate name -> Map<#[test] fn name, ignored>
 for (const base of ['crates', 'src-tauri']) {
   const files = [];
   await collectFiles(path.join(ROOT, base), '.rs', files);
   for (const file of files) {
     const crate =
       base === 'src-tauri' ? 'app' : path.relative(path.join(ROOT, 'crates'), file).split(path.sep)[0];
-    const fns = rustFns.get(crate) ?? new Set();
+    const fns = rustFns.get(crate) ?? new Map();
     let armed = false; // saw a #[test]-like attribute; other attrs/comments may sit between
+    let ignored = false; // saw #[ignore] in the same attribute block (before or after #[test])
     for (const line of (await readFile(file, 'utf8')).split('\n')) {
       if (/^\s*#\[(?:[\w:]+::)?test(?:[\](]|$)/u.test(line)) {
         armed = true;
         continue;
       }
+      if (/^\s*#\[ignore\b/u.test(line)) {
+        ignored = true;
+        continue;
+      }
       if (/^\s*(#\[|\/\/)/u.test(line) || line.trim() === '') continue;
       const m = line.match(/\bfn\s+(\w+)\s*[(<]/u);
-      if (m && armed) fns.add(m[1]);
+      if (m && armed) fns.set(m[1], (fns.get(m[1]) ?? true) && ignored);
       armed = false;
+      ignored = false;
     }
     rustFns.set(crate, fns);
   }
@@ -205,12 +240,60 @@ for (const file of storyFiles) {
   }
 }
 
+// CI lanes a test-map note may name with `ci:<job>`: workflow jobs whose
+// body runs ignored tests (`--ignored` / `--include-ignored`).
+const ignoredLanes = new Set();
+const workflowDir = path.join(ROOT, '.github/workflows');
+for (const file of (await readdir(workflowDir)).filter((f) => /\.ya?ml$/u.test(f))) {
+  const lines = (await readFile(path.join(workflowDir, file), 'utf8')).split('\n');
+  const jobsAt = lines.findIndex((l) => /^jobs:\s*$/u.test(l));
+  if (jobsAt < 0) continue;
+  let job = null;
+  for (const line of lines.slice(jobsAt + 1)) {
+    if (/^\S/u.test(line)) break;
+    const key = line.match(/^ {2}([\w-]+):\s*$/u);
+    if (key) job = key[1];
+    else if (job && /--(?:include-)?ignored\b/u.test(line)) ignoredLanes.add(job);
+  }
+}
+
+// T-ids on main at #1758 whose every bound rust test is #[ignore]d and whose
+// row names no lane that runs it. This list may only shrink: an entry that no
+// longer violates fails the gate until it is removed, and new ids must not be
+// added — name a `manual:MT-...` procedure or `ci:<job>` lane instead.
+const IGNORED_ONLY_BASELINE = new Set([
+  'T-0329', // opt-in source-built CARTOGRAPH_TEST_MCP_RELAY relay cases; no lane runs them yet
+]);
+
+/** T-id -> { total, ignored: [refs] } over its rust refs (reference cell and note). */
+const rustCoverage = new Map();
+
+// A `rust:` ref in a row's note: `rust:fn`, `rust:crate::fn` or
+// `rust:crate::module::path::fn`. Its last segment is the #[test] fn; a bare
+// fn may live in any crate. It counts toward the row's ignored coverage.
+const checkNoteRust = (tid, ref) => {
+  const parts = ref.split('::');
+  const fn = parts.at(-1);
+  const crates =
+    parts.length === 1
+      ? [...rustFns.keys()].filter((c) => rustFns.get(c).has(fn))
+      : [parts[0], parts[0].replaceAll('_', '-')].filter((c) => rustFns.get(c)?.has(fn));
+  const cov = rustCoverage.get(tid) ?? { total: 0, ignored: [] };
+  rustCoverage.set(tid, cov);
+  cov.total += 1;
+  if (crates.length === 0) return fail(`${tid}: note rust test ${ref} not found in the tree`);
+  if (crates.every((c) => rustFns.get(c).get(fn))) cov.ignored.push(ref);
+};
+
 const checkRef = (tid, kind, ref) => {
   if (kind === 'rust') {
     const [crate, fn] = ref.split('::');
     if (!crate || !fn) return fail(`${tid}: rust ref "${ref}" is not crate::test_fn`);
-    if (!rustFns.get(crate)?.has(fn))
-      fail(`${tid}: rust test ${ref} not found in the tree`);
+    const cov = rustCoverage.get(tid) ?? { total: 0, ignored: [] };
+    rustCoverage.set(tid, cov);
+    cov.total += 1;
+    if (!rustFns.get(crate)?.has(fn)) fail(`${tid}: rust test ${ref} not found in the tree`);
+    else if (rustFns.get(crate).get(fn)) cov.ignored.push(ref);
   } else if (kind === 'story') {
     if (!stories.has(ref)) fail(`${tid}: story ${ref} not found in ui/src/**/*.stories.tsx`);
   } else if (kind === 'manual') {
@@ -221,6 +304,7 @@ const checkRef = (tid, kind, ref) => {
 };
 
 const mappedTestIds = new Set();
+const runLaneNamed = new Set(); // T-ids whose note names a manual procedure or ci lane
 for (const line of mapSrc.split('\n')) {
   const row = line.match(
     /^\|\s*(T-\d{4})\s*\|\s*(AC-\d{4})\s*\|\s*(\w+)\s*\|\s*([^|]+)\|\s*([^|]*)\|/u,
@@ -247,6 +331,16 @@ for (const line of mapSrc.split('\n')) {
   const secondaryRefs = [...note.matchAll(/\b(story|manual):([\w/ -]+?)(?=[,)]|\s+and\b|$)/gu)];
   for (const m of secondaryRefs) {
     checkRef(tid, m[1], m[2].trim());
+    if (m[1] === 'manual' && manualIds.has(m[2].trim())) runLaneNamed.add(tid);
+  }
+  for (const m of note.matchAll(/(?<![\w-])rust:(\w[\w-]*(?:::\w+)*)/gu)) {
+    checkNoteRust(tid, m[1]);
+  }
+  // A manual row is realized by its validated procedure, which says when it runs.
+  if (kind === 'manual') runLaneNamed.add(tid);
+  for (const m of note.matchAll(/\bci:([\w-]+)/gu)) {
+    if (ignoredLanes.has(m[1])) runLaneNamed.add(tid);
+    else fail(`${tid}: ci:${m[1]} names no workflow job that runs ignored tests (--ignored)`);
   }
   // A ref the pattern cannot terminate would otherwise be silently skipped —
   // a claimed realization the gate never checks. Reject it instead.
@@ -262,6 +356,32 @@ for (const tid of reservedTestIds) {
   if (!mappedTestIds.has(tid)) fail(`${tid} reserved in US-TM.md but missing from test-map.md`);
 }
 
+// --- ignored tests (#1758) ---------------------------------------------------
+const partlyIgnored = [];
+const ignoredOnly = new Set();
+for (const [tid, { total, ignored }] of rustCoverage) {
+  if (ignored.length === 0) continue;
+  if (ignored.length < total) {
+    partlyIgnored.push(`${tid}: ${ignored.length}/${total} ignored (${ignored.join(', ')})`);
+    continue;
+  }
+  if (runLaneNamed.has(tid)) continue;
+  ignoredOnly.add(tid);
+  if (!IGNORED_ONLY_BASELINE.has(tid)) {
+    fail(
+      `${tid}: every bound rust test is #[ignore]d (${ignored.join(', ')}) and CI never runs it — ` +
+        'name where and when it runs in the note (manual:MT-... or ci:<job>), or bind a test CI runs',
+    );
+  }
+}
+for (const tid of IGNORED_ONLY_BASELINE) {
+  if (!ignoredOnly.has(tid)) {
+    fail(
+      `${tid} is in the ignored-test baseline but no longer violates — remove it (the baseline only shrinks)`,
+    );
+  }
+}
+
 // --- verdict -----------------------------------------------------------------
 if (errors.length > 0) {
   console.error(`Traceability check failed (${errors.length} error${errors.length === 1 ? '' : 's'}):\n`);
@@ -274,6 +394,11 @@ if (errors.length > 0) {
   process.exit(1);
 }
 const realized = [...mappedTestIds].length;
+if (partlyIgnored.length > 0 || ignoredOnly.size > 0) {
+  console.log('T-ids bound to #[ignore]d rust tests (CI skips them):');
+  for (const line of partlyIgnored) console.log(`  ~ ${line}`);
+  for (const tid of ignoredOnly) console.log(`  ! ${tid}: all bound tests ignored (baselined, #1758)`);
+}
 console.log(
   `Traceability check passed: ${storyAcs.size} stories, ${seenAcs.size} ACs, ${adrIds.size} ADRs, ${realized} test ids mapped — consistent.`,
 );

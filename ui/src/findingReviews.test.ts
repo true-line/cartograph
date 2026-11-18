@@ -69,6 +69,21 @@ it('AC-0295 shows conflict winner and requires refresh and a deliberate action',
   await store.getState().reviewFinding(result.findings[0].finding_id, 'accepted_for_follow_up');
   expect(writes).toBe(2); expect(store.getState().findingReviews[0].revision).toBe(2);
 });
+it('AC-0733 reports a busy store as an unsaved decision and never retries by itself', async () => {
+  store.setState({ findingReviews: rows() }); let writes = 0;
+  mockIPC((command) => {
+    if (command !== 'review_investigation_finding') return snapshot(rows());
+    writes++;
+    if (writes === 1) throw { code: 'busy' };
+    return rows(1)[0];
+  });
+  await store.getState().reviewFinding(result.findings[0].finding_id, 'accepted_for_follow_up');
+  expect(writes).toBe(1); expect(store.getState().findingReviews).toEqual(rows());
+  expect(store.getState().reviewError).toMatch(/was not saved/);
+  await store.getState().refreshReviews();
+  await store.getState().reviewFinding(result.findings[0].finding_id, 'accepted_for_follow_up');
+  expect(writes).toBe(2); expect(store.getState().findingReviews[0].revision).toBe(1);
+});
 it('AC-0295 preserves last decision on read failure and prevents an older in-flight read replacing a newer read', async () => {
   store.setState({ findingReviews: rows(1) });
   const older = deferred<FindingReviews>(); let reads = 0;

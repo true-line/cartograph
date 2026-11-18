@@ -51,14 +51,12 @@ import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDi
 import type { InvestigationChanged, InvestigationFollowUpContext } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
 import {
+  exportSpecBundle,
   isSameArtifact,
   resolveArtifactForCopy,
-  withFullArtifacts,
   type ReadSpecArtifact,
-  type ReadSpecArtifacts,
   type ReportSpecError,
 } from './specExport';
-import { saveExport } from './saveExport';
 
 const AtlasCanvas = lazy(() =>
   import('./components/AtlasCanvas').then(({ AtlasCanvas: Component }) => ({
@@ -79,26 +77,6 @@ const SpecWorkbench = lazy(() =>
 /** Surfaces a refused export or copy (e.g. a stale artifact identity) in
  *  the Workbench's error banner. */
 const reportSpecError: ReportSpecError = (message) => useAppStore.setState({ specError: message });
-
-/** Exports the bundle, or aborts (leaving `specError` for the Workbench to
- *  show) if any truncated artifact's full content couldn't be fetched — see
- *  `withFullArtifacts` in `specExport.ts`. Never downloads a file built from
- *  capped previews. */
-async function exportSpecBundle(
-  bundle: SpecBundle,
-  readSpecArtifacts: ReadSpecArtifacts,
-  reportError: ReportSpecError,
-) {
-  const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifacts, reportError);
-  if (artifacts === null) return;
-  const files = Object.fromEntries(artifacts.map((artifact) => [artifact.file_name, artifact.content]));
-  const content = JSON.stringify({ ...bundle, artifacts, files }, null, 2);
-  try {
-    await saveExport(`cartograph-spec-${bundle.mode}.json`, content);
-  } catch (error) {
-    reportError(error instanceof Error ? error.message : typeof error === 'string' ? error : String(error));
-  }
-}
 
 /** Copies the artifact's content, or aborts (leaving `specError` for the
  *  Workbench to show) if the on-demand full fetch failed — see
@@ -149,10 +127,13 @@ export default function App() {
     specError,
     ingestBusy,
     ingestSummary,
+    recordedCoverage,
+    recordedCoverageError,
     ingestError,
     ingestSource,
     ingestTarget,
     preflight,
+    systemPreflight,
     preflightBusy,
     preflightError,
     preflightProgress,
@@ -660,6 +641,8 @@ export default function App() {
             <WorkspaceSurface
               systemContents={systemContents}
               summary={ingestSummary}
+              recordedCoverage={recordedCoverage}
+              recordedCoverageError={recordedCoverageError}
               findings={findings}
               distribution={tierDistribution(atlas)}
               bundle={specBundle}
@@ -899,6 +882,7 @@ export default function App() {
             source={ingestSource}
             target={ingestTarget}
             report={preflight}
+            system={systemPreflight}
             busy={preflightBusy}
             progress={preflightProgress}
             error={preflightError}

@@ -177,34 +177,11 @@ fn validate_bound<'a>(
         .specialist_id
         .as_deref()
         .unwrap_or("domain-analyst@10");
-    if !matches!(
+    captured_analyst_lane(
         specialist,
-        "domain-analyst@10"
-            | "domain-analyst@11"
-            | "domain-analyst@12"
-            | "domain-analyst@13"
-            | "domain-analyst@14"
-            | "domain-analyst@15"
-            | "domain-analyst@17"
-            | "domain-analyst@18"
-            | "domain-analyst@19"
-            | "domain-analyst@20"
-            | "domain-analyst@21"
-            | "domain-analyst@22"
-            | "domain-analyst@23"
-            | "domain-analyst@24"
-            | "domain-analyst@25"
-            | "domain-analyst@26"
-            | "domain-analyst@27"
-    ) {
-        return Err("unsupported captured analyst specialist".into());
-    }
-    if expected.generation_policy.is_some()
-        && (!matches!(specialist, "domain-analyst@26" | "domain-analyst@27")
-            || expected.provider.mode != InvestigationProviderMode::Local)
-    {
-        return Err("invalid local finish policy lane".into());
-    }
+        expected.generation_policy.is_some(),
+        expected.provider.mode,
+    )?;
     if let Some(limits) = expected.run_limits {
         let minimum = llm::bounded::CompletionLimits::default()
             .values()
@@ -233,6 +210,71 @@ fn validate_bound<'a>(
         definition,
         specialist,
     })
+}
+
+/// The captured analyst identities and the local finish lane (#1335: @28
+/// takes @27's lane; the frozen #598 negative cases stay pinned to @27).
+fn captured_analyst_lane(
+    specialist: &str,
+    local_finish: bool,
+    mode: InvestigationProviderMode,
+) -> Result<(), String> {
+    if !matches!(
+        specialist,
+        "domain-analyst@10"
+            | "domain-analyst@11"
+            | "domain-analyst@12"
+            | "domain-analyst@13"
+            | "domain-analyst@14"
+            | "domain-analyst@15"
+            | "domain-analyst@17"
+            | "domain-analyst@18"
+            | "domain-analyst@19"
+            | "domain-analyst@20"
+            | "domain-analyst@21"
+            | "domain-analyst@22"
+            | "domain-analyst@23"
+            | "domain-analyst@24"
+            | "domain-analyst@25"
+            | "domain-analyst@26"
+            | "domain-analyst@27"
+            | "domain-analyst@28"
+    ) {
+        return Err("unsupported captured analyst specialist".into());
+    }
+    if local_finish
+        && (!matches!(
+            specialist,
+            "domain-analyst@26" | "domain-analyst@27" | "domain-analyst@28"
+        ) || mode != InvestigationProviderMode::Local)
+    {
+        return Err("invalid local finish policy lane".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn captured_analyst_lane_admits_analyst28_like_analyst27() {
+    // AC-0835 (#1335): acceptance preparation accepts @28 exactly as @27.
+    use InvestigationProviderMode::{Cloud, Local};
+    for role in [
+        "domain-analyst@26",
+        "domain-analyst@27",
+        "domain-analyst@28",
+    ] {
+        captured_analyst_lane(role, false, Cloud).unwrap();
+        captured_analyst_lane(role, true, Local).unwrap();
+        assert!(captured_analyst_lane(role, true, Cloud).is_err());
+    }
+    captured_analyst_lane("domain-analyst@25", false, Local).unwrap();
+    assert!(captured_analyst_lane("domain-analyst@25", true, Local).is_err());
+    for role in [
+        "domain-analyst@29",
+        "domain-analyst@16",
+        "evidence-auditor@14",
+    ] {
+        assert!(captured_analyst_lane(role, false, Local).is_err(), "{role}");
+    }
 }
 
 /// No external callback enters this concrete fixture owner.

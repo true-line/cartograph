@@ -537,6 +537,64 @@ export const CoverageInventoryBeforeInterpretation: Story = {
   },
 };
 
+export const RecordedCoverageRestoredAfterRelaunch: Story = {
+  // AC-0700 (#1656): after a relaunch there is no ingest summary; the
+  // recorded inventory is shown as recorded, not newly validated, and a stale
+  // one is named stale with nothing read from it.
+  args: {
+    summary: null,
+    recordedCoverage: [
+      {
+        repo: "acme/api",
+        status: "recorded",
+        inventory_hash: "blake3:0123456789abcdef0123",
+        compared: ["registration", "plugins"],
+        inventory: COVERAGE[0],
+      },
+      {
+        repo: "acme/web",
+        status: "stale",
+        inventory_hash: "blake3:fedcba9876543210fedc",
+        compared: ["registration", "plugins"],
+        inventory: null,
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inventory = canvas.getByTestId("coverage-inventory");
+    await expect(inventory).toHaveTextContent(
+      "Limited coverage · 1 producer ran · 1 excluded by layer hints · 1 unsupported capability",
+    );
+    await expect(inventory).toHaveTextContent(
+      "source inputs and everything else are as recorded, not newly validated",
+    );
+    await expect(inventory).not.toHaveTextContent("acme/web");
+    const stale = canvas.getByTestId("stale-coverage");
+    await expect(stale).toHaveTextContent(
+      "acme/web blake3:fedcba987654: stale, not current.",
+    );
+    await expect(stale).toHaveTextContent("compared: registration, plugins");
+  },
+};
+
+export const RecordedCoverageReadFailureShowsNoCards: Story = {
+  // AC-0700: a failed read is stated and shows no inventory card.
+  args: {
+    summary: null,
+    recordedCoverage: [],
+    recordedCoverageError: "incompatible coverage schema",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("alert")).toHaveTextContent(
+      "Recorded coverage could not be read: incompatible coverage schema.",
+    );
+    await expect(canvas.queryByTestId("coverage-inventory")).toBeNull();
+    await expect(canvas.queryByTestId("stale-coverage")).toBeNull();
+  },
+};
+
 const REFUSED_COVERAGE = [
   {
     ...COVERAGE[0],

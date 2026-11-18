@@ -1,6 +1,6 @@
 # ADR-0047 — Graph store revision
 
-- **Status:** Proposed — #744; owner review required
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #744
 - **Date:** 2026-10-22
 - **Deciders:** Cartograph owner; Codex implements, Claude cross-reviews shared semantics
 

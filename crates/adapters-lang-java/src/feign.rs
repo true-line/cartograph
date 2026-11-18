@@ -323,6 +323,7 @@ pub(crate) fn sites(
                 Some(true) => (computed, Some((obscuring("RequestMapping"), own))),
             };
             let site = FetchSite {
+                straight_line: None,
                 method: http_method,
                 url,
                 symbol: Some(symbol.clone()),
