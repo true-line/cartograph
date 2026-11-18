@@ -1,6 +1,6 @@
 # ADR-0031 — Placeholder provenance and proven import boundaries
 
-- **Status:** Proposed in #237 (owner review)
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #237
 - **Date:** 2026-09-22
 - **Deciders:** Cartograph owner; implementation agent
 

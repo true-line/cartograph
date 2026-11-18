@@ -62,7 +62,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0051 | Layered knowledge model: SQLite deterministic base of record, derived knowledge layer (embeddings ingest, hybrid FTS5 + vector retrieval, knowledge-node producers), artifact evidence basis for targets without source |
 | ADR-0052 | Desktop investigation snapshot ceiling (4 GiB / 10M rows) split from the MCP default and reservation; amended 2026-11-10 to cover the post-ingest knowledge phase and the desktop context query |
 
-| ADR-0053 | Owner-tunable investigation time limits (task ≤ 60 min, per call ≤ 10 min) from Configure → Run Limits; all other caps fixed |
+| ADR-0053 | Owner-tunable investigation time limits (task ≤ 60 min, per call ≤ 10 min) from Configure → Run Limits; all other caps fixed (accepted 2026-11-18, #1761) |
 
 ## Coverage assertions
 - Every Must-priority US is anchored to an original milestone, post-M10 work, or a SPEC-01 delivery gate; a milestone label alone does not establish completion.
@@ -106,32 +106,32 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0028 | Separate durable investigations from edge-resolution proposals |
 | ADR-0029 | Risk-tiered review: owner review for protected paths only |
 | ADR-0030 | One shared, `.gitignore`-aware source walk |
-| ADR-0031 | Placeholder provenance and proven import boundaries |
-| ADR-0032 | Owned execution Gaps make a flow Partial |
-| ADR-0033 | Proven-external JVM import ids key on the package |
+| ADR-0031 | Placeholder provenance and proven import boundaries (accepted 2026-11-18, #1761) |
+| ADR-0032 | Owned execution Gaps make a flow Partial (accepted 2026-11-18, #1761) |
+| ADR-0033 | Proven-external JVM import ids key on the package (accepted 2026-11-18, #1761) |
 | ADR-0034 | Explicit references override `.gitignore`; direct reads honor it |
-| ADR-0035 | Erasure-level parameter signatures in JVM method identity |
-| ADR-0036 | Lifecycle reconstruction as the product direction |
+| ADR-0035 | Erasure-level parameter signatures in JVM method identity (accepted 2026-11-18, #1761) |
+| ADR-0036 | Lifecycle reconstruction as the product direction (accepted with amendment 2026-11-18, #1761) |
 
 | ADR-0037 | Bounded persistent semantic vectors |
 
-| ADR-0038 | Independent evaluation for semantic families |
+| ADR-0038 | Independent evaluation for semantic families (accepted 2026-11-18, #1761) |
 
-| ADR-0039 | Citable TS/JS declaration facts |
+| ADR-0039 | Citable TS/JS declaration facts (accepted 2026-11-18, #1761) |
 
-| ADR-0040 | Immutable investigation budget and admission policies (proposed) |
+| ADR-0040 | Immutable investigation budget and admission policies (accepted with amendment 2026-11-18, #1761) |
 
-| ADR-0041 | Bounded query history with explicit runtime families (proposed) |
+| ADR-0041 | Bounded query history with explicit runtime families (accepted with amendment 2026-11-18, #1761) |
 
-| ADR-0042 | Prove continuation capacity before tool admission (proposed) |
+| ADR-0042 | Prove continuation capacity before tool admission (accepted with amendment 2026-11-18, #1761) |
 
-| ADR-0046 | Compact receipts, positive absence records and reclaimable retention (proposed; receipt v3, per-fact omission records and forget reclaim implemented) |
-| ADR-0047 | Graph store revision (proposed) |
+| ADR-0046 | Compact receipts, positive absence records and reclaimable retention (accepted with amendment 2026-11-18, #1761; receipt v3, per-fact omission records and forget reclaim implemented) |
+| ADR-0047 | Graph store revision (accepted 2026-11-18, #1761) |
 
-| ADR-0044 | App-owned read-only MCP with a separate local relay (proposed; #718) |
+| ADR-0044 | App-owned read-only MCP with a separate local relay (accepted with amendment 2026-11-18, #1761; proposed in #718) |
 
-| ADR-0048 | MCP investigation authority and durable client identity (proposed; owner review required) |
-| ADR-0050 | Journey identity and tier: T0 navigation facts, T2 journey candidates (proposed; owner review required) |
+| ADR-0048 | MCP investigation authority and durable client identity (accepted with amendment 2026-11-18, #1761) |
+| ADR-0050 | Journey identity and tier: T0 navigation facts, T2 journey candidates (accepted with amendment 2026-11-18, #1761) |
 
 | ADR-0054 | Advisory semantic audit with preserved historical blocking semantics (accepted 2026-11-06, #1678) |
 | ADR-0055 | Bounded, independently bound refusal diagnostic sidecars outside workspace capacity accounting (#1707) |
@@ -139,7 +139,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0057 | Provider keys in the OS credential store; write-only, environment variable takes precedence (proposed; #1763, owner review); amended 2026-11-10 for the consent-free, recorded connection check (#1795) |
 | ADR-0060 | Build and deployment pipelines as ordered facts: four node labels, `PART_OF` and `NEEDS`, declared not evaluated (proposed; #1790, owner review) |
 | ADR-0059 | Configuration-read facts: `ConfigRead` per file and key, `READS_CONFIG`, names only, proven standard-library reads (proposed; #1789, owner review) |
-| ADR-0058 | Citation ids derived from fact identity and the fact and evidence index (proposed; #1785, owner review) |
+| ADR-0058 | Citation ids derived from fact identity and the fact and evidence index (accepted 2026-11-18, #1761) |
 | ADR-0061 | The curated read contract: a computed projection, a content-identity revision, DR-4 fields, one state per accepted record, conservative eligibility (proposed; #1746, owner review) |
 | ADR-0062 | A plugin failure on one file refuses that file and coverage records it: deterministic failure classes refuse, machine-dependent ones fail the ingest (proposed; #1810, owner review) |
 | ADR-0063 | The system boundary: registered sources are inside, outside is claimed only from a literal host no binding covers, everything else is unclassified (proposed; #1788, owner review) |
