@@ -25,6 +25,13 @@ missing_docs = "warn"
 #                   merge only uses catch_unwind to re-raise a worker panic on
 #                   the caller (a release panic aborts either way) — and
 #                   wasmtime guest traps do not rely on host unwinding.
+# Tests run optimized. The app suite's replay and acceptance tests spend
+# their time in serialization, hashing and SQLite, and ran about ten times
+# slower unoptimized (#1924). Debug assertions and overflow checks stay on:
+# they come from the dev profile this one inherits.
+[profile.test]
+opt-level = 1
+
 [profile.release]
 strip = "symbols"
 lto = "thin"
