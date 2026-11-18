@@ -35,15 +35,16 @@ pub fn sanitize_export_name(raw: &str) -> String {
 /// `path`, so a failed or partial write leaves any existing file at `path`
 /// exactly as it was.
 pub fn write_export_file(path: &Path, content: &str) -> Result<(), String> {
-    write_export_file_with(path, content, |file, bytes| file.write_all(bytes))
+    write_export_with(path, |file| file.write_all(content.as_bytes()))
 }
 
-/// [`write_export_file`] with the byte copy injectable, so tests can fail it
-/// part-way.
-fn write_export_file_with(
+/// [`write_export_file`] with the bytes produced by `write`, so a large
+/// export can be streamed into the file instead of built as one string
+/// (#1582), and tests can fail it part-way. The error never includes what
+/// `write` wrote.
+pub(crate) fn write_export_with(
     path: &Path,
-    content: &str,
-    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<(), String> {
     let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
     // Replacing a symlink would swap the link for a file; write through it to
@@ -62,7 +63,7 @@ fn write_export_file_with(
         _ => Path::new("."),
     };
     let (temp, mut file) = create_sibling(parent).map_err(fail)?;
-    let written = write(&mut file, content.as_bytes())
+    let written = write(&mut file)
         .and_then(|()| file.sync_all())
         .and_then(|()| match existing {
             Some(permissions) => file.set_permissions(permissions),
@@ -204,8 +205,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let target = dir.path().join("cartograph-spec-best-effort.json");
         std::fs::write(&target, "previous export").expect("seed");
-        let err = write_export_file_with(&target, "new export content", |file, bytes| {
-            file.write_all(&bytes[..4])?;
+        let err = write_export_with(&target, |file| {
+            file.write_all(&b"new export content"[..4])?;
             Err(std::io::Error::other("disk full"))
         })
         .expect_err("injected failure");

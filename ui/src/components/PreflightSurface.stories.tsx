@@ -290,3 +290,69 @@ export const Cancelled: Story = {
     );
   },
 };
+
+/** AC-0705/AC-0706 (#1655): a system manifest previews each local member
+ *  in manifest order and defers remote or managed entries explicitly. */
+export const SystemManifestMembers: Story = {
+  args: {
+    source: 'manifest',
+    target: '/repos/shop/cartograph.system.toml',
+    report: null,
+    system: {
+      members: [
+        { kind: 'local', entry: 'services/api', path: '/repos/shop/services/api', report: REPORT },
+        { kind: 'deferred', entry: 'https://github.com/acme/web' },
+        {
+          kind: 'local',
+          entry: 'worker',
+          path: '/repos/shop/worker',
+          report: {
+            languages: [{ language: 'Go', files: 4, adapter: 't0.adapter-go' }],
+            frameworks: [],
+            potential_gaps: [],
+            unsupported: [],
+            detector: 'preflight@1',
+          },
+        },
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const members = canvas.getAllByRole('region', { name: /^Repository / });
+    await expect(members.map((member) => member.getAttribute('aria-label'))).toEqual([
+      'Repository services/api',
+      'Repository https://github.com/acme/web',
+      'Repository worker',
+    ]);
+    const api = within(members[0]);
+    await expect(api.getByText('t0.adapter-ts')).toBeInTheDocument();
+    await expect(api.getByText('Chrome Extension MV3')).toBeInTheDocument();
+    await expect(api.getByText(/\/repos\/shop\/services\/api/)).toBeInTheDocument();
+    const remote = within(members[1]);
+    await expect(remote.getByText('Detection deferred')).toBeInTheDocument();
+    await expect(remote.getByText(/not fetched by preflight/)).toBeInTheDocument();
+    await expect(within(members[2]).getByText('t0.adapter-go')).toBeInTheDocument();
+    // A preview, never a record: recovery owns the findings.
+    await expect(canvas.getByText(/no finding is recorded/)).toBeInTheDocument();
+    await expect(canvas.queryByText(/Preflight did not complete/)).not.toBeInTheDocument();
+    await expect(canvas.getByRole('button', { name: /run full recovery/i })).toBeEnabled();
+  },
+};
+
+/** AC-0707: a failed manifest preview shows the error and no member. */
+export const SystemManifestFailed: Story = {
+  args: {
+    source: 'manifest',
+    target: '/repos/shop/cartograph.system.toml',
+    report: null,
+    system: null,
+    error: 'worker: registered source unavailable; reconnect or re-run ingestion',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/registered source unavailable/)).toBeInTheDocument();
+    await expect(canvas.queryByRole('region', { name: /^Repository / })).not.toBeInTheDocument();
+    await expect(canvas.getByText(/Preflight did not complete/)).toBeInTheDocument();
+  },
+};

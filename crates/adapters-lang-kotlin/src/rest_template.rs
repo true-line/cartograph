@@ -382,6 +382,7 @@ pub(crate) fn sites(
             continue;
         }
         out.push(FetchSite {
+            straight_line: None,
             method: http_method,
             url: match pure_string_literal(cx, url) {
                 Some(literal) => IdentityExpr::Literal(literal),

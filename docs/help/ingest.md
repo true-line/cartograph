@@ -6,7 +6,11 @@ Recovery is a three-step, local-only flow:
    (multiple repos as one system). Nothing leaves the device.
 2. **Preflight** — a pure filesystem scan detects languages, frameworks, and
    adapter coverage, and classifies risky constructs before any recovery:
-   potential gaps vs unsupported patterns, never conflated.
+   potential gaps vs unsupported patterns, never conflated. For a system
+   manifest, each local repository it declares is scanned relative to the
+   manifest's folder and listed with its own results; remote and managed
+   entries are shown as deferred and are not fetched until recovery. The
+   manifest preview records nothing: recovery records the findings.
 3. **Recover** — deterministic extraction runs as a durable, cancellable job;
    the summary reports per-language file/node/edge counts, including zeros.
 

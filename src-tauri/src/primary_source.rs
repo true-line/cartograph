@@ -18,10 +18,10 @@ pub(crate) use pinned::PinnedReadError;
 use crate::AppState;
 use crate::sources::RegisteredSource;
 
-const MAX_RECEIPTS: u64 = 100_000;
+const MAX_RECEIPTS: u64 = 200_000;
 const MAX_RECEIPT_BYTES: u64 = 128 * 1024;
 const MAX_RECEIPT_HEADER_BYTES: u64 = 16 * 1024;
-const MAX_RECEIPT_STORE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RECEIPT_STORE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_TOMBSTONE_CAPTURE_IDS_BYTES: u64 = 64 * 1024;
 const RECEIPT_HEADER_DOMAIN: &[u8] = b"cartograph:receipt-header:v1\0";
 const RECEIPTS_SCHEMA_V1: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072)) STRICT";
@@ -782,6 +782,10 @@ impl Drop for RetentionGuard {
     }
 }
 
+/// How long a receipt-store connection waits for a competing writer's lock;
+/// every Cartograph SQLite store uses the same 5 s (AC-0822, #1653).
+const RECEIPT_STORE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) struct ReceiptStore {
     conn: Connection,
     /// Retained receipt count (and reclaim ledger bound) and payload bytes; tests narrow them.
@@ -1168,7 +1172,16 @@ fn encode_capture_ids(capture_ids: &[String]) -> Result<(String, i64), String> {
 
 // The caller retains a transaction after receipt_storage validated all lengths.
 fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, String> {
+    #[cfg(test)]
+    STORED_RECEIPT_DECODES.with(|count| count.set(count.get() + 1));
     pinned::stored_receipt(conn, id).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Full receipt rebuilds and decodes on this thread, so tests can bound
+    /// how many stored rows a store operation hydrates (AC-0836).
+    static STORED_RECEIPT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl ReceiptStore {
@@ -1188,7 +1201,7 @@ impl ReceiptStore {
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(storage_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(1))
+        conn.busy_timeout(RECEIPT_STORE_BUSY_TIMEOUT)
             .map_err(storage_error)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(storage_error)?;
@@ -1483,18 +1496,23 @@ impl ReceiptStore {
         source_id(source)?;
         let tx = self.conn.unchecked_transaction().map_err(storage_error)?;
         receipt_storage(&tx)?;
+        // ADR-0046 decision 5 (#1233): only this source's rows are rebuilt
+        // and decoded, so the work does not grow with other sources' rows.
+        // A row whose `source_id` column disagrees with its decoded payload
+        // fails closed when the source that column names is read.
         let mut ids = Vec::new();
         {
             let mut statement = tx
-                .prepare("SELECT id FROM receipts ORDER BY id")
+                .prepare("SELECT id FROM receipts WHERE source_id = ?1 ORDER BY id")
                 .map_err(storage_error)?;
-            let mut rows = statement.query([]).map_err(storage_error)?;
+            let mut rows = statement.query([source]).map_err(storage_error)?;
             while let Some(row) = rows.next().map_err(storage_error)? {
                 let id: String = row.get(0).map_err(storage_error)?;
                 let receipt = stored_receipt(&tx, &id)?;
-                if receipt.source_id().as_str() == source {
-                    ids.push(id);
+                if receipt.source_id().as_str() != source {
+                    return Err(storage_error("receipt ownership"));
                 }
+                ids.push(id);
             }
         }
         tx.commit().map_err(storage_error)?;
@@ -2600,6 +2618,19 @@ mod tests {
         (directory, source, capture, extraction, receipts)
     }
 
+    // AC-0822: the receipt store waits 5 s for a competing writer, the same
+    // busy timeout as every other Cartograph store (#1653).
+    #[test]
+    fn receipt_store_waits_five_seconds_for_a_busy_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        let timeout: i64 = store
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5_000);
+    }
+
     // AC-0292: a full receipt store keeps what fits in order, names the rest
     // by file instead of refusing the recovery, keeps already-stored evidence,
     // and returns only retained ids for bindings (#722).
@@ -2953,8 +2984,11 @@ mod tests {
         }
     }
 
-    // AC-0153: SQL ownership indexes cannot hide a receipt from its actual
-    // source's preview; every bounded payload is validated before filtering.
+    // AC-0153, AC-0837: a `source_id` column that disagrees with a row's
+    // header or payload cannot hide a receipt. A normalized row fails the
+    // bounded store-wide header check on every read; a legacy row (no header)
+    // fails closed when the source its column names is read, and on `get`,
+    // while the payload's source no longer decodes it (#1233).
     #[test]
     fn receipt_inventory_rejects_hidden_ownership_and_retains_history() {
         let (_directory, source, capture, _, receipts) = fixture();
@@ -2977,6 +3011,36 @@ mod tests {
             .unwrap();
         assert!(store.ids(&source.source_id).is_err());
         assert!(store.ids(&wrong_source).is_err());
+        assert_eq!(receipt_count(&store), expected.len() as i64);
+        store
+            .conn
+            .execute(
+                "UPDATE receipts SET source_id=?1 WHERE id=?2",
+                params![source.source_id, receipts[0].id()],
+            )
+            .unwrap();
+        assert_eq!(store.ids(&source.source_id).unwrap(), expected);
+
+        // A legacy row whose column names another source than its payload.
+        store
+            .conn
+            .execute(
+                "UPDATE receipts SET source_id=?1, header_id=NULL, payload=?2 WHERE id=?3",
+                params![
+                    wrong_source,
+                    receipts[0].to_json().unwrap(),
+                    receipts[0].id()
+                ],
+            )
+            .unwrap();
+        let without_hidden: Vec<String> = expected
+            .iter()
+            .filter(|id| id.as_str() != receipts[0].id())
+            .cloned()
+            .collect();
+        assert_eq!(store.ids(&source.source_id).unwrap(), without_hidden);
+        assert!(store.ids(&wrong_source).is_err());
+        assert!(store.get(receipts[0].id()).is_err());
         assert_eq!(receipt_count(&store), expected.len() as i64);
     }
 
@@ -3034,6 +3098,162 @@ mod tests {
         }
         assert!(matching_bindings(&extraction, &receipts).is_empty());
         assert!(packed(&extraction).is_empty());
+    }
+
+    type SourceReceipts = (RegisteredSource, Vec<Receipt>);
+
+    /// Two registered sources in one receipt store: `a` with one small file,
+    /// `b` with several files so it holds more rows than `a`.
+    fn two_source_store() -> (
+        tempfile::TempDir,
+        ReceiptStore,
+        SourceReceipts,
+        SourceReceipts,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.sqlite");
+        let _findings = crate::findings::FindingStore::open(&state_path).unwrap();
+        let mut registry =
+            crate::sources::SourceRegistry::open(&state_path, directory.path()).unwrap();
+        let mut store = ReceiptStore::open(&directory.path().join("receipts.sqlite")).unwrap();
+        let mut sources = Vec::new();
+        for (name, files) in [("target-a", 1), ("target-b", 4)] {
+            let target = directory.path().join(name);
+            std::fs::create_dir(&target).unwrap();
+            let paths: Vec<String> = (0..files).map(|file| format!("rule{file}.ts")).collect();
+            for (file, path) in paths.iter().enumerate() {
+                std::fs::write(
+                    target.join(path),
+                    format!(
+                        "export function ready{file}(ok: boolean) {{ if (!ok) return false; return true; }}\n\
+                         export function steady{file}(ok: boolean) {{ if (ok) return 1; return 0; }}"
+                    ),
+                )
+                .unwrap();
+            }
+            let source = registry.register_local(&target).unwrap();
+            let capture = source_capture::capture_working_tree(
+                &target,
+                &source_id(&source.source_id).unwrap(),
+                &paths
+                    .iter()
+                    .map(|path| path.as_str().into())
+                    .collect::<Vec<_>>(),
+                CaptureLimits::default(),
+            )
+            .unwrap();
+            let mut receipts = Vec::new();
+            for path in &paths {
+                let (_, file_receipts) = captured::extract_file(
+                    capture.file(path).unwrap(),
+                    &adapters_lang_ts::SourceId {
+                        repo: &source.repo_key,
+                        commit: "workdir",
+                    },
+                )
+                .unwrap();
+                receipts.extend(file_receipts);
+            }
+            assert!(!receipts.is_empty());
+            store.persist(&capture, &source, &receipts).unwrap();
+            sources.push((source, receipts));
+        }
+        let b = sources.pop().unwrap();
+        let a = sources.pop().unwrap();
+        assert!(b.1.len() > a.1.len());
+        (directory, store, a, b)
+    }
+
+    fn decodes_during<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        let before = STORED_RECEIPT_DECODES.with(std::cell::Cell::get);
+        let result = operation();
+        let after = STORED_RECEIPT_DECODES.with(std::cell::Cell::get);
+        (result, after - before)
+    }
+
+    /// The pre-#1233 inventory: decode every stored row, keep the payloads
+    /// that name `source`. The result the indexed read must reproduce.
+    fn store_wide_inventory(store: &ReceiptStore, source: &str) -> Vec<String> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT id FROM receipts ORDER BY id")
+            .unwrap();
+        let all: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        all.into_iter()
+            .filter(|id| {
+                stored_receipt(&store.conn, id)
+                    .unwrap()
+                    .source_id()
+                    .as_str()
+                    == source
+            })
+            .collect()
+    }
+
+    // AC-0836: the supersession inventory of a source in a shared store returns
+    // exactly the ids the store-wide decode returned, in the same order, with
+    // unchanged receipt bytes.
+    #[test]
+    fn ac0836_source_inventory_matches_the_store_wide_result() {
+        let (_directory, store, (a, receipts_a), (b, receipts_b)) = two_source_store();
+        for (source, receipts) in [(&a, &receipts_a), (&b, &receipts_b)] {
+            let ids = store.ids(&source.source_id).unwrap();
+            assert_eq!(ids, store_wide_inventory(&store, &source.source_id));
+            let mut expected: Vec<String> = receipts
+                .iter()
+                .map(|receipt| receipt.id().to_owned())
+                .collect();
+            expected.sort();
+            expected.dedup();
+            assert_eq!(ids, expected);
+            for receipt in receipts {
+                assert_eq!(&store.get(receipt.id()).unwrap(), receipt);
+            }
+        }
+    }
+
+    // AC-0836: the inventory rebuilds and decodes only the source's own rows,
+    // however many rows other sources hold.
+    #[test]
+    fn ac0836_source_inventory_decodes_only_its_own_rows() {
+        let (_directory, store, (a, _), (b, _)) = two_source_store();
+        let total = receipt_count(&store) as usize;
+        let (ids_a, decodes_a) = decodes_during(|| store.ids(&a.source_id).unwrap());
+        assert_eq!(decodes_a, ids_a.len());
+        assert!(decodes_a < total);
+        let (ids_b, decodes_b) = decodes_during(|| store.ids(&b.source_id).unwrap());
+        assert_eq!(decodes_b, ids_b.len());
+        assert_eq!(ids_a.len() + ids_b.len(), total);
+        let unknown = format!("src_{}", "e".repeat(32));
+        let (ids, decodes) = decodes_during(|| store.ids(&unknown).unwrap());
+        assert!(ids.is_empty());
+        assert_eq!(decodes, 0);
+    }
+
+    // AC-0837: a corrupt row of another source no longer fails this source's
+    // inventory; it still fails closed on its own source's inventory and read.
+    #[test]
+    fn ac0837_foreign_corruption_fails_closed_on_its_own_source_only() {
+        let (_directory, store, (a, receipts_a), (b, receipts_b)) = two_source_store();
+        let expected_a = store.ids(&a.source_id).unwrap();
+        let count = receipt_count(&store);
+        store
+            .conn
+            .execute(
+                "UPDATE receipts SET payload='do-not-echo-private-input' WHERE id=?1",
+                [receipts_b[0].id()],
+            )
+            .unwrap();
+        assert_eq!(store.ids(&a.source_id).unwrap(), expected_a);
+        assert_eq!(store.get(receipts_a[0].id()).unwrap(), receipts_a[0]);
+        let error = store.ids(&b.source_id).expect_err("corrupt row must fail");
+        assert!(!error.contains("do-not-echo-private-input"));
+        assert!(store.get(receipts_b[0].id()).is_err());
+        assert_eq!(receipt_count(&store), count);
     }
 
     // AC-0153: private storage rejects known symlink/hardlink substitutions and

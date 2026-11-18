@@ -1,4 +1,8 @@
 //! Current-response exclusion planning, not result or correction authorization.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{staged_finish::*, *};
 use std::collections::BTreeSet;
 
