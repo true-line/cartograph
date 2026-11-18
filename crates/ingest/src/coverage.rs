@@ -217,7 +217,11 @@ impl ReceiptOmission {
             ),
             Self::StoreCapacity => format!(
                 "{occurrences} receipts in {files} files did not fit the retained \
-                 receipt store, which cannot yet reclaim space"
+                 receipt store (forgetting a retained source frees its receipts, and \
+                 a recovery after a source changed frees space once its superseded \
+                 receipts are reclaimed, in both cases only receipts that nothing pins \
+                 and the current graph no longer binds; a recovery of an unchanged source frees \
+                 nothing, and neither frees room under a source's own share limit)"
             ),
         };
         format!(
