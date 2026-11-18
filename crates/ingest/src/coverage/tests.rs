@@ -339,10 +339,17 @@ fn receipt_omissions_are_a_named_limitation() {
             .reason
             .starts_with("5 TypeScript rule facts in 2 files")
     );
-    // Forgetting sources frees no receipt rows yet (#725), so the reason
-    // offers no remediation that cannot work.
+    // AC-0839: forget and supersession reclaim unpinned receipts (AC-0838),
+    // so the reason points at both as the way to free space (#725).
     let store = &both.unsupported[1].reason;
-    assert!(store.contains("cannot yet reclaim space") && !store.contains("forget"));
+    assert!(store.starts_with("5 receipts in 2 files did not fit the retained receipt store"));
+    assert!(store.contains("forgetting a retained source"));
+    assert!(store.contains("superseded receipts are reclaimed"));
+    assert!(store.contains("receipts that nothing pins"));
+    assert!(store.contains("a recovery of an unchanged source frees nothing"));
+    assert!(store.contains("share limit"));
+    assert!(!store.contains("cannot yet reclaim"));
+    assert!(store.ends_with("a tool limitation, not a system gap"));
 }
 
 // AC-0148 (#1229): symlinks the captured selection skipped are one named,
@@ -719,4 +726,80 @@ fn inventory_without_refusals_keeps_its_bytes_and_old_inventories_still_read() {
 
     let read: RepoCoverage = serde_json::from_slice(&legacy_bytes).unwrap();
     assert_eq!(read, coverage);
+}
+
+// AC-0685 (#1847): the found ADR and API contract readers are catalogued
+// rows, and an ADR file too large or not UTF-8 is a named, counted
+// limitation on the reader's row and in the not-covered list. (T-0685)
+#[test]
+fn found_adr_and_contract_readers_are_catalogued_and_unread_adrs_named() {
+    let facts = CoverageFacts {
+        repo: "acme/api",
+        commit: "0123abc",
+        commit_note: None,
+        layer_hints: &[],
+        deterministic: vec![(FOUND_ADR_PRODUCER_ID, count(2))],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let full = RepoCoverage::from_facts(&facts).with_unsupported(&PreflightReport::default());
+    assert_eq!(
+        state_of(&full, FOUND_ADR_PRODUCER_ID),
+        (
+            &ProducerState::Ran,
+            "completed over 2 files of acme/api@0123abc"
+        )
+    );
+    assert_eq!(
+        state_of(&full, API_CONTRACT_PRODUCER_ID),
+        (
+            &ProducerState::NotApplicable,
+            "no declared API reference files in acme/api@0123abc"
+        )
+    );
+    assert!(!full.limited);
+    assert_eq!(full.clone().with_unread_adrs(&[], &[]), full);
+
+    let limited = full.with_unread_adrs(
+        &["docs/adr/huge.md".to_string()],
+        &["docs/adr/a.md".to_string(), "docs/adr/b.md".to_string()],
+    );
+    assert!(limited.limited);
+    assert_eq!(
+        state_of(&limited, FOUND_ADR_PRODUCER_ID),
+        (
+            &ProducerState::Ran,
+            "read 2 of the 5 ADR and RFC files in acme/api@0123abc; 1 too large and 2 not \
+             UTF-8 were not read"
+        )
+    );
+    let entries: Vec<_> = limited
+        .unsupported
+        .iter()
+        .map(|entry| {
+            (
+                entry.capability.as_str(),
+                entry.occurrences,
+                entry.first_site.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            (ADR_TOO_LARGE_CAPABILITY, 1, "docs/adr/huge.md"),
+            (ADR_NOT_UTF8_CAPABILITY, 2, "docs/adr/a.md"),
+        ]
+    );
+
+    // Only skipped files: the row still says the reader ran and read none.
+    let none = RepoCoverage::from_facts(&CoverageFacts {
+        deterministic: Vec::new(),
+        ..facts
+    })
+    .with_unread_adrs(&[], &["docs/adr/a.md".to_string()]);
+    assert_eq!(
+        state_of(&none, FOUND_ADR_PRODUCER_ID).0,
+        &ProducerState::Ran
+    );
 }
