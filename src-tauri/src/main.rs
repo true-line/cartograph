@@ -7377,6 +7377,7 @@ fn main() {
             manifest_draft::save_system_manifest,
             investigations::commands::investigation_specialists,
             investigations::commands::start_investigation,
+            investigations::section_drafts::section_redraft_question,
             investigations::section_drafts::section_draft_question,
             investigations::section_drafts::section_draft_outcome,
             section_review::section_document,

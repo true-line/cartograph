@@ -221,6 +221,118 @@ fn another_role_stages_no_draft() {
     assert!(stored(&state).is_empty());
 }
 
+// AC-0674 (T-0674): a re-draft is requested only for an accepted draft
+// whose cited facts drifted, and the draft a later run stages for the
+// address names that accepted draft as the one it replaces.
+#[test]
+fn a_stale_accepted_draft_is_re_drafted_as_its_successor() {
+    use crate::investigations::section_drafts::{predecessor, redraft_question};
+    use agents::draft_store::{DraftDecision, DraftOrigin};
+
+    let (_provider, fixture) = drafting(Mode::CompletionSupported, "1.5", spec::SYSTEM_SCOPE);
+    let state = fixture.base.app.state::<AppState>();
+    let staged = stored(&state).remove(0);
+    let question =
+        drafting_question(spec::CATALOGUE_VERSION, "D1", "1.5", spec::SYSTEM_SCOPE).unwrap();
+    let snapshot = || {
+        let graph = state.graph.lock().unwrap();
+        let (_, (snapshot, _)) = crate::curated::read_graph(&graph).unwrap();
+        snapshot
+    };
+    let replaced = |state: &AppState| {
+        let (nodes, edges) = snapshot();
+        let store = state.drafts.lock().unwrap();
+        predecessor(&store, &staged.draft.address, (&nodes, &edges)).unwrap()
+    };
+
+    // Closed refusals: unknown, not accepted, accepted and current.
+    assert_eq!(
+        redraft_question(&state, &"0".repeat(64)),
+        Err("unknown_draft".to_owned())
+    );
+    assert_eq!(
+        redraft_question(&state, &staged.draft_id),
+        Err("draft_not_accepted".to_owned())
+    );
+    let mut drafts = state.drafts.lock().unwrap();
+    drafts
+        .review(&staged.draft_id, 0, DraftDecision::Accepted, None)
+        .unwrap();
+    drop(drafts);
+    assert_eq!(
+        redraft_question(&state, &staged.draft_id),
+        Err("draft_not_stale".to_owned())
+    );
+    // A current accepted draft is not replaced by a new run either.
+    assert_eq!(replaced(&state), None);
+
+    // A cited fact changes: its content hash moves.
+    let cited = staged.draft.cited_hashes.keys().next().unwrap().clone();
+    let (nodes, _) = snapshot();
+    let mut node = nodes
+        .into_iter()
+        .find(|node| {
+            spec::citation_id(&core_graph::FactKey::Node {
+                id: node.id.clone(),
+            }) == cited
+        })
+        .expect("the draft cites a node");
+    let recorded = node.props["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    node.props["prov"]["content_hash"] =
+        serde_json::json!(recorded.chars().rev().collect::<String>());
+    state.graph.lock().unwrap().put_node(&node).unwrap();
+
+    // The request is the ordinary drafting question for the same address,
+    // and the draft the run stages will name the accepted draft.
+    assert_eq!(redraft_question(&state, &staged.draft_id), Ok(question));
+    assert_eq!(replaced(&state), Some(staged.draft_id.clone()));
+
+    // A successor that stands blocks another request; the accepted draft
+    // is unchanged.
+    let successor = {
+        let mut draft = staged.draft.clone();
+        draft.claims[0].statement = "Rewritten against the changed fact.".into();
+        let origin = DraftOrigin {
+            job_id: staged.origin.job_id + 1,
+            ..staged.origin.clone()
+        };
+        let mut drafts = state.drafts.lock().unwrap();
+        drafts
+            .store(&draft, &origin, Some(&staged.draft_id))
+            .unwrap()
+    };
+    assert_eq!(
+        successor.replaces.as_deref(),
+        Some(staged.draft_id.as_str())
+    );
+    assert_eq!(
+        redraft_question(&state, &staged.draft_id),
+        Err("successor_pending".to_owned())
+    );
+    assert_eq!(replaced(&state), None);
+    let kept = state
+        .drafts
+        .lock()
+        .unwrap()
+        .get(&staged.draft_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.review_decision, Some(DraftDecision::Accepted));
+
+    // Rejecting the successor allows another re-draft.
+    state
+        .drafts
+        .lock()
+        .unwrap()
+        .review(&successor.draft_id, 0, DraftDecision::Rejected, None)
+        .unwrap();
+    assert!(redraft_question(&state, &staged.draft_id).is_ok());
+    assert_eq!(replaced(&state), Some(staged.draft_id.clone()));
+}
+
 // AC-0668: a draft is staged only against the graph snapshot its run froze.
 // A cited fact that keeps its id but changes content after the run (a
 // re-ingest, or a retry after the store failed) stages nothing.

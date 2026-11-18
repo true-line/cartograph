@@ -193,13 +193,13 @@ fn a_returned_draft_admits_exactly_one_successor_that_cannot_be_returned() {
     };
     let successor = draft("1.3", "A signed-in user can check out.");
 
-    // Not while the first is pending or accepted.
+    // Not while the first is pending or rejected.
     assert!(matches!(
         store.store(&successor, &next_origin, Some(&first.draft_id)),
         Err(DraftStoreError::PredecessorNotReturned)
     ));
     store
-        .review(&first.draft_id, 0, DraftDecision::Accepted, None)
+        .review(&first.draft_id, 0, DraftDecision::Rejected, None)
         .unwrap();
     assert!(matches!(
         store.store(&successor, &next_origin, Some(&first.draft_id)),
@@ -276,6 +276,156 @@ fn a_returned_draft_admits_exactly_one_successor_that_cannot_be_returned() {
         store.review(&second.draft_id, 1, DraftDecision::Returned, None),
         Err(DraftStoreError::SuccessorCannotBeReturned)
     ));
+}
+
+/// AC-0674 (T-0674): an accepted draft admits a re-draft as its successor.
+/// One successor that is not rejected stands at a time; a rejected one
+/// leaves the accepted draft free for another.
+#[test]
+fn an_accepted_draft_admits_one_successor_that_is_not_rejected() {
+    let (_dir, mut store) = store();
+    let accepted = store
+        .store(&draft("1.3", "A user can check out."), &origin(), None)
+        .unwrap();
+    store
+        .review(&accepted.draft_id, 0, DraftDecision::Accepted, None)
+        .unwrap();
+    let job = |job_id| DraftOrigin { job_id, ..origin() };
+
+    let first = store
+        .store(
+            &draft("1.3", "A signed-in user can check out."),
+            &job(8),
+            Some(&accepted.draft_id),
+        )
+        .unwrap();
+    assert_eq!(first.replaces.as_deref(), Some(accepted.draft_id.as_str()));
+    // The accepted draft is untouched by its successor.
+    let kept = store.get(&accepted.draft_id).unwrap().unwrap();
+    assert_eq!(kept.review_decision, Some(DraftDecision::Accepted));
+    assert_eq!(kept.review_revision, 1);
+
+    // While the first stands, pending or accepted, there is no second.
+    let second = draft("1.3", "A signed-in user with a cart can check out.");
+    assert!(matches!(
+        store.store(&second, &job(9), Some(&accepted.draft_id)),
+        Err(DraftStoreError::SuccessorExists)
+    ));
+    // A successor is never returned.
+    assert!(matches!(
+        store.review(&first.draft_id, 0, DraftDecision::Returned, None),
+        Err(DraftStoreError::SuccessorCannotBeReturned)
+    ));
+
+    // Rejecting it changes nothing else and allows another re-draft.
+    store
+        .review(&first.draft_id, 0, DraftDecision::Rejected, None)
+        .unwrap();
+    assert_eq!(store.get(&accepted.draft_id).unwrap().unwrap(), kept);
+    let second = store
+        .store(&second, &job(9), Some(&accepted.draft_id))
+        .unwrap();
+    assert_eq!(second.replaces.as_deref(), Some(accepted.draft_id.as_str()));
+    assert_eq!(count(&store), 3);
+
+    // The rejected one cannot come back while the second stands.
+    assert!(matches!(
+        store.review(&first.draft_id, 1, DraftDecision::Accepted, None),
+        Err(DraftStoreError::SuccessorExists)
+    ));
+    store
+        .review(&second.draft_id, 0, DraftDecision::Accepted, None)
+        .unwrap();
+    // Both stay in the store; the replaced draft is still accepted there
+    // and the projection lists it as superseded.
+    assert_eq!(
+        store
+            .get(&accepted.draft_id)
+            .unwrap()
+            .unwrap()
+            .review_decision,
+        Some(DraftDecision::Accepted)
+    );
+}
+
+/// AC-0674 (T-0674): a table created before ADR-0045 keeps its rows and
+/// then admits a second successor of an accepted draft.
+#[test]
+fn a_table_from_before_re_drafts_is_widened_with_its_rows_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("review.sqlite");
+    let (accepted, first) = {
+        let mut store = DraftStore::open(&path).unwrap();
+        let accepted = store
+            .store(&draft("1.3", "A user can check out."), &origin(), None)
+            .unwrap();
+        let accepted = store
+            .review(&accepted.draft_id, 0, DraftDecision::Accepted, None)
+            .unwrap();
+        let first = store
+            .store(
+                &draft("1.3", "A signed-in user can check out."),
+                &DraftOrigin {
+                    job_id: 8,
+                    ..origin()
+                },
+                Some(&accepted.draft_id),
+            )
+            .unwrap();
+        let first = store
+            .review(&first.draft_id, 0, DraftDecision::Rejected, None)
+            .unwrap();
+        (accepted, first)
+    };
+    // Put the table back into its earlier shape, as an older build left it.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "DROP TRIGGER staged_section_drafts_immutable;
+             DROP INDEX staged_section_drafts_one_successor;
+             ALTER TABLE staged_section_drafts RENAME TO moved;
+             CREATE TABLE staged_section_drafts (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 draft_id TEXT NOT NULL UNIQUE,
+                 immutable_json TEXT NOT NULL,
+                 replaces TEXT UNIQUE,
+                 review_revision INTEGER NOT NULL DEFAULT 0,
+                 review_decision TEXT,
+                 review_note TEXT,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                 reviewed_at TEXT
+             ) STRICT;
+             INSERT INTO staged_section_drafts ({SUCCESSOR_COLUMNS})
+                 SELECT {SUCCESSOR_COLUMNS} FROM moved;
+             DROP TABLE moved;"
+        ))
+        .unwrap();
+    }
+    let mut store = DraftStore::open(&path).unwrap();
+    assert_eq!(count(&store), 2);
+    assert_eq!(store.get(&accepted.draft_id).unwrap().unwrap(), accepted);
+    assert_eq!(store.get(&first.draft_id).unwrap().unwrap(), first);
+    let second = store
+        .store(
+            &draft("1.3", "A signed-in user with a cart can check out."),
+            &DraftOrigin {
+                job_id: 9,
+                ..origin()
+            },
+            Some(&accepted.draft_id),
+        )
+        .unwrap();
+    assert_eq!(second.replaces.as_deref(), Some(accepted.draft_id.as_str()));
+    // Content is still immutable after the rebuild.
+    assert!(
+        store
+            .conn
+            .execute(
+                "UPDATE staged_section_drafts SET replaces = NULL WHERE draft_id = ?1",
+                [&second.draft_id],
+            )
+            .is_err()
+    );
 }
 
 #[test]

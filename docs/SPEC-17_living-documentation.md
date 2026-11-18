@@ -100,8 +100,27 @@ draft, the stored draft names the accepted draft as the one it replaces.
 - Rejecting the successor leaves the replaced draft as it was and allows
   another re-draft.
 - A draft has at most one successor that is not rejected.
-- A successor of an accepted draft may be returned once, as any draft may
-  (ADR-0064 decision 6).
+- A successor is accepted or rejected and is never returned, as ADR-0064
+  decision 6 says of every successor. To ask for another attempt, reject
+  it and re-draft.
+
+As built (slice 4): the `section_redraft_question` command takes the id of
+an accepted draft and returns the ordinary drafting question for its
+address, or a closed reason: `unknown_draft`, `draft_not_accepted`,
+`draft_not_stale` (no cited fact changed or is gone) or `successor_pending`
+(a successor that is not rejected is stored). The check compares the
+draft's recorded hashes with the current graph, the same comparison the
+curated projection makes. No new kind of run exists: when any drafting run
+for an address stages its draft, the host names as replaced the newest
+returned draft without a successor (ADR-0064) and otherwise the one
+accepted draft of that address whose cited facts drifted and that has no
+standing successor. Two such accepted drafts are in conflict and neither
+is named. The draft store accepts an accepted draft as the replaced one,
+holds "one successor that is not rejected" in a partial unique index, and
+refuses to bring a rejected successor back while another stands. A table
+created before this slice is rebuilt on open with its rows and sequence
+kept. The Workbench shows a re-draft beside the accepted draft it
+replaces.
 
 ## Section change
 

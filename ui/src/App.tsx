@@ -39,8 +39,8 @@ import { hasRecordedExecution, selectRecoveryJob } from './jobPresentation';
 import { TopologyCard } from './components/TopologyCard';
 import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
-import { sectionDraftQuestion, useSectionDocumentStore } from './sectionDocument';
-import type { SectionAddress } from './sectionDocument';
+import { sectionDraftQuestion, sectionRedraftQuestion, useSectionDocumentStore } from './sectionDocument';
+import type { SectionAddress, StoredSectionDraft } from './sectionDocument';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { SavedResultNotices } from './components/SavedResultNotices';
@@ -491,9 +491,12 @@ export default function App() {
   // "Draft this section" opens the investigation composer on the Section
   // Writer with the one question that names the address. The reviewer still
   // chooses the evidence, the provider and the start there.
-  const draftSection = useCallback(async (address: SectionAddress) => {
+  const draftSection = useCallback(async (request: SectionAddress | StoredSectionDraft) => {
     try {
-      const question = await sectionDraftQuestion(address);
+      // A re-draft names the accepted draft; the host checks its state.
+      const question = 'draft_id' in request
+        ? await sectionRedraftQuestion(request)
+        : await sectionDraftQuestion(request);
       useInvestigationStore.getState().updateComposer({ specialistId: 'section-writer@1', question });
       navigate('investigations');
     } catch (error) {
@@ -753,6 +756,7 @@ export default function App() {
                     if (recorded) void reloadSpec();
                   }),
                 onDraft: (address) => void draftSection(address),
+                onRedraft: (draft) => void draftSection(draft),
               }}
               mode={specMode}
               decisions={curation}

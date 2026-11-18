@@ -365,7 +365,11 @@ product specification is listed with its kind and every draft stored for it.
   claim that cites a changed fact says so.
 - **Re-draft this section** on a stale or unresolvable draft opens the
   composer for the same section and scope. The accepted draft stays as it
-  is while the new one is written and reviewed.
+  is while the new one is written and reviewed. The new draft is listed as
+  a **re-draft of** the accepted one. Accept it and it takes that draft's
+  place; the replaced draft is kept and listed as replaced. Reject it and
+  nothing else changes, and you can re-draft again. A re-draft cannot be
+  returned. Only one re-draft of a draft is open at a time.
 
 ## Curated items
 

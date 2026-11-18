@@ -183,6 +183,35 @@ fn an_accepted_successor_supersedes_the_draft_it_replaces() {
 }
 
 #[test]
+fn a_replacement_chain_leaves_only_its_last_draft_eligible() {
+    // d1 <- d2 <- d3: a section re-drafted and accepted twice.
+    let d2 = ReviewedDraft {
+        replaces: Some("d1".into()),
+        ..draft("d2")
+    };
+    let d3 = ReviewedDraft {
+        replaces: Some("d2".into()),
+        ..draft("d3")
+    };
+    let projection = run(&[draft("d1"), d2.clone(), d3.clone()]);
+    assert_eq!(outcome(&projection, "d1").0, DraftState::Superseded);
+    assert_eq!(outcome(&projection, "d2").0, DraftState::Superseded);
+    assert_eq!(
+        outcome(&projection, "d3"),
+        (DraftState::Eligible, DraftStateReason::AllConditionsHold)
+    );
+    assert_eq!(projection.draft_counts.superseded, 2);
+    assert_eq!(projection.draft_counts.conflicted, 0);
+
+    // Another accepted draft beside the chain conflicts with its last draft
+    // only.
+    let projection = run(&[draft("d1"), d2, d3, draft("d4")]);
+    assert_eq!(outcome(&projection, "d3").0, DraftState::Conflicted);
+    assert_eq!(outcome(&projection, "d4").0, DraftState::Conflicted);
+    assert_eq!(projection.draft_counts.conflicted, 2);
+}
+
+#[test]
 fn two_accepted_drafts_for_one_address_conflict_unless_one_replaces_the_other() {
     let projection = run(&[draft("d1"), draft("d2")]);
     for id in ["d1", "d2"] {

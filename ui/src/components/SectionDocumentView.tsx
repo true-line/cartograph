@@ -21,6 +21,9 @@ export interface SectionDocumentViewProps {
   canReview: boolean;
   onReload?: () => void;
   onDraft?: (address: SectionAddress) => void;
+  /** Request a re-draft of a stale or unresolvable accepted draft. The
+   *  host checks the state and names this draft as the one replaced. */
+  onRedraft?: (draft: StoredSectionDraft) => void;
   onReview: (draft: StoredSectionDraft, decision: DraftDecision, note: string | null) => void;
   onOpenCitation?: (citationId: string) => void;
 }
@@ -103,13 +106,15 @@ function AcceptedState({ row, stated, onOpenCitation }: {
   );
 }
 
-function DraftCard({ draft, row, stated, busy, canReview, onDraft, onReview, onOpenCitation }: {
+function DraftCard({ draft, row, stated, replaced, busy, canReview, onRedraft, onReview, onOpenCitation }: {
   draft: StoredSectionDraft;
   row: CuratedDraftRow | undefined;
   stated: boolean;
   busy: boolean;
   canReview: boolean;
-  onDraft?: (address: SectionAddress) => void;
+  /** The stored draft this one replaces, when the view holds it. */
+  replaced: StoredSectionDraft | undefined;
+  onRedraft?: (draft: StoredSectionDraft) => void;
   onReview: SectionDocumentViewProps['onReview'];
   onOpenCitation?: (citationId: string) => void;
 }) {
@@ -145,11 +150,20 @@ function DraftCard({ draft, row, stated, busy, canReview, onDraft, onReview, onO
           : 'Not accepted: no document prints it.'}
       </p>
       {accepted && <AcceptedState row={row} stated={stated} onOpenCitation={onOpenCitation} />}
-      {draft.replaces && (
+      {draft.replaces && (replaced?.review_decision === 'accepted' ? (
+        // SPEC-17 (AC-0674): a re-draft; the accepted draft stays printed
+        // until this one is accepted.
+        <p className="muted" data-testid="draft-redraft-of">
+          Re-draft of accepted draft <code title={draft.replaces}>{shortDraftId(draft.replaces)}</code>.{' '}
+          {decision === 'accepted'
+            ? 'It replaces that draft.'
+            : 'That draft stays in place until this one is accepted.'}
+        </p>
+      ) : (
         <p className="muted">
           Replaces returned draft <code title={draft.replaces}>{shortDraftId(draft.replaces)}</code>.
         </p>
-      )}
+      ))}
       <ol className="document-claims">
         {draft.draft.claims.map((claim, index) => (
           <li key={index}>
@@ -202,11 +216,11 @@ function DraftCard({ draft, row, stated, busy, canReview, onDraft, onReview, onO
               {ACTION_LABEL[item]}
             </button>
           ))}
-          {redraft && onDraft && (
+          {redraft && onRedraft && (
             <button
               type="button"
               disabled={busy || !canReview}
-              onClick={() => onDraft(draft.draft.address)}
+              onClick={() => onRedraft(draft)}
             >
               Re-draft this section
             </button>
@@ -267,7 +281,9 @@ function DraftRequest({ document, section, busy, canReview, onDraft }: {
   );
 }
 
-function Section({ document, section, states, stated, busy, canReview, onDraft, onReview, onOpenCitation }: {
+function Section({
+  document, section, states, stated, busy, canReview, onDraft, onRedraft, onReview, onOpenCitation,
+}: {
   document: SectionDocument;
   section: DocumentSection;
   states: Map<string, CuratedDraftRow>;
@@ -275,6 +291,7 @@ function Section({ document, section, states, stated, busy, canReview, onDraft, 
   busy: boolean;
   canReview: boolean;
   onDraft?: (address: SectionAddress) => void;
+  onRedraft?: (draft: StoredSectionDraft) => void;
   onReview: SectionDocumentViewProps['onReview'];
   onOpenCitation?: (citationId: string) => void;
 }) {
@@ -303,7 +320,8 @@ function Section({ document, section, states, stated, busy, canReview, onDraft, 
           stated={stated}
           busy={busy}
           canReview={canReview}
-          onDraft={onDraft}
+          replaced={section.drafts.find((other) => other.draft_id === draft.replaces)}
+          onRedraft={onRedraft}
           onReview={onReview}
           onOpenCitation={onOpenCitation}
         />
@@ -329,8 +347,8 @@ function Section({ document, section, states, stated, busy, canReview, onDraft, 
  * T3 / InferredWeak and never as a recovered fact (R-INT-2, R-INT-3).
  */
 export function SectionDocumentView({
-  document, curated, busy = false, error = null, canReview, onReload, onDraft, onReview,
-  onOpenCitation,
+  document, curated, busy = false, error = null, canReview, onReload, onDraft, onRedraft,
+  onReview, onOpenCitation,
 }: SectionDocumentViewProps) {
   const states = curatedDraftStates(curated);
   const stated = curatedReadStatesDrafts(curated);
@@ -382,6 +400,7 @@ export function SectionDocumentView({
               busy={busy}
               canReview={canReview}
               onDraft={onDraft}
+              onRedraft={onRedraft}
               onReview={onReview}
               onOpenCitation={onOpenCitation}
             />
