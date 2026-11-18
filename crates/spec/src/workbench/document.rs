@@ -43,7 +43,8 @@
 //! indexed or walked.
 
 use super::catalogue::{
-    CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_sections,
+    CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
+    catalogue_sections,
 };
 use super::curated::Curated;
 use super::producers::Output;
@@ -55,6 +56,9 @@ use core_prov::ConfidenceTier;
 use flowtracer::Flow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+
+/// The scope of a section written once for the whole system.
+pub const SYSTEM_SCOPE: &str = "system";
 
 /// Artifact id of `product-specification.md`.
 pub(super) const D1_ARTIFACT_ID: &str = "d1-product-specification";
@@ -205,6 +209,14 @@ pub fn cited_fact_hashes(
     edges: &[Edge],
     cited: &BTreeSet<String>,
 ) -> BTreeMap<String, String> {
+    hashes_of(nodes.iter(), edges.iter(), cited)
+}
+
+fn hashes_of<'a>(
+    nodes: impl Iterator<Item = &'a Node>,
+    edges: impl Iterator<Item = &'a Edge>,
+    cited: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
     let mut hashes = BTreeMap::new();
     if cited.is_empty() {
         return hashes;
@@ -226,6 +238,86 @@ pub fn cited_fact_hashes(
         }
     }
     hashes
+}
+
+/// Why an address has no citation set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionScopeError {
+    /// The section table of this catalogue version holds no such section,
+    /// or the section is not drafted (it is P or H).
+    NotDrafted,
+    /// The section is not written per subject, so only the system scope
+    /// addresses it.
+    NotPerSubject,
+    /// The scope names no node of the section's subject label.
+    SubjectNotFound,
+}
+
+impl SectionScopeError {
+    /// The reason code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NotDrafted => "section_not_drafted",
+            Self::NotPerSubject => "section_not_per_subject",
+            Self::SubjectNotFound => "subject_not_found",
+        }
+    }
+}
+
+/// The section a draft for `(catalogue_version, document, number)` targets:
+/// a section of the table, of this catalogue version, of a drafted kind.
+pub fn drafted_section(
+    catalogue_version: &str,
+    document: &str,
+    number: &str,
+) -> Result<&'static CatalogueSection, SectionScopeError> {
+    (catalogue_version == CATALOGUE_VERSION)
+        .then(|| catalogue_section(document, number))
+        .flatten()
+        .filter(|section| section.kind.drafted())
+        .ok_or(SectionScopeError::NotDrafted)
+}
+
+/// The citation set of a drafting run for `section` and `scope`, restricted
+/// to the ids in `cited`: citation id to current content hash (ADR-0064
+/// decision 3). An id `cited` names that is outside the set is absent, so
+/// admitting a finish against the result refuses a claim that cites it.
+///
+/// The system scope admits every fact of `nodes` and `edges`, which holds
+/// the section's frame. A subject scope admits the subject node, every edge
+/// that touches it and the node at the other end of each. One pass over
+/// each; nothing is kept beyond the cited ids.
+pub fn section_citation_set(
+    section: &CatalogueSection,
+    scope: &str,
+    nodes: &[Node],
+    edges: &[Edge],
+    cited: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>, SectionScopeError> {
+    if scope == SYSTEM_SCOPE {
+        return Ok(cited_fact_hashes(nodes, edges, cited));
+    }
+    let label = section.subject.ok_or(SectionScopeError::NotPerSubject)?;
+    let subject = nodes
+        .iter()
+        .find(|node| {
+            node.label == label
+                && citation_id(&FactKey::Node {
+                    id: node.id.clone(),
+                }) == scope
+        })
+        .ok_or(SectionScopeError::SubjectNotFound)?;
+    let touching = |edge: &&Edge| edge.src == subject.id || edge.dst == subject.id;
+    let mut near: BTreeSet<&str> = BTreeSet::from([subject.id.as_str()]);
+    for edge in edges.iter().filter(touching) {
+        near.insert(edge.src.as_str());
+        near.insert(edge.dst.as_str());
+    }
+    Ok(hashes_of(
+        nodes.iter().filter(|node| near.contains(node.id.as_str())),
+        edges.iter().filter(touching),
+        cited,
+    ))
 }
 
 #[derive(Clone, Copy)]
