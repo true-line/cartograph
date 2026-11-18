@@ -385,3 +385,28 @@ fn a_stored_finding_becomes_the_projection_input_without_an_upgrade() {
         );
     }
 }
+
+// A writer that holds the file for the whole busy timeout is contention,
+// not a storage failure, and nothing is written.
+#[test]
+fn a_locked_store_reports_busy_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("review.sqlite");
+    let drafts = DraftStore::open(&path).unwrap();
+    let store = drafts.finding_curation();
+    store.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let finding = record("finding-1", '0');
+
+    let other = rusqlite::Connection::open(&path).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(matches!(
+        store.review(&finding, 0, CurationDecision::Accepted),
+        Err(FindingCurationError::Busy)
+    ));
+    other.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(count(&drafts), 0);
+    // The same review succeeds once the lock is free.
+    store
+        .review(&finding, 0, CurationDecision::Accepted)
+        .unwrap();
+}

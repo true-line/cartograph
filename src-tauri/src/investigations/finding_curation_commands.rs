@@ -22,7 +22,7 @@ use agents::finding_curation::{
 };
 use agents::investigation::{CurateInvestigationFindingRequest, InvestigationEvidenceOrigin};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tauri::{Emitter, Manager};
 
 /// Most findings one saved result holds: a finish admits twelve.
@@ -95,6 +95,7 @@ impl From<FindingCurationError> for CurationCommandError {
             | FindingCurationError::RecordTooLarge { .. }
             | FindingCurationError::ContentChanged
             | FindingCurationError::InvalidStored => Self::InvalidRecord,
+            FindingCurationError::Busy => Self::Busy,
             FindingCurationError::InvalidLimit
             | FindingCurationError::Storage(_)
             | FindingCurationError::Json(_) => Self::StorageUnavailable,
@@ -169,6 +170,19 @@ fn curate(
         .review(&record, request.expected_revision, request.decision)?)
 }
 
+/// The curation reviews whose subject the saved result still computes. A
+/// row stored under another subject of the same result id is not a review
+/// of a finding the caller can see.
+fn current_curations(
+    stored: Vec<CurationObservation>,
+    subjects: &BTreeSet<String>,
+) -> Vec<CurationObservation> {
+    stored
+        .into_iter()
+        .filter(|review| subjects.contains(&review.subject_id))
+        .collect()
+}
+
 fn id_ok(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128
 }
@@ -183,13 +197,28 @@ pub(crate) async fn get_investigation_finding_curations(
         return Err(CurationCommandError::InvalidRequest);
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let reviews = app
-            .state::<AppState>()
-            .drafts
+        let state = app.state::<AppState>();
+        // The saved result decides whether the pair exists: a missing or
+        // replaced result is an error, never an empty list. Released before
+        // the draft store is taken.
+        let subjects: BTreeSet<String> = state
+            .jobs
             .lock()
             .map_err(|_| CurationCommandError::StorageUnavailable)?
-            .finding_curation()
-            .for_result(&investigation_id, &expected_result_id, MAX_RESULT_FINDINGS)?;
+            .investigation_finding_reviews(&investigation_id, &expected_result_id)?
+            .reviews
+            .into_iter()
+            .map(|review| review.subject.subject_id)
+            .collect();
+        let reviews = current_curations(
+            state
+                .drafts
+                .lock()
+                .map_err(|_| CurationCommandError::StorageUnavailable)?
+                .finding_curation()
+                .for_result(&investigation_id, &expected_result_id, MAX_RESULT_FINDINGS)?,
+            &subjects,
+        );
         Ok(FindingCurations {
             schema_version: 1,
             investigation_id,
@@ -363,5 +392,28 @@ mod tests {
             CurationCommandError::from(FindingReviewError::Busy),
             CurationCommandError::Busy
         );
+        assert_eq!(
+            CurationCommandError::from(FindingCurationError::Busy),
+            CurationCommandError::Busy
+        );
+    }
+
+    // AC-0844: the read returns only reviews of subjects the saved result
+    // computes.
+    #[test]
+    fn curation_read_keeps_only_the_subjects_of_the_saved_result() {
+        let review = |subject: &str| CurationObservation {
+            subject_id: subject.into(),
+            finding_id: "finding-1".into(),
+            review_revision: 1,
+            review_decision: agents::finding_curation::CurationDecision::Accepted,
+            reviewed_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let subjects = BTreeSet::from(["subject-a".to_owned()]);
+        assert_eq!(
+            current_curations(vec![review("subject-a"), review("subject-b")], &subjects),
+            vec![review("subject-a")]
+        );
+        assert!(current_curations(vec![review("subject-b")], &subjects).is_empty());
     }
 }

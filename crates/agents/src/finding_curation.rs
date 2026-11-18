@@ -153,6 +153,10 @@ pub enum FindingCurationError {
         /// Revision now stored.
         actual: u64,
     },
+    /// Another connection held the write lock for the whole busy timeout.
+    /// Raised only while taking the lock, so nothing was written.
+    #[error("the finding curation store is busy")]
+    Busy,
     /// A read limit of zero.
     #[error("read limit must be at least one")]
     InvalidLimit,
@@ -416,7 +420,13 @@ impl FindingCurationStore<'_> {
         }
         let digest = identity(&json);
         let subject = &record.subject;
-        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)?;
+        // Lock contention is retryable; any other failure is storage.
+        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate).map_err(
+            |error| match error.sqlite_error_code() {
+                Some(rusqlite::ErrorCode::DatabaseBusy) => FindingCurationError::Busy,
+                _ => error.into(),
+            },
+        )?;
         let current = get_on(&tx, &subject.subject_id)?;
         let actual = match &current {
             Some((stored_digest, stored)) => {
