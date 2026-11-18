@@ -102,6 +102,16 @@ pub(super) fn start_access<R: tauri::Runtime>(
             "This specialist version is not available.",
         ));
     }
+    // Drafting is not exposed over MCP (SPEC-15, Surfaces).
+    if session.is_some() && request.specialist_id == agents::section_run::SECTION_WRITER_ROLE {
+        return Err(rejected(
+            "invalid_input",
+            "This specialist version is not available.",
+        ));
+    }
+    // A drafting run names one drafted catalogue section (SPEC-15 slice 6).
+    super::super::section_drafts::validate_start(&request.specialist_id, &request.question)
+        .map_err(|error| rejected("invalid_input", error))?;
     let _guards = match validate_targets(
         &app,
         &state,
