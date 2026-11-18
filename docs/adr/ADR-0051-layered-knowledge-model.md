@@ -21,7 +21,7 @@ Today's facts:
 
 - **Graph store.** `core-graph` exposes a `GraphStore` trait whose only
   implementation is SQLite in WAL mode with recursive-CTE traversal
-  (ADR-0008; Kuzu archived). ADR-0047 (Proposed) adds the revision token.
+  (ADR-0008; Kuzu archived). ADR-0047 (accepted 2026-11-18) adds the revision token.
   Every node and edge carries `core-prov` provenance: tier, confidence,
   evidence spans and extractor.
 - **Embeddings.** `crates/semantic` embeds through a local Ollama

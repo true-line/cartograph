@@ -150,6 +150,23 @@ fn rich_body() -> PacketBody {
     body
 }
 
+// AC-0823: the packet store waits 5 s for a competing writer, the same busy
+// timeout as every other Cartograph store (#1653).
+#[test]
+fn packet_store_waits_five_seconds_for_a_busy_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = [
+        PacketStore::open(dir.path().join("packets.sqlite")).unwrap(),
+        PacketStore::in_memory().unwrap(),
+    ];
+    for store in stores {
+        let timeout: i64 = store
+            .connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5_000);
+    }
+}
 #[test]
 fn ac0248_seven_groups_omissions_and_exact_identity() {
     let body = body();

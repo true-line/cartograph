@@ -2640,10 +2640,9 @@ button.status-live-link:hover {
   border-top-color: var(--tier-gap);
 }
 
-/* ── Route error boundary & interim empty surfaces ───────────────────── */
+/* ── Route error boundary ───────────────────────────────────────────── */
 
-.route-error,
-.empty-surface {
+.route-error {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2661,13 +2660,7 @@ button.status-live-link:hover {
   color: var(--tier-gap);
 }
 
-.empty-surface .material-symbols-outlined {
-  font-size: 2rem;
-  color: var(--text-faint);
-}
-
-.route-error h2,
-.empty-surface h2 {
+.route-error h2 {
   font-size: 1rem;
 }
 
@@ -2675,12 +2668,6 @@ button.status-live-link:hover {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--tier-gap);
-}
-
-.empty-surface p {
-  max-width: 48ch;
-  color: var(--text-muted);
-  font-size: 0.85rem;
 }
 
 /* Keyboard-first: visible focus everywhere (handoff §Interactions #4). */
@@ -4898,4 +4885,30 @@ details.investigation-section { display: block; }
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+
+/* System manifest preview (#1655): one section per declared repository. */
+.preflight-system {
+  display: grid;
+  gap: 1.2rem;
+}
+
+.preflight-member {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.preflight-member-title {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.preflight-member-title .muted {
+  font-weight: normal;
+  font-size: 0.8rem;
+}
+
+.preflight-preview-note {
+  margin: 0;
+  font-size: 0.85rem;
 }
