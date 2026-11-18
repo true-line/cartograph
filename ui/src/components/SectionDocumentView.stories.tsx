@@ -99,7 +99,7 @@ export const AcceptedDraftShowsTheHostStateAndReason: Story = {
     const stale = within(canvas.getByRole('article', { name: `Draft ${STALE_DRAFT.draft_id.slice(0, 12)}` }));
     await expect(stale.getByText(`Subject ${SUBJECT_SCOPE}`)).toBeVisible();
     await expect(stale.getByTestId('draft-state')).toHaveTextContent(
-      'State: stale. A fact this draft cites changed after the draft was written. (cited_fact_changed)',
+      'State: stale. A fact this draft cites changed after the draft was written; a best-effort export prints it marked stale. (cited_fact_changed)',
     );
   },
 };

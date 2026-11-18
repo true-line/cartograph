@@ -49,18 +49,31 @@ when a draft is accepted, so a project without one keeps its bytes. The
 ids are printed as text and are not citations of the artifact: a missing id
 has no row in the fact index by definition.
 
+As built (slice 2): `product-specification.md` prints a `stale` draft in
+its section in a `best-effort` export, under the stale line and the changed
+ids, and each claim that cites one ends with `cites a changed fact`. The
+claims keep their annotations and their citations resolve as before. A
+`verified-only` export prints no claim, counts the stale draft's claims
+among those left out and names the draft with its state. Both modes carry
+`Stale sections:` in the header. One changed fact marks exactly the
+accepted drafts that cite it, and a second compilation of the same inputs
+is byte-identical (T-0672).
+
 ## Surfaces
 
 - **Compiled document, best-effort.** A stale draft is printed in its
   section under the line `Stale: cited facts changed since this text was
   accepted`, followed by the changed ids. Each claim that cites a changed
   id ends with `cites a changed fact`. An unresolvable draft is not
-  printed; the section states that and lists the missing ids.
+  printed; the section states that and how many cited ids are missing.
+  The ids themselves are in `curated.md`: every id the document prints
+  resolves in the fact index, and a missing id does not.
 - **Compiled document, verified-only.** No drafted claim is printed. The
   count left out and the stale list are stated.
 - **Header.** After the as-of values: `Stale sections:` and the addresses
-  (section number and scope) of every stale or unresolvable accepted draft,
-  or `none`.
+  (section number, scope and state) of every stale or unresolvable accepted
+  draft, or `none`. Without a curated projection the line says the list is
+  not known.
 - **`curated.md`.** Each draft row lists its changed and missing ids.
 - **Workbench.** The draft card shows the changed and missing ids under the
   state, and offers "Re-draft this section".

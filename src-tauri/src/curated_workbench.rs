@@ -78,7 +78,7 @@ pub(crate) fn draft_reason_sentence(reason: DraftStateReason) -> &'static str {
             "A fact this draft cites is not in the current graph."
         }
         DraftStateReason::CitedFactChanged => {
-            "A fact this draft cites changed after the draft was written."
+            "A fact this draft cites changed after the draft was written; a best-effort export prints it marked stale."
         }
         DraftStateReason::AnotherDraftAccepted => {
             "Another accepted draft is for the same section and scope."

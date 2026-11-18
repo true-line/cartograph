@@ -349,7 +349,8 @@ fn drafts_by_section<'a>(curated: Curated<'a>) -> BTreeMap<&'a str, Vec<&'a Cura
     sections
 }
 
-/// The admitted facts the eligible drafts cite, by citation id.
+/// The admitted facts the printed drafts cite, by citation id. A stale draft
+/// is printed in place (ADR-0045), so its citations are looked up too.
 fn cited_facts<'a>(
     drafts: &BTreeMap<&str, Vec<&CuratedDraft>>,
     nodes: &[&'a Node],
@@ -358,7 +359,7 @@ fn cited_facts<'a>(
     let wanted: BTreeSet<&str> = drafts
         .values()
         .flatten()
-        .filter(|draft| draft.state == DraftState::Eligible)
+        .filter(|draft| matches!(draft.state, DraftState::Eligible | DraftState::Stale))
         .flat_map(|draft| &draft.claims)
         .flat_map(|claim| &claim.citations)
         .map(String::as_str)
@@ -384,6 +385,32 @@ fn cited_facts<'a>(
     facts
 }
 
+/// Printed above an accepted draft whose cited facts changed (SPEC-17).
+const STALE_LINE: &str = "Stale: cited facts changed since this text was accepted";
+
+/// The header value of `Stale sections:`: the section number and scope of
+/// every stale or unresolvable accepted draft, in document order.
+fn stale_sections(drafts: &BTreeMap<&str, Vec<&CuratedDraft>>) -> String {
+    let listed: Vec<String> = catalogue_sections("D1")
+        .filter_map(|section| drafts.get(section.number))
+        .flatten()
+        .filter(|draft| matches!(draft.state, DraftState::Stale | DraftState::Unresolvable))
+        .map(|draft| {
+            format!(
+                "{} (scope `{}`, `{}`)",
+                Literal(&draft.address.section),
+                Literal(&draft.address.scope),
+                state_name(draft.state)
+            )
+        })
+        .collect();
+    if listed.is_empty() {
+        "none".to_owned()
+    } else {
+        listed.join(", ")
+    }
+}
+
 struct Drafted<'a, 'b> {
     facts: &'b BTreeMap<String, Fact<'a>>,
     /// Citation ids already asserted by this artifact.
@@ -406,7 +433,28 @@ impl Drafted<'_, '_> {
         let mut omitted = 0usize;
         let mut notes: Vec<String> = Vec::new();
         for draft in drafts {
-            if draft.state != DraftState::Eligible {
+            let stale = draft.state == DraftState::Stale;
+            if draft.state == DraftState::Unresolvable {
+                // The ids are not printed here: every id this document
+                // prints resolves in the fact index, and these do not.
+                notes.push(format!(
+                    "- Draft `{}` for scope `{}` is listed as `{}` (`{}`) and is not printed: \
+                     {} of the facts it cites {} no longer in the graph. `curated.md` names \
+                     them.",
+                    Literal(&draft.draft_id),
+                    Literal(&draft.address.scope),
+                    state_name(draft.state),
+                    reason_name(draft.reason),
+                    draft.missing.len(),
+                    if draft.missing.len() == 1 {
+                        "is"
+                    } else {
+                        "are"
+                    }
+                ));
+                continue;
+            }
+            if !stale && draft.state != DraftState::Eligible {
                 notes.push(format!(
                     "- Draft `{}` for scope `{}` is listed as `{}` (`{}`).",
                     Literal(&draft.draft_id),
@@ -419,6 +467,15 @@ impl Drafted<'_, '_> {
             if mode == ExportMode::VerifiedOnly {
                 omitted += draft.claims.len();
                 shown = true;
+                if stale {
+                    notes.push(format!(
+                        "- Draft `{}` for scope `{}` is listed as `{}` (`{}`).",
+                        Literal(&draft.draft_id),
+                        Literal(&draft.address.scope),
+                        state_name(draft.state),
+                        reason_name(draft.reason)
+                    ));
+                }
                 continue;
             }
             let resolves = draft
@@ -428,10 +485,11 @@ impl Drafted<'_, '_> {
                 .all(|id| self.facts.contains_key(id));
             if !resolves {
                 notes.push(format!(
-                    "- Draft `{}` for scope `{}` is eligible and is not printed: it cites a \
+                    "- Draft `{}` for scope `{}` is {} and is not printed: it cites a \
                      fact this export does not list.",
                     Literal(&draft.draft_id),
-                    Literal(&draft.address.scope)
+                    Literal(&draft.address.scope),
+                    state_name(draft.state)
                 ));
                 continue;
             }
@@ -445,6 +503,9 @@ impl Drafted<'_, '_> {
                 Literal(&draft.address.scope),
                 Literal(&draft.draft_id)
             )?;
+            if stale {
+                writeln!(out, "{STALE_LINE}: {}.\n", draft.changed.join(", "))?;
+            }
             for (index, claim) in draft.claims.iter().enumerate() {
                 write!(
                     out,
@@ -465,6 +526,9 @@ impl Drafted<'_, '_> {
                             Fact::Edge(edge) => assertions.edge(edge)?,
                         }
                     }
+                }
+                if stale && claim.citations.iter().any(|id| draft.changed.contains(id)) {
+                    out.push_str("; cites a changed fact")?;
                 }
                 out.push_str(")\n")?;
                 self.printed += 1;
@@ -524,6 +588,15 @@ pub(super) fn d1(
             content.push_str("- Curated revision: not supplied to this compilation\n")?;
         }
     }
+    let drafts = drafts_by_section(curated);
+    match curated {
+        Curated::Computed(_) => {
+            writeln!(content, "- Stale sections: {}", stale_sections(&drafts))?;
+        }
+        Curated::NotComputed(_) | Curated::NotSupplied => {
+            content.push_str("- Stale sections: not known without a curated projection\n")?;
+        }
+    }
     content.push_str(
         "\nSection kinds: **P** is compiled from recovered facts. **A** is drafted by an agent \
          role from cited facts and shown only after a human accepts it; it stays T3 / \
@@ -531,7 +604,6 @@ pub(super) fn d1(
          for the team. A citation id resolves in `fact-index.md`.\n",
     )?;
 
-    let drafts = drafts_by_section(curated);
     let facts = match mode {
         ExportMode::BestEffort => cited_facts(&drafts, nodes, edges),
         // No claim is printed, so no cited fact is looked for.

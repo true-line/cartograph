@@ -291,8 +291,8 @@ export function SectionDocumentView({
           <h3 id="section-document-title">Product specification sections</h3>
           <p className="muted">
             Document D1 by section. A drafted claim is an agent's reading of the facts it cites:
-            T3 / InferredWeak before and after review. An export prints an accepted draft only
-            while every fact it cites is unchanged.
+            T3 / InferredWeak before and after review. A best-effort export prints an accepted
+            draft, marked stale once a fact it cites has changed.
           </p>
         </div>
         {onReload && (
