@@ -404,6 +404,27 @@ fn spec_writer_rejects_non_proposed_design_findings_at_finish() {
     ));
 }
 
+// AC-0668: a section draft describes the system as it is, so the drafting
+// role's finish admits every claim kind but a proposed design.
+#[test]
+fn section_writer_rejects_proposed_design_findings_at_finish() {
+    let fixture = fixture_policy(
+        true,
+        true,
+        false,
+        Some(&INVESTIGATION_V1_POLICY),
+        Some(SpecialistId::SectionWriterV1),
+    );
+    assert!(matches!(
+        decide(&fixture, &spec_writer_finish(), &[]),
+        Err(InvestigationError::InvalidAction)
+    ));
+    assert!(matches!(
+        decide(&fixture, &finish(false), &[]),
+        Ok(FinishDecision::Accepted(_))
+    ));
+}
+
 #[test]
 fn gap_triager_rejects_non_proposed_design_findings_at_finish() {
     let fixture = gap_triager_fixture();

@@ -1,5 +1,6 @@
 import { admissionCatalog, completionChoices } from './completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import { sectionDocumentFixture } from './sectionDocumentFixtures';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import App from './App';
@@ -1064,6 +1065,9 @@ function installFakeCore(options: {
         return null;
       case 'local_lane_status':
         return { reachable: false, start_command: 'ollama serve', models: [] };
+      case 'section_document':
+        // The Workbench document view (AC-0669): D1 with no stored draft.
+        return sectionDocumentFixture([]);
       case 'recorded_coverage':
         return [];
       default:
