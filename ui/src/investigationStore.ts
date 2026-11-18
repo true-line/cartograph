@@ -1,3 +1,4 @@
+import { mergeCurations, validCuration, validCurationChanged, validCurations, type CurationDecision, type FindingCuration, type FindingCurationChanged, type FindingCurations } from './findingCurations';
 import { validReviewChanged, type FindingReviewChanged, sameReviewSubject, mergeReviews, validReview, validReviews, type FindingReview, type FindingReviews, type FindingReviewDecision } from './findingReviews';
 import { isCompletionDisclosure, isCompletionSpecialist, isExpandedSpecialist } from './investigationFamilies';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
@@ -297,6 +298,15 @@ export interface InvestigationState {
   refreshReviews: () => Promise<void>;
   reviewFinding: (findingId: string, decision: FindingReviewDecision) => Promise<void>;
   invalidateReview: (message: FindingReviewChanged) => void;
+  /** Curation reviews of the selected result's findings (ADR-0074). A
+   *  finding with no row has none. Separate from the follow-up reviews. */
+  findingCurations: FindingCuration[];
+  curationLoading: boolean;
+  curationBusy: boolean;
+  curationError: string | null;
+  refreshCurations: () => Promise<void>;
+  curateFinding: (findingId: string, decision: CurationDecision) => Promise<void>;
+  invalidateCuration: (message: FindingCurationChanged) => void;
   catalog: InvestigationCatalog | null;
   catalogLoading: boolean;
   catalogError: string | null;
@@ -382,6 +392,7 @@ export interface InvestigationState {
 }
 
 let reviewRequest = 0;
+let curationRequest = 0;
 let catalogRequest = 0;
 let historyRequest = 0;
 let conversationRequest = 0;
@@ -638,6 +649,56 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       if (!result || !validReviewChanged(message, result)) return;
       const known = findingReviews.find((row) => row.subject.subject_id === message.subject_id);
       if (!known || message.review_revision > known.revision) void get().refreshReviews();
+    },
+    findingCurations: [], curationLoading: false, curationBusy: false, curationError: null,
+    refreshCurations: async () => {
+      const { selectedId, selectionGeneration, result } = get();
+      if (!selectedId || !result) return;
+      const request = ++curationRequest;
+      const current = () => get().selectionGeneration === selectionGeneration && get().selectedId === selectedId && get().result?.result_id === result.result_id && request === curationRequest;
+      set({ curationLoading: true });
+      try {
+        const value = await invokeOr<FindingCurations | null>('get_investigation_finding_curations', null, { investigationId: selectedId, expectedResultId: result.result_id });
+        if (!current()) return;
+        if (!validCurations(value, result)) throw new Error('Invalid curation read');
+        set({ findingCurations: mergeCurations(get().findingCurations, value.reviews), curationLoading: false, curationError: null });
+      } catch {
+        if (current()) set({ curationLoading: false, curationError: 'Curation reviews are unavailable. Refresh curation reviews before deciding. Historical findings remain readable.' });
+      }
+    },
+    curateFinding: async (findingId, decision) => {
+      const { selectedId, result, selectionGeneration, findingReviews, findingCurations, curationBusy, curationLoading, curationError } = get();
+      // The host names a finding by its review subject, so that row must be loaded.
+      const subject = findingReviews.find((row) => row.subject.finding_id === findingId)?.subject;
+      const known = findingCurations.find((row) => row.finding_id === findingId);
+      if (!result || !subject || curationBusy || curationLoading || curationError) return;
+      if (known && known.subject_id !== subject.subject_id) {
+        set({ curationError: 'The saved curation review names another finding identity. Refresh curation reviews before deciding.' });
+        return;
+      }
+      const expected = known?.review_revision ?? 0;
+      const current = () => get().selectedId === selectedId && get().selectionGeneration === selectionGeneration && get().result?.result_id === result.result_id;
+      set({ curationBusy: true, curationError: null });
+      try {
+        const value = await invokeOr<FindingCuration | null>('curate_investigation_finding', null, { requestJson: JSON.stringify({ schema_version: 1, subject, expected_revision: expected, decision }) });
+        if (!current()) return;
+        if (!validCuration(value, result) || value.subject_id !== subject.subject_id || value.finding_id !== findingId || value.review_revision !== expected + 1 || value.review_decision !== decision) throw new Error('Unconfirmed write');
+        set({ findingCurations: mergeCurations(get().findingCurations, [value]), curationBusy: false });
+      } catch (error) {
+        if (!current()) return;
+        const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : null;
+        set({ curationBusy: false, curationError: code === 'conflict'
+          ? 'Another curation review was saved first and this one was not. Refresh curation reviews, then deliberately choose again.'
+          : code === 'busy'
+            ? 'Curation storage was busy and this review was not saved. Refresh curation reviews, then choose again. No automatic retry was made.'
+            : 'The curation review could not be confirmed. Refresh curation reviews to recover the saved decision before choosing again. No automatic retry was made.' });
+      }
+    },
+    invalidateCuration: (message) => {
+      const { result, findingCurations } = get();
+      if (!result || !validCurationChanged(message, result)) return;
+      const known = findingCurations.find((row) => row.subject_id === message.subject_id);
+      if (!known || message.review_revision > known.review_revision) void get().refreshCurations();
     },
     catalog: null, catalogLoading: false, catalogError: null,
     history: [], historySearch: '', historyAnswerMatchIds: [], historyNameMatchIds: [], historyActiveOnly: false, nextCursor: null, historyLoading: false, historyError: null,
@@ -1040,6 +1101,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       ++detailRequest;
       ++reviewRequest;
       set({ findingReviews: [], reviewLoading: false, reviewBusy: false, reviewError: null });
+      ++curationRequest;
+      set({ findingCurations: [], curationLoading: false, curationBusy: false, curationError: null });
       citationOwnerCleanup?.(); citationOwnerCleanup = undefined;
       ++citationRequest;
       ++actionRequest;
@@ -1181,7 +1244,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           consentOpen: state.consentOpen && state.consent?.step_id === consent?.step_id &&
             state.consent?.preview.payload_hash === consent?.preview.payload_hash,
           loading: options?.awaitChat === true, error: null }));
-        if (current()) void get().refreshReviews();
+        if (current()) { void get().refreshReviews(); void get().refreshCurations(); }
 
         transcriptSettled = chatObservation.then((chatRead) => {
           if (!current()) return;

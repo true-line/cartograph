@@ -1,5 +1,6 @@
 import type {
-  ComputedCuratedRead, CuratedCounts, CuratedRead, CuratedRecord, SpecExportMode,
+  ComputedCuratedRead, CuratedCounts, CuratedFinding, CuratedFindingListing, CuratedRead,
+  CuratedRecord, SpecExportMode,
 } from './store';
 
 // Story and test fixtures for the curated read (SPEC-12 slice 3, AC-0655).
@@ -102,6 +103,55 @@ export function emptyCuratedRead(mode: SpecExportMode = 'best-effort'): Computed
       stale: [],
     },
     counts: NO_COUNTS,
+  };
+}
+
+export const ELIGIBLE_FINDING: CuratedFinding = {
+  finding_ref: `investigation-finding-review-v1:${'1f'.repeat(32)}`,
+  investigation_id: 'inv-refunds',
+  result_id: 'result:inv-refunds',
+  finding_id: 'F1',
+  role: 'domain-analyst@2',
+  kind: 'implemented_behavior',
+  title: 'Refunds need an approved return',
+  statement: 'A refund is issued only for an approved return.',
+  limitations: ['Partial refunds were not read.'],
+  citations: ['F-0123456789abcdef', 'F-fedcba9876543210'],
+  tier: 'Agentic',
+  confidence: 'InferredWeak',
+  review_status: 'accepted',
+  source_support: { captured: 1, unverified: 1 },
+  state: 'eligible',
+  reason: 'all_conditions_hold',
+  reason_sentence: 'Every fact the finding cites is as the investigation read it.',
+  changed: [],
+  missing: [],
+};
+
+export const STALE_FINDING: CuratedFindingListing = {
+  finding_ref: `investigation-finding-review-v1:${'2f'.repeat(32)}`,
+  investigation_id: 'inv-refunds',
+  result_id: 'result:inv-refunds',
+  finding_id: 'F2',
+  role: 'domain-analyst@2',
+  cited_facts: 1,
+  state: 'stale',
+  reason: 'cited_fact_changed',
+  reason_sentence: 'A fact the finding cites changed after the investigation read it.',
+  changed: ['F-00000000000000c1'],
+  missing: [],
+};
+
+/** The curated read with one eligible and one stale accepted finding, split
+ *  by export mode as the host splits it (ADR-0074 decision 11). */
+export function curatedFindingsReadFixture(mode: SpecExportMode = 'best-effort'): ComputedCuratedRead {
+  const findings = mode === 'best-effort' ? [ELIGIBLE_FINDING] : [];
+  return {
+    ...curatedReadFixture(mode),
+    findings,
+    findings_omitted: 1 - findings.length,
+    findings_listed: [STALE_FINDING],
+    finding_counts: { accepted: 2, eligible: 1, unresolvable: 0, stale: 1 },
   };
 }
 

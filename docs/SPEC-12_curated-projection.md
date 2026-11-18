@@ -101,7 +101,7 @@ and `reason`.
 [ADR-0074](adr/ADR-0074-curated-findings.md) makes an investigation finding
 the third record kind. It is built in three slices: the projection core
 (AC-0843, implemented), the curation review (AC-0844, implemented), the
-reads (AC-0845, implemented) and the screens (AC-0846).
+reads (AC-0845, implemented) and the screens (AC-0846, implemented).
 
 - **Two reviews.** The follow-up review of SPEC-03 is unchanged and is not
   curation. A separate curation review, `accepted` or `rejected`, is what
@@ -234,8 +234,9 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
 - Findings (#1746 requirement 2): the projection core admits them, the
   host stores and reads their curation reviews, and the export, the
   Workbench read and the MCP reads list them (ADR-0074, AC-0843 to
-  AC-0845). No screen offers the review or draws the list until the
-  screen slice lands (AC-0846).
+  AC-0845). The Investigations surface offers the curation review beside
+  the follow-up review, and the Workbench curated section draws the list
+  (AC-0846).
 - Cardinality is one accepted edge per Gap until slot cardinality can be
   proven from the graph.
 - The Gap predicate is duplicated in `context-hub` and `spec`; a parity test
