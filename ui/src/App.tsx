@@ -151,6 +151,7 @@ export default function App() {
     clearGraph,
     setSpecMode,
     readSpecArtifact,
+    readSpecArtifacts,
     readSelectedFlowView,
     curateAssertion,
     select,
@@ -731,7 +732,7 @@ export default function App() {
                 void curateAssertion(assertion, decision, note)
               }
               onCopyArtifact={(artifact) => void copySpecArtifact(artifact, readSpecArtifact, reportSpecError)}
-              onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifact, reportSpecError)}
+              onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifacts, reportSpecError)}
               onSelectNode={(node) => void select(node)}
               onSelectEdge={selectEdgeSubject}
             />
