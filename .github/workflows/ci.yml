@@ -157,6 +157,10 @@ jobs:
       - name: Traceability check
         run: node scripts/check-traceability.mjs
 
+      # Every crate inherits [workspace.lints]; missing_docs allows only shrink (#1764).
+      - name: Workspace lints check
+        run: node scripts/check-workspace-lints.mjs
+
       - name: Version synchronization check
         run: npm run version:check
 

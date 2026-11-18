@@ -124,6 +124,11 @@ fn open_directory(path: &Path) -> Result<std::fs::File, String> {
 }
 
 #[cfg(windows)]
+// SAFETY: `BY_HANDLE_FILE_INFORMATION` is a plain C struct of integers and
+// `FILETIME`s, so the all-zero bit pattern is a valid value. The borrowed file
+// keeps the handle alive for the synchronous call, `information` is a valid,
+// writable out-pointer for the call's duration, and the API retains neither.
+#[allow(unsafe_code)]
 fn directory_identity(file: &std::fs::File) -> Result<(u32, u32, u32), String> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{

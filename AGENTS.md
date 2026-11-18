@@ -162,7 +162,7 @@ enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
 ## Verification before "done"
 
 ```sh
-node scripts/check-traceability.mjs && node scripts/check-help-mirror.mjs --validate && npm run version:check && npm run test:version
+node scripts/check-traceability.mjs && node scripts/check-help-mirror.mjs --validate && node scripts/check-workspace-lints.mjs && npm run version:check && npm run test:version
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run test && npm --prefix ui run build
 ```
