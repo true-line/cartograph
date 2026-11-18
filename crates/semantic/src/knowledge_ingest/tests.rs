@@ -307,7 +307,9 @@ fn derived_flows_are_units_rendered_by_their_hops() {
     );
     let refund = flow("business-flow:a", "POST /refund", &[]);
     let stray = node("sym:stray", "Symbol", serde_json::json!({}));
-    let (units, omitted) = units_with_flows(&nodes, &[&pay, &refund, &stray, &pay]);
+    // A flow under a base node's id is not a second unit of that id.
+    let shadow = flow("sym:a", "GET /shadow", &[]);
+    let (units, omitted) = units_with_flows(&nodes, &[&pay, &refund, &stray, &pay, &shadow]);
     assert_eq!(omitted, 0);
     let ids: Vec<_> = units.iter().map(|u| u.node_id.as_str()).collect();
     assert_eq!(

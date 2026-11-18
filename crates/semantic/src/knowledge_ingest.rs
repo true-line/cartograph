@@ -18,6 +18,7 @@ use crate::embedding_cache::{
 use core_graph::Node;
 use llm::{LlmProvider, ProviderError};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 /// Versioned unit selection and rendering recipe.
@@ -83,15 +84,22 @@ pub fn units(nodes: &[Node]) -> (Vec<KnowledgeUnit>, usize) {
 
 /// Deterministic units for a base snapshot and the flows derived from it,
 /// and the count past the caps. `flows` are the producers' `BusinessFlow`
-/// nodes; anything else in it is ignored. Flows past [`MAX_FLOW_UNITS`] and
+/// nodes; anything else in it, and a flow with a base node's id, is ignored.
+/// Flows past [`MAX_FLOW_UNITS`] and
 /// units past [`MAX_UNITS`] are counted, never embedded.
 pub fn units_with_flows(nodes: &[Node], flows: &[&Node]) -> (Vec<KnowledgeUnit>, usize) {
     let rank = |node: &Node| LABELS.iter().position(|label| *label == node.label);
     let base = nodes.iter().filter(|node| node.label != FLOW_LABEL);
+    // A flow cannot take the id of a base node: the base node is the unit.
+    let base_ids: BTreeSet<&str> = if flows.is_empty() {
+        BTreeSet::new()
+    } else {
+        nodes.iter().map(|node| node.id.as_str()).collect()
+    };
     let flows = flows
         .iter()
         .copied()
-        .filter(|node| node.label == FLOW_LABEL);
+        .filter(|node| node.label == FLOW_LABEL && !base_ids.contains(node.id.as_str()));
     let mut ranked: Vec<_> = base
         .chain(flows)
         .filter_map(|node| rank(node).map(|rank| (rank, node)))
