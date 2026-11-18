@@ -600,6 +600,16 @@ pub(super) fn admit_finish_with_locator(
     ) {
         return Err(InvestigationError::InvalidAction);
     }
+    // A section draft describes the system as it is (SPEC-15 slice 6).
+    if request.specialist_id == "section-writer@1"
+        && matches!(
+            &finish.action,
+            InvestigationAction::Finish { findings, .. }
+                if findings.iter().any(|finding| finding.claim_kind == InvestigationClaimKind::ProposedDesign)
+        )
+    {
+        return Err(InvestigationError::InvalidAction);
+    }
     let ledger = input.ledger();
     if matches!(disclosure.schema_version, 4..=6) {
         input.validate_completion_binding_with_policy(&request, disclosure, attempts, policy)?;
