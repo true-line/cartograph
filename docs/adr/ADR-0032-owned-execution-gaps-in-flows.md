@@ -1,6 +1,6 @@
 # ADR-0032 — Owned execution Gaps make a flow Partial
 
-- **Status:** Proposed in #473 (owner review)
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #473
 - **Date:** 2026-09-24
 - **Deciders:** Cartograph owner; implementation agent
 

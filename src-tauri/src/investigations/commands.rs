@@ -10,7 +10,7 @@ use std::time::Instant;
 use tauri::Manager;
 
 // Shared by the production catalog and staged-version boundary test.
-const AVAILABLE_SPECIALISTS: [SpecialistId; 14] = [
+const AVAILABLE_SPECIALISTS: [SpecialistId; 15] = [
     SpecialistId::DomainAnalystV3,
     SpecialistId::EvidenceAuditorV3,
     SpecialistId::DomainAnalystV4,
@@ -25,6 +25,7 @@ const AVAILABLE_SPECIALISTS: [SpecialistId; 14] = [
     SpecialistId::SpecWriterV2,
     SpecialistId::GapTriagerV1,
     SpecialistId::GapTriagerV2,
+    SpecialistId::SectionWriterV1,
 ];
 
 fn available_specialists() -> Vec<SpecialistId> {
@@ -105,6 +106,7 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                         SpecialistId::SpecWriterV2,
                         SpecialistId::GapTriagerV1,
                         SpecialistId::GapTriagerV2,
+                        SpecialistId::SectionWriterV1,
                     ]
                 },
             })
