@@ -1,6 +1,6 @@
 # ADR-0033 — Proven-external JVM import ids key on the package
 
-- **Status:** Proposed in #464 (owner review)
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #464
 - **Date:** 2026-09-24
 - **Deciders:** Cartograph owner; implementation agent
 

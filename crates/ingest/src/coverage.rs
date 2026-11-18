@@ -24,6 +24,15 @@ pub const STORED_RECEIPT_OMISSION_CAPABILITY: &str = "receipt-store-capacity";
 /// Capability naming symlinks the captured TypeScript selection did not follow (#1229).
 pub const UNFOLLOWED_LINK_CAPABILITY: &str = "symlink-not-followed";
 
+/// Capability naming found ADR/RFC files over the reader's size bound (#1847).
+pub const ADR_TOO_LARGE_CAPABILITY: &str = "adr-file-too-large";
+/// Capability naming found ADR/RFC files that are not valid UTF-8 (#1847).
+pub const ADR_NOT_UTF8_CAPABILITY: &str = "adr-file-not-utf8";
+/// Extractor id of the found ADR/RFC reader (`spec::FOUND_ADR_EXTRACTOR_ID`).
+pub const FOUND_ADR_PRODUCER_ID: &str = "t0.adr-markdown";
+/// Extractor id of the declared API contract reader (`spec::CONTRACT_EXTRACTOR_ID`).
+pub const API_CONTRACT_PRODUCER_ID: &str = "t0.api-contract";
+
 /// Most refused file paths one plugin's [`PluginRefusals::files`] lists
 /// (#1810). The rest are counted in [`PluginRefusals::omitted`].
 pub const MAX_REFUSED_FILES_LISTED: usize = 256;
@@ -217,7 +226,11 @@ impl ReceiptOmission {
             ),
             Self::StoreCapacity => format!(
                 "{occurrences} receipts in {files} files did not fit the retained \
-                 receipt store, which cannot yet reclaim space"
+                 receipt store (forgetting a retained source frees its receipts, and \
+                 a recovery after a source changed frees space once its superseded \
+                 receipts are reclaimed, in both cases only receipts that nothing pins \
+                 and the current graph no longer binds; a recovery of an unchanged source frees \
+                 nothing, and neither frees room under a source's own share limit)"
             ),
         };
         format!(
@@ -444,6 +457,10 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
     ),
     // Stitching consumes every layer's event and client-call sites.
     ("t0.events", "event and client-call site", None),
+    // Found decisions and declared API references are read for every layer
+    // selection (#1847).
+    (FOUND_ADR_PRODUCER_ID, "ADR and RFC Markdown", None),
+    (API_CONTRACT_PRODUCER_ID, "declared API reference", None),
 ];
 
 fn selected(hints: &[String], id: &str, layers: Option<&[&str]>) -> bool {
@@ -753,6 +770,59 @@ impl RepoCoverage {
             });
             self.refresh_limited();
         }
+        self
+    }
+
+    /// Add the found ADR/RFC files the reader did not read (#1847): one
+    /// not-covered entry per reason, and the reader's row says how many it
+    /// skipped, so a skipped decision is never read as covered. Each list is
+    /// sorted. Apply after [`RepoCoverage::with_unsupported`], which replaces
+    /// the list.
+    pub fn with_unread_adrs(mut self, too_large: &[String], not_utf8: &[String]) -> Self {
+        let skipped = too_large.len() + not_utf8.len();
+        if skipped == 0 {
+            return self;
+        }
+        for (capability, files, why) in [
+            (
+                ADR_TOO_LARGE_CAPABILITY,
+                too_large,
+                "were larger than the 1 MiB ADR bound",
+            ),
+            (ADR_NOT_UTF8_CAPABILITY, not_utf8, "were not valid UTF-8"),
+        ] {
+            if let Some(first) = files.first() {
+                let count = files.len();
+                self.unsupported.push(UnsupportedCapability {
+                    capability: capability.into(),
+                    occurrences: count as u64,
+                    first_site: first.clone(),
+                    reason: format!(
+                        "{count} ADR or RFC file(s) {why} and were not read; no decision \
+                         or governed link from them joined the graph: a tool limitation, \
+                         not a system gap"
+                    ),
+                });
+            }
+        }
+        if let Some(row) = self
+            .producers
+            .iter_mut()
+            .find(|row| row.id == FOUND_ADR_PRODUCER_ID)
+            && row.state != ProducerState::NotSelected
+        {
+            let scope = format!("{}@{}", self.repo, self.commit);
+            row.state = ProducerState::Ran;
+            row.stopping_reason = format!(
+                "read {} of the {} ADR and RFC files in {scope}; {} too large and {} not \
+                 UTF-8 were not read",
+                row.files,
+                row.files.saturating_add(skipped as u64),
+                too_large.len(),
+                not_utf8.len()
+            );
+        }
+        self.refresh_limited();
         self
     }
 
