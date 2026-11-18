@@ -1,3 +1,7 @@
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{InvestigationError, bounded_bytes};
 use core_prov::{ConfidenceTier, Tier};
 use serde::{Deserialize, Serialize};

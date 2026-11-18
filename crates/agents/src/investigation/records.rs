@@ -1,5 +1,9 @@
 //! Versioned transport and durable metadata. None of these DTOs grants access to
 //! a filesystem path, execution lease, current graph or provider.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::{
     InputClosureStatus, PrimarySourceScope, TaskCaptureSpanRef, TaskFactKey, TaskFactSelection,
