@@ -334,6 +334,10 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 - **Trace:** R1 · `app`, `ui` · — · T-0740
 - **AC-0760** Given a spec export in either mode, then `data_model.md` prints beside each fact it asserts (each entity and related node, each access or mapping relation, and each relation field, which cites its relation edge) that fact's citation id with its confidence; the ids it prints are exactly the facts it asserts and each resolves to a row of the fact index; a `verified-only` document prints no InferredWeak fact or citation and `best-effort` prints them with their confidence (R-INT-5); the same graph yields the same bytes. The diagram draws the same facts and carries no ids.
 - **Trace:** R2 · `spec` · ADR-0058 · T-0760
+- **AC-0761** Given a spec export in either mode, then `pipelines.md` prints beside each fact it asserts that fact's citation id: each pipeline; each trigger, job and step with the `PART_OF` relation that places it; and each `NEEDS` relation of a job, resolved or not, in the order of the job's Needs cell. Each relation's id carries the relation's confidence, and each node's confidence is in its row. The ids it prints are exactly the facts it asserts and each resolves to a row of the fact index.
+- **Trace:** R2 · `spec` · ADR-0058 · T-0761
+- **AC-0762** Given a spec export, then a `verified-only` `pipelines.md` prints no citation of an InferredWeak pipeline fact, placing relation or need, and its fact index has no row for one; a `best-effort` one prints each with its confidence (R-INT-5); in both modes every printed id resolves, and the same graph yields the same bytes.
+- **Trace:** R2 · `spec` · ADR-0058 · T-0762
 
 ### US-0013 — ADR recovery and drift detection
 - **Actor:** Engine
