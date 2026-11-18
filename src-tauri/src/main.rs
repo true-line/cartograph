@@ -3070,12 +3070,19 @@ fn stitch_http_bindings(
 /// A rescan first drops links previously owned by that repo's found ADRs and
 /// removes ADR nodes whose source file disappeared, so re-ingest cannot retain
 /// declarations that are no longer present.
+///
+/// Each repo's inventory in `recorded` was built before the rescan, so its
+/// found-ADR row counted only links into that repo. The row is restated with
+/// the relinked edge count and republished with the patch, so a cross-repo
+/// decision is never counted as linking nothing (#1847). Returns each
+/// rescanned repo's found-ADR edge count.
 fn relink_found_adrs(
     state: &AppState,
     operation: &SourceOperation,
     execution: &JobExecution,
     facts: &mut OperationFacts,
-) -> Result<u64, String> {
+    recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
+) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
     let snapshot = state
         .graph
@@ -3090,16 +3097,49 @@ fn relink_found_adrs(
         operation.root(repo)
     })?;
     let (patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
+    let mut restated = Vec::new();
+    for (repo, entry) in recorded.iter_mut() {
+        if let Some(&edges) = linked.get(repo)
+            && restate_adr_edges(&mut entry.coverage, edges)
+        {
+            entry.record.inventory_json =
+                serde_json::to_string(&entry.coverage).map_err(|e| e.to_string())?;
+            restated.push(entry.record.clone());
+        }
+    }
     let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
     ensure_running_job(state, execution)?;
     if !graph
-        .apply_patch_if_snapshot_matches(&snapshot, &patch)
+        .apply_patch_with_coverage_if_snapshot_matches(&snapshot, &patch, &restated)
         .map_err(|e| e.to_string())?
     {
         return Err("graph context changed during ADR recovery; retry recovery".into());
     }
     facts.record_patch(&patch);
     Ok(linked)
+}
+
+/// A repo's coverage inventory and the record it was published as, kept so
+/// a later system-wide pass can restate it (#1847).
+struct RecordedCoverage {
+    coverage: ingest::coverage::RepoCoverage,
+    record: core_graph::coverage::CoverageRecord,
+}
+
+/// Set the found-ADR row's edge count to the relinked count. Returns whether
+/// it changed.
+fn restate_adr_edges(coverage: &mut ingest::coverage::RepoCoverage, edges: u64) -> bool {
+    match coverage
+        .producers
+        .iter_mut()
+        .find(|row| row.id == spec::FOUND_ADR_EXTRACTOR_ID)
+    {
+        Some(row) if row.edges != edges => {
+            row.edges = edges;
+            true
+        }
+        _ => false,
+    }
 }
 
 fn collect_found_adrs<'a>(
@@ -3132,9 +3172,12 @@ fn found_adr_patch(
     nodes: &[Node],
     edges: &[Edge],
     updates: Vec<(String, spec::AdrFacts)>,
-) -> (core_graph::GraphPatch, u64) {
+) -> (
+    core_graph::GraphPatch,
+    std::collections::BTreeMap<String, u64>,
+) {
     let mut patch = core_graph::GraphPatch::default();
-    let mut linked = 0;
+    let mut linked = std::collections::BTreeMap::new();
     for (repo, facts) in updates {
         let adr_prefix = format!("adr:{repo}@");
         let existing_ids = nodes
@@ -3160,7 +3203,7 @@ fn found_adr_patch(
         patch
             .delete_node_ids
             .extend(existing_ids.difference(&current_ids).cloned());
-        linked += facts.edges.len() as u64;
+        linked.insert(repo, distinct_edge_count(&facts.edges));
         patch.upsert_nodes.extend(facts.nodes);
         patch.upsert_edges.extend(facts.edges);
     }
@@ -3180,7 +3223,7 @@ fn apply_found_adrs(
     {
         return Err("graph context changed during ADR recovery; retry recovery".into());
     }
-    Ok(linked)
+    Ok(linked.values().sum())
 }
 
 /// The single source of truth for register counts (#116): every surface —
@@ -5005,7 +5048,14 @@ fn run_ingest<R: tauri::Runtime>(
     }
     reclaim_superseded_receipts(state, source, primary);
 
-    relink_found_adrs(state, operation, execution, &mut published).map_err(&fail)?;
+    relink_found_adrs(
+        state,
+        operation,
+        execution,
+        &mut published,
+        &mut Default::default(),
+    )
+    .map_err(&fail)?;
 
     ensure_running_job(state, execution)?;
     record_ingest_metrics(
@@ -5446,7 +5496,14 @@ fn add_repo_blocking<R: tauri::Runtime>(
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
     reclaim_superseded_receipts(&state, &source, primary);
-    relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
+    relink_found_adrs(
+        &state,
+        &operation,
+        &execution,
+        &mut published,
+        &mut Default::default(),
+    )
+    .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
     record_ingest_metrics(
         &state,
@@ -5600,6 +5657,7 @@ fn add_system_blocking<R: tauri::Runtime>(
     // Each repo's eval proof, reconciled only once the whole system is
     // published: a later repo's failure must leave every register pending.
     let mut proofs = Vec::new();
+    let mut recorded = std::collections::BTreeMap::new();
     let mut on_file = detail_throttle(&app, job_id);
     // AC-0240: declared services and gateway routes, resolved to repo keys
     // once. Their origins are deferred from each repo's own fetch matching.
@@ -5762,6 +5820,14 @@ fn add_system_blocking<R: tauri::Runtime>(
             );
         }
         reclaim_superseded_receipts(&state, source, primary);
+        // The latest publication of a repo owns its stored inventory.
+        recorded.insert(
+            repo.clone(),
+            RecordedCoverage {
+                coverage: coverage.clone(),
+                record,
+            },
+        );
         let sha12: String = commit.chars().take(12).collect();
         repos.push(format!("{repo}@{sha12}"));
         if repo_identities.insert(repo.clone()) {
@@ -5779,7 +5845,19 @@ fn add_system_blocking<R: tauri::Runtime>(
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
     }
-    relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
+    let relinked = relink_found_adrs(
+        &state,
+        &operation,
+        &execution,
+        &mut published,
+        &mut recorded,
+    )
+    .map_err(&fail)?;
+    for (_, coverage) in &mut proofs {
+        if let Some(&edges) = relinked.get(&coverage.repo) {
+            restate_adr_edges(coverage, edges);
+        }
+    }
     // One history record for the whole system; the per-repo identities are
     // the record's identity (a system has no single commit).
     ensure_running_job(&state, &execution)?;
@@ -12219,6 +12297,72 @@ export function App() {
             super::coverage_config_hash(&[], registries),
             core_prov::content_hash(none.to_string().as_bytes())
         );
+    }
+
+    #[test]
+    fn system_recovery_counts_cross_repo_adr_links_in_coverage() {
+        // AC-0685 (T-0685, #1847): a decision repo recovered before the service its
+        // ADR governs counts the link the system-wide relink makes, in the
+        // returned and the stored inventory, rather than the zero its own
+        // isolated read saw.
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs-repo");
+        let service = dir.path().join("service");
+        std::fs::create_dir_all(docs.join("docs/adr")).unwrap();
+        std::fs::create_dir_all(&service).unwrap();
+        std::fs::write(service.join("app.ts"), "export function handle() {}\n").unwrap();
+        let manifest = dir.path().join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"docs-repo\"\n\n[[repos]]\nurl = \"service\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        // The service's symbol id names its registered repo identity.
+        let probe =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+        let service_repo = probe.coverage[1].repo.clone();
+        std::fs::write(
+            docs.join("docs/adr/ADR-0001-service.md"),
+            format!(
+                "# Service ownership\n\n- **Status:** Accepted\n- **Governs:** \
+                 `sym:{service_repo}@app.ts#handle`\n"
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+
+        let adr_row = |coverage: &ingest::coverage::RepoCoverage| {
+            coverage
+                .producers
+                .iter()
+                .find(|row| row.id == spec::FOUND_ADR_EXTRACTOR_ID)
+                .map(|row| (row.files, row.nodes, row.edges))
+                .unwrap()
+        };
+        let docs_repo = summary.coverage[0].repo.clone();
+        assert_eq!(adr_row(&summary.coverage[0]), (1, 1, 1));
+        let graph = state.graph.lock().unwrap();
+        let decides = graph.edges_with_labels(&["DECIDES"]).unwrap();
+        assert_eq!(decides.len(), 1);
+        assert_eq!(decides[0].dst, format!("sym:{service_repo}@app.ts#handle"));
+        let stored = graph
+            .coverage_records()
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.record.repo_key == docs_repo)
+            .unwrap();
+        let inventory: ingest::coverage::RepoCoverage =
+            serde_json::from_str(&stored.record.inventory_json).unwrap();
+        assert_eq!(adr_row(&inventory), (1, 1, 1));
+        assert_eq!(inventory, summary.coverage[0]);
     }
 
     #[test]
