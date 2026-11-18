@@ -3109,7 +3109,14 @@ fn relink_found_adrs(
         ensure_running_job(state, execution)?;
         operation.root(repo)
     })?;
-    let (patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
+    let (mut patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
+    // The same pass reads each repository's documentation files as
+    // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1).
+    let documents = collect_documents(&snapshot.0, |repo| {
+        ensure_running_job(state, execution)?;
+        operation.root(repo)
+    })?;
+    document_patch(&snapshot.0, &snapshot.1, documents, &mut patch);
     let mut restated = Vec::new();
     for (repo, entry) in recorded.iter_mut() {
         if let Some(&edges) = linked.get(repo)
@@ -3221,6 +3228,72 @@ fn found_adr_patch(
         patch.upsert_edges.extend(facts.edges);
     }
     (patch, linked)
+}
+
+/// Read the documentation files of every repository in the graph.
+fn collect_documents<'a>(
+    nodes: &[Node],
+    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
+) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
+    nodes
+        .iter()
+        .filter(|node| node.label == "Repo")
+        .map(|node| {
+            let repo = node
+                .id
+                .strip_prefix("repo:")
+                .ok_or("invalid repository fact identity")?;
+            let commit = node.props["commit"].as_str().unwrap_or("workdir");
+            let facts = spec::extract_documents(root_for(repo)?, repo, commit)
+                .map_err(|e| e.to_string())?;
+            Ok((repo.to_owned(), facts))
+        })
+        .collect()
+}
+
+/// Add each repository's documentation facts to `patch`, and remove the
+/// documents, sections and `HAS_SECTION` edges of that repository that the
+/// read no longer yields, so a re-ingest keeps no fact of a deleted file or
+/// section.
+fn document_patch(
+    nodes: &[Node],
+    edges: &[Edge],
+    updates: Vec<(String, spec::DocumentFacts)>,
+    patch: &mut core_graph::GraphPatch,
+) {
+    for (repo, facts) in updates {
+        let prefixes = [format!("doc:{repo}@"), format!("docsec:{repo}@")];
+        let owned = |id: &str| prefixes.iter().any(|prefix| id.starts_with(prefix));
+        let current_ids = facts
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let current_edges = facts
+            .edges
+            .iter()
+            .map(edge_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        patch.delete_node_ids.extend(
+            nodes
+                .iter()
+                .filter(|node| {
+                    matches!(node.label.as_str(), "Document" | "DocSection")
+                        && owned(&node.id)
+                        && !current_ids.contains(node.id.as_str())
+                })
+                .map(|node| node.id.clone()),
+        );
+        patch.delete_edges.extend(
+            edges
+                .iter()
+                .filter(|edge| edge.label == "HAS_SECTION" && owned(&edge.src))
+                .map(edge_key)
+                .filter(|key| !current_edges.contains(key)),
+        );
+        patch.upsert_nodes.extend(facts.nodes);
+        patch.upsert_edges.extend(facts.edges);
+    }
 }
 
 #[cfg(test)]
@@ -8540,6 +8613,82 @@ resource "aws_sqs_queue" "orders" {
                     .any(|edge| edge.src == importer && edge.dst == "mod:foo")
             );
         }
+    }
+
+    #[test]
+    fn documentation_files_are_facts_and_a_reingest_drops_what_was_removed() {
+        // AC-0676 (T-0676): the ingest pass stores each documentation file
+        // as a Document with its DocSection facts; the same tree yields the
+        // same graph content hash; a removed file or section leaves no fact.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("app.ts"), "export function handle() {}\n").unwrap();
+        std::fs::write(root.join("README.md"), "# Shop\n\n## Routes\n\n## Deploy\n").unwrap();
+        std::fs::write(root.join("NOTES.txt"), "notes\n").unwrap();
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        let extraction = crate::extract_tree(
+            root,
+            "local/shop",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        crate::load_into_graph(&mut store, &extraction, "local/shop", root, "workdir").unwrap();
+        let read = |store: &mut SqliteGraphStore| {
+            let snapshot = store.read_snapshot().unwrap();
+            let updates = crate::collect_documents(&snapshot.0, |_| Ok(root)).unwrap();
+            let mut patch = core_graph::GraphPatch::default();
+            crate::document_patch(&snapshot.0, &snapshot.1, updates, &mut patch);
+            assert!(
+                store
+                    .apply_patch_if_snapshot_matches(&snapshot, &patch)
+                    .unwrap()
+            );
+            let (nodes, edges) = store.read_snapshot().unwrap();
+            let ids: Vec<String> = nodes
+                .iter()
+                .filter(|node| matches!(node.label.as_str(), "Document" | "DocSection"))
+                .map(|node| node.id.clone())
+                .collect();
+            let sections = edges
+                .iter()
+                .filter(|edge| edge.label == "HAS_SECTION")
+                .count();
+            (ids, sections, spec::graph_content_hash(&nodes, &edges))
+        };
+
+        let (ids, sections, hash) = read(&mut store);
+        assert_eq!(
+            ids,
+            [
+                "doc:local/shop@NOTES.txt",
+                "doc:local/shop@README.md",
+                "docsec:local/shop@NOTES.txt#0",
+                "docsec:local/shop@README.md#0",
+                "docsec:local/shop@README.md#1",
+                "docsec:local/shop@README.md#2",
+            ]
+        );
+        assert_eq!(sections, 4);
+        // The same tree again: the same facts and the same content hash.
+        assert_eq!(read(&mut store), (ids, sections, hash));
+
+        std::fs::remove_file(root.join("NOTES.txt")).unwrap();
+        std::fs::write(root.join("README.md"), "# Shop\n\n## Routes\n").unwrap();
+        let (ids, sections, _) = read(&mut store);
+        assert_eq!(
+            ids,
+            [
+                "doc:local/shop@README.md",
+                "docsec:local/shop@README.md#0",
+                "docsec:local/shop@README.md#1",
+            ]
+        );
+        assert_eq!(sections, 2);
     }
 
     #[test]

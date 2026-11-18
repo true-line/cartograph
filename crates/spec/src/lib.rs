@@ -10,6 +10,11 @@ use flowtracer::Flow;
 
 mod adr;
 mod contract;
+mod documents;
+pub use documents::{
+    DOCUMENT_EXTRACTOR_ID, DocumentCounts, DocumentFacts, DocumentSkip, MAX_DOCUMENT_BYTES,
+    MAX_DOCUMENTS_PER_REPO, MAX_SECTIONS_PER_DOCUMENT, document_id, extract_documents, section_id,
+};
 mod graph_basis;
 pub use graph_basis::{
     GraphBasis, SourceRevision, edge_fact_line, graph_content_hash, hash_fact_lines, node_fact_line,
