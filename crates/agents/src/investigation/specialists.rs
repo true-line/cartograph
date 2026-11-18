@@ -97,6 +97,9 @@ pub enum SpecialistId {
     GapTriagerV1,
     #[serde(rename = "gap-triager@2")]
     GapTriagerV2,
+    /// Drafts one catalogue section as cited claims (#1748, SPEC-15 slice 6).
+    #[serde(rename = "section-writer@1")]
+    SectionWriterV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +136,14 @@ fn spec_writer_definition_data() -> &'static SpecWriterDefinitionData {
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("data/spec-writer-v1.json"))
             .expect("compiled Spec Writer definition is valid")
+    })
+}
+
+fn section_writer_definition_data() -> &'static SpecWriterDefinitionData {
+    static DATA: OnceLock<SpecWriterDefinitionData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("data/section-writer-v1.json"))
+            .expect("compiled Section Writer definition is valid")
     })
 }
 
@@ -242,6 +253,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV3
                 | Self::EvidenceAuditorV3
                 | Self::DomainAnalystV4
@@ -289,6 +301,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
                 | Self::DomainAnalystV5
@@ -339,6 +352,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
@@ -380,6 +394,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
                 | Self::DomainAnalystV8
@@ -518,7 +533,8 @@ impl SpecialistId {
             Self::DomainAnalystV1
             | Self::EvidenceAuditorV1
             | Self::SpecWriterV1
-            | Self::GapTriagerV1 => 1,
+            | Self::GapTriagerV1
+            | Self::SectionWriterV1 => 1,
             Self::DomainAnalyst
             | Self::EvidenceAuditor
             | Self::SpecWriterV2
@@ -607,7 +623,11 @@ impl SpecialistId {
         }
         if matches!(
             self,
-            Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1 | Self::GapTriagerV2
+            Self::SpecWriterV1
+                | Self::SpecWriterV2
+                | Self::GapTriagerV1
+                | Self::GapTriagerV2
+                | Self::SectionWriterV1
         ) {
             7
         } else {
@@ -869,6 +889,7 @@ impl SpecialistId {
         let role = match self {
             Self::SpecWriterV2 => spec_writer_v2_definition_data().role_prompt.as_str(),
             Self::SpecWriterV1 => spec_writer_definition_data().role_prompt.as_str(),
+            Self::SectionWriterV1 => section_writer_definition_data().role_prompt.as_str(),
             Self::GapTriagerV1 => gap_triager_definition_data().role_prompt.as_str(),
             Self::GapTriagerV2 => gap_triager_v2_definition_data().role_prompt.as_str(),
             Self::DomainAnalyst
@@ -979,6 +1000,13 @@ impl SpecialistId {
                             "Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design.",
                             "The only valid claim kind is proposed_design.",
                         )
+                } else if self == Self::SectionWriterV1 {
+                    // The host refuses a proposed_design claim in a section
+                    // draft. COMMON itself stays immutable.
+                    common.replace(
+                        "Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design.",
+                        "Claim kinds are implemented_behavior, documented_intent and inferred_interpretation; never report proposed_design.",
+                    )
                 } else {
                     common
                 };
@@ -1062,6 +1090,10 @@ impl SpecialistId {
             }
             Self::SpecWriterV1 => {
                 let data = spec_writer_definition_data();
+                (data.name.as_str(), data.purpose.as_str())
+            }
+            Self::SectionWriterV1 => {
+                let data = section_writer_definition_data();
                 (data.name.as_str(), data.purpose.as_str())
             }
             Self::GapTriagerV2 => {
@@ -1215,6 +1247,44 @@ mod policy_tests {
             assert!(new.uses_compact_disclosure());
             assert!(new.uses_policy_selection());
             assert!(!old.uses_policy_selection());
+        }
+    }
+
+    // AC-0668: the drafting role joins the generation-seven completion
+    // family as its own definition, and no other role's prompt changes.
+    #[test]
+    fn section_writer_v1_is_a_completion_role_with_its_own_definition() {
+        let role = SpecialistId::SectionWriterV1;
+        let definition = role.definition().unwrap();
+        assert_eq!(serde_json::to_value(role).unwrap(), "section-writer@1");
+        assert_eq!(definition.version, 1);
+        assert_eq!(definition.name, "Section Writer");
+        assert_eq!(definition.tier, Tier::Agentic);
+        assert_eq!(definition.confidence_tier, ConfidenceTier::InferredWeak);
+        assert_eq!(role.prompt_generation(), 7);
+        assert!(role.uses_completion_obligations());
+        assert!(role.uses_coverage_qualification());
+        assert!(!role.uses_cited_narrative());
+        assert!(!role.uses_next_prompt_admission());
+        let prompt = role.prompt();
+        assert!(prompt.contains(
+            "Claim kinds are implemented_behavior, documented_intent and inferred_interpretation; never report proposed_design."
+        ));
+        assert!(!prompt.contains("The only valid claim kind is proposed_design."));
+        assert!(prompt.contains(r#""schema_version":1,"outcome":"supported""#));
+        for other in [
+            SpecialistId::SpecWriterV1,
+            SpecialistId::SpecWriterV2,
+            SpecialistId::GapTriagerV1,
+            SpecialistId::GapTriagerV2,
+            SpecialistId::DomainAnalystV7,
+            SpecialistId::EvidenceAuditorV7,
+        ] {
+            assert_ne!(
+                other.definition().unwrap().prompt_fingerprint,
+                definition.prompt_fingerprint,
+                "{other:?}"
+            );
         }
     }
 
