@@ -5,6 +5,8 @@
 //! FTS5 over the knowledge units, fused by reciprocal rank with vector
 //! similarity when unit vectors and a provider are present. Every hit cites
 //! base facts and carries the T2 tier; nothing is written back to the base.
+//! A traced flow the knowledge producers derived is a ranked unit too: its
+//! hit names the flow and cites the base facts the flow was traced from.
 //! Without a provider the lexical leg alone answers.
 //!
 //! The vector leg takes its candidates from a usearch index rebuilt from the
@@ -16,7 +18,7 @@
     reason = "undocumented before workspace lints (#1764): document and delete"
 )]
 use crate::knowledge_ingest::{self, KnowledgeUnit};
-use core_graph::overlay::BaseRef;
+use core_graph::overlay::{BaseRef, OverlayFact, OverlayItem};
 use core_graph::{Edge, Node};
 use core_prov::Tier;
 use llm::{EmbeddingIdentity, LlmProvider, ProviderError};
@@ -62,15 +64,16 @@ pub enum Reason {
     Ranked,
 }
 
-/// One retrieved base node. `score` is the fused rank score for ranked hits
-/// and zero for anchors and neighbours, which precede every ranked hit.
+/// One retrieved base node or derived flow. `score` is the fused rank score
+/// for ranked hits and zero for anchors and neighbours, which precede every
+/// ranked hit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub node_id: String,
     pub reason: Reason,
     pub score: f64,
     /// Base facts the hit rests on: the node, plus the anchoring edge for a
-    /// neighbour.
+    /// neighbour; for a derived flow, the base facts the flow cites.
     pub cites: Vec<BaseRef>,
     pub tier: Tier,
 }
@@ -94,13 +97,47 @@ pub struct Retrieval {
     vector_index: Option<Index>,
     names: BTreeMap<String, BTreeSet<String>>,
     edges: Vec<Edge>,
+    /// Base citations of each derived flow unit, by flow id.
+    flow_cites: BTreeMap<String, Vec<BaseRef>>,
 }
 
 impl Retrieval {
     /// Index the knowledge units of a base snapshot. The indexed text is the
     /// redacted unit text the embedding phase uses.
     pub fn build(nodes: &[Node], edges: &[Edge]) -> Result<Self, RetrievalError> {
-        let (units, omitted) = knowledge_ingest::units(nodes);
+        Self::build_with_flows(nodes, edges, &[])
+    }
+
+    /// Index the knowledge units of a base snapshot and of the flows derived
+    /// from it, as the embedding phase chooses them. `derived` is the
+    /// producers' output for that snapshot; only its `BusinessFlow` nodes
+    /// become units. A flow is ranked, never an anchor or a neighbour, and
+    /// its hit cites the base facts the flow cites.
+    pub fn build_with_flows(
+        nodes: &[Node],
+        edges: &[Edge],
+        derived: &[OverlayFact],
+    ) -> Result<Self, RetrievalError> {
+        let flows: Vec<(&Node, &OverlayFact)> = derived
+            .iter()
+            .filter_map(|fact| match &fact.item {
+                OverlayItem::Node(node) => Some((node, fact)),
+                OverlayItem::Edge(_) => None,
+            })
+            .collect();
+        let flow_nodes: Vec<&Node> = flows.iter().map(|(node, _)| *node).collect();
+        let (units, omitted) = knowledge_ingest::units_with_flows(nodes, &flow_nodes);
+        let base_ids: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+        let mut flow_cites: BTreeMap<String, Vec<BaseRef>> = BTreeMap::new();
+        for (node, fact) in flows {
+            // A base node of the same id is the unit; the first flow of an
+            // id is the one the unit recipe kept.
+            if !base_ids.contains(node.id.as_str()) {
+                flow_cites
+                    .entry(node.id.clone())
+                    .or_insert_with(|| fact.cites.iter().cloned().collect());
+            }
+        }
         let index = Connection::open_in_memory()?;
         index.execute_batch("CREATE VIRTUAL TABLE units USING fts5(text, node_id UNINDEXED)")?;
         {
@@ -144,6 +181,7 @@ impl Retrieval {
             vector_index: None,
             names,
             edges,
+            flow_cites,
         })
     }
 
@@ -246,12 +284,12 @@ impl Retrieval {
         for (row, score) in ranked {
             let id = &self.units[row].node_id;
             if seen.insert(id.clone()) {
-                hits.push(hit(
-                    id,
-                    Reason::Ranked,
-                    score,
-                    vec![BaseRef::Node(id.clone())],
-                ));
+                let cites = self
+                    .flow_cites
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| vec![BaseRef::Node(id.clone())]);
+                hits.push(hit(id, Reason::Ranked, score, cites));
             }
         }
         hits.truncate(limit);
