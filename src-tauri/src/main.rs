@@ -1246,6 +1246,14 @@ struct ProducerReads {
     captured_ts_ran: bool,
     /// Symlinks the captured TypeScript selection did not follow (#1229).
     unfollowed_links: Vec<String>,
+    /// What the found ADR/RFC reader read and published (#1847).
+    adrs: ingest::coverage::ProducerCount,
+    /// Found ADR/RFC files over the size bound, in path order (#1847).
+    adr_too_large: Vec<String>,
+    /// Found ADR/RFC files that are not UTF-8, in path order (#1847).
+    adr_not_utf8: Vec<String>,
+    /// What the declared API contract reader read and published (#1847).
+    contracts: ingest::coverage::ProducerCount,
 }
 
 impl Default for ProducerReads {
@@ -1260,6 +1268,10 @@ impl Default for ProducerReads {
             omitted_receipt_facts_complete: true,
             captured_ts_ran: false,
             unfollowed_links: Vec::new(),
+            adrs: ingest::coverage::ProducerCount::default(),
+            adr_too_large: Vec::new(),
+            adr_not_utf8: Vec::new(),
+            contracts: ingest::coverage::ProducerCount::default(),
         }
     }
 }
@@ -1405,6 +1417,8 @@ fn repo_coverage(
                 count(&layers.environments),
             ),
             (events::STITCH_EXTRACTOR_ID, count(&layers.events)),
+            (spec::FOUND_ADR_EXTRACTOR_ID, reads.adrs),
+            (spec::CONTRACT_EXTRACTOR_ID, reads.contracts),
         ],
         plugins: reads.plugins.clone(),
         observations: vec![
@@ -2071,16 +2085,35 @@ fn extract_tree_packed(
     drop(gaps);
     // Found ADR/RFC files are T0 facts. They are parsed after all code/infra
     // layers so explicit `Governs:` ids can link to existing graph targets.
-    let adr_facts = {
+    // A file too large or not UTF-8 is skipped and named in coverage, never
+    // fatal to the other decisions (#1847).
+    let adr_read = {
         let ids: std::collections::BTreeSet<&str> =
             facts.nodes().iter().map(|node| node.id.as_str()).collect();
-        spec::extract_found_adrs_among(root, repo, commit, |id| ids.contains(id))
+        spec::read_found_adrs_among(root, repo, commit, |id| ids.contains(id))
             .map_err(|error| error.to_string())?
     };
+    reads.adrs = ingest::coverage::ProducerCount {
+        files: adr_read.files,
+        nodes: distinct_node_count(&adr_read.facts.nodes),
+        edges: distinct_edge_count(&adr_read.facts.edges),
+    };
+    for unread in adr_read.unread {
+        match unread.reason {
+            spec::UnreadAdrReason::TooLarge => reads.adr_too_large.push(unread.path),
+            spec::UnreadAdrReason::NotUtf8 => reads.adr_not_utf8.push(unread.path),
+        }
+    }
     facts
-        .extend(adr_facts.nodes, adr_facts.edges)
+        .extend(adr_read.facts.nodes, adr_read.facts.edges)
         .map_err(pack_err)?;
-    let contract_facts = extract_repo_contracts(root, repo, commit, api_docs, &facts)?;
+    let (contract_facts, contract_files) =
+        extract_repo_contracts(root, repo, commit, api_docs, &facts)?;
+    reads.contracts = ingest::coverage::ProducerCount {
+        files: contract_files,
+        nodes: distinct_node_count(&contract_facts.nodes),
+        edges: distinct_edge_count(&contract_facts.edges),
+    };
     facts
         .extend(contract_facts.nodes, contract_facts.edges)
         .map_err(pack_err)?;
@@ -2322,10 +2355,10 @@ fn extract_repo_contracts(
     commit: &str,
     manifest_api_docs: &[ingest::api_docs::ApiDocDeclaration],
     facts: &FactStore,
-) -> Result<spec::ContractFacts, String> {
+) -> Result<(spec::ContractFacts, u64), String> {
     let loaded = ingest::api_docs::load_api_docs(root, manifest_api_docs);
     if !loaded.declared {
-        return Ok(spec::ContractFacts::default());
+        return Ok((spec::ContractFacts::default(), 0));
     }
     // Declared API docs match recovered facts by id and Endpoint attributes:
     // only Endpoint nodes are decoded, and only for a repository that
@@ -2350,13 +2383,12 @@ fn extract_repo_contracts(
             reason: gap.reason,
         })
         .collect();
-    Ok(spec::extract_contract_facts_among(
-        repo,
-        commit,
-        &docs,
-        &gaps,
-        &endpoints,
-        |id| ids.contains(id),
+    let files = docs.len() as u64;
+    Ok((
+        spec::extract_contract_facts_among(repo, commit, &docs, &gaps, &endpoints, |id| {
+            ids.contains(id)
+        }),
+        files,
     ))
 }
 
@@ -3039,12 +3071,19 @@ fn stitch_http_bindings(
 /// A rescan first drops links previously owned by that repo's found ADRs and
 /// removes ADR nodes whose source file disappeared, so re-ingest cannot retain
 /// declarations that are no longer present.
+///
+/// Each repo's inventory in `recorded` was built before the rescan, so its
+/// found-ADR row counted only links into that repo. The row is restated with
+/// the relinked edge count and republished with the patch, so a cross-repo
+/// decision is never counted as linking nothing (#1847). Returns each
+/// rescanned repo's found-ADR edge count.
 fn relink_found_adrs(
     state: &AppState,
     operation: &SourceOperation,
     execution: &JobExecution,
     facts: &mut OperationFacts,
-) -> Result<u64, String> {
+    recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
+) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
     let snapshot = state
         .graph
@@ -3059,16 +3098,49 @@ fn relink_found_adrs(
         operation.root(repo)
     })?;
     let (patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
+    let mut restated = Vec::new();
+    for (repo, entry) in recorded.iter_mut() {
+        if let Some(&edges) = linked.get(repo)
+            && restate_adr_edges(&mut entry.coverage, edges)
+        {
+            entry.record.inventory_json =
+                serde_json::to_string(&entry.coverage).map_err(|e| e.to_string())?;
+            restated.push(entry.record.clone());
+        }
+    }
     let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
     ensure_running_job(state, execution)?;
     if !graph
-        .apply_patch_if_snapshot_matches(&snapshot, &patch)
+        .apply_patch_with_coverage_if_snapshot_matches(&snapshot, &patch, &restated)
         .map_err(|e| e.to_string())?
     {
         return Err("graph context changed during ADR recovery; retry recovery".into());
     }
     facts.record_patch(&patch);
     Ok(linked)
+}
+
+/// A repo's coverage inventory and the record it was published as, kept so
+/// a later system-wide pass can restate it (#1847).
+struct RecordedCoverage {
+    coverage: ingest::coverage::RepoCoverage,
+    record: core_graph::coverage::CoverageRecord,
+}
+
+/// Set the found-ADR row's edge count to the relinked count. Returns whether
+/// it changed.
+fn restate_adr_edges(coverage: &mut ingest::coverage::RepoCoverage, edges: u64) -> bool {
+    match coverage
+        .producers
+        .iter_mut()
+        .find(|row| row.id == spec::FOUND_ADR_EXTRACTOR_ID)
+    {
+        Some(row) if row.edges != edges => {
+            row.edges = edges;
+            true
+        }
+        _ => false,
+    }
 }
 
 fn collect_found_adrs<'a>(
@@ -3101,9 +3173,12 @@ fn found_adr_patch(
     nodes: &[Node],
     edges: &[Edge],
     updates: Vec<(String, spec::AdrFacts)>,
-) -> (core_graph::GraphPatch, u64) {
+) -> (
+    core_graph::GraphPatch,
+    std::collections::BTreeMap<String, u64>,
+) {
     let mut patch = core_graph::GraphPatch::default();
-    let mut linked = 0;
+    let mut linked = std::collections::BTreeMap::new();
     for (repo, facts) in updates {
         let adr_prefix = format!("adr:{repo}@");
         let existing_ids = nodes
@@ -3129,7 +3204,7 @@ fn found_adr_patch(
         patch
             .delete_node_ids
             .extend(existing_ids.difference(&current_ids).cloned());
-        linked += facts.edges.len() as u64;
+        linked.insert(repo, distinct_edge_count(&facts.edges));
         patch.upsert_nodes.extend(facts.nodes);
         patch.upsert_edges.extend(facts.edges);
     }
@@ -3149,7 +3224,7 @@ fn apply_found_adrs(
     {
         return Err("graph context changed during ADR recovery; retry recovery".into());
     }
-    Ok(linked)
+    Ok(linked.values().sum())
 }
 
 /// The single source of truth for register counts (#116): every surface —
@@ -4931,7 +5006,8 @@ fn run_ingest<R: tauri::Runtime>(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
     )
-    .with_unfollowed_links(&reads.unfollowed_links);
+    .with_unfollowed_links(&reads.unfollowed_links)
+    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -4973,7 +5049,14 @@ fn run_ingest<R: tauri::Runtime>(
     }
     reclaim_superseded_receipts(state, source, primary);
 
-    relink_found_adrs(state, operation, execution, &mut published).map_err(&fail)?;
+    relink_found_adrs(
+        state,
+        operation,
+        execution,
+        &mut published,
+        &mut Default::default(),
+    )
+    .map_err(&fail)?;
 
     ensure_running_job(state, execution)?;
     record_ingest_metrics(
@@ -5377,7 +5460,8 @@ fn add_repo_blocking<R: tauri::Runtime>(
         ingest::coverage::ReceiptOmission::StoreCapacity,
         &reads.omitted_stored_receipts,
     )
-    .with_unfollowed_links(&reads.unfollowed_links);
+    .with_unfollowed_links(&reads.unfollowed_links)
+    .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5413,7 +5497,14 @@ fn add_repo_blocking<R: tauri::Runtime>(
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
     reclaim_superseded_receipts(&state, &source, primary);
-    relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
+    relink_found_adrs(
+        &state,
+        &operation,
+        &execution,
+        &mut published,
+        &mut Default::default(),
+    )
+    .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
     record_ingest_metrics(
         &state,
@@ -5567,6 +5658,7 @@ fn add_system_blocking<R: tauri::Runtime>(
     // Each repo's eval proof, reconciled only once the whole system is
     // published: a later repo's failure must leave every register pending.
     let mut proofs = Vec::new();
+    let mut recorded = std::collections::BTreeMap::new();
     let mut on_file = detail_throttle(&app, job_id);
     // AC-0240: declared services and gateway routes, resolved to repo keys
     // once. Their origins are deferred from each repo's own fetch matching.
@@ -5686,7 +5778,8 @@ fn add_system_blocking<R: tauri::Runtime>(
             ingest::coverage::ReceiptOmission::StoreCapacity,
             &reads.omitted_stored_receipts,
         )
-        .with_unfollowed_links(&reads.unfollowed_links);
+        .with_unfollowed_links(&reads.unfollowed_links)
+        .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         let omission_records = reads.source_omissions();
@@ -5728,6 +5821,14 @@ fn add_system_blocking<R: tauri::Runtime>(
             );
         }
         reclaim_superseded_receipts(&state, source, primary);
+        // The latest publication of a repo owns its stored inventory.
+        recorded.insert(
+            repo.clone(),
+            RecordedCoverage {
+                coverage: coverage.clone(),
+                record,
+            },
+        );
         let sha12: String = commit.chars().take(12).collect();
         repos.push(format!("{repo}@{sha12}"));
         if repo_identities.insert(repo.clone()) {
@@ -5745,7 +5846,19 @@ fn add_system_blocking<R: tauri::Runtime>(
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
     }
-    relink_found_adrs(&state, &operation, &execution, &mut published).map_err(&fail)?;
+    let relinked = relink_found_adrs(
+        &state,
+        &operation,
+        &execution,
+        &mut published,
+        &mut recorded,
+    )
+    .map_err(&fail)?;
+    for (_, coverage) in &mut proofs {
+        if let Some(&edges) = relinked.get(&coverage.repo) {
+            restate_adr_edges(coverage, edges);
+        }
+    }
     // One history record for the whole system; the per-repo identities are
     // the record's identity (a system has no single commit).
     ensure_running_job(&state, &execution)?;
@@ -8250,6 +8363,107 @@ resource "aws_sqs_queue" "orders" {
         assert_eq!(decides.src, adr.id);
         assert_eq!(decides.dst, "sym:local/shop@orders.ts#placeOrder");
         assert_eq!(decides.props["prov"]["confidence_tier"], "Confirmed");
+    }
+
+    #[test]
+    fn ingest_redacts_found_adr_text_and_names_unread_adrs_in_coverage() {
+        // AC-0685 (T-0685, #1847): a secret in a found ADR never reaches the
+        // graph; a non-UTF-8 or oversized ADR no longer fails the ingest and
+        // is named on the reader's coverage row and in the not-covered list.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("orders.ts"),
+            "export function placeOrder() {}\n",
+        )
+        .unwrap();
+        let adr = dir.path().join("docs/adr");
+        std::fs::create_dir_all(&adr).unwrap();
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        std::fs::write(
+            adr.join("ADR-0001-orders.md"),
+            format!("# Orders\n\n- **Governs:** `sym:local/shop@orders.ts#placeOrder`\n\npassword: {secret}\n"),
+        )
+        .unwrap();
+        std::fs::write(adr.join("ADR-0002-latin1.md"), b"# Caf\xe9\n").unwrap();
+        std::fs::write(
+            adr.join("ADR-0003-huge.md"),
+            "x".repeat(spec::MAX_FOUND_ADR_BYTES as usize + 1),
+        )
+        .unwrap();
+
+        let mut reads = super::ProducerReads::default();
+        let (extraction, layers, _) = super::extract_tree_with_primary(
+            dir.path(),
+            "local/shop",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+            None,
+            None,
+            &[],
+            &mut super::RepoExtractionCache::default(),
+            &[],
+            &mut |_| {},
+            None,
+            &mut Vec::new(),
+            &mut reads,
+        )
+        .unwrap();
+        let adrs: Vec<_> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "ADR")
+            .collect();
+        assert_eq!(adrs.len(), 1);
+        let stored = serde_json::to_string(&adrs[0].props).unwrap();
+        assert!(!stored.contains(secret), "secret stored: {stored}");
+        assert!(
+            extraction
+                .edges
+                .iter()
+                .any(|edge| edge.label == "DECIDES" && edge.src == adrs[0].id)
+        );
+
+        let coverage = super::repo_coverage(
+            "local/shop",
+            "workdir",
+            None,
+            &[],
+            &layers,
+            &extraction,
+            &super::DeclaredInputs::default(),
+            &reads,
+        )
+        .with_unsupported(&ingest::preflight::PreflightReport::default())
+        .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8);
+        let row = coverage
+            .producers
+            .iter()
+            .find(|producer| producer.id == spec::FOUND_ADR_EXTRACTOR_ID)
+            .expect("found-ADR reader row");
+        assert_eq!((row.files, row.nodes, row.edges), (1, 1, 1));
+        assert!(row.stopping_reason.starts_with("read 1 of the 3 ADR"));
+        assert!(
+            coverage
+                .producers
+                .iter()
+                .any(|producer| producer.id == spec::CONTRACT_EXTRACTOR_ID)
+        );
+        let named: Vec<_> = coverage
+            .unsupported
+            .iter()
+            .map(|entry| (entry.capability.as_str(), entry.first_site.as_str()))
+            .collect();
+        assert!(named.contains(&(
+            ingest::coverage::ADR_TOO_LARGE_CAPABILITY,
+            "docs/adr/ADR-0003-huge.md"
+        )));
+        assert!(named.contains(&(
+            ingest::coverage::ADR_NOT_UTF8_CAPABILITY,
+            "docs/adr/ADR-0002-latin1.md"
+        )));
+        assert!(coverage.limited);
     }
 
     #[test]
@@ -12277,6 +12491,72 @@ export function App() {
             super::coverage_config_hash(&[], registries),
             core_prov::content_hash(none.to_string().as_bytes())
         );
+    }
+
+    #[test]
+    fn system_recovery_counts_cross_repo_adr_links_in_coverage() {
+        // AC-0685 (T-0685, #1847): a decision repo recovered before the service its
+        // ADR governs counts the link the system-wide relink makes, in the
+        // returned and the stored inventory, rather than the zero its own
+        // isolated read saw.
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs-repo");
+        let service = dir.path().join("service");
+        std::fs::create_dir_all(docs.join("docs/adr")).unwrap();
+        std::fs::create_dir_all(&service).unwrap();
+        std::fs::write(service.join("app.ts"), "export function handle() {}\n").unwrap();
+        let manifest = dir.path().join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"docs-repo\"\n\n[[repos]]\nurl = \"service\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        // The service's symbol id names its registered repo identity.
+        let probe =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+        let service_repo = probe.coverage[1].repo.clone();
+        std::fs::write(
+            docs.join("docs/adr/ADR-0001-service.md"),
+            format!(
+                "# Service ownership\n\n- **Status:** Accepted\n- **Governs:** \
+                 `sym:{service_repo}@app.ts#handle`\n"
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+
+        let adr_row = |coverage: &ingest::coverage::RepoCoverage| {
+            coverage
+                .producers
+                .iter()
+                .find(|row| row.id == spec::FOUND_ADR_EXTRACTOR_ID)
+                .map(|row| (row.files, row.nodes, row.edges))
+                .unwrap()
+        };
+        let docs_repo = summary.coverage[0].repo.clone();
+        assert_eq!(adr_row(&summary.coverage[0]), (1, 1, 1));
+        let graph = state.graph.lock().unwrap();
+        let decides = graph.edges_with_labels(&["DECIDES"]).unwrap();
+        assert_eq!(decides.len(), 1);
+        assert_eq!(decides[0].dst, format!("sym:{service_repo}@app.ts#handle"));
+        let stored = graph
+            .coverage_records()
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.record.repo_key == docs_repo)
+            .unwrap();
+        let inventory: ingest::coverage::RepoCoverage =
+            serde_json::from_str(&stored.record.inventory_json).unwrap();
+        assert_eq!(adr_row(&inventory), (1, 1, 1));
+        assert_eq!(inventory, summary.coverage[0]);
     }
 
     #[test]
