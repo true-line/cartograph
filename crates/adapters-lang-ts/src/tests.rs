@@ -1070,6 +1070,95 @@ function buildUrl(): string { return '/x'; }
     );
 }
 
+// AC-0352 (#1012): a fetch site records whether every pass through its
+// Symbol's body that gets past the call makes it. A call under a branch, a
+// loop, a `try`, a short-circuit, an optional chain, a parameter default or
+// a callback does not, and neither does a call anchored at a component from
+// inside one of its closures.
+#[test]
+fn fetch_sites_record_whether_the_call_is_straight_line() {
+    let out = client_extract(
+        "flow.tsx",
+        r#"
+export async function submit(flag, items, hook, fallback = fetch('/default')) {
+  const first = await fetch('/first', { method: 'POST' });
+  if (flag) await fetch('/if');
+  else fetch('/else');
+  if (await fetch('/condition')) {}
+  flag && fetch('/and');
+  const pick = flag ? fetch('/then') : null;
+  for (const item of items) fetch('/loop');
+  try { fetch('/try'); } catch (e) { fetch('/catch'); } finally { fetch('/finally'); }
+  items.forEach(() => fetch('/callback'));
+  hook?.run(fetch('/optional'));
+  hook?.deep.run(fetch('/optional-deep'));
+  switch (flag) { case 1: fetch('/case'); }
+  return fetch('/last');
+}
+export const save = async () => {
+  await fetch('/arrow');
+};
+"#,
+    );
+    let mut lines: Vec<(String, Option<bool>)> = out
+        .fetch_sites
+        .iter()
+        .map(|site| {
+            let IdentityExpr::Literal(url) = &site.url else {
+                panic!("{site:?}");
+            };
+            (url.clone(), site.straight_line)
+        })
+        .collect();
+    lines.sort();
+    let straight: Vec<&str> = lines
+        .iter()
+        .filter(|(_, straight_line)| *straight_line == Some(true))
+        .map(|(url, _)| url.as_str())
+        .collect();
+    // The callback's call is its own Symbol's, and straight-line there: a
+    // navigation in `submit` is in another Symbol and proves nothing by it.
+    assert_eq!(
+        straight,
+        ["/arrow", "/callback", "/condition", "/first", "/last"]
+    );
+    let callback = out
+        .fetch_sites
+        .iter()
+        .find(|site| matches!(&site.url, IdentityExpr::Literal(url) if url == "/callback"))
+        .unwrap();
+    assert_ne!(callback.symbol, out.fetch_sites[0].symbol);
+    assert_eq!(lines.len(), 17);
+    assert!(
+        lines
+            .iter()
+            .all(|(_, straight_line)| straight_line.is_some())
+    );
+
+    // A site anchored at its component from inside a closure is not
+    // straight-line in the component, whatever it is in the closure.
+    let component = client_extract(
+        "page.tsx",
+        r#"
+export function Page() {
+  fetch('/render');
+  const submit = () => { fetch('/closure'); };
+  return <button onClick={submit}/>;
+}
+"#,
+    );
+    let by_url = |url: &str| {
+        component
+            .fetch_sites
+            .iter()
+            .find(|site| matches!(&site.url, IdentityExpr::Literal(u) if u == url))
+            .unwrap()
+    };
+    assert_eq!(by_url("/render").symbol, by_url("/closure").symbol);
+    assert_eq!(by_url("/render").straight_line, Some(true));
+    assert_eq!(by_url("/closure").straight_line, Some(false));
+}
+
 // A shadowed `fetch` (imported or locally defined) is application code —
 // treating it as the browser API would confirm FETCHES against the wrong
 // target and corrupt the graph.
