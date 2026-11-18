@@ -8,7 +8,8 @@ use std::{collections::BTreeMap, mem::size_of};
 /// Task ownership, bounded row decoding, saved-call/ledger/result replay and
 /// host encodings are separate. Regex/native allocations are not modeled.
 pub fn next_prompt_validation_workspace() -> Option<usize> {
-    let definition = definition_workspace(SpecialistId::DomainAnalystV24)?
+    let definition = definition_workspace(SpecialistId::DomainAnalystV28)?
+        .max(definition_workspace(SpecialistId::DomainAnalystV24)?)
         .max(definition_workspace(SpecialistId::DomainAnalystV23)?)
         .max(definition_workspace(SpecialistId::DomainAnalystV22)?)
         .max(definition_workspace(SpecialistId::EvidenceAuditorV11)?)
@@ -46,7 +47,11 @@ pub(super) fn definition_workspace(role: SpecialistId) -> Option<usize> {
     // suffix during formatting. This accounts owners; it raises no ceiling.
     // @20 retains @19 plus its qualified replacement while appending guidance.
     // @21 retains the @20 prompt while appending capacity-exclusion guidance.
-    let owners = if matches!(
+    // @28 retains the complete, slightly longer @27 prompt (counted twice),
+    // the replaced hash sentence and its own replacement output.
+    let owners = if role == SpecialistId::DomainAnalystV28 {
+        21
+    } else if matches!(
         role,
         SpecialistId::DomainAnalystV22
             | SpecialistId::DomainAnalystV23

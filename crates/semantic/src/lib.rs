@@ -75,6 +75,7 @@ pub struct UnresolvedHop {
 }
 
 impl UnresolvedHop {
+    /// Candidate group this hop is matched within.
     pub fn family(&self) -> FamilyKey {
         FamilyKey::new(self.kind, self.subtype.clone())
     }
@@ -106,6 +107,7 @@ pub struct Candidate {
 }
 
 impl Candidate {
+    /// Candidate group this target belongs to.
     pub fn family(&self) -> FamilyKey {
         FamilyKey::new(self.kind, self.subtype.clone())
     }
@@ -133,6 +135,7 @@ pub struct SemanticProposal {
 }
 
 impl SemanticProposal {
+    /// Candidate group this proposal came from.
     pub fn family(&self) -> &FamilyKey {
         &self.family
     }
@@ -464,6 +467,9 @@ pub fn embedding_inputs(
     Ok(texts.into_iter().cloned().collect())
 }
 
+/// Embeds candidates and ANN-eligible hops per family and stages a proposal
+/// for each hop's `neighbors` nearest candidates. Proposals are T2, not graph
+/// facts, until an eval gate approves them.
 pub fn propose(
     provider: &dyn LlmProvider,
     hops: &[UnresolvedHop],

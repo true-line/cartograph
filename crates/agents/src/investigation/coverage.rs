@@ -1,5 +1,9 @@
 //! Immutable inventory detail admission for qualified investigations (AC-0239).
 //! This value owns preparation-time data; it never reads the current graph.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{
     INVESTIGATION_V1_POLICY, InvestigationError, InvestigationPolicy, MAX_QUERY_BYTES,
     bounded_bytes,

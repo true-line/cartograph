@@ -286,6 +286,30 @@ fn preflight(connection: &Connection, limits: CoverageReadLimits) -> Result<(), 
 }
 
 impl SqliteGraphStore {
+    /// Apply `patch` and replace each record's repo inventory in one write
+    /// transaction, leaving source associations and omission records as they
+    /// are. A system-wide pass that changes a repo's published counts after its
+    /// own publication (found-ADR relinking, #1847) restates that repo's
+    /// inventory with the facts, so neither describes a different revision.
+    pub fn apply_patch_with_coverage_if_snapshot_matches(
+        &mut self,
+        expected: &impl crate::ExpectedSnapshot,
+        patch: &crate::GraphPatch,
+        records: &[CoverageRecord],
+    ) -> Result<bool, GraphError> {
+        let transaction =
+            Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        if !self.snapshot_matches(expected)? {
+            return Ok(false);
+        }
+        self.apply_patch_rows(patch)?;
+        for record in records {
+            replace(&transaction, &record.repo_key, Some(record))?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     /// Read bounded coverage and its revision in one transaction, without
     /// materializing graph facts or claiming that coverage is complete.
     pub fn read_coverage_records_with_revision_bounded(

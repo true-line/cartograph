@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, endpoint inventory, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -13,6 +13,17 @@ shown in **Workspace**.
 
 Beside it, `curated_basis` records the curated revision and the counts of
 accepted proposals by state. See **Curated items** below.
+
+## Endpoint inventory
+
+Every export includes **endpoint-inventory.md**. It lists every recovered
+endpoint once, including endpoints that no test references. Each row shows the
+method, path, framework and language as they were recovered, and `unknown`
+where nothing was recovered, with the endpoint's tier, confidence and source
+span. It does not state parameters, responses or authentication. An endpoint
+recorded as a Gap is counted and listed in the gap register instead. A
+`verified-only` export leaves out InferredWeak endpoints and says how many; a
+`best-effort` export marks them.
 
 ## Endpoints and permission sites
 
@@ -71,7 +82,10 @@ A job has no place in the order when one of its needs could not be resolved,
 when it needs such a job, or when its needs form a cycle. These jobs are
 listed after the ordered ones, each with the reason.
 
-Every row shows the tier, confidence and source span of its fact.
+Every row shows the tier, confidence and source span of its fact, and the
+citation id of each fact it states: the fact itself, the relation that places
+a trigger, job or step, and each need of a job. Each relation shows its
+confidence beside its id. Every id is a row of the fact index.
 
 A `verified-only` export leaves out InferredWeak rows and states how many
 pipeline facts it left out. A `best-effort` export includes them and marks
@@ -184,10 +198,14 @@ The outside list is a lower bound. Read the unclassified count beside it.
 
 A binding is a service base URL or a gateway route in the system manifest.
 Without one, a call to another ingested repository by its full web address
-is listed as outside. The manifest itself is not stored, so a binding is
-known only where it joined a call to an endpoint. When bindings exist, a
-call to a host they do not cover is listed as unclassified, with the
-sentence recorded for it, and not yet as outside.
+is listed as outside. When bindings exist, each call and each observed HTTP
+client records what the bindings say about its host. A call to a host no
+binding names is listed as outside. A call or client of a host a binding
+names is not listed as outside, even where no endpoint matched.
+
+A system ingested before this was recorded keeps the older result: a call
+to a host its bindings do not cover is listed as unclassified, with the
+sentence recorded for it. Add the system again to record the outcome.
 
 **External data flows** has one row for each flow and outside service it
 reaches. The entities are those a symbol on the flow reads or writes. The
@@ -514,9 +532,11 @@ lists every evidence record and the documents that carry each one. Nothing
 is chosen for you.
 
 An export is refused when one of its statements cites an id that has no row,
-or when two different facts would share one id. The documents do not print
+or when two different facts would share one id. Most documents do not print
 the citation id beside each statement yet. That is added one document at a
-time.
+time. `data_model.md` prints one beside each entity, related node, relation
+and relation field it lists, `pipelines.md` beside each pipeline, trigger,
+job, step and need, and `curated.md` beside each curated item.
 
 The index grows with the number of facts the documents state, not with the
 size of the graph.
