@@ -634,3 +634,22 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
     autoExpanded,
   };
 }
+
+/**
+ * The `expanded` set that reveals `nodeId` in the scene built from
+ * `snapshot` (#1666): every group on the path to its cluster, outermost
+ * first, plus the cluster itself — the same ids a viewer would open by
+ * hand from the indexes. Each opened group is the only open group at its
+ * level, so it is the drill-in focus there. A node that is not in the
+ * scene (a boundary placeholder, or absent) reveals nothing.
+ */
+export function revealExpansion(snapshot: AtlasSnapshot, nodeId: string): Set<string> {
+  // With nothing expanded, the scene lists every group at every depth.
+  const scene = buildAtlasScene(snapshot, new Set());
+  const cluster = scene.clusters.find((candidate) => candidate.members.includes(nodeId));
+  if (!cluster) return new Set();
+  const path = scene.groups
+    .filter((group) => group.clusters.some((candidate) => candidate.id === cluster.id))
+    .map((group) => group.id);
+  return new Set([...path, cluster.id]);
+}
