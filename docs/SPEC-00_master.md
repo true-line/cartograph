@@ -229,7 +229,7 @@ The spec compiler **projects the graph → artifacts**. Artifact set:
 | `US-TM.md` | US ↔ AC ↔ Module ↔ Flow ↔ ADR ↔ Test | traceability matrix; past 200 links grouped by relation × target with capped representatives and counted omissions, plus a `US-TM.json` index of every link (AC-0221) |
 | Flow dossiers | each BusinessFlow | Markdown + Mermaid sequence + provenance table |
 | Resource/topology map | Resource graph | Mermaid/Graphviz + table |
-| Data model | DataEntity + MAPS_TO | ERD (Mermaid) + table |
+| Data model | DataEntity + MAPS_TO | ERD (Mermaid) + tables; each node, relation and relation field prints its confidence and its fact-index citation id (ADR-0058 decision 8, AC-0760) |
 | ADR set | found + recovered | author ADR format |
 | Gap register | all `Gap` nodes | table (the explicit 5% the system could not confirm); past 12 rows grouped by cause class with capped representatives and counted omissions, plus a `gap_register.json` index of every instance (AC-0210); every row and cause class names its omission class and filling seam, with a by-class rollup (ADR-0036 decision 5, AC-0254) |
 | Drift register | ADR/code conflicts | table |

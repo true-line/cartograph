@@ -483,9 +483,10 @@ lists every evidence record and the documents that carry each one. Nothing
 is chosen for you.
 
 An export is refused when one of its statements cites an id that has no row,
-or when two different facts would share one id. The documents do not print
+or when two different facts would share one id. Most documents do not print
 the citation id beside each statement yet. That is added one document at a
-time.
+time. `data_model.md` prints one beside each entity, related node, relation
+and relation field it lists, and `curated.md` beside each curated item.
 
 The index grows with the number of facts the documents state, not with the
 size of the graph.
