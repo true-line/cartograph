@@ -1502,5 +1502,32 @@ fn export_commands_do_their_work_off_the_calling_thread() {
             "{id}"
         );
     }
+    // AC-0720 (#1662): the batched read on its worker returns what the
+    // single reads return, in the requested order, from one snapshot.
+    let ids = vec!["topology".to_string(), "curated".to_string()];
+    let together = tauri::async_runtime::block_on(crate::read_spec_artifacts(
+        mode,
+        ids.clone(),
+        app.handle().clone(),
+    ))
+    .unwrap();
+    let reads = crate::spec_reads();
+    let blocking = crate::read_spec_artifacts_blocking(mode, &ids, &state).unwrap();
+    assert_eq!(crate::spec_reads(), reads + 1);
+    assert_eq!(json(&together), json(&blocking));
+    for (artifact, id) in blocking.iter().zip(&ids) {
+        assert_eq!(
+            json(artifact),
+            json(&crate::read_spec_artifact_blocking(mode, id, &state).unwrap()),
+            "{id}"
+        );
+    }
+    let reads = crate::spec_reads();
+    assert!(
+        crate::read_spec_artifacts_blocking(mode, &[], &state)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(crate::spec_reads(), reads, "nothing capped, nothing read");
     assert_eq!(compiles(), before + 1);
 }
