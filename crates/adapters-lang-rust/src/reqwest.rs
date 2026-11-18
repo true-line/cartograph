@@ -523,6 +523,7 @@ pub(super) fn extract_function_calls(
             continue;
         };
         out.fetch_sites.push(FetchSite {
+            straight_line: None,
             method,
             url: proof.url(url),
             symbol: Some(symbol.to_string()),
