@@ -390,15 +390,15 @@ pub(super) fn data(
         .collect();
     if !relation_fields.is_empty() {
         content.push_str(
-            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target | Citation |\n|---|---|---|---|---|---|---|\n",
+            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target | Confidence | Citation |\n|---|---|---|---|---|---|---|---|\n",
         )?;
         for (e, relations) in relation_fields {
             // A field is a property of its relation edge, so it cites that edge.
-            let cite = edge_citation(e);
+            let (confidence, cite) = (edge_confidence(e), edge_citation(e));
             for relation in relations {
                 writeln!(
                     content,
-                    "| `{}` | `{}` | {} | {} | {} | `{}` | {cite} |",
+                    "| `{}` | `{}` | {} | {} | {} | `{}` | {confidence:?} | {cite} |",
                     Safe(&e.src),
                     Safe(relation_value(&relation["field"])),
                     Safe(relation_value(&relation["relation"])),

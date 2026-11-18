@@ -1415,6 +1415,19 @@ mod tests {
             "cardinality": "one-to-many",
             "owning": false,
         }]);
+        let mut weak_relation = edge(
+            "data:owner",
+            "data:guess",
+            "REFERENCES",
+            Tier::Semantic,
+            C::InferredWeak,
+        );
+        weak_relation.props["relations"] = serde_json::json!([{
+            "field": "guess",
+            "relation": "ManyToOne",
+            "cardinality": "many-to-one",
+            "owning": true,
+        }]);
         let edges = vec![
             relation,
             edge(
@@ -1431,6 +1444,7 @@ mod tests {
                 Tier::Semantic,
                 C::InferredWeak,
             ),
+            weak_relation,
         ];
         (nodes, edges)
     }
@@ -1483,7 +1497,7 @@ mod tests {
                 "| `data:owner` | REFERENCES | `data:pet` | Confirmed | {relation} |"
             )));
             assert!(data.content.contains(&format!(
-                "| `data:owner` | `pets` | OneToMany | one-to-many | false | `data:pet` | {relation} |"
+                "| `data:owner` | `pets` | OneToMany | one-to-many | false | `data:pet` | Confirmed | {relation} |"
             )));
             let pet = citation_id(&FactKey::Node {
                 id: "data:pet".into(),
@@ -1526,6 +1540,16 @@ mod tests {
         )));
         assert!(best.contains(&format!(
             "| `sym:save-pet` | WRITES | `data:guess` | InferredWeak | {weak_write} |"
+        )));
+        // A relation field prints its relation edge's confidence and citation.
+        let weak_relation = citation_id(&FactKey::Edge {
+            source: "data:owner".into(),
+            label: "REFERENCES".into(),
+            destination: "data:guess".into(),
+        });
+        assert!(!verified.contains(&weak_relation));
+        assert!(best.contains(&format!(
+            "| `data:owner` | `guess` | ManyToOne | many-to-one | true | `data:guess` | InferredWeak | {weak_relation} |"
         )));
         // Deterministic: the same graph prints the same bytes.
         assert_eq!(best, content(ExportMode::BestEffort));
