@@ -1,5 +1,9 @@
 //! Metadata for what one invocation actually received. Acquisition stays in the
 //! unchanged ledger; these hashes cannot reconstruct source or grant authority.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::TaskFactKey;
 use serde::{Deserialize, Serialize};

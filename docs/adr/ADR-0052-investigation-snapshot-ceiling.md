@@ -81,3 +81,55 @@ reads with no reservation: desktop-started investigations, the post-ingest
 knowledge phase and the desktop context query. MCP context reads do not use this
 path and keep `default()`.
 
+### Amendment — 2026-11-18: the streamed identity pass has its own caps (#1602)
+
+- **Status:** Accepted — decided by the owner 2026-11-18
+- **Deciders:** Cartograph owner; Claude implements
+
+Scoped preparation (#1602, AC-0735) computes the complete-graph `context-v1`
+identity by streaming the whole graph one row at a time, and keeps in memory
+only the facts of the investigation's scope. Under the rule above, an
+MCP-started task would stream under `default()`, so any estate over 50,000 rows
+would still stop with `host_limit` even though the pass holds one row, not the
+graph.
+
+Decision (owner, 2026-11-18): the identity pass and the retained scope take
+separate limits (`core_graph::IdentityPassLimits`).
+
+- **Identity pass (aggregate):** the ADR-0052 ceilings,
+  `SnapshotReadLimits::investigation()` (10,000,000 rows, 4 GiB raw and
+  canonical bytes, depth 32, 500,000,000 values), for desktop-started and
+  MCP-started tasks alike.
+- **Retained scope:** the task's own limits, unchanged. MCP-started tasks keep
+  `default()` (50,000 rows, 32 MiB, 1,000,000 values), so the worker reservation
+  sized from it is unchanged; desktop-started tasks keep `investigation()`.
+- **The one row the pass holds** is capped by the retained limits too: its raw
+  stored bytes are checked against the retained `max_bytes` before its body is
+  copied, and its property values and depth against the retained `max_values`
+  and `max_depth` while it decodes. A row the retained limits could never have
+  admitted is refused (`SingleRowByteLimit`, `SingleRowValueLimit`), so the
+  pass never holds more than the reservation already covers.
+- `IdentityPassLimits::for_retained(retained)` is the only constructor
+  preparation uses. `IdentityPassLimits::uniform` (and a plain
+  `SnapshotReadLimits`) keeps exactly the admission of `read_snapshot_bounded`.
+- A preparation snapshot refusal names the phase and the limit:
+  `Investigation limit reached: host_limit; phase=graph_identity|graph_scope;
+  limit=snapshot_rows|snapshot_bytes|snapshot_values|snapshot_depth|snapshot_row_bytes|snapshot_row_values.`
+  The message carries no fact, path or count.
+
+Consequences:
+
+- Once preparation is wired to it, an MCP-started task over a real estate gets
+  a complete-graph identity instead of `host_limit`. Its memory stays within its
+  reservation; its time grows with the whole estate, as a desktop task's does.
+- This is an exception for reads that retain one row, not a change to the rule
+  above: every read that materializes the graph, or sizes a reservation from
+  the graph it holds, still keeps `default()` or its operator-configured value.
+  MCP read sessions are unchanged.
+- The graph identity itself is unchanged: the pass hashes to the id
+  `ContextSnapshot::new` assigns (AC-0735).
+- Not yet wired: investigation preparation (`investigations/context.rs`,
+  `evidence.rs`, `inspection.rs`) still reads the frozen graph under
+  `task_graph_limits`, and reports a snapshot refusal as the plain
+  `host_limit` message until that slice lands.
+

@@ -17,6 +17,9 @@ const OBJECTS_SCHEMA: &str =
 pub const MAX_STORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Hard retained-capture count; no automatic eviction occurs.
 pub const MAX_STORED_CAPTURES: u64 = 10_000;
+/// How long a store connection waits for a competing writer's lock; every
+/// Cartograph SQLite store uses the same 5 s (AC-0821, #1653).
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Logical retention capacity; lower limits are useful for bounded host tasks.
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +125,7 @@ impl CaptureStore {
     }
 
     fn initialize(mut connection: Connection, limits: StoreLimits) -> Result<Self> {
-        connection.busy_timeout(std::time::Duration::from_secs(1))?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -789,6 +792,25 @@ fn load_capture(connection: &Connection, id: &str) -> Result<Capture> {
 mod tests {
     use super::*;
     use crate::{SourceId, capture_working_tree};
+
+    // AC-0821: the capture store waits 5 s for a competing writer, the same
+    // busy timeout as every other Cartograph store (#1653).
+    #[test]
+    fn capture_store_waits_five_seconds_for_a_busy_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let stores = [
+            CaptureStore::open(&dir.path().join("captures.sqlite"), StoreLimits::default())
+                .unwrap(),
+            CaptureStore::in_memory(StoreLimits::default()).unwrap(),
+        ];
+        for store in stores {
+            let timeout: i64 = store
+                .connection
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap();
+            assert_eq!(timeout, 5_000);
+        }
+    }
 
     fn captured(name: &str, bytes: &[u8]) -> Capture {
         captured_with_cap(name, bytes, MAX_SPAN_BYTES)

@@ -10,6 +10,7 @@ fn mcp_granted_completion_start_preserves_families_and_refuses_revocation() {
         (true, Some("domain-analyst@18")),
         (true, Some("domain-analyst@26")),
         (true, Some("domain-analyst@27")),
+        (true, Some("domain-analyst@28")),
     ] {
         let source = if next {
             Fixture::with_family_preparation(

@@ -13,11 +13,13 @@
 //!
 //! **What the graph holds about declared bindings.** The system manifest is
 //! read at ingest and is not stored, so this crate sees a declared binding
-//! only where cross-repository HTTP binding left a citation: the `binding`
-//! of a joined `FETCHES` relation and the `candidates` of an ambiguous Gap.
-//! A Gap the binding pass kept for another reason carries `t0_reason` and a
-//! sentence; the sentence is not parsed. Such a call is unclassified with
-//! that stated, unless a citation elsewhere names its origin.
+//! only where cross-repository HTTP binding recorded it on a fact it
+//! evaluated (#1843): the `binding` citations of a joined `FETCHES`
+//! relation, of a kept Gap and of an observed HTTP client, the `candidates`
+//! of an ambiguous Gap, and the `binding_state` of every Gap that pass
+//! kept. A Gap stored before the state was recorded carries `t0_reason`
+//! and a sentence; the sentence is not parsed. Such a call is unclassified
+//! with that stated, unless a citation elsewhere names its origin.
 //!
 //! **Outside is claimed only from a literal.** The origin must be written in
 //! the source (`url_source` `literal`, or a literal base joined to a literal
@@ -48,6 +50,15 @@ const FETCH_GAP: &str = "gap:fetch:";
 const OBSERVED_GAP: &str = "gap:observed:";
 const HTTP_API: &str = "http-api";
 const IN_PROCESS: &str = "inproc-event";
+/// What cross-repository HTTP binding recorded about a kept Gap's origin
+/// (`events::BINDING_STATE` and its values; this crate does not depend on
+/// `events`, and a test there and here pins the same words).
+const BINDING_STATE: &str = "binding_state";
+/// No declared binding names the origin.
+const STATE_NONE: &str = "none";
+/// A declared binding names the origin, or places the call in a registered
+/// repository, or several endpoints are equally supported.
+const STATES_INSIDE: [&str; 3] = ["origin_declared", "names_repository", "ambiguous"];
 
 /// Why a target is listed as unclassified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,9 +67,11 @@ pub(super) enum Unknown {
     HostNotInSource,
     /// The URL names a host and no scheme (`//host/path`).
     SchemeNotInSource,
-    /// The binding pass kept the Gap and its outcome is a sentence only.
+    /// The binding pass kept the Gap before it recorded its outcome as a
+    /// field, so the outcome is a sentence only.
     BindingNotRecorded,
-    /// The method is computed, so the binding pass did not evaluate it.
+    /// The method is computed and no binding pass recorded what the
+    /// declared bindings say about the origin.
     MethodNotKnown,
     /// An SDK or auth-provider client.
     ProviderOperator,
@@ -201,9 +214,11 @@ pub(super) fn boundary(target: &Target<'_>, bound: &BTreeSet<String>) -> Boundar
             let request = &gap.props["request"];
             // Several equally supported targets, each in a registered
             // repository.
+            let state = gap.props[BINDING_STATE].as_str();
             if gap.props["candidates"]
                 .as_array()
                 .is_some_and(|candidates| !candidates.is_empty())
+                || state.is_some_and(|state| STATES_INSIDE.contains(&state))
             {
                 return NotACrossing(NotCrossing::InsideUnresolved);
             }
@@ -219,13 +234,16 @@ pub(super) fn boundary(target: &Target<'_>, bound: &BTreeSet<String>) -> Boundar
                 Host::Origin(_) if !literal_source(request) => {
                     Unclassified(Unknown::HostNotInSource)
                 }
-                // The binding pass kept this Gap. Whether it found no
-                // binding, or one with no matching endpoint, is recorded as
-                // a sentence only.
+                // The binding pass evaluated this call and no declared
+                // binding names its origin (#1843).
+                Host::Origin(_) if state == Some(STATE_NONE) => Outside,
+                // The binding pass kept this Gap before it recorded its
+                // outcome as a field. Whether it found no binding, or one
+                // with no matching endpoint, is a sentence only.
                 Host::Origin(_) if gap.props["t0_reason"].is_string() => {
                     Unclassified(Unknown::BindingNotRecorded)
                 }
-                // The binding pass skips a call with a computed method.
+                // A computed method, and no pass recorded a binding state.
                 Host::Origin(_) if request["method"].as_str().is_none_or(|m| m == "?") => {
                     Unclassified(Unknown::MethodNotKnown)
                 }
@@ -529,7 +547,12 @@ impl<'a> Model<'a> {
         }
         // One outbound call by its site, to find the observed use of it.
         let mut gap_at: BTreeMap<Place<'_>, &str> = BTreeMap::new();
+        // An observed HTTP client of a declared host cites its bindings.
+        for resource in by_id.values().copied().filter(|node| is_observed(node)) {
+            cite(&resource.props["binding"]);
+        }
         for gap in by_id.values().copied().filter(|node| is_fetch_gap(node)) {
+            cite(&gap.props["binding"]);
             for candidate in gap.props["candidates"].as_array().into_iter().flatten() {
                 cite(&candidate["binding"]);
             }
@@ -1039,9 +1062,11 @@ beside the outside count.\n\
 listed as outside.** Only a service base URL or a gateway route in the system manifest places \
 such a host inside.\n\
 - **A declared binding is known here only through the graph.** The system manifest is not \
-stored. A binding is seen where it joined a call to an endpoint or left its candidates on an \
-ambiguous call. Where binding evidence was evaluated for a call and the fact records the \
-outcome only as a sentence, the call is unclassified and the sentence is shown as recorded.\n\
+stored. Binding evidence records what it found on each call and observed HTTP client it \
+evaluated: the binding that joined a call to an endpoint, the bindings that name a host, and \
+for a call it kept, whether a declared binding names its host. A call kept by an ingest that \
+did not yet record that outcome carries it as a sentence only: it is unclassified, with the \
+sentence shown as recorded, until the system is ingested again.\n\
 - **An absolute URL whose path matches an endpoint of the calling repository** is recorded as \
 a call to that endpoint when no binding covers its host, and so is not listed here.\n\
 - Origins are compared as scheme, host and port, with scheme and host in lower case. No DNS \

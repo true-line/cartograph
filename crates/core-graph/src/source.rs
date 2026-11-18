@@ -15,7 +15,7 @@ const MAX_ID_BYTES: usize = 8192;
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_REPO_BYTES: usize = 256;
 const MAX_RECEIPT_BYTES: usize = 256;
-const MAX_BINDINGS: usize = 100_000;
+const MAX_BINDINGS: usize = 200_000;
 
 /// Maximum raw selection entries, before duplicate identities are removed.
 pub const MAX_SOURCE_SELECTION_KEYS: usize = 65;

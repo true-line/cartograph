@@ -1,6 +1,6 @@
 # ADR-0058 — Citation ids and the fact and evidence index
 
-- **Status:** Proposed; owner review
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #1785
 - **Date:** 2026-11-11
 - **Deciders:** Cartograph owner; Claude implements
 - **Related:** #1785; #1745; US-0012 / AC-0595; ADR-0056; `docs/DOCUMENT-CATALOGUE.md` D11 §11.7
