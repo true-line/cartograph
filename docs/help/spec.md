@@ -1,7 +1,7 @@
 # Spec Workbench
 
 The generated official artifacts (user stories, flow dossiers, topology, gap
-register, ADRs, endpoint permissions, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
+register, ADRs, endpoint permissions, endpoint inventory, pipelines, configuration keys, external services, environments, curated items, product specification, coverage, fact index) with T0-locked semantics:
 deterministic facts cannot be edited away, only annotated. Curation decisions (accept / reject / annotate)
 persist and re-apply on re-ingest while the underlying evidence is unchanged.
 
@@ -13,6 +13,17 @@ shown in **Workspace**.
 
 Beside it, `curated_basis` records the curated revision and the counts of
 accepted proposals by state. See **Curated items** below.
+
+## Endpoint inventory
+
+Every export includes **endpoint-inventory.md**. It lists every recovered
+endpoint once, including endpoints that no test references. Each row shows the
+method, path, framework and language as they were recovered, and `unknown`
+where nothing was recovered, with the endpoint's tier, confidence and source
+span. It does not state parameters, responses or authentication. An endpoint
+recorded as a Gap is counted and listed in the gap register instead. A
+`verified-only` export leaves out InferredWeak endpoints and says how many; a
+`best-effort` export marks them.
 
 ## Endpoints and permission sites
 
@@ -294,8 +305,9 @@ of the product specification, in order, each marked with its kind.
 - **P+A** sections show the compiled part, then the accepted draft for the
   section, or **Not drafted**. Business rules and acceptance criteria point
   to **rule-evidence.md** and **test_arrangements.md** and are not repeated.
-- **A** sections show the accepted draft, or **Not drafted**. No agent
-  writes a section yet, so there is no draft to accept.
+- **A** sections show the accepted draft, or **Not drafted**. The Section
+  Writer role drafts one section per investigation run and its draft is
+  stored for review. A draft is printed only after you accept it.
 - **H** sections are left blank for your team. Cartograph never fills them.
 
 The header shows the catalogue version, the export mode, the graph content
@@ -312,6 +324,25 @@ export prints no drafted claim and says how many it left out of each
 section. A draft that is stale, replaced, in conflict with another accepted
 draft, or citing a fact that is no longer in the graph is named with that
 reason and not printed.
+
+### Drafting and reviewing sections
+
+Open **Spec** and expand **Sections and drafts**. Each section of the
+product specification is listed with its kind and every draft stored for it.
+
+- **Draft this section** opens the investigation composer with the Section
+  Writer role and the question for that section already filled in. Leave the
+  subject empty to draft for the whole system, or enter the citation id of
+  one actor, capability or rule. The run starts only when you start it, with
+  the same consent and limits as any investigation.
+- A draft shows its claims, each marked **T3 / InferredWeak** with its
+  citation ids. Selecting a citation id opens the fact index.
+- **Accept**, **Reject** and **Return** record your decision with an
+  optional note. A decision changes no claim. If the draft changed since the
+  view was read, the decision is refused and the view is read again.
+- An accepted draft shows its state from the latest curated read: current,
+  stale, replaced, in conflict or unresolvable, with the reason. Only a
+  current draft is printed in an export.
 
 ## Curated items
 
@@ -483,9 +514,10 @@ lists every evidence record and the documents that carry each one. Nothing
 is chosen for you.
 
 An export is refused when one of its statements cites an id that has no row,
-or when two different facts would share one id. The documents do not print
+or when two different facts would share one id. Most documents do not print
 the citation id beside each statement yet. That is added one document at a
-time.
+time. `data_model.md` prints one beside each entity, related node, relation
+and relation field it lists, and `curated.md` beside each curated item.
 
 The index grows with the number of facts the documents state, not with the
 size of the graph.

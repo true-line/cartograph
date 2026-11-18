@@ -1356,3 +1356,202 @@ fn capability_stories_count_own_filtering_once_and_keep_validation() {
     }
     assert_eq!(base, before);
 }
+
+const CONTROLLER_PATH: &str = "packages/admin/src/orders.controller.ts";
+const CONTROLLER_SOURCE: &[u8] = br#"
+import {Controller, Get, Post} from '@nestjs/common';
+@Controller('orders')
+export class OrdersController {
+  @Get() list() {}
+  @Post(':id/cancel') cancel() {}
+  helper() {}
+}
+@Controller('health')
+export class HealthController {
+  @Get() check() {}
+}
+export class Plain {
+  @Get() notRouted() {}
+}
+"#;
+
+// AC-0801: one Capability per NestJS controller, citing every endpoint,
+// handler and relation it groups; the base is unchanged.
+#[test]
+fn controller_capability_groups_real_adapter_routes_by_class() {
+    let base = fixture_source(CONTROLLER_SOURCE, CONTROLLER_PATH, REPO);
+    let before = base.clone();
+    let report = derive_nestjs_controller_capabilities(&base);
+    assert_eq!(base, before);
+    assert_eq!(report.oversized_groups, 0);
+    let mut titles: Vec<_> = report
+        .facts
+        .iter()
+        .map(|fact| capability(fact).props["title"].as_str().unwrap().to_owned())
+        .collect();
+    titles.sort();
+    assert_eq!(
+        titles,
+        [
+            "HTTP operations in HealthController",
+            "HTTP operations in OrdersController"
+        ]
+    );
+    let orders = report
+        .facts
+        .iter()
+        .find(|fact| capability(fact).props["title"] == "HTTP operations in OrdersController")
+        .unwrap();
+    let node = capability(orders);
+    assert_eq!(node.label, "Capability");
+    assert!(node.id.starts_with("capability:nestjs-controller:"));
+    assert_eq!(node.props.as_object().unwrap().len(), 2); // no auth/business assertions
+    let list = format!("ep:{REPO}@GET:/orders");
+    let cancel = format!("ep:{REPO}@POST:/orders/:id/cancel");
+    let list_handler = format!("sym:{REPO}@{CONTROLLER_PATH}#OrdersController.list");
+    let cancel_handler = format!("sym:{REPO}@{CONTROLLER_PATH}#OrdersController.cancel");
+    let expected: BTreeSet<_> = [
+        BaseRef::Node(list.clone()),
+        BaseRef::Node(cancel.clone()),
+        BaseRef::Node(list_handler.clone()),
+        BaseRef::Node(cancel_handler.clone()),
+        BaseRef::Edge(list, list_handler, "HANDLES".into()),
+        BaseRef::Edge(cancel, cancel_handler, "HANDLES".into()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(orders.cites, expected);
+    let prov: Provenance = serde_json::from_value(node.props["prov"].clone()).unwrap();
+    assert!(prov.validate().is_ok());
+    assert_eq!(prov.tier, Tier::Semantic);
+    assert_eq!(prov.confidence_tier, ConfidenceTier::InferredWeak);
+    assert_eq!(
+        prov.extractor_id,
+        "t2.knowledge.capability.nestjs-controller"
+    );
+    assert_eq!(
+        prov.method,
+        ProducingMethod::Rule {
+            rule: CAPABILITY_CONTROLLER_RULE.into(),
+            version: CAPABILITY_CONTROLLER_RULE_VERSION.into()
+        }
+    );
+    assert!(!prov.evidence.is_empty());
+    assert!(prov.evidence.iter().all(|e| e.path == CONTROLLER_PATH));
+
+    // Fact order does not change identity or content.
+    let mut reversed = base.clone();
+    reversed.graph.0.reverse();
+    reversed.graph.1.reverse();
+    assert_eq!(derive_nestjs_controller_capabilities(&reversed), report);
+    // GraphQL resolvers are another rule's subject, and the reverse.
+    assert!(derive_graphql_resolver_capabilities(&base).facts.is_empty());
+    assert!(
+        derive_nestjs_controller_capabilities(&fixture(PATH, REPO))
+            .facts
+            .is_empty()
+    );
+}
+
+// AC-0801: support that is ambiguous, not a class method, from another file
+// or not source-backed yields no candidate for that route.
+#[test]
+fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
+    let base = fixture_source(CONTROLLER_SOURCE, CONTROLLER_PATH, REPO);
+    let health = format!("ep:{REPO}@GET:/health");
+    let titles = |snapshot: &RevisionedSnapshot| -> Vec<String> {
+        let mut titles: Vec<_> = derive_nestjs_controller_capabilities(snapshot)
+            .facts
+            .iter()
+            .map(|fact| capability(fact).props["title"].as_str().unwrap().to_owned())
+            .collect();
+        titles.sort();
+        titles
+    };
+    let orders_only = ["HTTP operations in OrdersController"];
+
+    // A second handler for the route.
+    let mut two_handlers = base.clone();
+    let mut extra = two_handlers
+        .graph
+        .1
+        .iter()
+        .find(|e| e.src == health && e.label == "HANDLES")
+        .unwrap()
+        .clone();
+    extra.dst = format!("sym:{REPO}@{CONTROLLER_PATH}#OrdersController.list");
+    two_handlers.graph.1.push(extra);
+    assert_eq!(titles(&two_handlers), orders_only);
+
+    // The endpoint id declared twice.
+    let mut duplicate = base.clone();
+    let copy = duplicate
+        .graph
+        .0
+        .iter()
+        .find(|n| n.id == health)
+        .unwrap()
+        .clone();
+    duplicate.graph.0.push(copy);
+    assert_eq!(titles(&duplicate), orders_only);
+
+    let edit = |change: &dyn Fn(&mut Node)| {
+        let mut changed = base.clone();
+        for node in &mut changed.graph.0 {
+            change(node);
+        }
+        changed
+    };
+    let handler = format!("sym:{REPO}@{CONTROLLER_PATH}#HealthController.check");
+    // The handler is not a class method.
+    assert_eq!(
+        titles(&edit(&|node| if node.id == handler {
+            node.props["kind"] = "Function".into();
+        })),
+        orders_only
+    );
+    // The class has no name of its own: the adapter's `class@<offset>`
+    // placeholder is not something to title a Capability with.
+    let mut anonymous = edit(&|node| {
+        if node.id == handler {
+            node.id = format!("sym:{REPO}@{CONTROLLER_PATH}#class@42.check");
+            node.props["class"] = "class@42".into();
+            node.props["name"] = "class@42.check".into();
+        }
+    });
+    for edge in &mut anonymous.graph.1 {
+        if edge.dst == handler {
+            edge.dst = format!("sym:{REPO}@{CONTROLLER_PATH}#class@42.check");
+        }
+    }
+    assert_eq!(titles(&anonymous), orders_only);
+    // Another framework's endpoint.
+    assert_eq!(
+        titles(&edit(&|node| if node.id == health {
+            node.props["framework"] = "express".into();
+        })),
+        orders_only
+    );
+    // Endpoint evidence from another file.
+    assert_eq!(
+        titles(&edit(&|node| if node.id == health {
+            node.props["prov"]["evidence"][0]["path"] = "other.ts".into();
+        })),
+        orders_only
+    );
+    // Support that is not source-backed, or not confident.
+    assert_eq!(
+        titles(&edit(&|node| if node.id == health {
+            node.props["prov"]["basis"] = "structural".into();
+        })),
+        orders_only
+    );
+    assert_eq!(
+        titles(&edit(&|node| if node.id == health {
+            node.props["prov"]["extractor_id"] = "t0.adapter-go".into();
+        })),
+        orders_only
+    );
+    // Unchanged, both controllers are named.
+    assert_eq!(titles(&base).len(), 2);
+}

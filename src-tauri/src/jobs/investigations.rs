@@ -396,6 +396,28 @@ pub(crate) enum PreparationPhase {
     SourceReservation,
 }
 
+impl PreparationPhase {
+    /// The closed, text-free diagnostic boundary for this phase (AC-0725).
+    pub(crate) fn diagnostic_phase(self) -> agents::investigation::InvestigationFailurePhase {
+        use agents::investigation::InvestigationFailurePhase as Phase;
+        match self {
+            Self::Continuation => Phase::Continuation,
+            Self::Finish => Phase::Finish,
+            Self::Metadata => Phase::Metadata,
+            Self::Query => Phase::Query,
+            Self::Inventory => Phase::Inventory,
+            Self::Candidate => Phase::Candidate,
+            Self::Certification => Phase::Certification,
+            Self::Seal => Phase::Seal,
+            Self::Publication => Phase::Publication,
+            Self::Source => Phase::Source,
+            Self::SourcePrepare => Phase::SourcePrepare,
+            Self::SourceCertification => Phase::SourceCertification,
+            Self::SourceReservation => Phase::SourceReservation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostLimitKind {
     Unspecified,
@@ -1090,9 +1112,12 @@ impl JobStore {
             Some(intent) => intent.request_hash.clone(),
             None => request.intent_hash()?,
         };
+        // AC-0840: the principal cap limits live work, not lifetime history.
+        // `live` is the store's terminal-state column (phase != Terminal),
+        // the same one the global live ceiling counts. Retry ran above.
         if let Some(identity) = mcp {
             let count: i64 = tx.query_row(
-                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1",
+                "SELECT count(*) FROM investigation_tasks WHERE request_namespace=?1 AND live=1",
                 [&request_namespace],
                 |r| r.get(0),
             )?;

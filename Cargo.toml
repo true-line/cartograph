@@ -31,6 +31,13 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 
+# Tests run optimized. The app suite's replay and acceptance tests spend
+# their time in serialization, hashing and SQLite, and ran about ten times
+# slower unoptimized (#1924). Debug assertions and overflow checks stay on:
+# they come from the dev profile this one inherits.
+[profile.test]
+opt-level = 1
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: parse floats correctly rounded, so a value serialized

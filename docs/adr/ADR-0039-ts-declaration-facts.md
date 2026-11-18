@@ -1,8 +1,8 @@
 # ADR-0039 — Citable TS/JS declaration facts
 
-- **Status:** Proposed
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761)
 - **Date:** 2026-10-21
-- **Deciders:** Cartograph maintainers (owner review pending)
+- **Deciders:** Cartograph maintainers (owner accepted 2026-11-18, #1761)
 
 ## Context
 

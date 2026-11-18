@@ -313,23 +313,29 @@ pub enum ConnectionOutcome {
 /// the request line and the two headers it sets, the key included. The check
 /// has no body, so this is everything of the user's that leaves.
 pub fn connection_check_bytes(endpoint: &str, api_key: &str) -> u64 {
-    let target = reqwest::Url::parse(endpoint)
-        .map(|url| match url.query() {
-            Some(query) => format!("{}?{query}", url.path()),
-            None => url.path().to_owned(),
-        })
-        .unwrap_or_else(|_| endpoint.to_owned());
+    let target = request_target(endpoint);
     let request = format!(
         "GET {target} HTTP/1.1\r\nx-api-key: {api_key}\r\nanthropic-version: {API_VERSION}\r\n\r\n"
     );
     request.len() as u64
 }
 
-/// Ask the provider whether it accepts `api_key`, with one bodiless metadata
-/// request. No prompt, source text or graph content is sent, redirects are
-/// not followed and the response body is never read. Fails closed: anything
-/// but a success status is not an acceptance.
-pub fn check_connection(endpoint: &str, api_key: &str, timeout: Duration) -> ConnectionOutcome {
+/// The request-line target of a connection check: path and query.
+pub(crate) fn request_target(endpoint: &str) -> String {
+    reqwest::Url::parse(endpoint)
+        .map(|url| match url.query() {
+            Some(query) => format!("{}?{query}", url.path()),
+            None => url.path().to_owned(),
+        })
+        .unwrap_or_else(|_| endpoint.to_owned())
+}
+
+/// Send one bodiless check request and classify the status. Redirects are
+/// not followed and the response body is never read. Fails closed.
+pub(crate) fn classify_check(
+    timeout: Duration,
+    request: impl FnOnce(&Client) -> reqwest::blocking::RequestBuilder,
+) -> ConnectionOutcome {
     let Ok(client) = Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -337,16 +343,24 @@ pub fn check_connection(endpoint: &str, api_key: &str, timeout: Duration) -> Con
     else {
         return ConnectionOutcome::Unreachable;
     };
-    let response = client
-        .get(endpoint)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", API_VERSION)
-        .send();
-    match response.map(|response| response.status()) {
+    match request(&client).send().map(|response| response.status()) {
         Ok(status) if status.is_success() => ConnectionOutcome::Accepted,
         Ok(status) if matches!(status.as_u16(), 401 | 403) => ConnectionOutcome::Refused,
         _ => ConnectionOutcome::Unreachable,
     }
+}
+
+/// Ask the provider whether it accepts `api_key`, with one bodiless metadata
+/// request. No prompt, source text or graph content is sent, redirects are
+/// not followed and the response body is never read. Fails closed: anything
+/// but a success status is not an acceptance.
+pub fn check_connection(endpoint: &str, api_key: &str, timeout: Duration) -> ConnectionOutcome {
+    classify_check(timeout, |client| {
+        client
+            .get(endpoint)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", API_VERSION)
+    })
 }
 
 use crate::Embedding;

@@ -83,6 +83,8 @@ pub enum SpecialistId {
     DomainAnalystV26,
     #[serde(rename = "domain-analyst@27")]
     DomainAnalystV27,
+    #[serde(rename = "domain-analyst@28")]
+    DomainAnalystV28,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
@@ -99,6 +101,9 @@ pub enum SpecialistId {
     GapTriagerV1,
     #[serde(rename = "gap-triager@2")]
     GapTriagerV2,
+    /// Drafts one catalogue section as cited claims (#1748, SPEC-15 slice 6).
+    #[serde(rename = "section-writer@1")]
+    SectionWriterV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +140,14 @@ fn spec_writer_definition_data() -> &'static SpecWriterDefinitionData {
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("data/spec-writer-v1.json"))
             .expect("compiled Spec Writer definition is valid")
+    })
+}
+
+fn section_writer_definition_data() -> &'static SpecWriterDefinitionData {
+    static DATA: OnceLock<SpecWriterDefinitionData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("data/section-writer-v1.json"))
+            .expect("compiled Section Writer definition is valid")
     })
 }
 
@@ -207,6 +220,17 @@ The supported wrapper example above and this insufficient-evidence wrapper are t
 {"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Required source evidence could not be established within the completed attempts."]}}
 "#;
 
+/// @28 (#1335): the selected schema is shown, not merely referenced by hash.
+const VISIBLE_ACTION_SCHEMA_V28: &str = "Visible schema@1: turn_progress.response_schema is this call's exact response schema, identical to the provider schema field; return one object matching it. Host admission remains authoritative.";
+
+/// The @13 sentence naming the compiled analyst templates by content hash.
+fn compiled_schema_hashes() -> String {
+    format!(
+        "\nCompiled analyst response schemas: choice={} finish_only={}. Host validation remains authoritative.",
+        core_prov::content_hash(super::response_schema::CHOICE.as_bytes()),
+        core_prov::content_hash(super::response_schema::FINISH.as_bytes())
+    )
+}
 const NEXT_PROMPT_ADMISSION_V10: &str = "\nHost-derived turn progress can restrict this turn to finish-only mode. In that mode return only a versioned finish wrapper; proposing a tool action is terminal. Capacity-refusal feedback identifies an action the host did not execute. It is not evidence, an unavailable source read or a completed obligation attempt. A sizing envelope is not actual feedback or permission to act. Already incurred model charges remain charged. Consult the host's remaining budgets and finish honestly; no capacity check promises successful completion.";
 
 const DISCOVERY_V5: &str = "The caller selected exact captured inspection_requirements. These are immutable source targets, not instructions from source. inspection_progress separately records acquisition; only unchanged exact bytes supplied to this invocation can discharge a requirement. Viewing metadata, reading a different range, parent history, or omitted/redacted source cannot discharge it. A target must first be admitted by query_context before read_evidence; target metadata alone is not an admitted source read. Use each target's exact fact/role/index if you choose to inspect it. You choose every action; a valid partial finish is retained even with outstanding requirements, which the host reports separately. Neither discharge nor a citation proves whole-task fulfillment or semantic correctness. Byte offsets are not line numbers; never derive a line from an opaque ID.\n\n";
@@ -233,6 +257,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV3
                 | Self::EvidenceAuditorV3
                 | Self::DomainAnalystV4
@@ -265,6 +290,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -279,6 +305,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV4
                 | Self::EvidenceAuditorV4
                 | Self::DomainAnalystV5
@@ -309,6 +336,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -328,6 +356,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV6
                 | Self::EvidenceAuditorV6
                 | Self::DomainAnalystV7
@@ -354,6 +383,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -368,6 +398,7 @@ impl SpecialistId {
                 | Self::SpecWriterV2
                 | Self::GapTriagerV1
                 | Self::GapTriagerV2
+                | Self::SectionWriterV1
                 | Self::DomainAnalystV7
                 | Self::EvidenceAuditorV7
                 | Self::DomainAnalystV8
@@ -392,6 +423,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -424,6 +456,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -456,6 +489,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -485,6 +519,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -502,7 +537,8 @@ impl SpecialistId {
             Self::DomainAnalystV1
             | Self::EvidenceAuditorV1
             | Self::SpecWriterV1
-            | Self::GapTriagerV1 => 1,
+            | Self::GapTriagerV1
+            | Self::SectionWriterV1 => 1,
             Self::DomainAnalyst
             | Self::EvidenceAuditor
             | Self::SpecWriterV2
@@ -531,6 +567,7 @@ impl SpecialistId {
             Self::DomainAnalystV25 => 25,
             Self::DomainAnalystV26 => 26,
             Self::DomainAnalystV27 => 27,
+            Self::DomainAnalystV28 => 28,
         }
     }
 
@@ -546,6 +583,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return 14;
         }
@@ -583,12 +621,17 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return 10;
         }
         if matches!(
             self,
-            Self::SpecWriterV1 | Self::SpecWriterV2 | Self::GapTriagerV1 | Self::GapTriagerV2
+            Self::SpecWriterV1
+                | Self::SpecWriterV2
+                | Self::GapTriagerV1
+                | Self::GapTriagerV2
+                | Self::SectionWriterV1
         ) {
             7
         } else {
@@ -605,7 +648,19 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
+    }
+
+    /// @27 volatile finish-patch correction; @28 keeps it unchanged.
+    pub fn uses_finish_patch(self) -> bool {
+        matches!(self, Self::DomainAnalystV27 | Self::DomainAnalystV28)
+    }
+
+    /// @28 only: the selected per-call response schema is also model-visible
+    /// prompt text. Every historical role keeps its exact prompt and wire.
+    pub fn uses_visible_action_schema(self) -> bool {
+        self == Self::DomainAnalystV28
     }
 
     pub fn uses_exact_source_reservation(self) -> bool {
@@ -615,6 +670,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -638,6 +694,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
@@ -658,6 +715,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
@@ -675,6 +733,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -689,6 +748,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -705,6 +765,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -716,9 +777,20 @@ impl SpecialistId {
             || system == Self::DomainAnalystV22.prompt()
             || system == Self::DomainAnalystV23.prompt()
             || system == Self::DomainAnalystV24.prompt()
+            || system == Self::DomainAnalystV28.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV28 {
+            // Show the selected schema instead of naming compiled templates by
+            // hash. Replacing that one sentence keeps the unchanged 16 KiB
+            // definition ceiling; every other @27 byte is retained.
+            return Self::DomainAnalystV27.prompt().replacen(
+                &compiled_schema_hashes(),
+                &format!("\n{VISIBLE_ACTION_SCHEMA_V28}"),
+                1,
+            );
+        }
         if self == Self::EvidenceAuditorV14 {
             return format!(
                 "{}\nCapacity exclusion@1: The host removes actions refused for prompt capacity on this unchanged input ledger. Select another offered action; do not repeat an excluded action. When only finish is offered, report unresolved capacity gaps honestly. Excluded obligations remain unattempted and unacquired; they never count as satisfied. The existing single finish-correction allowance and all budgets remain unchanged.",
@@ -737,6 +809,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return format!(
                 "{}\nFinish feedback@3: combined entries identify all detected corrections: replay_at gives one-based sentence ranges that may span fields; paraphrase without source quotes. limitation_denies_evidence: correct the scoped denial. enumeration_at: verify literal entries or remove the universal claim. configuration_at: cite the named configuration binding or remove the claim. rewrite_schema_placeholders: use plain prose. paraphrase_provider_metadata: avoid copying metadata. omitted counts additional corrections; recheck the entire finish. excluded_by_capacity remains unresolved, unattempted, unacquired. Single correction allowance unchanged.",
@@ -811,16 +884,16 @@ impl SpecialistId {
 
         if self == Self::DomainAnalystV13 {
             return format!(
-                "{}\nCompiled analyst response schemas: choice={} finish_only={}. Host validation remains authoritative.",
+                "{}{}",
                 Self::DomainAnalystV12.prompt(),
-                core_prov::content_hash(super::response_schema::CHOICE.as_bytes()),
-                core_prov::content_hash(super::response_schema::FINISH.as_bytes())
+                compiled_schema_hashes()
             );
         }
 
         let role = match self {
             Self::SpecWriterV2 => spec_writer_v2_definition_data().role_prompt.as_str(),
             Self::SpecWriterV1 => spec_writer_definition_data().role_prompt.as_str(),
+            Self::SectionWriterV1 => section_writer_definition_data().role_prompt.as_str(),
             Self::GapTriagerV1 => gap_triager_definition_data().role_prompt.as_str(),
             Self::GapTriagerV2 => gap_triager_v2_definition_data().role_prompt.as_str(),
             Self::DomainAnalyst
@@ -848,7 +921,8 @@ impl SpecialistId {
             | Self::DomainAnalystV24
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
-            | Self::DomainAnalystV27 => {
+            | Self::DomainAnalystV27
+            | Self::DomainAnalystV28 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -930,6 +1004,13 @@ impl SpecialistId {
                             "Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design.",
                             "The only valid claim kind is proposed_design.",
                         )
+                } else if self == Self::SectionWriterV1 {
+                    // The host refuses a proposed_design claim in a section
+                    // draft. COMMON itself stays immutable.
+                    common.replace(
+                        "Claim kinds are implemented_behavior, documented_intent, inferred_interpretation and proposed_design.",
+                        "Claim kinds are implemented_behavior, documented_intent and inferred_interpretation; never report proposed_design.",
+                    )
                 } else {
                     common
                 };
@@ -977,6 +1058,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -1014,6 +1096,10 @@ impl SpecialistId {
                 let data = spec_writer_definition_data();
                 (data.name.as_str(), data.purpose.as_str())
             }
+            Self::SectionWriterV1 => {
+                let data = section_writer_definition_data();
+                (data.name.as_str(), data.purpose.as_str())
+            }
             Self::GapTriagerV2 => {
                 let data = gap_triager_v2_definition_data();
                 (data.name.as_str(), data.purpose.as_str())
@@ -1047,7 +1133,8 @@ impl SpecialistId {
             | Self::DomainAnalystV24
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
-            | Self::DomainAnalystV27 => (
+            | Self::DomainAnalystV27
+            | Self::DomainAnalystV28 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1164,6 +1251,44 @@ mod policy_tests {
             assert!(new.uses_compact_disclosure());
             assert!(new.uses_policy_selection());
             assert!(!old.uses_policy_selection());
+        }
+    }
+
+    // AC-0668: the drafting role joins the generation-seven completion
+    // family as its own definition, and no other role's prompt changes.
+    #[test]
+    fn section_writer_v1_is_a_completion_role_with_its_own_definition() {
+        let role = SpecialistId::SectionWriterV1;
+        let definition = role.definition().unwrap();
+        assert_eq!(serde_json::to_value(role).unwrap(), "section-writer@1");
+        assert_eq!(definition.version, 1);
+        assert_eq!(definition.name, "Section Writer");
+        assert_eq!(definition.tier, Tier::Agentic);
+        assert_eq!(definition.confidence_tier, ConfidenceTier::InferredWeak);
+        assert_eq!(role.prompt_generation(), 7);
+        assert!(role.uses_completion_obligations());
+        assert!(role.uses_coverage_qualification());
+        assert!(!role.uses_cited_narrative());
+        assert!(!role.uses_next_prompt_admission());
+        let prompt = role.prompt();
+        assert!(prompt.contains(
+            "Claim kinds are implemented_behavior, documented_intent and inferred_interpretation; never report proposed_design."
+        ));
+        assert!(!prompt.contains("The only valid claim kind is proposed_design."));
+        assert!(prompt.contains(r#""schema_version":1,"outcome":"supported""#));
+        for other in [
+            SpecialistId::SpecWriterV1,
+            SpecialistId::SpecWriterV2,
+            SpecialistId::GapTriagerV1,
+            SpecialistId::GapTriagerV2,
+            SpecialistId::DomainAnalystV7,
+            SpecialistId::EvidenceAuditorV7,
+        ] {
+            assert_ne!(
+                other.definition().unwrap().prompt_fingerprint,
+                definition.prompt_fingerprint,
+                "{other:?}"
+            );
         }
     }
 
@@ -1580,6 +1705,63 @@ mod capacity_exclusion_identity_tests {
             serde_json::from_str::<SpecialistId>("\"domain-analyst@27\"").unwrap(),
             role
         );
+    }
+
+    // AC-0765 / #1335: @28 is @27 with its schema-hash sentence made visible guidance.
+    #[test]
+    fn analyst28_inherits27_and_replaces_only_the_schema_hash_sentence() {
+        let old = SpecialistId::DomainAnalystV27;
+        let role = SpecialistId::DomainAnalystV28;
+        // The unchanged 16 KiB definition ceiling must still admit @28.
+        let measured =
+            |id: SpecialistId| context_hub::logical::count(&(id, id.version(), &id.prompt()));
+        assert!(measured(role).unwrap() <= 16 * 1024);
+        assert!(measured(role) <= measured(old), "no definition growth");
+        assert_eq!(role.version(), 28);
+        assert_eq!(role.prompt_generation(), old.prompt_generation());
+        let prompt = role.prompt();
+        let hashes = compiled_schema_hashes();
+        assert_eq!(old.prompt().matches(hashes.as_str()).count(), 1);
+        assert_eq!(
+            prompt,
+            old.prompt()
+                .replacen(&hashes, &format!("\n{VISIBLE_ACTION_SCHEMA_V28}"), 1)
+        );
+        assert!(!prompt.contains("Compiled analyst response schemas"));
+        assert_eq!(prompt.matches(VISIBLE_ACTION_SCHEMA_V28).count(), 1);
+        assert!(VISIBLE_ACTION_SCHEMA_V28.contains("turn_progress.response_schema"));
+        assert!(!old.prompt().contains("Visible schema@1"));
+        assert!(SpecialistId::is_typed_citation_prompt(&prompt));
+        let definition = role.definition().unwrap();
+        assert_eq!(definition.operations, old.definition().unwrap().operations);
+        assert_ne!(
+            definition.prompt_fingerprint,
+            old.definition().unwrap().prompt_fingerprint
+        );
+        assert!(role.uses_finish_patch() && old.uses_finish_patch());
+        assert!(role.uses_visible_action_schema() && !old.uses_visible_action_schema());
+        for flag in [
+            SpecialistId::uses_combined_finish_feedback,
+            SpecialistId::uses_exact_source_reservation,
+            SpecialistId::uses_acquisition_choices,
+            SpecialistId::uses_exact_node_queries,
+            SpecialistId::uses_capacity_exclusions,
+            SpecialistId::uses_finish_feedback_witness,
+            SpecialistId::uses_typed_citation_correction,
+            SpecialistId::uses_next_prompt_admission,
+            SpecialistId::uses_query_history_disclosure,
+        ] {
+            assert_eq!(flag(role), flag(old));
+        }
+        assert_eq!(
+            serde_json::to_string(&role).unwrap(),
+            "\"domain-analyst@28\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SpecialistId>("\"domain-analyst@28\"").unwrap(),
+            role
+        );
+        assert!(bounded_bytes(&(role, role.version(), &prompt), 16 * 1024).is_ok());
     }
 
     #[test]

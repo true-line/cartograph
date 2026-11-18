@@ -4,6 +4,9 @@ mod effective_policy_tests;
 #[path = "query_refusal_tests.rs"]
 mod query_refusal_tests;
 
+#[path = "failure_record_tests.rs"]
+mod failure_record_tests;
+
 use super::chat::StoredChatMessage;
 use super::*;
 use crate::job_execution::JobExecutionLocks;
@@ -2826,6 +2829,9 @@ mod principal_access_tests;
 
 #[path = "mcp_nonce_tests.rs"]
 mod mcp_nonce_tests;
+
+#[path = "mcp_live_cap_tests.rs"]
+mod mcp_live_cap_tests;
 
 #[test]
 fn investigation_finish_diagnostic_classes_fit_the_existing_message_bound() {

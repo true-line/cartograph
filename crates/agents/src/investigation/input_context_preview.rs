@@ -155,6 +155,15 @@ impl InvestigationInput {
             progress["citation_correction"] = serde_json::to_value(&candidate.citation_correction)
                 .map_err(|_| InvestigationError::InvalidInput)?;
         }
+        // admission_reserve_basis already validated the candidate's transport
+        // against its expected per-call selection, including the @28 visible
+        // copy. Growth is accepted only as that same derived schema.
+        if let (_, Some(visible)) = response_schema::visible_projection(
+            candidate.frozen_specialist()?,
+            candidate.payload.response_schema.clone(),
+        )? {
+            progress["response_schema"] = visible;
+        }
         if next["turn_progress"] != progress {
             return Err(InvestigationError::InvalidInput);
         }

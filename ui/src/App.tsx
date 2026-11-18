@@ -39,6 +39,8 @@ import { hasRecordedExecution, selectRecoveryJob } from './jobPresentation';
 import { TopologyCard } from './components/TopologyCard';
 import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
+import { sectionDraftQuestion, useSectionDocumentStore } from './sectionDocument';
+import type { SectionAddress } from './sectionDocument';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { SavedResultNotices } from './components/SavedResultNotices';
@@ -49,14 +51,12 @@ import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDi
 import type { InvestigationChanged, InvestigationFollowUpContext } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
 import {
+  exportSpecBundle,
   isSameArtifact,
   resolveArtifactForCopy,
-  withFullArtifacts,
   type ReadSpecArtifact,
-  type ReadSpecArtifacts,
   type ReportSpecError,
 } from './specExport';
-import { saveExport } from './saveExport';
 
 const AtlasCanvas = lazy(() =>
   import('./components/AtlasCanvas').then(({ AtlasCanvas: Component }) => ({
@@ -77,26 +77,6 @@ const SpecWorkbench = lazy(() =>
 /** Surfaces a refused export or copy (e.g. a stale artifact identity) in
  *  the Workbench's error banner. */
 const reportSpecError: ReportSpecError = (message) => useAppStore.setState({ specError: message });
-
-/** Exports the bundle, or aborts (leaving `specError` for the Workbench to
- *  show) if any truncated artifact's full content couldn't be fetched — see
- *  `withFullArtifacts` in `specExport.ts`. Never downloads a file built from
- *  capped previews. */
-async function exportSpecBundle(
-  bundle: SpecBundle,
-  readSpecArtifacts: ReadSpecArtifacts,
-  reportError: ReportSpecError,
-) {
-  const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifacts, reportError);
-  if (artifacts === null) return;
-  const files = Object.fromEntries(artifacts.map((artifact) => [artifact.file_name, artifact.content]));
-  const content = JSON.stringify({ ...bundle, artifacts, files }, null, 2);
-  try {
-    await saveExport(`cartograph-spec-${bundle.mode}.json`, content);
-  } catch (error) {
-    reportError(error instanceof Error ? error.message : typeof error === 'string' ? error : String(error));
-  }
-}
 
 /** Copies the artifact's content, or aborts (leaving `specError` for the
  *  Workbench to show) if the on-demand full fetch failed — see
@@ -147,10 +127,13 @@ export default function App() {
     specError,
     ingestBusy,
     ingestSummary,
+    recordedCoverage,
+    recordedCoverageError,
     ingestError,
     ingestSource,
     ingestTarget,
     preflight,
+    systemPreflight,
     preflightBusy,
     preflightError,
     preflightProgress,
@@ -498,6 +481,26 @@ export default function App() {
     [setView],
   );
 
+  // The Workbench document view (SPEC-15 slice 7, AC-0669): read while the
+  // Workbench is open, and the curated projection is read again after a
+  // review so an accepted draft's state is the host's.
+  const sectionDocument = useSectionDocumentStore();
+  useEffect(() => {
+    if (view === 'spec' && backend === 'up') void useSectionDocumentStore.getState().load();
+  }, [view, backend]);
+  // "Draft this section" opens the investigation composer on the Section
+  // Writer with the one question that names the address. The reviewer still
+  // chooses the evidence, the provider and the start there.
+  const draftSection = useCallback(async (address: SectionAddress) => {
+    try {
+      const question = await sectionDraftQuestion(address);
+      useInvestigationStore.getState().updateComposer({ specialistId: 'section-writer@1', question });
+      navigate('investigations');
+    } catch (error) {
+      reportSpecError(error instanceof Error ? error.message : String(error));
+    }
+  }, [navigate]);
+
   // ⌘K / Ctrl+K toggles the palette; ⌘1–⌘8 jump straight to a surface;
   // '?' or F1 opens Help on the current surface's topic (#154).
   useEffect(() => {
@@ -635,6 +638,8 @@ export default function App() {
             <WorkspaceSurface
               systemContents={systemContents}
               summary={ingestSummary}
+              recordedCoverage={recordedCoverage}
+              recordedCoverageError={recordedCoverageError}
               findings={findings}
               distribution={tierDistribution(atlas)}
               bundle={specBundle}
@@ -737,6 +742,18 @@ export default function App() {
               views={specViews}
               curated={specCurated}
               onRefreshCurated={() => void reloadSpec()}
+              sections={{
+                document: sectionDocument.document,
+                busy: sectionDocument.busy || specBusy,
+                error: sectionDocument.error,
+                canReview: backend === 'up',
+                onReload: () => void sectionDocument.load(),
+                onReview: (draft, decision, note) =>
+                  void sectionDocument.review(draft, decision, note).then((recorded) => {
+                    if (recorded) void reloadSpec();
+                  }),
+                onDraft: (address) => void draftSection(address),
+              }}
               mode={specMode}
               decisions={curation}
               busy={specBusy}
@@ -861,6 +878,7 @@ export default function App() {
             source={ingestSource}
             target={ingestTarget}
             report={preflight}
+            system={systemPreflight}
             busy={preflightBusy}
             progress={preflightProgress}
             error={preflightError}

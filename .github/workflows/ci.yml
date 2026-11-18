@@ -214,6 +214,18 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # The image's mirror list starts with the region's EC2 mirror, which
+      # stalled for minutes on single archives and timed out the apt step on
+      # most lanes (#1924). apt only moves on errors, never on slowness, and
+      # the image's list outranked entries we prepended, so replace the list
+      # with the Azure and primary archives only.
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
@@ -229,8 +241,13 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: flock
-          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
+          # A slow hosted mirror timed out three Rust lanes in 20 minutes
+          # (#1924). Downloaded archives stay in apt's cache, so a retry resumes;
+          # DPkg::Lock::Timeout lets it wait for a timed-out attempt's apt-get.
+          attempts: '2'
+          retry-delay-seconds: '5'
 
       # The runners share one user's home. rust-cache's post-job cleanup
       # prunes registry sources under CARGO_HOME, which deleted crates out
@@ -259,8 +276,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The app unit-test binary runs in the Rust app tests shards (#1924);
+      # `app` is a binary-only package, so excluding it drops nothing else.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude app
 
       # A cancelled job frees its slot when the runner reaps its processes.
       - name: Release the host heavy-build slot
@@ -312,7 +331,7 @@ jobs:
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -382,7 +401,8 @@ jobs:
           task: Test native Windows job ownership and process exit
           executable: cargo.exe
           arguments-json: '["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"]'
-          timeout-seconds: '600'
+          # A cold optimized-dependency build alone takes ~7 minutes (#1924).
+          timeout-seconds: '900'
 
       # Report what the tests left behind so the leaking holder can be found
       # (#1307 follow-up). Read-only: runner.temp is emptied after the job.
@@ -398,6 +418,90 @@ jobs:
 
   # License compliance + supply-chain gate (#222). This remains a complete-
   # suite lane and retains its stable context.
+  # The app unit-test binary held about 59 of the Rust job's 80 minutes on a
+  # 4-vCPU runner (#1924). Its tests are split across parallel shards, each a
+  # plain libtest run, so no test executes differently; the shard script fails
+  # when the tests libtest accounts for differ from the shard's selection.
+  # Hosted runners are separate machines, so no heavy-build slot is taken.
+  rust-app-tests:
+    name: Rust app tests (${{ matrix.shard }}/4)
+    needs: [policy, merge-evidence, preflight-evidence]
+    if: >-
+      !cancelled() && needs.policy.result == 'success' &&
+      ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
+      (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
+    runs-on: ubuntu-latest
+    # One shard's tests plus a cold build of the app test binary.
+    timeout-minutes: 60
+    strategy:
+      # Every shard reports, so one failure does not hide another shard's.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      CARGO_BUILD_JOBS: 6
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # See the Rust job: replace the image's mirror list (EC2 first).
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
+      - name: Refresh apt metadata
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Refresh Tauri apt metadata
+          executable: flock
+          arguments-json: '["-w","120","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          timeout-seconds: '240'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      - name: Install Tauri system dependencies
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install Tauri system dependencies
+          executable: flock
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          timeout-seconds: '420'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      - name: Isolate cargo home per runner
+        run: echo "CARGO_HOME=$HOME/.cargo-runners/$RUNNER_NAME" >> "$GITHUB_ENV"
+
+      # The shards build the same binary, so they share one cache entry and
+      # only the first shard writes it.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: app-tests
+          save-if: ${{ matrix.shard == 1 }}
+
+      - name: Enable Rust problem matcher
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      - name: Test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: node scripts/rust-test-shard.mjs "$SHARD/4" -- -p app --bin app
+
   compliance:
     name: License & supply-chain
     needs: [policy, merge-evidence, preflight-evidence]
@@ -432,6 +536,14 @@ jobs:
 
       # The organisation's Linux runner has no Rust toolchain; rustup from apt
       # resolves the exact one from rust-toolchain.toml, as in the Rust lane.
+      # See the Rust job: replace the image's mirror list (EC2 first).
+      - name: Prefer faster Ubuntu mirrors
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+
       - name: Refresh apt metadata
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
@@ -560,6 +672,20 @@ jobs:
           attempts: '2'
           retry-delay-seconds: '5'
 
+      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      # Playwright's --with-deps calls apt-get without our options, so set
+      # them in apt.conf.d: a retry waits for a timed-out attempt's dpkg
+      # lock instead of failing at once (#1924).
+      - name: Prefer faster Ubuntu mirrors
+        working-directory: .
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+          printf '%s\n' 'DPkg::Lock::Timeout "180";' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > "$RUNNER_TEMP/99-ci-apt"
+          sudo cp "$RUNNER_TEMP/99-ci-apt" /etc/apt/apt.conf.d/99-ci-apt
+
       - name: Install Playwright browser (for story tests)
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
         with:
@@ -636,7 +762,7 @@ jobs:
 
   complete:
     name: Complete suite
-    needs: [policy, merge-evidence, preflight-evidence, docs, rust, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
+    needs: [policy, merge-evidence, preflight-evidence, docs, rust, rust-app-tests, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
@@ -648,6 +774,7 @@ jobs:
         env:
           DOCS: ${{ needs.docs.result }}
           RUST: ${{ needs.rust.result }}
+          RUST_APP_TESTS: ${{ needs.rust-app-tests.result }}
           WINDOWS_JOB_OWNERSHIP: ${{ needs.windows-job-ownership.result }}
           COMPLIANCE: ${{ needs.compliance.result }}
           ZIZMOR: ${{ needs.zizmor.result }}
@@ -657,6 +784,7 @@ jobs:
         run: |
           test "$DOCS" = success
           test "$RUST" = success
+          test "$RUST_APP_TESTS" = success
           test "$WINDOWS_JOB_OWNERSHIP" = success
           test "$COMPLIANCE" = success
           test "$ZIZMOR" = success

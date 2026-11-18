@@ -103,6 +103,10 @@ impl ScopedGraphReader<'_> {
     pub fn limits(&self) -> SnapshotReadLimits {
         self.limits
     }
+    /// The pinned transaction's connection, for crate-internal complete reads.
+    pub(crate) fn connection(&self) -> &Connection {
+        self.connection
+    }
     fn keys(&self, keys: &[&str]) -> Result<(), GraphError> {
         validate_request(self.limits, Some(&self.revision), false, keys)
     }
