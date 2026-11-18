@@ -265,8 +265,25 @@ const IGNORED_ONLY_BASELINE = new Set([
   'T-0329', // opt-in source-built CARTOGRAPH_TEST_MCP_RELAY relay cases; no lane runs them yet
 ]);
 
-/** T-id -> { total, ignored: [refs] } for kind=rust rows. */
+/** T-id -> { total, ignored: [refs] } over its rust refs (reference cell and note). */
 const rustCoverage = new Map();
+
+// A `rust:` ref in a row's note: `rust:fn`, `rust:crate::fn` or
+// `rust:crate::module::path::fn`. Its last segment is the #[test] fn; a bare
+// fn may live in any crate. It counts toward the row's ignored coverage.
+const checkNoteRust = (tid, ref) => {
+  const parts = ref.split('::');
+  const fn = parts.at(-1);
+  const crates =
+    parts.length === 1
+      ? [...rustFns.keys()].filter((c) => rustFns.get(c).has(fn))
+      : [parts[0], parts[0].replaceAll('_', '-')].filter((c) => rustFns.get(c)?.has(fn));
+  const cov = rustCoverage.get(tid) ?? { total: 0, ignored: [] };
+  rustCoverage.set(tid, cov);
+  cov.total += 1;
+  if (crates.length === 0) return fail(`${tid}: note rust test ${ref} not found in the tree`);
+  if (crates.every((c) => rustFns.get(c).get(fn))) cov.ignored.push(ref);
+};
 
 const checkRef = (tid, kind, ref) => {
   if (kind === 'rust') {
@@ -316,6 +333,11 @@ for (const line of mapSrc.split('\n')) {
     checkRef(tid, m[1], m[2].trim());
     if (m[1] === 'manual' && manualIds.has(m[2].trim())) runLaneNamed.add(tid);
   }
+  for (const m of note.matchAll(/(?<![\w-])rust:(\w[\w-]*(?:::\w+)*)/gu)) {
+    checkNoteRust(tid, m[1]);
+  }
+  // A manual row is realized by its validated procedure, which says when it runs.
+  if (kind === 'manual') runLaneNamed.add(tid);
   for (const m of note.matchAll(/\bci:([\w-]+)/gu)) {
     if (ignoredLanes.has(m[1])) runLaneNamed.add(tid);
     else fail(`${tid}: ci:${m[1]} names no workflow job that runs ignored tests (--ignored)`);
