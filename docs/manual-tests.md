@@ -1551,9 +1551,12 @@ the page describes, and before #1796 closes.
 2. Download the release `.dmg` from the repository's release page. Record its
    file name and the app version. If it is an `unsigned-dev` build, also
    record that.
-3. Follow `docs/help/first-run.md` from step 1 to step 5 exactly as written,
-   in order, without using anything the page does not say. For an
-   `unsigned-dev` build this includes **Open Anyway**.
+3. For the install step, follow the page as published (`docs/help/first-run.md`
+   in the release's source). Once the app opens, open **Help → First run** in
+   the installed app and follow that rendered copy from there, step by step,
+   exactly as written and without using anything it does not say. Record
+   whether the topic opened and rendered. For an `unsigned-dev` build the
+   install step includes **Open Anyway**.
 4. At each step record whether the page matched what the app showed: the
    control names, the screen order, the status bar text, the **Detection
    deferred** Preflight screen for a GitHub repository, the model names and
