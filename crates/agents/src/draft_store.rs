@@ -475,6 +475,23 @@ impl DraftStore {
         get_on(&self.conn, draft_id)
     }
 
+    /// The oldest draft produced by the durable job `job_id`, if any. Reads
+    /// by origin directly, so the answer does not depend on the store size.
+    pub fn for_job(&self, job_id: i64) -> Result<Option<StoredDraft>, DraftStoreError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{SELECT} WHERE json_extract(immutable_json, '$.origin.job_id') = ?1 \
+                     ORDER BY sequence ASC LIMIT 1"
+                ),
+                [job_id],
+                read_row,
+            )
+            .optional()?
+            .map(|row| decode(row).map(|(_, draft)| draft))
+            .transpose()
+    }
+
     /// Record a decision on the draft at the revision the reviewer read.
     /// The content, the origin and the cited hashes are not changed.
     pub fn review(

@@ -55,6 +55,7 @@ import {
   resolveArtifactForCopy,
   withFullArtifacts,
   type ReadSpecArtifact,
+  type ReadSpecArtifacts,
   type ReportSpecError,
 } from './specExport';
 import { saveExport } from './saveExport';
@@ -85,10 +86,10 @@ const reportSpecError: ReportSpecError = (message) => useAppStore.setState({ spe
  *  capped previews. */
 async function exportSpecBundle(
   bundle: SpecBundle,
-  readSpecArtifact: ReadSpecArtifact,
+  readSpecArtifacts: ReadSpecArtifacts,
   reportError: ReportSpecError,
 ) {
-  const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifact, reportError);
+  const artifacts = await withFullArtifacts(bundle.artifacts, readSpecArtifacts, reportError);
   if (artifacts === null) return;
   const files = Object.fromEntries(artifacts.map((artifact) => [artifact.file_name, artifact.content]));
   const content = JSON.stringify({ ...bundle, artifacts, files }, null, 2);
@@ -174,6 +175,7 @@ export default function App() {
     clearGraph,
     setSpecMode,
     readSpecArtifact,
+    readSpecArtifacts,
     readSelectedFlowView,
     curateAssertion,
     select,
@@ -790,7 +792,7 @@ export default function App() {
                 void curateAssertion(assertion, decision, note)
               }
               onCopyArtifact={(artifact) => void copySpecArtifact(artifact, readSpecArtifact, reportSpecError)}
-              onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifact, reportSpecError)}
+              onExportBundle={(bundle) => void exportSpecBundle(bundle, readSpecArtifacts, reportSpecError)}
               onSelectNode={(node) => void select(node)}
               onSelectEdge={selectEdgeSubject}
             />
