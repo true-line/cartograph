@@ -1,4 +1,5 @@
-import { CoverageInventory } from './CoverageInventory';
+import { CoverageInventory, RecordedCoverageInventory } from './CoverageInventory';
+import type { RestoredCoverage } from '../coverage';
 import { HelpTip } from './HelpTip';
 import { createRepositoryLabeler } from '../repositoryLabels';
 import type {
@@ -11,6 +12,11 @@ import type {
 
 export interface WorkspaceSurfaceProps {
   summary: IngestSummary | null;
+  /** Inventories recorded by earlier ingests (AC-0700), shown when this
+   *  session has no ingest summary of its own. */
+  recordedCoverage?: RestoredCoverage[];
+  /** Why the recorded inventories could not be read. */
+  recordedCoverageError?: string | null;
   findings: FindingsSummary | null;
   distribution: TierDistribution;
   bundle: SpecBundle | null;
@@ -57,6 +63,8 @@ function recoveryAuthority(findings: FindingsSummary, distribution: TierDistribu
  *  register summary and atlas projection the other surfaces read. */
 export function WorkspaceSurface({
   summary,
+  recordedCoverage = [],
+  recordedCoverageError = null,
   findings,
   distribution,
   bundle,
@@ -124,7 +132,11 @@ export function WorkspaceSurface({
         </button>
       </header>
 
-      {summary?.coverage && <CoverageInventory coverage={summary.coverage} />}
+      {summary?.coverage ? (
+        <CoverageInventory coverage={summary.coverage} />
+      ) : (
+        <RecordedCoverageInventory restored={recordedCoverage} error={recordedCoverageError} />
+      )}
 
       {onInvestigate && <div className="workspace-investigation-entry">
         <div><h3>Investigate this system</h3><p className="muted">Ask the Domain analyst or Evidence auditor a scoped question. Inspect their tools, citations and limitations.</p></div>

@@ -7,7 +7,7 @@ import {
   type DropItem,
 } from './dropIntake';
 import { create } from 'zustand';
-import type { RepoCoverage } from './coverage';
+import type { RepoCoverage, RestoredCoverage } from './coverage';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
 import type { SurfaceView } from './views';
@@ -223,6 +223,18 @@ export interface PreflightReport {
   /** Set on `preflight` results: the report's place in the register order.
    *  A scan a recovery reconciled past carries that recovery's report. */
   register?: RegisterStamp;
+}
+
+/** One `cartograph.system.toml` entry's preview (#1655, AC-0705): a local
+ *  member scanned in place, or a remote/managed one deferred to recovery. */
+export type MemberPreflight =
+  | { kind: 'local'; entry: string; path: string; report: PreflightReport }
+  | { kind: 'deferred'; entry: string };
+
+/** A system manifest's preflight preview, in manifest order. It registers
+ *  no source and records no finding; recovery owns both (AC-0706). */
+export interface SystemPreflight {
+  members: MemberPreflight[];
 }
 
 /** A report's place in its repo's register order (AC-0216, #458). The
@@ -1036,6 +1048,8 @@ export interface AppStore {
   dropIntake: DropItem[] | null;
   /** Local detection result; null for remote targets (detected on clone). */
   preflight: PreflightReport | null;
+  /** A system manifest's per-member preview (#1655); null otherwise. */
+  systemPreflight: SystemPreflight | null;
   preflightBusy: boolean;
   preflightError: string | null;
   /** Latest progress of the running preflight; null when none is running. */
@@ -1050,6 +1064,11 @@ export interface AppStore {
   ingestHistory: IngestRecord[];
   /** Per-extractor coverage for the latest ingest (#119). */
   coverage: ExtractorCoverage[];
+  /** Coverage inventories recorded by earlier ingests, read back from the
+   *  store so Workspace keeps them across a relaunch (AC-0700, #1656). */
+  recordedCoverage: RestoredCoverage[];
+  /** Why the recorded inventories could not be read; no card is shown then. */
+  recordedCoverageError: string | null;
   /** Paired-eval calibration records, newest first. */
   evals: EvalResult[];
   /** Resolution Strategy modal state; null while closed (#113). */
@@ -1139,7 +1158,8 @@ export interface AppStore {
   /** Clear a finished drop's outcomes; an unresolved drop stays. */
   dismissDropIntake: () => void;
   /** Navigate to Preflight and run local detection (#116). Local targets get
-   *  a real report; remote/manifest targets are detected during recovery. */
+   *  a real report and a system manifest a per-member preview (#1655);
+   *  GitHub targets are detected during recovery. */
   runPreflight: () => Promise<void>;
   /** Apply one `preflight://progress` ping while a preflight is running. */
   applyPreflightProgress: (progress: PreflightProgress) => void;
@@ -1167,6 +1187,10 @@ export interface AppStore {
   openStagedProposal: (proposal: StagedProposal) => void;
   assessStagedBasis: () => Promise<void>;
   loadStagedProposals: (loadMore?: boolean) => Promise<void>;
+  /** Read the recorded coverage inventories; a superseded read is dropped,
+   *  and so is one whose caller began before the coverage epoch `since`
+   *  (default: now) was bumped by a clear, ingest or plugin change. */
+  loadRecordedCoverage: (since?: number) => Promise<void>;
   /** Run a strategy. Local runs immediately; cloud first loads the exact
    *  egress preview so the one-action consent dialog can show it. */
   runStrategy: (strategyId: 'local-slm' | 'cloud-opus') => Promise<void>;
@@ -1196,6 +1220,13 @@ let evidenceRequestVersion = 0;
 let basisAssessmentGeneration = 0;
 // A later mode/curation request owns the visible spec result, error, and busy state.
 let specRequestVersion = 0;
+/** Bumped by every recorded-coverage read: a read that settles after a
+ *  newer one began is dropped. */
+let recordedCoverageRequest = 0;
+/** Bumped when a clear, ingest or plugin change starts and again when it
+ *  settles: a read requested from before the bump (a refresh already
+ *  running, say) can no longer describe the store or plugin basis. */
+let coverageEpoch = 0;
 let jobActionVersion = 0;
 /** Only the latest preflight may publish its result: a superseded or
  *  cancelled scan settles late and must not overwrite the current one. */
@@ -1264,6 +1295,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ingestTarget: '',
   dropIntake: null,
   preflight: null,
+  systemPreflight: null,
   preflightBusy: false,
   preflightError: null,
   preflightProgress: null,
@@ -1273,6 +1305,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   registerFindings: [],
   ingestHistory: [],
   coverage: [],
+  recordedCoverage: [],
+  recordedCoverageError: null,
   evals: [],
   escalation: null,
   escalationEdgeLabels: null,
@@ -1288,6 +1322,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selected: null,
 
   refresh: async () => {
+    const coverageSince = coverageEpoch;
     const ping = await invokeOr<{ app: string; version: string } | null>('ping', null);
     if (ping === null) {
       set({
@@ -1311,6 +1346,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         escalationEdgeLabels: null,
         ingestHistory: [],
         coverage: [],
+        recordedCoverage: [],
+        recordedCoverageError: null,
         evals: [],
         tierSettings: [],
         egress: null,
@@ -1380,26 +1417,60 @@ export const useAppStore = create<AppStore>((set, get) => ({
       disclosures: { T2: disclosureT2 ?? undefined, T3: disclosureT3 ?? undefined },
       escalationEdgeLabels,
     });
-    await get().loadStagedProposals();
+    await Promise.all([get().loadStagedProposals(), get().loadRecordedCoverage(coverageSince)]);
+  },
+
+  loadRecordedCoverage: async (since = coverageEpoch) => {
+    // A caller from before a clear, ingest or plugin change neither reads nor
+    // supersedes the read that change starts.
+    if (since !== coverageEpoch) return;
+    const request = ++recordedCoverageRequest;
+    const current = () => request === recordedCoverageRequest && since === coverageEpoch;
+    try {
+      const recordedCoverage = await invokeOr<RestoredCoverage[] | null>('recorded_coverage', []);
+      if (current()) {
+        set({ recordedCoverage: recordedCoverage ?? [], recordedCoverageError: null });
+      }
+    } catch (error) {
+      // A failed read never leaves earlier cards standing in for it.
+      if (current()) {
+        set({ recordedCoverage: [], recordedCoverageError: String(error) });
+      }
+    }
   },
 
   setPluginEnabled: async (plugin: PluginStatus, enabled: boolean) => {
-    await invokeOr('set_plugin_enabled', null, {
-      projectRoot: plugin.project_root ?? 'user',
-      pluginId: plugin.id,
-      contentHash: plugin.content_hash,
-      enabled,
-    });
-    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
-    set({ plugins });
+    // The plugin basis qualifies recorded coverage: requalify after it moves.
+    coverageEpoch++;
+    try {
+      await invokeOr('set_plugin_enabled', null, {
+        projectRoot: plugin.project_root ?? 'user',
+        pluginId: plugin.id,
+        contentHash: plugin.content_hash,
+        enabled,
+      });
+      const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+      set({ plugins });
+    } finally {
+      coverageEpoch++;
+      await get().loadRecordedCoverage();
+    }
   },
 
   runPluginGate: async (plugin: PluginStatus) => {
     // The verdict lands in the settings store keyed by content hash; the
     // refreshed list reflects passed/failed for these exact bytes.
-    await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
-    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
-    set({ plugins });
+    // A gate verdict can change which plugins are active, and so the plugin
+    // basis recorded coverage is qualified by.
+    coverageEpoch++;
+    try {
+      await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
+      const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+      set({ plugins });
+    } finally {
+      coverageEpoch++;
+      await get().loadRecordedCoverage();
+    }
   },
 
   clearFinishedJobs: async () => {
@@ -1409,7 +1480,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   ingest: async (path: string, source?: IngestSource, options?: { exactPath?: boolean }) => {
     // Clear prior outcome up front so a failed run never shows a stale summary.
-    set({ ingestBusy: true, ingestError: null, ingestSummary: null });
+    coverageEpoch++;
+    set({ ingestBusy: true, ingestError: null, ingestSummary: null, recordedCoverage: [] });
     // A GitHub reference clones with real identity (US-0001); a topology
     // manifest ingests the whole declared system (AC-0002); anything else
     // ingests as a local tree. The Connect step's explicit source wins over
@@ -1440,13 +1512,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ ingestError: String(e) });
     } finally {
+      coverageEpoch++;
       set({ ingestBusy: false });
       await get().refresh();
     }
   },
 
   clearGraph: async () => {
-    set({ clearBusy: true, clearError: null });
+    // Cards from before the clear never return, even from a read in flight
+    // or from a refresh that began before it.
+    coverageEpoch++;
+    set({ clearBusy: true, clearError: null, recordedCoverage: [], recordedCoverageError: null });
     try {
       const stats = await invokeOr<GraphStats | null>('clear_graph', null);
       if (stats !== null) {
@@ -1455,6 +1531,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ clearError: String(e) });
     } finally {
+      coverageEpoch++;
       set({ clearBusy: false });
       await get().refresh();
     }
@@ -1640,7 +1717,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setIngestSource: (ingestSource) => {
     // A local scan still running on the backend would otherwise finish and
     // persist findings for a target the user has left (#434 review).
-    if (ingestSource !== 'local' && get().preflightBusy) void get().cancelPreflight();
+    // A manifest preview is abandoned the same way (#1655). Retire the run
+    // id too, as a path change does: a scan whose commit claim already won
+    // the race with this cancel still settles, and its result must not
+    // reach the store (AC-0198, AC-0707).
+    if (ingestSource !== get().ingestSource && get().preflightBusy) {
+      preflightRun += 1;
+      set({ ingestSource, preflightBusy: false, preflightProgress: null });
+      void get().cancelPreflight();
+      return;
+    }
     set({ ingestSource });
   },
 
@@ -1757,17 +1843,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
       view: 'preflight',
       selected: null,
       preflight: null,
+      systemPreflight: null,
       preflightError: null,
       preflightBusy: false,
       preflightProgress: null,
     });
-    // Only a local tree can be detected before recovery. GitHub and manifest
-    // targets are scanned by their recovery, which writes the reconciled
-    // findings to the register (AC-0209). Showing nothing beats inventing a
-    // report (three-way honesty starts here).
-    if (get().ingestSource !== 'local') return;
+    // A local tree, and a system manifest's local members (#1655), can be
+    // detected before recovery. GitHub targets are scanned by their
+    // recovery, which writes the reconciled findings to the register
+    // (AC-0209). Showing nothing beats inventing a report (three-way honesty
+    // starts here).
+    const source = get().ingestSource;
+    if (source === 'github') return;
     set({ preflightBusy: true });
     try {
+      if (source === 'manifest') {
+        // A preview records nothing, so it has no register stamp to order;
+        // only the current run's complete result is shown (AC-0707).
+        const system = await invokeOr<SystemPreflight | null>('preflight_system', null, {
+          path: target,
+          run,
+        });
+        if (run === preflightRun) set({ systemPreflight: system });
+        return;
+      }
       const preflight = await invokeOr<PreflightReport | null>('preflight', null, {
         path: target,
         run,
@@ -1784,7 +1883,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const error = String(e);
       set({
         preflightError:
-          error === 'cancelled' ? 'Preflight cancelled. No findings were recorded.' : error,
+          error === 'cancelled'
+            ? source === 'manifest'
+              ? 'Preflight cancelled. Nothing was recorded.'
+              : 'Preflight cancelled. No findings were recorded.'
+            : error,
       });
     } finally {
       if (run === preflightRun) set({ preflightBusy: false, preflightProgress: null });
