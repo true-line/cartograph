@@ -25,6 +25,7 @@ pub use decision_selection::{
 };
 pub mod curated;
 pub mod draft_store;
+pub mod finding_curation;
 pub mod investigation;
 pub mod prepared;
 pub mod section_draft;

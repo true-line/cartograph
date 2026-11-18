@@ -331,7 +331,8 @@ fn get_on(conn: &Connection, draft_id: &str) -> Result<Option<StoredDraft>, Draf
 
 impl DraftStore {
     /// Open the draft table in the review store at `path`, creating it when
-    /// absent. Other tables of the file are not read or changed.
+    /// absent, and the finding curation table beside it (ADR-0074). Other
+    /// tables of the file are not read or changed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DraftStoreError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -354,7 +355,13 @@ impl DraftStore {
              BEFORE UPDATE OF sequence, draft_id, immutable_json, replaces, created_at ON staged_section_drafts
              BEGIN SELECT RAISE(ABORT, 'section draft content is immutable'); END;",
         )?;
+        crate::finding_curation::create_schema(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// The store's connection, for the other record kinds of this file.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     /// Store an admitted draft before reporting it as staged.
