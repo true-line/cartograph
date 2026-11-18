@@ -3,8 +3,8 @@ import { expect, fn, userEvent, within } from 'storybook/test';
 import { SectionDocumentView } from './SectionDocumentView';
 import { NOT_COMPUTED_READ } from '../curatedFixtures';
 import {
-  ACTOR_FACT, CAPABILITY_FACT, ELIGIBLE_DRAFT, ELIGIBLE_ROW, MISSING_FACT, PENDING_DRAFT,
-  REDRAFT_DRAFT, RETURNED_DRAFT, STALE_DRAFT, STALE_ROW, SUBJECT_SCOPE, SUCCESSOR_DRAFT,
+  ACTOR_FACT, CAPABILITY_FACT, ELIGIBLE_DRAFT, ELIGIBLE_ROW, MISSING_FACT, NEW_FACT, PENDING_DRAFT,
+  REDRAFT_CHANGE, REDRAFT_DRAFT, RETURNED_DRAFT, STALE_DRAFT, STALE_ROW, SUBJECT_SCOPE, SUCCESSOR_DRAFT,
   UNRESOLVABLE_DRAFT, UNRESOLVABLE_ROW, curatedReadWithDrafts, sectionDocumentFixture,
 } from '../sectionDocumentFixtures';
 
@@ -171,6 +171,52 @@ export const ReDraftIsShownBesideTheAcceptedDraftItReplaces: Story = {
     // The accepted draft is still shown with its state.
     const stale = within(canvas.getByRole('article', { name: `Draft ${STALE_DRAFT.draft_id.slice(0, 12)}` }));
     await expect(stale.getByTestId('draft-state')).toHaveTextContent('State: stale.');
+  },
+};
+
+export const ReDraftShowsWhatItChanges: Story = {
+  // SPEC-17 slice 5 (ADR-0045 decision 7), AC-0675: beside a draft that
+  // replaces another, the host's comparison: claims added, removed and
+  // kept, and cited facts added, removed and changed, before review.
+  args: {
+    document: sectionDocumentFixture(
+      [STALE_DRAFT, REDRAFT_DRAFT, PENDING_DRAFT],
+      { [REDRAFT_DRAFT.draft_id]: REDRAFT_CHANGE },
+    ),
+    curated: curatedReadWithDrafts([STALE_ROW]),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = await open(canvasElement);
+    const redraft = within(canvas.getByRole('article', { name: `Draft ${REDRAFT_DRAFT.draft_id.slice(0, 12)}` }));
+    const change = redraft.getByTestId('draft-change');
+    await expect(change).toHaveTextContent(
+      'Change from the draft it replaces: 1 claim added, 1 removed, 1 kept; 3 cited facts differ',
+    );
+    await expect(change).not.toHaveAttribute('open');
+    await userEvent.click(within(change).getByText(/^Change from the draft it replaces/));
+    const detail = within(change);
+    await expect(detail.getByText('Added')).toBeVisible();
+    await expect(detail.getByText('Checkout validates the cart and the stock.')).toBeVisible();
+    await expect(detail.getByText('Removed')).toBeVisible();
+    await expect(detail.getByText('Checkout validates the cart before payment.')).toBeVisible();
+    await expect(detail.getByText('Kept')).toBeVisible();
+    await expect(detail.getByText('The README says refunds are planned.')).toBeVisible();
+    // A fact the re-draft cites opens; one it no longer cites is text.
+    await userEvent.click(detail.getByRole('button', { name: `Open evidence for ${NEW_FACT}` }));
+    await expect(args.onOpenCitation).toHaveBeenLastCalledWith(NEW_FACT);
+    await userEvent.click(detail.getByRole('button', { name: `Open evidence for ${CAPABILITY_FACT}` }));
+    await expect(args.onOpenCitation).toHaveBeenLastCalledWith(CAPABILITY_FACT);
+    await expect(detail.getByText(/No longer cited:/)).toHaveTextContent(ACTOR_FACT);
+    await expect(detail.queryByRole('button', { name: `Open evidence for ${ACTOR_FACT}` })).not.toBeInTheDocument();
+    // It is shown before review: the review actions are still offered.
+    await expect(redraft.getByRole('button', { name: 'Accept' })).toBeEnabled();
+
+    // A draft that replaces none, or whose change the host did not send,
+    // shows no comparison.
+    for (const draft of [STALE_DRAFT, PENDING_DRAFT]) {
+      const card = within(canvas.getByRole('article', { name: `Draft ${draft.draft_id.slice(0, 12)}` }));
+      await expect(card.queryByTestId('draft-change')).not.toBeInTheDocument();
+    }
   },
 };
 

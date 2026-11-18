@@ -133,6 +133,18 @@ For a draft that replaces another, the host returns:
 
 The Workbench shows this beside the successor before it is reviewed.
 
+As built (slice 5): `agents::section_change` compares two drafts and reads
+nothing else. Claims are matched once per appearance; added and kept claims
+are in the successor's order and removed ones in the replaced draft's. The
+fact lists are sorted. The host adds `changes` to the document view: one
+entry, keyed by draft id, for each listed draft that replaces a stored
+draft. No separate command exists. The Workbench shows the entry on the
+successor's card as a closed summary (claims added, removed and kept, and
+how many cited facts differ) that opens to the claims and the fact ids. A
+fact the successor cites opens as evidence; one it no longer cites is text.
+The comparison applies to every successor, so a draft that replaces a
+returned draft shows it too.
+
 ## Slices
 
 Each slice is one PR with its acceptance criterion.

@@ -48,11 +48,26 @@ export interface DocumentSection {
   drafts: StoredSectionDraft[];
 }
 
+/** What a draft changes in the draft it replaces, as the host compared
+ *  the two stored drafts (SPEC-17, AC-0675). */
+export interface SectionChange {
+  claims_added: DraftClaim[];
+  claims_removed: DraftClaim[];
+  claims_kept: DraftClaim[];
+  facts_added: string[];
+  facts_removed: string[];
+  /** Cited by both drafts with another recorded hash. */
+  facts_changed: string[];
+}
+
 export interface SectionDocument {
   catalogue_version: string;
   document: string;
   sections: DocumentSection[];
   drafts_truncated: boolean;
+  /** By the id of a draft that replaces a stored draft; absent from a
+   *  host that predates the comparison. */
+  changes?: Record<string, SectionChange>;
 }
 
 /** An accepted draft's state in the curated read; it carries no claim. */

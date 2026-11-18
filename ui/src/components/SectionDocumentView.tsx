@@ -4,8 +4,8 @@ import {
   KIND_MEANING, SYSTEM_SCOPE, curatedDraftStates, curatedReadStatesDrafts, scopeLabel,
 } from '../sectionDocument';
 import type {
-  CuratedDraftRow, DocumentSection, DraftClaimKind, DraftDecision, SectionAddress,
-  SectionDocument, StoredSectionDraft,
+  CuratedDraftRow, DocumentSection, DraftClaim, DraftClaimKind, DraftDecision, SectionAddress,
+  SectionChange, SectionDocument, StoredSectionDraft,
 } from '../sectionDocument';
 import { TierBadge } from './TierBadge';
 
@@ -106,7 +106,85 @@ function AcceptedState({ row, stated, onOpenCitation }: {
   );
 }
 
-function DraftCard({ draft, row, stated, replaced, busy, canReview, onRedraft, onReview, onOpenCitation }: {
+function count(items: unknown[], one: string, many: string): string {
+  return `${items.length} ${items.length === 1 ? one : many}`;
+}
+
+function ChangedClaims({ label, claims }: { label: string; claims: DraftClaim[] }) {
+  if (claims.length === 0) return null;
+  return (
+    <>
+      <p className="document-change-label">{label}</p>
+      <ul className="document-change-claims">
+        {claims.map((claim, index) => (
+          <li key={index}>
+            {claim.statement}{' '}
+            <span className="document-claim-kind">({CLAIM_KIND[claim.kind] ?? claim.kind})</span>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+function ChangedFacts({ label, ids, onOpenCitation }: {
+  label: string;
+  ids: string[];
+  /** Absent for facts the newer draft does not cite. */
+  onOpenCitation?: (citationId: string) => void;
+}) {
+  if (ids.length === 0) return null;
+  return (
+    <p className="document-change-facts">
+      {label}{' '}
+      {ids.map((id) => (onOpenCitation ? (
+        <button
+          key={id}
+          type="button"
+          className="citation-link"
+          aria-label={`Open evidence for ${id}`}
+          onClick={() => onOpenCitation(id)}
+        >
+          {id}
+        </button>
+      ) : (
+        <code key={id} className="document-missing-fact">{id}</code>
+      )))}
+    </p>
+  );
+}
+
+/** What this draft changes in the one it replaces (SPEC-17 slice 5,
+ *  AC-0675). The comparison is the host's; nothing is compared here. */
+function DraftChange({ change, onOpenCitation }: {
+  change: SectionChange;
+  onOpenCitation?: (citationId: string) => void;
+}) {
+  const facts = change.facts_added.length + change.facts_removed.length + change.facts_changed.length;
+  return (
+    <details className="document-draft-change" data-testid="draft-change">
+      <summary>
+        Change from the draft it replaces: {count(change.claims_added, 'claim', 'claims')} added,{' '}
+        {change.claims_removed.length} removed, {change.claims_kept.length} kept;{' '}
+        {facts === 0 ? 'the same cited facts' : `${facts} cited ${facts === 1 ? 'fact differs' : 'facts differ'}`}
+      </summary>
+      <ChangedClaims label="Added" claims={change.claims_added} />
+      <ChangedClaims label="Removed" claims={change.claims_removed} />
+      <ChangedClaims label="Kept" claims={change.claims_kept} />
+      <ChangedFacts label="Newly cited:" ids={change.facts_added} onOpenCitation={onOpenCitation} />
+      <ChangedFacts label="No longer cited:" ids={change.facts_removed} />
+      <ChangedFacts
+        label="Cited by both, recorded with another content hash:"
+        ids={change.facts_changed}
+        onOpenCitation={onOpenCitation}
+      />
+    </details>
+  );
+}
+
+function DraftCard({
+  draft, row, stated, replaced, change, busy, canReview, onRedraft, onReview, onOpenCitation,
+}: {
   draft: StoredSectionDraft;
   row: CuratedDraftRow | undefined;
   stated: boolean;
@@ -114,6 +192,8 @@ function DraftCard({ draft, row, stated, replaced, busy, canReview, onRedraft, o
   canReview: boolean;
   /** The stored draft this one replaces, when the view holds it. */
   replaced: StoredSectionDraft | undefined;
+  /** What this draft changes in the one it replaces, from the host. */
+  change: SectionChange | undefined;
   onRedraft?: (draft: StoredSectionDraft) => void;
   onReview: SectionDocumentViewProps['onReview'];
   onOpenCitation?: (citationId: string) => void;
@@ -164,6 +244,7 @@ function DraftCard({ draft, row, stated, replaced, busy, canReview, onRedraft, o
           Replaces returned draft <code title={draft.replaces}>{shortDraftId(draft.replaces)}</code>.
         </p>
       ))}
+      {change && <DraftChange change={change} onOpenCitation={onOpenCitation} />}
       <ol className="document-claims">
         {draft.draft.claims.map((claim, index) => (
           <li key={index}>
@@ -321,6 +402,7 @@ function Section({
           busy={busy}
           canReview={canReview}
           replaced={section.drafts.find((other) => other.draft_id === draft.replaces)}
+          change={document.changes?.[draft.draft_id]}
           onRedraft={onRedraft}
           onReview={onReview}
           onOpenCitation={onOpenCitation}

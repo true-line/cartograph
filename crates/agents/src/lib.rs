@@ -28,6 +28,7 @@ pub mod draft_store;
 pub mod finding_curation;
 pub mod investigation;
 pub mod prepared;
+pub mod section_change;
 pub mod section_draft;
 pub mod section_run;
 pub mod source_basis;

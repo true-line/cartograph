@@ -2,7 +2,7 @@
 import { curatedReadFixture } from './curatedFixtures';
 import type { ComputedCuratedRead } from './store';
 import type {
-  CuratedDraftRow, DraftDecision, SectionDocument, StoredSectionDraft,
+  CuratedDraftRow, DraftDecision, SectionChange, SectionDocument, StoredSectionDraft,
 } from './sectionDocument';
 
 const ID = (seed: string) => seed.repeat(32);
@@ -45,6 +45,20 @@ export const STALE_DRAFT = stored('c3', '1.3', SUBJECT_SCOPE, 'Checkout validate
 export const REDRAFT_DRAFT = stored('a7', '1.3', SUBJECT_SCOPE, 'Checkout validates the cart and the stock.', null, {
   replaces: STALE_DRAFT.draft_id,
 });
+export const NEW_FACT = 'F-00000000000000e5';
+/** What the re-draft changes in the stale draft, as the host compares the
+ *  two: the first claim reworded, the second kept, one fact newly cited,
+ *  one no longer cited and one recorded with another hash. */
+export const REDRAFT_CHANGE: SectionChange = {
+  claims_added: [
+    { statement: 'Checkout validates the cart and the stock.', kind: 'implemented', citations: [CAPABILITY_FACT, NEW_FACT] },
+  ],
+  claims_removed: [STALE_DRAFT.draft.claims[0]],
+  claims_kept: [STALE_DRAFT.draft.claims[1]],
+  facts_added: [NEW_FACT],
+  facts_removed: [ACTOR_FACT],
+  facts_changed: [CAPABILITY_FACT],
+};
 export const MISSING_FACT = 'F-00000000000000d4';
 /** Accepted, and one cited fact is gone from the graph. Not in the default
  *  document: a story adds it. */
@@ -71,11 +85,12 @@ const SECTIONS: [string, string, SectionDocument['sections'][number]['kind'], st
  *  returns it. */
 export function sectionDocumentFixture(drafts: StoredSectionDraft[] = [
   SUCCESSOR_DRAFT, RETURNED_DRAFT, ELIGIBLE_DRAFT, PENDING_DRAFT, STALE_DRAFT,
-]): SectionDocument {
+], changes: Record<string, SectionChange> = {}): SectionDocument {
   return {
     catalogue_version: '1.0',
     document: 'D1',
     drafts_truncated: false,
+    changes,
     sections: SECTIONS.map(([number, title, kind, subject]) => ({
       number, title, kind, subject,
       drafted: kind === 'A' || kind === 'P+A',

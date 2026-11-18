@@ -17,7 +17,9 @@
 //! decided by the next curated read.
 
 use agents::draft_store::{DraftDecision, DraftStore, MAX_DRAFT_PAGE_ITEMS, StoredDraft};
+use agents::section_change::{SectionChange, section_change};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use tauri::Manager;
 
 /// Most stored drafts one document view reads.
@@ -53,6 +55,10 @@ pub(crate) struct SectionDocument {
     /// Whether more stored drafts exist than the view read. The newest
     /// [`MAX_VIEW_DRAFTS`] are shown.
     drafts_truncated: bool,
+    /// For each listed draft that replaces a stored draft, by its id: what
+    /// it changes in that draft (SPEC-17, AC-0675). Computed from the two
+    /// stored drafts alone.
+    changes: BTreeMap<String, SectionChange>,
 }
 
 /// The document view of `document`, or the closed reason there is none.
@@ -110,11 +116,25 @@ pub(crate) fn document_view(store: &DraftStore, document: &str) -> Result<Sectio
             key(left).cmp(&key(right))
         });
     }
+    let mut changes = BTreeMap::new();
+    for draft in sections.iter().flat_map(|section| &section.drafts) {
+        let Some(replaced) = draft.replaces.as_deref() else {
+            continue;
+        };
+        // Read by id: the replaced draft may be older than the view reads.
+        if let Some(replaced) = store.get(replaced).map_err(|error| error.to_string())? {
+            changes.insert(
+                draft.draft_id.clone(),
+                section_change(&replaced.draft, &draft.draft),
+            );
+        }
+    }
     Ok(SectionDocument {
         catalogue_version: spec::CATALOGUE_VERSION,
         document: document.to_owned(),
         sections,
         drafts_truncated,
+        changes,
     })
 }
 
@@ -284,6 +304,70 @@ mod tests {
         assert_eq!(
             document_view(&store, "D2").unwrap_err(),
             "document_not_in_section_table"
+        );
+    }
+
+    // AC-0675 (T-0675): the view carries, for a draft that replaces
+    // another, what it changes in that draft, from the two stored drafts.
+    #[test]
+    fn the_view_carries_the_change_of_a_draft_that_replaces_another() {
+        let (_dir, mut store) = store();
+        let accepted = store
+            .store(
+                &draft("1.3", "system", "A user can check out."),
+                &origin(),
+                None,
+            )
+            .unwrap();
+        review(
+            &mut store,
+            &accepted.draft_id,
+            0,
+            DraftDecision::Accepted,
+            None,
+        )
+        .unwrap();
+        // No draft replaces another yet.
+        assert!(document_view(&store, "D1").unwrap().changes.is_empty());
+
+        let mut rewritten = draft("1.3", "system", "A signed-in user can check out.");
+        rewritten.claims.push(Claim {
+            statement: "Stock is checked.".into(),
+            kind: ClaimKind::Implemented,
+            citations: vec!["F-0000000000000002".into()],
+        });
+        rewritten.cited_hashes = BTreeMap::from([
+            ("F-0000000000000001".to_owned(), "hash-after".to_owned()),
+            ("F-0000000000000002".to_owned(), "hash".to_owned()),
+        ]);
+        let successor = store
+            .store(
+                &rewritten,
+                &DraftOrigin {
+                    job_id: 8,
+                    ..origin()
+                },
+                Some(&accepted.draft_id),
+            )
+            .unwrap();
+
+        let view = document_view(&store, "D1").unwrap();
+        assert_eq!(
+            view.changes.keys().collect::<Vec<_>>(),
+            [&successor.draft_id]
+        );
+        let change = &view.changes[&successor.draft_id];
+        assert_eq!(change.claims_added, rewritten.claims);
+        assert_eq!(change.claims_removed, accepted.draft.claims);
+        assert!(change.claims_kept.is_empty());
+        assert_eq!(change.facts_added, ["F-0000000000000002"]);
+        assert!(change.facts_removed.is_empty());
+        assert_eq!(change.facts_changed, ["F-0000000000000001"]);
+        // Serialized under the successor's id for the Workbench.
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["changes"][&successor.draft_id]["facts_changed"],
+            serde_json::json!(["F-0000000000000001"])
         );
     }
 

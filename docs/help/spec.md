@@ -370,6 +370,12 @@ product specification is listed with its kind and every draft stored for it.
   place; the replaced draft is kept and listed as replaced. Reject it and
   nothing else changes, and you can re-draft again. A re-draft cannot be
   returned. Only one re-draft of a draft is open at a time.
+- A draft that replaces another shows **Change from the draft it
+  replaces**: how many claims were added, removed and kept, and how many
+  cited facts differ. Open it to read the claims and the facts newly cited,
+  no longer cited, or cited by both but recorded with another content hash.
+  The comparison is of the two stored drafts only, so it is the same before
+  and after review.
 
 ## Curated items
 
