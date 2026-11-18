@@ -100,8 +100,8 @@ and `reason`.
 
 [ADR-0074](adr/ADR-0074-curated-findings.md) makes an investigation finding
 the third record kind. It is built in three slices: the projection core
-(AC-0843, implemented), the curation review (AC-0844, implemented) and the
-surfaces (AC-0845, AC-0846).
+(AC-0843, implemented), the curation review (AC-0844, implemented), the
+reads (AC-0845, implemented) and the screens (AC-0846).
 
 - **Two reviews.** The follow-up review of SPEC-03 is unchanged and is not
   curation. A separate curation review, `accepted` or `rejected`, is what
@@ -152,6 +152,21 @@ surfaces (AC-0845, AC-0846).
   the read took. It is the digest an investigation records for a fact it
   reads, so a finding is eligible exactly while its facts are as the run
   read them.
+- **Reads (as built).** `curated.md` gains a section, "Findings accepted
+  as curated", written only when a finding is accepted. `best-effort`
+  prints each eligible finding as one numbered statement with its title,
+  claim kind, `T3 / InferredWeak`, producing role, source support, identity
+  and citation ids, then its limitations. Each cited node or edge is an
+  assertion of the artifact, once, so every printed id has a row in the
+  fact index. An eligible finding that cites a fact the export does not
+  admit is named and not printed. `verified-only` prints none and states
+  how many it left out. Every accepted finding that is not eligible is in
+  a table with its state, reason and changed and missing ids, the same in
+  both modes, and its statement and title are printed nowhere. The
+  Workbench read and `curated-json` carry the same split as data:
+  `findings` (shown), `findings_omitted`, `findings_listed` (identity,
+  role, state, reason and ids only) and `finding_counts`. One rule,
+  `spec::curated_finding_shown`, decides what every read shows.
 
 ## Surfaces
 
@@ -216,10 +231,11 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
 
 ## Open items
 
-- Findings (#1746 requirement 2): the projection core admits them and the
-  host stores and reads their curation reviews (ADR-0074, AC-0843,
-  AC-0844). No screen offers the review, and no surface lists a finding,
-  until the surface slice lands.
+- Findings (#1746 requirement 2): the projection core admits them, the
+  host stores and reads their curation reviews, and the export, the
+  Workbench read and the MCP reads list them (ADR-0074, AC-0843 to
+  AC-0845). No screen offers the review or draws the list until the
+  screen slice lands (AC-0846).
 - Cardinality is one accepted edge per Gap until slot cardinality can be
   proven from the graph.
 - The Gap predicate is duplicated in `context-hub` and `spec`; a parity test

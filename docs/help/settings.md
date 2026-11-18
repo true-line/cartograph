@@ -76,8 +76,11 @@ same reviews, graph and export mode. `curated-json` gives the same content as
 data: the curated revision, the graph it was computed over, each accepted
 proposal with its proposed relation, tier, confidence, state and reason, and
 the counts. This shows the client which proposals you accepted and why each is
-or is not a curated item; review notes are not shown. A `verified-only`
-service shows no curated item, only how many it left out. The session's basis
+or is not a curated item; review notes are not shown. Both also list the
+investigation findings you accepted as curated: the eligible ones with their
+statement and the facts they cite, and the others with the reason only. A
+`verified-only` service shows no curated item and no finding, only how many it
+left out. The session's basis
 carries the curated revision, and `h3_curated_available` is true only when the
 session computed it; otherwise the basis and both documents give the reason
 and every other read still works. One such reason is a Workbench decision

@@ -18,7 +18,8 @@ mod coverage;
 pub use coverage::{COVERAGE_DETAIL_REPO_LIMIT, logical_coverage_render_bound};
 mod curated;
 pub use curated::{
-    Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_reason_sentence,
+    Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_finding_reason_sentence,
+    curated_finding_shown, curated_reason_sentence,
 };
 pub(crate) mod diagrams;
 mod document;

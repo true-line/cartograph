@@ -806,3 +806,7 @@ mod drafts_tests;
 #[cfg(test)]
 #[path = "curated_findings_tests.rs"]
 mod findings_tests;
+
+#[cfg(test)]
+#[path = "curated_finding_reads_tests.rs"]
+mod finding_reads_tests;

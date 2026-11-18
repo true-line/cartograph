@@ -357,7 +357,7 @@ pub fn section_citation_set(
 }
 
 #[derive(Clone, Copy)]
-enum Fact<'a> {
+pub(super) enum Fact<'a> {
     Node(&'a Node),
     Edge(&'a Edge),
 }
@@ -400,6 +400,16 @@ fn cited_facts<'a>(
         .flat_map(|claim| &claim.citations)
         .map(String::as_str)
         .collect();
+    facts_named(&wanted, nodes, edges)
+}
+
+/// The facts of `nodes` and `edges` that `wanted` names, by citation id.
+/// One pass over both, and none when nothing is wanted.
+pub(super) fn facts_named<'a>(
+    wanted: &BTreeSet<&str>,
+    nodes: &[&'a Node],
+    edges: &[&'a Edge],
+) -> BTreeMap<String, Fact<'a>> {
     let mut facts = BTreeMap::new();
     if wanted.is_empty() {
         return facts;
