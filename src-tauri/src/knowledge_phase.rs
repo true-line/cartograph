@@ -296,7 +296,7 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
         oversized: capabilities.oversized_groups,
         omissions: Vec::new(),
     };
-    let controllers = spec::derive_nestjs_controller_capabilities(snapshot);
+    let controllers = spec::derive_controller_capabilities(snapshot);
     derived.facts.extend(controllers.facts);
     derived.oversized += controllers.oversized_groups;
     match spec::derive_business_flows(snapshot, flow_limits) {
