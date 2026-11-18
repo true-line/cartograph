@@ -1375,7 +1375,7 @@ export class Plain {
 }
 "#;
 
-// AC-0766: one Capability per NestJS controller, citing every endpoint,
+// AC-0801: one Capability per NestJS controller, citing every endpoint,
 // handler and relation it groups; the base is unchanged.
 #[test]
 fn controller_capability_groups_real_adapter_routes_by_class() {
@@ -1453,7 +1453,7 @@ fn controller_capability_groups_real_adapter_routes_by_class() {
     );
 }
 
-// AC-0766: support that is ambiguous, not a class method, from another file
+// AC-0801: support that is ambiguous, not a class method, from another file
 // or not source-backed yields no candidate for that route.
 #[test]
 fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
