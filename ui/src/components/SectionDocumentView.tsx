@@ -51,12 +51,47 @@ function shortDraftId(id: string): string {
 
 /** What the next curated read does with an accepted draft, or why that is
  *  not known. Stated only for an accepted draft. */
-function AcceptedState({ row, stated }: { row: CuratedDraftRow | undefined; stated: boolean }) {
+function AcceptedState({ row, stated, onOpenCitation }: {
+  row: CuratedDraftRow | undefined;
+  stated: boolean;
+  onOpenCitation?: (citationId: string) => void;
+}) {
   if (row) {
+    const changed = row.changed ?? [];
+    const missing = row.missing ?? [];
     return (
-      <p className="document-draft-state" data-testid="draft-state">
-        State: <code>{row.state}</code>. {row.reason_sentence} (<code>{row.reason}</code>)
-      </p>
+      <>
+        <p className="document-draft-state" data-testid="draft-state">
+          State: <code>{row.state}</code>. {row.reason_sentence} (<code>{row.reason}</code>)
+        </p>
+        {/* SPEC-17 slice 3 (AC-0673): the host's two lists, never derived
+            here. A changed fact still exists and opens; a missing one has
+            no evidence to open. */}
+        {changed.length > 0 && (
+          <p className="document-draft-facts" data-testid="draft-changed">
+            Changed since this draft was accepted:{' '}
+            {changed.map((id) => (onOpenCitation ? (
+              <button
+                key={id}
+                type="button"
+                className="citation-link"
+                aria-label={`Open changed fact ${id}`}
+                onClick={() => onOpenCitation(id)}
+              >
+                {id}
+              </button>
+            ) : (
+              <code key={id}>{id}</code>
+            )))}
+          </p>
+        )}
+        {missing.length > 0 && (
+          <p className="document-draft-facts" data-testid="draft-missing">
+            No longer in the graph:{' '}
+            {missing.map((id) => <code key={id} className="document-missing-fact">{id}</code>)}
+          </p>
+        )}
+      </>
     );
   }
   return (
@@ -68,12 +103,13 @@ function AcceptedState({ row, stated }: { row: CuratedDraftRow | undefined; stat
   );
 }
 
-function DraftCard({ draft, row, stated, busy, canReview, onReview, onOpenCitation }: {
+function DraftCard({ draft, row, stated, busy, canReview, onDraft, onReview, onOpenCitation }: {
   draft: StoredSectionDraft;
   row: CuratedDraftRow | undefined;
   stated: boolean;
   busy: boolean;
   canReview: boolean;
+  onDraft?: (address: SectionAddress) => void;
   onReview: SectionDocumentViewProps['onReview'];
   onOpenCitation?: (citationId: string) => void;
 }) {
@@ -84,6 +120,10 @@ function DraftCard({ draft, row, stated, busy, canReview, onReview, onOpenCitati
   const actions = (['accepted', 'rejected', 'returned'] as const).filter(
     (item) => item !== decision && !(item === 'returned' && draft.replaces !== null),
   );
+  const accepted = decision === 'accepted';
+  const changed = new Set(accepted ? row?.changed ?? [] : []);
+  // A re-draft is offered for the two states the host re-drafts (SPEC-17).
+  const redraft = accepted && (row?.state === 'stale' || row?.state === 'unresolvable');
   return (
     <article className="document-draft" aria-label={`Draft ${shortDraftId(draft.draft_id)}`}>
       <header className="document-draft-header">
@@ -104,7 +144,7 @@ function DraftCard({ draft, row, stated, busy, canReview, onReview, onOpenCitati
           ? 'Human-reviewed: accepted. Acceptance does not raise the tier.'
           : 'Not accepted: no document prints it.'}
       </p>
-      {decision === 'accepted' && <AcceptedState row={row} stated={stated} />}
+      {accepted && <AcceptedState row={row} stated={stated} onOpenCitation={onOpenCitation} />}
       {draft.replaces && (
         <p className="muted">
           Replaces returned draft <code title={draft.replaces}>{shortDraftId(draft.replaces)}</code>.
@@ -131,6 +171,9 @@ function DraftCard({ draft, row, stated, busy, canReview, onReview, onOpenCitati
                 <code key={id}>{id}</code>
               )))}
             </span>
+            {claim.citations.some((id) => changed.has(id)) && (
+              <span className="document-claim-changed"> Cites a changed fact.</span>
+            )}
           </li>
         ))}
       </ol>
@@ -159,6 +202,15 @@ function DraftCard({ draft, row, stated, busy, canReview, onReview, onOpenCitati
               {ACTION_LABEL[item]}
             </button>
           ))}
+          {redraft && onDraft && (
+            <button
+              type="button"
+              disabled={busy || !canReview}
+              onClick={() => onDraft(draft.draft.address)}
+            >
+              Re-draft this section
+            </button>
+          )}
         </div>
       </div>
     </article>
@@ -251,6 +303,7 @@ function Section({ document, section, states, stated, busy, canReview, onDraft, 
           stated={stated}
           busy={busy}
           canReview={canReview}
+          onDraft={onDraft}
           onReview={onReview}
           onOpenCitation={onOpenCitation}
         />

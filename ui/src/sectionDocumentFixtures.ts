@@ -40,6 +40,10 @@ function stored(
 export const PENDING_DRAFT = stored('a1', '1.3', 'system', 'An administrator can check out an order.', null);
 export const ELIGIBLE_DRAFT = stored('b2', '1.2', 'system', 'The administrator is the only recovered actor.', 'accepted');
 export const STALE_DRAFT = stored('c3', '1.3', SUBJECT_SCOPE, 'Checkout validates the cart before payment.', 'accepted');
+export const MISSING_FACT = 'F-00000000000000d4';
+/** Accepted, and one cited fact is gone from the graph. Not in the default
+ *  document: a story adds it. */
+export const UNRESOLVABLE_DRAFT = stored('f6', '1.5', 'system', 'An order over the limit is refused.', 'accepted');
 export const RETURNED_DRAFT = stored('d4', '1.1', 'system', 'The system sells goods online.', 'returned', {
   review_note: 'Cite the checkout handler.',
 });
@@ -75,7 +79,10 @@ export function sectionDocumentFixture(drafts: StoredSectionDraft[] = [
   };
 }
 
-function row(draft: StoredSectionDraft, state: CuratedDraftRow['state'], reason: string, sentence: string): CuratedDraftRow {
+function row(
+  draft: StoredSectionDraft, state: CuratedDraftRow['state'], reason: string, sentence: string,
+  facts: Pick<CuratedDraftRow, 'changed' | 'missing'> = { changed: [], missing: [] },
+): CuratedDraftRow {
   return {
     draft_id: draft.draft_id,
     address: draft.draft.address,
@@ -85,6 +92,7 @@ function row(draft: StoredSectionDraft, state: CuratedDraftRow['state'], reason:
     state,
     reason,
     reason_sentence: sentence,
+    ...facts,
   };
 }
 
@@ -95,6 +103,12 @@ export const ELIGIBLE_ROW = row(
 export const STALE_ROW = row(
   STALE_DRAFT, 'stale', 'cited_fact_changed',
   'A fact this draft cites changed after the draft was written; a best-effort export prints it marked stale.',
+  { changed: [CAPABILITY_FACT], missing: [] },
+);
+export const UNRESOLVABLE_ROW = row(
+  UNRESOLVABLE_DRAFT, 'unresolvable', 'cited_fact_missing',
+  'A fact this draft cites is not in the current graph.',
+  { changed: [ACTOR_FACT], missing: [MISSING_FACT] },
 );
 
 /** The curated read that goes with [`sectionDocumentFixture`]. */

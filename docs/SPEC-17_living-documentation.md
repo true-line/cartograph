@@ -59,6 +59,14 @@ among those left out and names the draft with its state. Both modes carry
 accepted drafts that cite it, and a second compilation of the same inputs
 is byte-identical (T-0672).
 
+As built (slice 3): the Workbench draft card of an accepted draft shows
+the curated read's `changed` ids as evidence buttons and its `missing` ids
+as text under the state, and marks each claim that cites a changed id. A
+missing id has no fact, so it opens nothing. A `stale` or `unresolvable`
+draft offers "Re-draft this section", which opens the composer for the
+same address; naming the accepted draft as replaced is slice 4. Nothing is
+derived in the view: the two lists are the host's.
+
 ## Surfaces
 
 - **Compiled document, best-effort.** A stale draft is printed in its

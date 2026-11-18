@@ -356,8 +356,16 @@ product specification is listed with its kind and every draft stored for it.
   optional note. A decision changes no claim. If the draft changed since the
   view was read, the decision is refused and the view is read again.
 - An accepted draft shows its state from the latest curated read: current,
-  stale, replaced, in conflict or unresolvable, with the reason. Only a
-  current draft is printed in an export.
+  stale, replaced, in conflict or unresolvable, with the reason. A
+  best-effort export prints a current draft, and a stale one marked stale.
+- A stale or unresolvable draft lists the facts behind that state.
+  **Changed since this draft was accepted** names each cited fact whose
+  content changed; selecting one opens it. **No longer in the graph** names
+  each cited id that has no fact now, so there is nothing to open. Each
+  claim that cites a changed fact says so.
+- **Re-draft this section** on a stale or unresolvable draft opens the
+  composer for the same section and scope. The accepted draft stays as it
+  is while the new one is written and reviewed.
 
 ## Curated items
 
