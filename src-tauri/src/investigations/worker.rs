@@ -249,20 +249,29 @@ fn run_completion_with_clock<R: tauri::Runtime>(
             &request, &policy,
         )?)
     })();
+    // A drafting run stages its draft once the run has ended (SPEC-15 slice
+    // 6). The run's own result and history are already settled by then.
+    let drafting = (request.specialist_id == agents::section_run::SECTION_WRITER_ROLE)
+        .then(|| (app.clone(), id.clone()));
     match projected {
-        Ok(projected) => run_inner(
-            app,
-            id,
-            Ok(projected),
-            Some(request),
-            execution,
-            provider,
-            live,
-            clock,
-            task_limits,
-            dispatch_audit,
-            auditor,
-        ),
+        Ok(projected) => {
+            run_inner(
+                app,
+                id,
+                Ok(projected),
+                Some(request),
+                execution,
+                provider,
+                live,
+                clock,
+                task_limits,
+                dispatch_audit,
+                auditor,
+            );
+            if let Some((app, id)) = drafting {
+                super::section_drafts::stage_after_run(&app, &id);
+            }
+        }
         Err(_) => {
             let state = app.state::<AppState>();
             let _cleanup = Cleanup {

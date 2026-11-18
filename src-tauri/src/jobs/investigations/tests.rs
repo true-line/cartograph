@@ -4,6 +4,9 @@ mod effective_policy_tests;
 #[path = "query_refusal_tests.rs"]
 mod query_refusal_tests;
 
+#[path = "failure_record_tests.rs"]
+mod failure_record_tests;
+
 use super::chat::StoredChatMessage;
 use super::*;
 use crate::job_execution::JobExecutionLocks;

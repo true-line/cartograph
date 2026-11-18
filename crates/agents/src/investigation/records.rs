@@ -635,6 +635,17 @@ impl InvestigationInputLedger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "schema", deny_unknown_fields)]
 pub enum InvestigationTerminalDiagnostic {
+    /// A completed response that failed action decoding: the closed decode
+    /// stage or semantic rule family plus error class, never response text.
+    #[serde(rename = "investigation-terminal-diagnostic@5")]
+    RejectedAction {
+        stage: InvestigationActionDecodeDiagnostic,
+        reason: InvestigationFinishRejection,
+    },
+    /// A host input-preparation refusal at a closed boundary, never a field,
+    /// query or error string.
+    #[serde(rename = "investigation-terminal-diagnostic@6")]
+    Preparation { phase: InvestigationFailurePhase },
     #[serde(rename = "investigation-terminal-diagnostic@4")]
     CapacityCompletion { reason: CapacityCompletionReason },
     #[serde(rename = "investigation-terminal-diagnostic@3")]
@@ -695,6 +706,77 @@ pub enum InvestigationOperationalClass {
     StoreUnavailable,
     StoreOwnership,
     StoreStorage,
+}
+
+/// Closed, text-free decode boundary of a rejected action (AC-0725). Semantic
+/// rule families are flattened into the same vocabulary as the terminal error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationActionDecodeDiagnostic {
+    Preflight,
+    TypedEnvelope,
+    TypedStagedFinish,
+    TypedCoverageRead,
+    TypedLegacyAction,
+    TypedReplay,
+    BareFinish,
+    CanonicalFields,
+    Semantic,
+    QueryContext,
+    QueryShape,
+    InventoryContext,
+    InventoryShape,
+    ReplayContext,
+    ReplayReference,
+    EvidenceShape,
+    FinishRole,
+    FinishShape,
+    FinishOverall,
+    FindingTextLimits,
+    FindingCitations,
+    FinishOutcome,
+    HostBinding,
+}
+impl From<ActionDecodeStage> for InvestigationActionDecodeDiagnostic {
+    fn from(stage: ActionDecodeStage) -> Self {
+        use ActionDecodeStage as Stage;
+        use ActionSemanticRule as Rule;
+        match stage {
+            Stage::Preflight => Self::Preflight,
+            Stage::TypedEnvelope => Self::TypedEnvelope,
+            Stage::TypedStagedFinish => Self::TypedStagedFinish,
+            Stage::TypedCoverageRead => Self::TypedCoverageRead,
+            Stage::TypedLegacyAction => Self::TypedLegacyAction,
+            Stage::TypedReplay => Self::TypedReplay,
+            Stage::BareFinish => Self::BareFinish,
+            Stage::CanonicalFields => Self::CanonicalFields,
+            Stage::Semantic => Self::Semantic,
+            Stage::SemanticRule(rule) => match rule {
+                Rule::QueryContext => Self::QueryContext,
+                Rule::QueryShape => Self::QueryShape,
+                Rule::InventoryContext => Self::InventoryContext,
+                Rule::InventoryShape => Self::InventoryShape,
+                Rule::ReplayContext => Self::ReplayContext,
+                Rule::ReplayReference => Self::ReplayReference,
+                Rule::EvidenceShape => Self::EvidenceShape,
+                Rule::FinishRole => Self::FinishRole,
+                Rule::FinishShape => Self::FinishShape,
+                Rule::FinishOverall => Self::FinishOverall,
+                Rule::FindingTextLimits => Self::FindingTextLimits,
+                Rule::FindingCitations => Self::FindingCitations,
+                Rule::FinishOutcome => Self::FinishOutcome,
+            },
+            Stage::HostBinding => Self::HostBinding,
+        }
+    }
+}
+impl From<ActionDecodeFailure> for InvestigationTerminalDiagnostic {
+    fn from(failure: ActionDecodeFailure) -> Self {
+        Self::RejectedAction {
+            stage: failure.stage.into(),
+            reason: failure.error.into(),
+        }
+    }
 }
 
 /// Closed, text-free origin of a rejected authenticated finish (AC-0591).
