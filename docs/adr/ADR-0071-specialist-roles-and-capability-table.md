@@ -42,7 +42,8 @@ the completion versions (analyst/auditor @7, spec-writer, gap-triager,
 section-writer); @3–@6 start through the older non-completion paths.
 
 Everything else deserializes, so a stored run made with it still opens, but
-nothing can start it: domain-analyst @1, @2, @8, @9, @13, @14, @15, @17,
+the catalog does not offer it (the legacy schema-v1 start path can still start
+some of these; see decision 2): domain-analyst @1, @2, @8, @9, @13, @14, @15, @17,
 @24, @25, @26; evidence-auditor @1, @2, @8, @9. AC-0574 pins that @24–@26
 stay out of the catalog while @27 is in it.
 
@@ -101,11 +102,20 @@ the role, not the user.
   `specialist_id` or upgrades it to the current version.
 - A retired run starts no new provider work under its own version: retry,
   resume, continue, re-draft and finish correction are not offered. A
-  follow-up from it starts a new task with the role's current version, as a
-  child of the saved run.
+  follow-up keeps the saved specialist selection, as SPEC-10 and AC-0260
+  require. When that version is retired, the user picks an available
+  replacement explicitly before the follow-up starts, with the role's current
+  version listed first. Nothing upgrades the selection silently. The follow-up
+  is a child of the saved run.
 - The start refusal stays the existing `invalid_input` from
-  `completion_start.rs`; the read-only state is driven by the catalog, not
-  by a client list.
+  `completion_start.rs`, and the read-only state is driven by the catalog, not
+  by a client list. Today only `completion_start::start_access` checks
+  `available_specialists()`. The legacy schema-v1 path
+  (`commands::start_access` through `StartInvestigationRequest::validate`)
+  rejects only completion-obligation roles, so a retired id such as
+  `domain-analyst@1` can still start there. The first code slice applies the
+  same availability gate to every start path, legacy included, before any id
+  is retired from the catalog.
 
 ### 3. One capability table replaces the `uses_*` predicates
 
