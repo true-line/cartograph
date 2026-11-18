@@ -1044,6 +1044,8 @@ function installFakeCore(options: {
         return null;
       case 'local_lane_status':
         return { reachable: false, start_command: 'ollama serve', models: [] };
+      case 'recorded_coverage':
+        return [];
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }
