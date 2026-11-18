@@ -438,4 +438,31 @@ fn references_are_read_in_offset_order_with_their_spans() {
             ("c".to_string(), false),
         ]
     );
+    // Balanced and escaped parentheses belong to a bare target; an
+    // angle-bracket target runs to its `>`.
+    let text = "[a](app/(shop)/page.tsx) [b](<my (file).md> \"t\") [c](x\\)y.md)\n";
+    let targets: Vec<String> = markdown_references(text)
+        .into_iter()
+        .map(|(reference, _, start, end)| {
+            assert_eq!(&text[start..end], reference);
+            reference
+        })
+        .collect();
+    assert_eq!(targets, ["app/(shop)/page.tsx", "my (file).md", "x\\)y.md"]);
+}
+
+#[test]
+fn a_reference_in_a_section_past_the_bound_is_not_credited_to_a_kept_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut text = String::from("# Top\n");
+    for index in 0..MAX_SECTIONS_PER_DOCUMENT {
+        text.push_str(&format!("## H{index}\n"));
+    }
+    text.push_str("`kept`\n");
+    fs::write(dir.path().join("many.md"), &text).unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    assert_eq!(facts.counts.sections_truncated, 1);
+    // The reference sits in the last `##` section, which the bound dropped;
+    // `# Top` still spans it but is not its innermost section.
+    assert!(facts.references.is_empty(), "{:?}", facts.references);
 }

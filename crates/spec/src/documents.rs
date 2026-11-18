@@ -266,8 +266,10 @@ fn code_spans(line: &str) -> Vec<(usize, usize)> {
 }
 
 /// The inline link and image targets of one line outside `code`: start and
-/// end within it. A title after the target and angle brackets around it are
-/// not part of the target.
+/// end within it. A title after the target is not part of it. As in
+/// CommonMark, a target in angle brackets runs to its `>`, and a bare target
+/// runs to whitespace or the `)` that balances its parentheses, so
+/// `[page](app/(shop)/page.tsx)` names `app/(shop)/page.tsx`.
 fn link_targets(line: &str, code: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let in_code = |at: usize| code.iter().any(|(start, end)| (*start..*end).contains(&at));
     let mut targets = Vec::new();
@@ -278,24 +280,52 @@ fn link_targets(line: &str, code: &[(usize, usize)]) -> Vec<(usize, usize)> {
             continue;
         }
         let rest = &line[cursor..];
-        let Some(close) = rest.find(')') else {
-            break;
+        let lead = rest.len() - rest.trim_start().len();
+        let Some((start, end)) = link_destination(&rest[lead..]) else {
+            continue;
         };
-        let inner = &rest[..close];
-        let lead = inner.len() - inner.trim_start().len();
-        let target = inner.trim_start();
-        let target = target.split(char::is_whitespace).next().unwrap_or("");
-        let (skip, target) = match target.strip_prefix('<') {
-            Some(bracketed) => (1, bracketed.trim_end_matches('>')),
-            None => (0, target),
-        };
-        if !target.is_empty() {
-            let start = cursor + lead + skip;
-            targets.push((start, start + target.len()));
+        let (start, end) = (cursor + lead + start, cursor + lead + end);
+        if start < end {
+            targets.push((start, end));
         }
-        cursor += close + 1;
+        // Past the destination and any title, to the link's closing `)`.
+        cursor = line[end..]
+            .find(')')
+            .map_or(line.len(), |close| end + close + 1);
     }
     targets
+}
+
+/// The destination at the start of `rest`: start and end within it, without
+/// angle brackets. `None` when it is not a well-formed destination.
+fn link_destination(rest: &str) -> Option<(usize, usize)> {
+    if let Some(bracketed) = rest.strip_prefix('<') {
+        let mut escaped = false;
+        for (at, ch) in bracketed.char_indices() {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '<' => return None,
+                '>' => return Some((1, 1 + at)),
+                _ => {}
+            }
+        }
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (at, ch) in rest.char_indices() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some((0, at)),
+            ')' => depth -= 1,
+            ch if ch.is_whitespace() => return (depth == 0).then_some((0, at)),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The inline code spans and link targets of a Markdown file outside fenced
@@ -444,11 +474,11 @@ pub fn extract_documents(root: &Path, repo: &str, commit: &str) -> std::io::Resu
             continue;
         };
         facts.counts.read += 1;
-        let mut found = sections(format, &text);
-        if found.len() > MAX_SECTIONS_PER_DOCUMENT {
-            found.truncate(MAX_SECTIONS_PER_DOCUMENT);
+        let all = sections(format, &text);
+        if all.len() > MAX_SECTIONS_PER_DOCUMENT {
             facts.counts.sections_truncated += 1;
         }
+        let found = &all[..all.len().min(MAX_SECTIONS_PER_DOCUMENT)];
         facts.counts.sections += found.len() as u64;
         let path = file.rel.as_str();
         let id = document_id(repo, path);
@@ -499,10 +529,13 @@ pub fn extract_documents(root: &Path, repo: &str, commit: &str) -> std::io::Resu
         }
         if format == Format::Markdown {
             for (reference, link, start, end) in markdown_references(&text) {
-                // The innermost kept section that holds the reference.
-                let Some(ordinal) = found
+                // The innermost section that holds the reference, decided
+                // before the bound: a reference in a section past it is not
+                // credited to an enclosing section that was kept.
+                let Some(ordinal) = all
                     .iter()
                     .rposition(|section| (section.start..section.end).contains(&start))
+                    .filter(|ordinal| *ordinal < found.len())
                 else {
                     continue;
                 };
