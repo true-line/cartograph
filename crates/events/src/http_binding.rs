@@ -323,6 +323,10 @@ pub fn stitch_cross_repo_with(
             if let Some(join) = gap.props.get("join") {
                 props["join"] = join.clone();
             }
+            // And whether it is straight-line in its Symbol (#1012).
+            if let Some(straight_line) = gap.props.get(crate::STRAIGHT_LINE) {
+                props[crate::STRAIGHT_LINE] = straight_line.clone();
+            }
             out.joined.push(JoinedFetch {
                 gap_id: gap.id.clone(),
                 edge: Edge {
