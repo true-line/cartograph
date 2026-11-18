@@ -1,5 +1,9 @@
 //! Internal prompt9 construction. This representation grants no dispatch or
 //! acquisition authority; the host must bind it to its saved admission state.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::{InputClosureStatus, PrimarySourceScope};
 use serde::{Deserialize, Serialize};

@@ -3,6 +3,10 @@
 //! A preview is not source access, tool admission, database provenance, a seal,
 //! or dispatch authority. The host must retain its prepared metadata and bind
 //! publication to this exact base/candidate on the authoritative transaction.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use llm::bounded::{BoundedWireMeasurements, CompletionLimits, ProviderProfile};
 use serde::Serialize;
