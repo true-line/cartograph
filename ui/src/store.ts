@@ -1168,8 +1168,10 @@ export interface AppStore {
   openStagedProposal: (proposal: StagedProposal) => void;
   assessStagedBasis: () => Promise<void>;
   loadStagedProposals: (loadMore?: boolean) => Promise<void>;
-  /** Read the recorded coverage inventories; a superseded read is dropped. */
-  loadRecordedCoverage: () => Promise<void>;
+  /** Read the recorded coverage inventories; a superseded read is dropped,
+   *  and so is one whose caller began before the coverage epoch `since`
+   *  (default: now) was bumped by a clear, ingest or plugin change. */
+  loadRecordedCoverage: (since?: number) => Promise<void>;
   /** Run a strategy. Local runs immediately; cloud first loads the exact
    *  egress preview so the one-action consent dialog can show it. */
   runStrategy: (strategyId: 'local-slm' | 'cloud-opus') => Promise<void>;
@@ -1199,9 +1201,13 @@ let evidenceRequestVersion = 0;
 let basisAssessmentGeneration = 0;
 // A later mode/curation request owns the visible spec result, error, and busy state.
 let specRequestVersion = 0;
-/** Bumped by every recorded-coverage read, clear and ingest: a read that
- *  settles after a newer one began, or after the graph changed, is dropped. */
+/** Bumped by every recorded-coverage read: a read that settles after a
+ *  newer one began is dropped. */
 let recordedCoverageRequest = 0;
+/** Bumped when a clear, ingest or plugin change starts and again when it
+ *  settles: a read requested from before the bump (a refresh already
+ *  running, say) can no longer describe the store or plugin basis. */
+let coverageEpoch = 0;
 let jobActionVersion = 0;
 /** Only the latest preflight may publish its result: a superseded or
  *  cancelled scan settles late and must not overwrite the current one. */
@@ -1296,6 +1302,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selected: null,
 
   refresh: async () => {
+    const coverageSince = coverageEpoch;
     const ping = await invokeOr<{ app: string; version: string } | null>('ping', null);
     if (ping === null) {
       set({
@@ -1390,41 +1397,60 @@ export const useAppStore = create<AppStore>((set, get) => ({
       disclosures: { T2: disclosureT2 ?? undefined, T3: disclosureT3 ?? undefined },
       escalationEdgeLabels,
     });
-    await Promise.all([get().loadStagedProposals(), get().loadRecordedCoverage()]);
+    await Promise.all([get().loadStagedProposals(), get().loadRecordedCoverage(coverageSince)]);
   },
 
-  loadRecordedCoverage: async () => {
+  loadRecordedCoverage: async (since = coverageEpoch) => {
+    // A caller from before a clear, ingest or plugin change neither reads nor
+    // supersedes the read that change starts.
+    if (since !== coverageEpoch) return;
     const request = ++recordedCoverageRequest;
+    const current = () => request === recordedCoverageRequest && since === coverageEpoch;
     try {
       const recordedCoverage = await invokeOr<RestoredCoverage[] | null>('recorded_coverage', []);
-      if (request === recordedCoverageRequest) {
+      if (current()) {
         set({ recordedCoverage: recordedCoverage ?? [], recordedCoverageError: null });
       }
     } catch (error) {
       // A failed read never leaves earlier cards standing in for it.
-      if (request === recordedCoverageRequest) {
+      if (current()) {
         set({ recordedCoverage: [], recordedCoverageError: String(error) });
       }
     }
   },
 
   setPluginEnabled: async (plugin: PluginStatus, enabled: boolean) => {
-    await invokeOr('set_plugin_enabled', null, {
-      projectRoot: plugin.project_root ?? 'user',
-      pluginId: plugin.id,
-      contentHash: plugin.content_hash,
-      enabled,
-    });
-    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
-    set({ plugins });
+    // The plugin basis qualifies recorded coverage: requalify after it moves.
+    coverageEpoch++;
+    try {
+      await invokeOr('set_plugin_enabled', null, {
+        projectRoot: plugin.project_root ?? 'user',
+        pluginId: plugin.id,
+        contentHash: plugin.content_hash,
+        enabled,
+      });
+      const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+      set({ plugins });
+    } finally {
+      coverageEpoch++;
+      await get().loadRecordedCoverage();
+    }
   },
 
   runPluginGate: async (plugin: PluginStatus) => {
     // The verdict lands in the settings store keyed by content hash; the
     // refreshed list reflects passed/failed for these exact bytes.
-    await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
-    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
-    set({ plugins });
+    // A gate verdict can change which plugins are active, and so the plugin
+    // basis recorded coverage is qualified by.
+    coverageEpoch++;
+    try {
+      await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
+      const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+      set({ plugins });
+    } finally {
+      coverageEpoch++;
+      await get().loadRecordedCoverage();
+    }
   },
 
   clearFinishedJobs: async () => {
@@ -1434,7 +1460,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   ingest: async (path: string, source?: IngestSource, options?: { exactPath?: boolean }) => {
     // Clear prior outcome up front so a failed run never shows a stale summary.
-    recordedCoverageRequest++;
+    coverageEpoch++;
     set({ ingestBusy: true, ingestError: null, ingestSummary: null, recordedCoverage: [] });
     // A GitHub reference clones with real identity (US-0001); a topology
     // manifest ingests the whole declared system (AC-0002); anything else
@@ -1466,14 +1492,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ ingestError: String(e) });
     } finally {
+      coverageEpoch++;
       set({ ingestBusy: false });
       await get().refresh();
     }
   },
 
   clearGraph: async () => {
-    // Cards from before the clear never return, even from a read in flight.
-    recordedCoverageRequest++;
+    // Cards from before the clear never return, even from a read in flight
+    // or from a refresh that began before it.
+    coverageEpoch++;
     set({ clearBusy: true, clearError: null, recordedCoverage: [], recordedCoverageError: null });
     try {
       const stats = await invokeOr<GraphStats | null>('clear_graph', null);
@@ -1483,6 +1511,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ clearError: String(e) });
     } finally {
+      coverageEpoch++;
       set({ clearBusy: false });
       await get().refresh();
     }

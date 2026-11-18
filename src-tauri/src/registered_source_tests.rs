@@ -1891,7 +1891,10 @@ fn recorded_coverage_survives_relaunch_and_clear_removes_it_for_good() {
     assert_eq!(reopened[0].inventory_hash, stored.inventory_hash);
     assert_eq!(
         reopened[0].inventory,
-        Some(serde_json::from_str(&stored.record.inventory_json).unwrap())
+        Some(
+            serde_json::from_str::<ingest::coverage::RepoCoverage>(&stored.record.inventory_json)
+                .unwrap()
+        )
     );
     {
         let state = tauri::Manager::state::<AppState>(&app);

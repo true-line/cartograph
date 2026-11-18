@@ -65,4 +65,44 @@ describe('recorded coverage after relaunch (AC-0700)', () => {
     inFlight.resolve([restored('acme/api')]); await read; await clear;
     expect(useAppStore.getState()).toMatchObject({ recordedCoverage: [], recordedCoverageError: null });
   });
+  it('drops the read of a refresh that began before a clear, even while the clear is pending', async () => {
+    const statsHeld = deferred<{ nodes: number; edges: number }>(), cleared = deferred<{ nodes: number; edges: number }>();
+    let storeCleared = false, statsCalls = 0;
+    mockIPC((command) => {
+      if (command === 'ping') return { app: 'cartograph', version: 'test' };
+      if (command === 'graph_stats') return ++statsCalls === 1 ? statsHeld.promise : { nodes: 0, edges: 0 };
+      if (command === 'clear_graph') return cleared.promise.then((stats) => { storeCleared = true; return stats; });
+      if (command === 'recorded_coverage') return storeCleared ? [] : [restored('acme/api')];
+      if (command === 'list_staged_proposals') return { items: [], next_cursor: null };
+      return null;
+    });
+    const refresh = useAppStore.getState().refresh();
+    const clear = useAppStore.getState().clearGraph();
+    // The older refresh settles while the store still holds the inventory.
+    statsHeld.resolve({ nodes: 3, edges: 1 }); await refresh;
+    expect(useAppStore.getState().recordedCoverage).toEqual([]);
+    cleared.resolve({ nodes: 0, edges: 0 }); await clear;
+    expect(useAppStore.getState()).toMatchObject({ recordedCoverage: [], recordedCoverageError: null });
+  });
+  it('requalifies recorded coverage after a plugin change or gate run', async () => {
+    let basisMoved = false;
+    const stale: RestoredCoverage = { ...restored('acme/api'), status: 'stale', inventory: null };
+    mockIPC((command) => {
+      if (command === 'set_plugin_enabled' || command === 'run_plugin_gate') { basisMoved = true; return null; }
+      if (command === 'list_plugins') return [];
+      if (command === 'recorded_coverage') return basisMoved ? [stale] : [restored('acme/api')];
+      return null;
+    });
+    const plugin = { id: 'zig', content_hash: 'h', project_root: null } as unknown as Parameters<ReturnType<typeof useAppStore.getState>['setPluginEnabled']>[0];
+    for (const change of [
+      () => useAppStore.getState().setPluginEnabled(plugin, false),
+      () => useAppStore.getState().runPluginGate(plugin),
+    ]) {
+      basisMoved = false;
+      await useAppStore.getState().loadRecordedCoverage();
+      expect(useAppStore.getState().recordedCoverage).toEqual([restored('acme/api')]);
+      await change();
+      expect(useAppStore.getState().recordedCoverage).toEqual([stale]);
+    }
+  });
 });

@@ -159,8 +159,9 @@ pub(crate) struct RestoredCoverage {
     /// else in the inventory, declared inputs included, is as recorded.
     pub compared: Vec<String>,
     /// The stored body, only while it is current: nothing is read from a
-    /// stale inventory.
-    pub inventory: Option<serde_json::Value>,
+    /// stale inventory. It is read under the full inventory schema the UI
+    /// renders, so an incomplete body is refused as corrupt.
+    pub inventory: Option<ingest::coverage::RepoCoverage>,
 }
 
 /// Qualify the stored inventories with the registration and plugin basis that
@@ -189,9 +190,9 @@ pub(crate) fn restored_coverage(
                     coverage
                         .inventory(&repo.repo, &hash)
                         .and_then(|body| {
-                            serde_json::from_str(body).map_err(|_| {
-                                context_hub::ContextError::InvalidCoverage(repo.repo.clone())
-                            })
+                            serde_json::from_str::<ingest::coverage::RepoCoverage>(body).map_err(
+                                |_| context_hub::ContextError::InvalidCoverage(repo.repo.clone()),
+                            )
                         })
                         .map_err(|error| error.to_string()),
                 ),
@@ -387,7 +388,11 @@ mod tests {
     fn inventory() -> serde_json::Value {
         serde_json::json!({
             "inventory": "coverage@1", "repo": "acme/api", "commit": "a".repeat(40),
-            "layer_hints": [], "producers": [{"id": "t0.adapter-ts", "state": "ran"}],
+            "layer_hints": [], "producers": [{
+                "id": "t0.adapter-ts", "kind": "deterministic", "covers": "TypeScript",
+                "state": "ran", "files": 1, "nodes": 2, "edges": 1, "inputs": [],
+                "stopping_reason": "completed",
+            }],
             "missing_inputs": [], "unsupported": [], "limited": false,
         })
     }
@@ -416,7 +421,7 @@ mod tests {
                 status: CoverageStatus::Recorded,
                 inventory_hash: core_prov::content_hash(inventory().to_string().as_bytes()),
                 compared: vec!["registration".into(), "plugins".into()],
-                inventory: Some(inventory()),
+                inventory: Some(serde_json::from_value(inventory()).unwrap()),
             }]
         );
         let mut reads = 0;
@@ -446,13 +451,20 @@ mod tests {
 
     #[test]
     fn restored_coverage_refuses_a_corrupt_inventory_and_a_failed_scope() {
-        // AC-0700: an inventory whose recorded flag disagrees with its counts
-        // is an error, not an empty or partial list; so is a scope read that
-        // fails. (T-0700)
-        let mut corrupt = inventory();
-        corrupt["limited"] = serde_json::json!(true);
-        let graph = store_with_inventory(corrupt);
-        assert!(restored_coverage(&graph, || Ok(api_scope("config"))).is_err());
+        // AC-0700: an inventory whose recorded flag disagrees with its counts,
+        // or that lacks a field of the inventory schema the UI renders, is an
+        // error, not an empty or partial list; so is a scope read that fails.
+        // (T-0700)
+        let mut disagreeing = inventory();
+        disagreeing["limited"] = serde_json::json!(true);
+        let mut incomplete = inventory();
+        incomplete.as_object_mut().unwrap().remove("missing_inputs");
+        let mut bare_producer = inventory();
+        bare_producer["producers"] = serde_json::json!([{"id": "t0.adapter-ts", "state": "ran"}]);
+        for corrupt in [disagreeing, incomplete, bare_producer] {
+            let graph = store_with_inventory(corrupt);
+            assert!(restored_coverage(&graph, || Ok(api_scope("config"))).is_err());
+        }
         let graph = store_with_inventory(inventory());
         assert!(restored_coverage(&graph, || Err("registry unavailable".to_string())).is_err());
     }
