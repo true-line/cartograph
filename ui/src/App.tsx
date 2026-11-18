@@ -125,10 +125,13 @@ export default function App() {
     specError,
     ingestBusy,
     ingestSummary,
+    recordedCoverage,
+    recordedCoverageError,
     ingestError,
     ingestSource,
     ingestTarget,
     preflight,
+    systemPreflight,
     preflightBusy,
     preflightError,
     preflightProgress,
@@ -613,6 +616,8 @@ export default function App() {
             <WorkspaceSurface
               systemContents={systemContents}
               summary={ingestSummary}
+              recordedCoverage={recordedCoverage}
+              recordedCoverageError={recordedCoverageError}
               findings={findings}
               distribution={tierDistribution(atlas)}
               bundle={specBundle}
@@ -839,6 +844,7 @@ export default function App() {
             source={ingestSource}
             target={ingestTarget}
             report={preflight}
+            system={systemPreflight}
             busy={preflightBusy}
             progress={preflightProgress}
             error={preflightError}
