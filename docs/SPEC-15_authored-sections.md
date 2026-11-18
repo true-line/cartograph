@@ -147,7 +147,8 @@ drafts and, per cited id, the current content hash of the fact it resolves
 to; an id that resolves to nothing is absent. The projection reports every
 accepted draft with its state and reason, and the totals. `superseded` and
 `conflicted` look only at accepted drafts of the same address, whatever
-their own state. The policy version is `curated-policy-v2`. The revision of
+their own state. The policy version was `curated-policy-v2`; ADR-0074 moves
+the revision and the policy to version 3 for findings. The revision of
 an existing project changes once and its content does not. Each accepted
 draft carries its claims, which are what a document prints.
 

@@ -158,6 +158,8 @@ mod tests {
             current_assertion_hashes: &BTreeSet::new(),
             drafts: &[],
             cited_fact_hashes: &std::collections::BTreeMap::new(),
+            findings: &[],
+            cited_fact_digests: &std::collections::BTreeMap::new(),
             policy_version: CURATED_POLICY_VERSION,
         })
         .unwrap()

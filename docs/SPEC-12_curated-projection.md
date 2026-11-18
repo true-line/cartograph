@@ -13,7 +13,7 @@ curated revision, in the Spec Workbench, a `best-effort` export and an MCP
 read. Every other accepted record is listed with the reason it does not
 appear. Base facts, their tiers and the base graph hash do not change.
 
-Not in this specification: a fact shape for investigation findings; any write
+Not in this specification: any write
 to the base graph; agent-authored document sections; re-drafting on drift;
 MCP or ACP execution; extending captured evidence (#385).
 
@@ -76,11 +76,13 @@ A proposal that is pending or rejected has no state and is not listed.
 
 ### Curated revision
 
-`revision = digest("curated-revision-v2", policy_version, graph_content_hash,
+`revision = digest("curated-revision-v3", policy_version, graph_content_hash,
 [(record_id, review_decision, state, reason)…], [(draft_id, review_decision,
-state, reason)…], assertion_decision_digest)`, with the record list and the
-draft list each in identity order. Version 2 adds the section drafts of
-SPEC-15 (ADR-0064 decision 7); the policy version is `curated-policy-v2`. A rejected record enters with
+state, reason)…], [(finding_ref, review_decision, state, reason)…],
+assertion_decision_digest)`, with the record list, the draft list and the
+finding list each in identity order. Version 2 added the section drafts of
+SPEC-15 (ADR-0064 decision 7). Version 3 adds findings accepted as curated
+(ADR-0074 decision 6); the policy version is `curated-policy-v3`. A rejected record enters with
 its decision and no state, so any review gives a new revision; a pending
 record does not enter. The assertion-decision digest covers the rejections
 applied and the decisions that match no current assertion. Review notes,
@@ -93,6 +95,41 @@ Per read: `view`, `revision`, `graph_basis`. Per item and per listed record:
 `record_id`, `tier` and `confidence` as produced, `review_status`,
 `source_support` (count of captured items and of unverified items), `state`
 and `reason`.
+
+## Findings
+
+[ADR-0074](adr/ADR-0074-curated-findings.md) makes an investigation finding
+the third record kind. It is built in three slices: the projection core
+(AC-0843, implemented), the curation review (AC-0844) and the surfaces
+(AC-0845, AC-0846).
+
+- **Two reviews.** The follow-up review of SPEC-03 is unchanged and is not
+  curation. A separate curation review, `accepted` or `rejected`, is what
+  the projection reads. A finding with no curation review is not listed and
+  does not enter the revision.
+- **Input.** Per finding: its complete identity (the SPEC-03 review
+  subject id), the investigation, result and finding ids, the producing
+  role, the claim kind, title, statement and limitations, and for each
+  cited fact its ADR-0058 citation id with the fact digest the producing
+  run recorded. The host also passes the current digest of each cited fact
+  that is in the graph.
+- **States.** Each accepted finding gets the first that applies:
+
+  | State | Condition |
+  |---|---|
+  | `unresolvable` | It cites no fact, or a cited id has no current digest |
+  | `stale` | A cited fact's current digest differs from the recorded one |
+  | `eligible` | Neither |
+
+  Findings do not conflict and do not supersede one another. The changed
+  and the missing ids are reported whatever the state.
+- **DR-4 fields.** `finding_ref`, `tier` Agentic and `confidence`
+  InferredWeak, `review_status`, `source_support` (citations that rest on
+  captured primary-source evidence, and those that do not), `state` and
+  `reason`. Source support is reported and does not decide the state.
+- **Result.** `findings` lists every accepted finding in identity order and
+  `finding_counts` totals them by state. Two findings with one identity
+  fail the projection.
 
 ## Surfaces
 
@@ -157,7 +194,9 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
 
 ## Open items
 
-- Findings (#1746 requirement 2) need a fact shape before they can enter.
+- Findings (#1746 requirement 2): the projection core admits them
+  (ADR-0074, AC-0843). No surface can accept one as curated or shows one
+  until the curation review and the surface slices land.
 - Cardinality is one accepted edge per Gap until slot cardinality can be
   proven from the graph.
 - The Gap predicate is duplicated in `context-hub` and `spec`; a parity test

@@ -716,6 +716,8 @@ pub(crate) fn project(
         current_assertion_hashes: &current,
         drafts: &review.drafts,
         cited_fact_hashes: &cited_hashes,
+        findings: &[],
+        cited_fact_digests: &std::collections::BTreeMap::new(),
         policy_version: core::CURATED_POLICY_VERSION,
     })
     .map_err(|error| match error {
