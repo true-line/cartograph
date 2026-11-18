@@ -23,7 +23,7 @@ use agents::ProposalDecision;
 use agents::staging::{MAX_STAGED_PAGE_ITEMS, MAX_STAGED_REFERENCE_SCAN};
 use context_hub::curated::{
     self as core, BasisAssessment, BasisDimensions, CuratedProjection, EvidenceAvailability,
-    EvidenceStatus, ProjectionInput, ReviewedDraft, ReviewedProposal,
+    EvidenceStatus, ProjectionInput, ReviewedDraft, ReviewedFinding, ReviewedProposal,
 };
 use core_graph::{Edge, Node, SqliteGraphStore, StoreRevision};
 use core_prov::{ConfidenceTier, Provenance, Tier};
@@ -59,6 +59,9 @@ pub(crate) struct CuratedReview {
     /// Every reviewed section draft (SPEC-15). A pending draft is not kept:
     /// the projection reads none.
     drafts: Vec<ReviewedDraft>,
+    /// Every finding with a curation review (ADR-0074), from the section
+    /// draft store's file.
+    findings: Vec<ReviewedFinding>,
     /// By record identity, with the store revision the assessment's graph
     /// read observed (`None` when that read failed).
     assessments: BTreeMap<String, (BasisAssessment, Option<StoreRevision>)>,
@@ -322,6 +325,43 @@ fn reviewed_drafts(
     }
 }
 
+/// Every finding of `store` with a curation review, oldest first; the
+/// caller holds the draft store lock. The bounds are those of the staged
+/// records: more findings, or more accepted ones, fail the read.
+fn reviewed_findings(
+    store: &agents::draft_store::DraftStore,
+) -> Result<Vec<ReviewedFinding>, CuratedFailure> {
+    use agents::finding_curation::{CurationDecision, reviewed_finding};
+    let read = store
+        .finding_curation()
+        .reviewed(MAX_CURATED_RECORD_SCAN)
+        .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+    if read.more {
+        return Err(CuratedFailure::TooManyRecords {
+            limit: MAX_CURATED_RECORD_SCAN,
+        });
+    }
+    let accepted = read
+        .items
+        .iter()
+        .filter(|stored| stored.review_decision == CurationDecision::Accepted)
+        .count();
+    if accepted > MAX_CURATED_ACCEPTED {
+        return Err(CuratedFailure::TooManyAccepted {
+            limit: MAX_CURATED_ACCEPTED,
+        });
+    }
+    Ok(read.items.iter().map(reviewed_finding).collect())
+}
+
+/// The reviewed drafts and the reviewed findings of `store`, read under
+/// the one lock its caller holds.
+fn reviewed_in_draft_store(
+    store: &agents::draft_store::DraftStore,
+) -> Result<(Vec<ReviewedDraft>, Vec<ReviewedFinding>), CuratedFailure> {
+    Ok((reviewed_drafts(store)?, reviewed_findings(store)?))
+}
+
 impl CuratedReview {
     /// A review that read no record, with the reason.
     pub(crate) fn failed(failure: CuratedFailure) -> Self {
@@ -339,9 +379,10 @@ pub(crate) fn read_records_and_drafts(
     store: &agents::ProposalStore,
     drafts: &agents::draft_store::DraftStore,
 ) -> CuratedReview {
-    match reviewed_drafts(drafts) {
-        Ok(drafts) => CuratedReview {
+    match reviewed_in_draft_store(drafts) {
+        Ok((drafts, findings)) => CuratedReview {
             drafts,
+            findings,
             ..read_records(store)
         },
         Err(failure) => CuratedReview::failed(failure),
@@ -374,10 +415,16 @@ impl CuratedReview {
 }
 
 impl CuratedReview {
-    /// Whether `records` and `drafts`, read later, are the ones this review
-    /// read. A review that failed read none, so nothing is compared for it.
-    fn same_records(&self, records: &[ReviewedProposal], drafts: &[ReviewedDraft]) -> bool {
-        self.failure.is_some() || (self.proposals == records && self.drafts == drafts)
+    /// Whether `records`, `drafts` and `findings`, read later, are the ones
+    /// this review read. A review that failed read none, so nothing is
+    /// compared for it.
+    fn same_records(
+        &self,
+        records: &[ReviewedProposal],
+        (drafts, findings): (&[ReviewedDraft], &[ReviewedFinding]),
+    ) -> bool {
+        self.failure.is_some()
+            || (self.proposals == records && self.drafts == drafts && self.findings == findings)
     }
 }
 
@@ -407,14 +454,14 @@ impl ReviewSource for AppState {
                 .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
             reviewed_records(&store)?
         };
-        let drafts = {
+        let (drafts, findings) = {
             let store = self
                 .drafts
                 .lock()
                 .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-            reviewed_drafts(&store)?
+            reviewed_in_draft_store(&store)?
         };
-        Ok(review.same_records(&records, &drafts))
+        Ok(review.same_records(&records, (&drafts, &findings)))
     }
 }
 
@@ -463,7 +510,7 @@ impl ReviewSource for std::sync::Mutex<agents::ProposalStore> {
         let store = self
             .lock()
             .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-        Ok(review.same_records(&reviewed_records(&store)?, &[]))
+        Ok(review.same_records(&reviewed_records(&store)?, (&[], &[])))
     }
 }
 
@@ -492,7 +539,8 @@ impl ReviewSource for StoredReviews {
             .drafts
             .lock()
             .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-        Ok(review.same_records(&reviewed_records(&proposals)?, &reviewed_drafts(&drafts)?))
+        let (drafts, findings) = reviewed_in_draft_store(&drafts)?;
+        Ok(review.same_records(&reviewed_records(&proposals)?, (&drafts, &findings)))
     }
 }
 
@@ -521,9 +569,9 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         .drafts
         .lock()
         .map_err(|_| CuratedFailure::ReviewsUnavailable)
-        .and_then(|store| reviewed_drafts(&store));
-    let drafts = match read {
-        Ok(drafts) => drafts,
+        .and_then(|store| reviewed_in_draft_store(&store));
+    let (drafts, findings) = match read {
+        Ok(read) => read,
         Err(failure) => return CuratedReview::failed(failure),
     };
     let mut assessments = BTreeMap::new();
@@ -541,6 +589,7 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         failure: None,
         proposals,
         drafts,
+        findings,
         assessments,
         settled: Arc::clone(&state.curated_settled),
     }
@@ -706,6 +755,16 @@ pub(crate) fn project(
         .flat_map(|draft| draft.cited_hashes.keys().cloned())
         .collect();
     let cited_hashes = spec::cited_fact_hashes(snapshot.nodes, snapshot.edges, &cited);
+    // The current digest of each fact an accepted finding cites, the same
+    // way (ADR-0074 decision 5): one pass, and none when no finding is
+    // accepted.
+    let cited: BTreeSet<String> = review
+        .findings
+        .iter()
+        .filter(|finding| finding.decision == Some(core::FindingCuration::Accepted))
+        .flat_map(|finding| finding.cited_digests.keys().cloned())
+        .collect();
+    let cited_digests = spec::cited_fact_digests(snapshot.nodes, snapshot.edges, &cited);
     core::project(&ProjectionInput {
         nodes: snapshot.nodes,
         edges: snapshot.edges,
@@ -716,8 +775,8 @@ pub(crate) fn project(
         current_assertion_hashes: &current,
         drafts: &review.drafts,
         cited_fact_hashes: &cited_hashes,
-        findings: &[],
-        cited_fact_digests: &std::collections::BTreeMap::new(),
+        findings: &review.findings,
+        cited_fact_digests: &cited_digests,
         policy_version: core::CURATED_POLICY_VERSION,
     })
     .map_err(|error| match error {
@@ -743,3 +802,11 @@ pub(crate) fn read_graph(
 #[cfg(test)]
 #[path = "curated_drafts_tests.rs"]
 mod drafts_tests;
+
+#[cfg(test)]
+#[path = "curated_findings_tests.rs"]
+mod findings_tests;
+
+#[cfg(test)]
+#[path = "curated_finding_reads_tests.rs"]
+mod finding_reads_tests;
