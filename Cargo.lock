@@ -4646,9 +4646,11 @@ dependencies = [
 name = "spec"
 version = "0.71.0"
 dependencies = [
+ "adapters-lang-go",
  "adapters-lang-java",
  "adapters-lang-kotlin",
  "adapters-lang-python",
+ "adapters-lang-rust",
  "adapters-lang-ts",
  "blake3",
  "context-hub",
