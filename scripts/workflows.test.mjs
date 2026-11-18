@@ -291,7 +291,7 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
   assert.equal(condition(complete), condition(rust));
   assert.match(windows, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
   assert.match(windows, /runs-on: windows-latest$/mu);
-  assert.match(windows, /timeout-minutes: 20/u);
+  assert.match(windows, /timeout-minutes: 25/u);
   assert.match(windows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/u);
   assert.match(
     windows,
@@ -307,7 +307,7 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
     windows,
     /arguments-json: '\["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"\]'/u,
   );
-  assert.match(windows, /timeout-seconds: '600'/u);
+  assert.match(windows, /timeout-seconds: '900'/u);
   assert.equal(
     windows.match(new RegExp(`bounded-command@${PLAYBOOK_RUNTIME_PIN}`, 'gu'))?.length,
     2,
