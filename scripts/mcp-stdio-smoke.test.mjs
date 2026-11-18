@@ -29,7 +29,7 @@ const error=()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,error
 let result;if(q.method==='initialize')result={protocolVersion:'2025-11-25'};
 else if(q.method==='tools/list')result={tools:names.map(name=>({name,inputSchema:{type:'object'},annotations:{readOnlyHint:true}}))};
 else {const name=q.params.name;const a=q.params.arguments;let data;
-if(name==='cartograph_capabilities')data={session_id:'session',basis_id:'basis',h3_curated_available:false};
+if(name==='cartograph_capabilities')data={session_id:'session',basis_id:'basis',h3_curated_available:true,basis:{curated:{status:'computed',revision:'revision'}}};
 else if(name==='cartograph_discover'){
  const r=a.request.request;const cursor=r.cursor;
  if(fault==='rejected-fact'){data={context:{response:{total_candidates:0,candidates:[],next_cursor:null}}};}else {

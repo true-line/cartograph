@@ -180,7 +180,7 @@ pub(super) const LOST_CANDIDATE: &str =
 /// foreign roles cannot smuggle patch state into a legacy task.
 pub(super) fn validate_shape(task: &StoredTask) -> Result<(), InvestigationStoreError> {
     if let Some(marker) = &task.pending_correction {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27
+        if !task.detail.summary.specialist_id.uses_finish_patch()
             || !matches!(
                 task.phase,
                 Phase::Ready | Phase::Consent | Phase::Invocation
@@ -206,7 +206,7 @@ pub(super) fn authenticate(
 ) -> Result<Option<PatchBasis>, InvestigationStoreError> {
     validate_shape(task)?;
     let Some(marker) = &task.pending_correction else {
-        if task.detail.summary.specialist_id == SpecialistId::DomainAnalystV27
+        if task.detail.summary.specialist_id.uses_finish_patch()
             && matches!(
                 task.phase,
                 Phase::Ready | Phase::Consent | Phase::Invocation
@@ -275,7 +275,7 @@ impl MergeAuthority {
         finish: &StagedFinish,
         response: &InvestigationResponseMeta,
     ) -> Result<(), InvestigationStoreError> {
-        if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27
+        if !task.detail.summary.specialist_id.uses_finish_patch()
             || task.detail.summary.cancel_requested
             || task.pending_patch() != Some(&self.first)
             || response.step_id != self.step_id
@@ -368,7 +368,7 @@ pub(super) fn result_witness(
     basis: &admission_journal::AuthenticatedCompletionBasis,
 ) -> Result<String, InvestigationStoreError> {
     let patch = basis.patch().ok_or(InvestigationStoreError::Invalid)?;
-    if task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27
+    if !task.detail.summary.specialist_id.uses_finish_patch()
         || result.investigation_id != task.detail.summary.investigation_id
         || result.invocation_step_id.as_ref() != Some(&response.step_id)
         || result
@@ -508,6 +508,38 @@ mod tests {
         if let Some(CorrectionMode::Patch { basis }) = &mut task.pending_correction {
             basis.flagged_indices = vec![2, 0];
         }
+        assert!(validate_shape(&task).is_err());
+    }
+
+    // AC-0832 (#1335): @28 carries @27's volatile patch marker with the same
+    // phase and intent rules; the neighbouring @26 still cannot.
+    #[test]
+    fn volatile_patch_marker_admits_analyst28_like_analyst27() {
+        let fixture = completion::internal_next_prompt_fixture();
+        let mut task = fixture.task.clone();
+        task.pending_correction = Some(CorrectionMode::Patch { basis: marker() });
+        for role in [
+            SpecialistId::DomainAnalystV26,
+            SpecialistId::DomainAnalystV27,
+            SpecialistId::DomainAnalystV28,
+        ] {
+            task.detail.summary.specialist_id = role;
+            for phase in [
+                Phase::Ready,
+                Phase::Consent,
+                Phase::Invocation,
+                Phase::Terminal,
+            ] {
+                task.phase = phase;
+                assert_eq!(
+                    validate_shape(&task).is_ok(),
+                    role != SpecialistId::DomainAnalystV26 && phase != Phase::Terminal,
+                    "{role:?} {phase:?}"
+                );
+            }
+        }
+        task.phase = Phase::Ready;
+        task.completion_intent = None;
         assert!(validate_shape(&task).is_err());
     }
 }

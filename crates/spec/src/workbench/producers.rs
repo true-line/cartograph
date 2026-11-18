@@ -1,17 +1,21 @@
 //! Shared native artifact renderers with per-occurrence output admission.
 use super::render::{Assertions, Budget, Join, Json, NodeName, RenderLimit, Replace, Safe, Text};
 use super::*;
+use core_graph::FactKey;
 use std::fmt::{self, Write};
 
 pub(super) struct Output {
     pub content: String,
     pub assertions: Vec<SpecAssertion>,
+    /// The fact-key shape of each assertion's subject (ADR-0058).
+    pub subjects: Vec<fact_index::Subject>,
 }
 fn finish(mut content: Text, assertions: Assertions) -> Result<Output, RenderLimit> {
     render::inline(&mut content, &assertions.values)?;
     Ok(Output {
         content: content.finish(),
         assertions: assertions.values,
+        subjects: assertions.subjects,
     })
 }
 fn nongap(node: &&Node) -> bool {
@@ -139,12 +143,14 @@ pub(super) fn stories_with_support(
         Ok(Output {
             content: content.finish(),
             assertions: assertions.values,
+            subjects: assertions.subjects,
         })
     } else {
         render::inline_literal(&mut content, &assertions.values)?;
         Ok(Output {
             content: content.finish(),
             assertions: assertions.values,
+            subjects: assertions.subjects,
         })
     }
 }
@@ -248,6 +254,28 @@ impl fmt::Display for ModelName<'_> {
 /// Producer-owned incident labels used by both rendering and partition closure.
 pub const DATA_PARTITION_EDGE_LABELS: &[&str] = DATA_EDGE_LABELS;
 
+/// The citation id of a node fact (ADR-0058).
+fn node_citation(node: &Node) -> String {
+    citation_id(&FactKey::Node {
+        id: node.id.clone(),
+    })
+}
+/// The citation id of an edge fact (ADR-0058).
+fn edge_citation(edge: &Edge) -> String {
+    citation_id(&FactKey::Edge {
+        source: edge.src.clone(),
+        label: edge.label.clone(),
+        destination: edge.dst.clone(),
+    })
+}
+/// An edge's confidence, decoded as its assertion decodes it.
+fn edge_confidence(edge: &Edge) -> ConfidenceTier {
+    provenance(&edge.props, &edge_identity(edge)).confidence_tier
+}
+const DATA_CITATIONS: &str = "\nEvery statement below prints its citation id. `fact-index.md` \
+lists the tier, confidence, method and evidence spans of each id. The diagram draws the same \
+facts and carries no ids.\n";
+
 pub(super) fn data(
     nodes: &[&Node],
     edges: &[&Edge],
@@ -317,17 +345,37 @@ pub(super) fn data(
     if entities.is_empty() {
         content.push_str("\nNo DataEntity facts have been recovered yet.\n")?;
     }
+    if !model_nodes.is_empty() {
+        content.push_str(DATA_CITATIONS)?;
+        content.push_str(
+            "\n## Entities and related nodes\n\n| Node | Kind | Tier | Confidence | Citation |\n|---|---|---|---|---|\n",
+        )?;
+        for n in &model_nodes {
+            let prov = provenance(&n.props, &n.id);
+            writeln!(
+                content,
+                "| `{}` | {} | {:?} | {:?} | {} |",
+                Safe(&n.id),
+                Safe(&n.label),
+                prov.tier,
+                prov.confidence_tier,
+                node_citation(n)
+            )?;
+        }
+    }
     if !mappings.is_empty() {
         content.push_str(
-            "\n## Access and mapping relations\n\n| Source | Relation | Target |\n|---|---|---|\n",
+            "\n## Access and mapping relations\n\n| Source | Relation | Target | Confidence | Citation |\n|---|---|---|---|---|\n",
         )?;
         for e in &mappings {
             writeln!(
                 content,
-                "| `{}` | {} | `{}` |",
+                "| `{}` | {} | `{}` | {:?} | {} |",
                 Safe(&e.src),
                 e.label,
-                Safe(&e.dst)
+                Safe(&e.dst),
+                edge_confidence(e),
+                edge_citation(e)
             )?;
         }
     }
@@ -342,13 +390,15 @@ pub(super) fn data(
         .collect();
     if !relation_fields.is_empty() {
         content.push_str(
-            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target |\n|---|---|---|---|---|---|\n",
+            "\n## Relation fields\n\n| Source | Field | Relation | Cardinality | Owning | Target | Confidence | Citation |\n|---|---|---|---|---|---|---|---|\n",
         )?;
         for (e, relations) in relation_fields {
+            // A field is a property of its relation edge, so it cites that edge.
+            let (confidence, cite) = (edge_confidence(e), edge_citation(e));
             for relation in relations {
                 writeln!(
                     content,
-                    "| `{}` | `{}` | {} | {} | {} | `{}` |",
+                    "| `{}` | `{}` | {} | {} | {} | `{}` | {confidence:?} | {cite} |",
                     Safe(&e.src),
                     Safe(relation_value(&relation["field"])),
                     Safe(relation_value(&relation["relation"])),
@@ -728,6 +778,8 @@ fn list(out: &mut Text, values: &[&str]) -> fmt::Result {
         write!(out, "{}", Safe(Join(values, ", ")))
     }
 }
+/// `security.md`. An endpoint finding states what was recovered, in the words
+/// `endpoint-permissions.md` uses for the same fact (#1820, AC-0656).
 pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let findings: Vec<_> = nodes
@@ -741,14 +793,16 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
     }
     let mut content = Text::new(
         &budget,
-        "# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
+        "# Security findings\n\n\"No authentication check recovered\" means none recovered in the source that was read: a check outside it, such as a gateway or middleware the adapters do not read, is not visible to this finding.\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n",
     )?;
     for n in &findings {
         write!(
             content,
             "| {} | `{}` | `{}` | ",
             Safe(NodeName(n)),
-            Safe(n.props["category"].as_str().unwrap_or("security")),
+            Safe(security_type(
+                n.props["category"].as_str().unwrap_or("security")
+            )),
             Safe(n.props["subject_id"].as_str().unwrap_or("—"))
         )?;
         list(&mut content, &strings(n, "resource_scope"))?;
@@ -766,6 +820,15 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
         content.push_str("| — | — | — | — | — | No explicit security findings | — |\n")?;
     }
     finish(content, assertions)
+}
+/// The Type cell of a `security.md` row. The stored category of an endpoint
+/// finding keeps its identity (`unauthenticated_endpoint`); the document names
+/// what was recovered, so it never calls the endpoint unauthenticated (#1820).
+fn security_type(category: &str) -> &str {
+    match category {
+        "unauthenticated_endpoint" => "no_auth_check_recovered",
+        other => other,
+    }
 }
 struct Settings<'a>(&'a Node);
 impl fmt::Display for Settings<'_> {
@@ -1252,5 +1315,23 @@ pub(super) fn logical_index_bytes(rows: usize, values: usize) -> Option<usize> {
         set_slots::<&str>(rows)?, // topology backed + configured
         slots::<&str>(values)?,
     ])?;
-    Some(data.max(tools).max(tests).max(simple))
+    let endpoints = super::endpoint_permissions::logical_index_bytes(rows)?;
+    let pipelines = super::pipelines::logical_index_bytes(rows)?;
+    let configuration = super::configuration::logical_index_bytes(rows, values)?;
+    let external = super::external::logical_index_bytes(rows, values)?;
+    let environments = super::environments::logical_index_bytes(rows, values)?;
+    let curated = super::curated::logical_index_bytes(rows)?;
+    let inventory = super::endpoint_inventory::logical_index_bytes(rows)?;
+    Some(
+        data.max(tools)
+            .max(tests)
+            .max(simple)
+            .max(endpoints)
+            .max(pipelines)
+            .max(configuration)
+            .max(external)
+            .max(environments)
+            .max(curated)
+            .max(inventory),
+    )
 }

@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {
+      "label": "ConfigRead",
+      "id": "cfgread:local/p@Config.kt:env:DATABASE_URL",
+      "props": {
+        "source": "env",
+        "key": "DATABASE_URL"
+      }
+    },
+    {
+      "label": "ConfigRead",
+      "id": "cfgread:local/p@Config.kt:env:?",
+      "props": {
+        "source": "env",
+        "dynamic": true
+      }
+    }
+  ]
+}

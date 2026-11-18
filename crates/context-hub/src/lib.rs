@@ -6,6 +6,7 @@
 //! part of this first recovered-graph projection.
 
 pub mod coverage;
+pub mod curated;
 pub mod logical;
 mod scope_refs;
 
@@ -16,6 +17,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod discovery;
+mod identity;
+pub use identity::{CompleteIdentityError, ContextIdentityBuilder};
 pub mod investigation_basis;
 pub mod scoped;
 pub use discovery::{
@@ -316,6 +319,9 @@ pub enum ContextError {
         /// Size of the empty page or next single-fact page, including cursor.
         required_bytes: usize,
     },
+    /// Streamed identity input was not in snapshot identity order.
+    #[error("graph facts are not in snapshot identity order")]
+    UnorderedInput,
     /// JSON encoding failure, kept explicit rather than emitting partial data.
     #[error("context serialization: {0}")]
     Serialization(#[from] serde_json::Error),

@@ -140,6 +140,96 @@ fn checked_availability(
 }
 
 pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessment, String> {
+    assess_observed(state, proposal_id, &mut SharedObservation::default())
+        .map(|(assessment, _)| assessment)
+}
+
+/// The graph one or more assessments observed: the rows of one store
+/// revision and the snapshot identity of those rows. A caller that makes
+/// many assessments in one read passes the same value to each, so the graph
+/// is copied and its identity computed once for all of them instead of once
+/// for each (#1834). It is in memory only and ends with that read.
+///
+/// Every assessment still observes the store itself. Its source
+/// associations are read in a transaction that first checks the store is at
+/// the revision of these rows; when the store has moved, the rows are read
+/// again and replace these. So an assessment never reports the identity of
+/// a graph the store did not hold when it was made, and it reports the
+/// revision it was made at.
+#[derive(Default)]
+pub(crate) struct SharedObservation(Option<Observation>);
+
+struct Observation {
+    /// The complete graph and its store revision, with no selection kept.
+    rows: core_graph::source::SourceSelectionSnapshot,
+    /// `ContextSnapshot::id` of `rows.graph`. `Err` when it has none.
+    identity: Result<String, ()>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static GRAPH_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times an assessment on this thread copied the graph.
+#[cfg(test)]
+pub(crate) fn graph_copies() -> usize {
+    GRAPH_COPIES.with(std::cell::Cell::get)
+}
+
+impl SharedObservation {
+    /// The observation the store is at now and the source-selection states
+    /// of `keys` in it. The graph lock is held for the store read alone and
+    /// not while the identity is computed. `Err` when the store read failed.
+    fn observe(
+        &mut self,
+        state: &AppState,
+        keys: &[core_graph::source::FactKey],
+    ) -> Result<(&Observation, Vec<core_graph::source::FactSourceSelection>), ()> {
+        let graph = state.graph.lock().map_err(|_| ())?;
+        let current = match &self.0 {
+            Some(observed) => match graph.read_source_selections_at(&observed.rows, keys) {
+                Ok(selections) => Some(selections),
+                // The store moved since these rows were read: read again.
+                Err(core_graph::GraphError::Generation(core_graph::GenerationError::Changed)) => {
+                    None
+                }
+                Err(_) => return Err(()),
+            },
+            None => None,
+        };
+        let selections = match current {
+            Some(selections) => selections,
+            None => {
+                #[cfg(test)]
+                GRAPH_COPIES.with(|count| count.set(count.get() + 1));
+                let mut rows = graph.read_source_selection_snapshot(keys).map_err(|_| ())?;
+                drop(graph);
+                let selections = std::mem::take(&mut rows.selections);
+                let identity =
+                    context_hub::ContextSnapshot::new(rows.graph.0.clone(), rows.graph.1.clone())
+                        .map(|snapshot| snapshot.id().to_owned())
+                        .map_err(|_| ());
+                self.0 = Some(Observation { rows, identity });
+                selections
+            }
+        };
+        self.0
+            .as_ref()
+            .map(|observed| (observed, selections))
+            .ok_or(())
+    }
+}
+
+/// [`assess`], with the store revision its graph and association read
+/// observed. `None` when that read failed. A caller that combines the
+/// assessment with a later graph read compares the two revisions (SPEC-12).
+/// `shared` is the observation kept between the assessments of one read.
+pub(crate) fn assess_observed(
+    state: &AppState,
+    proposal_id: &str,
+    shared: &mut SharedObservation,
+) -> Result<(BasisAssessment, Option<core_graph::StoreRevision>), String> {
     let staged = state
         .proposals
         .lock()
@@ -169,7 +259,7 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
                 status: Availability::WorkingTreeUnverified,
             })
             .collect();
-        return Ok(result);
+        return Ok((result, None));
     };
     let mut sources = BTreeMap::new();
     for origin in &basis.evidence {
@@ -248,27 +338,23 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
         .iter()
         .map(|selected| graph_fact(&selected.fact))
         .collect();
-    let observed = state
-        .graph
-        .lock()
-        .map_err(|_| ())
-        .and_then(|graph| graph.read_source_selection_snapshot(&keys).map_err(|_| ()));
-    match observed {
-        Ok(observed) => {
-            let snapshot = context_hub::ContextSnapshot::new(observed.graph.0, observed.graph.1);
-            match snapshot {
-                Ok(snapshot) => {
-                    result.graph_comparison = if snapshot.id() == basis.graph_snapshot_id {
+    let mut revision = None;
+    match shared.observe(state, &keys) {
+        Ok((observed, selections)) => {
+            revision = Some(observed.rows.revision.clone());
+            match &observed.identity {
+                Ok(identity) => {
+                    result.graph_comparison = if *identity == basis.graph_snapshot_id {
                         BasisComparison::Unchanged
                     } else {
                         BasisComparison::Changed
                     };
-                    result.current_graph_snapshot_id = Some(snapshot.id().into());
+                    result.current_graph_snapshot_id = Some(identity.clone());
                 }
-                Err(_) => result.graph_comparison = BasisComparison::OperationalFailure,
+                Err(()) => result.graph_comparison = BasisComparison::OperationalFailure,
             }
             result.association_comparison = BasisComparison::Unchanged;
-            for value in &observed.selections {
+            for value in &selections {
                 if matches!(value.state, FactSourceState::Invalid { .. }) {
                     result.association_comparison = BasisComparison::OperationalFailure;
                     break;
@@ -289,7 +375,7 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
         }
     }
     drop(guards);
-    Ok(result)
+    Ok((result, revision))
 }
 
 #[tauri::command]

@@ -1,6 +1,10 @@
 //! SPEC-10 bounded, separately authorized completions. These APIs do not change
 //! legacy completion wire formats or consent hashes. Prepared inputs are transient;
 //! the host journals consent consumption and invocation start before dispatch.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 
 use crate::{
     AnalysisTier, CompletionAction, CompletionPayload, ConsentGrant, EgressFirewall, EgressPreview,
@@ -899,7 +903,22 @@ pub fn openai_cloud_wire_schema(schema: &str) -> Option<(serde_json::Value, bool
     request_wire::openai_cloud_schema(schema)
 }
 
+/// Fallback total timeout of reusable bounded clients. Every bounded call sets
+/// its own timeout from `request_timeout_ms` (cut to the host deadline), and
+/// reqwest applies that in place of the client's, so a call is governed by its
+/// declared limit alone. The fallback equals the configurable ceiling, so it can
+/// never cut a permitted call short (ADR-0053, AC-0820).
+pub const CLIENT_FALLBACK_TIMEOUT: Duration = Duration::from_millis(MAX_REQUEST_TIMEOUT_MS);
+
 pub(super) fn build_client(builder: ClientBuilder, local: bool) -> Result<Client, reqwest::Error> {
+    build_client_with_fallback(builder, local, CLIENT_FALLBACK_TIMEOUT)
+}
+
+fn build_client_with_fallback(
+    builder: ClientBuilder,
+    local: bool,
+    fallback: Duration,
+) -> Result<Client, reqwest::Error> {
     let builder = builder
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
@@ -908,7 +927,7 @@ pub(super) fn build_client(builder: ClientBuilder, local: bool) -> Result<Client
         .no_zstd()
         .no_deflate()
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(Duration::from_secs(180));
+        .timeout(fallback);
     let builder = if local { builder.no_proxy() } else { builder };
     builder.build()
 }

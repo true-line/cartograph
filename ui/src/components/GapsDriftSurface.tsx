@@ -206,8 +206,8 @@ function GapClassRow({
                   : `Escalate class locally (${gapClass.members.length} instances)`}
               </button>
               <span className="muted">
-                One durable job, one proposal per instance. Accepted reviews await context
-                reconciliation; source binding remains unverified. Cloud escalation stays per-instance (consent binds to one
+                One durable job, one proposal per instance. An accepted proposal is listed with its
+                state under Curated items; source binding remains unverified. Cloud escalation stays per-instance (consent binds to one
                 exact payload).
               </span>
             </div>

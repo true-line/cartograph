@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { assignBands, buildAtlasScene, expandAcross, GROUP_BUDGET, type AtlasScene } from './atlasLayout';
+import {
+  assignBands,
+  buildAtlasScene,
+  expandAcross,
+  GROUP_BUDGET,
+  revealExpansion,
+  type AtlasScene,
+} from './atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode } from './store';
 
 function node(id: string, label: string, props: GraphNode['props'] = {}): GraphNode {
@@ -59,6 +66,29 @@ describe('assignBands — Tools/Build config File placement', () => {
     };
     const bands = assignBands(snapshot);
     expect(bands.get('file:local/app@src/index.ts')).toBe('server');
+  });
+});
+
+// AC-0651 (#1821): a configuration read is banded with the code that reads
+// it and clusters with its file's module, not under Unclassified.
+describe('assignBands — configuration reads', () => {
+  it('bands a ConfigRead in Server code, in the cluster of its file', () => {
+    const read = node('cfgread:local/app@src/db.ts:env:DATABASE_URL', 'ConfigRead', { key: 'DATABASE_URL' });
+    const unnamed = node('cfgread:local/app@config.ts:env:?', 'ConfigRead', { dynamic: true });
+    const symbol = node('sym:local/app@src/db.ts#connect', 'Symbol');
+    const snapshot: AtlasSnapshot = {
+      nodes: [read, unnamed, symbol, node('file:local/app@config.ts', 'File', { path: 'config.ts' })],
+      edges: [edge(symbol.id, read.id, 'READS_CONFIG')],
+    };
+    const bands = assignBands(snapshot);
+    expect(bands.get(read.id)).toBe('server');
+    expect(bands.get(unnamed.id)).toBe('server');
+    const scene = buildAtlasScene(snapshot, new Set());
+    expect(scene.bands.map((band) => band.label)).toEqual(['Server code']);
+    const cluster = (id: string) => scene.clusters.find((item) => item.members.includes(id))?.key;
+    expect(cluster(read.id)).toBe('local/app · src');
+    expect(cluster(read.id)).toBe(cluster(symbol.id));
+    expect(cluster(unnamed.id)).toBe(cluster('file:local/app@config.ts'));
   });
 });
 
@@ -298,5 +328,31 @@ describe('buildAtlasScene — estate-scale grouping', () => {
   it('keeps small graphs ungrouped', () => {
     const scene = buildAtlasScene(estate(1, 40), new Set());
     expect(scene.groups).toEqual([]);
+  });
+});
+
+// AC-0715 (#1666): Find reveals a result folded inside groups.
+describe('revealExpansion', () => {
+  const estate: AtlasSnapshot = {
+    nodes: Array.from({ length: 1000 }, (_, index) => ({
+      id: `sym:local/estate@d${String(Math.floor(index / 2)).padStart(3, '0')}/m.ts#f${index % 2}`,
+      label: 'Symbol',
+      props: { name: `f${index % 2}` },
+    })),
+    edges: [],
+  };
+
+  it('opens the group path and the cluster, so the node renders as itself', () => {
+    const id = 'sym:local/estate@d300/m.ts#f1';
+    expect(buildAtlasScene(estate, new Set()).nodes.some((n) => n.id === id)).toBe(false);
+    const expanded = revealExpansion(estate, id);
+    const scene = buildAtlasScene(estate, expanded);
+    expect(scene.nodes.some((n) => n.node?.id === id)).toBe(true);
+    expect(scene.openGroups.map((g) => g.id)).toEqual([...expanded].filter((e) => e.startsWith('group:')));
+    expect(scene.nodes.length).toBeLessThanOrEqual(GROUP_BUDGET + 2);
+  });
+
+  it('reveals nothing for a node that is not in the scene', () => {
+    expect(revealExpansion(estate, 'missing:node').size).toBe(0);
   });
 });

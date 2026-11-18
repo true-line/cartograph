@@ -10,14 +10,19 @@ use flowtracer::Flow;
 
 mod adr;
 mod contract;
+mod graph_basis;
+pub use graph_basis::{
+    GraphBasis, SourceRevision, edge_fact_line, graph_content_hash, hash_fact_lines, node_fact_line,
+};
 mod knowledge;
 pub use knowledge::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
-    CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport,
-    DOMAIN_ENTITY_ORM_RULE, DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport,
-    derive_business_flows, derive_graphql_resolver_capabilities, derive_orm_domain_entities,
-    derive_permission_actors,
+    CAPABILITY_CONTROLLER_RULE, CAPABILITY_CONTROLLER_RULE_VERSION, CAPABILITY_GRAPHQL_RULE,
+    CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport, DOMAIN_ENTITY_ORM_RULE,
+    DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport, derive_business_flows,
+    derive_graphql_resolver_capabilities, derive_nestjs_controller_capabilities,
+    derive_orm_domain_entities, derive_permission_actors,
 };
 
 /// Version of the spec compiler's projection rules, recorded with every
@@ -61,8 +66,9 @@ pub use security::{
 mod views;
 mod workbench;
 pub use adr::{
-    AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, derive_adr_facts, derive_adr_facts_bounded,
-    extract_found_adrs, extract_found_adrs_among,
+    AdrFacts, AdrLimit, AdrLimitExceeded, AdrLimits, FOUND_ADR_EXTRACTOR_ID, FoundAdrRead,
+    MAX_FOUND_ADR_BYTES, UnreadAdr, UnreadAdrReason, derive_adr_facts, derive_adr_facts_bounded,
+    extract_found_adrs, extract_found_adrs_among, read_found_adrs_among,
 };
 pub use contract::{
     CONTRACT_DRIFT_EXTRACTOR_ID, CONTRACT_EXTRACTOR_ID, CONTRACT_METHODS, ContractFacts,
@@ -73,23 +79,36 @@ pub use contract::{
 pub use views::{
     DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,
     SpecViewBundle, compile_selected_flow_view, compile_spec_views, compile_spec_with_views,
+    compile_spec_with_views_and_coverage, try_compile_spec_with_views_and_coverage,
+    try_compile_spec_with_views_supplied,
 };
 pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,
-    CapabilityCompileWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
-    CompileWorkspaceBound, DATA_PARTITION_EDGE_LABELS, ExportMode,
+    CONFIG_READ_COVERAGE, COVERAGE_DETAIL_REPO_LIMIT, CapabilityCompileWorkspaceBound,
+    CapabilityStory, CapabilityStoryInputError, CompileWorkspaceBound, Curated, CuratedBasis,
+    CuratedFailure, DATA_PARTITION_EDGE_LABELS, ENDPOINT_PATH_MAX_DEPTH,
+    ENDPOINT_PATH_MAX_RELATIONS, ENDPOINT_PATH_MAX_SYMBOLS, ExportMode, FACT_INDEX_SCHEMA,
+    FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
     KnowledgeStoryCompileWorkspaceBound, PartitionAcquisition, PartitionArtifact,
     PartitionArtifactKind, PartitionError, PartitionWorkspaceBound, SelectedArtifactLimit,
     SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle,
-    artifact_catalog, compile_capability_user_stories,
-    compile_capability_user_stories_with_flows_and_security,
+    StaleCoverage, Supplied, artifact_catalog, check_citations, citation_id, cited_fact_hashes,
+    compile_capability_user_stories, compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, compile_partition_selected,
-    compile_spec, compile_spec_selected, compile_spec_selected_with_security, count_gap_findings,
-    count_interpretation_backlog, is_drift_edge, is_drift_node, is_gap_edge, is_gap_node,
-    logical_actor_story_workspace_bound, logical_capability_compile_bound, logical_compile_bound,
-    logical_knowledge_story_compile_bound, logical_partition_bound, project_recovered_facts,
-    provenance,
+    compile_spec, compile_spec_selected, compile_spec_selected_supplied,
+    compile_spec_selected_with_coverage, compile_spec_selected_with_security,
+    compile_spec_with_coverage, count_gap_findings, count_interpretation_backlog,
+    curated_basis_summary, curated_reason_sentence, is_drift_edge, is_drift_node, is_gap_edge,
+    is_gap_node, logical_actor_story_workspace_bound, logical_capability_compile_bound,
+    logical_compile_bound, logical_coverage_render_bound, logical_knowledge_story_compile_bound,
+    logical_partition_bound, project_recovered_facts, provenance, try_compile_spec_supplied,
+    try_compile_spec_with_coverage,
+};
+pub use workbench::{
+    CATALOGUE_VERSION, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
+    SectionScopeError, catalogue_section, catalogue_sections, drafted_section,
+    section_citation_set,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query

@@ -1,6 +1,10 @@
 //! Versioned progressive query disclosure. The durable ledger retains every
 //! selector; this representation supplies one latest view and bounded references
 //! to older acquisitions. References do not supply their selectors or results.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::TaskFactKey;
 use core_prov::content_hash;

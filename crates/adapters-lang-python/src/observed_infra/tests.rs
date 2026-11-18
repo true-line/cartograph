@@ -286,7 +286,13 @@ shadowed = create_engine(DB)
         assert_eq!(edge.props["instance_unresolved"], true);
         assert!(gaps.iter().any(|g| g.id == edge.props["gap"]), "{edge:?}");
     }
-    assert_eq!(edges.len(), 7);
+    // The fixture's `os.environ["DB_HOST"]` is also a configuration read
+    // (#1789): its `READS_CONFIG` edge is counted apart from the client edges.
+    assert_eq!(edges.iter().filter(|e| e.label == "USES").count(), 7);
+    assert_eq!(
+        edges.iter().filter(|e| e.label == "READS_CONFIG").count(),
+        1
+    );
 }
 
 // AC-0318: Redis reached through the `limits` rate-limit storage is the same
@@ -1619,4 +1625,163 @@ KafkaProducer().send("t")
 KafkaConsumer("t")
 "#,
     )]);
+}
+
+fn evidence_spans(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["byte_start"].as_u64().unwrap(),
+                e["byte_end"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+// AC-0597 (#1789, ADR-0059): one literal `os.getenv` read, one dynamic read
+// and one shadowed look-alike (a local function named `getenv`) yield
+// exactly one named ConfigRead, one dynamic ConfigRead and nothing for the
+// look-alike. Only the key name and the span of the read are recorded,
+// never the default value.
+#[test]
+fn os_env_reads_are_config_reads() {
+    let source = r#"import os
+
+def load(name):
+    url = os.getenv("DATABASE_URL", "postgres://user:pw@db/app")
+    return url, os.environ[name]
+
+def getenv(key):
+    return key
+
+def fake():
+    return getenv("SHADOWED")
+"#;
+    let files = [("app/settings.py", source)];
+    let (nodes, edges) = extract(&files);
+    let reads: Vec<&Node> = nodes.iter().filter(|n| n.label == "ConfigRead").collect();
+    let ids: Vec<&str> = reads.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "cfgread:local/py@app/settings.py:env:DATABASE_URL",
+            "cfgread:local/py@app/settings.py:env:?",
+        ]
+    );
+    let named = reads[0];
+    assert_eq!(named.props["source"], "env");
+    assert_eq!(named.props["key"], "DATABASE_URL");
+    assert_eq!(named.props["language"], "python");
+    assert_eq!(named.props["prov"]["tier"], "Deterministic");
+    assert_eq!(named.props["prov"]["confidence_tier"], "Confirmed");
+    let read = r#"os.getenv("DATABASE_URL", "postgres://user:pw@db/app")"#;
+    let at = source.find(read).unwrap() as u64;
+    assert_eq!(evidence_spans(&named.props), [(at, at + read.len() as u64)]);
+    let dynamic = reads[1];
+    assert_eq!(dynamic.props["dynamic"], true);
+    assert!(dynamic.props.get("key").is_none());
+    let at = source.find("os.environ[name]").unwrap() as u64;
+    assert_eq!(
+        evidence_spans(&dynamic.props),
+        [(at, at + "os.environ[name]".len() as u64)]
+    );
+    let read_edges: Vec<(&str, &str)> = edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    assert_eq!(
+        read_edges,
+        [
+            (
+                "sym:local/py@app/settings.py#load",
+                "cfgread:local/py@app/settings.py:env:DATABASE_URL"
+            ),
+            (
+                "sym:local/py@app/settings.py#load",
+                "cfgread:local/py@app/settings.py:env:?"
+            ),
+        ]
+    );
+    let all = serde_json::to_string(&nodes).unwrap() + &serde_json::to_string(&edges).unwrap();
+    assert!(!all.contains("postgres://") && !all.contains("SHADOWED"));
+    // Determinism: a second run yields the same facts.
+    let (again_nodes, again_edges) = extract(&files);
+    assert_eq!(
+        serde_json::to_string(&nodes).unwrap(),
+        serde_json::to_string(&again_nodes).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&edges).unwrap(),
+        serde_json::to_string(&again_edges).unwrap()
+    );
+}
+
+// AC-0597 (ADR-0059 decisions 1, 4, 6): every proven form of the read of
+// one key in a file is one node citing each span in byte order; a read that
+// is a client identity keeps its observed resource and is a ConfigRead too;
+// a write, a rebound `os`, and a repository module named `os` are not reads.
+// A file that writes `os.environ[...]` voids its own subscript reads.
+#[test]
+fn os_env_read_forms_and_refusals() {
+    let reads = r#"import os
+import smtplib
+from os import environ, getenv
+
+A = os.environ["SMTP_HOST"]
+B = environ.get("SMTP_HOST")
+C = getenv("SMTP_HOST")
+mail = smtplib.SMTP(os.environ["SMTP_HOST"])
+"#;
+    let rebound = r#"import os
+os = object()
+D = os.getenv("REBOUND")
+"#;
+    // A write is no read, and a file that writes `os.environ` members has
+    // rebound what `os.environ[...]` reads: those reads prove nothing.
+    let written = r#"import os
+os.environ["WRITTEN"] = "1"
+del os.environ["GONE"]
+E = os.environ["AFTER_WRITE"]
+"#;
+    let (nodes, edges) = extract(&[
+        ("app/reads.py", reads),
+        ("app/rebound.py", rebound),
+        ("app/written.py", written),
+    ]);
+    let found: Vec<&Node> = nodes.iter().filter(|n| n.label == "ConfigRead").collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "{:?}",
+        found.iter().map(|n| &n.id).collect::<Vec<_>>()
+    );
+    assert_eq!(found[0].id, "cfgread:local/py@app/reads.py:env:SMTP_HOST");
+    let starts: Vec<u64> = evidence_spans(&found[0].props)
+        .iter()
+        .map(|s| s.0)
+        .collect();
+    let expected = [
+        reads.find(r#"os.environ["SMTP_HOST"]"#).unwrap() as u64,
+        reads.find(r#"environ.get("SMTP_HOST")"#).unwrap() as u64,
+        reads.find(r#"getenv("SMTP_HOST")"#).unwrap() as u64,
+        reads.rfind(r#"os.environ["SMTP_HOST"]"#).unwrap() as u64,
+    ];
+    assert_eq!(starts, expected);
+    let read_edges: Vec<&Edge> = edges.iter().filter(|e| e.label == "READS_CONFIG").collect();
+    assert_eq!(read_edges.len(), 1);
+    assert_eq!(read_edges[0].src, "file:local/py@app/reads.py");
+    // The client identity is still the observed resource it was.
+    let smtp = nodes
+        .iter()
+        .find(|n| n.id == res("smtp:env:SMTP_HOST"))
+        .unwrap();
+    assert_eq!(smtp.props["env_key"], "SMTP_HOST");
+
+    // A repository package named `os` may be what `import os` binds.
+    let (nodes, _) = extract(&[("app/reads.py", reads), ("os/__init__.py", "")]);
+    assert!(!nodes.iter().any(|n| n.label == "ConfigRead"));
 }

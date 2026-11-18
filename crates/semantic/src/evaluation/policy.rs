@@ -1,4 +1,8 @@
 //! Frozen explicit mechanism policies and label-free prediction through production ANN.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::fixtures::{self, CaseInput, CaseLabel, LoadedFixtureBundle, Split};
 use crate::{
     FamilyKey, SemanticProposal,

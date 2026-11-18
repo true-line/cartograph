@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "label": "ConfigRead",
+      "id": "cfgread:local/p@config.ts:env:DATABASE_URL",
+      "props": {
+        "source": "env",
+        "key": "DATABASE_URL"
+      }
+    },
+    {
+      "label": "ConfigRead",
+      "id": "cfgread:local/p@config.ts:env:?",
+      "props": {
+        "source": "env",
+        "dynamic": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "READS_CONFIG",
+      "src": "sym:local/p@config.ts#load",
+      "dst": "cfgread:local/p@config.ts:env:DATABASE_URL"
+    }
+  ]
+}

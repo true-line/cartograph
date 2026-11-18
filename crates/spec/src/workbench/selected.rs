@@ -1,5 +1,6 @@
 //! Selected artifact dispatch; projection and native renderers are shared.
 use super::*;
+use core_graph::coverage::StoredCoverage;
 use std::{fmt, io};
 
 /// Bounds on selected output and the complete shared ADR derivation.
@@ -43,6 +44,10 @@ pub enum SelectedArtifactLimit {
     AdrDerivation(crate::AdrLimitExceeded),
     /// Complete security projection exceeded its explicit admission.
     SecurityDerivation(crate::SecurityLimitExceeded),
+    /// The fact index could not be built: a citation does not resolve or two
+    /// facts share one citation id (ADR-0058). Not a size limit; no index is
+    /// returned.
+    FactIndex(FactIndexFailure),
 }
 /// A complete artifact or explicit limit outcome, in official artifact order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +61,85 @@ pub enum SelectedArtifactOutcome {
         /// Construction resource that prevented a complete result.
         limit: SelectedArtifactLimit,
     },
+}
+
+/// What the host supplies beside the graph facts. A bare compile supplies
+/// neither, and the artifacts that read them say so.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Supplied<'a> {
+    /// The coverage inventories stored with the graph (AC-0592).
+    pub coverage: &'a [StoredCoverage],
+    /// The repositories in `coverage` whose stored inventory the host does
+    /// not hold as current (AC-0657). Each is listed as stale with what was
+    /// compared, and nothing is read from its inventory. A host that makes
+    /// no such comparison supplies none.
+    pub stale_coverage: &'a [StaleCoverage<'a>],
+    /// The curated projection the host computed for this graph, or why it
+    /// computed none (SPEC-12, AC-0653).
+    pub curated: Curated<'a>,
+    /// The content hash of the graph being compiled, when the host has
+    /// it. It is supplied apart from `curated`, so a document header can
+    /// state it when no projection was computed (AC-0663).
+    pub graph_content_hash: Option<&'a str>,
+}
+
+/// One stored inventory the host compared with the repository's current
+/// state and found recorded under another (AC-0657).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleCoverage<'a> {
+    /// The repository the stored inventory belongs to.
+    pub repo_key: &'a str,
+    /// What the host compared at read time, such as `registration` and
+    /// `plugins`. Which of them differs is not known.
+    pub compared: &'a [String],
+}
+
+/// What an artifact reads beside the admitted graph facts.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Beside<'a> {
+    /// The coverage inventories stored with the graph.
+    pub(crate) coverage: &'a [StoredCoverage],
+    /// The repositories whose stored inventory is stale.
+    pub(crate) stale_coverage: &'a [StaleCoverage<'a>],
+    /// Pipeline facts the export mode and the rejections withheld, counted
+    /// before the filter (`pipelines::withheld`).
+    pub(crate) pipelines_withheld: usize,
+    /// Configuration facts withheld the same way (`configuration::withheld`).
+    pub(crate) configuration_withheld: usize,
+    /// Boundary facts withheld the same way (`external::withheld`).
+    pub(crate) external_withheld: usize,
+    /// Environment facts withheld the same way (`environments::withheld`).
+    pub(crate) environments_withheld: usize,
+    /// Endpoint facts withheld the same way (`endpoint_inventory::withheld`).
+    pub(crate) endpoints_withheld: usize,
+    /// The curated projection, or why there is none.
+    pub(crate) curated: Curated<'a>,
+    /// The graph content hash the host supplied, if any.
+    pub(crate) graph_content_hash: Option<&'a str>,
+}
+
+impl<'a> Beside<'a> {
+    /// Counted over the stored facts, before the projection and the export
+    /// filter drop what the mode and the rejections withhold.
+    pub(crate) fn new<N: Borrow<Node>, E: Borrow<Edge>>(
+        nodes: &[N],
+        edges: &[E],
+        mode: ExportMode,
+        rejected: &BTreeSet<String>,
+        supplied: Supplied<'a>,
+    ) -> Self {
+        Self {
+            coverage: supplied.coverage,
+            stale_coverage: supplied.stale_coverage,
+            pipelines_withheld: pipelines::withheld(nodes, edges, mode, rejected),
+            configuration_withheld: configuration::withheld(nodes, edges, mode, rejected),
+            external_withheld: external::withheld(nodes, edges, mode, rejected),
+            environments_withheld: environments::withheld(nodes, edges, mode, rejected),
+            endpoints_withheld: endpoint_inventory::withheld(nodes, mode, rejected),
+            curated: supplied.curated,
+            graph_content_hash: supplied.graph_content_hash,
+        }
+    }
 }
 
 struct Artifact {
@@ -159,6 +243,88 @@ const ARTIFACTS: &[Artifact] = &[
         id: "rule-evidence-index",
         file: "rule-evidence.json",
         title: "Source rule evidence index",
+        format: "json",
+    },
+    // After the frozen graph artifacts, so their bytes are unchanged (#1787).
+    Artifact {
+        id: "endpoint-permissions",
+        file: "endpoint-permissions.md",
+        title: "Endpoints and permission sites",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1818).
+    Artifact {
+        id: "pipelines",
+        file: "pipelines.md",
+        title: "Build and deployment pipelines",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1821).
+    Artifact {
+        id: "configuration",
+        file: "configuration.md",
+        title: "Configuration keys",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1788).
+    Artifact {
+        id: "external",
+        file: "external.md",
+        title: "Calls and publishes that leave the system boundary",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1791).
+    Artifact {
+        id: "environments",
+        file: "environments.md",
+        title: "Environments and the workloads they declare",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1658).
+    Artifact {
+        id: "endpoint-inventory",
+        file: "endpoint-inventory.md",
+        title: "Endpoint inventory",
+        format: "markdown",
+    },
+    // After it, for the same reason (#1746).
+    Artifact {
+        id: curated::ARTIFACT_ID,
+        file: "curated.md",
+        title: "Curated items",
+        format: "markdown",
+    },
+    // After it: the document's header carries the curated revision, and its
+    // frames are cited before the index (#1748, AC-0663).
+    Artifact {
+        id: document::D1_ARTIFACT_ID,
+        file: "product-specification.md",
+        title: "Product specification (D1)",
+        format: "markdown",
+    },
+    Artifact {
+        id: "coverage",
+        file: "coverage.md",
+        title: "Coverage",
+        format: "markdown",
+    },
+    Artifact {
+        id: "coverage-index",
+        file: "coverage.json",
+        title: "Coverage index",
+        format: "json",
+    },
+    // Last: the index lists what the artifacts before it cite (ADR-0058).
+    Artifact {
+        id: fact_index::MARKDOWN_ID,
+        file: "fact-index.md",
+        title: "Fact and evidence index",
+        format: "markdown",
+    },
+    Artifact {
+        id: fact_index::JSON_ID,
+        file: "fact-index.json",
+        title: "Fact and evidence index data",
         format: "json",
     },
 ];
@@ -280,17 +446,20 @@ fn produce(
     edges: &[&Edge],
     flows: &[Flow],
     gaps: usize,
-    (mode, rejected, stories): (
+    (mode, rejected, stories, beside): (
         ExportMode,
         &BTreeSet<String>,
         Option<&capabilities::Stories<'_>>,
+        Beside<'_>,
     ),
     max: Option<usize>,
-) -> Result<SpecArtifact, render::RenderLimit> {
+) -> Result<Cited, render::RenderLimit> {
+    let coverage = beside.coverage;
     use producers::Output;
     let Output {
         content,
         assertions,
+        subjects,
     } = match a.id {
         "user-stories" => match stories {
             Some(stories) => producers::stories_with_support(nodes, Some(stories), max)?,
@@ -319,6 +488,7 @@ fn produce(
                 }
                 .expect("selected register content"),
                 assertions: output.assertions,
+                subjects: output.subjects,
             }
         }
         "gap-register" | "gap-register-index" => {
@@ -334,6 +504,7 @@ fn produce(
                 }
                 .expect("selected register content"),
                 assertions: output.assertions,
+                subjects: output.subjects,
             }
         }
         "rule-evidence" | "rule-evidence-index" => {
@@ -357,12 +528,90 @@ fn produce(
                 }
                 .expect("selected rule content"),
                 assertions: output.assertions,
+                subjects: output.subjects,
             }
         }
+        // A permission site carries its own provenance inside the endpoint
+        // fact, so mode and rejection apply to it here (AC-0599).
+        "endpoint-permissions" => {
+            endpoint_permissions::output(nodes, edges, (mode, rejected), max)?
+        }
+        // Pipeline facts in the admitted graph, the count the mode and the
+        // rejections withheld, and the files the inventories record as
+        // present and not read (AC-0650).
+        "pipelines" => pipelines::output(
+            nodes,
+            edges,
+            coverage,
+            (mode, beside.pipelines_withheld),
+            max,
+        )?,
+        // Environment-file and configuration-read facts in the admitted
+        // graph, and the count the mode and the rejections withheld. No
+        // stored inventory is read (AC-0651).
+        "configuration" => {
+            configuration::output(nodes, edges, (mode, beside.configuration_withheld), max)?
+        }
+        // Outbound-call Gaps, observed clients and channels in the admitted
+        // graph, the admitted flows, and the count the mode and the
+        // rejections withheld. No stored inventory is read (AC-0660).
+        "external" => external::output(nodes, edges, flows, (mode, beside.external_withheld), max)?,
+        // Environment, Workload and environment-Gap facts in the admitted
+        // graph with their relations, and the count the mode and the
+        // rejections withheld. No stored inventory is read (AC-0661).
+        "environments" => {
+            environments::output(nodes, edges, (mode, beside.environments_withheld), max)?
+        }
+        // Endpoint facts in the admitted graph and the count the mode and
+        // the rejections withheld. No stored inventory is read (AC-0694).
+        "endpoint-inventory" => {
+            endpoint_inventory::output(nodes, (mode, beside.endpoints_withheld), max)?
+        }
+        // The curated projection the host supplied, and the admitted nodes
+        // its items cite (AC-0653). No stored inventory is read.
+        curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
+        // The catalogue's D1 over the admitted nodes and flows, the gap
+        // count and the supplied projection's revision (AC-0663).
+        document::D1_ARTIFACT_ID => document::d1(
+            (nodes, edges),
+            flows,
+            gaps,
+            (beside.curated, beside.graph_content_hash),
+            mode,
+            max,
+        )?,
+        // The stored inventories only: no graph fact, mode or rejection applies.
+        "coverage" | "coverage-index" => {
+            coverage::output(coverage, beside.stale_coverage, a.id == "coverage", max)?
+        }
+        // The two index artifacts are rendered from the collected citations.
         _ => unreachable!("validated static artifact id"),
     };
+    Ok(Cited {
+        artifact: identified_artifact(a.id, a.file, a.title, a.format, content, assertions),
+        subjects,
+    })
+}
+/// A produced artifact with the fact-key shape of each assertion's subject,
+/// which the artifact itself does not serialize (ADR-0058).
+struct Cited {
+    artifact: SpecArtifact,
+    subjects: Vec<fact_index::Subject>,
+}
+/// One of the two index artifacts over a finished index.
+fn index_artifact(
+    a: &Artifact,
+    index: &FactIndex,
+    max: Option<usize>,
+) -> Result<SpecArtifact, render::RenderLimit> {
+    let content = fact_index::render(index, a.id == fact_index::MARKDOWN_ID, max)?;
     Ok(identified_artifact(
-        a.id, a.file, a.title, a.format, content, assertions,
+        a.id,
+        a.file,
+        a.title,
+        a.format,
+        content,
+        Vec::new(),
     ))
 }
 fn bytes(artifact: &SpecArtifact) -> usize {
@@ -390,6 +639,14 @@ fn bytes(artifact: &SpecArtifact) -> usize {
 /// The caller separately admits graph/flow input and selection cardinality.
 /// Every success exactly matches ordinary compilation; output/derivation limits
 /// return explicit outcomes and never return a truncated artifact.
+///
+/// The two fact-index artifacts list what the whole export cites (ADR-0058),
+/// so selecting either also compiles every artifact that carries assertions,
+/// one at a time, as workspace: an unselected one is read for its citations
+/// and dropped, is not returned and is not charged to `max_bytes`. The index
+/// itself is admitted against the remaining output budget like any other
+/// artifact. Citations that do not resolve are
+/// [`SelectedArtifactLimit::FactIndex`].
 pub fn compile_spec_selected(
     nodes: &[Node],
     edges: &[Edge],
@@ -405,7 +662,70 @@ pub fn compile_spec_selected(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, None, None),
+        (requested_ids, limits, None, None, Supplied::default()),
+    )
+}
+
+/// [`compile_spec_selected`] with the stored coverage inventories the
+/// `coverage` and `coverage-index` artifacts project (AC-0592). Every other
+/// artifact is unchanged by them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "additive coverage input preserves the existing selected compiler arguments"
+)]
+pub fn compile_spec_selected_with_coverage(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    requested_ids: &[&str],
+    limits: SelectedCompileLimits,
+    coverage: &[StoredCoverage],
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_spec_selected_supplied(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        requested_ids,
+        limits,
+        Supplied {
+            coverage,
+            stale_coverage: &[],
+            curated: Curated::NotSupplied,
+            graph_content_hash: None,
+        },
+    )
+}
+
+/// [`compile_spec_selected`] with everything the host supplies beside the
+/// graph: the stored coverage inventories (AC-0592) and the curated
+/// projection the `curated` artifact lists (AC-0653). Every other artifact is
+/// unchanged by them, except the fact index, which lists what `curated`
+/// cites.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "additive host input preserves the existing selected compiler arguments"
+)]
+pub fn compile_spec_selected_supplied(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    requested_ids: &[&str],
+    limits: SelectedCompileLimits,
+    supplied: Supplied<'_>,
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_selected(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        (requested_ids, limits, None, None, supplied),
     )
 }
 
@@ -432,7 +752,13 @@ pub fn compile_spec_selected_with_security(
         flows,
         mode,
         rejected,
-        (requested_ids, limits, Some(security), None),
+        (
+            requested_ids,
+            limits,
+            Some(security),
+            None,
+            Supplied::default(),
+        ),
     )
 }
 fn compile_selected(
@@ -446,9 +772,10 @@ fn compile_selected(
         SelectedCompileLimits,
         Option<crate::SecurityLimits>,
         Option<&capabilities::Stories<'_>>,
+        Supplied<'_>,
     ),
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
-    let (requested_ids, limits, security, stories) = selection;
+    let (requested_ids, limits, security, stories, supplied) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
             return Err(ArtifactSelectionError::UnknownArtifact { index });
@@ -481,35 +808,123 @@ fn compile_selected(
                 .collect());
         }
     };
+    let beside = Beside::new(nodes, edges, mode, rejected, supplied);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
     let gaps = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let mut remaining = limits.max_bytes;
-    Ok(selected
-        .into_iter()
-        .map(|a| {
-            match produce(
+    // The index lists what the whole export cites, whatever else was
+    // selected, so that it equals the bundle's. A citing artifact that was
+    // not selected is compiled, read for its citations and dropped before
+    // the next: it is workspace, never output, so it is not charged to the
+    // output budget and nothing unselected is retained (#1582).
+    let mut citations = if selected.iter().any(|a| fact_index::is_index(a.id)) {
+        Citations::Collecting(fact_index::Collector::new(mode, citation_id))
+    } else {
+        Citations::Unwanted
+    };
+    let mut outcomes = Vec::with_capacity(selected.len());
+    for a in ARTIFACTS {
+        let is_selected = selected.iter().any(|s| s.id == a.id);
+        if fact_index::is_index(a.id) {
+            if !is_selected {
+                continue;
+            }
+            citations = citations.finished();
+            let limit = match &citations {
+                Citations::Finished(index) => match index_artifact(a, index, Some(remaining)) {
+                    Ok(artifact) => {
+                        remaining = remaining
+                            .checked_sub(bytes(&artifact))
+                            .expect("renderer admitted cumulative output");
+                        outcomes.push(SelectedArtifactOutcome::Produced(artifact));
+                        continue;
+                    }
+                    Err(_) => SelectedArtifactLimit::OutputBytes { remaining },
+                },
+                Citations::TooLarge => SelectedArtifactLimit::OutputBytes { remaining },
+                Citations::Failed(failure) => SelectedArtifactLimit::FactIndex(*failure),
+                Citations::Unwanted | Citations::Collecting(_) => {
+                    unreachable!("a selected index finishes its citations")
+                }
+            };
+            outcomes.push(SelectedArtifactOutcome::Limited {
+                artifact_id: a.id.into(),
+                limit,
+            });
+            continue;
+        }
+        let produce = |max| {
+            produce(
                 a,
                 &nodes,
                 &edges,
                 &projection.flows,
                 gaps,
-                (mode, rejected, stories),
-                Some(remaining),
-            ) {
-                Ok(artifact) => {
-                    remaining = remaining
-                        .checked_sub(bytes(&artifact))
-                        .expect("renderer admitted cumulative output");
-                    SelectedArtifactOutcome::Produced(artifact)
+                (mode, rejected, stories, beside),
+                max,
+            )
+        };
+        let produced = is_selected.then(|| produce(Some(remaining)));
+        if let Citations::Collecting(collector) = &mut citations
+            && fact_index::cites(a.id)
+        {
+            let cited = match &produced {
+                Some(Ok(cited)) => {
+                    collector.cite(a.id, &cited.artifact.assertions, &cited.subjects)
                 }
-                Err(_) => SelectedArtifactOutcome::Limited {
-                    artifact_id: a.id.into(),
-                    limit: SelectedArtifactLimit::OutputBytes { remaining },
-                },
+                // Not selected, or selected and past the output budget: its
+                // citations still belong to the export.
+                Some(Err(_)) | None => {
+                    let cited = produce(None).expect("unbounded native artifact");
+                    collector.cite(a.id, &cited.artifact.assertions, &cited.subjects)
+                }
+            };
+            match cited {
+                // Already certain not to fit: stop collecting rows.
+                Ok(()) if collector.lower_bound() > remaining => citations = Citations::TooLarge,
+                Ok(()) => {}
+                Err(error) => citations = Citations::Failed(error.failure()),
             }
-        })
-        .collect())
+        }
+        match produced {
+            Some(Ok(cited)) => {
+                remaining = remaining
+                    .checked_sub(bytes(&cited.artifact))
+                    .expect("renderer admitted cumulative output");
+                outcomes.push(SelectedArtifactOutcome::Produced(cited.artifact));
+            }
+            Some(Err(_)) => outcomes.push(SelectedArtifactOutcome::Limited {
+                artifact_id: a.id.into(),
+                limit: SelectedArtifactLimit::OutputBytes { remaining },
+            }),
+            None => {}
+        }
+    }
+    Ok(outcomes)
+}
+/// The citations of a selected compilation, on the way to its index.
+enum Citations {
+    /// No index artifact was selected.
+    Unwanted,
+    Collecting(fact_index::Collector),
+    Finished(FactIndex),
+    /// The rows collected so far already exceed the output budget, which
+    /// only shrinks: the index is refused when its turn comes.
+    TooLarge,
+    /// The citations do not resolve: no index can be returned.
+    Failed(FactIndexFailure),
+}
+impl Citations {
+    fn finished(self) -> Self {
+        match self {
+            Self::Collecting(collector) => match collector.finish() {
+                Ok(index) => Self::Finished(index),
+                Err(error) => Self::Failed(error.failure()),
+            },
+            other => other,
+        }
+    }
 }
 pub(super) fn all(
     nodes: &[Node],
@@ -517,12 +932,14 @@ pub(super) fn all(
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
-) -> SpecBundle {
+    supplied: Supplied<'_>,
+) -> Result<SpecBundle, FactIndexError> {
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
+    let beside = Beside::new(nodes, edges, mode, rejected, supplied);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
-    bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected)
+    try_bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, beside)
 }
 pub(crate) fn flow_artifact_from_filtered(
     nodes: &[&Node],
@@ -541,19 +958,50 @@ pub(crate) fn flow_artifact_from_filtered(
         edges,
         flows,
         0,
-        (mode, rejected, None),
+        (mode, rejected, None, Beside::default()),
         None,
     )
     .expect("unbounded flow dossier renderer")
+    .artifact
 }
 
-pub(crate) fn bundle_from_filtered(
+/// The complete bundle, or the reason its citations do not resolve
+/// (ADR-0058 decision 6): nothing is returned for an export whose own
+/// assertions cite an id without a row or share an id between two facts.
+pub(crate) fn try_bundle_from_filtered(
     nodes: &[&Node],
     edges: &[&Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
-) -> SpecBundle {
+    beside: Beside<'_>,
+) -> Result<SpecBundle, FactIndexError> {
+    bundle_with_citation_ids(nodes, edges, flows, (mode, rejected, beside), citation_id)
+}
+
+fn cite(
+    citations: &mut Option<fact_index::Collector>,
+    artifact_id: &str,
+    assertions: &[SpecAssertion],
+    subjects: &[fact_index::Subject],
+) -> Result<(), FactIndexError> {
+    citations
+        .as_mut()
+        .expect("every citing artifact precedes the index")
+        .cite(artifact_id, assertions, subjects)
+}
+
+/// [`try_bundle_from_filtered`] with the id function named, so a test can
+/// force two facts onto one id.
+pub(super) fn bundle_with_citation_ids(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    (mode, rejected, beside): (ExportMode, &BTreeSet<String>, Beside<'_>),
+    id_of: fn(&core_graph::FactKey) -> String,
+) -> Result<SpecBundle, FactIndexError> {
+    let mut citations = Some(fact_index::Collector::new(mode, id_of));
+    let mut finished: Option<FactIndex> = None;
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
     let drift_count = nodes.iter().filter(|n| is_drift_node(n)).count();
     let security_count = nodes
@@ -565,6 +1013,17 @@ pub(crate) fn bundle_from_filtered(
     let mut artifacts = Vec::with_capacity(ARTIFACTS.len());
     let mut pending_index: Option<(&str, String)> = None;
     for a in ARTIFACTS {
+        if fact_index::is_index(a.id) {
+            // Every citing artifact precedes the index in ARTIFACTS.
+            if let Some(collector) = citations.take() {
+                finished = Some(collector.finish()?);
+            }
+            artifacts.push(
+                index_artifact(a, finished.as_ref().expect("finished index"), None)
+                    .expect("unbounded native artifact"),
+            );
+            continue;
+        }
         if let Some((id, content)) = pending_index.take() {
             assert_eq!(a.id, id, "paired index follows its Markdown artifact");
             artifacts.push(identified_artifact(
@@ -581,12 +1040,12 @@ pub(crate) fn bundle_from_filtered(
             "us-tm" => Some((
                 "us-tm-index",
                 registers::matrix_selected(edges, mode, true, true, None)
-                    .map(|o| (o.markdown, o.index, o.assertions)),
+                    .map(|o| (o.markdown, o.index, o.assertions, o.subjects)),
             )),
             "gap-register" => Some((
                 "gap-register-index",
                 registers::gap_selected(nodes, edges, flows, gap_count, mode, true, true, None)
-                    .map(|o| (o.markdown, o.index, o.assertions)),
+                    .map(|o| (o.markdown, o.index, o.assertions, o.subjects)),
             )),
             "rule-evidence" => Some((
                 "rule-evidence-index",
@@ -600,13 +1059,15 @@ pub(crate) fn bundle_from_filtered(
                     },
                     None,
                 )
-                .map(|o| (o.markdown, o.index, o.assertions))
+                .map(|o| (o.markdown, o.index, o.assertions, o.subjects))
                 .map_err(|_| registers::RegisterLimit),
             )),
             _ => None,
         };
         if let Some((index_id, output)) = pair {
-            let (markdown, index, assertions) = output.expect("unbounded native artifact");
+            let (markdown, index, assertions, subjects) =
+                output.expect("unbounded native artifact");
+            cite(&mut citations, a.id, &assertions, &subjects)?;
             artifacts.push(identified_artifact(
                 a.id,
                 a.file,
@@ -618,29 +1079,36 @@ pub(crate) fn bundle_from_filtered(
             pending_index = Some((index_id, index.expect("paired index content")));
             continue;
         }
-        artifacts.push(
-            produce(
-                a,
-                nodes,
-                edges,
-                flows,
-                gap_count,
-                (mode, rejected, None),
-                None,
-            )
-            .expect("unbounded native artifact"),
-        );
+        let cited = produce(
+            a,
+            nodes,
+            edges,
+            flows,
+            gap_count,
+            (mode, rejected, None, beside),
+            None,
+        )
+        .expect("unbounded native artifact");
+        cite(
+            &mut citations,
+            a.id,
+            &cited.artifact.assertions,
+            &cited.subjects,
+        )?;
+        artifacts.push(cited.artifact);
     }
     assert!(pending_index.is_none(), "paired index artifact missing");
     let assertion_count = artifacts.iter().map(|a| a.assertions.len()).sum();
-    SpecBundle {
+    Ok(SpecBundle {
         mode,
         artifacts,
         assertion_count,
         gap_count,
         drift_count,
         security_count,
-    }
+        graph_basis: None,
+        curated_basis: None,
+    })
 }
 
 #[cfg(test)]
@@ -683,7 +1151,13 @@ pub(super) fn compile_stories_with_flows_and_security(
         flows,
         mode,
         rejected,
-        (&["user-stories"], limits, security, Some(stories)),
+        (
+            &["user-stories"],
+            limits,
+            security,
+            Some(stories),
+            Supplied::default(),
+        ),
     )
     .expect("official artifact id")
     .remove(0)

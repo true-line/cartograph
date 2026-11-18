@@ -62,14 +62,15 @@ fn inventory_reports_each_producer_input_and_capability_with_a_scoped_reason() {
             ("t0.iac-terraform", count(2)),
             (crate::toolchain::TOOLCHAIN_EXTRACTOR_ID, count(1)),
         ],
-        plugins: vec![(
-            "plugin.zig@1".into(),
-            ProducerCount {
+        plugins: vec![PluginRead {
+            id: "plugin.zig@1".into(),
+            count: ProducerCount {
                 files: 2,
                 nodes: 5,
                 edges: 3,
             },
-        )],
+            refused: Vec::new(),
+        }],
         observations: vec![
             observation("t1.terraform-state", "state_json", &[], 5),
             observation("t1.pulumi-deployment", "pulumi_json", &[], 0),
@@ -338,10 +339,17 @@ fn receipt_omissions_are_a_named_limitation() {
             .reason
             .starts_with("5 TypeScript rule facts in 2 files")
     );
-    // Forgetting sources frees no receipt rows yet (#725), so the reason
-    // offers no remediation that cannot work.
+    // AC-0839: forget and supersession reclaim unpinned receipts (AC-0838),
+    // so the reason points at both as the way to free space (#725).
     let store = &both.unsupported[1].reason;
-    assert!(store.contains("cannot yet reclaim space") && !store.contains("forget"));
+    assert!(store.starts_with("5 receipts in 2 files did not fit the retained receipt store"));
+    assert!(store.contains("forgetting a retained source"));
+    assert!(store.contains("superseded receipts are reclaimed"));
+    assert!(store.contains("receipts that nothing pins"));
+    assert!(store.contains("a recovery of an unchanged source frees nothing"));
+    assert!(store.contains("share limit"));
+    assert!(!store.contains("cannot yet reclaim"));
+    assert!(store.ends_with("a tool limitation, not a system gap"));
 }
 
 // AC-0148 (#1229): symlinks the captured selection skipped are one named,
@@ -457,4 +465,341 @@ fn commit_note_round_trips_and_none_serializes_byte_identically() {
     let note = bounded.commit_note.unwrap();
     assert!(note.len() <= MAX_COMMIT_NOTE_BYTES);
     assert_eq!(note.len(), MAX_COMMIT_NOTE_BYTES - 1);
+}
+
+fn plugin_facts(refused: Vec<(String, RefusalReason)>) -> CoverageFacts<'static> {
+    CoverageFacts {
+        repo: "acme/api",
+        commit: "0123abc",
+        deterministic: vec![("t0.adapter-ts", count(1))],
+        plugins: vec![PluginRead {
+            id: "plugin.zig@0123456789ab".into(),
+            count: ProducerCount {
+                files: 2,
+                nodes: 5,
+                edges: 3,
+            },
+            refused,
+        }],
+        ..CoverageFacts::default()
+    }
+}
+
+// AC-0658: the inventory names the plugin, each file it was refused on and
+// the reason class, in path order whatever order the refusals arrive in. The
+// refused files are not counted as read, and each class is a not-covered
+// entry, so the inventory is limited.
+#[test]
+fn plugin_refusals_are_recorded_by_class_and_limit_the_inventory() {
+    let refused = vec![
+        ("src/z.zig".to_string(), RefusalReason::BoundExceeded),
+        ("src/a.zig".to_string(), RefusalReason::MalformedFact),
+        ("lib/m.zig".to_string(), RefusalReason::MalformedFact),
+        ("src/g.zig".to_string(), RefusalReason::GuestError),
+    ];
+    let coverage = RepoCoverage::from_facts(&plugin_facts(refused.clone()));
+    let row = coverage
+        .producers
+        .iter()
+        .find(|producer| producer.id == "plugin.zig@0123456789ab")
+        .unwrap();
+    assert_eq!(row.state, ProducerState::Ran);
+    assert_eq!(row.files, 2, "refused files are not counted as read");
+    assert_eq!(
+        row.stopping_reason,
+        "read 2 of the 6 files its extensions claim in acme/api@0123abc; the host refused its \
+         extraction of 4 (2 malformed fact, 1 guest error, 1 bound exceeded), and no fact from \
+         those files by this plugin joined the graph"
+    );
+    let refusals = row.refusals.as_ref().expect("refusals recorded");
+    assert_eq!(
+        (
+            refusals.malformed_fact,
+            refusals.guest_error,
+            refusals.bound_exceeded,
+            refusals.omitted
+        ),
+        (2, 1, 1, 0)
+    );
+    let listed: Vec<(&str, RefusalReason)> = refusals
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.reason))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("lib/m.zig", RefusalReason::MalformedFact),
+            ("src/a.zig", RefusalReason::MalformedFact),
+            ("src/g.zig", RefusalReason::GuestError),
+            ("src/z.zig", RefusalReason::BoundExceeded),
+        ]
+    );
+
+    assert!(coverage.limited);
+    let entries: Vec<(&str, u64, &str)> = coverage
+        .unsupported
+        .iter()
+        .map(|entry| {
+            (
+                entry.capability.as_str(),
+                entry.occurrences,
+                entry.first_site.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            ("plugin-malformed-fact", 2, "lib/m.zig"),
+            ("plugin-guest-error", 1, "src/g.zig"),
+            ("plugin-bound-exceeded", 1, "src/z.zig"),
+        ]
+    );
+    assert_eq!(
+        coverage.unsupported[0].reason,
+        "2 file(s) were refused for a gated plugin because the plugin emitted a fact the host \
+         does not accept; no fact from them by that plugin joined the graph, so that plugin \
+         does not cover them: a plugin failure, not a system gap"
+    );
+
+    // The record is a function of the refusals alone: another arrival order
+    // gives the same bytes, and nothing in it is the host's error text.
+    let mut reversed = refused;
+    reversed.reverse();
+    assert_eq!(
+        serde_json::to_string(&coverage).unwrap(),
+        serde_json::to_string(&RepoCoverage::from_facts(&plugin_facts(reversed))).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(row).unwrap()["refusals"],
+        serde_json::json!({
+            "malformed_fact": 2,
+            "guest_error": 1,
+            "bound_exceeded": 1,
+            "files": [
+                {"path": "lib/m.zig", "reason": "malformed_fact"},
+                {"path": "src/a.zig", "reason": "malformed_fact"},
+                {"path": "src/g.zig", "reason": "guest_error"},
+                {"path": "src/z.zig", "reason": "bound_exceeded"}
+            ],
+            "omitted": 0
+        })
+    );
+
+    // The preflight report replaces the not-covered list; the refusals stay.
+    let report = PreflightReport {
+        unsupported: vec![finding("uncovered-language", "lib/a.rb", 1, Some("Ruby"))],
+        ..PreflightReport::default()
+    };
+    let reconciled = coverage.with_unsupported(&report);
+    let capabilities: Vec<&str> = reconciled
+        .unsupported
+        .iter()
+        .map(|entry| entry.capability.as_str())
+        .collect();
+    assert_eq!(
+        capabilities,
+        [
+            "Ruby",
+            "plugin-malformed-fact",
+            "plugin-guest-error",
+            "plugin-bound-exceeded"
+        ]
+    );
+    assert!(
+        reconciled
+            .with_unsupported(&PreflightReport::default())
+            .limited,
+        "a refusal alone limits the inventory"
+    );
+}
+
+// AC-0658: the listed paths are bounded per plugin by count and by bytes;
+// the counts by class stay exact and the rest is counted as omitted.
+#[test]
+fn plugin_refusal_listing_is_bounded_and_counts_the_rest() {
+    let many: Vec<(String, RefusalReason)> = (0..MAX_REFUSED_FILES_LISTED + 44)
+        .map(|index| (format!("src/{index:04}.zig"), RefusalReason::GuestError))
+        .collect();
+    let coverage = RepoCoverage::from_facts(&plugin_facts(many));
+    let refusals = coverage.producers.last().unwrap().refusals.clone().unwrap();
+    assert_eq!(refusals.guest_error, MAX_REFUSED_FILES_LISTED as u64 + 44);
+    assert_eq!(refusals.files.len(), MAX_REFUSED_FILES_LISTED);
+    assert_eq!(refusals.omitted, 44);
+    assert_eq!(refusals.files[0].path, "src/0000.zig");
+    assert_eq!(refusals.files.last().unwrap().path, "src/0255.zig");
+
+    let long: Vec<(String, RefusalReason)> = (0..5)
+        .map(|index| {
+            (
+                format!("{index}/{}", "d".repeat(MAX_REFUSED_PATH_BYTES / 4)),
+                RefusalReason::MalformedFact,
+            )
+        })
+        .collect();
+    let coverage = RepoCoverage::from_facts(&plugin_facts(long));
+    let refusals = coverage.producers.last().unwrap().refusals.clone().unwrap();
+    assert_eq!(refusals.malformed_fact, 5);
+    assert_eq!(refusals.files.len(), 3);
+    assert_eq!(refusals.omitted, 2);
+    assert!(
+        refusals
+            .files
+            .iter()
+            .map(|file| file.path.len())
+            .sum::<usize>()
+            <= MAX_REFUSED_PATH_BYTES
+    );
+    assert_eq!(coverage.unsupported[0].occurrences, 5);
+}
+
+// AC-0658: an ingest with no refusal records exactly the inventory it did
+// before the refusal record existed, byte for byte, so its inventory hash is
+// unchanged; and a stored inventory without the field still reads.
+#[test]
+fn inventory_without_refusals_keeps_its_bytes_and_old_inventories_still_read() {
+    #[derive(Serialize)]
+    struct LegacyProducer<'a> {
+        id: &'a str,
+        kind: ProducerKind,
+        covers: &'a str,
+        state: ProducerState,
+        files: u64,
+        nodes: u64,
+        edges: u64,
+        inputs: &'a [String],
+        stopping_reason: &'a str,
+    }
+    #[derive(Serialize)]
+    struct LegacyRepoCoverage<'a> {
+        inventory: &'a str,
+        repo: &'a str,
+        commit: &'a str,
+        layer_hints: &'a [String],
+        producers: Vec<LegacyProducer<'a>>,
+        missing_inputs: &'a [MissingInput],
+        unsupported: &'a [UnsupportedCapability],
+        limited: bool,
+    }
+
+    let coverage = RepoCoverage::from_facts(&plugin_facts(Vec::new()));
+    assert!(coverage.producers.iter().all(|p| p.refusals.is_none()));
+    let legacy = LegacyRepoCoverage {
+        inventory: &coverage.inventory,
+        repo: &coverage.repo,
+        commit: &coverage.commit,
+        layer_hints: &coverage.layer_hints,
+        producers: coverage
+            .producers
+            .iter()
+            .map(|producer| LegacyProducer {
+                id: &producer.id,
+                kind: producer.kind,
+                covers: &producer.covers,
+                state: producer.state,
+                files: producer.files,
+                nodes: producer.nodes,
+                edges: producer.edges,
+                inputs: &producer.inputs,
+                stopping_reason: &producer.stopping_reason,
+            })
+            .collect(),
+        missing_inputs: &coverage.missing_inputs,
+        unsupported: &coverage.unsupported,
+        limited: coverage.limited,
+    };
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    let bytes = serde_json::to_vec(&coverage).unwrap();
+    assert_eq!(bytes, legacy_bytes);
+    assert_eq!(
+        core_prov::content_hash(&bytes),
+        core_prov::content_hash(&legacy_bytes)
+    );
+    // The plugin row itself, as it was recorded before this change.
+    assert_eq!(
+        serde_json::to_string(coverage.producers.last().unwrap()).unwrap(),
+        r#"{"id":"plugin.zig@0123456789ab","kind":"deterministic","covers":"gated plugin","state":"ran","files":2,"nodes":5,"edges":3,"inputs":[],"stopping_reason":"completed over the files its extensions claim in acme/api@0123abc"}"#
+    );
+    assert!(!coverage.limited);
+    assert!(coverage.unsupported.is_empty());
+
+    let read: RepoCoverage = serde_json::from_slice(&legacy_bytes).unwrap();
+    assert_eq!(read, coverage);
+}
+
+// AC-0685 (#1847): the found ADR and API contract readers are catalogued
+// rows, and an ADR file too large or not UTF-8 is a named, counted
+// limitation on the reader's row and in the not-covered list. (T-0685)
+#[test]
+fn found_adr_and_contract_readers_are_catalogued_and_unread_adrs_named() {
+    let facts = CoverageFacts {
+        repo: "acme/api",
+        commit: "0123abc",
+        commit_note: None,
+        layer_hints: &[],
+        deterministic: vec![(FOUND_ADR_PRODUCER_ID, count(2))],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let full = RepoCoverage::from_facts(&facts).with_unsupported(&PreflightReport::default());
+    assert_eq!(
+        state_of(&full, FOUND_ADR_PRODUCER_ID),
+        (
+            &ProducerState::Ran,
+            "completed over 2 files of acme/api@0123abc"
+        )
+    );
+    assert_eq!(
+        state_of(&full, API_CONTRACT_PRODUCER_ID),
+        (
+            &ProducerState::NotApplicable,
+            "no declared API reference files in acme/api@0123abc"
+        )
+    );
+    assert!(!full.limited);
+    assert_eq!(full.clone().with_unread_adrs(&[], &[]), full);
+
+    let limited = full.with_unread_adrs(
+        &["docs/adr/huge.md".to_string()],
+        &["docs/adr/a.md".to_string(), "docs/adr/b.md".to_string()],
+    );
+    assert!(limited.limited);
+    assert_eq!(
+        state_of(&limited, FOUND_ADR_PRODUCER_ID),
+        (
+            &ProducerState::Ran,
+            "read 2 of the 5 ADR and RFC files in acme/api@0123abc; 1 too large and 2 not \
+             UTF-8 were not read"
+        )
+    );
+    let entries: Vec<_> = limited
+        .unsupported
+        .iter()
+        .map(|entry| {
+            (
+                entry.capability.as_str(),
+                entry.occurrences,
+                entry.first_site.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            (ADR_TOO_LARGE_CAPABILITY, 1, "docs/adr/huge.md"),
+            (ADR_NOT_UTF8_CAPABILITY, 2, "docs/adr/a.md"),
+        ]
+    );
+
+    // Only skipped files: the row still says the reader ran and read none.
+    let none = RepoCoverage::from_facts(&CoverageFacts {
+        deterministic: Vec::new(),
+        ..facts
+    })
+    .with_unread_adrs(&[], &["docs/adr/a.md".to_string()]);
+    assert_eq!(
+        state_of(&none, FOUND_ADR_PRODUCER_ID).0,
+        &ProducerState::Ran
+    );
 }

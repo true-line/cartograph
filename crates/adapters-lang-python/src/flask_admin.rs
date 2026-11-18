@@ -33,7 +33,11 @@
 //! when [`crate::flask_admin_access`] proves the view's `is_accessible`
 //! requires login, else `unknown`: the view's `is_accessible` runs on every
 //! request, named by the class defining it (with why it is not proven), or
-//! `flask_admin_default_allows_all` when no repository class does.
+//! `flask_admin_default_allows_all` when no repository class does. In that
+//! last case an exposed method whose own body answers an anonymous request
+//! first ([`access::body_check`], #1320) is `required` on that basis, and
+//! one that reads the login check in an unproven shape names the function
+//! holding it (`in_body_auth_check:<function>`).
 //! Routes a library class generates (a model view's list/create/edit views,
 //! the default index page) are not in source and are one Gap per view. A
 //! non-literal argument, an unrecovered or unmodelled base, a repository
@@ -137,6 +141,8 @@ struct Exposed {
     evidence: EvidenceRef,
     inputs: Option<serde_json::Value>,
     responses: Option<serde_json::Value>,
+    /// The login check the method's own body makes (#1320).
+    body: access::BodyCheck,
 }
 
 /// An `Admin(…)` constructor or an `init_app(…)` call on its instance.
@@ -210,6 +216,7 @@ pub(crate) struct Expose {
     method: String,
     url: Option<String>,
     methods: Option<Vec<String>>,
+    body: access::BodyCheck,
 }
 
 impl Expose {
@@ -230,6 +237,7 @@ impl Expose {
             evidence,
             inputs,
             responses,
+            body: self.body,
         });
     }
 }
@@ -256,9 +264,10 @@ pub(crate) fn expose(
     {
         return None;
     }
-    let class = function
+    let decorated = function
         .parent()
-        .filter(|parent| parent.kind() == "decorated_definition")?
+        .filter(|parent| parent.kind() == "decorated_definition")?;
+    let class = decorated
         .parent()
         .filter(|block| block.kind() == "block")?
         .parent()
@@ -278,14 +287,13 @@ pub(crate) fn expose(
         }
         _ => None,
     };
+    let class_name = cx.text(&class.child_by_field_name("name")?);
     Some(Expose {
-        class: (
-            cx.path.to_string(),
-            cx.text(&class.child_by_field_name("name")?).to_string(),
-        ),
+        class: (cx.path.to_string(), class_name.to_string()),
         method: cx.text(&function.child_by_field_name("name")?).to_string(),
         url,
         methods,
+        body: access::body_check(cx, root, function, decorated, class_name, bindings),
     })
 }
 
@@ -1031,20 +1039,36 @@ fn login(
 enum Auth {
     Required {
         guard: String,
+        basis: &'static str,
+        assumptions: Vec<&'static str>,
         evidence: Vec<EvidenceRef>,
     },
     Unknown(Vec<String>),
 }
 
+/// `is_accessible` is proven to require login.
+const BASIS_ACCESS: &str = "flask_admin_is_accessible_requires_login";
+/// The view's own body answers an anonymous request first (#1320).
+const BASIS_BODY: &str = "flask_view_body_denies_anonymous";
+const ASSUME_ANONYMOUS: &str = "anonymous_user_not_named_by_computed_or_escaped_string";
+/// A helper's `redirect(…)` is returned by `x or …` only while the response
+/// object is truthy, as Werkzeug's is.
+const ASSUME_TRUTHY: &str = "redirect_response_is_truthy";
+
 impl Auth {
     fn props(&self, handler: &str) -> serde_json::Value {
         match self {
-            Auth::Required { guard, evidence } => serde_json::json!({
+            Auth::Required {
+                guard,
+                basis,
+                assumptions,
+                evidence,
+            } => serde_json::json!({
                 "state": "required",
                 "authenticated": true,
                 "guards": [guard],
-                "basis": ["flask_admin_is_accessible_requires_login"],
-                "assumptions": ["anonymous_user_not_named_by_computed_or_escaped_string"],
+                "basis": [basis],
+                "assumptions": assumptions,
                 "prov": prov_from(
                     bounded(evidence.clone()),
                     ConfidenceTier::InferredStrong,
@@ -1052,6 +1076,59 @@ impl Auth {
                 ),
             }),
             Auth::Unknown(reasons) => serde_json::json!({ "state": "unknown", "reasons": reasons }),
+        }
+    }
+}
+
+/// The `auth` an exposed method's own body gives it when no class in its
+/// chain defines `is_accessible`: `required` when the body's check is
+/// proven and every condition outside the view holds, else `unknown` naming
+/// the function that holds the check. `None` when the body reads no check.
+fn body_auth(
+    repo: &str,
+    exposed: &Exposed,
+    login: &Result<(Vec<EvidenceRef>, Key), String>,
+    global: &Result<Vec<EvidenceRef>, String>,
+) -> Option<Auth> {
+    let open = "flask_admin_default_allows_all";
+    let (function, proof) = match &exposed.body {
+        access::BodyCheck::Absent => return None,
+        access::BodyCheck::Seen(function) => (function, None),
+        access::BodyCheck::Proven {
+            function,
+            helper,
+            evidence,
+        } => (function, Some((*helper, evidence))),
+    };
+    let mut reasons = vec![open.to_string(), format!("in_body_auth_check:{function}")];
+    let Some((helper, spans)) = proof else {
+        return Some(Auth::Unknown(reasons));
+    };
+    // A `_handle_view` or `_run_view` override, or a hook outside a view
+    // class, may run something other than the method.
+    let chain = match login {
+        Err(reason) if reason == open => Ok(()),
+        Err(reason) => Err(reason.clone()),
+        Ok(_) => Ok(()),
+    };
+    match chain.and(global.as_ref().map_err(Clone::clone)) {
+        Ok(pinned) => {
+            let mut evidence = spans.clone();
+            evidence.extend(pinned.iter().cloned());
+            let mut assumptions = vec![ASSUME_ANONYMOUS];
+            if helper {
+                assumptions.push(ASSUME_TRUTHY);
+            }
+            Some(Auth::Required {
+                guard: symbol_id(repo, &exposed.class.0, function),
+                basis: BASIS_BODY,
+                assumptions,
+                evidence,
+            })
+        }
+        Err(reason) => {
+            reasons.push(reason);
+            Some(Auth::Unknown(reasons))
         }
     }
 }
@@ -1414,6 +1491,8 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                     evidence.extend(pinned.iter().cloned());
                     Auth::Required {
                         guard: symbol_id(repo, &guard.0, &guard.1),
+                        basis: BASIS_ACCESS,
+                        assumptions: vec![ASSUME_ANONYMOUS],
                         evidence,
                     }
                 }
@@ -1442,6 +1521,13 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                 };
                 let path = rule_path(&prefix, rule);
                 let name = format!("{endpoint}.{}", exposed.method);
+                // #1320: no `is_accessible` guards the view, and its own
+                // body may still answer an anonymous request first.
+                let own = chain
+                    .access
+                    .is_none()
+                    .then(|| body_auth(repo, exposed, &chain.login, &global))
+                    .flatten();
                 let mut evidence = vec![exposed.evidence.clone(), view.evidence.clone()];
                 evidence.extend(site_evidence.iter().cloned());
                 for method in methods {
@@ -1466,7 +1552,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &st
                         Some(&name),
                     );
                     if let Some(node) = emit.out.nodes.last_mut() {
-                        node.props["auth"] = auth.props(&exposed.handler);
+                        node.props["auth"] = own.as_ref().unwrap_or(&auth).props(&exposed.handler);
                     }
                 }
             }

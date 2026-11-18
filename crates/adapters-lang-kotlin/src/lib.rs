@@ -83,6 +83,10 @@ pub struct Extraction {
     /// Top-level type names a product file declares, which can obscure a
     /// star import (#1288).
     shadow_names: Vec<ShadowName>,
+    /// `System.getenv` sites awaiting the repo-wide `System` check (#1789).
+    pending_config: Vec<config_read::Pending>,
+    /// Some file declares or imports something named `System`.
+    system_rebound: bool,
 }
 
 /// A top-level class, interface, object, enum, annotation class or type
@@ -1514,6 +1518,16 @@ pub fn extract_source(
             &mut out.edges,
         );
     }
+    // Within one file only its own package is known to be declared here.
+    let packages = out.packages.clone();
+    config_read::resolve(
+        id,
+        std::mem::take(&mut out.pending_config),
+        out.system_rebound,
+        |package| packages.iter().any(|declared| declared == package),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     Ok(out)
 }
 
@@ -1980,6 +1994,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             }
         }
     }
+
+    // Configuration reads (#1789, AC-0597) wait for the repo-wide check.
+    let (config_sites, system_rebound) = config_read::sites(&cx, root, &functions, &imports);
+    out.pending_config.extend(config_sites);
+    out.system_rebound |= system_rebound;
 
     // Retrofit client calls (#737): interface methods now, base URL at the
     // directory join.
@@ -2487,6 +2506,8 @@ pub fn extract_dir_incremental_with_progress(
             out.hilt_binds.extend(extraction.hilt_binds);
             out.pending_endpoints.extend(extraction.pending_endpoints);
             out.shadow_names.extend(extraction.shadow_names);
+            out.pending_config.extend(extraction.pending_config);
+            out.system_rebound |= extraction.system_rebound;
             Ok(())
         },
     );
@@ -2541,7 +2562,9 @@ pub fn extract_dir_incremental_with_progress(
     // fails closed to a Gap. In a mixed JVM tree a product Java type of the
     // package obscures it too; Java sources are read only when some route
     // waits on the check.
-    let java_types: BTreeSet<String> = if out.pending_endpoints.is_empty() {
+    let java_types: BTreeSet<String> = if out.pending_endpoints.is_empty()
+        && out.pending_config.is_empty()
+    {
         BTreeSet::new()
     } else {
         adapters_lang_java::product_top_level_types(root)
@@ -2570,6 +2593,20 @@ pub fn extract_dir_incremental_with_progress(
     let mut repo_packages: BTreeSet<String> = out.packages.iter().cloned().collect();
     let foreign = foreign_packages(root, &["java"])?;
     repo_packages.extend(foreign.packages);
+    // Configuration reads (#1789): a Kotlin or product Java `System` in the
+    // repository, or a star import of a package it does not declare, may
+    // obscure `java.lang.System`.
+    let java_system = java_types
+        .iter()
+        .any(|fqn| fqn.rsplit('.').next() == Some("System"));
+    config_read::resolve(
+        id,
+        std::mem::take(&mut out.pending_config),
+        out.system_rebound || java_system,
+        |package| repo_packages.contains(package),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     let known = out
         .nodes
         .iter()
@@ -2752,6 +2789,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 }
 
 mod apache_http;
+mod config_read;
 mod hilt_binds;
 mod ktor_client;
 pub mod navigation3;

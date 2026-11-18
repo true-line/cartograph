@@ -93,6 +93,9 @@ pub(super) fn plan(
             || node.id == gap_id
             || !in_context.contains(node.id.as_str())
             || spec::is_gap_node(node)
+            // A configuration read (ADR-0059) is never the endpoint of the
+            // edge a gap needs, so it is no candidate and takes no slot.
+            || node.label == adapters_fw::config_read::CONFIG_READ
         {
             continue;
         }
@@ -118,4 +121,110 @@ pub(super) fn plan(
             .map_err(|_: core_graph::GraphError| "Task slot is invalid.")?,
         unplanned_candidates,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn prov(confidence: &str, path: &str) -> serde_json::Value {
+        json!({
+            "tier": "Deterministic",
+            "confidence_tier": confidence,
+            "evidence": [{
+                "repo": "local/fixture",
+                "path": path,
+                "byte_start": 0,
+                "byte_end": 24,
+                "commit_sha": "workdir",
+            }],
+            "extractor_id": "t0.adapter-ts",
+            "content_hash": "a".repeat(64),
+        })
+    }
+
+    fn node(id: &str, label: &str, confidence: &str) -> Node {
+        Node {
+            id: id.into(),
+            label: label.into(),
+            props: json!({"name": id, "prov": prov(confidence, "src/a.ts")}),
+        }
+    }
+
+    fn edge(src: &str, dst: &str, label: &str) -> Edge {
+        Edge {
+            src: src.into(),
+            dst: dst.into(),
+            label: label.into(),
+            props: json!({"prov": prov("Confirmed", "src/a.ts")}),
+        }
+    }
+
+    fn candidate_ids(plan: &TaskPlan) -> Vec<&str> {
+        plan.requests
+            .iter()
+            .filter_map(|request| request.candidate.as_ref())
+            .map(|candidate| candidate.node_id.as_str())
+            .collect()
+    }
+
+    // AC-0597 (#1789, ADR-0059): a gap whose source symbol also reads
+    // configuration gets its call neighbour as a candidate and never the
+    // `ConfigRead` node, which sorts first by id and would otherwise take a
+    // slot from a real target.
+    #[test]
+    fn config_reads_are_never_gap_candidates() {
+        let nodes = vec![
+            node(
+                "cfgread:local/fixture@src/a.ts:env:API_URL",
+                "ConfigRead",
+                "Confirmed",
+            ),
+            node("gap:call", "Gap", "Gap"),
+            node("sym:caller", "Symbol", "Confirmed"),
+            node("sym:helper", "Symbol", "Confirmed"),
+        ];
+        let edges = vec![
+            edge("sym:caller", "gap:call", "CALLS"),
+            edge("sym:caller", "sym:helper", "CALLS"),
+            edge(
+                "sym:caller",
+                "cfgread:local/fixture@src/a.ts:env:API_URL",
+                "READS_CONFIG",
+            ),
+        ];
+        let plan = plan(&nodes, &edges, "gap:call", "escalate:test").unwrap();
+        assert_eq!(plan.source_id, "sym:caller");
+        assert_eq!(candidate_ids(&plan), ["sym:helper"]);
+        assert_eq!(plan.unplanned_candidates, 0);
+    }
+
+    // AC-0597: past the request limit only real candidates are counted as
+    // unplanned; configuration reads are not candidates at all.
+    #[test]
+    fn config_reads_are_not_counted_as_unplanned_candidates() {
+        let mut nodes = vec![
+            node("gap:call", "Gap", "Gap"),
+            node("sym:caller", "Symbol", "Confirmed"),
+        ];
+        let mut edges = vec![edge("sym:caller", "gap:call", "CALLS")];
+        for index in 0..MAX_REQUESTS {
+            let id = format!("cfgread:local/fixture@src/a.ts:env:KEY_{index:03}");
+            nodes.push(node(&id, "ConfigRead", "Confirmed"));
+            edges.push(edge("sym:caller", &id, "READS_CONFIG"));
+        }
+        // Two requests are the source and the gap; three more overflow.
+        for index in 0..MAX_REQUESTS + 1 {
+            let id = format!("sym:helper_{index:03}");
+            nodes.push(node(&id, "Symbol", "Confirmed"));
+            edges.push(edge("sym:caller", &id, "CALLS"));
+        }
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        let plan = plan(&nodes, &edges, "gap:call", "escalate:test").unwrap();
+        let candidates = candidate_ids(&plan);
+        assert_eq!(candidates.len(), MAX_REQUESTS - 2);
+        assert!(candidates.iter().all(|id| id.starts_with("sym:helper_")));
+        assert_eq!(plan.unplanned_candidates, 3);
+    }
 }

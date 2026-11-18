@@ -37,6 +37,15 @@ pub(crate) struct ConnectionCheck {
     pub bytes_sent: u64,
 }
 
+/// The pinned model-list URL a provider's connection check asks. Each key
+/// goes only to its own provider (#1709).
+pub(crate) fn check_url(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::Anthropic => llm::anthropic::CONNECTION_CHECK_URL,
+        ProviderId::OpenAi => llm::openai::CONNECTION_CHECK_URL,
+    }
+}
+
 /// Check the configured key against `endpoint`. `record` writes the egress
 /// record and must succeed before anything is sent (fail closed).
 pub(crate) fn check_connection_with(
@@ -53,11 +62,18 @@ pub(crate) fn check_connection_with(
             bytes_sent: 0,
         });
     };
-    let bytes = llm::anthropic::connection_check_bytes(endpoint, &key);
+    let bytes = match provider {
+        ProviderId::Anthropic => llm::anthropic::connection_check_bytes(endpoint, &key),
+        ProviderId::OpenAi => llm::openai::connection_check_bytes(endpoint, &key),
+    };
     if !record(&check_label(provider), bytes) {
         return Err("the egress record could not be written, so nothing was sent".into());
     }
-    let outcome = match llm::anthropic::check_connection(endpoint, &key, timeout) {
+    let outcome = match provider {
+        ProviderId::Anthropic => llm::anthropic::check_connection(endpoint, &key, timeout),
+        ProviderId::OpenAi => llm::openai::check_connection(endpoint, &key, timeout),
+    };
+    let outcome = match outcome {
         ConnectionOutcome::Accepted => "accepted",
         ConnectionOutcome::Refused => "refused",
         ConnectionOutcome::Unreachable => "unreachable",
@@ -215,6 +231,54 @@ mod tests {
         .unwrap();
         server.join().unwrap();
         assert_eq!(refused.outcome, "refused");
+    }
+
+    // AC-0752 (#1709): an OpenAI check sends the OpenAI key as a bearer
+    // header, only to the OpenAI endpoint, under its own egress label.
+    #[test]
+    fn an_openai_check_sends_its_own_key_to_its_own_endpoint() {
+        assert_eq!(
+            check_url(ProviderId::OpenAi),
+            llm::openai::CONNECTION_CHECK_URL
+        );
+        assert_eq!(
+            check_url(ProviderId::Anthropic),
+            llm::anthropic::CONNECTION_CHECK_URL
+        );
+        let credentials = crate::provider_credentials::ProviderCredentials::new(
+            Box::new(crate::provider_credentials::MemoryStore::default()),
+            Box::new(|name| match name {
+                "OPENAI_API_KEY" => Some("sk-proj-openai".to_owned()),
+                "ANTHROPIC_API_KEY" => Some(KEY.to_owned()),
+                _ => None,
+            }),
+        );
+        let (endpoint, server) = mock("200 OK");
+        let mut recorded = Vec::new();
+        let check = check_connection_with(
+            &credentials,
+            ProviderId::OpenAi,
+            &endpoint,
+            Duration::from_secs(5),
+            |label, bytes| {
+                recorded.push((label.to_owned(), bytes));
+                true
+            },
+        )
+        .unwrap();
+        let request = server.join().unwrap().to_ascii_lowercase();
+        assert_eq!((check.provider, check.outcome), ("openai", "accepted"));
+        assert_eq!(
+            recorded,
+            [("openai:connection-check".to_owned(), check.bytes_sent)]
+        );
+        assert!(request.contains("authorization: bearer sk-proj-openai"));
+        assert!(
+            !request.contains(&KEY.to_ascii_lowercase()),
+            "no Anthropic key"
+        );
+        assert!(!request.contains("x-api-key"));
+        assert!(!serde_json::to_string(&check).unwrap().contains("sk-proj"));
     }
 
     // AC-0590: with no key nothing is sent or recorded; when the record

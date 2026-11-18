@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { displayName, filterAtlasGraph } from './AtlasCanvas';
+import {
+  baseLayers,
+  displayName,
+  filterAtlasGraph,
+  searchAtlasEntities,
+  UNNAMED_CONFIG_KEY,
+} from './AtlasCanvas';
 import type { AtlasSnapshot, GraphNode } from '../store';
 
 function node(id: string, label: string, props: GraphNode['props'] = {}): GraphNode {
@@ -52,6 +58,32 @@ describe('displayName', () => {
   });
 });
 
+// AC-0651 (#1821): a configuration read is filed under Server code with the
+// symbol that reads it, and is labelled with its key, never its raw id. A
+// read whose key the source does not state as a literal says so.
+describe('configuration reads', () => {
+  const named = node('cfgread:r@src/db.ts:env:DATABASE_URL', 'ConfigRead', { source: 'env', key: 'DATABASE_URL' });
+  const unnamed = node('cfgread:r@src/db.ts:env:?', 'ConfigRead', { source: 'env', dynamic: true });
+
+  it('shows the key, not the id', () => {
+    expect(displayName(named)).toBe('DATABASE_URL');
+    expect(displayName(unnamed)).toBe(UNNAMED_CONFIG_KEY);
+    expect(displayName(node('cfgread:r@src/db.ts:env:X', 'ConfigRead', { key: '' }))).toBe(UNNAMED_CONFIG_KEY);
+  });
+
+  it('is on the Server code layer with its reading symbol', () => {
+    const snapshot: AtlasSnapshot = {
+      nodes: [named, unnamed, node('sym:r@src/db.ts#connect', 'Symbol', { name: 'connect' }), node('res:r@db', 'Resource')],
+      edges: [{ src: 'sym:r@src/db.ts#connect', dst: named.id, label: 'READS_CONFIG', props: {} }],
+    };
+    expect(baseLayers(named)).toEqual(['server']);
+    const server = filterAtlasGraph(snapshot, 'server');
+    expect(server.nodes.map((n) => n.id).sort()).toEqual([unnamed.id, named.id, 'sym:r@src/db.ts#connect'].sort());
+    expect(server.edges).toHaveLength(1);
+    expect(filterAtlasGraph(snapshot, 'infra').nodes.map((n) => n.id)).toEqual(['res:r@db']);
+  });
+});
+
 // AC-0028: recorded routes are display-only; do not parse stable IDs.
 describe('recorded screen route labels', () => {
   it('uses root and named routes only for Screens after explicit names', () => {
@@ -67,5 +99,38 @@ describe('recorded screen route labels', () => {
     expect(displayName(node('screen:r@/main', 'Screen', { route: '  ' }))).toBe('screen:r@/main');
     expect(displayName(node('screen:r@/main', 'Screen'))).toBe('screen:r@/main');
     expect(displayName(node('other', 'Symbol', { route: '/main' }))).toBe('other');
+  });
+});
+
+// AC-0715 (#1666): literal Find over the loaded snapshot.
+describe('searchAtlasEntities', () => {
+  const snapshot: AtlasSnapshot = {
+    nodes: [
+      node('ep:r@POST:/orders', 'Endpoint', { method: 'POST', path: '/orders' }),
+      node('component:r@Checkout', 'Component', { name: 'Checkout' }),
+      node('res:r@aws_sqs_queue.orders', 'Resource', { logical_id: 'orders' }),
+      node('sym:r@a.ts#b', 'Symbol', { name: 'Alpha' }),
+    ],
+    edges: [],
+  };
+  const ids = (query: string) => searchAtlasEntities(snapshot, query).map((n) => n.id);
+
+  it('matches display name, kind and stable id, trimmed and case-insensitive', () => {
+    expect(ids('  CHECKOUT ')).toEqual(['component:r@Checkout']);
+    expect(ids('endpoint')).toEqual(['ep:r@POST:/orders']);
+    expect(ids('aws_sqs')).toEqual(['res:r@aws_sqs_queue.orders']);
+    expect(ids('a.ts#b')).toEqual(['sym:r@a.ts#b']);
+  });
+
+  it('orders by display name then id, independent of input order', () => {
+    expect(ids('orders')).toEqual(['res:r@aws_sqs_queue.orders', 'ep:r@POST:/orders']);
+    const reversed = { nodes: [...snapshot.nodes].reverse(), edges: [] };
+    expect(searchAtlasEntities(reversed, 'r@').map((n) => n.id)).toEqual(ids('r@'));
+  });
+
+  it('returns the original node objects and nothing for a blank query', () => {
+    expect(searchAtlasEntities(snapshot, 'alpha')[0]).toBe(snapshot.nodes[3]);
+    expect(ids('   ')).toEqual([]);
+    expect(ids('no-such')).toEqual([]);
   });
 });

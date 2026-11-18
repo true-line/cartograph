@@ -3,7 +3,9 @@
 Status: agreed in [#572](https://github.com/true-line/cartograph/issues/572);
 realigned on 2026-10-21 (section 8); next phase planned 2026-10-24 (section 9);
 realigned to the owner's goal restatement on 2026-11-09 (section 10, which takes
-precedence where it differs from earlier sections). Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md)
+precedence where it differs from earlier sections); v1.0.0 scope decided on
+2026-11-17 (section 11, which takes precedence over section 10 on what v1.0.0
+contains). Direction: [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md)
 and [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md).
 Vision elements V1–V13: [VISION.md](VISION.md). Baseline of sections 1–7: `main` at `cb0e876` (v0.15.5).
 
@@ -339,8 +341,8 @@ implementation: every item lands through its own issue.
 | Stage | On `main` today | Missing | Issues |
 |-------|-----------------|---------|--------|
 | 1. Gather an app, or as much of its code as exists | Registered sources (local, `file://`, GitHub), system manifests, partial ingestion with a coverage inventory | The coverage inventory is lost on relaunch | #1655, #1656 |
-| 2. Trace it deterministically: infrastructure, code, UI/UX, documentation | T0 adapters for six languages, Terraform and AWS, events and flows; sixteen compiled artifacts (`crates/spec/src/workbench.rs:908-926`); 44 of 45 SimpleLogin endpoints; a 61-repository OpenMRS run | Documentation is read only as API descriptions and found ADRs; the knowledge phase skips graphs over 50,000 rows; the graph content hash exists only in tests | #1750, #1771, #1765, #1658 |
-| 3. The agent team writes the document set | Bounded specialists answer cited questions and stage proposals. Nothing they produce reaches a document: review "does not yet change context or exports" (`ui/src/components/ResolutionStrategyModal.tsx:161`) and the curated projection is unavailable (`src-tauri/src/mcp_reads.rs:169`) | The curated projection, the document catalogue, section drafting | #1746, #1747, #1748, #1751 |
+| 2. Trace it deterministically: infrastructure, code, UI/UX, documentation | T0 adapters for six languages, Terraform and AWS, events and flows; twenty-six compiled artifacts (`ARTIFACTS` in `crates/spec/src/workbench/selected.rs`); 44 of 45 SimpleLogin endpoints; a 61-repository OpenMRS run | Documentation is read only as API descriptions and found ADRs; the knowledge phase skips graphs over 50,000 rows; the graph content hash exists only in tests | #1750, #1771, #1765, #1658 |
+| 3. The agent team writes the document set | Bounded specialists answer cited questions and stage proposals. An export lists accepted proposals with their state in `curated.md` (SPEC-12 slice 2); nothing they produce reaches any other document, the Workbench does not show curated items, and the curated projection is unavailable to MCP readers (`src-tauri/src/mcp_reads.rs:169`) | The curated projection, the document catalogue, section drafting | #1746, #1747, #1748, #1751 |
 | 4. The documents follow the code | Drift is detected and listed in `drift_register.md` | Sections that know their facts, stale marking, redrafting | #1749 |
 | 5. Engineers rebuild or port (enabled, not performed) | Local work packets whose only state is `Unoffered` (`crates/work-packets/src/store.rs:14-16`); the export bundle | A defined handoff bundle and a sufficiency check | #1752 |
 
@@ -354,10 +356,10 @@ authorship. Stages 4 and 5 have their inputs and no product path.
 |----|------------|-------|-----------|
 | W5 | Curated projection (unchanged from section 4; now first) | #1746 | An accepted proposal appears in the Workbench, a `best-effort` export and an MCP read under one curated revision; the base graph hash is unchanged |
 | W14 | Enterprise document catalogue | #1747 | A versioned catalogue approved by the owner: each document's reader, sections, deterministic inputs, authorable sections and acceptance |
-| W13 | Agent-authored document sections | #1748 | One SimpleLogin document with authored sections scored claim by claim against an expected set written before the run |
+| W13 | Agent-authored document sections | #1748; contract proposed in [SPEC-15](SPEC-15_authored-sections.md), ADR-0064 | One SimpleLogin document with authored sections scored claim by claim against an expected set written before the run |
 | W15 | Living documentation | #1749 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run |
 | W16 | Existing documentation as evidence | #1750 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited |
-| W17 | Rebuild handoff bundle | #1752 | One SimpleLogin bundle reviewed against the sufficiency checklist by someone who did not produce it |
+| W17 | Rebuild handoff bundle | #1752; defined in [SPEC-16](SPEC-16_rebuild-handoff-bundle.md) | One SimpleLogin bundle reviewed against the sufficiency checklist by someone who did not produce it |
 
 ### Order
 
@@ -395,10 +397,9 @@ content acceptance of authored documents (W13), not by question answering.
 | Frozen rubric and real-model acceptance (#598, #1710) | Context hub mode |
 | Readiness report | All of the above |
 
-No current criterion proves stage 3 as authorship, or stage 4. Whether
-v1.0 carries a reconstruction criterion, or ships as the deterministic
-foundation with the context hub and names reconstruction as the next
-release, is the owner's decision and is recorded on #1610.
+None of these criteria proves stage 3 as authorship, or stage 4. The owner
+decided on 2026-11-17 that v1.0.0 carries reconstruction criteria as well:
+see [section 11](#11-v100-scope-2026-11-17).
 
 ### Defects that bear on the pipeline
 
@@ -418,10 +419,10 @@ milestones.
 
 | Milestone | Exit | Holds |
 |-----------|------|-------|
-| R1 — v1.0 GA: foundation and context hub | v1.0.0 tagged per #1610 | Release-blocking defects, the acceptance track (#598, #1710), pilot findings, the readiness report |
+| R1 — Foundation and context hub (release candidate) | The foundation and context hub criteria of #1610 pass on a release build. No v1.0.0 tag: see section 11 | Release-blocking defects, the acceptance track (#598, #1710), pilot findings, the readiness report |
 | R2 — Curated projection and document catalogue | An accepted proposal is visible in the Workbench, the export and an MCP read under one curated revision; the catalogue is approved | W5, W14, #1751, #1761, #1765 |
 | R3 — Agent-authored documents | One SimpleLogin document with authored sections scored against an independent expected set | W13, W16, the knowledge and semantic layer, W10 and W11 inputs |
-| R4 — Living documentation and rebuild handoff | Stale marking is exact and repeatable on a fixture; one handoff bundle passes its review | W15, W17 |
+| R4 — Living documentation and rebuild handoff; v1.0 GA | Stale marking is exact and repeatable on a fixture; one handoff bundle passes its review | W15, W17 |
 | Engineering health | Continuous | CI, tests, release mechanics, internal scale |
 | Later | Not scheduled | Experiments and platform work off the path |
 
@@ -429,3 +430,70 @@ Three epics group work that crosses milestones, with the work as their
 sub-issues: #1773 (the pipeline: W5, W13 to W15, W17), #1774 (trace
 completeness for the document set) and #1775 (integrity and privacy
 hardening).
+
+## 11. v1.0.0 scope (2026-11-17)
+
+Section 10 left one decision to the owner: whether v1.0.0 carries a
+reconstruction criterion, or ships as the deterministic foundation with the
+context hub. The owner decided on 2026-11-17 (#1853): **v1.0.0 is the full
+pipeline of [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md)**,
+all five stages and both modes. Like the rest of this roadmap, this section
+authorizes no implementation: every item lands through its own issue.
+
+Rebuild stays enabled, not performed (NG2). An enterprise user takes
+Cartograph's documents and evidence as the source for rebuilding or porting
+the application. Cartograph writes no target code.
+
+### v1.0.0 criteria
+
+The criteria are the existing ones on #1610 plus the exit gates that section
+10 already set for the pipeline workstreams. Nothing here is a new gate.
+
+| # | Criterion | Proves | Source |
+|---|-----------|--------|--------|
+| 1 | Large-estate run recorded with time, memory and gaps | Stages 1 and 2 at scale | #1610 |
+| 2 | SimpleLogin pilot passes on a release build | Stages 1 and 2 on a real application; context hub end to end | #1610 |
+| 3 | Frozen rubric and a real-model acceptance run | Context hub mode | #598, #1710 |
+| 4 | An accepted proposal appears in the Workbench, a `best-effort` export and an MCP read under one curated revision; the base graph hash is unchanged | Stage 3 has a place to land | W5, #1746 |
+| 5 | A versioned document catalogue approved by the owner: each document's reader, sections, deterministic inputs, authorable sections and acceptance. Met by catalogue version 1.0, approved 2026-11-17 | Stage 3 knows what to write | W14, #1747, #1856 |
+| 6 | One SimpleLogin document with authored sections, scored claim by claim against an expected set written before the run | Stage 3 as authorship (reconstruction mode) | W13, #1748 |
+| 7 | Changing one handler between two commits marks exactly the sections that cite it as stale, the same way on every run | Stage 4 | W15, #1749 |
+| 8 | A README reference that resolves is linked at T0; one that no longer resolves appears in the drift register with both sides cited | Stage 2 reads existing documentation as evidence | W16, #1750 |
+| 9 | One SimpleLogin handoff bundle reviewed against the sufficiency checklist by someone who did not produce it | Stage 5, enabled | W17, #1752 |
+| 10 | Owner-approved readiness report covering 1 to 9 | All of the above | #1610 |
+| 11 | v1.0.0 tagged | The release decision | #1610 |
+
+### What changes in section 10
+
+- **The tag moves.** v1.0.0 is tagged when R4 exits, not R1. R1 to R4 are
+  the four stages of one release. R1's exit is its criteria passing on a
+  release build, which makes that build a release candidate for the
+  foundation and context hub. The milestone table in section 10 names R1
+  and R4 accordingly. The GitHub milestone still titled "R1 — v1.0 GA:
+  foundation and context hub" is renamed to match, and R4 becomes the v1.0
+  GA milestone; until the owner renames them, this section governs.
+- **The order does not change.** W5 and W14 first and in parallel, then W13,
+  then W15 and W17, with W16 alongside. The integrity and privacy defects of
+  #1775 that bear on a release build stay release-blocking.
+- **Providers.** Reconstruction runs on local open-source models and, where
+  the user opts in with their own key, on cloud providers. In-app provider
+  setup is #1763 (ADR-0057). Whether the cloud lanes use the providers'
+  agent SDKs is an open decision that needs its own ADR before W13's
+  drafting acceptance is run on a cloud model.
+
+### Tracking
+
+Every open issue carries the organization **Stage** issue field, set from its
+milestone on 2026-11-17, so the planning board
+([project 5](https://github.com/orgs/true-line/projects/5)) can order the
+work. The milestone stays the source: a new issue gets the Stage of its
+milestone.
+
+| Milestone | Stage |
+|-----------|-------|
+| R1 | 1 |
+| R2 | 2a |
+| R3 | 3 |
+| R4 | 4 |
+| Engineering health | Maintenance |
+| Later | Post-MVP |

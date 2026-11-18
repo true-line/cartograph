@@ -89,6 +89,25 @@ fn missing(want: &Value, key: &str, got: &[Value]) -> Vec<String> {
         .collect()
 }
 
+// AC-0651 (#1821): `configuration.md` states which languages are read from a
+// list in `spec`, which cannot see the coverage matrix. The list equals the
+// `config_reads` cells, in order and word for word, and every such cell is
+// partial, so the document never claims a language is read completely.
+#[test]
+fn configuration_coverage_matches_the_matrix_cells() {
+    use ingest::matrix::{Capability, Support};
+    let cells: Vec<(&str, &str)> = COVERAGE_MATRIX
+        .iter()
+        .filter(|cell| cell.capability == Capability::ConfigReads)
+        .map(|cell| {
+            assert_eq!(cell.support, Support::Partial, "{}", cell.id());
+            assert_eq!(cell.framework, ingest::matrix::CORE, "{}", cell.id());
+            (cell.language, cell.note)
+        })
+        .collect();
+    assert_eq!(cells, spec::CONFIG_READ_COVERAGE);
+}
+
 #[test]
 fn every_claimed_cell_passes_its_conformance_fixture() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/ingest/conformance");

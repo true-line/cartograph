@@ -1,6 +1,17 @@
-import { describe, expect, it } from 'vitest';
-import { isSameArtifact, resolveArtifactForCopy, withFullArtifacts } from './specExport';
-import type { SpecArtifact } from './store';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import {
+  exportSpecBundle,
+  incompleteArtifactsMessage,
+  isSameArtifact,
+  resolveArtifactForCopy,
+  specBundleFileContent,
+  withFullArtifacts,
+  type ReadSpecArtifacts,
+} from './specExport';
+import type { SpecArtifact, SpecBundle } from './store';
+import bundleFileInput from './fixtures/spec-bundle-file.input.json';
+import bundleFileExpected from './fixtures/spec-bundle-file.expected.json?raw';
 
 const artifact = (id: string, overrides: Partial<SpecArtifact> = {}): SpecArtifact => ({
   id, file_name: `${id}.md`, title: id, format: 'markdown', schema: `cartograph.spec/${id}@1`,
@@ -13,9 +24,9 @@ describe('withFullArtifacts aborts on a failed on-demand fetch (PR #533 review t
   it('passes untruncated artifacts through without calling readSpecArtifact', async () => {
     const whole = artifact('whole');
     const calls: string[] = [];
-    const result = await withFullArtifacts([whole], async (id) => {
-      calls.push(id);
-      return artifact(id);
+    const result = await withFullArtifacts([whole], async (ids) => {
+      calls.push(...ids);
+      return ids.map((id) => artifact(id));
     });
     expect(result).toEqual([whole]);
     expect(calls).toEqual([]);
@@ -24,15 +35,15 @@ describe('withFullArtifacts aborts on a failed on-demand fetch (PR #533 review t
   it('replaces a truncated artifact with its fetched full content on success', async () => {
     const capped = artifact('gap-register', { content_truncated: true, content: 'capped preview' });
     const full = artifact('gap-register', { content: 'the complete register' });
-    const result = await withFullArtifacts([capped], async () => full);
+    const result = await withFullArtifacts([capped], async () => [full]);
     expect(result).toEqual([full]);
   });
 
   it('aborts the whole export (returns null) when any truncated artifact fetch fails, instead of falling back to the capped preview', async () => {
     const ok = artifact('drift-register', { content_truncated: true });
     const failing = artifact('gap-register', { assertions_truncated: true });
-    const result = await withFullArtifacts([ok, failing], async (id) =>
-      id === 'gap-register' ? null : artifact(id),
+    const result = await withFullArtifacts([ok, failing], async (ids) =>
+      ids.includes('gap-register') ? null : ids.map((id) => artifact(id)),
     );
     expect(result).toBeNull();
   });
@@ -70,7 +81,7 @@ describe('artifact identity guards copy and export (AC-0242)', () => {
     const full = identified('gap-register', 'spec-artifact-v1:aa', { content: 'complete' });
     const errors: string[] = [];
     expect(await resolveArtifactForCopy(capped, async () => full, (m) => errors.push(m))).toEqual(full);
-    expect(await withFullArtifacts([capped], async () => full, (m) => errors.push(m))).toEqual([full]);
+    expect(await withFullArtifacts([capped], async () => [full], (m) => errors.push(m))).toEqual([full]);
     expect(errors).toEqual([]);
   });
 
@@ -79,7 +90,7 @@ describe('artifact identity guards copy and export (AC-0242)', () => {
     const changed = identified('gap-register', 'spec-artifact-v1:bb', { content: 'recompiled' });
     const errors: string[] = [];
     expect(await resolveArtifactForCopy(capped, async () => changed, (m) => errors.push(m))).toBeNull();
-    expect(await withFullArtifacts([capped], async () => changed, (m) => errors.push(m))).toBeNull();
+    expect(await withFullArtifacts([capped], async () => [changed], (m) => errors.push(m))).toBeNull();
     expect(errors).toHaveLength(2);
     expect(errors[0]).toContain('gap-register.md changed since this preview was compiled');
   });
@@ -90,6 +101,153 @@ describe('artifact identity guards copy and export (AC-0242)', () => {
       schema: 'cartograph.spec/gap-register@2',
     });
     expect(isSameArtifact(capped, newer)).toBe(false);
-    expect(await withFullArtifacts([capped], async () => newer)).toBeNull();
+    expect(await withFullArtifacts([capped], async () => [newer])).toBeNull();
+  });
+});
+
+// AC-0720 (#1662): every capped artifact of an export is fetched in one host
+// request; untruncated ones are not fetched; any result that does not
+// answer the request one for one refuses the whole export.
+describe('withFullArtifacts fetches every capped artifact in one request (AC-0720)', () => {
+  const capped = (id: string) => artifact(id, { content_truncated: true, content: 'capped' });
+  const full = (id: string) => artifact(id, { content: `${id} complete` });
+  const recorder = (answer: (ids: string[]) => SpecArtifact[] | null) => {
+    const requests: string[][] = [];
+    const read: ReadSpecArtifacts = async (ids) => {
+      requests.push(ids);
+      return answer(ids);
+    };
+    return { requests, read };
+  };
+
+  it('makes one request for a mixed bundle and keeps the bundle order', async () => {
+    const bundle = [capped('us-tm'), artifact('topology'), capped('data-model'), artifact('adrs')];
+    const { requests, read } = recorder((ids) => ids.map(full));
+    const result = await withFullArtifacts(bundle, read);
+    expect(requests).toEqual([['us-tm', 'data-model']]);
+    expect(result).toEqual([full('us-tm'), bundle[1], full('data-model'), bundle[3]]);
+  });
+
+  it('makes no request when nothing was capped', async () => {
+    const bundle = [artifact('topology'), artifact('adrs')];
+    const { requests, read } = recorder(() => null);
+    expect(await withFullArtifacts(bundle, read)).toBe(bundle);
+    expect(requests).toEqual([]);
+  });
+
+  it.each([
+    ['missing', () => [full('us-tm')]],
+    ['duplicate', () => [full('us-tm'), full('us-tm')]],
+    ['reordered', () => [full('data-model'), full('us-tm')]],
+    ['unexpected', () => [full('us-tm'), full('data-model'), full('adrs')]],
+    ['still truncated', () => [full('us-tm'), capped('data-model')]],
+  ])('refuses the whole export for a %s result, never a preview', async (_, answer) => {
+    const bundle = [capped('us-tm'), artifact('topology'), capped('data-model')];
+    const errors: string[] = [];
+    const { requests, read } = recorder(answer);
+    expect(await withFullArtifacts(bundle, read, (m) => errors.push(m))).toBeNull();
+    expect(requests).toHaveLength(1);
+    expect(errors).toEqual([incompleteArtifactsMessage()]);
+  });
+
+  it('refuses the whole export when one fetched artifact is stale', async () => {
+    const bundle = [capped('us-tm'), capped('data-model')];
+    const errors: string[] = [];
+    const { read } = recorder(() => [
+      full('us-tm'),
+      artifact('data-model', { content_id: 'spec-artifact-v1:other' }),
+    ]);
+    expect(await withFullArtifacts(bundle, read, (m) => errors.push(m))).toBeNull();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('data-model.md changed since this preview was compiled');
+  });
+});
+
+// AC-0740 (#1582): the shared fixture's expected file is what the Workbench
+// built before the host streamed it; `app::spec_bundle_file` tests assert the
+// host writes these same bytes.
+describe('Export bundle file (#1582, AC-0740)', () => {
+  const preview = bundleFileInput.preview as SpecBundle;
+  const fullArtifacts = bundleFileInput.full_artifacts as SpecArtifact[];
+  const readFull: ReadSpecArtifacts = async (ids) =>
+    ids.flatMap((id) => fullArtifacts.filter((full) => full.id === id));
+
+  beforeEach(() => {
+    vi.stubGlobal('window', {});
+  });
+
+  afterEach(() => {
+    clearMocks();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('the fixture expected file is the pre-#1582 Workbench JSON for its preview', async () => {
+    expect(preview.artifacts.some((a) => a.content_truncated)).toBe(true);
+    const artifacts = await withFullArtifacts(preview.artifacts, readFull);
+    expect(artifacts).not.toBeNull();
+    const legacyFiles = Object.fromEntries(artifacts!.map((a) => [a.file_name, a.content]));
+    const legacy = JSON.stringify({ ...preview, artifacts, files: legacyFiles }, null, 2);
+    expect(legacy).toBe(bundleFileExpected);
+    expect(specBundleFileContent(preview, artifacts!)).toBe(bundleFileExpected);
+  });
+
+  it('in the desktop app sends only artifact identities and builds no bundle string', async () => {
+    const calls: { command: string; args: unknown }[] = [];
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      return true;
+    });
+    const reads: string[] = [];
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const errors: string[] = [];
+    await exportSpecBundle(
+      preview,
+      async (ids) => {
+        reads.push(...ids);
+        return readFull(ids);
+      },
+      (message) => errors.push(message),
+    );
+    const ownStringify = stringify.mock.calls.filter(([value]) => value && typeof value === 'object' && 'files' in value);
+    stringify.mockRestore();
+    expect(ownStringify).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      command: 'save_spec_bundle_export',
+      args: {
+        suggestedName: 'cartograph-spec-best-effort.json',
+        expected: {
+          mode: preview.mode,
+          artifacts: preview.artifacts.map(({ id, file_name, schema, content_id }) => ({
+            id,
+            file_name,
+            schema,
+            content_id,
+          })),
+          assertion_count: preview.assertion_count,
+          gap_count: preview.gap_count,
+          drift_count: preview.drift_count,
+          security_count: preview.security_count,
+          graph_basis: preview.graph_basis,
+          curated_basis: preview.curated_basis,
+        },
+      },
+    });
+    const sent = JSON.stringify(calls[0].args);
+    for (const artifact of fullArtifacts) expect(sent).not.toContain(JSON.stringify(artifact.content));
+  });
+
+  it('shows the host refusal of a changed selection in the Workbench error banner', async () => {
+    mockIPC(() => {
+      throw 'gap_register.json changed since this preview was compiled. Refresh the Spec Workbench and try again.';
+    });
+    const errors: string[] = [];
+    await exportSpecBundle(preview, readFull, (message) => errors.push(message));
+    expect(errors).toEqual([
+      'gap_register.json changed since this preview was compiled. Refresh the Spec Workbench and try again.',
+    ]);
   });
 });

@@ -1,4 +1,8 @@
 //! Bounded, disposable local embedding vectors. No source text or verdicts persist.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use llm::{Embedding, EmbeddingIdentity, LlmProvider, Locality, ProviderCaps, ProviderError};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;

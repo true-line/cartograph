@@ -95,13 +95,19 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
     assert_eq!(artifact.basis_id(), session.basis_id().unwrap());
     assert_eq!(artifact.content_id(), official.content_id);
     let catalog = session.artifact_catalog();
-    assert_eq!(catalog, spec::artifact_catalog());
+    assert_eq!(catalog, super::readable_catalog());
     assert!(
         catalog
             .iter()
             .any(|metadata| metadata.id == official.id && metadata.schema == official.schema)
     );
-    for descriptor in catalog {
+    // The curated artifacts and the D1 document read the session's
+    // projection, which a bare compile is not supplied with;
+    // `curated_read::tests` and `curated::drafts_tests` compare them with
+    // the host export (AC-0654, AC-0667).
+    for descriptor in catalog.into_iter().filter(|descriptor| {
+        !descriptor.id.starts_with("curated") && descriptor.id != "d1-product-specification"
+    }) {
         let ArtifactCompilation::Produced(actual) = session
             .compile_artifact(descriptor.id, trace_limits(), compile_limits())
             .unwrap()
@@ -121,6 +127,112 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
         owned,
         (session.base.graph.0.as_ptr(), session.base.graph.1.as_ptr())
     );
+}
+
+// AC-0595 (ADR-0058): the fact index is not readable over MCP, because the
+// reserved compile workspace does not model it. Both ids are refused like an
+// unknown id before any tracing or compilation, are not advertised, and every
+// advertised artifact still reads.
+#[test]
+fn mcp_read_refuses_the_fact_index_without_compiling() {
+    let session = fixture(ExportMode::BestEffort);
+    // Limits under which any tracing or compilation reports a limit.
+    let no_trace = flowtracer::TraceLimits {
+        max_output_bytes: 0,
+        ..trace_limits()
+    };
+    let no_output = spec::SelectedCompileLimits {
+        max_bytes: 0,
+        ..compile_limits()
+    };
+    let official: Vec<&str> = spec::artifact_catalog().iter().map(|a| a.id).collect();
+    let advertised: Vec<&str> = session.artifact_catalog().iter().map(|a| a.id).collect();
+    let schema =
+        crate::mcp_reads::dispatch::tool_descriptor(mcp_wire::admission::ReadTool::ReadArtifact);
+    let selectable = schema["inputSchema"]["properties"]["artifact_id"]["enum"]
+        .as_array()
+        .expect("closed artifact id enum");
+    for id in ["fact-index", "fact-index-json"] {
+        assert!(official.contains(&id), "{id} is an official artifact");
+        assert!(!advertised.contains(&id), "{id} is not advertised");
+        assert!(!selectable.iter().any(|value| value == id));
+        assert!(matches!(
+            session.compile_artifact(id, no_trace, no_output),
+            Err(ReadError::InvalidRequest)
+        ));
+        assert!(matches!(
+            session.compile_artifact(id, trace_limits(), compile_limits()),
+            Err(ReadError::InvalidRequest)
+        ));
+    }
+    // The two fact-index ids are withheld and `curated-json`, which is not
+    // an export artifact, is added (AC-0654). The D1 document is readable
+    // (AC-0667).
+    assert!(advertised.contains(&"d1-product-specification"));
+    assert_eq!(advertised.len(), official.len() - 2 + 1);
+    assert_eq!(selectable.len(), advertised.len());
+    for id in advertised {
+        assert!(
+            matches!(
+                session.compile_artifact(id, trace_limits(), compile_limits()),
+                Ok(ArtifactCompilation::Produced(artifact)) if artifact.artifact.id == id
+            ),
+            "{id} still reads"
+        );
+    }
+}
+
+// AC-0654 (SPEC-12 slice 4): the session computes the curated projection,
+// so `curated` and its structured form are in the catalogue and the tool
+// schema and are read like any artifact. The fact index stays unreadable.
+// The structured form is admitted against the output budget whole.
+#[test]
+fn mcp_read_lists_and_reads_the_curated_document_and_its_structured_form() {
+    let session = fixture(ExportMode::BestEffort);
+    let catalog = session.artifact_catalog();
+    let ids: Vec<_> = catalog.iter().map(|artifact| artifact.id).collect();
+    let at = ids.iter().position(|id| *id == "curated").expect("curated");
+    assert_eq!(ids[at + 1], "curated-json");
+    assert!(
+        spec::artifact_catalog()
+            .iter()
+            .all(|artifact| artifact.id != "curated-json"),
+        "the structured form is not an export artifact"
+    );
+    assert!(ids.iter().all(|id| !id.starts_with("fact-index")));
+    let schema =
+        crate::mcp_reads::dispatch::tool_descriptor(mcp_wire::admission::ReadTool::ReadArtifact);
+    let readable = schema["inputSchema"]["properties"]["artifact_id"]["enum"]
+        .as_array()
+        .expect("closed artifact id enum");
+    for id in ["curated", "curated-json"] {
+        assert!(readable.iter().any(|value| value == id), "{id}");
+        let ArtifactCompilation::Produced(artifact) = session
+            .compile_artifact(id, trace_limits(), compile_limits())
+            .unwrap()
+        else {
+            panic!("{id} is produced");
+        };
+        assert_eq!(artifact.basis_id(), session.basis_id().unwrap());
+        assert_eq!(
+            artifact.content_id(),
+            artifact.artifact().compute_content_id()
+        );
+    }
+    assert!(session.basis().h3_curated_available);
+    let no_output = spec::SelectedCompileLimits {
+        max_bytes: 0,
+        ..compile_limits()
+    };
+    for id in ["curated", "curated-json"] {
+        assert!(
+            matches!(
+                session.compile_artifact(id, trace_limits(), no_output),
+                Ok(ArtifactCompilation::Limited { .. })
+            ),
+            "{id}"
+        );
+    }
 }
 
 #[test]
@@ -434,7 +546,12 @@ fn mcp_security_artifact_preserves_legacy_compiler_identity() {
         panic!("legacy security fixture")
     };
     assert_eq!(&actual.artifact, expected);
-    assert!(actual.artifact.content.contains("Unauthenticated endpoint"));
+    assert!(
+        actual
+            .artifact
+            .content
+            .contains("No authentication check recovered")
+    );
 }
 
 mod overlay_capture;

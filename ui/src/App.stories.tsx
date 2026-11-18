@@ -1,5 +1,6 @@
 import { admissionCatalog, completionChoices } from './completionFixtures';
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import { sectionDocumentFixture } from './sectionDocumentFixtures';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import App from './App';
@@ -8,10 +9,12 @@ import { useInvestigationStore } from './investigationStore';
 import { inspectionCatalog, inspectionDetail, inspectionTarget, investigationCatalog, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult } from './investigationFixtures';
 import type { InvestigationChat, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, StartInvestigationRequest } from './investigationTypes';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
+import { CURATED_GRAPH_BASIS, NO_COUNTS, UNVERIFIED_RECORD } from './curatedFixtures';
 import { usePrimarySourceStore, type CapturedDescription, type FactKey } from './primarySourceStore';
 import {
   useAppStore,
   type AssertionDecisionRecord,
+  type ComputedCuratedRead,
   type Flow,
   type Provenance,
   type SpecAssertion,
@@ -372,6 +375,45 @@ function installFakeCore(options: {
   savedNoticeChatFirstReadPartial?: boolean;
 } = {}) {
   let staged = [...(options.staged ?? [])];
+  // The curated read of the fake stores (AC-0655). Every staged record here
+  // is a version 1 record, so an accepted one is listed as `unverified`, as
+  // the host lists it. The revision changes with every review, as the
+  // host's does, and the bundle's curated basis is taken from the same read.
+  const fakeCurated = (mode: SpecBundle['mode']): ComputedCuratedRead => {
+    const reviews = staged
+      .filter((proposal) => proposal.review_decision)
+      .map((proposal) => `${proposal.proposal_id}=${proposal.review_decision}`)
+      .sort();
+    let digest = 0;
+    for (const char of reviews.join(',')) digest = (digest * 31 + char.charCodeAt(0)) >>> 0;
+    const listed = staged
+      .filter((proposal) => proposal.review_decision === 'accepted')
+      .map((proposal) => ({
+        ...UNVERIFIED_RECORD,
+        record_id: proposal.proposal_id,
+        gap_id: proposal.gap_id,
+        source_id: proposal.source_id,
+        target_id: proposal.target_id,
+        edge_label: proposal.edge_label,
+      }))
+      .sort((left, right) => left.record_id.localeCompare(right.record_id));
+    return {
+      status: 'computed',
+      export_mode: mode,
+      view: 'curated',
+      revision: `curated-revision-v1:${digest.toString(16).padStart(64, '0')}`,
+      graph_basis: CURATED_GRAPH_BASIS,
+      items: [],
+      items_omitted: 0,
+      listed,
+      assertion_decisions: {
+        digest: `curated-assertion-decisions-v1:${'0'.repeat(64)}`,
+        rejections_applied: curation.filter((record) => record.decision === 'rejected').length,
+        stale: [],
+      },
+      counts: { ...NO_COUNTS, accepted: listed.length, unverified: listed.length },
+    };
+  };
   let rejectJobAction = options.rejectJobActionOnce ?? false;
   reviewRequests = [];
   historyRequests = [];
@@ -675,9 +717,13 @@ function installFakeCore(options: {
         return fakeSpecViews((args as { mode: SpecBundle['mode'] }).mode);
       case 'export_spec_with_views': {
         const mode = (args as { mode: SpecBundle['mode'] }).mode;
+        const curated = fakeCurated(mode);
         return {
-          bundle: { ...FAKE_SPEC, mode },
+          // As the host does: one projection per compile, returned beside
+          // the bundle whose curated basis it gives.
+          bundle: { ...FAKE_SPEC, mode, curated_basis: { revision: curated.revision, counts: curated.counts } },
           views: fakeSpecViews(mode),
+          curated,
         };
       }
       case 'read_spec_artifact':
@@ -685,6 +731,10 @@ function installFakeCore(options: {
           FAKE_SPEC.artifacts.find(
             (artifact) => artifact.id === (args as { artifactId: string }).artifactId,
           ) ?? null
+        );
+      case 'read_spec_artifacts':
+        return (args as { artifactIds: string[] }).artifactIds.map(
+          (id) => FAKE_SPEC.artifacts.find((artifact) => artifact.id === id) ?? null,
         );
       case 'list_assertion_decisions':
         return curation;
@@ -736,7 +786,7 @@ function installFakeCore(options: {
               est_usd: null,
               latency: 'seconds on-device',
               privacy: 'payload never leaves the device',
-              export_impact: 'Accepted reviews await context reconciliation. T3/InferredWeak is preserved.',
+              export_impact: 'An accepted proposal gets one state each time it is read. T3/InferredWeak is preserved.',
               available: true,
               unavailable_reason: null,
             },
@@ -912,6 +962,26 @@ function installFakeCore(options: {
           ],
           detector: 'preflight@1',
         };
+      case 'preflight_system':
+        // A manifest preview (#1655): a local member's own report, and a
+        // remote member deferred to recovery.
+        return {
+          members: [
+            {
+              kind: 'local',
+              entry: 'infra',
+              path: '/fake/system-checkout/infra',
+              report: {
+                languages: [{ language: 'Terraform', files: 2, adapter: 't0.iac-terraform' }],
+                frameworks: [],
+                potential_gaps: [],
+                unsupported: [],
+                detector: 'preflight@1',
+              },
+            },
+            { kind: 'deferred', entry: 'https://github.com/acme/shop' },
+          ],
+        };
       case 'ingest_path':
         return {
           job_id: 1,
@@ -995,6 +1065,11 @@ function installFakeCore(options: {
         return null;
       case 'local_lane_status':
         return { reachable: false, start_command: 'ollama serve', models: [] };
+      case 'section_document':
+        // The Workbench document view (AC-0669): D1 with no stored draft.
+        return sectionDocumentFixture([]);
+      case 'recorded_coverage':
+        return [];
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }
@@ -1200,8 +1275,14 @@ export const ManifestDirectoryUsesAddSystem: Story = {
     await userEvent.click(canvas.getByRole('radio', { name: 'System manifest' }));
     await userEvent.type(canvas.getByRole('textbox'), '/fake/system-checkout');
     await userEvent.click(canvas.getByRole('button', { name: /preflight/i }));
-    // Manifest detection defers to recovery rather than inventing a report.
-    await expect(canvas.getByText('Detection deferred')).toBeInTheDocument();
+    // The manifest preview scans its local member and defers the remote one
+    // to recovery rather than inventing a report (#1655).
+    await waitFor(() =>
+      expect(canvas.getByRole('region', { name: 'Repository infra' })).toBeInTheDocument(),
+    );
+    await expect(canvas.getByText('t0.iac-terraform')).toBeInTheDocument();
+    const remote = canvas.getByRole('region', { name: 'Repository https://github.com/acme/shop' });
+    await expect(within(remote).getByText('Detection deferred')).toBeInTheDocument();
 
     await userEvent.click(canvas.getByRole('button', { name: /run full recovery/i }));
     // add_system's summary lists every declared repo — the landing titles
@@ -1254,7 +1335,7 @@ export const EscalationRoundTrip: Story = {
 
     await userEvent.click(canvas.getByRole('button', { name: 'Run locally' }));
     await waitFor(() => expect(canvas.getByTestId('proposal-card')).toBeInTheDocument());
-    await expect(canvas.getByText(/Accepted proposals await context reconciliation/)).toBeInTheDocument();
+    await expect(canvas.getByText(/An accepted proposal gets one state each time it is read: only/)).toBeInTheDocument();
 
     await userEvent.click(canvas.getByRole('button', { name: 'Accept as InferredWeak' }));
     await waitFor(() =>
@@ -1844,6 +1925,55 @@ export const ClearGraphPreservesJobs: Story = {
   },
 };
 
+export const CuratedSectionFollowsReviewsAndExportMode: Story = {
+  // AC-0655 (SPEC-12 slice 3): the Workbench's curated section is re-read
+  // when a review is recorded and when the export mode changes, with no
+  // polling, and it shows the revision the bundle on screen carries.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(useAppStore.getState().backend).toBe('up'));
+    await waitFor(() => expect(useAppStore.getState().stagedLoading).toBe(false));
+    installFakeCore({ staged: [stagedFixture('proposal:pending')] });
+    await useAppStore.getState().loadStagedProposals();
+    await useAppStore.getState().reloadSpec();
+    await userEvent.click(canvas.getByRole('button', { name: 'Spec Workbench' }));
+    const section = within(await canvas.findByRole('region', { name: 'Curated items' }));
+    const sameRevision = async () => {
+      const state = useAppStore.getState();
+      await expect(state.specCurated?.status).toBe('computed');
+      await expect(section.getByTestId('curated-revision')).toHaveAttribute(
+        'title',
+        state.specBundle?.curated_basis?.revision,
+      );
+      return state.specBundle?.curated_basis?.revision;
+    };
+    // A pending proposal is not an accepted record.
+    await expect(section.getByTestId('curated-empty')).toBeVisible();
+    const before = await sameRevision();
+
+    // A review is recorded: the views are reloaded, and the section with them.
+    const pending = useAppStore.getState().stagedProposals[0];
+    await expect(await useAppStore.getState().recordProposalDecision(pending, 'accepted')).toBe(true);
+    await waitFor(() => expect(section.getByLabelText('Curated record counts')).toHaveTextContent('Unverified1'));
+    await userEvent.click(section.getByText(/^Records and decisions: 0 curated items shown, 1 listed/));
+    const listed = within(await section.findByRole('table', { name: 'State unverified (1)' }));
+    await expect(listed.getByRole('row', { name: /proposal:pending/ })).toHaveTextContent(
+      'The record predates captured evidence, so nothing ties its evidence to stored source bytes. (legacy_record)',
+    );
+    await expect(listed.getByText('Inferred (weak)')).toBeVisible();
+    await expect(section.queryByTestId('curated-empty')).not.toBeInTheDocument();
+    await expect(await sameRevision()).not.toBe(before);
+
+    // The export mode changes: the section is read again for that mode.
+    await userEvent.click(canvas.getByRole('button', { name: 'verified-only' }));
+    await waitFor(() => expect(section.getByTestId('curated-omitted')).toHaveTextContent('Curated items left out: 0.'));
+    await expect(useAppStore.getState().specCurated).toMatchObject({ export_mode: 'verified-only' });
+    await sameRevision();
+    // Listed records are the same in both modes.
+    await expect(section.getByRole('table', { name: 'State unverified (1)' })).toBeVisible();
+  },
+};
+
 export const SavedProposalReviewResumesAfterUiReset: Story = {
   // AC-0129: pending/reviewed history comes from durable host records, with explicit paging.
   play: async ({ canvasElement }) => {
@@ -1856,10 +1986,12 @@ export const SavedProposalReviewResumesAfterUiReset: Story = {
     ], pageSize: 2 });
     useAppStore.setState({ escalation: null, stagedProposals: [], stagedNextCursor: null });
     await useAppStore.getState().loadStagedProposals();
+    await useAppStore.getState().reloadSpec();
     await userEvent.click(canvas.getByRole('button', { name: 'Gaps & Drift' }));
     await userEvent.click(canvas.getByRole('tab', { name: 'Proposal history' }));
     await expect(canvas.getByText('Pending review')).toBeInTheDocument();
-    await expect(canvas.getByText('Accepted · awaiting context reconciliation')).toBeInTheDocument();
+    // AC-0655: the accepted record shows the state the curated read gave it.
+    await expect(canvas.getByText('Accepted · unverified')).toBeInTheDocument();
     await expect(canvas.queryByText('Saved annotation for proposal:older.')).not.toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'Load more proposals' }));
     await waitFor(() => expect(canvas.getByText('Saved annotation for proposal:older.')).toBeInTheDocument());
@@ -1873,7 +2005,9 @@ export const SavedProposalReviewResumesAfterUiReset: Story = {
     await expect(dialog.getByText('Saved annotation for proposal:pending.')).toBeInTheDocument();
     await expect(dialog.getByText(/Source binding unverified:/)).toBeInTheDocument();
     await userEvent.click(dialog.getByRole('button', { name: 'Accept as InferredWeak' }));
-    await waitFor(() => expect(dialog.getByTestId('decision-recorded')).toHaveTextContent('Awaiting context reconciliation'));
+    await waitFor(() => expect(dialog.getByTestId('decision-recorded')).toHaveTextContent(
+      'State: unverified. The record predates captured evidence',
+    ));
     await expect(reviewRequests).toEqual([{
       proposalId: 'proposal:pending', expectedRevision: 0, decision: 'accepted', note: null,
     }]);
@@ -1882,7 +2016,7 @@ export const SavedProposalReviewResumesAfterUiReset: Story = {
     // Lose all in-memory review history; the host still returns the reviewed record.
     useAppStore.setState({ stagedProposals: [], stagedNextCursor: null, escalation: null });
     await userEvent.click(canvas.getByRole('button', { name: 'Refresh proposal history' }));
-    await waitFor(() => expect(canvas.getAllByText('Accepted · awaiting context reconciliation')).toHaveLength(2));
+    await waitFor(() => expect(canvas.getAllByText('Accepted · unverified')).toHaveLength(2));
     await expect(canvas.queryByRole('button', { name: 'Review proposal' })).not.toBeInTheDocument();
     await expect(useAppStore.getState().stagedProposals[0].review_revision).toBe(1);
   },

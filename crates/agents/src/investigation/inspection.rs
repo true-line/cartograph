@@ -1,4 +1,8 @@
 //! Caller-bound captured inspection requirements; never inferred from prose.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::{TaskCaptureSpanRef, TaskFactKey, TaskRangeRole};
 use core_prov::EvidenceRef;

@@ -1,7 +1,8 @@
 //! Official selected compilation and identity-bound artifact text pages.
 //! No cache: the caller owns every produced handle and its retention admission.
 
-use super::{ReadError, ReadSession};
+use super::{ReadError, ReadSession, curated_read};
+use context_hub::coverage::CoverageStatus;
 use serde::Serialize;
 use std::{
     io::{self, Write},
@@ -49,11 +50,48 @@ pub(crate) struct ArtifactPage<'a> {
     pub content: &'a str,
 }
 
+/// The fact and evidence index (ADR-0058) is not readable over MCP: compiling
+/// it compiles every citing artifact and holds the rows, which the reserved
+/// `spec::logical_compile_bound` workspace does not model. The desktop export
+/// and single-artifact read still produce it. A `curated` read therefore
+/// prints citation ids that this surface cannot look up, and so does a read
+/// of the D1 document.
+const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
+
+/// The D1 document (#1748, SPEC-15 slice 5, AC-0667). It reads the session's
+/// curated projection, which carries the accepted section drafts, and the
+/// session's graph content hash; for the same inputs and export mode its
+/// bytes are the desktop export's.
+const D1_ID: &str = "d1-product-specification";
+
+/// The two projections of the stored coverage inventories (AC-0592).
+const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];
+
+/// The artifacts an MCP reader may select: the compiler's catalogue without
+/// the ids in [`NOT_READABLE`], and the structured form of the curated
+/// projection after `curated` (SPEC-12 slice 4, AC-0654). The one list
+/// behind the advertised catalogue, the tool's input schema and the read's
+/// own admission.
+pub(crate) fn readable_catalog() -> Vec<spec::ArtifactDescriptor> {
+    let mut catalog = Vec::new();
+    for artifact in spec::artifact_catalog() {
+        if NOT_READABLE.contains(&artifact.id) {
+            continue;
+        }
+        let curated = artifact.id == curated_read::ARTIFACT_ID;
+        catalog.push(artifact);
+        if curated {
+            catalog.push(curated_read::json_descriptor());
+        }
+    }
+    catalog
+}
+
 impl ReadSession {
     /// Authoritative metadata only; availability/content identity requires an
     /// actual selected compilation, rather than an ID inferred from a title.
     pub(crate) fn artifact_catalog(&self) -> Vec<spec::ArtifactDescriptor> {
-        spec::artifact_catalog()
+        readable_catalog()
     }
 
     pub(crate) fn compile_artifact(
@@ -62,11 +100,31 @@ impl ReadSession {
         trace_limits: flowtracer::TraceLimits,
         compile_limits: spec::SelectedCompileLimits,
     ) -> Result<ArtifactCompilation, ReadError> {
-        if !spec::artifact_catalog()
-            .iter()
-            .any(|artifact| artifact.id == id)
-        {
+        // An id that is not readable here is refused like an unknown one,
+        // before any tracing or compilation.
+        if !readable_catalog().iter().any(|artifact| artifact.id == id) {
             return Err(ReadError::InvalidRequest);
+        }
+        if id == curated_read::JSON_ARTIFACT_ID {
+            // The projection the session holds, serialized. Nothing is
+            // traced or compiled, and no partial document is returned.
+            let artifact = self
+                .curated
+                .json_artifact(self.basis.export_mode)
+                .map_err(|()| ReadError::Storage)?;
+            return Ok(if artifact.content.len() > compile_limits.max_bytes {
+                ArtifactCompilation::Limited {
+                    artifact_id: id.into(),
+                    limit: ArtifactLimit::Compiler(spec::SelectedArtifactLimit::OutputBytes {
+                        remaining: compile_limits.max_bytes,
+                    }),
+                }
+            } else {
+                ArtifactCompilation::Produced(CompiledArtifact {
+                    basis_id: self.basis_id()?,
+                    artifact,
+                })
+            });
         }
         let security = spec::security_projection_bound(
             self.graph_limits.max_bytes,
@@ -113,6 +171,44 @@ impl ReadSession {
                 },
             )
             .map_err(|_| ReadError::Storage)?
+        } else if id == curated_read::ARTIFACT_ID || id == D1_ID || COVERAGE_IDS.contains(&id) {
+            // The selected compiler the desktop single-artifact read uses,
+            // supplied as the export supplies it. `curated.md` and the D1
+            // document read the projection this session computed and no
+            // coverage inventory.
+            // The coverage artifacts (#1814, AC-0657) read the inventories
+            // of this session's own bounded read, borrowed, and no
+            // projection. Neither reads a security projection.
+            let coverage = COVERAGE_IDS.contains(&id);
+            let stale = if coverage {
+                self.stale_coverage()
+            } else {
+                Vec::new()
+            };
+            spec::compile_spec_selected_supplied(
+                &self.base.graph.0,
+                &self.base.graph.1,
+                &flows,
+                self.basis.export_mode,
+                &self.rejected_hashes,
+                &[id],
+                compile_limits,
+                spec::Supplied {
+                    coverage: if coverage { &self.recorded } else { &[] },
+                    stale_coverage: &stale,
+                    curated: if coverage {
+                        spec::Curated::NotSupplied
+                    } else {
+                        self.curated.supplied()
+                    },
+                    // The D1 header states it, computed or not (AC-0663).
+                    graph_content_hash: (!coverage).then_some(self.graph_content_hash.as_str()),
+                },
+            )
+            .map_err(|_| ReadError::InvalidRequest)?
+            .into_iter()
+            .next()
+            .ok_or(ReadError::Storage)?
         } else {
             spec::compile_spec_selected_with_security(
                 &self.base.graph.0,
@@ -149,10 +245,34 @@ impl ReadSession {
     }
 }
 
+impl ReadSession {
+    /// The repositories whose stored inventory this session's coverage
+    /// qualification does not hold as recorded under the current
+    /// registration and plugin basis, with what it compared. Fail closed:
+    /// every status but `Recorded` is named, so no such inventory is read
+    /// as current. A repository with no stored inventory has no row to mark.
+    fn stale_coverage(&self) -> Vec<spec::StaleCoverage<'_>> {
+        self.qualified
+            .coverage()
+            .repos
+            .iter()
+            .filter(|repo| repo.status != CoverageStatus::Recorded)
+            .map(|repo| spec::StaleCoverage {
+                repo_key: &repo.repo,
+                compared: &repo.compared,
+            })
+            .collect()
+    }
+}
+
 impl CompiledArtifact {
     #[cfg(test)]
     pub(crate) fn basis_id(&self) -> &str {
         &self.basis_id
+    }
+    #[cfg(test)]
+    pub(crate) fn artifact(&self) -> &spec::SpecArtifact {
+        &self.artifact
     }
     pub(crate) fn content_id(&self) -> &str {
         &self.artifact.content_id

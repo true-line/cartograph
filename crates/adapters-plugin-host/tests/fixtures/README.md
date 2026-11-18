@@ -14,6 +14,12 @@ suite runs against those directly with no wasm toolchain required.
 | `net-probe` | No ambient network capability (attempts a TCP connect) |
 | `clock-probe` | No ambient wall/monotonic clock (reads both, twice, across a real sleep) |
 
+`refusing-adapter.wat` is a component in text form, loaded as it is: it needs
+no build step and has no entry in `compiled/`. It picks its behaviour from the
+first byte of the source (malformed fact, guest error, trap, fuel, memory,
+table, stack; anything else succeeds), so one plugin can fail on some files of
+a tree and succeed on the others. It proves per-file refusal (AC-0658).
+
 To regenerate after changing `wit/adapter.wit` or a fixture's `src/lib.rs`:
 
 ```sh
