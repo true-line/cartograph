@@ -3951,13 +3951,14 @@ fn pinned_repository_reingest_yields_identical_graph_hash() {
                 &BTreeSet::from([repo.to_owned()]),
             )
             .content_hash;
-            (
-                spec::graph_content_hash(&nodes, &edges),
-                recorded,
-                deterministic_graph_hashes(&graph).unwrap(),
-                nodes.len(),
-                edges.len(),
-            )
+            PinnedIngest {
+                graph_hash: spec::graph_content_hash(&nodes, &edges),
+                recorded_hash: recorded,
+                identities: deterministic_graph_hashes(&graph).unwrap(),
+                facts: keyed_facts(&nodes, &edges),
+                nodes: nodes.len(),
+                edges: edges.len(),
+            }
         })
     };
     let production = source_walk::parallel::Parallelism::Auto.workers();
@@ -3965,14 +3966,144 @@ fn pinned_repository_reingest_yields_identical_graph_hash() {
     println!(
         "{} @ {commit}: {} nodes, {} edges, {production} workers, graph hash {}",
         root.display(),
-        first.3,
-        first.4,
-        first.0
+        first.nodes,
+        first.edges,
+        first.graph_hash
     );
-    assert!(first.3 > 0, "the pinned checkout produced no facts");
-    assert!(
-        first == ingest(production),
-        "repeat ingest changed the graph"
+    assert!(first.nodes > 0, "the pinned checkout produced no facts");
+    if let Some(difference) = ingest_difference(&first, &ingest(production)) {
+        panic!("repeat ingest changed the graph: {difference}");
+    }
+    if let Some(difference) = ingest_difference(&first, &ingest(1)) {
+        panic!("worker count changed the graph: {difference}");
+    }
+}
+
+// What one ingest of the pinned checkout yields, for comparison.
+struct PinnedIngest {
+    graph_hash: String,
+    recorded_hash: String,
+    identities: Vec<String>,
+    facts: Vec<(String, String)>,
+    nodes: usize,
+    edges: usize,
+}
+
+// Every fact as (identity key, full serialized fact), in key order.
+fn keyed_facts(nodes: &[core_graph::Node], edges: &[core_graph::Edge]) -> Vec<(String, String)> {
+    let mut facts = nodes
+        .iter()
+        .map(|node| {
+            (
+                format!("node {}", node.id),
+                serde_json::to_string(node).unwrap(),
+            )
+        })
+        .chain(edges.iter().map(|edge| {
+            (
+                format!("edge {} -[{}]-> {}", edge.src, edge.label, edge.dst),
+                serde_json::to_string(edge).unwrap(),
+            )
+        }))
+        .collect::<Vec<_>>();
+    facts.sort();
+    facts
+}
+
+// The first fact, in key order, on which two ingests disagree: present in
+// only one of them, or present in both with different content.
+fn first_differing_fact(first: &[(String, String)], second: &[(String, String)]) -> Option<String> {
+    let (mut left, mut right) = (first.iter().peekable(), second.iter().peekable());
+    loop {
+        match (left.peek(), right.peek()) {
+            (None, None) => return None,
+            (Some((key, _)), None) => return Some(format!("{key} only in the first ingest")),
+            (None, Some((key, _))) => return Some(format!("{key} only in the second ingest")),
+            (Some(a), Some(b)) => match a.0.cmp(&b.0) {
+                std::cmp::Ordering::Less => {
+                    return Some(format!("{} only in the first ingest", a.0));
+                }
+                std::cmp::Ordering::Greater => {
+                    return Some(format!("{} only in the second ingest", b.0));
+                }
+                std::cmp::Ordering::Equal if a.1 != b.1 => {
+                    return Some(format!("{} differs: first {} second {}", a.0, a.1, b.1));
+                }
+                std::cmp::Ordering::Equal => {
+                    left.next();
+                    right.next();
+                }
+            },
+        }
+    }
+}
+
+// Why two ingests differ, naming the first differing fact when there is one.
+fn ingest_difference(first: &PinnedIngest, second: &PinnedIngest) -> Option<String> {
+    if let Some(fact) = first_differing_fact(&first.facts, &second.facts) {
+        return Some(format!("first differing fact: {fact}"));
+    }
+    if first.graph_hash != second.graph_hash {
+        return Some(format!(
+            "graph hash {} became {} over the same facts",
+            first.graph_hash, second.graph_hash
+        ));
+    }
+    if first.recorded_hash != second.recorded_hash {
+        return Some(format!(
+            "recorded hash {} became {} over the same facts",
+            first.recorded_hash, second.recorded_hash
+        ));
+    }
+    (first.identities != second.identities)
+        .then(|| "the T0 identity list changed over the same facts".to_owned())
+}
+
+// AC-0770 (#1812): a failed real-repository determinism run names the first
+// differing fact rather than only reporting that the graph changed.
+#[test]
+fn determinism_failure_names_the_first_differing_fact() {
+    let fact = |key: &str, body: &str| (key.to_owned(), body.to_owned());
+    let base = vec![fact("edge a -[CALLS]-> b", "1"), fact("node a", "2")];
+    assert_eq!(first_differing_fact(&base, &base.clone()), None);
+    let changed = vec![fact("edge a -[CALLS]-> b", "1"), fact("node a", "3")];
+    assert_eq!(
+        first_differing_fact(&base, &changed).as_deref(),
+        Some("node a differs: first 2 second 3")
     );
-    assert!(first == ingest(1), "worker count changed the graph");
+    let missing = vec![fact("node a", "2")];
+    assert_eq!(
+        first_differing_fact(&base, &missing).as_deref(),
+        Some("edge a -[CALLS]-> b only in the first ingest")
+    );
+    assert_eq!(
+        first_differing_fact(&missing, &base).as_deref(),
+        Some("edge a -[CALLS]-> b only in the second ingest")
+    );
+    let extra = vec![
+        fact("edge a -[CALLS]-> b", "1"),
+        fact("node a", "2"),
+        fact("node z", "9"),
+    ];
+    assert_eq!(
+        first_differing_fact(&base, &extra).as_deref(),
+        Some("node z only in the second ingest")
+    );
+
+    let ingest = |facts: Vec<(String, String)>, hash: &str| PinnedIngest {
+        graph_hash: hash.to_owned(),
+        recorded_hash: hash.to_owned(),
+        identities: vec![],
+        facts,
+        nodes: 1,
+        edges: 1,
+    };
+    assert_eq!(
+        ingest_difference(&ingest(base.clone(), "h"), &ingest(base.clone(), "h")),
+        None
+    );
+    assert_eq!(
+        ingest_difference(&ingest(base.clone(), "h"), &ingest(changed, "g")).as_deref(),
+        Some("first differing fact: node a differs: first 2 second 3")
+    );
 }
