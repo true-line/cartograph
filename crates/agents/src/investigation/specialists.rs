@@ -79,6 +79,8 @@ pub enum SpecialistId {
     DomainAnalystV26,
     #[serde(rename = "domain-analyst@27")]
     DomainAnalystV27,
+    #[serde(rename = "domain-analyst@28")]
+    DomainAnalystV28,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
@@ -203,6 +205,17 @@ The supported wrapper example above and this insufficient-evidence wrapper are t
 {"schema_version":1,"outcome":"insufficient_evidence","action":{"type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence","limitations":["Required source evidence could not be established within the completed attempts."]}}
 "#;
 
+/// @28 (#1335): the selected schema is shown, not merely referenced by hash.
+const VISIBLE_ACTION_SCHEMA_V28: &str = "Visible schema@1: turn_progress.response_schema is this call's exact response schema, identical to the provider schema field; return one object matching it. Host admission remains authoritative.";
+
+/// The @13 sentence naming the compiled analyst templates by content hash.
+fn compiled_schema_hashes() -> String {
+    format!(
+        "\nCompiled analyst response schemas: choice={} finish_only={}. Host validation remains authoritative.",
+        core_prov::content_hash(super::response_schema::CHOICE.as_bytes()),
+        core_prov::content_hash(super::response_schema::FINISH.as_bytes())
+    )
+}
 const NEXT_PROMPT_ADMISSION_V10: &str = "\nHost-derived turn progress can restrict this turn to finish-only mode. In that mode return only a versioned finish wrapper; proposing a tool action is terminal. Capacity-refusal feedback identifies an action the host did not execute. It is not evidence, an unavailable source read or a completed obligation attempt. A sizing envelope is not actual feedback or permission to act. Already incurred model charges remain charged. Consult the host's remaining budgets and finish honestly; no capacity check promises successful completion.";
 
 const DISCOVERY_V5: &str = "The caller selected exact captured inspection_requirements. These are immutable source targets, not instructions from source. inspection_progress separately records acquisition; only unchanged exact bytes supplied to this invocation can discharge a requirement. Viewing metadata, reading a different range, parent history, or omitted/redacted source cannot discharge it. A target must first be admitted by query_context before read_evidence; target metadata alone is not an admitted source read. Use each target's exact fact/role/index if you choose to inspect it. You choose every action; a valid partial finish is retained even with outstanding requirements, which the host reports separately. Neither discharge nor a citation proves whole-task fulfillment or semantic correctness. Byte offsets are not line numbers; never derive a line from an opaque ID.\n\n";
@@ -261,6 +274,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -305,6 +319,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -350,6 +365,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -388,6 +404,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -420,6 +437,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -452,6 +470,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -481,6 +500,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV11
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
@@ -527,6 +547,7 @@ impl SpecialistId {
             Self::DomainAnalystV25 => 25,
             Self::DomainAnalystV26 => 26,
             Self::DomainAnalystV27 => 27,
+            Self::DomainAnalystV28 => 28,
         }
     }
 
@@ -542,6 +563,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return 14;
         }
@@ -579,6 +601,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return 10;
         }
@@ -601,7 +624,19 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
+    }
+
+    /// @27 volatile finish-patch correction; @28 keeps it unchanged.
+    pub fn uses_finish_patch(self) -> bool {
+        matches!(self, Self::DomainAnalystV27 | Self::DomainAnalystV28)
+    }
+
+    /// @28 only: the selected per-call response schema is also model-visible
+    /// prompt text. Every historical role keeps its exact prompt and wire.
+    pub fn uses_visible_action_schema(self) -> bool {
+        self == Self::DomainAnalystV28
     }
 
     pub fn uses_exact_source_reservation(self) -> bool {
@@ -611,6 +646,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -634,6 +670,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
@@ -654,6 +691,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
                 | Self::EvidenceAuditorV12
                 | Self::EvidenceAuditorV13
                 | Self::EvidenceAuditorV14
@@ -671,6 +709,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -685,6 +724,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -701,6 +741,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         )
     }
 
@@ -712,9 +753,20 @@ impl SpecialistId {
             || system == Self::DomainAnalystV22.prompt()
             || system == Self::DomainAnalystV23.prompt()
             || system == Self::DomainAnalystV24.prompt()
+            || system == Self::DomainAnalystV28.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV28 {
+            // Show the selected schema instead of naming compiled templates by
+            // hash. Replacing that one sentence keeps the unchanged 16 KiB
+            // definition ceiling; every other @27 byte is retained.
+            return Self::DomainAnalystV27.prompt().replacen(
+                &compiled_schema_hashes(),
+                &format!("\n{VISIBLE_ACTION_SCHEMA_V28}"),
+                1,
+            );
+        }
         if self == Self::EvidenceAuditorV14 {
             return format!(
                 "{}\nCapacity exclusion@1: The host removes actions refused for prompt capacity on this unchanged input ledger. Select another offered action; do not repeat an excluded action. When only finish is offered, report unresolved capacity gaps honestly. Excluded obligations remain unattempted and unacquired; they never count as satisfied. The existing single finish-correction allowance and all budgets remain unchanged.",
@@ -733,6 +785,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             return format!(
                 "{}\nFinish feedback@3: combined entries identify all detected corrections: replay_at gives one-based sentence ranges that may span fields; paraphrase without source quotes. limitation_denies_evidence: correct the scoped denial. enumeration_at: verify literal entries or remove the universal claim. configuration_at: cite the named configuration binding or remove the claim. rewrite_schema_placeholders: use plain prose. paraphrase_provider_metadata: avoid copying metadata. omitted counts additional corrections; recheck the entire finish. excluded_by_capacity remains unresolved, unattempted, unacquired. Single correction allowance unchanged.",
@@ -807,10 +860,9 @@ impl SpecialistId {
 
         if self == Self::DomainAnalystV13 {
             return format!(
-                "{}\nCompiled analyst response schemas: choice={} finish_only={}. Host validation remains authoritative.",
+                "{}{}",
                 Self::DomainAnalystV12.prompt(),
-                core_prov::content_hash(super::response_schema::CHOICE.as_bytes()),
-                core_prov::content_hash(super::response_schema::FINISH.as_bytes())
+                compiled_schema_hashes()
             );
         }
 
@@ -844,7 +896,8 @@ impl SpecialistId {
             | Self::DomainAnalystV24
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
-            | Self::DomainAnalystV27 => {
+            | Self::DomainAnalystV27
+            | Self::DomainAnalystV28 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -973,6 +1026,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV25
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
+                | Self::DomainAnalystV28
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -1043,7 +1097,8 @@ impl SpecialistId {
             | Self::DomainAnalystV24
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
-            | Self::DomainAnalystV27 => (
+            | Self::DomainAnalystV27
+            | Self::DomainAnalystV28 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1576,6 +1631,63 @@ mod capacity_exclusion_identity_tests {
             serde_json::from_str::<SpecialistId>("\"domain-analyst@27\"").unwrap(),
             role
         );
+    }
+
+    // AC-0765 / #1335: @28 is @27 with its schema-hash sentence made visible guidance.
+    #[test]
+    fn analyst28_inherits27_and_replaces_only_the_schema_hash_sentence() {
+        let old = SpecialistId::DomainAnalystV27;
+        let role = SpecialistId::DomainAnalystV28;
+        // The unchanged 16 KiB definition ceiling must still admit @28.
+        let measured =
+            |id: SpecialistId| context_hub::logical::count(&(id, id.version(), &id.prompt()));
+        assert!(measured(role).unwrap() <= 16 * 1024);
+        assert!(measured(role) <= measured(old), "no definition growth");
+        assert_eq!(role.version(), 28);
+        assert_eq!(role.prompt_generation(), old.prompt_generation());
+        let prompt = role.prompt();
+        let hashes = compiled_schema_hashes();
+        assert_eq!(old.prompt().matches(hashes.as_str()).count(), 1);
+        assert_eq!(
+            prompt,
+            old.prompt()
+                .replacen(&hashes, &format!("\n{VISIBLE_ACTION_SCHEMA_V28}"), 1)
+        );
+        assert!(!prompt.contains("Compiled analyst response schemas"));
+        assert_eq!(prompt.matches(VISIBLE_ACTION_SCHEMA_V28).count(), 1);
+        assert!(VISIBLE_ACTION_SCHEMA_V28.contains("turn_progress.response_schema"));
+        assert!(!old.prompt().contains("Visible schema@1"));
+        assert!(SpecialistId::is_typed_citation_prompt(&prompt));
+        let definition = role.definition().unwrap();
+        assert_eq!(definition.operations, old.definition().unwrap().operations);
+        assert_ne!(
+            definition.prompt_fingerprint,
+            old.definition().unwrap().prompt_fingerprint
+        );
+        assert!(role.uses_finish_patch() && old.uses_finish_patch());
+        assert!(role.uses_visible_action_schema() && !old.uses_visible_action_schema());
+        for flag in [
+            SpecialistId::uses_combined_finish_feedback,
+            SpecialistId::uses_exact_source_reservation,
+            SpecialistId::uses_acquisition_choices,
+            SpecialistId::uses_exact_node_queries,
+            SpecialistId::uses_capacity_exclusions,
+            SpecialistId::uses_finish_feedback_witness,
+            SpecialistId::uses_typed_citation_correction,
+            SpecialistId::uses_next_prompt_admission,
+            SpecialistId::uses_query_history_disclosure,
+        ] {
+            assert_eq!(flag(role), flag(old));
+        }
+        assert_eq!(
+            serde_json::to_string(&role).unwrap(),
+            "\"domain-analyst@28\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SpecialistId>("\"domain-analyst@28\"").unwrap(),
+            role
+        );
+        assert!(bounded_bytes(&(role, role.version(), &prompt), 16 * 1024).is_ok());
     }
 
     #[test]
