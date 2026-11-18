@@ -4132,7 +4132,7 @@ async fn check_provider_connection(
         provider_checks::check_connection_with(
             provider_credentials::system(),
             provider,
-            llm::anthropic::CONNECTION_CHECK_URL,
+            provider_checks::check_url(provider),
             provider_checks::CHECK_TIMEOUT,
             |label, bytes| {
                 state
