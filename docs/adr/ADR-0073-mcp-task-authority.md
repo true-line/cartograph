@@ -146,11 +146,10 @@ not settle are listed separately for the owner, under Open questions.
 
 These are not decided by this ADR. Each records what main does today.
 
-1. **Cloud from MCP.** The wire request chooses `provider_mode`, so an MCP
-   client can ask for a cloud task. Egress still waits for per-step App consent,
-   and AC-0326's host consent behaviour is not yet proven (T-0326 PARTIAL).
-   Should a grant allow cloud mode, should MCP tasks be local-only, or should the
-   grant say which?
+1. **Cloud from MCP (decided by the owner, 2026-11-18): keep it.** The wire
+   request chooses `provider_mode`, so an MCP client can ask for a cloud task.
+   Egress still waits for per-step consent in the App. AC-0326's host consent
+   behaviour must still be proven (T-0326 PARTIAL) before this ADR is accepted.
 2. **Grant breadth.** The grant is all-or-nothing over the five tools and every
    advertised specialist and scope. Should it be narrower, for example to
    specialists, scope or provider mode?
