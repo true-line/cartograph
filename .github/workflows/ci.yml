@@ -383,7 +383,8 @@ jobs:
           task: Test native Windows job ownership and process exit
           executable: cargo.exe
           arguments-json: '["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"]'
-          timeout-seconds: '600'
+          # A cold optimized-dependency build alone takes ~7 minutes (#1924).
+          timeout-seconds: '900'
 
       # Report what the tests left behind so the leaking holder can be found
       # (#1307 follow-up). Read-only: runner.temp is emptied after the job.

@@ -307,7 +307,7 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
     windows,
     /arguments-json: '\["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"\]'/u,
   );
-  assert.match(windows, /timeout-seconds: '600'/u);
+  assert.match(windows, /timeout-seconds: '900'/u);
   assert.equal(
     windows.match(new RegExp(`bounded-command@${PLAYBOOK_RUNTIME_PIN}`, 'gu'))?.length,
     2,
