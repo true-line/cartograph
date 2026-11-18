@@ -8181,7 +8181,7 @@ SOFTWARE.
 
 Used by:
 - tree-sitter-language 0.1.9 — https://github.com/tree-sitter/tree-sitter
-- tree-sitter 0.27.1 — https://github.com/tree-sitter/tree-sitter
+- tree-sitter 0.27.2 — https://github.com/tree-sitter/tree-sitter
 
 ```
 The MIT License (MIT)
