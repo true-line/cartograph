@@ -28,7 +28,7 @@ permissions:
 jobs:
   policy:
     name: Action Policy
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # The organisation's Linux runner does not carry Node on its default PATH.
@@ -48,7 +48,7 @@ jobs:
   validate:
     name: Validate reviewed release tag
     needs: policy
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       actions: read
@@ -186,7 +186,7 @@ jobs:
     needs:
       - validate
       - build
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       actions: read

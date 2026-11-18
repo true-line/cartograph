@@ -10,6 +10,7 @@ import {
   type AtlasGroup,
   type AtlasScene,
   expandAcross,
+  revealExpansion,
 } from '../atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode, Tier } from '../store';
 
@@ -194,6 +195,30 @@ export function displayName(node: GraphNode): string {
     if (typeof value === 'string' && value.length > 0) return value;
   }
   return node.id;
+}
+
+/** How many search matches the Find list shows at once (#1666). */
+export const SEARCH_RESULT_LIMIT = 50;
+
+/** Literal entity lookup over a loaded Atlas snapshot (#1666): a trimmed,
+ *  case-insensitive substring match on the display name, the kind and the
+ *  stable id. It reads only the snapshot it is given — no graph reads, no
+ *  model calls — and orders matches by display name, then id, so the same
+ *  snapshot and query always list the same results. A blank query matches
+ *  nothing. */
+export function searchAtlasEntities(snapshot: AtlasSnapshot, query: string): GraphNode[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  return snapshot.nodes
+    .map((node) => ({ node, name: displayName(node) }))
+    .filter(
+      ({ node, name }) =>
+        name.toLowerCase().includes(needle) ||
+        node.label.toLowerCase().includes(needle) ||
+        node.id.toLowerCase().includes(needle),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name) || a.node.id.localeCompare(b.node.id))
+    .map(({ node }) => node);
 }
 
 /** Shape encodes kind, never color alone (handoff §Atlas): octagon with a
@@ -455,6 +480,8 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
   // graph of its root within the level above; Esc pops one level.
   const [focusStack, setFocusStack] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Find (#1666): literal lookup across the whole loaded snapshot.
+  const [query, setQuery] = useState('');
   // Confirmed external/internal boundary placeholders never reach the
   // canvas (#244) — dropped once, up front, so the legend count and the
   // entity/relation indexes below always agree with what the scene renders.
@@ -469,6 +496,11 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
   );
   // Deterministic banded scene (#159): same snapshot → same positions.
   const scene = useMemo(() => buildAtlasScene(visible, expanded), [visible, expanded]);
+  const matches = useMemo(
+    () => searchAtlasEntities(withoutPlaceholders, query),
+    [withoutPlaceholders, query],
+  );
+  const searching = query.trim().length > 0;
   const namesById = useMemo(
     () => new Map(snapshot.nodes.map((node) => [node.id, displayName(node)])),
     [snapshot],
@@ -487,6 +519,37 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
     setFocusStack((stack) => (stack.length > depth ? stack.slice(0, depth) : stack));
     setExpanded(new Set());
     containerRef.current?.focus();
+  };
+
+  // Choosing a Find result reveals the entity through the existing
+  // mechanisms (#1666): the layer widens to All layers only when the active
+  // layer does not hold it, focus backs out only as many levels as still
+  // hide it there (a widened layer keeps every focus level that now shows
+  // it), and the groups/cluster around it open. The exact original node
+  // goes to the evidence drawer.
+  const reveal = (node: GraphNode) => {
+    const inLayer = layered.nodes.some((candidate) => candidate.id === node.id);
+    const nextLayer: AtlasLayer = inLayer ? layer : 'all';
+    const base = inLayer ? layered : withoutPlaceholders;
+    // Every focus root is in the active layer, so it is in All layers too.
+    let stack = focusStack;
+    let projected = base;
+    for (; stack.length > 0; stack = stack.slice(0, -1)) {
+      projected = stack.reduce((snap, root) => focusAtlasGraph(snap, root), base);
+      if (projected.nodes.some((candidate) => candidate.id === node.id)) break;
+    }
+    if (stack.length === 0) projected = base;
+    const unchanged = nextLayer === layer && stack.length === focusStack.length;
+    const onCanvas = scene.nodes.some((item) => item.node?.id === node.id);
+    if (nextLayer !== layer) {
+      setLayer(nextLayer);
+      onLayerChange?.(LAYERS.find((item) => item.id === nextLayer)?.label ?? nextLayer);
+    }
+    if (stack.length !== focusStack.length) setFocusStack(stack);
+    // Keep what the viewer opened when the entity is already on screen.
+    if (!(unchanged && onCanvas)) setExpanded(revealExpansion(projected, node.id));
+    setSelectedId(node.id);
+    onSelect(node);
   };
 
   useEffect(() => {
@@ -604,6 +667,38 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         ))}
       </div>
 
+      <div className="atlas-find" role="search">
+        <label htmlFor="atlas-find-input">Find entity</label>
+        <input
+          id="atlas-find-input"
+          type="search"
+          value={query}
+          placeholder="Name, kind or stable ID"
+          aria-describedby="atlas-find-scope"
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            // Esc clears the query first; with nothing typed it keeps
+            // backing out of focus like everywhere else in the card.
+            if (event.key === 'Escape' && query) {
+              event.preventDefault();
+              event.stopPropagation();
+              setQuery('');
+            }
+          }}
+        />
+        {query && (
+          <button type="button" onClick={() => setQuery('')}>
+            Clear
+          </button>
+        )}
+        <span id="atlas-find-scope" className="muted">
+          Searches all {withoutPlaceholders.nodes.length} entities in the loaded Atlas — every layer,
+          focus level and collapsed group; boundary placeholders are not listed.
+        </span>
+      </div>
+
       <nav className="atlas-focus-path" aria-label="Focus path">
         <button
           type="button"
@@ -688,7 +783,41 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         )}
       </div>
 
-      {scene.openGroups.length > 0 && (
+      {searching && (
+        <div className="atlas-entity-index atlas-find-results" aria-label="Find results">
+          <span className="muted" aria-live="polite">
+            {matches.length === 0
+              ? `No entities match “${query.trim()}”`
+              : `${matches.length} ${matches.length === 1 ? 'match' : 'matches'}`}
+          </span>
+          {matches.length > 0 && (
+            <ul>
+              {matches.slice(0, SEARCH_RESULT_LIMIT).map((node) => (
+                <li key={node.id}>
+                  <button
+                    type="button"
+                    aria-current={node.id === selectedId ? 'true' : undefined}
+                    title={node.id}
+                    onClick={() => reveal(node)}
+                  >
+                    <span>{displayName(node)}</span>
+                    <span className="muted">
+                      {node.label} · {node.id}
+                    </span>
+                  </button>
+                </li>
+              ))}
+              {matches.length > SEARCH_RESULT_LIMIT && (
+                <li className="muted">
+                  +{matches.length - SEARCH_RESULT_LIMIT} more — refine the query
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {!searching && scene.openGroups.length > 0 && (
         <div className="atlas-entity-index" aria-label="Open groups">
           <span className="muted">Open groups — click to fold back</span>
           <div>
@@ -711,7 +840,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         </div>
       )}
 
-      {scene.collapsedGroups.length > 0 && (
+      {!searching && scene.collapsedGroups.length > 0 && (
         <div className="atlas-entity-index" aria-label="Collapsed groups">
           <span className="muted">Collapsed groups — click to open</span>
           <div>
@@ -728,7 +857,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         </div>
       )}
 
-      {scene.collapsed.length > 0 && (
+      {!searching && scene.collapsed.length > 0 && (
         <div className="atlas-entity-index" aria-label="Collapsed clusters">
           <span className="muted">Collapsed clusters — click to expand</span>
           <div>
@@ -745,7 +874,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         </div>
       )}
 
-      {visible.nodes.length > 0 && (
+      {!searching && visible.nodes.length > 0 && (
         <div className="atlas-entity-index">
           <span className="muted">Visible entities</span>
           <div>
@@ -770,7 +899,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
         </div>
       )}
 
-      {visible.edges.length > 0 && onSelectEdge && (
+      {!searching && visible.edges.length > 0 && onSelectEdge && (
         <div className="atlas-entity-index" aria-label="Visible relations">
           <span className="muted">Visible relations</span>
           <div>

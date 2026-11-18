@@ -31,7 +31,7 @@ permissions:
 jobs:
   policy:
     name: Action Policy
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # The organisation's Linux runner does not carry Node on its default PATH.
@@ -50,7 +50,7 @@ jobs:
     name: Sync help to the wiki
     needs: policy
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # The repository token only reads source; the wiki write uses the
     # dedicated secret at the push boundary.
