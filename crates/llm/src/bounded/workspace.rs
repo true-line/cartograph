@@ -3,6 +3,7 @@
 use super::*;
 use std::mem::size_of;
 
+/// Byte accounting for the firewall's prepared and authorized DTOs.
 #[derive(Debug, Clone, Copy)]
 pub struct FirewallWorkspace {
     /// Returned prepared DTO and its owned string/span payloads.

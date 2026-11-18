@@ -1851,3 +1851,6 @@ fn local_finish_policy_authenticates_complete_acquisition_and_restricts_schema()
 
 #[path = "input_bounded_tests.rs"]
 mod bounded_tests;
+
+#[path = "visible_schema_tests.rs"]
+mod visible_schema_tests;

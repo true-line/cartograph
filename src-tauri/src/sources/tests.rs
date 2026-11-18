@@ -25,6 +25,20 @@ fn file_url(path: &Path) -> String {
     url
 }
 
+// AC-0823: the source registry waits 5 s for a competing writer, the same
+// busy timeout as every other Cartograph store (#1653).
+#[test]
+fn source_registry_waits_five_seconds_for_a_busy_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let registry = SourceRegistry::open(app_data.join("state.db"), &app_data).unwrap();
+    let timeout: i64 = registry
+        .conn
+        .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+        .unwrap();
+    assert_eq!(timeout, 5_000);
+}
+
 // AC0140: same-basename roots and worktree-like independent directories retain
 // separate namespaces; canonical aliases and restart retain one registration.
 #[test]
