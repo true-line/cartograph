@@ -71,7 +71,10 @@ A job has no place in the order when one of its needs could not be resolved,
 when it needs such a job, or when its needs form a cycle. These jobs are
 listed after the ordered ones, each with the reason.
 
-Every row shows the tier, confidence and source span of its fact.
+Every row shows the tier, confidence and source span of its fact, and the
+citation id of each fact it states: the fact itself, the relation that places
+a trigger, job or step, and each need of a job. Each relation shows its
+confidence beside its id. Every id is a row of the fact index.
 
 A `verified-only` export leaves out InferredWeak rows and states how many
 pipeline facts it left out. A `best-effort` export includes them and marks
@@ -486,7 +489,8 @@ An export is refused when one of its statements cites an id that has no row,
 or when two different facts would share one id. Most documents do not print
 the citation id beside each statement yet. That is added one document at a
 time. `data_model.md` prints one beside each entity, related node, relation
-and relation field it lists, and `curated.md` beside each curated item.
+and relation field it lists, `pipelines.md` beside each pipeline, trigger,
+job, step and need, and `curated.md` beside each curated item.
 
 The index grows with the number of facts the documents state, not with the
 size of the graph.

@@ -302,6 +302,25 @@ fn table<'a>(content: &'a str, pipeline: &str, heading: &str) -> Vec<&'a str> {
         .collect()
 }
 
+fn node_cite(id: &str) -> String {
+    citation_id(&FactKey::Node { id: id.into() })
+}
+
+fn edge_cite(source: &str, label: &str, destination: &str) -> String {
+    citation_id(&FactKey::Edge {
+        source: source.into(),
+        label: label.into(),
+        destination: destination.into(),
+    })
+}
+
+/// The citation ids `text` prints: `F-` and 16 hex characters.
+fn printed_citation_ids(text: &str) -> BTreeSet<&str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|word| word.len() == 18 && word.starts_with("F-"))
+        .collect()
+}
+
 const WORKFLOW_SECTION: &str = "acme/shop@.github/workflows/deploy.yml";
 
 // AC-0650: each pipeline lists its triggers in declared order, its jobs
@@ -319,8 +338,9 @@ fn jobs_are_in_dependency_order_and_steps_in_declared_order() {
 
     let summary = line(content, "| acme/shop@.github/workflows/deploy.yml |");
     assert!(summary.contains("| github-actions | name: Deploy | 2 | 4 | 3 |"));
+    let pipeline = node_cite(&format!("pipeline:{REPO}@{WORKFLOW}"));
     assert!(summary.contains(&format!(
-        "| Deterministic | Confirmed | {SPAN_PREFIX} 0..12 @ 0123abc | — |"
+        "| Deterministic | Confirmed | {SPAN_PREFIX} 0..12 @ 0123abc | {pipeline} | — |"
     )));
 
     let triggers = table(content, WORKFLOW_SECTION, "Triggers");
@@ -350,9 +370,12 @@ fn jobs_are_in_dependency_order_and_steps_in_declared_order() {
             ["| 4", "lint", "job", "3", "—"],
         ]
     );
+    let build = job_id(WORKFLOW, "build");
     assert!(jobs[0].ends_with(&format!(
         "| runs-on: ubuntu-latest | Deterministic | Confirmed | {SPAN_PREFIX} 300..340 @ \
-         0123abc | — |"
+         0123abc | {}; placed by {} (Confirmed) | — |",
+        node_cite(&build),
+        edge_cite(&build, "PART_OF", &format!("pipeline:{REPO}@{WORKFLOW}"))
     )));
     assert!(jobs[2].contains("| environment: production |"));
 
@@ -377,7 +400,7 @@ fn jobs_are_in_dependency_order_and_steps_in_declared_order() {
     assert!(stages[1].starts_with("| 2 | stage-1 | stage | 1 | stage-0 (via copy-from) |"));
     assert_eq!(
         table(content, "acme/shop@Dockerfile", "Triggers"),
-        ["| — | None recovered | — | — | — | — | — |"]
+        ["| — | None recovered | — | — | — | — | — | — |"]
     );
 }
 
@@ -837,4 +860,170 @@ fn every_row_cites_a_fact_that_resolves_in_the_fact_index() {
     )
     .expect_err("no bundle, and so no pipelines.md, for a collision");
     assert!(matches!(error, FactIndexError::Collision { .. }));
+}
+
+/// The fact index of `bundle` and the citation ids its rows say this
+/// artifact cites.
+fn cited_by_pipelines(bundle: &crate::SpecBundle) -> (FactIndex, BTreeSet<String>) {
+    let index: FactIndex = serde_json::from_str(
+        &bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "fact-index-json")
+            .unwrap()
+            .content,
+    )
+    .unwrap();
+    let cited = index
+        .rows
+        .iter()
+        .filter(|row| row.cited_by.iter().any(|by| by == ID))
+        .map(|row| row.citation_id.clone())
+        .collect();
+    (index, cited)
+}
+
+// AC-0761 (#1785, ADR-0058 decision 8): pipelines.md prints the citation id
+// of every fact it asserts: each pipeline, each trigger, job and step with
+// the relation that places it, and each need of a job, resolved or not, in
+// the order of its Needs cell, each relation with its confidence. The ids it
+// prints are exactly its assertions and each resolves in the fact index.
+#[test]
+fn pipelines_print_a_resolving_citation_for_each_statement() {
+    let mut f = deploy();
+    f.dangling(WORKFLOW, "lint", "missing", (401, 408));
+    for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+        let bundle =
+            try_compile_spec_with_coverage(&f.nodes, &f.edges, &[], mode, &BTreeSet::new(), &[])
+                .expect("the citations resolve");
+        let artifact = bundle.artifacts.iter().find(|a| a.id == ID).unwrap();
+        let (index, cited) = cited_by_pipelines(&bundle);
+        assert_eq!(cited.len(), artifact.assertions.len(), "{mode:?}");
+        let printed = printed_citation_ids(&artifact.content);
+        assert_eq!(
+            printed,
+            cited.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+            "{mode:?}: {}",
+            artifact.content
+        );
+        check_citations(&index, printed.iter().copied()).expect("every id resolves");
+
+        let content = &artifact.content;
+        let pipeline = format!("pipeline:{REPO}@{WORKFLOW}");
+        let trigger = format!("pipeline-trigger:{REPO}@{WORKFLOW}#push");
+        let triggers = table(content, WORKFLOW_SECTION, "Triggers");
+        assert!(triggers[0].ends_with(&format!(
+            "| {}; placed by {} (Confirmed) | — |",
+            node_cite(&trigger),
+            edge_cite(&trigger, "PART_OF", &pipeline)
+        )));
+        // A job cites its needs in the order its Needs cell lists them.
+        let deploy = job_id(WORKFLOW, "deploy");
+        let jobs = table(content, WORKFLOW_SECTION, "Jobs in dependency order");
+        assert!(jobs[2].ends_with(&format!(
+            "| {}; placed by {} (Confirmed); needs {} (Confirmed), {} (Confirmed) | — |",
+            node_cite(&deploy),
+            edge_cite(&deploy, "PART_OF", &pipeline),
+            edge_cite(&deploy, "NEEDS", &job_id(WORKFLOW, "build")),
+            edge_cite(&deploy, "NEEDS", &job_id(WORKFLOW, "test")),
+        )));
+        // An unresolved need is a Gap relation and is cited as one.
+        let lint = job_id(WORKFLOW, "lint");
+        let gap = format!("gap:pipeline:{REPO}@{WORKFLOW}#lint/needs/missing");
+        let row = jobs.iter().find(|row| row.contains("| lint |")).unwrap();
+        assert!(row.contains(&format!(
+            "; needs {} (Gap) | — |",
+            edge_cite(&lint, "NEEDS", &gap)
+        )));
+        let step = step_id(WORKFLOW, "build", 0);
+        let steps = table(content, WORKFLOW_SECTION, "Steps in declared order");
+        assert!(steps[0].ends_with(&format!(
+            "| {}; placed by {} (Confirmed) | — |",
+            node_cite(&step),
+            edge_cite(&step, "PART_OF", &build_id())
+        )));
+    }
+}
+
+fn build_id() -> String {
+    job_id(WORKFLOW, "build")
+}
+
+// AC-0762 (#1785, R-INT-5): a verified-only pipelines.md prints no citation
+// of an InferredWeak fact, placement or need, and its index has no row for
+// one; a best-effort one prints each with its confidence; both resolve and
+// the same graph prints the same bytes.
+#[test]
+fn pipeline_citations_follow_the_export_mode() {
+    let mut f = deploy();
+    let weak_step = step_id(WORKFLOW, "build", 1);
+    f.fact(&weak_step).props["prov"] = weak_prov(WORKFLOW, (320, 340), &weak_step);
+    // A confirmed step placed by a weak relation.
+    let placed = step_id(WORKFLOW, "deploy", 0);
+    let deploy = job_id(WORKFLOW, "deploy");
+    f.edges
+        .iter_mut()
+        .find(|edge| edge.label == "PART_OF" && edge.src == placed)
+        .unwrap()
+        .props["prov"] = weak_prov(WORKFLOW, (120, 140), "weak placement");
+    let test = job_id(WORKFLOW, "test");
+    f.edges
+        .iter_mut()
+        .find(|edge| edge.label == "NEEDS" && edge.src == test)
+        .unwrap()
+        .props["prov"] = weak_prov(WORKFLOW, (210, 215), "weak need");
+    let weak = [
+        node_cite(&weak_step),
+        edge_cite(&weak_step, "PART_OF", &build_id()),
+        edge_cite(&placed, "PART_OF", &deploy),
+        edge_cite(&test, "NEEDS", &build_id()),
+    ];
+    let compile = |mode| {
+        try_compile_spec_with_coverage(&f.nodes, &f.edges, &[], mode, &BTreeSet::new(), &[])
+            .expect("the citations resolve")
+    };
+
+    let verified = compile(ExportMode::VerifiedOnly);
+    let (index, cited) = cited_by_pipelines(&verified);
+    let content = &find(verified.clone()).content;
+    for id in &weak {
+        assert!(!content.contains(id.as_str()), "{id} in {content}");
+        assert!(!index.rows.iter().any(|row| &row.citation_id == id));
+    }
+    assert!(!content.contains("(InferredWeak)"));
+    let printed = printed_citation_ids(content);
+    assert_eq!(printed, cited.iter().map(String::as_str).collect());
+    check_citations(&index, printed.iter().copied()).expect("every id resolves");
+
+    let best = compile(ExportMode::BestEffort);
+    let (index, cited) = cited_by_pipelines(&best);
+    let content = find(best).content;
+    let steps = table(&content, WORKFLOW_SECTION, "Steps in declared order");
+    assert!(steps[1].contains(&format!(
+        "| Agentic | InferredWeak | {SPAN_PREFIX} 320..340 @ 0123abc | {}; placed by {} \
+         (Confirmed) |",
+        weak[0], weak[1]
+    )));
+    let under = steps
+        .iter()
+        .find(|row| row.starts_with("| deploy |"))
+        .unwrap();
+    assert!(under.contains(&format!(
+        "| {}; placed by {} (InferredWeak) |",
+        node_cite(&placed),
+        weak[2]
+    )));
+    let jobs = table(&content, WORKFLOW_SECTION, "Jobs in dependency order");
+    let row = jobs.iter().find(|row| row.contains("| test |")).unwrap();
+    assert!(row.contains(&format!("; needs {} (InferredWeak) |", weak[3])));
+    let printed = printed_citation_ids(&content);
+    assert_eq!(printed, cited.iter().map(String::as_str).collect());
+    check_citations(&index, printed.iter().copied()).expect("every id resolves");
+
+    // Deterministic: the same graph prints the same bytes.
+    assert_eq!(content, find(compile(ExportMode::BestEffort)).content);
+    assert_eq!(
+        find(compile(ExportMode::VerifiedOnly)).content,
+        find(compile(ExportMode::VerifiedOnly)).content
+    );
 }
