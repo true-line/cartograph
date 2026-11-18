@@ -22,7 +22,9 @@ pub use curated::{
 };
 pub(crate) mod diagrams;
 mod document;
-pub use document::cited_fact_hashes;
+pub use document::{
+    SYSTEM_SCOPE, SectionScopeError, cited_fact_hashes, drafted_section, section_citation_set,
+};
 mod endpoint_inventory;
 mod endpoint_permissions;
 mod environments;
