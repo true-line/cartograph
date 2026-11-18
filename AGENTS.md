@@ -169,8 +169,10 @@ npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run
 
 The complete CI suite also requires native job ownership tests on Windows:
 `cargo test --locked -p job-execution-tests --test ownership`. Every run uses
-the organisation's self-hosted Windows runner (`self-hosted, Windows, X64`), a
-native Windows host, never WSL. No job runs on a GitHub-hosted runner.
+the GitHub-hosted `windows-latest` runner, a native Windows host, never WSL.
+The repository is public, so every job runs on GitHub-hosted runners
+(`ubuntu-latest`, `windows-latest`, `macos-latest`); no job runs on a
+self-hosted runner, because fork PRs would execute on it.
 The harness imports the production job modules and their existing tests without
 building Tauri. Local workspace tests run the same harness on the local platform;
 only a successful exact-SHA Windows lane establishes its Windows runtime result.
