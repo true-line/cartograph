@@ -150,6 +150,7 @@ export default function App() {
     ingestSource,
     ingestTarget,
     preflight,
+    systemPreflight,
     preflightBusy,
     preflightError,
     preflightProgress,
@@ -859,6 +860,7 @@ export default function App() {
             source={ingestSource}
             target={ingestTarget}
             report={preflight}
+            system={systemPreflight}
             busy={preflightBusy}
             progress={preflightProgress}
             error={preflightError}

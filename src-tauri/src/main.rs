@@ -49,6 +49,7 @@ mod settings;
 mod showcase_tests;
 mod source_access;
 mod sources;
+mod system_preflight;
 mod task_evidence;
 mod work_packets;
 
@@ -7166,6 +7167,7 @@ fn main() {
             retry_job,
             preflight,
             cancel_preflight,
+            system_preflight::preflight_system,
             findings_summary,
             list_findings,
             get_settings,
@@ -12581,7 +12583,9 @@ export function App() {
     }
 
     /// A mock app managing the stores a preflight touches, rooted in `dir`.
-    fn preflight_test_app(dir: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
+    pub(crate) fn preflight_test_app(
+        dir: &std::path::Path,
+    ) -> tauri::App<tauri::test::MockRuntime> {
         use tauri::Manager;
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))

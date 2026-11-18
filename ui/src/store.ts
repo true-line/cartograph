@@ -225,6 +225,18 @@ export interface PreflightReport {
   register?: RegisterStamp;
 }
 
+/** One `cartograph.system.toml` entry's preview (#1655, AC-0705): a local
+ *  member scanned in place, or a remote/managed one deferred to recovery. */
+export type MemberPreflight =
+  | { kind: 'local'; entry: string; path: string; report: PreflightReport }
+  | { kind: 'deferred'; entry: string };
+
+/** A system manifest's preflight preview, in manifest order. It registers
+ *  no source and records no finding; recovery owns both (AC-0706). */
+export interface SystemPreflight {
+  members: MemberPreflight[];
+}
+
 /** A report's place in its repo's register order (AC-0216, #458). The
  *  register holds the write with the highest epoch, so showing, per repo, the
  *  highest-epoch report seen always matches the register. */
@@ -1036,6 +1048,8 @@ export interface AppStore {
   dropIntake: DropItem[] | null;
   /** Local detection result; null for remote targets (detected on clone). */
   preflight: PreflightReport | null;
+  /** A system manifest's per-member preview (#1655); null otherwise. */
+  systemPreflight: SystemPreflight | null;
   preflightBusy: boolean;
   preflightError: string | null;
   /** Latest progress of the running preflight; null when none is running. */
@@ -1135,7 +1149,8 @@ export interface AppStore {
   /** Clear a finished drop's outcomes; an unresolved drop stays. */
   dismissDropIntake: () => void;
   /** Navigate to Preflight and run local detection (#116). Local targets get
-   *  a real report; remote/manifest targets are detected during recovery. */
+   *  a real report and a system manifest a per-member preview (#1655);
+   *  GitHub targets are detected during recovery. */
   runPreflight: () => Promise<void>;
   /** Apply one `preflight://progress` ping while a preflight is running. */
   applyPreflightProgress: (progress: PreflightProgress) => void;
@@ -1260,6 +1275,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ingestTarget: '',
   dropIntake: null,
   preflight: null,
+  systemPreflight: null,
   preflightBusy: false,
   preflightError: null,
   preflightProgress: null,
@@ -1624,7 +1640,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setIngestSource: (ingestSource) => {
     // A local scan still running on the backend would otherwise finish and
     // persist findings for a target the user has left (#434 review).
-    if (ingestSource !== 'local' && get().preflightBusy) void get().cancelPreflight();
+    // A manifest preview is abandoned the same way (#1655).
+    if (ingestSource !== get().ingestSource && get().preflightBusy) void get().cancelPreflight();
     set({ ingestSource });
   },
 
@@ -1741,17 +1758,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
       view: 'preflight',
       selected: null,
       preflight: null,
+      systemPreflight: null,
       preflightError: null,
       preflightBusy: false,
       preflightProgress: null,
     });
-    // Only a local tree can be detected before recovery. GitHub and manifest
-    // targets are scanned by their recovery, which writes the reconciled
-    // findings to the register (AC-0209). Showing nothing beats inventing a
-    // report (three-way honesty starts here).
-    if (get().ingestSource !== 'local') return;
+    // A local tree, and a system manifest's local members (#1655), can be
+    // detected before recovery. GitHub targets are scanned by their
+    // recovery, which writes the reconciled findings to the register
+    // (AC-0209). Showing nothing beats inventing a report (three-way honesty
+    // starts here).
+    const source = get().ingestSource;
+    if (source === 'github') return;
     set({ preflightBusy: true });
     try {
+      if (source === 'manifest') {
+        // A preview records nothing, so it has no register stamp to order;
+        // only the current run's complete result is shown (AC-0707).
+        const system = await invokeOr<SystemPreflight | null>('preflight_system', null, {
+          path: target,
+          run,
+        });
+        if (run === preflightRun) set({ systemPreflight: system });
+        return;
+      }
       const preflight = await invokeOr<PreflightReport | null>('preflight', null, {
         path: target,
         run,
@@ -1768,7 +1798,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const error = String(e);
       set({
         preflightError:
-          error === 'cancelled' ? 'Preflight cancelled. No findings were recorded.' : error,
+          error === 'cancelled'
+            ? source === 'manifest'
+              ? 'Preflight cancelled. Nothing was recorded.'
+              : 'Preflight cancelled. No findings were recorded.'
+            : error,
       });
     } finally {
       if (run === preflightRun) set({ preflightBusy: false, preflightProgress: null });

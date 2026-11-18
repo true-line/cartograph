@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { useAppStore, type PreflightReport } from './store';
+import { useAppStore, type PreflightReport, type SystemPreflight } from './store';
 
 const report = (detector: string): PreflightReport => ({
   languages: [],
@@ -14,6 +14,7 @@ const reset = {
   ingestSource: 'local' as const,
   ingestTarget: '/repos/app',
   preflight: null,
+  systemPreflight: null,
   preflightBusy: false,
   preflightError: null,
   preflightProgress: null,
@@ -322,5 +323,91 @@ describe('register-order precedence for preflight reports (AC-0216, #458)', () =
 
     expect(useAppStore.getState().preflight?.detector).toBe('retried');
     expect(applied).toEqual([job]);
+  });
+});
+
+// AC-0705..0707 (#1655): a system manifest gets a per-member preview.
+describe('system manifest preflight preview', () => {
+  const manifestState = { ...reset, ingestSource: 'manifest' as const, ingestTarget: '/sys/cartograph.system.toml' };
+  const system: SystemPreflight = {
+    members: [
+      { kind: 'local', entry: 'api', path: '/sys/api', report: report('preflight@1') },
+      { kind: 'deferred', entry: 'https://github.com/example/web' },
+    ],
+  };
+
+  it('previews the manifest through preflight_system and shows every member', async () => {
+    useAppStore.setState(manifestState);
+    const calls: Array<{ command: string; args: unknown }> = [];
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      return system;
+    });
+    await useAppStore.getState().runPreflight();
+    expect(calls.map((call) => call.command)).toEqual(['preflight_system']);
+    expect(calls[0].args).toMatchObject({ path: '/sys/cartograph.system.toml' });
+    const state = useAppStore.getState();
+    expect(state.systemPreflight).toEqual(system);
+    expect(state.preflight).toBeNull();
+    expect(state.preflightBusy).toBe(false);
+  });
+
+  it('shows no partial members when the preview fails or is cancelled', async () => {
+    useAppStore.setState({ ...manifestState, systemPreflight: system });
+    mockIPC(() => Promise.reject('missing: No such file or directory'));
+    await useAppStore.getState().runPreflight();
+    let state = useAppStore.getState();
+    expect(state.systemPreflight).toBeNull();
+    expect(state.preflightError).toBe('missing: No such file or directory');
+
+    mockIPC(() => Promise.reject('cancelled'));
+    await useAppStore.getState().runPreflight();
+    state = useAppStore.getState();
+    expect(state.systemPreflight).toBeNull();
+    expect(state.preflightError).toBe('Preflight cancelled. Nothing was recorded.');
+  });
+
+  it("ignores a superseded preview's late result", async () => {
+    useAppStore.setState(manifestState);
+    const pending: Array<(value: SystemPreflight) => void> = [];
+    mockIPC(() => new Promise<SystemPreflight>((resolve) => { pending.push(resolve); }));
+    const first = useAppStore.getState().runPreflight();
+    const second = useAppStore.getState().runPreflight();
+    pending[1](system);
+    pending[0]({ members: [{ kind: 'deferred', entry: 'stale' }] });
+    await Promise.all([first, second]);
+    expect(useAppStore.getState().systemPreflight).toEqual(system);
+  });
+
+  it('cancels a running preview when the source switches away from the manifest', async () => {
+    useAppStore.setState(manifestState);
+    const commands: string[] = [];
+    let reject: (reason: string) => void = () => {};
+    mockIPC((command) => {
+      commands.push(command);
+      if (command === 'cancel_preflight') {
+        reject('cancelled');
+        return null;
+      }
+      return new Promise((_resolve, fail) => { reject = fail; });
+    });
+    const running = useAppStore.getState().runPreflight();
+    useAppStore.getState().setIngestSource('local');
+    await running;
+    expect(commands).toEqual(['preflight_system', 'cancel_preflight']);
+    expect(useAppStore.getState().systemPreflight).toBeNull();
+    expect(useAppStore.getState().preflightBusy).toBe(false);
+  });
+
+  it('runs no preview for a GitHub target', async () => {
+    useAppStore.setState({ ...reset, ingestSource: 'github', ingestTarget: 'https://github.com/o/r' });
+    const commands: string[] = [];
+    mockIPC((command) => {
+      commands.push(command);
+      return null;
+    });
+    await useAppStore.getState().runPreflight();
+    expect(commands).toEqual([]);
+    expect(useAppStore.getState().systemPreflight).toBeNull();
   });
 });
