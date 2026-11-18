@@ -415,14 +415,15 @@
 ### US-0018 — In-app Help, single-sourced with the wiki
 - **Actor:** Engineer
 - **As a** engineer **I want** help inside the app — a native Help menu, an in-app Help view, and contextual per-surface topics — **so that** guidance is reachable without leaving the work, and never drifts from the published wiki.
-- **Priority:** Should · **Status:** Done
+- **Priority:** Should · **Status:** In-Progress
 - **AC-0090** Given the native app menu, when it renders, then a Help submenu offers Cartograph Help (opens the in-app Help view), User guide — wiki (opens the wiki in the system browser, never the webview), Report an issue (the tracker's new-issue page, system browser), and About Cartograph with the app version.
 - **AC-0091** Given the in-app Help view, when opened — from the menu, the command palette, or the `?`/F1 shortcut — then it renders a keyboard-navigable topic TOC (concepts plus every surface) and the selected topic's content entirely from markdown bundled at build time, offline, with no network dependency.
 - **AC-0092** Given any surface, when its contextual help entry (the header's Help action) is used, then the Help view opens on that surface's topic; topics are authored once under `docs/help/`; the PR gate validates that source without reading the wiki, and a post-merge workflow mirrors main's topics to the wiki so the two cannot drift.
 - **AC-0222** Given the desktop app on macOS, Linux, or Windows, when it opens an external link (the Help submenu's wiki and new-issue pages), then the complete URL — every query parameter after an `&` included — reaches the system browser through the platform's URL handler (`open`, `xdg-open`, or the Windows URL protocol handler, never `explorer`), and on an OS with no known launcher nothing is spawned and the refusal is logged; and on Windows neither that launcher nor the auth ladder's `gh auth token` step (AC-0001, ADR-0009) flashes a console window.
+- **AC-0730** Given a new user with a downloaded release build on macOS, when they open the **First run** Help topic (`docs/help/first-run.md`, listed right after Concepts and linked from the README), then it walks them from installing and first opening the build (the `unsigned-dev` **Open Anyway** case included), through what works with no provider (T0 recovery), setting up the local lane (Ollama, the required models and the commands that fetch them) and saving a cloud provider key and what consent means, to a first ingest and where to look afterwards; and the page names the app version against which every step was performed on a clean macOS account (#1796).
 - **Security:** External links open via the system browser; help content ships in the bundle (no runtime fetch).
 - **Performance:** Topics render from pre-bundled strings; no I/O on open.
-- **Trace:** post-M10 · `app`, `ingest`, UI, `scripts` · — · T-0090..0092, T-0222
+- **Trace:** post-M10 · `app`, `ingest`, UI, `scripts` · — · T-0090..0092, T-0222, T-0730
 
 ### US-0019 — Toolchain recovered as cited facts
 - **Actor:** Engineer
