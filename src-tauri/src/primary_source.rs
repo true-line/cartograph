@@ -18,10 +18,10 @@ pub(crate) use pinned::PinnedReadError;
 use crate::AppState;
 use crate::sources::RegisteredSource;
 
-const MAX_RECEIPTS: u64 = 100_000;
+const MAX_RECEIPTS: u64 = 200_000;
 const MAX_RECEIPT_BYTES: u64 = 128 * 1024;
 const MAX_RECEIPT_HEADER_BYTES: u64 = 16 * 1024;
-const MAX_RECEIPT_STORE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RECEIPT_STORE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_TOMBSTONE_CAPTURE_IDS_BYTES: u64 = 64 * 1024;
 const RECEIPT_HEADER_DOMAIN: &[u8] = b"cartograph:receipt-header:v1\0";
 const RECEIPTS_SCHEMA_V1: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072)) STRICT";
