@@ -1540,6 +1540,34 @@ It is run as step 8 of the release pilot ([readiness report](release/v1.0-readin
 4. Start an investigation and confirm its recorded limits show the new values.
 5. Choose **Restore defaults**; the window shows 10 and 3 again.
 
+## MT-1796-01 — First-run guide on a clean macOS account (AC-0730, T-0730)
+
+**Status: Not run.** AC-0730; #1796. Run once per release that changes a step
+the page describes, and before #1796 closes.
+
+1. Create a new macOS user account, or use one that has never run Cartograph
+   (no app profile, no Keychain entry for Cartograph, no Ollama models). Record
+   the macOS version and the CPU architecture.
+2. Download the release `.dmg` from the repository's release page. Record its
+   file name and the app version. If it is an `unsigned-dev` build, also
+   record that.
+3. For the install step, follow the page as published (`docs/help/first-run.md`
+   in the release's source). Once the app opens, open **Help → First run** in
+   the installed app and follow that rendered copy from there, step by step,
+   exactly as written and without using anything it does not say. Record
+   whether the topic opened and rendered. For an `unsigned-dev` build the
+   install step includes **Open Anyway**.
+4. At each step record whether the page matched what the app showed: the
+   control names, the screen order, the status bar text, the **Detection
+   deferred** Preflight screen for a GitHub repository, the model names and
+   `ollama pull` commands, and the consent dialogs.
+5. **Pass:** every step worked as written. Update the version line at the top
+   of the page to the version checked, in the same PR as any wording fixes,
+   and record the run on #1796.
+6. **Fail:** a step did not work or the page was wrong. Fix the page, or open
+   an issue if the app is wrong, and record the run on #1796. The issue is not
+   closed over a failed run.
+
 ## MT-1812-01 — Re-ingest determinism on a real repository (AC-0593, T-0593)
 
 **Status: Not run under this procedure.** AC-0593; #1812. Run at each milestone
