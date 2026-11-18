@@ -195,10 +195,14 @@ The outside list is a lower bound. Read the unclassified count beside it.
 
 A binding is a service base URL or a gateway route in the system manifest.
 Without one, a call to another ingested repository by its full web address
-is listed as outside. The manifest itself is not stored, so a binding is
-known only where it joined a call to an endpoint. When bindings exist, a
-call to a host they do not cover is listed as unclassified, with the
-sentence recorded for it, and not yet as outside.
+is listed as outside. When bindings exist, each call and each observed HTTP
+client records what the bindings say about its host. A call to a host no
+binding names is listed as outside. A call or client of a host a binding
+names is not listed as outside, even where no endpoint matched.
+
+A system ingested before this was recorded keeps the older result: a call
+to a host its bindings do not cover is listed as unclassified, with the
+sentence recorded for it. Add the system again to record the outcome.
 
 **External data flows** has one row for each flow and outside service it
 reaches. The entities are those a symbol on the flow reads or writes. The
