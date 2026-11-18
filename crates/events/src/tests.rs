@@ -1518,6 +1518,40 @@ fn kept_gaps_record_the_binding_state_of_their_origin() {
         &endpoints,
         &[service("third", "api", "https://third.example.com")],
     );
+    // The recorded outcome is part of each fact's content hash, derived from
+    // the extractor's own hash: the graph hash follows the outcome, and a
+    // later pass replaces the hash instead of chaining it.
+    let hash =
+        |props: &serde_json::Value| props["prov"]["content_hash"].as_str().unwrap().to_string();
+    for (kept, changed) in [(&out, &other), (&again, &other)] {
+        for node in &kept.kept_nodes {
+            let source = gaps.iter().find(|gap| gap.id == node.id).unwrap();
+            assert_eq!(node.props["t0_content_hash"], hash(&source.props));
+            assert_ne!(hash(&node.props), hash(&source.props));
+            let after = changed.kept_nodes.iter().find(|n| n.id == node.id).unwrap();
+            assert_eq!(after.props["t0_content_hash"], hash(&source.props));
+            assert_eq!(
+                hash(&after.props) == hash(&node.props),
+                after.props[BINDING_STATE] == node.props[BINDING_STATE]
+                    && after.props.get("binding") == node.props.get("binding")
+                    && after.props["reason"] == node.props["reason"]
+                    && after.props.get("candidates") == node.props.get("candidates"),
+                "{}",
+                node.id
+            );
+        }
+        for edge in &kept.kept_edges {
+            let source = edges.iter().find(|gap| gap.dst == edge.dst).unwrap();
+            assert_eq!(edge.props["t0_content_hash"], hash(&source.props));
+            assert_ne!(hash(&edge.props), hash(&source.props));
+        }
+    }
+    assert!(
+        out.kept_nodes
+            .iter()
+            .zip(&other.kept_nodes)
+            .any(|(first, second)| hash(&first.props) != hash(&second.props))
+    );
     for node in &other.kept_nodes {
         let third = node.props["request"]["url"]
             .as_str()
@@ -1540,7 +1574,12 @@ fn observed_clients_of_a_declared_origin_cite_its_bindings() {
     let resource = |id: &str, kind: &str, identity: &str, observed: bool| Node {
         id: id.into(),
         label: "Resource".into(),
-        props: serde_json::json!({"kind": kind, "identity": identity, "observed": observed}),
+        props: serde_json::json!({
+            "kind": kind,
+            "identity": identity,
+            "observed": observed,
+            "prov": {"content_hash": format!("hash of {id}")},
+        }),
     };
     let resources = [
         resource("res:b", "http-api", "https://Orders.example.com/v1", true),
@@ -1570,6 +1609,12 @@ fn observed_clients_of_a_declared_origin_cite_its_bindings() {
     assert_eq!(gateway[1]["service"], "orders");
     assert_eq!(bound[1].props["binding"][0]["kind"], "declared-service");
     assert_eq!(bound[1].props["identity"], "https://Orders.example.com/v1");
+    // The citations are part of the client's content hash.
+    for node in &bound {
+        let own = format!("hash of {}", node.id);
+        assert_eq!(node.props["t0_content_hash"], own);
+        assert_ne!(node.props["prov"]["content_hash"], own);
+    }
 
     // Unchanged citations are not written again; a binding that is no
     // longer declared takes its citation with it.
@@ -1582,6 +1627,18 @@ fn observed_clients_of_a_declared_origin_cite_its_bindings() {
     let ids: Vec<&str> = dropped.iter().map(|node| node.id.as_str()).collect();
     assert_eq!(ids, ["res:b"]);
     assert!(dropped[0].props.get("binding").is_none());
+    assert!(dropped[0].props.get("t0_content_hash").is_none());
+    assert_eq!(dropped[0].props["prov"]["content_hash"], "hash of res:b");
+    // Other citations give another hash, from the same own hash.
+    let fewer = bind_observed_clients(&stored, &bindings[..2]);
+    let ids: Vec<&str> = fewer.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(ids, ["res:a"]);
+    assert_eq!(fewer[0].props["t0_content_hash"], "hash of res:a");
+    assert_ne!(
+        fewer[0].props["prov"]["content_hash"],
+        bound[0].props["prov"]["content_hash"]
+    );
+    assert_ne!(fewer[0].props["prov"]["content_hash"], "hash of res:a");
     assert!(bind_observed_clients(&resources, &[]).is_empty());
 }
 

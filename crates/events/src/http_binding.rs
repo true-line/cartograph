@@ -475,6 +475,40 @@ fn record_state(node: &mut Node, edge: &mut Edge, state: &str, cited: &[&HttpBin
     } else {
         node.props["binding"] = citations.into();
     }
+    const RECORDED: [&str; 4] = [BINDING_STATE, "binding", "reason", "candidates"];
+    rehash(&mut node.props, &RECORDED);
+    rehash(&mut edge.props, &RECORDED);
+}
+
+/// Property keeping the content hash a fact's own extractor derived, once
+/// the system pass has recorded something on the fact.
+const BASE_CONTENT_HASH: &str = "t0_content_hash";
+
+/// Make a fact's provenance content hash cover what the system pass recorded
+/// on it under `keys`, so the graph hash changes whenever that does (#1843).
+/// The hash is derived from the extractor's own hash, kept under
+/// [`BASE_CONTENT_HASH`], so a later pass replaces it instead of chaining,
+/// and a fact with nothing recorded gets its own hash back. A fact without
+/// a provenance content hash is left as it is.
+fn rehash(props: &mut serde_json::Value, keys: &[&str]) {
+    let Some(current) = props["prov"]["content_hash"].as_str() else {
+        return;
+    };
+    let base = props[BASE_CONTENT_HASH]
+        .as_str()
+        .unwrap_or(current)
+        .to_string();
+    let recorded: Vec<&serde_json::Value> = keys.iter().map(|key| &props[*key]).collect();
+    if recorded.iter().all(|value| value.is_null()) {
+        if let Some(object) = props.as_object_mut() {
+            object.remove(BASE_CONTENT_HASH);
+        }
+        props["prov"]["content_hash"] = base.into();
+        return;
+    }
+    let fact = serde_json::to_vec(&(&base, keys, &recorded)).expect("recorded binding serializes");
+    props["prov"]["content_hash"] = core_prov::content_hash(&fact).into();
+    props[BASE_CONTENT_HASH] = base.into();
 }
 
 /// Citations of `bindings`, each once, in a fixed order.
@@ -531,6 +565,7 @@ pub fn bind_observed_clients(resources: &[Node], bindings: &[HttpBinding]) -> Ve
             } else {
                 node.props["binding"] = cited.into();
             }
+            rehash(&mut node.props, &["binding"]);
             Some(node)
         })
         .collect();
