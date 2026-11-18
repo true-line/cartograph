@@ -1092,6 +1092,8 @@ export async function submit(flag, items, hook, fallback = fetch('/default')) {
   items.forEach(() => fetch('/callback'));
   hook?.run(fetch('/optional'));
   hook?.deep.run(fetch('/optional-deep'));
+  fetch?.('/optional-call');
+  await hook?.client.fetch('/optional-receiver');
   switch (flag) { case 1: fetch('/case'); }
   return fetch('/last');
 }
@@ -1128,7 +1130,7 @@ export const save = async () => {
         .find(|site| matches!(&site.url, IdentityExpr::Literal(url) if url == "/callback"))
         .unwrap();
     assert_ne!(callback.symbol, out.fetch_sites[0].symbol);
-    assert_eq!(lines.len(), 17);
+    assert_eq!(lines.len(), 18);
     assert!(
         lines
             .iter()

@@ -81,6 +81,10 @@ pub(super) fn straight_line(cx: &FileCx<'_>, site: TsNode<'_>, symbol: Option<&s
     let Some(symbol) = symbol else {
         return false;
     };
+    // `fetch?.(url)`, `api?.client.get(url)`: the site itself may be skipped.
+    if optional_chain(site) {
+        return false;
+    }
     let mut child = site;
     while let Some(parent) = child.parent() {
         if is_callable(parent) {
@@ -123,7 +127,7 @@ fn optional_chain(node: TsNode<'_>) -> bool {
     let mut cursor = node.walk();
     if node
         .children(&mut cursor)
-        .any(|part| part.kind() == "optional_chain")
+        .any(|part| matches!(part.kind(), "optional_chain" | "?."))
     {
         return true;
     }
