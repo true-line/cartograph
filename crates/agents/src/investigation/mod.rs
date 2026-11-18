@@ -99,40 +99,63 @@ pub use withholding_witness::{
 #[cfg(test)]
 mod tests;
 
-/// Hard protocol and storage boundaries. Host counters may narrow these limits.
+// Hard protocol and storage boundaries. Host counters may narrow these limits.
+
+/// Largest accepted model action, in bytes.
 pub const MAX_ACTION_BYTES: usize = 32 * 1024;
+/// Largest assembled investigation input, in bytes.
 pub const MAX_INPUT_BYTES: usize = 128 * 1024;
+/// Largest input manifest, in bytes.
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
+/// Largest admitted investigation result, in bytes.
 pub const MAX_RESULT_BYTES: usize = 64 * 1024;
+/// Largest stored investigation record, in bytes.
 pub const MAX_RECORD_BYTES: usize = 256 * 1024;
-/// Shape limits shared with logical admission models; values are unchanged.
+// Shape limits shared with logical admission models; values are unchanged.
+
+/// Deepest JSON nesting accepted in a record.
 pub const RECORD_MAX_DEPTH: usize = 32;
+/// Most JSON values accepted in a record.
 pub const RECORD_MAX_VALUES: usize = 16384;
+/// Most items accepted in one record array.
 pub const RECORD_MAX_ARRAY_ITEMS: usize = 128;
 /// Cumulative raw query acquisitions, including repeated identical pages.
 pub const MAX_TOTAL_QUERY_BYTES: usize = 96 * 1024;
+/// Largest single raw query acquisition, in bytes.
 pub const MAX_QUERY_BYTES: usize = 32 * 1024;
+/// Most facts one query may return.
 pub const MAX_QUERY_FACTS: usize = 32;
+/// Most facts an investigation may select.
 pub const MAX_SELECTED_FACTS: usize = 64;
+/// Largest investigation question, in bytes.
 pub const MAX_QUESTION_BYTES: usize = 2048;
+/// Most model calls in one investigation.
 pub const MAX_MODEL_CALLS: u32 = 8;
+/// Most tool actions in one investigation.
 pub const MAX_TOOL_ACTIONS: u32 = 8;
 
 /// Fixed diagnostics never expose source, prompts or unadmitted model output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InvestigationError {
+    /// The request is malformed or out of bounds.
     #[error("invalid investigation request")]
     InvalidRequest,
+    /// A model action is malformed or not permitted.
     #[error("invalid investigation action")]
     InvalidAction,
+    /// A hard size, count or call bound was exceeded.
     #[error("investigation bound exceeded")]
     LimitExceeded,
+    /// The assembled input is malformed.
     #[error("invalid investigation input")]
     InvalidInput,
+    /// The output cites input that was not supplied.
     #[error("investigation output cites unavailable input")]
     InvalidCitation,
+    /// The output replays supplied source text.
     #[error("investigation output repeats supplied text")]
     SourceReplay,
+    /// The output contains text the redactor flags as sensitive.
     #[error("investigation output contains sensitive text")]
     SensitiveOutput,
 }
