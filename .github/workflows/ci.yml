@@ -212,13 +212,13 @@ jobs:
 
       # The image's mirror list starts with the region's EC2 mirror, which
       # stalled for minutes on single archives and timed out the apt step on
-      # most lanes (#1924). apt only moves down the list on errors, never on
-      # slowness, so put the Azure and primary archives first and keep the
-      # image's own entries as fallbacks.
+      # most lanes (#1924). apt only moves on errors, never on slowness, and
+      # the image's list outranked entries we prepended, so replace the list
+      # with the Azure and primary archives only.
       - name: Prefer faster Ubuntu mirrors
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
             sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
           fi
 
@@ -448,11 +448,11 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      # See the Rust job: replace the image's mirror list (EC2 first).
       - name: Prefer faster Ubuntu mirrors
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
             sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
           fi
 
@@ -532,11 +532,11 @@ jobs:
 
       # The organisation's Linux runner has no Rust toolchain; rustup from apt
       # resolves the exact one from rust-toolchain.toml, as in the Rust lane.
-      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      # See the Rust job: replace the image's mirror list (EC2 first).
       - name: Prefer faster Ubuntu mirrors
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            { printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/; cat /etc/apt/apt-mirrors.txt; } > "$RUNNER_TEMP/apt-mirrors.txt"
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
             sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
           fi
 
@@ -667,6 +667,20 @@ jobs:
           timeout-seconds: '300'
           attempts: '2'
           retry-delay-seconds: '5'
+
+      # See the Rust job: put faster Ubuntu mirrors ahead of the EC2 one.
+      # Playwright's --with-deps calls apt-get without our options, so set
+      # them in apt.conf.d: a retry waits for a timed-out attempt's dpkg
+      # lock instead of failing at once (#1924).
+      - name: Prefer faster Ubuntu mirrors
+        working-directory: .
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
+            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+          fi
+          printf '%s\n' 'DPkg::Lock::Timeout "180";' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > "$RUNNER_TEMP/99-ci-apt"
+          sudo cp "$RUNNER_TEMP/99-ci-apt" /etc/apt/apt.conf.d/99-ci-apt
 
       - name: Install Playwright browser (for story tests)
         uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
