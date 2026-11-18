@@ -141,6 +141,8 @@ impl Fixture {
             current_assertion_hashes: &self.current,
             drafts: &[],
             cited_fact_hashes: &std::collections::BTreeMap::new(),
+            findings: &[],
+            cited_fact_digests: &std::collections::BTreeMap::new(),
             policy_version: &self.policy,
         })
     }
@@ -172,7 +174,7 @@ fn eligible_record_is_an_item_with_dr4_fields() {
     let projection = Fixture::new(vec![record("r1")]).run();
     assert_eq!(projection.view, CuratedView::Curated);
     assert_eq!(projection.graph_basis, GRAPH_HASH);
-    assert!(projection.revision.starts_with("curated-revision-v2:"));
+    assert!(projection.revision.starts_with("curated-revision-v3:"));
     assert!(projection.listed.is_empty());
     let [item] = projection.items.as_slice() else {
         panic!("one item");
@@ -800,7 +802,7 @@ fn revision_changes_with_content() {
     assert_ne!(graph.run().revision, base, "graph hash");
 
     let mut policy = every_state();
-    policy.policy = "curated-policy-v3".into();
+    policy.policy = "curated-policy-next".into();
     assert_ne!(policy.run().revision, base, "policy version");
 }
 

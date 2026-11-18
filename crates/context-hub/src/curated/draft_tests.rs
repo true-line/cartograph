@@ -56,6 +56,8 @@ fn run_with(
         current_assertion_hashes: &BTreeSet::new(),
         drafts,
         cited_fact_hashes: current,
+        findings: &[],
+        cited_fact_digests: &std::collections::BTreeMap::new(),
         policy_version: CURATED_POLICY_VERSION,
     })
 }
@@ -99,7 +101,7 @@ fn an_accepted_draft_whose_cited_facts_are_unchanged_is_eligible_and_stays_t3() 
     assert!(projection.items.is_empty() && projection.listed.is_empty());
     assert_eq!(projection.counts, CuratedCounts::default());
     assert_eq!(projection.graph_basis, GRAPH_HASH);
-    assert!(projection.revision.starts_with("curated-revision-v2:"));
+    assert!(projection.revision.starts_with("curated-revision-v3:"));
 }
 
 #[test]
@@ -178,6 +180,35 @@ fn an_accepted_successor_supersedes_the_draft_it_replaces() {
         assert_eq!(outcome(&projection, "d1").0, DraftState::Eligible);
         assert_eq!(projection.drafts.len(), 1);
     }
+}
+
+#[test]
+fn a_replacement_chain_leaves_only_its_last_draft_eligible() {
+    // d1 <- d2 <- d3: a section re-drafted and accepted twice.
+    let d2 = ReviewedDraft {
+        replaces: Some("d1".into()),
+        ..draft("d2")
+    };
+    let d3 = ReviewedDraft {
+        replaces: Some("d2".into()),
+        ..draft("d3")
+    };
+    let projection = run(&[draft("d1"), d2.clone(), d3.clone()]);
+    assert_eq!(outcome(&projection, "d1").0, DraftState::Superseded);
+    assert_eq!(outcome(&projection, "d2").0, DraftState::Superseded);
+    assert_eq!(
+        outcome(&projection, "d3"),
+        (DraftState::Eligible, DraftStateReason::AllConditionsHold)
+    );
+    assert_eq!(projection.draft_counts.superseded, 2);
+    assert_eq!(projection.draft_counts.conflicted, 0);
+
+    // Another accepted draft beside the chain conflicts with its last draft
+    // only.
+    let projection = run(&[draft("d1"), d2, d3, draft("d4")]);
+    assert_eq!(outcome(&projection, "d3").0, DraftState::Conflicted);
+    assert_eq!(outcome(&projection, "d4").0, DraftState::Conflicted);
+    assert_eq!(projection.draft_counts.conflicted, 2);
 }
 
 #[test]
