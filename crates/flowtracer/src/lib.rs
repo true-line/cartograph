@@ -29,7 +29,7 @@ mod bounded;
 use bounded::{Candidate, FlowView, HopView, TraceBudget};
 pub use bounded::{
     TRACE_WORKSPACE_MODEL, TraceGraphBound, TraceLimit, TraceLimitExceeded, TraceLimits,
-    TraceWorkspaceBound, logical_workspace_bound,
+    TraceWorkspaceBound, logical_workspace_bound, output_evidence_bound,
 };
 
 /// Edge labels the tracer walks — callers use this to query exactly the
