@@ -952,9 +952,20 @@ fn explicit_acquisition_start_reopens_and_recovers_nonce() {
 // AC-0574: exercise the actual public coordinator, not just JobStore admission.
 #[test]
 fn desktop_analyst27_command_selects_finish_policy() {
+    desktop_analyst_command_selects_finish_policy(SpecialistId::DomainAnalystV27);
+}
+
+// AC-0834 (#1335): the public start path opens @28 on @27's saved local finish
+// policy, cancels before a model call and replays the saved nonce unchanged.
+#[test]
+fn desktop_analyst28_command_selects_finish_policy() {
+    desktop_analyst_command_selects_finish_policy(SpecialistId::DomainAnalystV28);
+}
+
+fn desktop_analyst_command_selects_finish_policy(role: SpecialistId) {
     let provider = Arc::new(PublicProvider::new(false));
     worker::with_public_start_fixture(provider.clone(), false, |app, mut request, _| {
-        request.specialist_id = "domain-analyst@27".into();
+        request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
         let state = app.state::<AppState>();
         state
             .investigations
@@ -974,7 +985,7 @@ fn desktop_analyst27_command_selects_finish_policy() {
         .unwrap();
         wait(|| provider.entered.load(Ordering::SeqCst).then_some(()));
         let saved = detail(app, &started.investigation_id);
-        assert_eq!(saved.summary.specialist_id, SpecialistId::DomainAnalystV27);
+        assert_eq!(saved.summary.specialist_id, role);
         assert_eq!(
             saved.limits.generation_policy,
             Some(agents::investigation::GenerationPolicy::LocalFinish4096V1)

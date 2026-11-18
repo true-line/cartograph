@@ -6,6 +6,7 @@ use serde::{
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use std::{fmt, io::Write};
+/// Lowercase hex SHA-256 digest of `bytes`.
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()

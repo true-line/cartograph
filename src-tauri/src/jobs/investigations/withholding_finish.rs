@@ -14,20 +14,18 @@ pub(super) fn project(
     policy: &InvestigationPolicy,
     patch_eligible: Option<&[usize]>,
 ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
-    if !matches!(
-        task.detail.summary.specialist_id,
-        SpecialistId::DomainAnalystV25
-            | SpecialistId::DomainAnalystV26
-            | SpecialistId::DomainAnalystV27
-    ) || !matches!(
-        (
-            task.detail.summary.specialist_id,
-            request.specialist_id.as_str()
-        ),
-        (SpecialistId::DomainAnalystV25, "domain-analyst@25")
-            | (SpecialistId::DomainAnalystV26, "domain-analyst@26")
-            | (SpecialistId::DomainAnalystV27, "domain-analyst@27")
-    ) || task.detail.summary.cancel_requested
+    if !uses_finding_withholding(task.detail.summary.specialist_id)
+        || !matches!(
+            (
+                task.detail.summary.specialist_id,
+                request.specialist_id.as_str()
+            ),
+            (SpecialistId::DomainAnalystV25, "domain-analyst@25")
+                | (SpecialistId::DomainAnalystV26, "domain-analyst@26")
+                | (SpecialistId::DomainAnalystV27, "domain-analyst@27")
+                | (SpecialistId::DomainAnalystV28, "domain-analyst@28")
+        )
+        || task.detail.summary.cancel_requested
     {
         return Ok(None);
     }

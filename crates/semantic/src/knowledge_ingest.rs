@@ -7,6 +7,10 @@
 //! retrieval reloads them from the cache namespace, which stays a rebuildable
 //! cache, never authority. Without an embedding provider the phase is skipped
 //! as a named omission.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::embedding_cache::{
     CacheStats, CachedProvider, EmbeddingCache, EmbeddingSpaceBinding, Lease,
 };

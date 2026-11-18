@@ -1,4 +1,8 @@
 //! V4 turn progress derived from durable ordered admissions, never model claims.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use crate::{TaskFactKey, TaskRangeRole};
 use serde::{Deserialize, Serialize};

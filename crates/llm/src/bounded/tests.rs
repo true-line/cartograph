@@ -2274,3 +2274,61 @@ fn openai_cloud_bounded_fails_closed() {
     assert_eq!(error.code, FailureCode::Unsupported);
     assert_no_request(&listener);
 }
+
+// AC-0820 (#1653): a bounded call is governed by its own declared
+// `request_timeout_ms`, never by the reusable client's fallback timeout, and
+// that fallback equals the configurable ceiling so a permitted call is never
+// cut short.
+#[test]
+fn bounded_call_timeout_follows_declared_limit_not_client_fallback() {
+    assert_eq!(
+        CLIENT_FALLBACK_TIMEOUT,
+        Duration::from_millis(MAX_REQUEST_TIMEOUT_MS)
+    );
+    let delayed = |delay: Duration| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            set_timeouts(&stream);
+            read_request(&mut stream).unwrap();
+            thread::sleep(delay);
+            let _ = stream.write_all(&framed(&ollama_body("{}")));
+        });
+        (endpoint, server)
+    };
+    let limits = |request_timeout_ms| {
+        CompletionLimits::new(CompletionLimitValues {
+            request_timeout_ms,
+            ..CompletionLimitValues::default()
+        })
+        .unwrap()
+    };
+
+    // A declared limit longer than the client fallback is honoured.
+    let (endpoint, server) = delayed(Duration::from_millis(700));
+    let mut local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    local.bounded_client =
+        build_client_with_fallback(Client::builder(), true, Duration::from_millis(200)).unwrap();
+    assert_eq!(
+        local
+            .complete_bounded(&authorize(&local, limits(5_000)), &control())
+            .unwrap()
+            .text,
+        "{}"
+    );
+    server.join().unwrap();
+
+    // A declared limit shorter than the client fallback still ends the call.
+    let (endpoint, server) = delayed(Duration::from_millis(1_500));
+    let mut local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10)).unwrap();
+    local.bounded_client =
+        build_client_with_fallback(Client::builder(), true, Duration::from_secs(30)).unwrap();
+    let before = Instant::now();
+    let error = local
+        .complete_bounded(&authorize(&local, limits(300)), &control())
+        .unwrap_err();
+    assert_eq!(error, unknown(FailureCode::DeadlineExceeded));
+    assert!(before.elapsed() < Duration::from_millis(1_400));
+    server.join().unwrap();
+}
