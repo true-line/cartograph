@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 #[path = "investigations/admission_contract.rs"]
 mod admission_contract;
+#[path = "investigations/analyst_lineage.rs"]
+mod analyst_lineage;
+use analyst_lineage::{uses_finding_withholding, uses_local_finish_generation};
 #[path = "investigations/admission_journal.rs"]
 mod admission_journal;
 pub(crate) use admission_journal::RefusalReason as NextPromptRefusalReason;
@@ -916,10 +919,7 @@ pub(crate) fn policy_for_detail(
     }
     if policy.local_finish_generation()
         && !(detail.origin == InvestigationOrigin::App
-            && matches!(
-                detail.summary.specialist_id,
-                SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
-            )
+            && uses_local_finish_generation(detail.summary.specialist_id)
             && detail.summary.provider_mode == InvestigationProviderMode::Local
             && detail.provider.mode == InvestigationProviderMode::Local)
     {
@@ -1019,10 +1019,7 @@ impl JobStore {
         {
             if !next_prompt
                 || mcp.is_some()
-                || !matches!(
-                    request.specialist_id,
-                    SpecialistId::DomainAnalystV26 | SpecialistId::DomainAnalystV27
-                )
+                || !uses_local_finish_generation(request.specialist_id)
                 || request.provider_mode != InvestigationProviderMode::Local
                 || provider.is_none_or(|p| p.mode != InvestigationProviderMode::Local)
             {

@@ -143,7 +143,7 @@ impl<'a> SavedMetadataHistory<'a> {
             .as_ref()
             .and_then(|s| s.finish_patch.as_ref());
         if let Some(patch) = patch {
-            if self.task.detail.summary.specialist_id != SpecialistId::DomainAnalystV27 {
+            if !self.task.detail.summary.specialist_id.uses_finish_patch() {
                 return Err(InvestigationStoreError::Invalid);
             }
             let prior = self
