@@ -3,6 +3,7 @@ import { expect, fn, userEvent, within } from 'storybook/test';
 import type { SpecArtifact, SpecAssertion, SpecBundle, SpecViewBundle } from '../store';
 import { STRUCTURED_VIEW_UNAVAILABLE_NOTICE } from './SpecDiagramView';
 import { SpecWorkbench } from './SpecWorkbench';
+import { CURATED_REVISION, curatedReadFixture } from '../curatedFixtures';
 
 const CONFIRMED: SpecAssertion = {
   id: 'node:cap:orders',
@@ -108,7 +109,7 @@ const UNAUTHENTICATED: SpecAssertion = {
   id: 'node:finding:security:admin',
   subject_id: 'finding:security:admin',
   subject_kind: 'Finding',
-  summary: 'Finding: Unauthenticated endpoint: GET /admin',
+  summary: 'Finding: No authentication check recovered: GET /admin',
   provenance: {
     ...CONFIRMED.provenance,
     extractor_id: 't0.security-projection',
@@ -210,7 +211,7 @@ const BUNDLE: SpecBundle = {
         'Security findings',
         [UNAUTHENTICATED, OVER_BROAD_GRANT],
       ),
-      content: '# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n| Unauthenticated endpoint: GET /admin | unauthenticated_endpoint | ep:admin | GET /admin | — | US-0015 / AC-0041 | Confirmed |\n| Over-broad IAM grant | over_broad_grant | res:admin GRANTS res:orders | arn:aws:s3:::orders/* | s3:Get* | US-0015 / AC-0042 | InferredWeak |\n',
+      content: '# Security findings\n\n| Finding | Type | Subject | Resource scope | Actions | US / AC | Confidence |\n|---|---|---|---|---|---|---|\n| No authentication check recovered: GET /admin | no_auth_check_recovered | ep:admin | GET /admin | — | US-0015 / AC-0041 | Confirmed |\n| Over-broad IAM grant | over_broad_grant | res:admin GRANTS res:orders | arn:aws:s3:::orders/* | s3:Get* | US-0015 / AC-0042 | InferredWeak |\n',
     },
   ],
   assertion_count: 11,
@@ -342,7 +343,7 @@ export const SecurityFindings: Story = {
     const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
     await userEvent.click(within(nav).getByRole('button', { name: /Security findings/ }));
     await expect(canvas.getByText('2 security findings')).toBeInTheDocument();
-    await expect(canvas.getByText('Finding: Unauthenticated endpoint: GET /admin')).toBeInTheDocument();
+    await expect(canvas.getByText('Finding: No authentication check recovered: GET /admin')).toBeInTheDocument();
     await expect(
       canvas.getByText('Finding: Over-broad IAM grant: admin policy → orders/*'),
     ).toBeInTheDocument();
@@ -421,6 +422,48 @@ export const ConfirmedBlocksAreLockedNotHidden: Story = {
       canvas.getByText('Gap: runtime-computed channel identity').closest('li') as HTMLElement,
     );
     await expect(gapBlock.queryByRole('button')).not.toBeInTheDocument();
+  },
+};
+
+export const CuratedSectionShowsTheBundleRevision: Story = {
+  // AC-0655 (SPEC-12 slice 3): the Workbench shows the curated projection of
+  // the bundle on screen, between the summary and the artifacts, and offers
+  // a refresh.
+  args: {
+    bundle: {
+      ...BUNDLE,
+      curated_basis: { revision: CURATED_REVISION, counts: curatedReadFixture().counts },
+    },
+    curated: curatedReadFixture(),
+    onRefreshCurated: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement);
+    const section = within(canvas.getByRole('region', { name: 'Curated items' }));
+    await expect(section.getByTestId('curated-revision')).toHaveAttribute(
+      'title',
+      args.bundle?.curated_basis?.revision,
+    );
+    // The records are closed until asked for, so the artifacts stay in view.
+    await expect(section.getByRole('table', { name: 'Curated items (1)' })).not.toBeVisible();
+    await expect(section.getByLabelText('Curated record counts')).toHaveTextContent('Accepted4');
+    await userEvent.click(section.getByText(/^Records and decisions:/));
+    await expect(section.getByRole('table', { name: 'Curated items (1)' })).toBeVisible();
+    await expect(section.getByRole('table', { name: 'State stale (1)' })).toBeVisible();
+    // The artifacts stay reachable below it.
+    const nav = canvas.getByRole('navigation', { name: 'Official spec artifacts' });
+    await expect(within(nav).getAllByRole('button')).toHaveLength(10);
+    await userEvent.click(section.getByRole('button', { name: 'Refresh curated items' }));
+    await expect(args.onRefreshCurated).toHaveBeenCalledOnce();
+  },
+};
+
+export const CuratedSectionUnreadStatesNothing: Story = {
+  // AC-0655: without a curated read the section says so and lists nothing.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('curated-unread')).toHaveTextContent('has not been read');
+    await expect(canvas.queryByTestId('curated-revision')).not.toBeInTheDocument();
   },
 };
 
@@ -790,7 +833,7 @@ export const MarkdownArtifactsRenderByDefault: Story = {
           ? {
               ...item,
               content:
-                '# Security findings\n\nInspect `GET /admin` exposure.\n\n| Finding | Confidence |\n|---|---|\n| Unauthenticated endpoint: GET /admin | Confirmed |\n',
+                '# Security findings\n\nInspect `GET /admin` exposure.\n\n| Finding | Confidence |\n|---|---|\n| No authentication check recovered: GET /admin | Confirmed |\n',
             }
           : item,
       ),
@@ -809,7 +852,7 @@ export const MarkdownArtifactsRenderByDefault: Story = {
     const rendered = within(canvas.getByTestId('spec-artifact-rendered'));
     await expect(rendered.getByRole('heading', { name: 'Security findings' })).toBeInTheDocument();
     const table = rendered.getByRole('table');
-    await expect(table).toHaveTextContent('Unauthenticated endpoint: GET /admin');
+    await expect(table).toHaveTextContent('No authentication check recovered: GET /admin');
     await expect(table).toHaveTextContent('Confirmed');
     await expect(rendered.getByText('GET /admin').tagName).toBe('CODE');
 
@@ -824,7 +867,7 @@ export const MarkdownArtifactsRenderByDefault: Story = {
     await expect(renderedBtn).toHaveAttribute('aria-pressed', 'true');
     await expect(
       within(canvas.getByTestId('spec-artifact-rendered')).getByRole('table'),
-    ).toHaveTextContent('Unauthenticated endpoint: GET /admin');
+    ).toHaveTextContent('No authentication check recovered: GET /admin');
   },
 };
 

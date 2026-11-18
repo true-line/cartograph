@@ -348,6 +348,8 @@ impl Worker {
                                             &state.graph,
                                             state.knowledge_overlay.as_deref(),
                                             &state.decisions,
+                                            // The reviews the export gathers.
+                                            &*state,
                                             || {
                                                 super::scope::coverage_scope(
                                                     &app,
@@ -1240,7 +1242,7 @@ mod native_tests {
                     .as_array()
                     .unwrap()
                     .len(),
-                spec::artifact_catalog().len()
+                crate::mcp_reads::artifacts::readable_catalog().len()
             );
             client.write(&json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ingest","arguments":{}}})).await.unwrap();
             assert!(client.read().await.unwrap().unwrap().get("error").is_some());

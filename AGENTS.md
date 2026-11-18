@@ -106,7 +106,9 @@ the agreed suite runs; it does not reduce the gate list below.
 - The merge queue runs the complete suite on its exact `merge_group` candidate.
   A `main` push with successful evidence for that exact SHA runs only Advanced
   CodeQL plus the short repository-integrity smoke; missing evidence runs the
-  complete suite fail-safe.
+  complete suite fail-safe. Until the queue is enabled, a passing ready-PR run
+  counts as that evidence only when the merged PR's head tree is identical to
+  the pushed commit's tree; the Version packages PR never borrows it.
 - Manual CI dispatch is limited to exact-SHA preflight, diagnostics, release
   recovery, workflow testing, and explicit reruns. Public-fork workflows are
   never approved or run.
@@ -146,7 +148,9 @@ enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
   handoff is recovered by manually dispatching the version-cut workflow; tags
   are immutable and are never moved.
 - A Version packages PR receives the normal ready/queue complete suite once;
-  version-cut never dispatches a duplicate suite. Tag and release automation
+  version-cut never dispatches a duplicate suite. It opens the PR as draft and
+  returns a ready one to draft before refreshing its head, so only the owner
+  marking the cut ready starts the suite. Tag and release automation
   require exact-commit CI and reviewed-PR evidence before release-specific work.
 - macOS production bundles are universal Intel + Apple Silicon `.app` and `.dmg`
   artifacts. Signing is all-or-nothing across the five repository secrets
@@ -158,15 +162,22 @@ enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
 ## Verification before "done"
 
 ```sh
-node scripts/check-traceability.mjs && node scripts/check-help-mirror.mjs --validate && npm run version:check && npm run test:version
+node scripts/check-traceability.mjs && node scripts/check-help-mirror.mjs --validate && node scripts/check-workspace-lints.mjs && npm run version:check && npm run test:version
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run test && npm --prefix ui run build
 ```
 
+CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
+every package except `app`, and four "Rust app tests" shards run the `app`
+test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
+run does not account for exactly the tests it selected.
+
 The complete CI suite also requires native job ownership tests on Windows:
 `cargo test --locked -p job-execution-tests --test ownership`. Every run uses
-the organisation's self-hosted Windows runner (`self-hosted, Windows, X64`), a
-native Windows host, never WSL. No job runs on a GitHub-hosted runner.
+the GitHub-hosted `windows-latest` runner, a native Windows host, never WSL.
+The repository is public, so every job runs on GitHub-hosted runners
+(`ubuntu-latest`, `windows-latest`, `macos-latest`); no job runs on a
+self-hosted runner, because fork PRs would execute on it.
 The harness imports the production job modules and their existing tests without
 building Tauri. Local workspace tests run the same harness on the local platform;
 only a successful exact-SHA Windows lane establishes its Windows runtime result.

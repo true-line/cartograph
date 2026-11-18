@@ -90,7 +90,7 @@ struct Title<'a>(&'a Claim<'a>);
 impl fmt::Display for Title<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Claim::Endpoint { name, .. } => write!(f, "Unauthenticated endpoint: {name}"),
+            Claim::Endpoint { name, .. } => write!(f, "No authentication check recovered: {name}"),
             Claim::Grant { src, scopes, .. } => {
                 write!(f, "Over-broad IAM grant: {src} → ")?;
                 for (i, scope) in scopes.iter().enumerate() {

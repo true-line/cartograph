@@ -7,9 +7,10 @@ import {
   type DropItem,
 } from './dropIntake';
 import { create } from 'zustand';
-import type { RepoCoverage } from './coverage';
+import type { RepoCoverage, RestoredCoverage } from './coverage';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
+import type { CuratedDraftCounts, CuratedDraftRow } from './sectionDocument';
 import type { SurfaceView } from './views';
 import type { EgressPreview } from './components/EgressConsentDialog';
 
@@ -120,6 +121,10 @@ export interface IngestSummary {
     tools: LayerSummary;
     /** Declared schedule files: Schedule triggers + ENTRY proofs (#770). */
     schedules?: LayerSummary;
+    /** Ordered workflow and Dockerfile steps: Pipeline facts (#1790). */
+    pipelines?: LayerSummary;
+    /** Environments and workloads from Compose files (#1791). */
+    environments?: LayerSummary;
     /** Channel and client-call stitching over every layer's sites (#874). */
     events?: LayerSummary;
   };
@@ -221,6 +226,18 @@ export interface PreflightReport {
   register?: RegisterStamp;
 }
 
+/** One `cartograph.system.toml` entry's preview (#1655, AC-0705): a local
+ *  member scanned in place, or a remote/managed one deferred to recovery. */
+export type MemberPreflight =
+  | { kind: 'local'; entry: string; path: string; report: PreflightReport }
+  | { kind: 'deferred'; entry: string };
+
+/** A system manifest's preflight preview, in manifest order. It registers
+ *  no source and records no finding; recovery owns both (AC-0706). */
+export interface SystemPreflight {
+  members: MemberPreflight[];
+}
+
 /** A report's place in its repo's register order (AC-0216, #458). The
  *  register holds the write with the highest epoch, so showing, per repo, the
  *  highest-epoch report seen always matches the register. */
@@ -285,6 +302,11 @@ export interface SystemRepo {
   repo: string;
   commit: string;
   display_name?: string | null;
+  /** Graph content hash recorded by the latest completed ingest of this
+   *  registration at `commit` (#1765); absent when none is recorded. Scoped
+   *  per registration — a `local/` key is random per installation, so the
+   *  value is not comparable across installations. */
+  graph_hash?: string | null;
 }
 
 /** One installed deterministic adapter, from the registry Preflight uses
@@ -303,7 +325,8 @@ export interface PlannedAdapter {
 }
 
 /** One class-level batch escalation outcome (#167): per-instance staged
- * proposals and failures; review awaits context reconciliation. */
+ * proposals and failures. Each still needs a review; an accepted one gets
+ * its curated state when the projection is read (ADR-0061). */
 export interface ClassEscalationOutcome {
   proposals: StagedProposal[];
   failures: { gap_id: string; error: string }[];
@@ -405,6 +428,13 @@ export interface SpecArtifact {
   assertions_total: number;
 }
 
+/** What an export was compiled from (#1765): the content hash of the whole
+ *  base graph and the source revisions it holds. */
+export interface GraphBasis {
+  content_hash: string;
+  sources: { repo: string; commit: string }[];
+}
+
 export interface SpecBundle {
   mode: SpecExportMode;
   artifacts: SpecArtifact[];
@@ -412,7 +442,96 @@ export interface SpecBundle {
   gap_count: number;
   drift_count: number;
   security_count: number;
+  /** Carried into the exported bundle file unchanged. */
+  graph_basis?: GraphBasis;
+  /** The curated revision and counts the bundle was compiled with
+   *  (AC-0653). Absent when the projection was not computed. */
+  curated_basis?: CuratedBasis;
 }
+
+/** Record totals of a curated projection; `accepted` is the sum of the rest. */
+export interface CuratedCounts {
+  accepted: number;
+  eligible: number;
+  unverified: number;
+  unresolvable: number;
+  stale: number;
+  already_covered: number;
+  conflicted: number;
+}
+
+export interface CuratedBasis {
+  revision: string;
+  counts: CuratedCounts;
+}
+
+/** The one state the host assigns an accepted record at projection time
+ *  (ADR-0061 decision 4). Never stored, and never assigned by the UI. */
+export type CuratedRecordState =
+  | 'unverified' | 'already-covered' | 'unresolvable' | 'stale' | 'conflicted' | 'eligible';
+
+/** One accepted record with its DR-4 fields (SPEC-12). The sentences come
+ *  from the host: the UI maps no reason code to prose. */
+export interface CuratedRecord {
+  record_id: string;
+  gap_id: string;
+  source_id: string;
+  target_id: string;
+  edge_label: string;
+  /** Producing tier, exactly as produced (`Agentic` for a proposal). */
+  tier: string;
+  /** Producing confidence, exactly as produced. */
+  confidence: Tier;
+  review_status: 'accepted' | 'rejected';
+  source_support: { captured: number; unverified: number };
+  state: CuratedRecordState;
+  reason: string;
+  reason_sentence: string;
+  /** The SPEC-09 dimensions the state was read beside. */
+  basis_summary: string;
+}
+
+/** A Workbench decision whose content hash matches no current statement. */
+export interface StaleAssertionDecision {
+  content_hash: string;
+  decision: AssertionDecision;
+  state: CuratedRecordState;
+}
+
+/** The curated projection as `export_spec_with_views` returns it beside the
+ *  bundle, for that bundle's export mode (SPEC-12 slice 3, AC-0655). */
+export type CuratedRead =
+  | {
+      status: 'computed';
+      export_mode: SpecExportMode;
+      view: 'recovered' | 'curated';
+      revision: string;
+      graph_basis: string;
+      /** The curated items this export mode shows; none in `verified-only`. */
+      items: CuratedRecord[];
+      items_omitted: number;
+      listed: CuratedRecord[];
+      /** Every accepted section draft with its state (SPEC-15 slice 7,
+       *  AC-0669); absent from a host that predates it. No claim. */
+      drafts?: CuratedDraftRow[];
+      draft_counts?: CuratedDraftCounts;
+      assertion_decisions: {
+        digest: string;
+        rejections_applied: number;
+        stale: StaleAssertionDecision[];
+      };
+      counts: CuratedCounts;
+    }
+  | {
+      status: 'not_computed';
+      export_mode: SpecExportMode;
+      reason: string;
+      limit?: number;
+      sentence: string;
+    };
+
+/** A curated read whose projection was computed. */
+export type ComputedCuratedRead = Extract<CuratedRead, { status: 'computed' }>;
 
 export interface DeploymentRole {
   resource_id: string;
@@ -451,12 +570,24 @@ export interface SpecViewBundle {
 export interface SpecWithViews {
   bundle: SpecBundle;
   views: SpecViewBundle;
+  /** The projection `bundle.curated_basis` was stamped from: the host
+   *  computes it once per compile and returns it here, so the section and
+   *  the bundle cannot show two revisions (AC-0655). */
+  curated?: CuratedRead;
 }
 
-function unpackSpecWithViews(
-  payload: SpecWithViews | null,
-): { specBundle: SpecBundle | null; specViews: SpecViewBundle | null } {
-  return { specBundle: payload?.bundle ?? null, specViews: payload?.views ?? null };
+function unpackSpecWithViews(payload: SpecWithViews | null): {
+  specBundle: SpecBundle | null;
+  specViews: SpecViewBundle | null;
+  specCurated: CuratedRead | null;
+} {
+  const curated = payload?.curated;
+  return {
+    specBundle: payload?.bundle ?? null,
+    specViews: payload?.views ?? null,
+    // Anything that is not one of the two host shapes is not a read.
+    specCurated: curated?.status === 'computed' || curated?.status === 'not_computed' ? curated : null,
+  };
 }
 
 export type AssertionDecision = 'accepted' | 'rejected' | 'annotated';
@@ -904,6 +1035,9 @@ export interface AppStore {
   /** Structured diagram projections under the active R-INT-5 mode (US-0036). */
   specViews: SpecViewBundle | null;
   specMode: SpecExportMode;
+  /** The curated projection `specBundle` was compiled with, from the same
+   *  response (AC-0655); `null` when there is none. */
+  specCurated: CuratedRead | null;
   curation: AssertionDecisionRecord[];
   specBusy: boolean;
   specError: string | null;
@@ -919,6 +1053,8 @@ export interface AppStore {
   dropIntake: DropItem[] | null;
   /** Local detection result; null for remote targets (detected on clone). */
   preflight: PreflightReport | null;
+  /** A system manifest's per-member preview (#1655); null otherwise. */
+  systemPreflight: SystemPreflight | null;
   preflightBusy: boolean;
   preflightError: string | null;
   /** Latest progress of the running preflight; null when none is running. */
@@ -933,6 +1069,11 @@ export interface AppStore {
   ingestHistory: IngestRecord[];
   /** Per-extractor coverage for the latest ingest (#119). */
   coverage: ExtractorCoverage[];
+  /** Coverage inventories recorded by earlier ingests, read back from the
+   *  store so Workspace keeps them across a relaunch (AC-0700, #1656). */
+  recordedCoverage: RestoredCoverage[];
+  /** Why the recorded inventories could not be read; no card is shown then. */
+  recordedCoverageError: string | null;
   /** Paired-eval calibration records, newest first. */
   evals: EvalResult[];
   /** Resolution Strategy modal state; null while closed (#113). */
@@ -976,10 +1117,17 @@ export interface AppStore {
   ) => Promise<void>;
   clearGraph: () => Promise<void>;
   setSpecMode: (mode: SpecExportMode) => Promise<void>;
+  /** Recompile the bundle, with its views and curated projection, for the
+   *  active mode: after a proposal review, or on request from the Workbench. */
+  reloadSpec: () => Promise<void>;
   /** Full artifact (untruncated content and assertions) for copy/export,
    *  after `export_spec`'s IPC-capped preview (#488). `null` on failure —
    *  callers fall back to the already-fetched preview. */
   readSpecArtifact: (artifactId: string) => Promise<SpecArtifact | null>;
+  /** Several full artifacts in one host request, in the order asked, for
+   *  Export bundle (#1662): one graph snapshot however many were capped.
+   *  `null` on failure, with `specError` recorded. */
+  readSpecArtifacts: (artifactIds: string[]) => Promise<SpecArtifact[] | null>;
   readSelectedFlowView: (trigger: string, mode: SpecExportMode, contentId: string) => Promise<SpecDiagramView | null>;
   curateAssertion: (
     assertion: SpecAssertion,
@@ -1015,7 +1163,8 @@ export interface AppStore {
   /** Clear a finished drop's outcomes; an unresolved drop stays. */
   dismissDropIntake: () => void;
   /** Navigate to Preflight and run local detection (#116). Local targets get
-   *  a real report; remote/manifest targets are detected during recovery. */
+   *  a real report and a system manifest a per-member preview (#1655);
+   *  GitHub targets are detected during recovery. */
   runPreflight: () => Promise<void>;
   /** Apply one `preflight://progress` ping while a preflight is running. */
   applyPreflightProgress: (progress: PreflightProgress) => void;
@@ -1043,6 +1192,10 @@ export interface AppStore {
   openStagedProposal: (proposal: StagedProposal) => void;
   assessStagedBasis: () => Promise<void>;
   loadStagedProposals: (loadMore?: boolean) => Promise<void>;
+  /** Read the recorded coverage inventories; a superseded read is dropped,
+   *  and so is one whose caller began before the coverage epoch `since`
+   *  (default: now) was bumped by a clear, ingest or plugin change. */
+  loadRecordedCoverage: (since?: number) => Promise<void>;
   /** Run a strategy. Local runs immediately; cloud first loads the exact
    *  egress preview so the one-action consent dialog can show it. */
   runStrategy: (strategyId: 'local-slm' | 'cloud-opus') => Promise<void>;
@@ -1072,6 +1225,13 @@ let evidenceRequestVersion = 0;
 let basisAssessmentGeneration = 0;
 // A later mode/curation request owns the visible spec result, error, and busy state.
 let specRequestVersion = 0;
+/** Bumped by every recorded-coverage read: a read that settles after a
+ *  newer one began is dropped. */
+let recordedCoverageRequest = 0;
+/** Bumped when a clear, ingest or plugin change starts and again when it
+ *  settles: a read requested from before the bump (a refresh already
+ *  running, say) can no longer describe the store or plugin basis. */
+let coverageEpoch = 0;
 let jobActionVersion = 0;
 /** Only the latest preflight may publish its result: a superseded or
  *  cancelled scan settles late and must not overwrite the current one. */
@@ -1129,6 +1289,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   specBundle: null,
   specViews: null,
   specMode: 'best-effort',
+  specCurated: null,
   curation: [],
   specBusy: false,
   specError: null,
@@ -1139,6 +1300,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ingestTarget: '',
   dropIntake: null,
   preflight: null,
+  systemPreflight: null,
   preflightBusy: false,
   preflightError: null,
   preflightProgress: null,
@@ -1148,6 +1310,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   registerFindings: [],
   ingestHistory: [],
   coverage: [],
+  recordedCoverage: [],
+  recordedCoverageError: null,
   evals: [],
   escalation: null,
   escalationEdgeLabels: null,
@@ -1163,6 +1327,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selected: null,
 
   refresh: async () => {
+    const coverageSince = coverageEpoch;
     const ping = await invokeOr<{ app: string; version: string } | null>('ping', null);
     if (ping === null) {
       set({
@@ -1179,12 +1344,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
         plugins: [],
         specBundle: null,
         specViews: null,
+        specCurated: null,
         curation: [],
         findings: null,
         registerFindings: [],
         escalationEdgeLabels: null,
         ingestHistory: [],
         coverage: [],
+        recordedCoverage: [],
+        recordedCoverageError: null,
         evals: [],
         tierSettings: [],
         egress: null,
@@ -1254,26 +1422,60 @@ export const useAppStore = create<AppStore>((set, get) => ({
       disclosures: { T2: disclosureT2 ?? undefined, T3: disclosureT3 ?? undefined },
       escalationEdgeLabels,
     });
-    await get().loadStagedProposals();
+    await Promise.all([get().loadStagedProposals(), get().loadRecordedCoverage(coverageSince)]);
+  },
+
+  loadRecordedCoverage: async (since = coverageEpoch) => {
+    // A caller from before a clear, ingest or plugin change neither reads nor
+    // supersedes the read that change starts.
+    if (since !== coverageEpoch) return;
+    const request = ++recordedCoverageRequest;
+    const current = () => request === recordedCoverageRequest && since === coverageEpoch;
+    try {
+      const recordedCoverage = await invokeOr<RestoredCoverage[] | null>('recorded_coverage', []);
+      if (current()) {
+        set({ recordedCoverage: recordedCoverage ?? [], recordedCoverageError: null });
+      }
+    } catch (error) {
+      // A failed read never leaves earlier cards standing in for it.
+      if (current()) {
+        set({ recordedCoverage: [], recordedCoverageError: String(error) });
+      }
+    }
   },
 
   setPluginEnabled: async (plugin: PluginStatus, enabled: boolean) => {
-    await invokeOr('set_plugin_enabled', null, {
-      projectRoot: plugin.project_root ?? 'user',
-      pluginId: plugin.id,
-      contentHash: plugin.content_hash,
-      enabled,
-    });
-    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
-    set({ plugins });
+    // The plugin basis qualifies recorded coverage: requalify after it moves.
+    coverageEpoch++;
+    try {
+      await invokeOr('set_plugin_enabled', null, {
+        projectRoot: plugin.project_root ?? 'user',
+        pluginId: plugin.id,
+        contentHash: plugin.content_hash,
+        enabled,
+      });
+      const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+      set({ plugins });
+    } finally {
+      coverageEpoch++;
+      await get().loadRecordedCoverage();
+    }
   },
 
   runPluginGate: async (plugin: PluginStatus) => {
     // The verdict lands in the settings store keyed by content hash; the
     // refreshed list reflects passed/failed for these exact bytes.
-    await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
-    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
-    set({ plugins });
+    // A gate verdict can change which plugins are active, and so the plugin
+    // basis recorded coverage is qualified by.
+    coverageEpoch++;
+    try {
+      await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
+      const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+      set({ plugins });
+    } finally {
+      coverageEpoch++;
+      await get().loadRecordedCoverage();
+    }
   },
 
   clearFinishedJobs: async () => {
@@ -1283,7 +1485,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   ingest: async (path: string, source?: IngestSource, options?: { exactPath?: boolean }) => {
     // Clear prior outcome up front so a failed run never shows a stale summary.
-    set({ ingestBusy: true, ingestError: null, ingestSummary: null });
+    coverageEpoch++;
+    set({ ingestBusy: true, ingestError: null, ingestSummary: null, recordedCoverage: [] });
     // A GitHub reference clones with real identity (US-0001); a topology
     // manifest ingests the whole declared system (AC-0002); anything else
     // ingests as a local tree. The Connect step's explicit source wins over
@@ -1314,13 +1517,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ ingestError: String(e) });
     } finally {
+      coverageEpoch++;
       set({ ingestBusy: false });
       await get().refresh();
     }
   },
 
   clearGraph: async () => {
-    set({ clearBusy: true, clearError: null });
+    // Cards from before the clear never return, even from a read in flight
+    // or from a refresh that began before it.
+    coverageEpoch++;
+    set({ clearBusy: true, clearError: null, recordedCoverage: [], recordedCoverageError: null });
     try {
       const stats = await invokeOr<GraphStats | null>('clear_graph', null);
       if (stats !== null) {
@@ -1329,6 +1536,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ clearError: String(e) });
     } finally {
+      coverageEpoch++;
       set({ clearBusy: false });
       await get().refresh();
     }
@@ -1351,6 +1559,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  reloadSpec: () => get().setSpecMode(get().specMode),
+
   readSelectedFlowView: async (trigger, mode, contentId) =>
     invokeOr<SpecDiagramView | null>('read_selected_flow_view', null, { trigger, mode, contentId }),
 
@@ -1359,6 +1569,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return await invokeOr<SpecArtifact | null>('read_spec_artifact', null, {
         mode: get().specMode,
         artifactId,
+      });
+    } catch (error) {
+      set({ specError: String(error) });
+      return null;
+    }
+  },
+
+  readSpecArtifacts: async (artifactIds: string[]) => {
+    try {
+      return await invokeOr<SpecArtifact[] | null>('read_spec_artifacts', null, {
+        mode: get().specMode,
+        artifactIds,
       });
     } catch (error) {
       set({ specError: String(error) });
@@ -1386,6 +1608,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // Recompile the currently requested mode after the decision is stored.
       request = ++specRequestVersion;
       const mode = get().specMode;
+      // A Workbench decision enters the curated revision; the recompiled
+      // response carries the new projection with the bundle.
       const [specWithViews, curation] = await Promise.all([
         invokeOr<SpecWithViews | null>('export_spec_with_views', null, { mode }),
         invokeOr<AssertionDecisionRecord[]>('list_assertion_decisions', []),
@@ -1498,7 +1722,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setIngestSource: (ingestSource) => {
     // A local scan still running on the backend would otherwise finish and
     // persist findings for a target the user has left (#434 review).
-    if (ingestSource !== 'local' && get().preflightBusy) void get().cancelPreflight();
+    // A manifest preview is abandoned the same way (#1655). Retire the run
+    // id too, as a path change does: a scan whose commit claim already won
+    // the race with this cancel still settles, and its result must not
+    // reach the store (AC-0198, AC-0707).
+    if (ingestSource !== get().ingestSource && get().preflightBusy) {
+      preflightRun += 1;
+      set({ ingestSource, preflightBusy: false, preflightProgress: null });
+      void get().cancelPreflight();
+      return;
+    }
     set({ ingestSource });
   },
 
@@ -1615,17 +1848,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
       view: 'preflight',
       selected: null,
       preflight: null,
+      systemPreflight: null,
       preflightError: null,
       preflightBusy: false,
       preflightProgress: null,
     });
-    // Only a local tree can be detected before recovery. GitHub and manifest
-    // targets are scanned by their recovery, which writes the reconciled
-    // findings to the register (AC-0209). Showing nothing beats inventing a
-    // report (three-way honesty starts here).
-    if (get().ingestSource !== 'local') return;
+    // A local tree, and a system manifest's local members (#1655), can be
+    // detected before recovery. GitHub targets are scanned by their
+    // recovery, which writes the reconciled findings to the register
+    // (AC-0209). Showing nothing beats inventing a report (three-way honesty
+    // starts here).
+    const source = get().ingestSource;
+    if (source === 'github') return;
     set({ preflightBusy: true });
     try {
+      if (source === 'manifest') {
+        // A preview records nothing, so it has no register stamp to order;
+        // only the current run's complete result is shown (AC-0707).
+        const system = await invokeOr<SystemPreflight | null>('preflight_system', null, {
+          path: target,
+          run,
+        });
+        if (run === preflightRun) set({ systemPreflight: system });
+        return;
+      }
       const preflight = await invokeOr<PreflightReport | null>('preflight', null, {
         path: target,
         run,
@@ -1642,7 +1888,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const error = String(e);
       set({
         preflightError:
-          error === 'cancelled' ? 'Preflight cancelled. No findings were recorded.' : error,
+          error === 'cancelled'
+            ? source === 'manifest'
+              ? 'Preflight cancelled. Nothing was recorded.'
+              : 'Preflight cancelled. No findings were recorded.'
+            : error,
       });
     } finally {
       if (run === preflightRun) set({ preflightBusy: false, preflightProgress: null });
@@ -1941,7 +2191,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
           result.review_revision !== proposal.review_revision + 1) {
         throw new Error('The core did not confirm this review. Refresh proposal history before retrying.');
       }
-      // Review is durable; context and exports still await reconciliation.
+      // The review is durable and gives a new curated revision (ADR-0061):
+      // the record's state is the host's, returned with the recompiled bundle.
       set((state) => {
         const opened = state.escalation?.proposal;
         const stagedProposals = mergeStagedProposals(state.stagedProposals, [
@@ -1959,6 +2210,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           } : {}),
         };
       });
+      void get().reloadSpec();
       return true;
     } catch (e) {
       const error = String(e);

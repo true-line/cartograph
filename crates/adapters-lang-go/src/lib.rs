@@ -692,6 +692,7 @@ fn extract_source_with_module(
             .extend(events::site(&cx, &bindings, literal, owner));
     }
 
+    let mut config_reads = Vec::new();
     let call_query = crate::queries::query("(call_expression) @call");
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(call_query, root, source);
@@ -779,6 +780,7 @@ fn extract_source_with_module(
         if let Some(site) = client.fetch_site(call, owner.clone()) {
             out.fetch_sites.push(site);
         }
+        config_reads.extend(config_read::site(&cx, &bindings, call, owner.clone()));
 
         let Some(src) = owner else {
             continue;
@@ -817,6 +819,7 @@ fn extract_source_with_module(
             }),
         });
     }
+    config_read::emit(&cx, &config_reads, &mut out);
     Ok(out)
 }
 
@@ -1157,6 +1160,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 }
 
 mod client;
+mod config_read;
 mod events;
 mod queries;
 

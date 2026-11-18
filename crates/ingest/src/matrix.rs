@@ -46,6 +46,9 @@ pub enum Capability {
     ExtensionContexts,
     /// Infrastructure resources and their capability edges.
     InfraResources,
+    /// Configuration keys read in source (`ConfigRead` + `READS_CONFIG`,
+    /// ADR-0059).
+    ConfigReads,
 }
 
 impl Capability {
@@ -62,6 +65,7 @@ impl Capability {
             Capability::DataModel => "data_model",
             Capability::ExtensionContexts => "extension_contexts",
             Capability::InfraResources => "infra_resources",
+            Capability::ConfigReads => "config_reads",
         }
     }
 }
@@ -190,6 +194,15 @@ const JAVA_KAFKA: &str = "`send` on a single-type-imported or fully qualified `K
 const PY_EVENTS: &str = "registry `pypi` entries: methods on a once-bound or inline selected factory call (`boto3.client(\"sqs\")`, `KafkaProducer(…)`) in their own scope, and constructors; instance attributes and passed-in clients are not read, an identity is followed only within its file, and qualifiers and batch keys are not applied";
 /// What the Python SQLAlchemy data model cell reads (AC-0474).
 const PY_SQLALCHEMY: &str = "declarative models on an import-proven base (`declarative_base()`, `registry().generate_base()`, `DeclarativeBase`, Flask-SQLAlchemy `db.Model`) with a literal `__tablename__`; imperative `Table()` and `map_imperatively` mappings are not read, and a dynamic table name or an unprovable reference target is a Gap";
+/// What the configuration-read cells read (AC-0597, ADR-0059). Every cell
+/// reads only the standard-library environment read; configuration
+/// frameworks are not read by any adapter.
+const TS_CONFIG: &str = "`process.env.X` and `process.env[\"X\"]` while `process` is the global or an import of `process`/`node:process`; a non-literal index is a read without a name; `import.meta.env`, destructuring of `process.env`, `globalThis.process` and configuration frameworks (NestJS `ConfigService`) are not read";
+const PY_CONFIG: &str = "`os.environ[\"X\"]`, `os.environ.get(\"X\")` and `os.getenv(\"X\")` through a module-level import of `os` nothing rebinds; a non-literal key is a read without a name; a keyword `key=` argument, `\"X\" in os.environ`, subscript reads in a file that also writes `os.environ[...]`, every read when the repository has a module named `os`, and settings frameworks are not read";
+const GO_CONFIG: &str = "`os.Getenv` and `os.LookupEnv` through the file's import of `os`; a constant or computed key is a read without a name; a dot-imported `Getenv` and configuration frameworks (Viper) are not read";
+const RUST_CONFIG: &str = "`std::env::var` and `std::env::var_os` through the qualified path or a `use` of `std::env`; a constant or computed key is a read without a name; the compile-time `env!`/`option_env!` macros, `std::env::vars()` and configuration crates are not read";
+const JAVA_CONFIG: &str = "`System.getenv(\"X\")` when no Java source in the repository declares or imports anything named `System` and the file has no static wildcard import; a non-literal key is a read without a name; a member named `System` inherited from a type outside the repository is not ruled out; `System.getenv()` as a map, `java.lang.System.getenv` and Spring `@Value`/`Environment` are not read";
+const KT_CONFIG: &str = "`System.getenv(\"X\")` when nothing in the repository's Kotlin sources or product Java top-level types is named `System` and every star import of the file names a repository package; a non-literal key is a read without a name; a member named `System` reached through an implicit receiver or a supertype outside the repository, or inherited from a repository Java class, is not ruled out; files with other star imports, `System.getenv()` as a map and Spring `@Value` are not read";
 const NEXT_API: &str = "pages/api and app-router route handlers under a package declaring next; next.config basePath is not applied and wrapped or re-exported handlers stay Gaps";
 const TSX_ONLY: &str = "recorded in .tsx/.js/.jsx files; plain .ts modules are not scanned";
 
@@ -225,6 +238,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("TypeScript", "sdk-client", InfraResources, Supported, ""),
     cell("TypeScript", "auth-provider", InfraResources, Supported, ""),
+    cell("TypeScript", CORE, ConfigReads, Partial, TS_CONFIG),
     cell(
         "TypeScript",
         "http-api",
@@ -251,6 +265,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("JavaScript", "chrome-messaging", EventSites, Supported, ""),
     cell("JavaScript", "indexeddb", DataModel, Supported, ""),
     cell("JavaScript", "sdk-client", InfraResources, Supported, ""),
+    cell("JavaScript", CORE, ConfigReads, Partial, TS_CONFIG),
     cell("Vue", CORE, Imports, Supported, ""),
     cell("Vue", CORE, Calls, Supported, ""),
     cell("Vue", "fetch", HttpClientCalls, Supported, ""),
@@ -284,6 +299,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Python", "boto3", EventSites, Partial, PY_EVENTS),
     cell("Python", "kafka-python", EventSites, Partial, PY_EVENTS),
     cell("Python", "sqlalchemy", DataModel, Partial, PY_SQLALCHEMY),
+    cell("Python", CORE, ConfigReads, Partial, PY_CONFIG),
     cell("Go", CORE, Imports, Supported, ""),
     cell("Go", CORE, Calls, Supported, ""),
     cell("Go", "net-http", HttpEndpoints, Supported, ""),
@@ -292,12 +308,14 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Go", "net-http", HttpClientCalls, Partial, GO_CLIENT),
     cell("Go", "aws-sdk", EventSites, Partial, GO_EVENTS),
     cell("Go", "kafka-go", EventSites, Partial, GO_EVENTS),
+    cell("Go", CORE, ConfigReads, Partial, GO_CONFIG),
     cell("Rust", CORE, Imports, Supported, ""),
     cell("Rust", CORE, Calls, Supported, ""),
     cell("Rust", "axum", HttpEndpoints, Supported, ""),
     cell("Rust", "actix-web", HttpEndpoints, Supported, ""),
     cell("Rust", "reqwest", HttpClientCalls, Supported, ""),
     cell("Rust", "rdkafka", EventSites, Partial, RUST_KAFKA),
+    cell("Rust", CORE, ConfigReads, Partial, RUST_CONFIG),
     cell("Java", CORE, Types, Supported, ""),
     cell("Java", CORE, Imports, Supported, ""),
     cell("Java", CORE, Calls, Supported, ""),
@@ -345,6 +363,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("Java", CORE, HttpClientCalls, Unsupported, NO_JAVA_CLIENT),
     cell("Java", "spring-kafka", EventSites, Partial, JAVA_KAFKA),
+    cell("Java", CORE, ConfigReads, Partial, JAVA_CONFIG),
     cell("Kotlin", CORE, Types, Supported, ""),
     cell("Kotlin", CORE, Calls, Supported, ""),
     cell("Kotlin", "spring-web", HttpEndpoints, Supported, ""),
@@ -375,6 +394,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     ),
     cell("Kotlin", "ktor-client", HttpClientCalls, Partial, KT_KTOR),
     cell("Kotlin", "spring-kafka", EventSites, Partial, KT_KAFKA),
+    cell("Kotlin", CORE, ConfigReads, Partial, KT_CONFIG),
     cell("Kotlin", CORE, HttpClientCalls, Unsupported, NO_JVM_CLIENT),
     cell("Kotlin", CORE, EventSites, Unsupported, NO_EVENTS),
     cell(

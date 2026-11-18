@@ -1,10 +1,30 @@
-//! App-private immutable recovered-context reads. No transport, app startup,
-//! provider calls or accepted-proposal/H3 projection lives here.
+//! App-private immutable recovered-context reads. No transport, app startup
+//! or provider calls live here. The curated projection (SPEC-12 slice 4,
+//! AC-0654) is computed once for the session by the host functions the
+//! export uses, `crate::curated::gather` and `crate::curated::project`, and
+//! frozen with the rest of the basis.
+//!
+//! The stored coverage inventories of the session's one bounded graph and
+//! coverage read stay with the session, moved and never copied, for the
+//! `coverage` and `coverage-index` artifacts (#1814, AC-0657). They are the
+//! rows of the revision every other read of the session is served from.
 //!
 //! Store admission bounds raw/canonical graph and coverage bytes. It does not
 //! bound exact RSS: retained raw facts, projection indexes, temporary identity
 //! construction and future artifact caches need separate service admission.
+//!
+//! The curated projection is outside the worker reservation ledger. Its
+//! work is bounded by record counts (`crate::curated`): one bounded review
+//! read, then one graph copy at a time for each accepted record that could
+//! be eligible. Those copies are made only after this session's bounded
+//! graph read succeeded, so each is within the session's graph limit. The
+//! graph content hash is one pass over the admitted snapshot. No document is
+//! compiled while a session is acquired: a Workbench decision that matches
+//! no stored fact leaves the projection not computed. The projection the
+//! session retains holds at most `crate::curated::MAX_CURATED_ACCEPTED`
+//! records and the stale decisions.
 
+use crate::curated::{self, ReviewSource};
 use agents::{DecisionLog, DecisionSelectionError};
 use context_hub::coverage::{
     CoverageContext, CoverageQualification, MAX_COVERAGE_IDENTITY_BYTES, MAX_COVERAGE_REPOS,
@@ -13,7 +33,7 @@ use context_hub::coverage::{
 use context_hub::{ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResponse};
 #[cfg(test)]
 use context_hub::{QueryRequest, QueryResponse};
-use core_graph::coverage::CoverageReadLimits;
+use core_graph::coverage::{CoverageReadLimits, StoredCoverage};
 use core_graph::overlay::{OverlayFact, OverlayIdentity, OverlayRead, OverlayStore};
 #[cfg(test)]
 use core_graph::{Edge, Node};
@@ -21,6 +41,7 @@ use core_graph::{
     GraphError, RevisionedSnapshot, SnapshotBoundsError, SnapshotReadLimits, SqliteGraphStore,
     StoreRevision,
 };
+use curated_read::{CuratedBasis, CuratedRead};
 use serde::Serialize;
 use spec::ExportMode;
 use std::{
@@ -31,6 +52,7 @@ use std::{
 pub(crate) mod artifacts;
 pub(crate) mod client_skill;
 pub(crate) mod commands;
+pub(crate) mod curated_read;
 pub(crate) mod dispatch;
 #[cfg(unix)]
 pub(crate) mod reservation;
@@ -70,7 +92,8 @@ pub(crate) enum ReadError {
     InvalidRequest,
 }
 
-/// Consistency identities, never authentication credentials or H3 revisions.
+/// Consistency identities, never authentication credentials. `curated` is the
+/// curated revision of ADR-0061 (the H3 revision), or why none was computed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReadBasis {
     pub recovered_graph_id: String,
@@ -82,7 +105,13 @@ pub(crate) struct ReadBasis {
     pub rejection_decision_digest: String,
     pub registration_basis_digest: String,
     pub export_mode: ExportMode,
+    /// True exactly when `curated` is a computed revision (ADR-0061
+    /// decision 11).
     pub h3_curated_available: bool,
+    /// The curated revision this session computed, or the reason it computed
+    /// none. It enters the basis identity, so a session over other reviews
+    /// has another `basis_id`.
+    pub curated: CuratedBasis,
     /// Captured mutation token, independent of the base content identity.
     pub base_revision: StoreRevision,
     pub knowledge: KnowledgeBasis,
@@ -166,7 +195,9 @@ impl ReadBasis {
             rejection_decision_digest: format!("compiler-rejections-v1:{hash}"),
             registration_basis_digest: format!("source-registration-basis-v1:{hash}"),
             export_mode: ExportMode::VerifiedOnly,
+            // The longer of the two spellings and the longer curated basis.
             h3_curated_available: false,
+            curated: CuratedBasis::reservation_fixture(),
             knowledge: KnowledgeBasis::Stale(StoreRevision {
                 graph_instance: "f".repeat(32),
                 generation: u64::MAX,
@@ -207,9 +238,16 @@ pub(crate) struct ReadSession {
     capabilities: Vec<OverlayFact>,
     actors: Vec<OverlayFact>,
     rejected_hashes: BTreeSet<String>,
+    /// The projection `basis.curated` names, or why there is none.
+    curated: CuratedRead,
+    /// `spec::graph_content_hash` of `base`, as the D1 header states it.
+    graph_content_hash: String,
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
     qualified: CoverageContext,
+    /// The inventories `qualified` was made from, as stored: the rows of the
+    /// same bounded read as `base`, within its `CoverageReadLimits`.
+    recorded: Vec<StoredCoverage>,
 }
 
 impl ReadSession {
@@ -230,16 +268,37 @@ impl ReadSession {
             graph,
             None,
             decisions,
+            &curated::NoReviews,
             scope,
             graph_limits,
             coverage_limits,
             mode,
         )
     }
+    /// The curated projection (SPEC-12 slice 4, AC-0654) is read in the
+    /// export's two steps. `reviews.gather()` runs once the bounded graph
+    /// read has succeeded, so no assessment is made for a graph over the
+    /// session's limits. Its assessments take the staging, registry, lease
+    /// and graph locks themselves; every lock here is a temporary of one
+    /// statement, so none is held when it runs or across another store's
+    /// read. After the
+    /// existing brackets the Workbench decisions are read once and must give
+    /// the rejection set the brackets observed, and the reviewed records must
+    /// still be the ones `gather` read; either difference is `StaleBasis`,
+    /// as is a graph revision that moved. The projection is then computed
+    /// over this session's own snapshot with no lock held and without
+    /// compiling any document: a Workbench decision that matches no stored
+    /// fact leaves it not computed. A projection that cannot be computed
+    /// does not fail the session.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the review source is one more explicit host borrow of the session"
+    )]
     pub(crate) fn acquire_with_overlay(
         graph: &Mutex<SqliteGraphStore>,
         overlay: Option<&Mutex<OverlayStore>>,
         decisions: &Mutex<DecisionLog>,
+        reviews: &dyn ReviewSource,
         mut scope: impl FnMut() -> Result<Vec<ScopedRepo>, ReadError>,
         graph_limits: SnapshotReadLimits,
         coverage_limits: CoverageReadLimits,
@@ -256,11 +315,51 @@ impl ReadSession {
         // This keeps reset's graph -> overlay lock order and the later recheck safe.
         let (knowledge, capabilities, actors) =
             read_knowledge(overlay, &base.revision, graph_limits)?;
+        // Only now: the bounded read above admitted the graph under this
+        // session's limits, so each graph copy an assessment makes is within
+        // them. A graph that does not fit has failed already, with no
+        // assessment made. No lock is held here (`crate::curated::gather`).
+        let review = reviews.gather();
         let after_scope = normalized_scope(scope()?)?;
         let after_rejected = rejected(decisions)?;
         if before_scope != after_scope || rejected_hashes != after_rejected {
             return Err(ReadError::StaleBasis);
         }
+        // The decisions the projection reads. They must reject exactly what
+        // the artifacts of this session reject. The rejection set was read
+        // above; if the full records cannot be listed, the projection is not
+        // computed and the session is still acquired.
+        let assertion_decisions = decisions
+            .lock()
+            .map_err(|_| ReadError::Storage)?
+            .list_assertions()
+            .ok();
+        if let Some(listed) = &assertion_decisions {
+            let listed: BTreeSet<&str> = listed
+                .iter()
+                .filter(|record| record.decision == agents::AssertionDecision::Rejected)
+                .map(|record| record.assertion.provenance.content_hash.as_str())
+                .collect();
+            if !listed
+                .iter()
+                .copied()
+                .eq(rejected_hashes.iter().map(String::as_str))
+            {
+                return Err(ReadError::StaleBasis);
+            }
+        }
+        // A review made since `gather` would give another curated revision.
+        // A record read that no longer finishes leaves the projection not
+        // computed; it does not fail the session.
+        let review = match (&assertion_decisions, reviews.unchanged(&review)) {
+            (_, Ok(false)) => return Err(ReadError::StaleBasis),
+            (Some(_), Ok(true)) => review,
+            (_, Err(failure)) => curated::CuratedReview::failed(failure),
+            (None, Ok(true)) => {
+                curated::CuratedReview::failed(spec::CuratedFailure::DecisionsUnavailable)
+            }
+        };
+        let assertion_decisions = assertion_decisions.unwrap_or_default();
         // Scope/decision observations run without the graph lock. Refuse any
         // observed graph drift, including same-content and coverage-only writes.
         if graph
@@ -272,6 +371,27 @@ impl ReadSession {
         {
             return Err(ReadError::StaleBasis);
         }
+        // Every store observation is made. The projection is computed over
+        // the snapshot this session keeps; an assessment that observed
+        // another graph revision counts as failed (`curated::project`).
+        let graph_content_hash = spec::graph_content_hash(&base.graph.0, &base.graph.1);
+        let curated = {
+            let content_hash = &graph_content_hash;
+            CuratedRead::of(curated::project(
+                &review,
+                &curated::Snapshot {
+                    nodes: &base.graph.0,
+                    edges: &base.graph.1,
+                    // No document is compiled while a session is acquired.
+                    derived_decisions: curated::DerivedDecisions::NotCompiled,
+                    coverage: &recorded,
+                    content_hash,
+                    revision: &base.revision,
+                },
+                &assertion_decisions,
+            ))
+        };
+        drop((review, assertion_decisions));
         // Drop the temporary raw index before constructing the filtered index.
         // Raw identity must never be replaced by the filtered projection's ID.
         let recovered_graph_id = ContextSnapshot::new(base.graph.0.clone(), base.graph.1.clone())
@@ -310,7 +430,8 @@ impl ReadSession {
             rejection_decision_digest: digest("compiler-rejections-v1", &rejected_hashes)?,
             registration_basis_digest: digest("source-registration-basis-v1", &before_scope)?,
             export_mode: mode,
-            h3_curated_available: false,
+            h3_curated_available: curated.computed(),
+            curated: curated.basis(),
             base_revision: base.revision.clone(),
             knowledge,
         };
@@ -322,9 +443,12 @@ impl ReadSession {
             capabilities,
             actors,
             rejected_hashes,
+            curated,
+            graph_content_hash,
             #[cfg(test)]
             snapshot,
             qualified,
+            recorded,
         })
     }
 
@@ -420,6 +544,8 @@ fn graph_error(error: GraphError) -> ReadError {
             | SnapshotBoundsError::CanonicalByteLimit
             | SnapshotBoundsError::JsonDepthLimit
             | SnapshotBoundsError::JsonValueLimit
+            | SnapshotBoundsError::SingleRowByteLimit
+            | SnapshotBoundsError::SingleRowValueLimit
             | SnapshotBoundsError::CoverageRecordLimit
             | SnapshotBoundsError::CoverageByteLimit,
         ) => ReadError::Limit,

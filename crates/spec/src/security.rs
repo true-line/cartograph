@@ -149,7 +149,7 @@ pub(crate) fn derive_security_findings<N: Borrow<Node>, E: Borrow<Edge>>(
         };
         findings.push(finding_node(
             provenance,
-            format!("Unauthenticated endpoint: {name}"),
+            format!("No authentication check recovered: {name}"),
             "unauthenticated_endpoint",
             "AC-0041",
             endpoint.id.clone(),
@@ -358,5 +358,87 @@ mod tests {
             bounded[0].props["prov"]["confidence_tier"],
             "InferredStrong"
         );
+    }
+
+    #[test]
+    fn flask_endpoint_with_no_recovered_check_is_titled_by_what_was_recovered() {
+        // AC-0656 (#1820): a Flask route whose auth fact is `none` is a
+        // finding about what the adapter recovered. security.md titles it
+        // "No authentication check recovered" and never calls the endpoint
+        // unauthenticated; the finding's kind and identity are unchanged.
+        let auth_prov = serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::InferredStrong,
+                vec![EvidenceRef {
+                    repo: "local/shop".into(),
+                    path: "app.py".into(),
+                    byte_start: 10,
+                    byte_end: 40,
+                    commit_sha: "abc123".into(),
+                }],
+                "t0.adapter-python",
+                b"auth of health endpoint",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let nodes = vec![Node {
+            id: "ep:local/shop@GET:/health".into(),
+            label: "Endpoint".into(),
+            props: serde_json::json!({
+                "method": "GET",
+                "path": "/health",
+                "framework": "flask",
+                "language": "python",
+                "auth": {
+                    "state": "none",
+                    "authenticated": false,
+                    "basis": "no_guard_decorator_or_blocking_request_hook",
+                    "assumptions": ["non_repository_calls_in_request_hooks_do_not_abort"],
+                    "prov": auth_prov,
+                },
+                "prov": prov("health endpoint"),
+            }),
+        }];
+        let title = "No authentication check recovered: GET /health";
+        let findings = derive_security_findings(&nodes, &[] as &[Edge]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].props["title"], title);
+        assert_eq!(findings[0].props["category"], "unauthenticated_endpoint");
+        let bounded = derive_security_findings_bounded(
+            &nodes,
+            &[],
+            SecurityLimits {
+                max_rows: 4,
+                max_output_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(bounded, findings);
+
+        for mode in [
+            crate::ExportMode::VerifiedOnly,
+            crate::ExportMode::BestEffort,
+        ] {
+            let bundle =
+                crate::compile_spec(&nodes, &[], &[], mode, &std::collections::BTreeSet::new());
+            let security = bundle
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.file_name == "security.md")
+                .expect("security.md is exported");
+            assert!(security.content.contains(&format!("| {title} |")));
+            assert!(!security.content.to_lowercase().contains("unauthenticated"));
+            assert!(security.content.contains("| `no_auth_check_recovered` |"));
+            // The coverage limit is stated once, before the table.
+            assert_eq!(
+                security
+                    .content
+                    .matches("is not visible to this finding")
+                    .count(),
+                1
+            );
+        }
     }
 }

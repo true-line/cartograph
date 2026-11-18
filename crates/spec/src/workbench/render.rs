@@ -1,4 +1,5 @@
 //! Shared streaming formatting and before-ownership assertion admission.
+use super::fact_index::Subject;
 use super::*;
 use serde::Serializer;
 use std::{cell::Cell, fmt, io, rc::Rc};
@@ -167,6 +168,11 @@ impl fmt::Display for NodeName<'_> {
         {
             return write!(f, "{method} {path}");
         }
+        // An environment is named only by what its file states (ADR-0070):
+        // without a stated name it is shown by its id, never by its path.
+        if n.label == "Environment" {
+            return f.write_str(text_prop(n, &["name"]).unwrap_or(&n.id));
+        }
         f.write_str(
             text_prop(
                 n,
@@ -260,12 +266,16 @@ struct AssertionView<'a> {
 pub(super) struct Assertions {
     budget: Budget,
     pub values: Vec<SpecAssertion>,
+    /// The fact-key shape of each value's subject, in step with `values`
+    /// (ADR-0058). Not part of any artifact.
+    pub subjects: Vec<Subject>,
 }
 impl Assertions {
     pub(super) fn new(budget: &Budget) -> Self {
         Self {
             budget: budget.clone(),
             values: Vec::new(),
+            subjects: Vec::new(),
         }
     }
     fn add(
@@ -275,9 +285,9 @@ impl Assertions {
         kind: &str,
         summary: &dyn fmt::Display,
         prov: Provenance,
-        metadata: (Option<&str>, Option<&Omission>),
+        metadata: (Option<&str>, Option<&Omission>, Subject),
     ) -> Result<(), RenderLimit> {
-        let (label, omission) = metadata;
+        let (label, omission, shape) = metadata;
         let view = AssertionView {
             id: DisplayValue(id),
             subject_id: DisplayValue(subject),
@@ -297,6 +307,7 @@ impl Assertions {
             edge_label: label.map(str::to_owned),
             omission: omission.cloned(),
         });
+        self.subjects.push(shape);
         Ok(())
     }
     pub(super) fn node(&mut self, node: &Node, label: Option<&str>) -> Result<(), RenderLimit> {
@@ -310,11 +321,12 @@ impl Assertions {
             &node.label,
             &format_args!("{}: {}", node.label, NodeName(node)),
             prov,
-            (label, omission.as_ref()),
+            (label, omission.as_ref(), Subject::Node),
         )
     }
     pub(super) fn edge(&mut self, edge: &Edge) -> Result<(), RenderLimit> {
         let subject = EdgeName(edge);
+        let shape = Subject::edge(&edge.src, &edge.label);
         let id = Prefix("edge:", &subject);
         self.budget.check(&DisplayValue(&id))?;
         let prov = provenance(&edge.props, &id.to_string());
@@ -332,7 +344,7 @@ impl Assertions {
                 &edge.label,
                 &format_args!("{}: {reason}", edge.label),
                 prov,
-                (Some(&edge.label), omission.as_ref()),
+                (Some(&edge.label), omission.as_ref(), shape),
             )
         } else {
             self.add(
@@ -341,7 +353,7 @@ impl Assertions {
                 &edge.label,
                 &subject,
                 prov,
-                (Some(&edge.label), omission.as_ref()),
+                (Some(&edge.label), omission.as_ref(), shape),
             )
         }
     }
@@ -357,7 +369,7 @@ impl Assertions {
                 &node.label,
                 &format_args!("{}: {}", node.label, NodeName(node)),
                 provenance(&node.props, &node.id),
-                (None, None),
+                (None, None, Subject::Node),
             ),
             capabilities::Support::Edge(edge) => self.add(
                 &id,
@@ -365,7 +377,11 @@ impl Assertions {
                 &edge.label,
                 &EdgeName(edge),
                 provenance(&edge.props, &edge_identity(edge)),
-                (Some(&edge.label), None),
+                (
+                    Some(&edge.label),
+                    None,
+                    Subject::edge(&edge.src, &edge.label),
+                ),
             ),
         }
     }
@@ -383,7 +399,13 @@ impl Assertions {
             "FlowHop",
             &format_args!("{}: {} → {}", hop.label, hop.src_name, hop.dst_name),
             hop.provenance.clone(),
-            (None, omission.as_deref()),
+            // A hop names the relation it walked, or no stored fact at all
+            // (a projection Gap); either way it is cited by its own key.
+            (
+                None,
+                omission.as_deref(),
+                Subject::edge(&hop.src, &hop.label),
+            ),
         )
     }
     pub(super) fn tool(&mut self, tool: &Node, paths: &[&str]) -> Result<(), RenderLimit> {
@@ -400,8 +422,19 @@ impl Assertions {
                 Join(paths, ", ")
             ),
             prov,
-            (None, omission.as_ref()),
+            (None, omission.as_ref(), Subject::Node),
         )
+    }
+    /// A fact derived from a stored one and carrying its own provenance (a
+    /// permission site inside an endpoint fact): cited by its own id.
+    pub(super) fn derived(
+        &mut self,
+        id: &dyn fmt::Display,
+        kind: &str,
+        summary: &dyn fmt::Display,
+        prov: Provenance,
+    ) -> Result<(), RenderLimit> {
+        self.add(id, id, kind, summary, prov, (None, None, Subject::Node))
     }
     pub(super) fn journey(
         &mut self,
@@ -418,7 +451,8 @@ impl Assertions {
                 candidate.result.as_str()
             ),
             candidate.provenance.clone(),
-            (None, None),
+            // Derived, never stored: cited by the candidate's own id.
+            (None, None, Subject::Node),
         )
     }
 }

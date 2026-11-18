@@ -19,7 +19,9 @@ use llm::bounded::{
 };
 use llm::{ConsentGrant, EgressFirewall, LlmProvider, Locality};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 use tauri::Manager;
 
 #[path = "worker/next_metadata.rs"]
@@ -249,20 +251,29 @@ fn run_completion_with_clock<R: tauri::Runtime>(
             &request, &policy,
         )?)
     })();
+    // A drafting run stages its draft once the run has ended (SPEC-15 slice
+    // 6). The run's own result and history are already settled by then.
+    let drafting = (request.specialist_id == agents::section_run::SECTION_WRITER_ROLE)
+        .then(|| (app.clone(), id.clone()));
     match projected {
-        Ok(projected) => run_inner(
-            app,
-            id,
-            Ok(projected),
-            Some(request),
-            execution,
-            provider,
-            live,
-            clock,
-            task_limits,
-            dispatch_audit,
-            auditor,
-        ),
+        Ok(projected) => {
+            run_inner(
+                app,
+                id,
+                Ok(projected),
+                Some(request),
+                execution,
+                provider,
+                live,
+                clock,
+                task_limits,
+                dispatch_audit,
+                auditor,
+            );
+            if let Some((app, id)) = drafting {
+                super::section_drafts::stage_after_run(&app, &id);
+            }
+        }
         Err(_) => {
             let state = app.state::<AppState>();
             let _cleanup = Cleanup {
@@ -311,7 +322,7 @@ fn run_inner<R: tauri::Runtime>(
             .lock()
             .map_err(|_| HostError::Operational)?
             .investigation_owned_runtime(&execution, &id)?;
-        clock.set_active_limit(detail.limits.active_seconds);
+        clock.apply_saved_limits(&detail.limits);
         let mut worker = Worker {
             pending_patch: None,
             app: &app,
@@ -1294,7 +1305,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         input: &InvestigationInput,
         context: &FrozenContext,
     ) -> Result<ConsentGrant, Failure> {
-        let remaining = self.clock.remaining_wall().min(Duration::from_secs(900));
+        let remaining = self.clock.consent_wait_remaining();
         if remaining.is_zero() {
             return Err(Failure::Stop(InvestigationStopReason::ConsentExpired));
         }

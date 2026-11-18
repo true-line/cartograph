@@ -9,6 +9,44 @@ steps. Record results in the closing comment of the milestone's task issue.
 Convention: run the relevant procedures at each milestone boundary, not per
 PR — per-PR verification is CI's job.
 
+## Unexecuted procedures: owner and milestone
+
+Every procedure below that is still marked **UNEXECUTED**, pending or not run,
+or that has no recorded result, is listed here with the person who runs it and
+records its result, and the GitHub milestone at whose boundary it runs (#1759). A procedure leaves this table in the PR that
+records its PASS or FAIL. The milestone follows the open issue that tracks the
+work the procedure verifies; `Later` means no open issue in R1–R4 schedules it.
+
+| Procedure | AC | Owner | Milestone | Tracked by |
+|-----------|----|-------|-----------|------------|
+| MT-H2-01 | AC-0106 | `qwts` | Later | no open issue schedules H2 domain acceptance |
+| MT-H2-02 | AC-0107 | `qwts` | Later | no open issue schedules H2 domain acceptance |
+| MT-H3-01 | AC-0108 | `qwts` | R2 — Curated projection and document catalogue | #1746 (W5) |
+| MT-H3-02 | AC-0109 | `qwts` | Later | no open issue schedules named project isolation |
+| MT-H4-01 | AC-0110 | `qwts` | Later | W8b coordinator; no open issue in R1–R4 |
+| MT-H4-02 | AC-0191 | `qwts` | R1 — v1.0 GA: foundation and context hub | #598 |
+| MT-H4-03 | AC-0261 | `qwts` | R1 — v1.0 GA: foundation and context hub | #598 |
+| MT-H4-04 | AC-0262 | `qwts` | R1 — v1.0 GA: foundation and context hub | #598 |
+| MT-H4-05 | AC-0267 | `qwts` | R1 — v1.0 GA: foundation and context hub | #598 |
+| MT-H4-06 | AC-0279 | `qwts` | R1 — v1.0 GA: foundation and context hub | #598 |
+| MT-H5-01 | AC-0111 | `qwts` | Later | W8b ACP host; no open issue in R1–R4 |
+| MT-H5-02 | AC-0112 | `qwts` | Later | W8b ACP host; no open issue in R1–R4 |
+| MT-H5-03 | AC-0113 | `qwts` | Later | W8b ACP host; no open issue in R1–R4 |
+| MT-H5-04 | AC-0114 | `qwts` | Later | W8b ACP host; no open issue in R1–R4 |
+| MT-H6-01 | AC-0115 | `qwts` | Later | no open issue schedules H6 |
+| MT-H6-02 | AC-0116 | `qwts` | Later | no open issue schedules H6 |
+| MT-H6-03 | AC-0117 | `qwts` | Later | no open issue schedules H6–H7 |
+| MT-H7-01 | AC-0118 | `qwts` | Later | no open issue schedules H7 |
+| MT-W8B-01 | AC-0293 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
+| MT-W8B-02 | AC-0294 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
+| MT-W8B-03 | AC-0295 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
+| MT-W8B-04 | AC-0296 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 (implementation shipped in #730) |
+| MT-M10-04 | AC-0423 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 criterion 1 (the measurements in `docs/showcases/scale.md` are not a recorded same-commit `--compare` run) |
+| MT-1618-01 | AC-0559, AC-0561 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 release pilot (#1618 is closed) |
+| MT-1624-01 | AC-0560 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1610 release pilot (#1624 is closed) |
+| MT-1633-01 | AC-0562 | `qwts` | R1 — v1.0 GA: foundation and context hub | #1633 |
+| MT-1812-01 | AC-0593 | `qwts` | R2 — Curated projection and document catalogue | #1812 |
+
 ---
 
 ## MT-M0-01 — Shell boots, job spine survives restart
@@ -269,8 +307,8 @@ PR — per-PR verification is CI's job.
    auth state. Include IAM `GRANTS` with both least-privilege actions and a
    wildcard action or literal wildcard resource scope.
 2. Open Workbench **Security findings**. **Pass:** only the explicit negative
-   endpoint appears as unauthenticated; the protected and unknown-auth
-   endpoints do not. The row cites its evidence and maps to US-0015/AC-0041.
+   endpoint appears, titled "No authentication check recovered"; the
+   protected and unknown-auth endpoints do not. The row cites its evidence and maps to US-0015/AC-0041.
 3. **Pass:** the wildcard grant appears with its exact action and resource
    scope, confidence, evidence, and US-0015/AC-0042 mapping. The bounded grant
    does not appear.
@@ -1497,7 +1535,7 @@ Select `CARTOGRAPH_VENDURE_AUDITOR_ACTION=reopen` to compare durable observation
 ## MT-1618-01 — Desktop default specialist on a release build
 
 **Status: Pending the v0.59.1 SimpleLogin pilot rerun.** AC-0559; #1618.
-It is run as step 8 of the release pilot ([readiness report](release/v1.0-readiness.md#2-simplelogin-pilot)), with a local provider only.
+It is run as step 8 of the release pilot ([readiness report, #1610](https://github.com/true-line/cartograph/issues/1610)), with a local provider only.
 
 **Fresh default.** On a fresh profile of the signed release build:
 
@@ -1539,6 +1577,67 @@ It is run as step 8 of the release pilot ([readiness report](release/v1.0-readin
    and 10.
 4. Start an investigation and confirm its recorded limits show the new values.
 5. Choose **Restore defaults**; the window shows 10 and 3 again.
+
+## MT-1796-01 — First-run guide on a clean macOS account (AC-0730, T-0730)
+
+**Status: Not run.** AC-0730; #1796. Run once per release that changes a step
+the page describes, and before #1796 closes.
+
+1. Create a new macOS user account, or use one that has never run Cartograph
+   (no app profile, no Keychain entry for Cartograph, no Ollama models). Record
+   the macOS version and the CPU architecture.
+2. Download the release `.dmg` from the repository's release page. Record its
+   file name and the app version. If it is an `unsigned-dev` build, also
+   record that.
+3. For the install step, follow the page as published (`docs/help/first-run.md`
+   in the release's source). Once the app opens, open **Help → First run** in
+   the installed app and follow that rendered copy from there, step by step,
+   exactly as written and without using anything it does not say. Record
+   whether the topic opened and rendered. For an `unsigned-dev` build the
+   install step includes **Open Anyway**.
+4. At each step record whether the page matched what the app showed: the
+   control names, the screen order, the status bar text, the **Detection
+   deferred** Preflight screen for a GitHub repository, the model names and
+   `ollama pull` commands, and the consent dialogs.
+5. **Pass:** every step worked as written. Update the version line at the top
+   of the page to the version checked, in the same PR as any wording fixes,
+   and record the run on #1796.
+6. **Fail:** a step did not work or the page was wrong. Fix the page, or open
+   an issue if the app is wrong, and record the run on #1796. The issue is not
+   closed over a failed run.
+
+## MT-1812-01 — Re-ingest determinism on a real repository (AC-0593, T-0593)
+
+**Status: Not run under this procedure.** AC-0593; #1812. Run at each milestone
+boundary until the check runs in CI. One earlier run of the same test on the
+Cartograph tree at `b0a139c2` passed (32,502 nodes, 58,430 edges, 323 s in a
+debug build).
+
+1. Check out the repository to compare at a fixed commit, with a clean work
+   tree. Record the repository and the full commit id on the milestone's task
+   issue.
+2. From the Cartograph root, run:
+
+   ```sh
+   CARTOGRAPH_DETERMINISM_ROOT=/path/to/checkout \
+   CARTOGRAPH_DETERMINISM_COMMIT=<full commit id> \
+   cargo test --locked -p app pinned_repository_reingest_yields_identical_graph_hash -- --ignored --nocapture
+   ```
+
+3. **Pass:** the test passes. It ingests the checkout twice into fresh graphs
+   at the production ingest parallelism and once with one worker, and the
+   whole-graph content hash, the hash recorded for the registration and the
+   T0 identity list are equal across the three.
+4. Record the printed line (node count, edge count, worker count, graph hash)
+   and the machine's operating system and CPU architecture on the task issue.
+5. **Fail:** any difference. The failure names which run differed (repeat or
+   one worker) and the first differing fact in identity order, with both
+   versions when it is in both (AC-0770, T-0770). Keep the output and open an
+   issue; a milestone is not closed over a failed run.
+
+The run covers extraction, load and name stitching. It does not cover the
+Tauri job path or the store on disk, and one machine does not establish
+equality across architectures.
 
 ### Captured start timing authority (#1626)
 

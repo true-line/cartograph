@@ -12,9 +12,17 @@ demand.
   **Open groups** folds it back. Edges between groups are combined into one
   line with a count.
 
+- **Find entity**: type a name, kind or stable ID to search every entity
+  in the loaded graph, whatever layer, focus level or collapsed group it is
+  in. Choosing a result opens its evidence and brings it into view; clear
+  the field (or press **Esc** in it) to get the usual lists back.
 - **Focus mode**: select a node and press **Enter** to re-root the view on it
   and its direct connections; **Esc** backs out one level; the breadcrumb
   shows the focus path.
 - The **confidence overlay** colors facts by confidence; shapes encode kind
   (octagon = gap, diamond = channel) so color never carries alone.
+- A **configuration read** (an environment variable read in source) is in
+  the Server code band, in the cluster of the file that reads it. It is
+  labelled with the key it reads. A read whose key is not written as a
+  literal in the source is labelled "key not named in source".
 - Every node and edge opens read-only evidence.

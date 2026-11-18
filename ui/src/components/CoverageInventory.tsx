@@ -1,6 +1,16 @@
 import { useRef, useState } from "react";
-import { coverageVerdict, producerRows, type RepoCoverage } from "../coverage";
+import {
+  coverageVerdict,
+  producerRows,
+  REFUSAL_REASON_TEXT,
+  unsupportedRows,
+  type RepoCoverage,
+  type RestoredCoverage,
+} from "../coverage";
 import { useAppStore, type DraftAdapterPacket } from "../store";
+
+/** A plugin that was refused on a file ran, but not over every file. */
+const REFUSED_LABEL = "Ran, files refused";
 
 const STATE_LABEL: Record<string, string> = {
   ran: "Ran",
@@ -37,6 +47,7 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const { shown, notApplicable } = producerRows(repo);
+  const unsupported = unsupportedRows(repo);
 
   const handleDraft = async () => {
     const ticket = ++generation.current;
@@ -72,12 +83,40 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
       </summary>
       <ul className="coverage-producers">
         {shown.map((producer) => (
-          <li key={producer.id} className={`coverage-${producer.state}`}>
+          <li
+            key={producer.id}
+            className={
+              producer.refusals
+                ? "coverage-refused-producer"
+                : `coverage-${producer.state}`
+            }
+          >
             <span className="coverage-state">
-              {STATE_LABEL[producer.state]}
+              {producer.refusals
+                ? REFUSED_LABEL
+                : STATE_LABEL[producer.state]}
             </span>{" "}
             <code>{producer.id}</code> ({producer.covers}):{" "}
             {producer.stopping_reason}
+            {producer.refusals && (
+              <ul
+                className="coverage-refused"
+                aria-label={`Files refused for ${producer.id}`}
+              >
+                {producer.refusals.files.map((file) => (
+                  <li key={file.path}>
+                    <code>{file.path}</code>: not covered,{" "}
+                    {REFUSAL_REASON_TEXT[file.reason] ?? file.reason}
+                  </li>
+                ))}
+                {producer.refusals.omitted > 0 && (
+                  <li>
+                    {producer.refusals.omitted} more refused files are counted
+                    but not listed
+                  </li>
+                )}
+              </ul>
+            )}
           </li>
         ))}
       </ul>
@@ -98,11 +137,11 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
           </ul>
         </>
       )}
-      {repo.unsupported.length > 0 && (
+      {unsupported.length > 0 && (
         <>
           <h4>Unsupported capabilities</h4>
           <ul>
-            {repo.unsupported.map((unsupported) => (
+            {unsupported.map((unsupported) => (
               <li key={unsupported.capability}>
                 {unsupported.capability} ×{unsupported.occurrences}, first at{" "}
                 <code>{unsupported.first_site}</code>: {unsupported.reason}
@@ -163,7 +202,14 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
 /** What each repo's producers covered and where they stopped (AC-0238),
  *  shown before any interpretation is offered. Each repo opens to its
  *  producers, missing inputs and unsupported capabilities. */
-export function CoverageInventory({ coverage }: { coverage: RepoCoverage[] }) {
+export function CoverageInventory({
+  coverage,
+  note,
+}: {
+  coverage: RepoCoverage[];
+  /** States where the inventories come from when not from this session. */
+  note?: string;
+}) {
   if (coverage.length === 0) return null;
   return (
     <section
@@ -172,6 +218,7 @@ export function CoverageInventory({ coverage }: { coverage: RepoCoverage[] }) {
       data-testid="coverage-inventory"
     >
       <h3 className="settings-section-title">Coverage inventory</h3>
+      {note && <p className="muted">{note}</p>}
       {coverage.map((repo) => (
         <RepoCoverageRow
           key={`${repo.repo}@${repo.commit}`}
@@ -179,5 +226,58 @@ export function CoverageInventory({ coverage }: { coverage: RepoCoverage[] }) {
         />
       ))}
     </section>
+  );
+}
+
+/** The inventories earlier ingests recorded, restored after a relaunch
+ *  (AC-0700). Current ones are shown as recorded, not revalidated; stale ones
+ *  are named as stale with nothing read from them; a failed read is stated
+ *  and shows no card. */
+export function RecordedCoverageInventory({
+  restored,
+  error,
+}: {
+  restored: RestoredCoverage[];
+  error?: string | null;
+}) {
+  if (error) {
+    return (
+      <p role="alert" data-testid="recorded-coverage-error">
+        Recorded coverage could not be read: {error}. No recorded inventory is
+        shown.
+      </p>
+    );
+  }
+  const current = restored.flatMap((repo) =>
+    repo.status === "recorded" && repo.inventory ? [repo.inventory] : [],
+  );
+  const stale = restored.filter((repo) => repo.status === "stale");
+  return (
+    <>
+      <CoverageInventory
+        coverage={current}
+        note="Recorded by the last ingest of each repo. Its registration and plugins were compared now; source inputs and everything else are as recorded, not newly validated."
+      />
+      {stale.length > 0 && (
+        <section
+          className="coverage-inventory"
+          aria-label="Stale coverage inventories"
+          data-testid="stale-coverage"
+        >
+          <h3 className="settings-section-title">Stale coverage inventories</h3>
+          <ul>
+            {stale.map((repo) => (
+              <li key={repo.repo}>
+                <strong>{repo.repo}</strong>{" "}
+                <code>{repo.inventory_hash.slice(0, 19)}</code>: stale, not
+                current. Its registration or plugins changed since it was
+                recorded (compared: {repo.compared.join(", ")}), so nothing is
+                read from it. Re-ingest to record current coverage.
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
   );
 }

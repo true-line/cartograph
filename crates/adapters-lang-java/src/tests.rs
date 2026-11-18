@@ -5095,3 +5095,150 @@ fn spring_unresolved_method_settles_through_wildcard_shadowing() {
         ]
     );
 }
+
+fn evidence_spans(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["byte_start"].as_u64().unwrap(),
+                e["byte_end"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn config_read_ids(out: &Extraction) -> Vec<&str> {
+    out.nodes
+        .iter()
+        .filter(|node| node.label == "ConfigRead")
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+#[test]
+fn system_getenv_reads_are_config_reads() {
+    // AC-0597 (#1789, ADR-0059): one literal `System.getenv` read, one
+    // dynamic read and one shadowed look-alike (a local method named
+    // `getenv`) yield exactly one named ConfigRead, one dynamic ConfigRead
+    // and nothing for the look-alike. Only the key name and the span of the
+    // call are recorded.
+    let text = r#"package com.acme;
+
+class Config {
+    static String getenv(String key) { return key; }
+
+    String[] load(String name) {
+        String url = System.getenv("DATABASE_URL");
+        System.out.println(url);
+        return new String[] { url, System.getenv(name) };
+    }
+
+    String fake() {
+        return getenv("SHADOWED");
+    }
+}
+"#;
+    let path = "src/main/java/com/acme/Config.java";
+    let out = extract_source(text.as_bytes(), path, &id()).unwrap();
+    assert_eq!(
+        config_read_ids(&out),
+        [
+            "cfgread:local/demo@src/main/java/com/acme/Config.java:env:DATABASE_URL",
+            "cfgread:local/demo@src/main/java/com/acme/Config.java:env:?",
+        ]
+    );
+    let named = node(
+        &out.nodes,
+        "cfgread:local/demo@src/main/java/com/acme/Config.java:env:DATABASE_URL",
+    );
+    assert_eq!(named.props["source"], "env");
+    assert_eq!(named.props["key"], "DATABASE_URL");
+    assert_eq!(named.props["language"], "java");
+    assert_eq!(named.props["prov"]["tier"], "Deterministic");
+    assert_eq!(named.props["prov"]["confidence_tier"], "Confirmed");
+    let read = r#"System.getenv("DATABASE_URL")"#;
+    let at = text.find(read).unwrap() as u64;
+    assert_eq!(evidence_spans(&named.props), [(at, at + read.len() as u64)]);
+    let dynamic = node(
+        &out.nodes,
+        "cfgread:local/demo@src/main/java/com/acme/Config.java:env:?",
+    );
+    assert_eq!(dynamic.props["dynamic"], true);
+    assert!(dynamic.props.get("key").is_none());
+    let at = text.find("System.getenv(name)").unwrap() as u64;
+    assert_eq!(
+        evidence_spans(&dynamic.props),
+        [(at, at + "System.getenv(name)".len() as u64)]
+    );
+    let reads: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "READS_CONFIG")
+        .collect();
+    assert_eq!(reads.len(), 2);
+    let load = out
+        .nodes
+        .iter()
+        .find(|node| node.label == "Symbol" && node.id.contains("#Config.load"))
+        .expect("the reading method is a symbol");
+    assert!(reads.iter().all(|edge| edge.src == load.id));
+    assert!(
+        !serde_json::to_string(&out.nodes)
+            .unwrap()
+            .contains("SHADOWED")
+    );
+    // Determinism: a second run yields the same facts.
+    let again = extract_source(text.as_bytes(), path, &id()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&(&out.nodes, &out.edges)).unwrap(),
+        serde_json::to_string(&(&again.nodes, &again.edges)).unwrap()
+    );
+}
+
+#[test]
+fn system_getenv_needs_an_unshadowed_system() {
+    // AC-0597 (ADR-0059 decision 4): a local, parameter, field, import or
+    // declared type named `System`, and a static wildcard import, void the
+    // file's reads; a `System` declared anywhere in the repository voids
+    // every Java read, since it may be a same-package or inherited member.
+    let shadowed = [
+        r#"class A { String f(Env System) { return System.getenv("PARAM"); } }"#,
+        r#"class A { String f() { Env System = new Env(); return System.getenv("LOCAL"); } }"#,
+        r#"class A { Env System; String f() { return System.getenv("FIELD"); } }"#,
+        "import com.fake.System;\nclass A { String f() { return System.getenv(\"IMPORT\"); } }",
+        "import static com.fake.Holder.*;\nclass A { String f() { return System.getenv(\"STATIC\"); } }",
+        r#"class A { static class System {} String f() { return System.getenv("NESTED"); } }"#,
+    ];
+    for text in shadowed {
+        let out = extract_source(text.as_bytes(), "src/main/java/A.java", &id()).unwrap();
+        assert!(config_read_ids(&out).is_empty(), "{text}");
+    }
+
+    let reader = r#"package com.acme;
+class Reader { String region = System.getenv("REGION"); }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "src/main/java/com/acme/Reader.java", reader);
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        config_read_ids(&out),
+        ["cfgread:local/demo@src/main/java/com/acme/Reader.java:env:REGION"]
+    );
+    // A field initializer has no enclosing method: the file reads the key.
+    edge(
+        &out.edges,
+        "file:local/demo@src/main/java/com/acme/Reader.java",
+        "cfgread:local/demo@src/main/java/com/acme/Reader.java:env:REGION",
+        "READS_CONFIG",
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/acme/System.java",
+        "package com.acme;\nclass System { static String getenv(String k) { return k; } }\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    assert!(config_read_ids(&out).is_empty());
+}

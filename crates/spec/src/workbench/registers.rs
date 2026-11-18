@@ -8,6 +8,8 @@ pub(super) struct RegisterOutput {
     pub(super) markdown: Option<String>,
     pub(super) index: Option<String>,
     pub(super) assertions: Vec<SpecAssertion>,
+    /// The fact-key shape of each assertion's subject (ADR-0058).
+    pub(super) subjects: Vec<fact_index::Subject>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RegisterLimit;
@@ -72,6 +74,9 @@ struct Candidate<'a> {
     edge_label: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     omission: Option<render::SharedOmission>,
+    /// How `subject_id` maps onto a fact key; never serialized (ADR-0058).
+    #[serde(skip)]
+    subject: fact_index::Subject,
 }
 impl Candidate<'_> {
     fn owned(&self) -> SpecAssertion {
@@ -142,6 +147,7 @@ fn node_candidate<'a>(node: &'a Node, labels: &GapEdgeLabels<'a>) -> Candidate<'
         provenance,
         omission,
         edge_label: gap_node_edge_label(node, labels),
+        subject: fact_index::Subject::Node,
     }
 }
 fn edge_candidate(edge: &Edge) -> Candidate<'_> {
@@ -169,6 +175,7 @@ fn edge_candidate(edge: &Edge) -> Candidate<'_> {
         summary,
         provenance,
         edge_label: Some(&edge.label),
+        subject: fact_index::Subject::edge(&edge.src, &edge.label),
     }
 }
 fn hop_candidate<'a>(
@@ -199,6 +206,9 @@ fn hop_candidate<'a>(
         provenance: hop.provenance.clone(),
         edge_label: None,
         omission: origins.omission(hop),
+        // A hop names the relation it walked, or no stored fact at all (a
+        // projection Gap); either way it is cited by its own key.
+        subject: fact_index::Subject::edge(&hop.src, &hop.label),
     }
 }
 
@@ -481,6 +491,7 @@ pub(super) fn matrix_selected(
             markdown: None,
             index: None,
             assertions: Vec::new(),
+            subjects: Vec::new(),
         });
     }
     let rows: Vec<_> = edges
@@ -521,15 +532,16 @@ pub(super) fn matrix_selected(
     } else {
         None
     };
-    let assertions = if markdown.is_some() {
-        rows.iter().map(|(_, a)| a.owned()).collect()
+    let (assertions, subjects) = if markdown.is_some() {
+        rows.iter().map(|(_, a)| (a.owned(), a.subject)).unzip()
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     Ok(RegisterOutput {
         markdown,
         index,
         assertions,
+        subjects,
     })
 }
 
@@ -867,6 +879,7 @@ pub(super) fn gap_selected(
             markdown: None,
             index: None,
             assertions: Vec::new(),
+            subjects: Vec::new(),
         });
     }
     let origins = render::Origins::new(nodes, edges);
@@ -937,15 +950,16 @@ pub(super) fn gap_selected(
     } else {
         None
     };
-    let assertions = if markdown.is_some() {
-        rows.iter().map(Candidate::owned).collect()
+    let (assertions, subjects) = if markdown.is_some() {
+        rows.iter().map(|a| (a.owned(), a.subject)).unzip()
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     Ok(RegisterOutput {
         markdown,
         index,
         assertions,
+        subjects,
     })
 }
 
@@ -970,7 +984,11 @@ pub(super) fn logical_workspace_bytes(
         slots::<Candidate<'_>>(candidates)?, // rows + stable-sort scratch
         slots::<Cow<'_, str>>(candidates.checked_mul(parts)?)?,
         slots::<Provenance>(rows)?,
-        slots::<core_prov::EvidenceRef>(values.checked_add(flow_bytes)?)?,
+        // Graph evidence by admitted values; copied hop evidence by the
+        // smallest serialized evidence element of the flow output.
+        slots::<core_prov::EvidenceRef>(
+            values.checked_add(flowtracer::output_evidence_bound(flow_bytes)?)?,
+        )?,
         slots::<Omission>(candidates)?,
         super::render::logical_origin_bytes(rows)?,
         map_slots::<&str, &str>(rows)?, // gap edge labels by destination

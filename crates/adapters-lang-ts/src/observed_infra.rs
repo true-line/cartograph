@@ -24,11 +24,21 @@
 //! only its scheme and authority (never credentials, paths or queries); an
 //! env reference records the variable name and never its value. A
 //! runtime-computed identity becomes a Gap naming the site, never a guess.
+//!
+//! The same scopes prove configuration reads (#1789, ADR-0059): `process.env.X`
+//! and `process.env["X"]` become the shared `ConfigRead` shape
+//! ([`adapters_fw::config_read`]) while `process` is the Node.js global or an
+//! import of `process` / `node:process` (`env` imported by name included). A
+//! non-literal index is a dynamic read. A bound `process`, a file that writes
+//! `process.env` itself, and a write of a variable (`process.env.X = …`) yield
+//! nothing. `import.meta.env.X` is a bundler substitution, not the
+//! standard-library read, and is not a configuration read here.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Node as TsNode, Parser};
 
+use adapters_fw::config_read::ConfigReadSite;
 use adapters_fw::events::{
     ClientForm, Ecosystem, IdentityArg, IdentityExpr, ObservedClient, ObservedFamily, Registries,
 };
@@ -925,12 +935,132 @@ fn fetch_rewritten(scopes: &Scopes) -> bool {
         .any(|global| scopes.member_written(global, "fetch"))
 }
 
+/// Modules whose default export is the Node.js `process` object.
+const PROCESS_MODULES: &[&str] = &["process", "node:process"];
+
+/// Whether `node` is the Node.js `process.env` object: `process.env` with
+/// `process` the unbound global or a default/namespace import of the
+/// `process` module, or `env` imported by name from it. A file that writes
+/// the `env` member of that name proves nothing (fail closed).
+fn process_env(cx: &FileCx, node: TsNode, scopes: &Scopes) -> bool {
+    let node = write_object(node);
+    match node.kind() {
+        "identifier" => matches!(
+            scopes.resolve(cx.text(&node), node),
+            Some(Declared::Module(module, Binding::Named(export)))
+                if PROCESS_MODULES.contains(&module.as_str()) && export == "env"
+        ),
+        "member_expression" => {
+            let (Some(object), Some(property)) = (
+                node.child_by_field_name("object").map(write_object),
+                node.child_by_field_name("property"),
+            ) else {
+                return false;
+            };
+            if object.kind() != "identifier"
+                || property.kind() != "property_identifier"
+                || cx.text(&property) != "env"
+            {
+                return false;
+            }
+            let name = cx.text(&object);
+            let process = match scopes.resolve(name, object) {
+                None => name == "process",
+                Some(Declared::Module(module, Binding::Default | Binding::Namespace)) => {
+                    PROCESS_MODULES.contains(&module.as_str())
+                }
+                Some(_) => false,
+            };
+            process && !scopes.member_written(name, "env")
+        }
+        _ => false,
+    }
+}
+
+/// True when `node` is written rather than read: the target of an
+/// assignment, an update or a `delete`.
+fn written_at(cx: &FileCx, node: TsNode) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "as_expression"
+            | "satisfies_expression"
+            | "non_null_expression"
+            | "parenthesized_expression" => current = parent,
+            "assignment_expression" | "augmented_assignment_expression" => {
+                return parent
+                    .child_by_field_name("left")
+                    .is_some_and(|left| left.id() == current.id());
+            }
+            "update_expression" => return true,
+            "unary_expression" => {
+                return parent
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| cx.text(&op) == "delete");
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The environment read `node` is (#1789, ADR-0059): `Some(Some(key))` for
+/// `process.env.KEY` or `process.env["KEY"]`, `Some(None)` for a read whose
+/// index is not a string literal, `None` for anything else, including a
+/// look-alike whose `process` is not proven and a write of the variable.
+fn env_read(cx: &FileCx, node: TsNode, scopes: &Scopes) -> Option<Option<String>> {
+    let key = match node.kind() {
+        "member_expression" => {
+            let property = node.child_by_field_name("property")?;
+            (property.kind() == "property_identifier").then(|| cx.text(&property).to_string())
+        }
+        "subscript_expression" => {
+            let index = node.child_by_field_name("index")?;
+            plain_string(cx, index)
+        }
+        _ => return None,
+    };
+    if node.kind() == "member_expression" && key.is_none() {
+        return None;
+    }
+    let object = node.child_by_field_name("object")?;
+    (process_env(cx, object, scopes) && !written_at(cx, node)).then_some(key)
+}
+
+/// The text of a string literal with no escape sequence and no template
+/// substitution: the only index read as a key name. Anything else is a
+/// dynamic read, never a partial name.
+fn plain_string(cx: &FileCx, node: TsNode) -> Option<String> {
+    let text = cx.text(&node);
+    let quote = text
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\'' | '`'))?;
+    let inner = text.strip_prefix(quote)?.strip_suffix(quote)?;
+    let plain = matches!(node.kind(), "string" | "template_string")
+        && !inner.is_empty()
+        && !inner.contains(['\\', quote, '\n'])
+        && !(quote == '`' && inner.contains("${"));
+    plain.then(|| inner.to_string())
+}
+
+/// The language recorded on a configuration read, from the file's extension.
+fn config_language(path: &str) -> &'static str {
+    const JS: &[&str] = &[".js", ".jsx", ".mjs", ".cjs"];
+    if JS.iter().any(|ext| path.ends_with(ext)) {
+        "javascript"
+    } else {
+        "typescript"
+    }
+}
+
 fn extract_file(
     source: &[u8],
     path: &str,
     id: &SourceId,
     registries: &Registries,
     sites: &mut Vec<ObservedSite>,
+    config: &mut Vec<ConfigReadSite>,
 ) -> Result<(), ExtractError> {
     let is_tsx = crate::vue::component_tsx(source, path).unwrap_or(path.ends_with(".tsx"));
     let language: tree_sitter::Language = if is_tsx {
@@ -966,6 +1096,17 @@ fn extract_file(
         let mut walk = node.walk();
         let children: Vec<_> = node.named_children(&mut walk).collect();
         stack.extend(children.into_iter().rev());
+        if let Some(key) = env_read(&cx, node, &scopes) {
+            let (symbol, byte_start, byte_end) = site(node);
+            config.push(ConfigReadSite {
+                key,
+                language: config_language(path),
+                symbol,
+                path: path.to_string(),
+                byte_start,
+                byte_end,
+            });
+        }
         match node.kind() {
             "new_expression" | "call_expression" => {
                 let (callee, form) = if node.kind() == "new_expression" {
@@ -1128,11 +1269,12 @@ pub fn extract_dir(
     crate::collect_ts_files(root, &mut files)?;
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
+    let mut config = Vec::new();
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
-        extract_file(&source, rel, id, registries, &mut sites)?;
+        extract_file(&source, rel, id, registries, &mut sites, &mut config)?;
     }
-    Ok(assemble(id, &sites))
+    Ok(assemble(id, &sites, &config))
 }
 
 /// Observed infrastructure from a retained capture: exactly the bytes the
@@ -1152,17 +1294,27 @@ pub fn extract_captured(
         .collect();
     files.sort(); // deterministic order (US-0014)
     let mut sites = Vec::new();
+    let mut config = Vec::new();
     for rel in files {
-        extract_file(capture.file(rel)?.bytes(), rel, id, registries, &mut sites)?;
+        extract_file(
+            capture.file(rel)?.bytes(),
+            rel,
+            id,
+            registries,
+            &mut sites,
+            &mut config,
+        )?;
     }
-    Ok(assemble(id, &sites))
+    Ok(assemble(id, &sites, &config))
 }
 
 /// Resources, `USES` edges and Gaps for the collected sites, assembled by
 /// the language-neutral [`adapters_fw::observed::assemble`]. A computed URL
 /// of the platform `fetch` (an HTTP site with no registry entry) is already
-/// the client-call pass's Gap, so it is not repeated.
-fn assemble(id: &SourceId, sites: &[ObservedSite]) -> Extraction {
+/// the client-call pass's Gap, so it is not repeated. The proven
+/// configuration reads follow as `ConfigRead` nodes and `READS_CONFIG` edges
+/// ([`adapters_fw::config_read::assemble`]).
+fn assemble(id: &SourceId, sites: &[ObservedSite], config: &[ConfigReadSite]) -> Extraction {
     let sites: Vec<ObservedSite> = sites
         .iter()
         .filter(|site| {
@@ -1178,7 +1330,10 @@ fn assemble(id: &SourceId, sites: &[ObservedSite]) -> Extraction {
         commit: id.commit,
         extractor: EXTRACTOR_ID,
     };
-    let (nodes, edges) = adapters_fw::observed::assemble(&source, &sites);
+    let (mut nodes, mut edges) = adapters_fw::observed::assemble(&source, &sites);
+    let (read_nodes, read_edges) = adapters_fw::config_read::assemble(&source, config);
+    nodes.extend(read_nodes);
+    edges.extend(read_edges);
     Extraction {
         nodes,
         edges,

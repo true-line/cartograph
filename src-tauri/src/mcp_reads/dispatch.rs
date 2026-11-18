@@ -304,7 +304,7 @@ fn capabilities_value(
     limits: DispatchLimits,
     evidence: Option<EvidenceWorkLimits>,
 ) -> Value {
-    json!({"session_id":session_id,"basis_id":basis_id,"basis":basis,"implemented_tools":tools.iter().copied().map(ReadTool::name).collect::<Vec<_>>(),"worker_reservation_model":super::worker::WORKER_MODEL,"structured_content_required":true,"h3_curated_available":false,"evidence_available":evidence.is_some(),"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":evidence.is_some(),"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":evidence.is_some(),"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"context_fact_kinds":["node","edge"],"discovery_fact_kinds":["node"],"relations_access":{"via":"official_artifacts","query_tool_available":false},"flows_access":{"via":"official_artifact","artifact_id":"flow-dossiers"},"limits":{"graph":{"scope":"complete_recovered_graph","max_rows":graph.max_rows,"hard_max_rows":core_graph::SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"evidence":evidence.map(|e|json!({"max_file_validation_bytes":e.max_file_validation_bytes.get(),"max_span_bytes":e.max_span_bytes.get()})),"trace":{"max_flows":limits.trace.max_flows,"max_hops":limits.trace.max_hops,"max_output_bytes":limits.trace.max_output_bytes},"selected_compile":{"max_bytes":limits.compile.max_bytes,"adr":{"max_rows":limits.compile.adr.max_rows,"max_output_bytes":limits.compile.adr.max_output_bytes}}}})
+    json!({"session_id":session_id,"basis_id":basis_id,"basis":basis,"implemented_tools":tools.iter().copied().map(ReadTool::name).collect::<Vec<_>>(),"worker_reservation_model":super::worker::WORKER_MODEL,"structured_content_required":true,"h3_curated_available":basis.h3_curated_available,"curated_access":{"via":"official_artifact","artifact_id":super::curated_read::ARTIFACT_ID,"structured_artifact_id":super::curated_read::JSON_ARTIFACT_ID,"revision":"basis.curated"},"evidence_available":evidence.is_some(),"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":evidence.is_some(),"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":evidence.is_some(),"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"context_fact_kinds":["node","edge"],"discovery_fact_kinds":["node"],"relations_access":{"via":"official_artifacts","query_tool_available":false},"flows_access":{"via":"official_artifact","artifact_id":"flow-dossiers"},"limits":{"graph":{"scope":"complete_recovered_graph","max_rows":graph.max_rows,"hard_max_rows":core_graph::SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"evidence":evidence.map(|e|json!({"max_file_validation_bytes":e.max_file_validation_bytes.get(),"max_span_bytes":e.max_span_bytes.get()})),"trace":{"max_flows":limits.trace.max_flows,"max_hops":limits.trace.max_hops,"max_output_bytes":limits.trace.max_output_bytes},"selected_compile":{"max_bytes":limits.compile.max_bytes,"adr":{"max_rows":limits.compile.adr.max_rows,"max_output_bytes":limits.compile.adr.max_output_bytes}}}})
 }
 mod logical;
 pub(crate) use logical::logical_protocol_workspace_bytes;
@@ -473,6 +473,10 @@ fn limit_value(limit: ArtifactLimit) -> Value {
         ArtifactLimit::Compiler(spec::SelectedArtifactLimit::SecurityDerivation(limit)) => {
             json!({"stage":"security_derivation","resource":match limit.limit {spec::SecurityLimit::Rows=>"rows",spec::SecurityLimit::OutputBytes=>"output_bytes"},"maximum":limit.maximum})
         }
+        // Not a size limit: the export's citations do not resolve (ADR-0058).
+        ArtifactLimit::Compiler(spec::SelectedArtifactLimit::FactIndex(failure)) => {
+            json!({"stage":"fact_index","resource":match failure {spec::FactIndexFailure::Unresolved=>"unresolved_citation",spec::FactIndexFailure::Collision=>"citation_id_collision",spec::FactIndexFailure::Withheld=>"withheld_citation"}})
+        }
     }
 }
 
@@ -519,7 +523,7 @@ pub(super) fn tool_descriptor(tool: ReadTool) -> Value {
         }
         ReadTool::ReadArtifact => {
             let mut properties = session_properties();
-            properties["artifact_id"] = json!({"type":"string","enum":spec::artifact_catalog().into_iter().map(|entry|entry.id).collect::<Vec<_>>()});
+            properties["artifact_id"] = json!({"type":"string","enum":super::artifacts::readable_catalog().into_iter().map(|entry|entry.id).collect::<Vec<_>>()});
             properties["expected_content_id"] = json!({"type":["string","null"],"description":"Required on nonzero offsets; binds exact complete artifact content."});
             properties["offset"] = json!({"type":"integer","minimum":0});
             properties["max_content_bytes"] = json!({"type":"integer","minimum":1});

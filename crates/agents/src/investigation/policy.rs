@@ -1,6 +1,10 @@
 //! Closed immutable policy registry with an explicit opt-in expanded profile.
 //! Admission bounds are distinct from durable runtime counters; callers cannot
 //! deserialize or construct a policy from their own limit values.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{
     GenerationPolicy, HistoryPolicy, InvestigationLimits, staged_refusal::CompletionCallMode,
 };

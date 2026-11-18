@@ -98,6 +98,55 @@ fn coverage_inventory_publishes_and_reads_with_its_facts() {
     assert!(store.coverage_records().unwrap().is_empty());
 }
 
+// AC-0239 (#1847): a system-wide pass restates a repo's inventory with the
+// facts it changes, in one transaction; a stale snapshot writes neither and
+// other repos' inventories stay as published. (T-0239)
+#[test]
+fn coverage_inventory_restates_with_a_later_system_patch() {
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let docs = record("acme/docs", json!({"inventory": "coverage@1", "edges": 0}));
+    let api = record("acme/api", json!({"inventory": "coverage@1", "edges": 3}));
+    assert!(publish(&mut store, "acme/docs", &["mod:d"], Some(&docs)));
+    assert!(publish(&mut store, "acme/api", &["mod:a"], Some(&api)));
+    let relinked = record("acme/docs", json!({"inventory": "coverage@1", "edges": 1}));
+    let patch = GraphPatch {
+        upsert_nodes: vec![node("mod:linked")],
+        ..GraphPatch::default()
+    };
+
+    let stale = store.read_snapshot().unwrap();
+    assert!(publish(&mut store, "acme/web", &["mod:w"], None));
+    assert!(
+        !store
+            .apply_patch_with_coverage_if_snapshot_matches(
+                &stale,
+                &patch,
+                std::slice::from_ref(&relinked)
+            )
+            .unwrap()
+    );
+    assert!(store.get_node("mod:linked").unwrap().is_none());
+
+    let expected = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_coverage_if_snapshot_matches(
+                &expected,
+                &patch,
+                std::slice::from_ref(&relinked)
+            )
+            .unwrap()
+    );
+    assert!(store.get_node("mod:linked").unwrap().is_some());
+    let records: Vec<_> = store
+        .coverage_records()
+        .unwrap()
+        .into_iter()
+        .map(|stored| stored.record)
+        .collect();
+    assert_eq!(records, [api, relinked]);
+}
+
 // AC-0239: a record with unbounded identities or a non-object body is never
 // written, and a stored body that no longer matches its hash is never read.
 // (T-0239)
@@ -191,6 +240,11 @@ fn bounded_coverage_read_admits_inventories_before_copying_them() {
         .unwrap();
     assert_eq!((snapshot.graph, recorded), unbounded);
     assert_eq!(snapshot.revision, store.read_revision().unwrap());
+    // AC-0653: the unbounded sibling carries the same payload and revision.
+    assert_eq!(
+        store.read_snapshot_with_coverage_and_revision().unwrap(),
+        (store.read_revision().unwrap(), unbounded.clone())
+    );
     let stored: usize = unbounded
         .1
         .iter()

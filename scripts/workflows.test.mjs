@@ -48,6 +48,15 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.match(workflow, /git diff-tree -p HEAD \| git patch-id --stable/u);
   assert.match(workflow, /git diff-tree -p "\$open_sha" \| git patch-id --stable/u);
   assert.match(workflow, /skipping the force-push/u);
+  // Draft PR events start no Actions jobs: the version PR is opened as draft
+  // and a ready one returns to draft before its head is refreshed, so the
+  // complete suite runs once, when the owner marks the cut ready.
+  assert.match(workflow, /gh pr create --draft --base main --head "\$BRANCH"/u);
+  assert.match(workflow, /gh pr ready "\$open_ready" --undo/u);
+  assert.ok(
+    workflow.indexOf('gh pr ready "$open_ready" --undo') < workflow.indexOf('node scripts/version-commit.mjs publish'),
+    'the version PR returns to draft before the new head is published',
+  );
   // checkout removes its credentials, so the open-PR fetch must authenticate
   // per command and never wait on a prompt (#667).
   assert.match(workflow, /GIT_TERMINAL_PROMPT: "0"/u);
@@ -74,6 +83,21 @@ test('CI enforces the governed lifecycle without draft jobs', () => {
   assert.match(workflow, /head_sha=\$GITHUB_SHA/u);
   assert.match(workflow, /name: Complete suite/u);
   assert.match(workflow, /name: CI/u);
+  // Without a merge queue, a main push reuses the merged PR's passing ready
+  // run only when the trees are byte-identical, and never for the Version
+  // packages PR, whose cut commit needs its own complete-suite evidence.
+  assert.match(workflow, /commits\/\$GITHUB_SHA\/pulls/u);
+  assert.match(workflow, /\[ "\$head_tree" = "\$tree" \] \|\| continue/u);
+  assert.match(workflow, /\.head\.ref != "changeset-release\/main"/u);
+  assert.match(workflow, /event=pull_request&head_sha=\$head/u);
+  // Actions runs bash with errexit; a failed lookup must fall back to the
+  // complete suite, not fail the main push.
+  assert.match(workflow, /run: \|\n\s+set \+e\n\s+run_id=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/actions\/runs\?event=merge_group/u);
+});
+
+test('Advanced CodeQL runs the security-and-quality suite', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
+  assert.match(workflow, /^\s+queries: security-and-quality$/mu);
 });
 
 test('required Advanced CodeQL contexts report on every non-draft PR run, even on the evidence path (#440)', () => {
@@ -109,7 +133,7 @@ test('queued PR lanes never cancel each other, and package installs serialize on
   ];
   for (const [, wait, , step] of calls) assert.ok(Number(wait) < Number(step));
   const locked = calls.map(([, , command]) => command);
-  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 5);
+  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 7);
   assert.equal(locked.filter((command) => command.includes('"--with-deps"')).length, 1);
   assert.equal([...workflow.matchAll(/arguments-json: .*(?:"apt-get"|"--with-deps")/gu)].length, calls.length);
 });
@@ -241,7 +265,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 10);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 11);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -266,8 +290,8 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
   assert.equal(condition(windows), condition(rust));
   assert.equal(condition(complete), condition(rust));
   assert.match(windows, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
-  assert.match(windows, /runs-on: \[self-hosted, Windows, X64\]$/mu);
-  assert.match(windows, /timeout-minutes: 20/u);
+  assert.match(windows, /runs-on: windows-latest$/mu);
+  assert.match(windows, /timeout-minutes: 25/u);
   assert.match(windows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/u);
   assert.match(
     windows,
@@ -283,15 +307,58 @@ test('Windows ownership tests are required by the same exact-SHA complete-suite 
     windows,
     /arguments-json: '\["test","--locked","-p","job-execution-tests","--test","ownership","--","--nocapture"\]'/u,
   );
-  assert.match(windows, /timeout-seconds: '600'/u);
+  assert.match(windows, /timeout-seconds: '900'/u);
   assert.equal(
     windows.match(new RegExp(`bounded-command@${PLAYBOOK_RUNTIME_PIN}`, 'gu'))?.length,
     2,
   );
-  assert.doesNotMatch(windows, /continue-on-error|--skip|--ignored|attempts:|windows-latest/u);
+  assert.doesNotMatch(windows, /continue-on-error|--skip|--ignored|attempts:/u);
   assert.match(complete, /needs: \[[^\]\n]*windows-job-ownership[^\]\n]*\]/u);
   assert.match(complete, /WINDOWS_JOB_OWNERSHIP: \$\{\{ needs\.windows-job-ownership\.result \}\}/u);
   assert.match(complete, /test "\$WINDOWS_JOB_OWNERSHIP" = success/u);
+});
+
+test('app unit tests run in required shards that jointly cover the binary (#1924)', () => {
+  // The Rust job excludes only the app package; the shards run its one test
+  // binary. Dropping a shard, or the gate on them, would silently drop tests.
+  const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const job = (name) => workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
+  const condition = (contents) =>
+    contents
+      .match(/    if: >-\n([\s\S]*?)    runs-on:/u)?.[1]
+      .replace(/^ *#.*\n/gmu, '')
+      .trim();
+  const rust = job('rust');
+  const shards = job('rust-app-tests');
+  const complete = job('complete');
+  assert.match(rust, /run: cargo test --workspace --exclude app\n/u);
+  assert.equal([...rust.matchAll(/--exclude/gu)].length, 1);
+  assert.ok(condition(shards));
+  assert.equal(condition(shards), condition(rust));
+  assert.match(shards, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
+  assert.match(shards, /runs-on: ubuntu-latest$/mu);
+  assert.match(shards, /^ {4}timeout-minutes: 60$/mu);
+  assert.match(shards, /fail-fast: false/u);
+  const [, list] = shards.match(/matrix:\n +shard: \[([\d, ]+)\]\n/u) ?? [];
+  const indexes = (list ?? '').split(', ').map(Number);
+  const [, count, target] =
+    shards.match(/run: node scripts\/rust-test-shard\.mjs "\$SHARD\/(\d+)" -- (.*)\n/u) ?? [];
+  assert.equal(target, '-p app --bin app');
+  assert.deepEqual(indexes, Array.from({ length: Number(count) }, (_, index) => index + 1));
+  assert.match(shards, new RegExp(`name: Rust app tests \\(\\$\\{\\{ matrix\\.shard \\}\\}/${count}\\)`, 'u'));
+  assert.match(shards, /SHARD: \$\{\{ matrix\.shard \}\}/u);
+  assert.match(shards, /ref: \$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/u);
+  assert.doesNotMatch(shards, /continue-on-error/u);
+  assert.match(complete, /needs: \[.*\brust-app-tests\b.*\]/u);
+  assert.match(complete, /RUST_APP_TESTS: \$\{\{ needs\.rust-app-tests\.result \}\}/u);
+  assert.match(complete, /test "\$RUST_APP_TESTS" = success/u);
+  // `app` has no library, integration-test or doc-test target the exclusion
+  // could drop: its tests are the binary's unit tests.
+  const manifest = readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8');
+  assert.match(manifest, /^name = "app"$/mu);
+  assert.doesNotMatch(manifest, /^\[lib\]|^\[\[(?:test|bin|example|bench)\]\]/mu);
+  assert.deepEqual(readdirSync(path.join(root, 'src-tauri')).filter((entry) => ['tests', 'examples', 'benches'].includes(entry)), []);
+  assert.deepEqual(readdirSync(path.join(root, 'src-tauri/src')).filter((entry) => entry === 'lib.rs' || entry === 'bin'), []);
 });
 
 test('real-model acceptance is explicit, bounded, and retains evidence after failures', () => {
@@ -344,7 +411,7 @@ test('the native ownership harness includes production modules without a Tauri d
   assert.doesNotMatch(harness, /\b(?:fn|struct|enum|impl)\s|include_str!|include_bytes!|allow\(warnings\)/u);
   const guidance = readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(guidance, /native job ownership tests on Windows:\s+`cargo test --locked -p job-execution-tests --test ownership`/u);
-  assert.match(guidance, /No job runs on a GitHub-hosted runner\./u);
+  assert.match(guidance, /no job runs on a\s+self-hosted runner/u);
 });
 
 test('workflow runtime policy is pinned and installer processes are centrally bounded', () => {
@@ -517,21 +584,21 @@ test('release publication is reviewed, exact-evidence-only, and idempotent', () 
 // Credential-bearing workflows never share a persistent self-hosted runner
 // with pull-request builds, which run repository-controlled scripts (#619).
 
-test('every job runs on organisation self-hosted runners', () => {
-  // Hosted minutes are billed: no job may name or fall back to a
-  // GitHub-hosted runner, and a workflow that reads secrets never runs
-  // pull-request code (#631).
+test('every job runs on GitHub-hosted runners', () => {
+  // The repository is public, so no job may run on a self-hosted runner
+  // (fork PRs would execute on it), and a workflow that reads secrets
+  // never runs pull-request code (#631).
   const dir = path.join(root, '.github/workflows');
   for (const name of readdirSync(dir).filter((file) => file.endsWith('.yml'))) {
     const workflow = readFileSync(path.join(dir, name), 'utf8');
     if (/secrets\.[A-Z]/u.test(workflow)) {
       assert.doesNotMatch(triggers(workflow), /pull_request/u, `${name}: secrets with a PR trigger`);
     }
-    assert.doesNotMatch(workflow, /(ubuntu|macos)-latest|windows-20\d\d/u, `${name}: names a hosted runner`);
+    assert.doesNotMatch(workflow, /self-hosted\]/u, `${name}: names a self-hosted runner`);
     for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
       assert.match(
         line,
-        /runs-on: \[self-hosted, (Linux, X64|Windows, X64|macOS, ARM64)\]$/u,
+        /runs-on: (ubuntu|windows|macos)-latest$/u,
         `${name}: ${line.trim()}`,
       );
     }

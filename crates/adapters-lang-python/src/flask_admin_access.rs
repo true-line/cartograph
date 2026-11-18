@@ -308,6 +308,387 @@ fn responds(
     }
 }
 
+/// What an exposed view method's own body shows about login (#1320,
+/// AC-0421): a check the body makes before anything else, when no
+/// `is_accessible` does it.
+#[derive(Debug, Clone)]
+pub(crate) enum BodyCheck {
+    /// The body reads no login check this tier recognises.
+    Absent,
+    /// An anonymous request is answered by a redirect or a 401/403 before
+    /// any other statement of the view runs. `function` holds the check:
+    /// the view method itself, or the module-level helper it returns.
+    Proven {
+        function: String,
+        helper: bool,
+        evidence: Vec<EvidenceRef>,
+    },
+    /// `function` reads the login check in a shape that is not proven.
+    Seen(String),
+}
+
+/// The login check the body of the exposed method `view` (of the class
+/// `class_name`, under `decorated`) makes. Proven shapes, docstrings
+/// aside:
+///
+/// - the view's first statement is `if <anonymous>: … return <denial>`;
+/// - the view's first statement is `x = helper()` and its second
+///   `return x or …` or `if x: return x`, or its first is
+///   `return helper()` / `return helper() or …`, where `helper` is the
+///   file's only binding of that name, a plain module-level function taking
+///   the call's no arguments, whose first statement is that `if`.
+///
+/// `<anonymous>` is `not <login check>` (as [`requires_login`] proves it),
+/// or an `or` chain with it as an operand: for an anonymous user an earlier
+/// operand is true or raises, or the check is reached and is true. No
+/// statement of the branch before its last returns, yields or awaits, and
+/// the last is `return redirect(…)`, `return abort(401|403)` or
+/// `abort(401|403)` on import-proven Flask helpers. The view is a plain
+/// method whose only decorator is `@expose`, since another decorator may
+/// answer without calling it; neither function is a generator.
+pub(crate) fn body_check<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'t>,
+    view: TsNode<'t>,
+    decorated: TsNode<'_>,
+    class_name: &str,
+    bindings: &HashMap<String, ImportBinding>,
+) -> BodyCheck {
+    let Some(method) = view.child_by_field_name("name") else {
+        return BodyCheck::Absent;
+    };
+    let own = format!("{class_name}.{}", cx.text(&method));
+    let helper = returned_helper(cx, root, view);
+    let decorators = named(decorated)
+        .into_iter()
+        .filter(|child| child.kind() == "decorator")
+        .count();
+    if decorators == 1 && plain(cx, view) {
+        let mut evidence = Vec::new();
+        if let Some(first) = statements(view).first()
+            && denies_anonymous(cx, root, view, *first, bindings, &mut evidence)
+        {
+            return BodyCheck::Proven {
+                function: own,
+                helper: false,
+                evidence,
+            };
+        }
+        if let Some((function, name, mut evidence)) = helper
+            && plain(cx, function)
+            && let Some(first) = statements(function).first()
+            && denies_anonymous(cx, root, function, *first, bindings, &mut evidence)
+        {
+            return BodyCheck::Proven {
+                function: name,
+                helper: true,
+                evidence,
+            };
+        }
+    }
+    // Not proven: name where a reviewer finds the check, if there is one.
+    if reads_login_check(cx, view, bindings) {
+        return BodyCheck::Seen(own);
+    }
+    let mut called = Vec::new();
+    bare_calls(cx, view, &mut called);
+    called.sort();
+    called.dedup();
+    for name in called {
+        if let Some(function) = module_function(cx, root, view, &name)
+            && reads_login_check(cx, function, bindings)
+        {
+            return BodyCheck::Seen(name);
+        }
+    }
+    BodyCheck::Absent
+}
+
+/// A synchronous function that is not a generator.
+fn plain(cx: &FileCx<'_>, function: TsNode<'_>) -> bool {
+    !cx.text(&function).starts_with("async")
+        && function
+            .child_by_field_name("body")
+            .is_some_and(|body| !yields(body))
+}
+
+/// Whether `node` holds a `yield` or `await` outside a nested scope.
+fn yields(node: TsNode<'_>) -> bool {
+    match node.kind() {
+        "yield" | "await" => true,
+        "function_definition" | "class_definition" | "lambda" => false,
+        _ => named(node).into_iter().any(yields),
+    }
+}
+
+/// The plain module-level function the bare name `name` calls from `scope`:
+/// the file's only binding of the name, not decorated, and not bound by a
+/// function or class enclosing `scope`.
+fn module_function<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'t>,
+    scope: TsNode<'_>,
+    name: &str,
+) -> Option<TsNode<'t>> {
+    let module = crate::module_binding(cx, root, name);
+    let [function] = module.writes[..] else {
+        return None;
+    };
+    (!module.global
+        && function.kind() == "function_definition"
+        && function.parent() == Some(root)
+        && !rebound(cx, root, name, Some(scope)))
+    .then_some(function)
+}
+
+/// The helper whose result the view `view` returns whenever it is truthy,
+/// before any other statement: the function, its name, and the spans of
+/// the call and the return.
+fn returned_helper<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'t>,
+    view: TsNode<'t>,
+) -> Option<(TsNode<'t>, String, Vec<EvidenceRef>)> {
+    let statements = statements(view);
+    let first = *statements.first()?;
+    // `helper()`, with no argument to evaluate first, of a helper that takes none.
+    let helper = |call: TsNode<'_>| {
+        let call = unparenthesize(call);
+        let callee = (call.kind() == "call")
+            .then(|| call.child_by_field_name("function"))
+            .flatten()
+            .filter(|callee| callee.kind() == "identifier")?;
+        let empty = call
+            .child_by_field_name("arguments")
+            .is_some_and(|arguments| named(arguments).is_empty());
+        let name = cx.text(&callee);
+        let function = module_function(cx, root, view, name)?;
+        // A helper that declares any parameter is not proven callable with
+        // none: a missing required argument raises before its body runs.
+        let parameterless = function
+            .child_by_field_name("parameters")
+            .is_some_and(|parameters| named(parameters).is_empty());
+        (empty && parameterless).then(|| (function, name.to_string()))
+    };
+    // `<value>` or `<value> or …`.
+    let or_left = |value: TsNode<'t>| {
+        let value = unparenthesize(value);
+        if value.kind() == "boolean_operator" && operator(cx, value) == Some("or") {
+            value.child_by_field_name("left").map(unparenthesize)
+        } else {
+            Some(value)
+        }
+    };
+    match first.kind() {
+        "return_statement" => {
+            let [value] = named(first)[..] else {
+                return None;
+            };
+            let (function, name) = helper(or_left(value)?)?;
+            Some((function, name, vec![cx.evidence(&first)]))
+        }
+        "expression_statement" => {
+            let [assignment] = named(first)[..] else {
+                return None;
+            };
+            if assignment.kind() != "assignment" {
+                return None;
+            }
+            let left = assignment
+                .child_by_field_name("left")
+                .filter(|left| left.kind() == "identifier")?;
+            let (function, name) = helper(assignment.child_by_field_name("right")?)?;
+            let result = cx.text(&left);
+            let is_result = |node: TsNode<'_>| {
+                let node = unparenthesize(node);
+                node.kind() == "identifier" && cx.text(&node) == result
+            };
+            let second = *statements.get(1)?;
+            let returns = match second.kind() {
+                "return_statement" => match named(second)[..] {
+                    [value] => {
+                        let value = unparenthesize(value);
+                        value.kind() == "boolean_operator"
+                            && operator(cx, value) == Some("or")
+                            && value.child_by_field_name("left").is_some_and(is_result)
+                    }
+                    _ => false,
+                },
+                "if_statement" => {
+                    second
+                        .child_by_field_name("condition")
+                        .is_some_and(is_result)
+                        && second.child_by_field_name("consequence").is_some_and(
+                            |block| match named(block)[..] {
+                                [only] if only.kind() == "return_statement" => {
+                                    matches!(named(only)[..], [value] if is_result(value))
+                                }
+                                _ => false,
+                            },
+                        )
+                }
+                _ => false,
+            };
+            returns.then(|| {
+                (
+                    function,
+                    name,
+                    vec![cx.evidence(&first), cx.evidence(&second)],
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether `statement` of `function` is an `if` that answers an anonymous
+/// request with a redirect or a 401/403, citing the check and the answer.
+fn denies_anonymous(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    function: TsNode<'_>,
+    statement: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+    evidence: &mut Vec<EvidenceRef>,
+) -> bool {
+    if statement.kind() != "if_statement" {
+        return false;
+    }
+    let (Some(condition), Some(branch)) = (
+        statement.child_by_field_name("condition"),
+        statement.child_by_field_name("consequence"),
+    ) else {
+        return false;
+    };
+    let Some(check) = anonymous(cx, root, function, condition, bindings) else {
+        return false;
+    };
+    let branch = named(branch);
+    let Some((last, rest)) = branch.split_last() else {
+        return false;
+    };
+    if rest.iter().any(|statement| exits(*statement)) {
+        return false;
+    }
+    let answer = match (last.kind(), &named(*last)[..]) {
+        ("return_statement", [value]) => denial(cx, root, function, *value, bindings, true),
+        ("expression_statement", [value]) => denial(cx, root, function, *value, bindings, false),
+        _ => None,
+    };
+    let Some(answer) = answer else {
+        return false;
+    };
+    evidence.push(cx.evidence(&check));
+    evidence.push(cx.evidence(&answer));
+    true
+}
+
+/// The login check that makes `expr` true for an anonymous user.
+fn anonymous<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    function: TsNode<'_>,
+    expr: TsNode<'t>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> Option<TsNode<'t>> {
+    let expr = unparenthesize(expr);
+    match expr.kind() {
+        "not_operator" => {
+            let argument = expr.child_by_field_name("argument")?;
+            requires_login(cx, root, function, argument, bindings)
+        }
+        "boolean_operator" if operator(cx, expr) == Some("or") => {
+            let left = expr.child_by_field_name("left")?;
+            let right = expr.child_by_field_name("right")?;
+            anonymous(cx, root, function, left, bindings)
+                .or_else(|| anonymous(cx, root, function, right, bindings))
+        }
+        _ => None,
+    }
+}
+
+/// `expr` as an import-proven `redirect(…)` (only where its value is
+/// returned) or `abort(401)` / `abort(403)`.
+fn denial<'t>(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    function: TsNode<'_>,
+    expr: TsNode<'t>,
+    bindings: &HashMap<String, ImportBinding>,
+    returned: bool,
+) -> Option<TsNode<'t>> {
+    let expr = unparenthesize(expr);
+    if expr.kind() != "call" {
+        return None;
+    }
+    let callee = expr.child_by_field_name("function")?;
+    let dotted = import_dotted(cx, callee, bindings)?;
+    let name = root_name(cx, callee)?;
+    if rebound(cx, root, name, Some(function)) || !sole_module_import(cx, root, name) {
+        return None;
+    }
+    let denies = match dotted.as_str() {
+        "flask.redirect" | "flask.helpers.redirect" => returned,
+        "flask.abort" | "flask.helpers.abort" => {
+            let arguments = expr.child_by_field_name("arguments")?;
+            named(arguments).first().is_some_and(|status| {
+                status.kind() == "integer" && matches!(cx.text(status), "401" | "403")
+            })
+        }
+        _ => false,
+    };
+    denies.then_some(expr)
+}
+
+/// Whether `function`'s body reads the import-proven login check, outside
+/// a nested scope.
+fn reads_login_check(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> bool {
+    fn reads(cx: &FileCx<'_>, node: TsNode<'_>, bindings: &HashMap<String, ImportBinding>) -> bool {
+        match node.kind() {
+            "function_definition" | "class_definition" | "lambda" => false,
+            "attribute"
+                if import_dotted(cx, node, bindings)
+                    .is_some_and(|dotted| LOGIN_CHECKS.contains(&dotted.as_str())) =>
+            {
+                true
+            }
+            _ => named(node)
+                .into_iter()
+                .any(|child| reads(cx, child, bindings)),
+        }
+    }
+    function
+        .child_by_field_name("body")
+        .is_some_and(|body| reads(cx, body, bindings))
+}
+
+/// The bare names `node` calls, outside a nested scope.
+fn bare_calls(cx: &FileCx<'_>, node: TsNode<'_>, names: &mut Vec<String>) {
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "function_definition" | "class_definition" | "lambda" => continue,
+            "call" => {
+                if let Some(callee) = node
+                    .child_by_field_name("function")
+                    .filter(|callee| callee.kind() == "identifier")
+                {
+                    names.push(cx.text(&callee).to_string());
+                }
+            }
+            _ => {}
+        }
+        stack.extend(named(node));
+    }
+}
+
 /// The target a binding statement writes: an assignment's or `for`
 /// loop's left side, a comprehension's `for` target, a `with … as` or
 /// `except … as` alias, or a `del` statement's operands.

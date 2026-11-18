@@ -826,3 +826,106 @@ fn repeated_metadata_identity_preserves_context_and_all_read_parameters() {
         .repeats_acquired_metadata(&ledger)
     );
 }
+
+// AC-0768 / #1335: an @28 metadata preview accepts the candidate schema only
+// as the validated per-call selection, shown in the prompt and charged by reserves.
+#[test]
+fn analyst28_context_preview_admits_only_the_derived_visible_schema_growth() {
+    fn choose(f: &Fixture, input: InvestigationInput) -> InvestigationInput {
+        let prompt: Value = serde_json::from_str(&input.payload.prompt).unwrap();
+        let metadata: ProtectedCompletionMetadata =
+            serde_json::from_value(prompt["completion_metadata"].clone()).unwrap();
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: metadata.request_hash.clone(),
+            obligations_hash: metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let choices = acquisition_choices::AcquisitionChoices::derive(
+            &contract,
+            &metadata,
+            "context-preview-task",
+            &input.ledger,
+            &[],
+            &INVESTIGATION_V2_POLICY,
+        )
+        .unwrap();
+        input
+            .with_acquisition_choices(std::sync::Arc::new(choices))
+            .unwrap()
+    }
+    let kind = ContextPreviewKind::Query;
+    for role in [
+        SpecialistId::DomainAnalystV27,
+        SpecialistId::DomainAnalystV28,
+    ] {
+        let fixture = Fixture::new(role, "{}");
+        let usage = InvestigationUsage::default();
+        let base = fixture.build(
+            role,
+            fixture.ledger.clone(),
+            None,
+            &[],
+            &[],
+            &usage,
+            &fixture.metadata,
+            None,
+            0,
+            None,
+        );
+        let base = choose(&fixture, base);
+        let (candidate, raw, admitted) = fixture.candidate(role, kind, &base, &usage, &[], &[]);
+        let candidate = choose(&fixture, candidate);
+        let proof = certify(&base, &candidate, kind, &raw, &admitted).unwrap();
+        let profile = provider().bounded_profile().unwrap();
+        let limits = CompletionLimits::default();
+        assert_eq!(
+            proof.measurements().continuation,
+            candidate
+                .measure_v9_reserve_with_policy(
+                    &profile,
+                    &limits,
+                    "step:preview",
+                    &INVESTIGATION_V2_POLICY
+                )
+                .unwrap()
+        );
+        let shown = |input: &InvestigationInput| {
+            serde_json::from_str::<Value>(&input.payload.prompt).unwrap()["turn_progress"]
+                .get("response_schema")
+                .cloned()
+        };
+        if role == SpecialistId::DomainAnalystV27 {
+            assert!(shown(&candidate).is_none());
+            continue;
+        }
+        let transport = candidate.payload.response_schema.clone().unwrap();
+        assert_eq!(
+            serde_json::to_string(&shown(&candidate).unwrap()).unwrap(),
+            transport
+        );
+        assert_eq!(
+            serde_json::to_string(&shown(&base).unwrap()).unwrap(),
+            base.payload.response_schema.clone().unwrap()
+        );
+        // A candidate showing any other schema is not a certifiable preview.
+        let mut forged: Value = serde_json::from_str(&candidate.payload.prompt).unwrap();
+        forged["turn_progress"]["response_schema"] =
+            serde_json::from_str(response_schema::FINISH).unwrap();
+        let mut tampered = candidate.clone();
+        tampered.payload.prompt = serde_json::to_string(&forged).unwrap();
+        assert!(certify(&base, &tampered, kind, &raw, &admitted).is_err());
+        let firewall = EgressFirewall::new(EgressPolicy::default());
+        let prepared = firewall
+            .prepare_bounded(
+                &provider(),
+                &candidate.action("step:preview".into()).unwrap(),
+                &limits,
+            )
+            .unwrap();
+        candidate
+            .seal_disclosure_with_policy(&prepared, &INVESTIGATION_V2_POLICY)
+            .unwrap()
+            .unwrap();
+    }
+}

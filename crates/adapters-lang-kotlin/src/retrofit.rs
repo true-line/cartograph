@@ -114,6 +114,7 @@ pub(crate) fn sites(
             };
             let entry = symbol.rsplit('#').next().unwrap_or(symbol).to_string();
             out.push(FetchSite {
+                straight_line: None,
                 method,
                 url,
                 symbol: Some(symbol.clone()),

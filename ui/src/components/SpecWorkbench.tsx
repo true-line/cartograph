@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type {
   AssertionDecision,
   AssertionDecisionRecord,
+  CuratedRead,
   GraphEdge,
   GraphNode,
   SpecArtifact,
@@ -19,10 +20,21 @@ import {
 } from './SpecDiagramView';
 import { renderArtifactMarkdown } from '../markdownView';
 import { TierBadge, methodLabel } from './TierBadge';
+import { CuratedSection } from './CuratedSection';
+import { SectionDocumentView } from './SectionDocumentView';
+import type { SectionDocumentViewProps } from './SectionDocumentView';
 
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
   views?: SpecViewBundle | null;
+  /** The curated projection `bundle` was compiled with, from the same host
+   *  response (SPEC-12 slice 3, AC-0655); `null` or absent when none. */
+  curated?: CuratedRead | null;
+  onRefreshCurated?: () => void;
+  /** The document view (SPEC-15 slice 7, AC-0669); absent when the host
+   *  surface does not offer it. Its accepted-draft states come from
+   *  `curated`, and a citation opens the fact index of `bundle`. */
+  sections?: Omit<SectionDocumentViewProps, 'curated' | 'onOpenCitation'>;
   pageSize?: number;
   mode: SpecExportMode;
   decisions: AssertionDecisionRecord[];
@@ -115,6 +127,9 @@ function decisionLabel(decision: AssertionDecision): string {
 export function SpecWorkbench({
   bundle,
   views,
+  curated,
+  onRefreshCurated,
+  sections,
   pageSize,
   mode,
   decisions,
@@ -135,6 +150,10 @@ export function SpecWorkbench({
   const [selectedId, setSelectedId] = useState('');
   const [artifactView, setArtifactView] = useState<'rendered' | 'source'>('rendered');
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // The citation a reviewer last opened from a draft: its evidence is its
+  // row in the fact index of this bundle.
+  const [openedCitation, setOpenedCitation] = useState<string | null>(null);
+  const factIndex = bundle?.artifacts.find((artifact) => artifact.id === 'fact-index') ?? null;
   const decisionByHash = useMemo(
     () => new Map(decisions.map((record) => [record.assertion.provenance.content_hash, record])),
     [decisions],
@@ -214,6 +233,26 @@ export function SpecWorkbench({
             <span>{bundle.security_count} security findings</span>
             {busy && <span>Refreshing…</span>}
           </div>
+
+          <CuratedSection read={curated ?? null} busy={busy} onRefresh={onRefreshCurated} />
+
+          {sections && (
+            <SectionDocumentView
+              {...sections}
+              curated={curated ?? null}
+              onOpenCitation={factIndex ? (citationId) => {
+                setSelectedId(factIndex.id);
+                setArtifactView('rendered');
+                setOpenedCitation(citationId);
+              } : undefined}
+            />
+          )}
+          {openedCitation && factIndex && selected?.id === factIndex.id && (
+            <p className="curated-notice spec-opened-citation" role="status">
+              Showing <code>{factIndex.file_name}</code>. The row for <code>{openedCitation}</code>{' '}
+              lists the fact and its evidence.
+            </p>
+          )}
 
           <div className="spec-workbench-layout">
             <nav className="spec-artifact-nav" aria-label="Official spec artifacts">

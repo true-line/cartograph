@@ -892,3 +892,177 @@ func C() {
     );
     assert_eq!(rows, ["sqs-queue Produces computed:aws.String(\"q\") C"]);
 }
+
+fn evidence_spans(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["byte_start"].as_u64().unwrap(),
+                e["byte_end"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn os_getenv_reads_are_config_reads() {
+    // AC-0597 (#1789, ADR-0059): one literal `os.Getenv` read, one dynamic
+    // read and one shadowed look-alike (a local function named `getenv`)
+    // yield exactly one named ConfigRead, one dynamic ConfigRead and
+    // nothing for the look-alike. Only the key name and the span of the
+    // call are recorded.
+    let text = r#"
+package main
+
+import "os"
+
+func getenv(key string) string { return key }
+
+func load(name string) (string, string) {
+    url := os.Getenv("DATABASE_URL")
+    return url, os.Getenv(name)
+}
+
+func fake() string {
+    return getenv("SHADOWED")
+}
+"#;
+    let extraction = extract_source(text.as_bytes(), "config.go", &id()).unwrap();
+    let reads: Vec<&Node> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "ConfigRead")
+        .collect();
+    let ids: Vec<&str> = reads.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "cfgread:local/go-service@config.go:env:DATABASE_URL",
+            "cfgread:local/go-service@config.go:env:?",
+        ]
+    );
+    let named = reads[0];
+    assert_eq!(named.props["source"], "env");
+    assert_eq!(named.props["key"], "DATABASE_URL");
+    assert_eq!(named.props["language"], "go");
+    assert_eq!(named.props["prov"]["tier"], "Deterministic");
+    assert_eq!(named.props["prov"]["confidence_tier"], "Confirmed");
+    let read = r#"os.Getenv("DATABASE_URL")"#;
+    let at = text.find(read).unwrap() as u64;
+    assert_eq!(evidence_spans(&named.props), [(at, at + read.len() as u64)]);
+    let dynamic = reads[1];
+    assert_eq!(dynamic.props["dynamic"], true);
+    assert!(dynamic.props.get("key").is_none());
+    let at = text.find("os.Getenv(name)").unwrap() as u64;
+    assert_eq!(
+        evidence_spans(&dynamic.props),
+        [(at, at + "os.Getenv(name)".len() as u64)]
+    );
+    assert_eq!(
+        edge_pairs(&extraction, "READS_CONFIG"),
+        [
+            (
+                "sym:local/go-service@config.go#load",
+                "cfgread:local/go-service@config.go:env:DATABASE_URL"
+            ),
+            (
+                "sym:local/go-service@config.go#load",
+                "cfgread:local/go-service@config.go:env:?"
+            ),
+        ]
+    );
+    assert!(
+        !serde_json::to_string(&extraction.nodes)
+            .unwrap()
+            .contains("SHADOWED")
+    );
+    // Determinism: a second run yields the same facts.
+    let again = extract_source(text.as_bytes(), "config.go", &id()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&(&extraction.nodes, &extraction.edges)).unwrap(),
+        serde_json::to_string(&(&again.nodes, &again.edges)).unwrap()
+    );
+}
+
+#[test]
+fn os_getenv_needs_the_standard_os_import() {
+    // AC-0597 (ADR-0059 decisions 1, 4): `LookupEnv` and an aliased import
+    // are the same read and share the key's node; a local named like the
+    // import, another package aliased `os` and a dot-import yield nothing;
+    // a constant key is a dynamic read, never a followed name.
+    let reads = r#"
+package main
+
+import env "os"
+
+var region = env.Getenv("REGION")
+
+func lookup() bool {
+    _, ok := env.LookupEnv("REGION")
+    return ok
+}
+
+func shadowed(env fakeEnv) string {
+    return env.Getenv("PARAM")
+}
+"#;
+    let extraction = extract_source(reads.as_bytes(), "reads.go", &id()).unwrap();
+    let nodes: Vec<&Node> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "ConfigRead")
+        .collect();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].id, "cfgread:local/go-service@reads.go:env:REGION");
+    assert_eq!(evidence_spans(&nodes[0].props).len(), 2);
+    assert_eq!(
+        edge_pairs(&extraction, "READS_CONFIG"),
+        [
+            (
+                "file:local/go-service@reads.go",
+                "cfgread:local/go-service@reads.go:env:REGION"
+            ),
+            (
+                "sym:local/go-service@reads.go#lookup",
+                "cfgread:local/go-service@reads.go:env:REGION"
+            ),
+        ]
+    );
+
+    let foreign = r#"
+package main
+
+import (
+    os "example.com/fake/os"
+    . "os"
+)
+
+const key = "CONST"
+
+func a() string { return os.Getenv("FOREIGN") }
+func b() string { return Getenv("DOT") }
+"#;
+    let extraction = extract_source(foreign.as_bytes(), "foreign.go", &id()).unwrap();
+    assert!(!extraction.nodes.iter().any(|n| n.label == "ConfigRead"));
+
+    let constant = r#"
+package main
+
+import "os"
+
+const key = "CONST"
+
+func a() string { return os.Getenv(key) }
+"#;
+    let extraction = extract_source(constant.as_bytes(), "constant.go", &id()).unwrap();
+    let ids: Vec<&str> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.label == "ConfigRead")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(ids, ["cfgread:local/go-service@constant.go:env:?"]);
+}

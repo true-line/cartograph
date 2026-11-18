@@ -88,6 +88,7 @@ impl InvestigationInput {
         Ok(input)
     }
 
+    /// Builds the v5 input for one turn from its ledger and query pages.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_v5(
         question: &str,

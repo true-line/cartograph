@@ -205,6 +205,77 @@ body {
   font-size: 0.72rem;
 }
 
+.atlas-find {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  padding: 0 1.25rem 0.75rem;
+  font-size: 0.72rem;
+}
+
+.atlas-find label {
+  color: var(--text-body);
+  font-weight: 600;
+}
+
+.atlas-find input {
+  flex: 0 1 18rem;
+  min-width: 0;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-alt);
+  color: var(--text);
+  font-size: 0.75rem;
+}
+
+.atlas-find input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.atlas-find button {
+  background: var(--control);
+  color: var(--text-body);
+  border-color: var(--border);
+  padding: 0.3rem 0.6rem;
+  font-size: 0.7rem;
+}
+
+.atlas-find > span {
+  flex: 1 1 100%;
+  font-size: 0.68rem;
+}
+
+.atlas-find-results ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  max-height: 16rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.atlas-find-results button {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.6rem;
+  width: 100%;
+  text-align: left;
+}
+
+.atlas-find-results button[aria-current='true'] {
+  border-color: var(--accent);
+}
+
+.atlas-find-results button .muted {
+  overflow-wrap: anywhere;
+}
+
 .atlas-legend {
   display: flex;
   align-items: center;
@@ -1477,6 +1548,175 @@ button.flow-hop-card:hover {
   font: 0.7rem var(--font-mono);
 }
 
+/* Curated items in the Spec Workbench (SPEC-12 slice 3). Tier meaning comes
+   from the shared .tier-badge and the words beside it, never from colour
+   alone (R-INT-2). */
+.curated-section {
+  display: grid;
+  /* A wide table scrolls in its own region and never widens the section. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.7rem;
+  padding: 0.9rem 1.25rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  min-width: 0;
+}
+
+.curated-section-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.curated-section h3,
+.curated-section h4 {
+  margin: 0 0 0.25rem;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.curated-section h4 {
+  margin-top: 0.4rem;
+  font-size: 0.76rem;
+}
+
+.curated-section p {
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.curated-section code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.curated-identity,
+.curated-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+  margin: 0;
+  font-size: 0.72rem;
+}
+
+.curated-identity > div,
+.curated-counts > div {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.curated-identity dt,
+.curated-counts dt {
+  color: var(--text-muted);
+}
+
+.curated-identity dd,
+.curated-counts dd {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.curated-full-identity {
+  font-size: 0.7rem;
+  color: var(--text-body);
+}
+
+.curated-full-identity p {
+  margin: 0.25rem 0 0;
+  font-size: 0.7rem;
+}
+
+.curated-notice {
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-body);
+  font-size: 0.75rem;
+}
+
+.curated-notice p + p {
+  margin-top: 0.35rem;
+}
+
+.curated-records {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.6rem;
+  font-size: 0.75rem;
+  color: var(--text-body);
+}
+
+.curated-records > summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.curated-records[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+.curated-records > section {
+  margin-top: 0.6rem;
+}
+
+.curated-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+}
+
+.curated-table caption {
+  padding: 0.3rem 0;
+  color: var(--text-body);
+  font-weight: 600;
+  text-align: left;
+}
+
+.curated-table th,
+.curated-table td {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  color: var(--text-body);
+  /* Words stay whole; only identifiers may break anywhere (below). */
+  overflow-wrap: break-word;
+  text-align: left;
+  vertical-align: top;
+  font-weight: 400;
+}
+
+.curated-table tbody th,
+.curated-table tbody td:nth-child(2),
+.curated-table tbody td:nth-child(3) {
+  overflow-wrap: anywhere;
+}
+
+.curated-table thead th {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.curated-table .curated-state {
+  white-space: nowrap;
+}
+
+.curated-tier {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-family: var(--font-mono);
+}
+
+.curated-record-state {
+  margin: 0.2rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-body);
+}
+
 .spec-workbench-error,
 .spec-workbench-empty {
   margin: 1rem 1.25rem;
@@ -2400,10 +2640,9 @@ button.status-live-link:hover {
   border-top-color: var(--tier-gap);
 }
 
-/* ── Route error boundary & interim empty surfaces ───────────────────── */
+/* ── Route error boundary ───────────────────────────────────────────── */
 
-.route-error,
-.empty-surface {
+.route-error {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2421,13 +2660,7 @@ button.status-live-link:hover {
   color: var(--tier-gap);
 }
 
-.empty-surface .material-symbols-outlined {
-  font-size: 2rem;
-  color: var(--text-faint);
-}
-
-.route-error h2,
-.empty-surface h2 {
+.route-error h2 {
   font-size: 1rem;
 }
 
@@ -2435,12 +2668,6 @@ button.status-live-link:hover {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--tier-gap);
-}
-
-.empty-surface p {
-  max-width: 48ch;
-  color: var(--text-muted);
-  font-size: 0.85rem;
 }
 
 /* Keyboard-first: visible focus everywhere (handoff §Interactions #4). */
@@ -4291,8 +4518,18 @@ details.investigation-section { display: block; }
 }
 
 .coverage-not_selected .coverage-state,
-.coverage-missing_input .coverage-state {
+.coverage-missing_input .coverage-state,
+.coverage-refused-producer .coverage-state {
   color: var(--finding-unsupported);
+}
+
+.coverage-refused {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+
+.coverage-refused code {
+  overflow-wrap: anywhere;
 }
 
 /* Local agent handoff packets; source-authored content stays inert text. */
@@ -4551,3 +4788,127 @@ details.investigation-section { display: block; }
 .configure-actions { display: flex; gap: 8px; margin-top: 8px; }
 .configure-section { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 8px; }
 .configure-field select { max-width: 280px; }
+
+/* The Workbench document view (SPEC-15 slice 7, AC-0669). It reuses the
+   curated section's frame; these are the section and draft blocks. */
+.document-sections {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.6rem;
+  font-size: 0.75rem;
+}
+
+.document-sections > summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.document-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+  padding: 0.6rem 0 0.2rem;
+  border-top: 1px solid var(--border);
+}
+
+.document-kind {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-body);
+}
+
+.document-draft {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.35rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-body);
+}
+
+.document-draft-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  align-items: baseline;
+  color: var(--text);
+}
+
+.document-draft-review {
+  font-weight: 600;
+}
+
+.document-claims {
+  margin: 0;
+  padding-left: 1.3rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.document-claim-statement {
+  color: var(--text);
+}
+
+.citation-link {
+  margin: 0 0.3rem 0 0;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--control);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.document-draft-actions,
+.document-draft-request {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.3rem;
+  justify-items: start;
+}
+
+.document-draft-actions textarea,
+.document-draft-request input {
+  width: min(100%, 32rem);
+  font: inherit;
+}
+
+.document-draft-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+
+/* System manifest preview (#1655): one section per declared repository. */
+.preflight-system {
+  display: grid;
+  gap: 1.2rem;
+}
+
+.preflight-member {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.preflight-member-title {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.preflight-member-title .muted {
+  font-weight: normal;
+  font-size: 0.8rem;
+}
+
+.preflight-preview-note {
+  margin: 0;
+  font-size: 0.85rem;
+}
