@@ -529,5 +529,8 @@ pub(crate) fn canonical_graph_bytes(
     Ok(max_bytes - counter.remaining)
 }
 
+mod stream;
+pub use stream::{SnapshotRow, StreamedSnapshot};
+
 #[cfg(test)]
 mod tests;

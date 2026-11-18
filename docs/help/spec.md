@@ -294,8 +294,9 @@ of the product specification, in order, each marked with its kind.
 - **P+A** sections show the compiled part, then the accepted draft for the
   section, or **Not drafted**. Business rules and acceptance criteria point
   to **rule-evidence.md** and **test_arrangements.md** and are not repeated.
-- **A** sections show the accepted draft, or **Not drafted**. No agent
-  writes a section yet, so there is no draft to accept.
+- **A** sections show the accepted draft, or **Not drafted**. The Section
+  Writer role drafts one section per investigation run and its draft is
+  stored for review. A draft is printed only after you accept it.
 - **H** sections are left blank for your team. Cartograph never fills them.
 
 The header shows the catalogue version, the export mode, the graph content
@@ -312,6 +313,25 @@ export prints no drafted claim and says how many it left out of each
 section. A draft that is stale, replaced, in conflict with another accepted
 draft, or citing a fact that is no longer in the graph is named with that
 reason and not printed.
+
+### Drafting and reviewing sections
+
+Open **Spec** and expand **Sections and drafts**. Each section of the
+product specification is listed with its kind and every draft stored for it.
+
+- **Draft this section** opens the investigation composer with the Section
+  Writer role and the question for that section already filled in. Leave the
+  subject empty to draft for the whole system, or enter the citation id of
+  one actor, capability or rule. The run starts only when you start it, with
+  the same consent and limits as any investigation.
+- A draft shows its claims, each marked **T3 / InferredWeak** with its
+  citation ids. Selecting a citation id opens the fact index.
+- **Accept**, **Reject** and **Return** record your decision with an
+  optional note. A decision changes no claim. If the draft changed since the
+  view was read, the decision is refused and the view is read again.
+- An accepted draft shows its state from the latest curated read: current,
+  stale, replaced, in conflict or unresolvable, with the reason. Only a
+  current draft is printed in an export.
 
 ## Curated items
 
