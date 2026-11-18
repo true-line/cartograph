@@ -1,6 +1,10 @@
 //! Host-reviewed independent dataset admission. A digest binds bytes, not label
 //! truth or human identity. The application owns the root, anchor and observed
 //! corpus evidence; none of them may come from an IPC caller's authority flags.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::{
     fixtures::{self, Corpus, LoadedFixtureBundle},
     policy::{self, CalibrationView, EvaluationInputs, FrozenPolicy, PredictionChoice},

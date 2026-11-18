@@ -1,6 +1,6 @@
 # ADR-0040 — Immutable investigation budget and admission policies
 
-- **Status:** Proposed
+- **Status:** Accepted with amendment, decided by the owner on 2026-11-18 (#1761; see the 2026-11-18 amendment)
 - **Date:** 2026-10-21
 - **Deciders:** Cartograph maintainers (owner numeric/time decision approved; integration pending)
 
@@ -129,3 +129,13 @@ budget resets or auditor reliance on undisclosed parent history.
 - **Batch source reads:** may reduce calls but requires its own exact-target,
   per-item charging and disclosure contract; it does not remove request admission
   or missing-evidence constraints.
+
+## Amendment — 2026-11-18: accepted; ADR-0053 amends the time caps
+
+The owner accepted this ADR on 2026-11-18 (#1761) with this amendment.
+[ADR-0053](ADR-0053-owner-tunable-investigation-time-limits.md) amends the
+clause "Active/consent/wall time caps remain 600/900/3,600 seconds": the task
+active-time budget (`active_seconds`) and the per-call timeout
+(`request_timeout_ms`) may lie in [registry default, ADR-0053 maximum], set
+upward by the owner. Every other field, consent wait and wall time included,
+must still match the registry entry exactly.

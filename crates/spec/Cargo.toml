@@ -24,5 +24,6 @@ blake3 = { workspace = true }
 rusqlite = { workspace = true }
 adapters-lang-ts = { workspace = true }
 adapters-lang-java = { workspace = true }
+adapters-lang-kotlin = { workspace = true }
 source-capture = { workspace = true }
 tempfile = "3"

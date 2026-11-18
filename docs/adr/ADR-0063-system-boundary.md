@@ -49,10 +49,17 @@ of these is outside, and a wrong boundary would read as a complete list.
 - Without a system manifest, a call to another registered repository by
   absolute URL is listed as outside until a binding declares its host. The
   document names that limit.
-- Declared bindings are not stored in the graph. Where a binding pass ran, the
-  kept Gap does not record whether a binding covers its host, so a literal
-  third-party call there is unclassified until that outcome is a field on the
-  fact (a graph-hash change, decided separately).
+- The system manifest is not stored in the graph. The binding pass records
+  its outcome on the facts it evaluates (#1843, decided 2026-11-18): a kept
+  fetch Gap and its Gap edge carry `binding_state`, and the Gap and an
+  observed HTTP client carry the citations of the bindings that name their
+  origin. A literal third-party call in a system with declared bindings is
+  therefore outside, and an observed client of a declared host is inside.
+  This changes the bytes of those facts and the graph hash of such a system
+  on its next ingest; a graph ingested earlier keeps the unclassified result.
+  The alternatives were to store each declared binding as a fact of its own,
+  which needs ownership and forget handling for facts no repository owns,
+  and to match the recorded sentence, which stays prose.
 - A channel is never listed as outside: the graph cannot show who owns a
   queue or topic. It is inside or unclassified.
 - Provider operators (which SDK clients are third-party services) are a

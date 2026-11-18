@@ -317,3 +317,102 @@ fn equal_text_scores_break_ties_by_node_id_before_the_row_limit() {
     let got: Vec<&str> = hits.iter().map(|h| h.node_id.as_str()).collect();
     assert_eq!(got, expected);
 }
+
+/// Vectors spread over a quarter circle by the number in the unit text; a
+/// query gets the direction its own number names.
+struct Spread;
+impl Spread {
+    fn angle(text: &str) -> f32 {
+        let digits: String = text
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse::<f32>().unwrap_or(0.0) / 10_000.0 * std::f32::consts::FRAC_PI_2
+    }
+}
+impl LlmProvider for Spread {
+    fn id(&self) -> &str {
+        "spread"
+    }
+    fn locality(&self) -> Locality {
+        Locality::Local
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        ProviderCaps {
+            embeddings: true,
+            chat: false,
+            tool_use: false,
+        }
+    }
+    fn embedding_cache_identity(&self) -> Result<Option<EmbeddingIdentity>, ProviderError> {
+        Ok(None)
+    }
+    fn embedding_model_id(&self) -> String {
+        "spread".into()
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                let angle = Self::angle(text);
+                vec![angle.cos(), angle.sin()]
+            })
+            .collect())
+    }
+}
+
+// AC-0734: the vector index is rebuilt from the unit vectors, proposes
+// candidates only, and leaves a small base's answer to the full scan.
+#[test]
+fn the_vector_index_is_rebuilt_with_the_units_and_only_proposes_candidates() {
+    let (nodes, edges) = base();
+    let mut small = Retrieval::build(&nodes, &edges).unwrap();
+    assert_eq!(small.indexed_vectors(), None);
+    small.embed_units(&Pinned::new()).unwrap();
+    assert_eq!(small.indexed_vectors(), Some(small.units.len()));
+    // Rebuilt, not appended to, when the units are embedded again.
+    small.embed_units(&Pinned::new()).unwrap();
+    assert_eq!(small.indexed_vectors(), Some(small.units.len()));
+    // At or under the candidate count every vector is scored: dropping the
+    // index changes nothing.
+    let with_index = small.search("billing", Some(&Pinned::new()), 10).unwrap();
+    small.vector_index = None;
+    let without = small.search("billing", Some(&Pinned::new()), 10).unwrap();
+    assert_eq!(with_index, without);
+
+    // Past the candidate count the index proposes rows and the stored
+    // vectors score them: the answer is the full scan's, in its order, and
+    // the same on a second build. Neighbouring units differ by less than an
+    // f32 can tell apart, so the nearest few tie and order by node id.
+    let total = VECTOR_CANDIDATES * 4;
+    let nodes: Vec<Node> = (0..total)
+        .map(|i| {
+            node(
+                &format!("sym:{i:05}"),
+                "Symbol",
+                serde_json::json!({"name": format!("unit{i}")}),
+            )
+        })
+        .collect();
+    let mut large = Retrieval::build(&nodes, &[]).unwrap();
+    large.embed_units(&Spread).unwrap();
+    assert_eq!(large.indexed_vectors(), Some(total));
+    // "q 1600" matches no unit text, so only the vector leg ranks.
+    let hits = large.search("q 1600", Some(&Spread), 5).unwrap();
+    assert_eq!(hits.len(), 5);
+    for hit in &hits {
+        let row: usize = hit.node_id["sym:".len()..].parse().unwrap();
+        assert!(
+            row.abs_diff(1600) <= 4,
+            "{} is not near the query",
+            hit.node_id
+        );
+    }
+    let mut again = Retrieval::build(&nodes, &[]).unwrap();
+    again.embed_units(&Spread).unwrap();
+    assert_eq!(again.search("q 1600", Some(&Spread), 5).unwrap(), hits);
+    // The index is a cache: without it the full scan gives the same answer.
+    large.vector_index = None;
+    assert_eq!(large.search("q 1600", Some(&Spread), 5).unwrap(), hits);
+}

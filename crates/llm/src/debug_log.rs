@@ -45,6 +45,7 @@ pub enum Phase {
 pub struct ModelExchange {
     /// Process-wide call number pairing a `Sent` entry with its `Received`.
     pub call: u64,
+    /// Whether this entry records the request or the response.
     pub phase: Phase,
     /// When this entry was produced.
     pub at: SystemTime,

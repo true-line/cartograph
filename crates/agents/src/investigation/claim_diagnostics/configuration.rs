@@ -1,4 +1,8 @@
 //! Syntactic configuration witnesses. Co-occurrence is never a binding.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::investigation::enumeration_claims::subjects;
 
 /// Recognizes narrowly supported configuration syntax in a cited source span.

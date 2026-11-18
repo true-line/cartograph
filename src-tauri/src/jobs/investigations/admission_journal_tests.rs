@@ -1125,6 +1125,9 @@ fn desktop_generation_start_selects_only_local_analysts_and_reopens() {
         ("domain-analyst@27", InvestigationProviderMode::Local, true),
         ("domain-analyst@26", InvestigationProviderMode::Cloud, false),
         ("domain-analyst@27", InvestigationProviderMode::Cloud, false),
+        // AC-0833 (#1335): @28 takes @27's local finish lane, and only it.
+        ("domain-analyst@28", InvestigationProviderMode::Local, true),
+        ("domain-analyst@28", InvestigationProviderMode::Cloud, false),
         ("domain-analyst@25", InvestigationProviderMode::Local, false),
         (
             "evidence-auditor@11",
@@ -1139,7 +1142,8 @@ fn desktop_generation_start_selects_only_local_analysts_and_reopens() {
         request.provider_mode = mode;
         let mut provider = f.task.detail.provider.clone();
         provider.mode = mode;
-        let hosted = mode == InvestigationProviderMode::Cloud && role == "domain-analyst@27";
+        let hosted = mode == InvestigationProviderMode::Cloud
+            && matches!(role, "domain-analyst@27" | "domain-analyst@28");
         if hosted {
             provider.provider_id =
                 format!("anthropic:{}", llm::anthropic::ClaudeLane::Opus.model_id());

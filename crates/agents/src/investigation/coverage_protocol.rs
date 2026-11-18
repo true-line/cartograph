@@ -1,4 +1,8 @@
 //! The @6 read envelope. Legacy action decoding is intentionally unchanged.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use serde::{Deserialize, Serialize};
 

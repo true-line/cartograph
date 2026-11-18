@@ -1,4 +1,8 @@
 //! Frozen visible mechanism fixture consistency validation. Never establishes label truth.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use crate::FamilyKey;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};

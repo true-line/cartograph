@@ -27,10 +27,12 @@ impl FamilyKey {
         Self { kind, subtype }
     }
 
+    /// Hop kind of this family.
     pub fn kind(&self) -> HopKind {
         self.kind
     }
 
+    /// Deterministic subtype, if any.
     pub fn subtype(&self) -> Option<&str> {
         self.subtype.as_deref()
     }

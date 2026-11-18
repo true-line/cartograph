@@ -3,6 +3,10 @@
 //! A preview is not source access, tool admission, database provenance, a seal,
 //! or dispatch authority. The host must retain its prepared metadata and bind
 //! publication to this exact base/candidate on the authoritative transaction.
+#![allow(
+    missing_docs,
+    reason = "undocumented before workspace lints (#1764): document and delete"
+)]
 use super::*;
 use llm::bounded::{BoundedWireMeasurements, CompletionLimits, ProviderProfile};
 use serde::Serialize;
@@ -150,6 +154,15 @@ impl InvestigationInput {
         if SpecialistId::is_typed_citation_prompt(&candidate.payload.system) {
             progress["citation_correction"] = serde_json::to_value(&candidate.citation_correction)
                 .map_err(|_| InvestigationError::InvalidInput)?;
+        }
+        // admission_reserve_basis already validated the candidate's transport
+        // against its expected per-call selection, including the @28 visible
+        // copy. Growth is accepted only as that same derived schema.
+        if let (_, Some(visible)) = response_schema::visible_projection(
+            candidate.frozen_specialist()?,
+            candidate.payload.response_schema.clone(),
+        )? {
+            progress["response_schema"] = visible;
         }
         if next["turn_progress"] != progress {
             return Err(InvestigationError::InvalidInput);
