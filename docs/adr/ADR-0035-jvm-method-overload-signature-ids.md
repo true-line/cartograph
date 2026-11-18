@@ -1,6 +1,6 @@
 # ADR-0035 — Erasure-level parameter signatures in JVM method identity
 
-- **Status:** Proposed in #435 (owner review)
+- **Status:** Accepted, decided by the owner on 2026-11-18 (#1761); proposed in #435
 - **Date:** 2026-09-24
 - **Deciders:** Cartograph owner; implementation agent
 
@@ -78,13 +78,8 @@ they are visible, but they are still merged.
   `foo(Object)` are not distinguished by argument count, so a call to either
   is ambiguous and becomes a Gap rather than a guess. A future T0/T1 pass
   could narrow this with literal-argument type inference; out of scope here.
-- `GRAPH_SCHEMA_VERSION` also changed in the concurrently-developed #464
-  (proven-external JVM import package ids, ADR-0033/PR #527), which touches
-  the same adapter file. The coordinator decided #527 merges first and claims
-  4 → 5; this PR was rebased onto that outcome and now bumps 5 → 6 instead of
-  reusing #527's 5. This PR therefore depends on #527 merging first — if
-  #527 has not merged yet, this bump (and the doc comment above
-  `GRAPH_SCHEMA_VERSION`) needs re-checking before merge.
+- `GRAPH_SCHEMA_VERSION` goes 5 → 6, on top of ADR-0033's 4 → 5 (#464,
+  PR #527).
 
 ## Alternatives
 
