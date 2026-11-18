@@ -7,9 +7,10 @@
 //! - [`validate_start`] refuses a start whose question does not name one
 //!   drafted section of the catalogue table, before anything durable.
 //! - [`stage`] turns a completed run into a staged draft, or into a closed
-//!   reason why there is none. It reads the saved result and ledger, takes
-//!   the citation set of the address from the current graph, applies the
-//!   pure admission rule and stores the draft. It calls no model and is
+//!   reason why there is none. It reads the saved result and ledger, refuses
+//!   when the current graph is no longer the snapshot the run froze, takes
+//!   the citation set of the address from that graph, applies the pure
+//!   admission rule and stores the draft. It calls no model and is
 //!   idempotent: storing identical content returns the stored record.
 //!
 //! The worker calls [`stage`] once when a drafting run ends. The
@@ -247,6 +248,16 @@ pub(crate) fn redraft_question(state: &AppState, draft_id: &str) -> Result<Strin
     .map_err(str::to_owned)
 }
 
+/// The draft already stored for the drafting job `job_id`, if any. A job
+/// produces at most one draft, so a reread must return it rather than
+/// recompute a predecessor, which changes with later reviews.
+fn existing_draft(
+    store: &agents::draft_store::DraftStore,
+    job_id: i64,
+) -> Result<Option<String>, DraftStoreError> {
+    Ok(store.for_job(job_id)?.map(|item| item.draft_id))
+}
+
 /// Stage the draft of the completed drafting run `id`, or say why it staged
 /// none. `Err` is an operational failure (a store or the graph could not be
 /// read); the run's result is unchanged and a later call retries.
@@ -264,6 +275,15 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         let ledger = jobs.investigation_ledger(id).map_err(|e| e.to_string())?;
         (summary, result, ledger)
     };
+    // A run that already staged a draft returns it, whatever has been
+    // reviewed since.
+    let stored = {
+        let store = state.drafts.lock().map_err(|e| e.to_string())?;
+        existing_draft(&store, summary.job_id).map_err(|e| e.to_string())?
+    };
+    if let Some(draft_id) = stored {
+        return Ok(DraftingOutcome::Staged { draft_id });
+    }
     let Some(result) = result else {
         return Ok(DraftingOutcome::none("run_not_completed"));
     };
@@ -276,8 +296,13 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         Ok(address) => address,
         Err(reason) => return Ok(DraftingOutcome::none(reason)),
     };
-    let citations = ledger.map(|ledger| ledger.citations).unwrap_or_default();
-    let finish = match finish_of(&address, &result.findings, &citations, |fact| {
+    // The draft is recorded as written against the current graph, so that
+    // graph must be the one the run's evidence was frozen from. A completed
+    // run without its ledger has no frozen snapshot to compare.
+    let Some(ledger) = ledger else {
+        return Ok(DraftingOutcome::none("graph_changed"));
+    };
+    let finish = match finish_of(&address, &result.findings, &ledger.citations, |fact| {
         spec::citation_id(&fact_key(fact))
     }) {
         Ok(finish) => finish,
@@ -288,24 +313,33 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         .iter()
         .flat_map(|claim| claim.citations.iter().cloned())
         .collect();
-    let (nodes, edges) = {
+    let (_, ((nodes, edges), _)) = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let (_, (snapshot, _)) = crate::curated::read_graph(&graph)?;
-        snapshot
+        crate::curated::read_graph(&graph)?
     };
-    let (citation_set, graph_content_hash) = {
-        // The table held the section when the address was checked above.
-        let section = spec::drafted_section(
-            &address.catalogue_version,
-            &address.document,
-            &address.section,
-        )
-        .map_err(|error| error.code().to_owned())?;
+    // A re-ingest since the run (or a retry after a failed store) may keep a
+    // cited fact's id and change its content: the snapshot identity covers
+    // every fact's content, so any change refuses rather than staging the
+    // draft against a graph it was not written from.
+    let current = context_hub::ContextSnapshot::new(nodes.clone(), edges.clone())
+        .ok()
+        .map(|snapshot| snapshot.id().to_owned());
+    if current.as_deref() != Some(ledger.graph_snapshot_id.as_str()) {
+        return Ok(DraftingOutcome::none("graph_changed"));
+    }
+    // The table held the section when the address was checked above.
+    let section = spec::drafted_section(
+        &address.catalogue_version,
+        &address.document,
+        &address.section,
+    )
+    .map_err(|error| error.code().to_owned())?;
+    let citation_set =
         match spec::section_citation_set(section, &address.scope, &nodes, &edges, &cited) {
-            Ok(set) => (set, spec::graph_content_hash(&nodes, &edges)),
+            Ok(set) => set,
             Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
-        }
-    };
+        };
+    let graph_content_hash = spec::graph_content_hash(&nodes, &edges);
     let draft = match admit(&address, &citation_set, finish) {
         Ok(draft) => draft,
         Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
@@ -416,6 +450,74 @@ mod tests {
             ),
             Err("question_not_an_address")
         );
+    }
+
+    fn draft(section: &str, statement: &str) -> agents::section_draft::SectionDraft {
+        use agents::section_draft::{Claim, ClaimKind, SYSTEM_SCOPE};
+        agents::section_draft::SectionDraft {
+            address: SectionAddress {
+                catalogue_version: "1.0".into(),
+                document: "D1".into(),
+                section: section.into(),
+                scope: SYSTEM_SCOPE.into(),
+            },
+            claims: vec![Claim {
+                statement: statement.into(),
+                kind: ClaimKind::Implemented,
+                citations: vec!["F-0000000000000001".into()],
+            }],
+            cited_hashes: std::collections::BTreeMap::from([(
+                "F-0000000000000001".to_owned(),
+                "hash-1".to_owned(),
+            )]),
+        }
+    }
+
+    fn origin(job_id: i64) -> DraftOrigin {
+        DraftOrigin {
+            role: SECTION_WRITER_ROLE.to_owned(),
+            role_definition: "definition-1".into(),
+            job_id,
+            graph_content_hash: "graph-1".into(),
+        }
+    }
+
+    // Rereading a run's outcome returns the draft the run produced: after a
+    // reviewer returned it (it must not become its own predecessor), and for
+    // a run that produced a successor (it must not store another draft).
+    #[test]
+    fn rereading_a_run_returns_the_draft_it_produced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = agents::draft_store::DraftStore::open(dir.path().join("d.sqlite")).unwrap();
+        assert_eq!(existing_draft(&store, 1).unwrap(), None);
+
+        let first = store.store(&draft("1.3", "A"), &origin(1), None).unwrap();
+        assert_eq!(
+            existing_draft(&store, 1).unwrap(),
+            Some(first.draft_id.clone())
+        );
+        store
+            .review(&first.draft_id, 0, DraftDecision::Returned, None)
+            .unwrap();
+        // Returned: the run still maps to its own draft, and no second
+        // draft exists for it.
+        assert_eq!(
+            existing_draft(&store, 1).unwrap(),
+            Some(first.draft_id.clone())
+        );
+        assert_eq!(
+            predecessor(&store, &draft("1.3", "A").address, (&[], &[])).unwrap(),
+            Some(first.draft_id.clone())
+        );
+
+        let second = store
+            .store(&draft("1.3", "B"), &origin(2), Some(&first.draft_id))
+            .unwrap();
+        // The successor's run maps to the successor, where recomputing
+        // would now find no predecessor and store a duplicate.
+        assert_eq!(existing_draft(&store, 2).unwrap(), Some(second.draft_id));
+        assert_eq!(existing_draft(&store, 1).unwrap(), Some(first.draft_id));
+        assert_eq!(existing_draft(&store, 3).unwrap(), None);
     }
 
     // AC-0668: only the drafting role's start is checked.
