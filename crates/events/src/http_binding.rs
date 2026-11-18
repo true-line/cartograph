@@ -21,6 +21,28 @@ pub const EXTRACTOR_ID: &str = "t0.http-cross-repo";
 /// by path alone, and the system pass decides it on the binding.
 pub const DEFERRED_REASON_PREFIX: &str = "deferred to system binding:";
 
+/// Property of a fetch Gap the system pass evaluated: what the declared
+/// bindings say about the call's origin (#1843, ADR-0063). One of the
+/// `BINDING_STATE_*` values. A Gap without it was not evaluated against
+/// declared bindings, or was stored before the outcome was recorded.
+pub const BINDING_STATE: &str = "binding_state";
+/// No declared binding names the call's origin.
+pub const BINDING_STATE_NONE: &str = "none";
+/// A declared binding names the origin, and none covers the URL (a gateway
+/// route with another prefix), or the method is computed so no endpoint
+/// could be matched.
+pub const BINDING_STATE_ORIGIN_DECLARED: &str = "origin_declared";
+/// A binding places the call in a registered repository, and no recovered
+/// endpoint there matches.
+pub const BINDING_STATE_NAMES_REPOSITORY: &str = "names_repository";
+/// Several endpoints are equally supported (`candidates`).
+pub const BINDING_STATE_AMBIGUOUS: &str = "ambiguous";
+
+/// Stop reason of a call whose method is computed: no endpoint can be
+/// matched, and the system pass records only what the bindings say about
+/// its origin.
+const COMPUTED_METHOD_REASON: &str = "runtime-computed HTTP method";
+
 /// Origins (`scheme://host`) the bindings cover, for the per-repo pass to
 /// defer (`ConfigIndex::defer_origins`).
 pub fn binding_origins(bindings: &[HttpBinding]) -> std::collections::BTreeSet<String> {
@@ -183,16 +205,20 @@ pub struct JoinedFetch {
 pub struct CrossRepoStitch {
     /// Gaps replaced by a bound edge.
     pub joined: Vec<JoinedFetch>,
-    /// Gap nodes kept with a cross-repo reason.
+    /// Gap nodes kept with a cross-repo reason and their binding state.
     pub kept_nodes: Vec<Node>,
     /// Their Gap edges, with the same reason.
     pub kept_edges: Vec<Edge>,
 }
 
 /// Join absolute-URL fetch Gaps across repos on binding evidence. Gaps
-/// without a recorded absolute request, a known method, or an unmatched
-/// same-repo stop reason are left untouched. Deterministic in Gap order;
-/// work is proportional to call sites × bindings for their origin.
+/// without a recorded absolute request or an unmatched same-repo stop reason
+/// are left untouched. Every Gap the pass keeps records what the bindings
+/// say about its origin ([`BINDING_STATE`]), with the citations of the
+/// bindings that name it; a call with a computed method is matched to no
+/// endpoint and records that state alone, its reason unchanged.
+/// Deterministic in Gap order; work is proportional to call sites ×
+/// bindings for their origin.
 pub fn stitch_cross_repo(
     gaps: &[Node],
     fetch_edges: &[Edge],
@@ -261,14 +287,35 @@ pub fn stitch_cross_repo_with(
         let (Some(origin), Some(gap_edge)) = (origin(url), gap_edges.get(gap.id.as_str())) else {
             continue;
         };
-        if method == "?" || !unmatched {
+        let declared = by_origin
+            .get(&origin)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if method == "?" {
+            // No endpoint can be matched without a method. What the bindings
+            // say about the origin is still a fact of this call (#1843).
+            if reason == COMPUTED_METHOD_REASON {
+                let state = if declared.is_empty() {
+                    BINDING_STATE_NONE
+                } else {
+                    BINDING_STATE_ORIGIN_DECLARED
+                };
+                let mut node = gap.clone();
+                let mut edge = (*gap_edge).clone();
+                record_state(&mut node, &mut edge, state, declared);
+                out.kept_nodes.push(node);
+                out.kept_edges.push(edge);
+            }
+            continue;
+        }
+        if !unmatched {
             continue;
         }
         let url_source = request["url_source"].as_str().unwrap_or("literal");
 
         let mut covering = Vec::new();
         let mut targets: BTreeMap<&str, Vec<&HttpBinding>> = BTreeMap::new();
-        for binding in by_origin.get(&origin).into_iter().flatten() {
+        for binding in declared {
             let paths = binding.forwarded_paths(url);
             if paths.is_empty() {
                 continue;
@@ -336,6 +383,15 @@ pub fn stitch_cross_repo_with(
         }
 
         let path = url_path(url);
+        let state = if !targets.is_empty() {
+            BINDING_STATE_AMBIGUOUS
+        } else if !covering.is_empty() {
+            BINDING_STATE_NAMES_REPOSITORY
+        } else if !declared.is_empty() {
+            BINDING_STATE_ORIGIN_DECLARED
+        } else {
+            BINDING_STATE_NONE
+        };
         let (kept_reason, candidates) = if covering.is_empty() {
             (
                 format!("no binding evidence: no declared service or gateway route covers {url}"),
@@ -390,8 +446,94 @@ pub fn stitch_cross_repo_with(
         let mut edge = (*gap_edge).clone();
         edge.props["t0_reason"] = original.into();
         edge.props["reason"] = kept_reason.into();
+        // An ambiguous call cites its bindings per candidate.
+        let cited = if state == BINDING_STATE_AMBIGUOUS {
+            &[][..]
+        } else if covering.is_empty() {
+            declared
+        } else {
+            covering.as_slice()
+        };
+        record_state(&mut node, &mut edge, state, cited);
         out.kept_nodes.push(node);
         out.kept_edges.push(edge);
     }
     out
+}
+
+/// Record on a kept Gap and its Gap edge what the declared bindings say
+/// about the call's origin, and on the Gap the citations of the bindings
+/// that name it. Replaces what an earlier pass recorded.
+fn record_state(node: &mut Node, edge: &mut Edge, state: &str, cited: &[&HttpBinding]) {
+    node.props[BINDING_STATE] = state.into();
+    edge.props[BINDING_STATE] = state.into();
+    let citations = citations(cited);
+    if citations.is_empty() {
+        if let Some(props) = node.props.as_object_mut() {
+            props.remove("binding");
+        }
+    } else {
+        node.props["binding"] = citations.into();
+    }
+}
+
+/// Citations of `bindings`, each once, in a fixed order.
+fn citations(bindings: &[&HttpBinding]) -> Vec<serde_json::Value> {
+    let mut citations: Vec<serde_json::Value> =
+        bindings.iter().map(|binding| binding.citation()).collect();
+    citations.sort_by_cached_key(|citation| citation.to_string());
+    citations.dedup();
+    citations
+}
+
+/// Observed HTTP clients (`Resource`, `observed: true`, kind `http-api`)
+/// whose origin a declared binding names, with those bindings cited on the
+/// node as `binding` (#1843). The client reaches a host the system manifest
+/// declares, so it is not a call that leaves the system (ADR-0063 decision
+/// 1). Returns only nodes whose stored citations change, in node id order;
+/// a client of an undeclared origin is returned only to drop citations an
+/// earlier pass recorded.
+pub fn bind_observed_clients(resources: &[Node], bindings: &[HttpBinding]) -> Vec<Node> {
+    let mut by_origin: BTreeMap<String, Vec<&HttpBinding>> = BTreeMap::new();
+    for binding in bindings {
+        if let Some(origin) = origin(&binding.base_url) {
+            by_origin.entry(origin).or_default().push(binding);
+        }
+    }
+    let mut changed: Vec<Node> = resources
+        .iter()
+        .filter(|node| {
+            node.label == "Resource"
+                && node.props["observed"] == true
+                && node.props["kind"] == "http-api"
+        })
+        .filter_map(|node| {
+            let declared = node.props["identity"]
+                .as_str()
+                .and_then(origin)
+                .and_then(|origin| by_origin.get(&origin))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let cited = citations(declared);
+            let stored = node.props.get("binding");
+            let unchanged = match stored {
+                None => cited.is_empty(),
+                Some(stored) => !cited.is_empty() && stored.as_array() == Some(&cited),
+            };
+            if unchanged {
+                return None;
+            }
+            let mut node = node.clone();
+            if cited.is_empty() {
+                if let Some(props) = node.props.as_object_mut() {
+                    props.remove("binding");
+                }
+            } else {
+                node.props["binding"] = cited.into();
+            }
+            Some(node)
+        })
+        .collect();
+    changed.sort_by(|left, right| left.id.cmp(&right.id));
+    changed
 }

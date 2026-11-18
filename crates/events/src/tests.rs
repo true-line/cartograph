@@ -1379,6 +1379,212 @@ fn fetch_without_binding_evidence_stays_a_gap_with_its_reason() {
     assert!(out.joined.is_empty() && out.kept_nodes.is_empty());
 }
 
+// AC-0660 (#1843): every Gap the system pass keeps records what the declared
+// bindings say about its origin, on the node and its Gap edge, and cites the
+// bindings that name that origin. The projection never parses the sentence.
+#[test]
+fn kept_gaps_record_the_binding_state_of_their_origin() {
+    let sites = [
+        // No declared binding names this origin.
+        fetch_site(
+            "GET",
+            IdentityExpr::Literal("https://third.example.com/x".into()),
+        ),
+        // A gateway origin, and no route with this prefix.
+        FetchSite {
+            byte_start: 50,
+            ..fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://gw.example.com/other/1".into()),
+            )
+        },
+        // A binding covers it and no endpoint there matches.
+        FetchSite {
+            byte_start: 90,
+            ..fetch_site(
+                "DELETE",
+                IdentityExpr::Literal("https://orders.example.com/v1/orders/7".into()),
+            )
+        },
+        // Two equally supported endpoints.
+        FetchSite {
+            byte_start: 130,
+            ..fetch_site(
+                "GET",
+                IdentityExpr::Literal("https://both.example.com/v1/orders/7".into()),
+            )
+        },
+        // Computed methods: no endpoint is matched, the origin is still known.
+        FetchSite {
+            byte_start: 170,
+            ..fetch_site(
+                "?",
+                IdentityExpr::Literal("https://third.example.com/y".into()),
+            )
+        },
+        FetchSite {
+            byte_start: 210,
+            ..fetch_site(
+                "?",
+                IdentityExpr::Literal("https://ORDERS.example.com/v1/orders".into()),
+            )
+        },
+    ];
+    let (gaps, edges) = web_gaps(&sites, &ConfigIndex::default());
+    assert_eq!(gaps.len(), sites.len());
+    let endpoints = eps(&[
+        "ep:api@GET:/v1/orders/:id",
+        "ep:b1@GET:/v1/orders/:id",
+        "ep:b2@GET:/v1/orders/:id",
+    ]);
+    let bindings = [
+        service("orders", "api", "https://orders.example.com"),
+        route("orders", "api", "https://gw.example.com", "/orders", true),
+        service("one", "b1", "https://both.example.com"),
+        service("two", "b2", "https://both.example.com"),
+    ];
+    let out = stitch_cross_repo(&gaps, &edges, &endpoints, &bindings);
+    assert!(out.joined.is_empty());
+    assert_eq!(out.kept_nodes.len(), sites.len());
+    let kept = |url: &str| {
+        let node = out
+            .kept_nodes
+            .iter()
+            .find(|node| node.props["request"]["url"] == url)
+            .unwrap_or_else(|| panic!("kept {url}"));
+        let edge = out
+            .kept_edges
+            .iter()
+            .find(|edge| edge.dst == node.id)
+            .unwrap();
+        assert_eq!(edge.props[BINDING_STATE], node.props[BINDING_STATE]);
+        assert!(edge.props.get("binding").is_none());
+        node
+    };
+    let services = |node: &Node| -> Vec<String> {
+        node.props["binding"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|citation| {
+                format!(
+                    "{}:{}",
+                    citation["kind"].as_str().unwrap(),
+                    citation["service"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+
+    let none = kept("https://third.example.com/x");
+    assert_eq!(none.props[BINDING_STATE], BINDING_STATE_NONE);
+    assert!(none.props.get("binding").is_none());
+
+    let declared = kept("https://gw.example.com/other/1");
+    assert_eq!(declared.props[BINDING_STATE], BINDING_STATE_ORIGIN_DECLARED);
+    assert_eq!(services(declared), ["gateway-route:orders"]);
+
+    let names = kept("https://orders.example.com/v1/orders/7");
+    assert_eq!(names.props[BINDING_STATE], BINDING_STATE_NAMES_REPOSITORY);
+    assert_eq!(services(names), ["declared-service:orders"]);
+
+    let ambiguous = kept("https://both.example.com/v1/orders/7");
+    assert_eq!(ambiguous.props[BINDING_STATE], BINDING_STATE_AMBIGUOUS);
+    assert!(ambiguous.props.get("binding").is_none());
+    assert_eq!(ambiguous.props["candidates"].as_array().unwrap().len(), 2);
+
+    // A computed method keeps its own reason and gains no cross-repo one.
+    let computed = kept("https://third.example.com/y");
+    assert_eq!(computed.props[BINDING_STATE], BINDING_STATE_NONE);
+    assert_eq!(computed.props["reason"], "runtime-computed HTTP method");
+    assert!(computed.props.get("t0_reason").is_none());
+    let computed = kept("https://ORDERS.example.com/v1/orders");
+    assert_eq!(computed.props[BINDING_STATE], BINDING_STATE_ORIGIN_DECLARED);
+    assert_eq!(services(computed), ["declared-service:orders"]);
+    assert_eq!(computed.props["reason"], "runtime-computed HTTP method");
+
+    // A second pass over its own output changes nothing, and a pass with
+    // other bindings replaces what the first recorded.
+    let again = stitch_cross_repo(&out.kept_nodes, &out.kept_edges, &endpoints, &bindings);
+    let props = |nodes: &[Node]| -> Vec<serde_json::Value> {
+        let mut nodes: Vec<&Node> = nodes.iter().collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        nodes.iter().map(|node| node.props.clone()).collect()
+    };
+    assert_eq!(props(&again.kept_nodes), props(&out.kept_nodes));
+    let other = stitch_cross_repo(
+        &out.kept_nodes,
+        &out.kept_edges,
+        &endpoints,
+        &[service("third", "api", "https://third.example.com")],
+    );
+    for node in &other.kept_nodes {
+        let third = node.props["request"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://third.example.com/");
+        if third {
+            assert_ne!(node.props[BINDING_STATE], BINDING_STATE_NONE);
+            assert_eq!(services(node), ["declared-service:third"]);
+        } else {
+            assert_eq!(node.props[BINDING_STATE], BINDING_STATE_NONE);
+            assert!(node.props.get("binding").is_none(), "{node:?}");
+        }
+    }
+}
+
+// AC-0660 (#1843): an observed HTTP client of a declared host cites the
+// bindings that name its origin, so it is not listed as leaving the system.
+#[test]
+fn observed_clients_of_a_declared_origin_cite_its_bindings() {
+    let resource = |id: &str, kind: &str, identity: &str, observed: bool| Node {
+        id: id.into(),
+        label: "Resource".into(),
+        props: serde_json::json!({"kind": kind, "identity": identity, "observed": observed}),
+    };
+    let resources = [
+        resource("res:b", "http-api", "https://Orders.example.com/v1", true),
+        resource("res:a", "http-api", "https://gw.example.com", true),
+        resource("res:c", "http-api", "https://third.example.com", true),
+        resource("res:d", "sdk-client", "https://orders.example.com", true),
+        resource("res:e", "http-api", "https://orders.example.com", false),
+        resource("res:f", "http-api", "orders", true),
+    ];
+    let bindings = [
+        service("orders", "api", "https://orders.example.com"),
+        route("orders", "api", "https://gw.example.com", "/orders", true),
+        route(
+            "catalog",
+            "catalog",
+            "https://gw.example.com",
+            "/items",
+            false,
+        ),
+    ];
+    let bound = bind_observed_clients(&resources, &bindings);
+    let ids: Vec<&str> = bound.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(ids, ["res:a", "res:b"]);
+    let gateway = bound[0].props["binding"].as_array().unwrap();
+    assert_eq!(gateway.len(), 2);
+    assert_eq!(gateway[0]["service"], "catalog");
+    assert_eq!(gateway[1]["service"], "orders");
+    assert_eq!(bound[1].props["binding"][0]["kind"], "declared-service");
+    assert_eq!(bound[1].props["identity"], "https://Orders.example.com/v1");
+
+    // Unchanged citations are not written again; a binding that is no
+    // longer declared takes its citation with it.
+    let mut stored = resources.to_vec();
+    for node in &bound {
+        *stored.iter_mut().find(|n| n.id == node.id).unwrap() = node.clone();
+    }
+    assert!(bind_observed_clients(&stored, &bindings).is_empty());
+    let dropped = bind_observed_clients(&stored, &bindings[1..]);
+    let ids: Vec<&str> = dropped.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(ids, ["res:b"]);
+    assert!(dropped[0].props.get("binding").is_none());
+    assert!(bind_observed_clients(&resources, &[]).is_empty());
+}
+
 // AC-0241: binding evidence that names a service with no matching endpoint
 // keeps the Gap and names the service. (T-0241)
 #[test]

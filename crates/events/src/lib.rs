@@ -20,8 +20,10 @@ use std::path::Path;
 
 pub mod http_binding;
 pub use http_binding::{
-    BindingKind, CrossRepoStitch, DEFERRED_REASON_PREFIX, HttpBinding, JoinedFetch,
-    binding_origins, stitch_cross_repo, stitch_cross_repo_with,
+    BINDING_STATE, BINDING_STATE_AMBIGUOUS, BINDING_STATE_NAMES_REPOSITORY, BINDING_STATE_NONE,
+    BINDING_STATE_ORIGIN_DECLARED, BindingKind, CrossRepoStitch, DEFERRED_REASON_PREFIX,
+    HttpBinding, JoinedFetch, bind_observed_clients, binding_origins, stitch_cross_repo,
+    stitch_cross_repo_with,
 };
 
 /// Stitching errors.
