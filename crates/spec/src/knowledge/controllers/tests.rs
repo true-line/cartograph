@@ -66,6 +66,48 @@ object StockProbe {
 }
 "#;
 
+const JAXRS_PATH: &str = "src/main/java/com/demo/InvoiceResource.java";
+const JAXRS_SOURCE: &[u8] = br#"package com.demo;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+@Path("/invoices")
+public class InvoiceResource {
+    @GET
+    public String list() { return "x"; }
+    @POST
+    @Path("/{id}/void")
+    public String cancel(String id) { return "x"; }
+    public String helper() { return "x"; }
+    @Path("/lines")
+    public Object lines() { return null; }
+}
+@Path("/remote/invoices")
+interface InvoiceClient {
+    @GET
+    String remote();
+}
+"#;
+
+fn jaxrs_snapshot() -> RevisionedSnapshot {
+    let facts = adapters_lang_java::extract_source(
+        JAXRS_SOURCE,
+        JAXRS_PATH,
+        &adapters_lang_java::SourceId {
+            repo: REPO,
+            commit: COMMIT,
+        },
+    )
+    .unwrap();
+    RevisionedSnapshot {
+        revision: StoreRevision {
+            graph_instance: "fixture".into(),
+            generation: 1,
+        },
+        graph: (facts.nodes, facts.edges),
+    }
+}
+
 fn spring_snapshot(java: bool) -> RevisionedSnapshot {
     let (nodes, edges) = if java {
         let facts = adapters_lang_java::extract_source(
@@ -316,4 +358,94 @@ fn controller_capability_omits_unproven_spring_routes() {
     assert!(without_list(&edit(&|node| if node.id == endpoints[0] {
         node.props["prov"]["basis"] = "structural".into();
     })));
+}
+
+// AC-0801: a JAX-RS resource class gives one Capability citing the class
+// Symbol with each endpoint, handler and relation; a sub-resource locator and
+// a resource method on an interface are route Gaps and give nothing.
+#[test]
+fn controller_capability_groups_real_jaxrs_routes_by_class() {
+    let jaxrs = jaxrs_snapshot();
+    let before = jaxrs.clone();
+    let report = derive_controller_capabilities(&jaxrs);
+    assert_eq!(jaxrs, before);
+    assert_eq!(
+        controller_titles(&jaxrs),
+        ["HTTP operations in InvoiceResource"]
+    );
+    let sym = |name: &str| format!("sym:{REPO}@{JAXRS_PATH}#{name}");
+    let list = format!("ep:{REPO}@GET:/invoices");
+    let cancel = format!("ep:{REPO}@POST:/invoices/{{id}}/void");
+    let expected: BTreeSet<_> = [
+        BaseRef::Node(sym("InvoiceResource")),
+        BaseRef::Node(list.clone()),
+        BaseRef::Node(cancel.clone()),
+        BaseRef::Node(sym("InvoiceResource.list()")),
+        BaseRef::Node(sym("InvoiceResource.cancel(String)")),
+        BaseRef::Edge(
+            list.clone(),
+            sym("InvoiceResource.list()"),
+            "HANDLES".into(),
+        ),
+        BaseRef::Edge(
+            cancel,
+            sym("InvoiceResource.cancel(String)"),
+            "HANDLES".into(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(report.facts[0].cites, expected);
+    let prov: Provenance =
+        serde_json::from_value(capability(&report.facts[0]).props["prov"].clone()).unwrap();
+    assert!(prov.validate().is_ok());
+    assert!(prov.evidence.iter().all(|e| e.path == JAXRS_PATH));
+    let mut reversed = jaxrs.clone();
+    reversed.graph.0.reverse();
+    reversed.graph.1.reverse();
+    assert_eq!(derive_controller_capabilities(&reversed), report);
+
+    // The Java shape is not read for another language or a Kotlin adapter,
+    // and the endpoint must name the handler its relation reaches.
+    let edit = |change: &dyn Fn(&mut Node)| {
+        let mut changed = jaxrs.clone();
+        for node in &mut changed.graph.0 {
+            change(node);
+        }
+        changed
+    };
+    let without_list = |snapshot: &RevisionedSnapshot| {
+        let facts = derive_controller_capabilities(snapshot).facts;
+        facts.len() == 1 && !facts[0].cites.contains(&BaseRef::Node(list.clone()))
+    };
+    assert!(!without_list(&jaxrs));
+    assert!(without_list(&edit(&|node| if node.id == list {
+        node.props["language"] = "kotlin".into();
+    })));
+    assert!(without_list(&edit(&|node| if node.id == list {
+        node.props["handler_sym"] = "sym:other".into();
+    })));
+    assert!(without_list(&edit(&|node| if node.id == list {
+        node.props["framework"] = "jax".into();
+    })));
+    let class = sym("InvoiceResource");
+    assert!(
+        controller_titles(&edit(&|node| if node.id == class {
+            node.props["kind"] = "interface".into();
+        }))
+        .is_empty()
+    );
+
+    // With Spring in the same snapshot each class keeps its own group.
+    let mut all = spring_snapshot(true);
+    all.graph.0.extend(jaxrs.graph.0.clone());
+    all.graph.1.extend(jaxrs.graph.1.clone());
+    assert_eq!(
+        controller_titles(&all),
+        [
+            "HTTP operations in InvoiceResource",
+            "HTTP operations in OrderController",
+            "HTTP operations in OrderController.Audit"
+        ]
+    );
 }
