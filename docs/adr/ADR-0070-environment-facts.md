@@ -142,25 +142,78 @@ span. It makes the loss visible; it does not stop it.
    and Pulumi resources (`res:{repo}@pulumi:{type}:{name}`,
    `adapters-lang-ts`) keep their ids. Their identities may contain `/`
    (an `http-api` origin), so no consumer may parse a scope out of a
-   non-Terraform `res:` id; consumers read `logical_id` and a new
-   `root_module` prop instead. Two Pulumi projects in one repository can
-   collide the same way; scoping them by the directory of their
-   `Pulumi.yaml` is a separate decision, recorded here as not covered.
+   non-Terraform `res:` id; consumers read `logical_id` and the
+   `root_module` prop (absent for the repository root) instead. Two Pulumi
+   projects in one repository can collide the same way; scoping them by
+   the directory of their `Pulumi.yaml` is a separate decision, recorded
+   here as not covered.
 
 ### Impact
 
 - **`iac`:** `resource_id`, `extract_source_unresolved`, the module
   expansion, `cached_file_key` and `resource_id_from_node` gain the scope.
-  `logical_id` stays the Terraform address; a `root_module` prop
-  (`"."` for the repository root) is added only to scoped nodes, so
-  root-only repositories gain no prop.
+  `logical_id` stays the Terraform address. A node scoped to a root module
+  outside the repository root carries `root_module: "<rootdir>"` (for
+  example `"envs/prod"`), on its own resources and on the child-module
+  resources it instantiates. A node of the repository-root module carries
+  no `root_module` prop: absence means the repository root, and the prop
+  never holds `"."` or an empty string. Root-only repositories therefore
+  keep byte-identical nodes and an identical graph hash. Nodes from a direct
+  read of a child module's directory carry `child_module: "<dir>"` and no
+  `root_module`; no state file matches them.
+- **Manifest: which root module a state file belongs to.** Today
+  `ManifestRepo` (`ingest/src/manifest.rs`) has one unscoped `state_json`
+  per repository, and `terraform show -json` output names no directory, so
+  the association must be declared. The manifest gains an optional list on
+  the repo entry:
+
+  ```toml
+  [[repos]]
+  url = "acme/infra"
+  state_json = "state/root.json"            # repository-root module, as today
+  [[repos.terraform_state]]
+  path = "state/prod.json"                  # relative to the manifest
+  root_module = "envs/prod"                 # repo-relative, "/" separators
+  [[repos.terraform_state]]
+  path = "state/staging.json"
+  root_module = "envs/staging"
+  ```
+
+  `state_json` keeps its meaning: it is the state of the repository-root
+  module. Each `terraform_state` entry names one root module by its
+  repo-relative directory. A `root_module` that is empty, `"."`, absolute,
+  contains `..` or ends in `/` is a manifest load error, like an invalid
+  base URL; the repository root is named only by using `state_json`. The
+  association is resolved after T0 extraction, deterministically, with no
+  silent skip:
+
+  - **Declared root module exists:** the state matches only nodes whose
+    `root_module` equals it (for `state_json`, only nodes with neither a
+    `root_module` nor a `child_module` prop).
+  - **Declared directory is not a root module** (no `.tf` files read
+    there, or it is only ever a local module's resolved source): a
+    `gap:tf-state-root:{repo}@{root_module}` Gap citing the manifest entry
+    and the state file; the state is not applied.
+  - **Two declarations for one root module** (two entries with the same
+    `root_module`): a `gap:tf-state-root:{repo}@{root_module}` Gap citing
+    both paths; neither is applied, because nothing says which is current.
+  - **`state_json` declared but the repository has no repository-root
+    module** (all Terraform lives in subdirectories): a
+    `gap:tf-state-root:{repo}@` Gap that lists the root modules found and
+    says to declare `terraform_state` entries; the state is not applied.
+  - **A root module with Terraform resources and no state declared:**
+    reported by coverage as today's `state_json` stopping reason, once per
+    root module, naming the `terraform_state` field.
+
+  A state address that matches no node of its root module is left
+  unmatched, as today.
 - **Observed-state matching (`dynamic::enrich_resources`, AC-0009):** it
-  strips `res:{repo}@` and looks the remainder up as a state address. A
-  state or plan file belongs to one root module, so matching must strip the
-  root module's scope as well and match only nodes of the root module the
-  state file is declared for; a state file with no declared root module
-  matches only the repository-root module, as today. Observed resources
-  from `adapters-fw/src/observed.rs` (line 235 builds
+  strips `res:{repo}@` and looks the remainder up as a state address. With
+  the association above, matching for a scoped state strips
+  `res:{repo}@{rootdir}/` and considers only nodes whose `root_module`
+  equals `{rootdir}`; matching for `state_json` considers only nodes with
+  neither prop and strips `res:{repo}@`, exactly as today. Observed
+  resources from `adapters-fw/src/observed.rs` (line 235 builds
   `res:{repo}@observed:…`) keep matching by their own ids; they never match
   a Terraform node by address, and the scope rule must not make them start.
   Pulumi enrichment (AC-0052) is unaffected.
