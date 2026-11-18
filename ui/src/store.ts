@@ -491,6 +491,56 @@ export interface CuratedRecord {
   basis_summary: string;
 }
 
+/** The state the host gives a finding accepted as curated (ADR-0074). */
+export type CuratedFindingState = 'unresolvable' | 'stale' | 'eligible';
+
+/** An eligible finding a curated read shows. Always InferredWeak. */
+export interface CuratedFinding {
+  finding_ref: string;
+  investigation_id: string;
+  result_id: string;
+  finding_id: string;
+  role: string;
+  kind: string;
+  title: string;
+  statement: string;
+  limitations: string[];
+  /** ADR-0058 citation ids of the facts it cites. */
+  citations: string[];
+  tier: string;
+  confidence: Tier;
+  review_status: 'accepted';
+  source_support: { captured: number; unverified: number };
+  state: CuratedFindingState;
+  reason: string;
+  reason_sentence: string;
+  changed: string[];
+  missing: string[];
+}
+
+/** An accepted finding that is not eligible: identity, state and the cited
+ *  ids behind the state. The host sends no statement and no title. */
+export interface CuratedFindingListing {
+  finding_ref: string;
+  investigation_id: string;
+  result_id: string;
+  finding_id: string;
+  role: string;
+  cited_facts: number;
+  state: CuratedFindingState;
+  reason: string;
+  reason_sentence: string;
+  changed: string[];
+  missing: string[];
+}
+
+export interface CuratedFindingCounts {
+  accepted: number;
+  eligible: number;
+  unresolvable: number;
+  stale: number;
+}
+
 /** A Workbench decision whose content hash matches no current statement. */
 export interface StaleAssertionDecision {
   content_hash: string;
@@ -515,6 +565,14 @@ export type CuratedRead =
        *  AC-0669); absent from a host that predates it. No claim. */
       drafts?: CuratedDraftRow[];
       draft_counts?: CuratedDraftCounts;
+      /** Findings accepted as curated (ADR-0074, AC-0845): the eligible
+       *  ones this export mode shows, the number it leaves out, and every
+       *  other accepted finding without its statement. Absent from a host
+       *  that predates them. */
+      findings?: CuratedFinding[];
+      findings_omitted?: number;
+      findings_listed?: CuratedFindingListing[];
+      finding_counts?: CuratedFindingCounts;
       assertion_decisions: {
         digest: string;
         rejections_applied: number;

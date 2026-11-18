@@ -152,3 +152,59 @@ export const Analyst27SupportedAfterCorrection: Story = {
     await expect(canvas.getAllByText(/T3 · InferredWeak/)).not.toHaveLength(0);
   },
 };
+
+// ADR-0074, AC-0846: the curation review is a second review with its own
+// controls and its own state, beside the follow-up review.
+const curationSubject = (index: number) => `investigation-finding-review-v1:${String(index).repeat(64)}`;
+export const CurationReviewControls: Story = {
+  args: { curations: [], onCurate: fn(), onRefreshCurations: fn() },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const first = within(canvas.getByLabelText('Curation review for A local stock guard is present'));
+    await expect(first.getByText('No curation review')).toBeVisible();
+    await expect(canvas.getByText(/second review, separate from follow-up/)).toHaveTextContent(
+      'stays T3 / InferredWeak',
+    );
+    await userEvent.click(first.getByRole('button', { name: 'Accept as curated' }));
+    await expect(args.onCurate).toHaveBeenLastCalledWith('F1', 'accepted');
+    const second = within(canvas.getByLabelText('Curation review for Clarify the policy boundary'));
+    await userEvent.click(second.getByRole('button', { name: 'Reject as curated' }));
+    await expect(args.onCurate).toHaveBeenLastCalledWith('F2', 'rejected');
+    // The follow-up review is unchanged and still pending.
+    await expect(canvas.getAllByText('Pending review')).toHaveLength(2);
+    await expect(args.onReview).not.toHaveBeenCalled();
+    await expect(canvas.getAllByText(/T3 · InferredWeak/)).toHaveLength(2);
+    await userEvent.click(canvas.getByRole('button', { name: 'Refresh curation reviews' }));
+    await expect(args.onRefreshCurations).toHaveBeenCalled();
+  },
+};
+export const AcceptedAsCurated: Story = {
+  args: { onCurate: fn(), curations: [{ subject_id: curationSubject(0), finding_id: 'F1', review_revision: 3, review_decision: 'accepted', reviewed_at: '2026-11-18T09:00:00Z' }] },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const first = within(canvas.getByLabelText('Curation review for A local stock guard is present'));
+    await expect(first.getByText('Accepted as curated')).toBeVisible();
+    await expect(first.getByText(/Curation revision 3/)).toBeVisible();
+    // The saved decision is not offered again; withdrawing it is.
+    await expect(first.getByRole('button', { name: 'Accept as curated' })).toBeDisabled();
+    await userEvent.click(first.getByRole('button', { name: 'Reject as curated' }));
+    await expect(args.onCurate).toHaveBeenLastCalledWith('F1', 'rejected');
+    await expect(canvas.getAllByText(/T3 · InferredWeak/)).toHaveLength(2);
+  },
+};
+export const CurationUnavailable: Story = {
+  args: { onCurate: fn(), onRefreshCurations: fn(), curationError: 'Curation reviews are unavailable. Refresh curation reviews before deciding. Historical findings remain readable.' },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
+    await expect(canvas.getByText(/Curation reviews are unavailable/)).toBeVisible();
+    // A failed read does not establish that a finding has no review.
+    await expect(canvas.getAllByText('Curation review state unavailable')).toHaveLength(2);
+    await expect(canvas.queryByText('No curation review')).not.toBeInTheDocument();
+    for (const button of canvas.getAllByRole('button', { name: /as curated$/ })) await expect(button).toBeDisabled();
+    // Follow-up review is a separate store and stays usable.
+    await expect(canvas.getAllByRole('button', { name: 'Use for follow-up' })[0]).toBeEnabled();
+    await userEvent.click(canvas.getByRole('button', { name: 'Refresh curation reviews' }));
+    await expect(args.onRefreshCurations).toHaveBeenCalled();
+  },
+};

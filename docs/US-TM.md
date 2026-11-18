@@ -24,7 +24,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | US-0018 | AC-0090..0092, AC-0222, AC-0730 | app, ingest, ui, scripts | post-M10 | — | ADR-0002, ADR-0018 | T-0090..0092, T-0222, T-0730 |
 | US-0019 | AC-0096..0097,AC-0598,AC-0650,AC-0661..0662 | ingest (toolchain config facts; keys-only env files including `*.env`/`env.example` templates, quote-aware key parsing, span-free `CONFIGURED_IN` links from env-keyed observed resources, #734), core-graph, spec (topology draws `CONFIGURED_IN` env files), app, ui | post-M10 | — | ADR-0003, ADR-0058, ADR-0060, ADR-0070 | T-0096..0097,T-0598,T-0650,T-0661..0662 |
 | US-0020 | AC-0101..0105, AC-0137..0139, AC-0232..0233, AC-0302..0303, AC-0460 | context-hub, core-graph, app | H1 | — | ADR-0008, ADR-0019, ADR-0047 | T-0101..0105, T-0137..0139, T-0232..0233, T-0302..0303, T-0460 |
-| US-0021 | AC-0106..0109,AC-0652..0655,AC-0659 | context-hub, agents, spec, app, ui | H2–H3 | — | ADR-0019, ADR-0058, ADR-0061 | T-0106..0109,T-0652..0655,T-0659 |
+| US-0021 | AC-0106..0109,AC-0652..0655,AC-0659,AC-0843..0846 | context-hub, agents, spec, app, ui | H2–H3 | — | ADR-0019, ADR-0058, ADR-0061, ADR-0074 | T-0106..0109,T-0652..0655,T-0659,T-0843..0846 |
 | US-0022 | AC-0110..0114 | context-hub, agents, app, ui | H4–H5 | — | ADR-0019 | T-0110..0114 |
 | US-0023 | AC-0115..0118 | context-hub, agents, app, ui | H6–H7 | — | ADR-0019 | T-0115..0118 |
 | US-0024 | AC-0119..0125 | adapters-lang-ts (lexical handlers and fail-closed syntax), core-graph, core-prov, core-redact, spec, context-hub, app | H2 | — | ADR-0003, ADR-0019, ADR-0020 | T-0119..0125 |
@@ -152,6 +152,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0071 | Specialist roles: one current version per role (analyst@27, auditor@14, spec-writer@2, gap-triager@2, section-writer@1), retired versions reopen read-only with their original id, and one capability table replaces the `uses_*` predicates (proposed; #1751, owner review) |
 | ADR-0072 | Producer input closure as a typed content-addressed input set, append-only reconciliation results for staged proposals, and own source/capture identities for manifest-supplied external evidence (proposed; #385, owner review) |
 | ADR-0073 | Authority and grants for MCP-started investigation tasks: host-assigned durable principal, runtime-only owner grant checked at every durable operation, own-task visibility, no consent over MCP (proposed; #1761, owner review) |
+| ADR-0074 | Findings accepted as curated: a curation review separate from follow-up, a finding as one cited statement, a third record kind in the curated projection with states from the digests the run recorded, one v3 revision (proposed; #1746, owner review) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression

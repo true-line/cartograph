@@ -13,12 +13,20 @@
 //! do. Listed records and assertion decisions assert nothing and are the
 //! same in both modes.
 //!
+//! A finding accepted as curated (ADR-0074, AC-0845) is InferredWeak too:
+//! a `best-effort` read returns each eligible finding with its statement
+//! and citation ids, a `verified-only` read returns none and the number
+//! left out, and both list every other accepted finding with its state and
+//! reason and without its statement. The MCP `curated-json` read is built
+//! from the same split.
+//!
 //! Nothing is written and no fact, tier or review changes (R-INT-1,
 //! R-INT-3).
 
 use context_hub::curated::{
-    AssertionDecisionSummary, CuratedCounts, CuratedDraft, CuratedProjection, CuratedRecord,
-    CuratedView, DraftAddress, DraftCounts, DraftState, DraftStateReason,
+    AssertionDecisionSummary, CuratedCounts, CuratedDraft, CuratedFinding, CuratedProjection,
+    CuratedRecord, CuratedView, DraftAddress, DraftCounts, DraftState, DraftStateReason,
+    FindingCounts, FindingState, FindingStateReason,
 };
 use serde::Serialize;
 use spec::{CuratedFailure, ExportMode};
@@ -106,6 +114,94 @@ impl DraftRow {
     }
 }
 
+/// One finding a read shows as curated content, with the sentence for its
+/// reason. It is always eligible.
+#[derive(Debug, Serialize)]
+pub(crate) struct FindingRow {
+    #[serde(flatten)]
+    finding: CuratedFinding,
+    /// What `reason` means, as `curated.md` states it.
+    reason_sentence: &'static str,
+}
+
+/// One accepted finding that is not eligible: its identity, state and the
+/// cited ids behind the state. It carries no statement and no title, so a
+/// read repeats no InferredWeak content it does not show.
+#[derive(Debug, Serialize)]
+pub(crate) struct FindingListing {
+    finding_ref: String,
+    investigation_id: String,
+    result_id: String,
+    finding_id: String,
+    role: String,
+    cited_facts: usize,
+    state: FindingState,
+    reason: FindingStateReason,
+    /// What `reason` means, as `curated.md` states it.
+    reason_sentence: &'static str,
+    /// Cited ids whose fact changed since the investigation read it.
+    changed: Vec<String>,
+    /// Cited ids that resolve to no fact now.
+    missing: Vec<String>,
+}
+
+/// The findings of a projection as one export mode reads them (ADR-0074
+/// decision 11). `shown` plus `omitted` plus `listed` is every accepted
+/// finding.
+#[derive(Debug, Serialize)]
+pub(crate) struct FindingsRead {
+    /// The eligible findings this export mode shows.
+    #[serde(rename = "findings")]
+    shown: Vec<FindingRow>,
+    /// Eligible findings the export mode leaves out.
+    #[serde(rename = "findings_omitted")]
+    omitted: usize,
+    /// Every accepted finding that is not eligible; the same in both modes.
+    #[serde(rename = "findings_listed")]
+    listed: Vec<FindingListing>,
+    finding_counts: FindingCounts,
+}
+
+impl FindingsRead {
+    pub(crate) fn of(projection: &CuratedProjection, mode: ExportMode) -> Self {
+        let mut shown = Vec::new();
+        let mut listed = Vec::new();
+        let mut omitted = 0;
+        for finding in &projection.findings {
+            let reason_sentence = spec::curated_finding_reason_sentence(finding.reason);
+            if spec::curated_finding_shown(finding, mode) {
+                shown.push(FindingRow {
+                    finding: finding.clone(),
+                    reason_sentence,
+                });
+            } else if finding.state == FindingState::Eligible {
+                // R-INT-5: no InferredWeak finding, and the number left out.
+                omitted += 1;
+            } else {
+                listed.push(FindingListing {
+                    finding_ref: finding.finding_ref.clone(),
+                    investigation_id: finding.investigation_id.clone(),
+                    result_id: finding.result_id.clone(),
+                    finding_id: finding.finding_id.clone(),
+                    role: finding.role.clone(),
+                    cited_facts: finding.citations.len(),
+                    state: finding.state,
+                    reason: finding.reason,
+                    reason_sentence,
+                    changed: finding.changed.clone(),
+                    missing: finding.missing.clone(),
+                });
+            }
+        }
+        Self {
+            shown,
+            omitted,
+            listed,
+            finding_counts: projection.finding_counts,
+        }
+    }
+}
+
 /// What the Workbench reads of the curated projection.
 // One value is built per read and serialized at once; boxing a field would
 // only add an allocation.
@@ -127,6 +223,10 @@ pub(crate) enum CuratedWorkbenchRead {
         /// modes, and without claims.
         drafts: Vec<DraftRow>,
         draft_counts: DraftCounts,
+        /// `findings`, `findings_omitted`, `findings_listed` and
+        /// `finding_counts`.
+        #[serde(flatten)]
+        findings: FindingsRead,
         assertion_decisions: AssertionDecisionSummary,
         counts: CuratedCounts,
     },
@@ -158,6 +258,7 @@ impl CuratedWorkbenchRead {
             listed: projection.listed.iter().map(CuratedRow::of).collect(),
             drafts: projection.drafts.iter().map(DraftRow::of).collect(),
             draft_counts: projection.draft_counts,
+            findings: FindingsRead::of(projection, mode),
             assertion_decisions: projection.assertion_decisions.clone(),
             counts: projection.counts,
         }
@@ -227,6 +328,8 @@ mod draft_tests {
                 "F-0000000000000001".to_owned(),
                 "current".to_owned(),
             )]),
+            findings: &[],
+            cited_fact_digests: &std::collections::BTreeMap::new(),
             policy_version: CURATED_POLICY_VERSION,
         })
         .unwrap();

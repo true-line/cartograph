@@ -220,7 +220,75 @@ fn load(
     Ok((response, body_hash))
 }
 
+/// One saved finding as the host resolved it for a curation review
+/// (ADR-0074 decision 2): the finding, its producing specialist and the
+/// saved citation behind each of its citation ids. Nothing in it comes from
+/// the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedFinding {
+    pub(crate) subject: FindingReviewSubjectV1,
+    /// The saved specialist id, such as `domain-analyst@2`.
+    pub(crate) role: String,
+    pub(crate) finding: InvestigationFinding,
+    /// One citation per citation id of the finding, in its order.
+    pub(crate) citations: Vec<InvestigationCitation>,
+}
+
 impl JobStore {
+    /// Resolve the exact historical finding `subject` names. The subject
+    /// must be the one this store computes for that finding of that result;
+    /// any other fails as [`FindingReviewError::SubjectChanged`]. Reads
+    /// only: no review row and no task state is written.
+    pub(crate) fn resolve_investigation_finding(
+        &self,
+        subject: &FindingReviewSubjectV1,
+    ) -> Result<ResolvedFinding, FindingReviewError> {
+        subject.validate()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let id = &subject.investigation_id;
+        let (reviews, _) = load(&tx, &self.namespace, id, &subject.result_id)?;
+        let current = reviews
+            .reviews
+            .iter()
+            .find(|review| review.subject.finding_id == subject.finding_id)
+            .ok_or(InvestigationStoreError::Missing)?;
+        if current.subject != *subject {
+            return Err(FindingReviewError::SubjectChanged);
+        }
+        let task = load_execution_task(&tx, id)?;
+        let result = load_result(&tx, &task)?.ok_or(InvestigationStoreError::Missing)?;
+        let finding = result
+            .findings
+            .iter()
+            .find(|finding| finding.finding_id == subject.finding_id)
+            .ok_or(InvestigationStoreError::Missing)?
+            .clone();
+        // The task's citations are the saved ledger's (`load_ledger`).
+        let citations = finding
+            .citation_ids
+            .iter()
+            .map(|cited| {
+                task.detail
+                    .citations
+                    .iter()
+                    .find(|citation| citation.citation_id == *cited)
+                    .cloned()
+                    .ok_or(InvestigationStoreError::Invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let role = serde_json::to_value(task.detail.specialist.id)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or(InvestigationStoreError::Invalid)?;
+        tx.commit()?;
+        Ok(ResolvedFinding {
+            subject: subject.clone(),
+            role,
+            finding,
+            citations,
+        })
+    }
+
     pub(crate) fn investigation_finding_reviews(
         &self,
         id: &str,
