@@ -1105,6 +1105,10 @@ export interface AppStore {
    *  after `export_spec`'s IPC-capped preview (#488). `null` on failure —
    *  callers fall back to the already-fetched preview. */
   readSpecArtifact: (artifactId: string) => Promise<SpecArtifact | null>;
+  /** Several full artifacts in one host request, in the order asked, for
+   *  Export bundle (#1662): one graph snapshot however many were capped.
+   *  `null` on failure, with `specError` recorded. */
+  readSpecArtifacts: (artifactIds: string[]) => Promise<SpecArtifact[] | null>;
   readSelectedFlowView: (trigger: string, mode: SpecExportMode, contentId: string) => Promise<SpecDiagramView | null>;
   curateAssertion: (
     assertion: SpecAssertion,
@@ -1544,6 +1548,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return await invokeOr<SpecArtifact | null>('read_spec_artifact', null, {
         mode: get().specMode,
         artifactId,
+      });
+    } catch (error) {
+      set({ specError: String(error) });
+      return null;
+    }
+  },
+
+  readSpecArtifacts: async (artifactIds: string[]) => {
+    try {
+      return await invokeOr<SpecArtifact[] | null>('read_spec_artifacts', null, {
+        mode: get().specMode,
+        artifactIds,
       });
     } catch (error) {
       set({ specError: String(error) });

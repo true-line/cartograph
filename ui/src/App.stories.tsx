@@ -731,6 +731,10 @@ function installFakeCore(options: {
             (artifact) => artifact.id === (args as { artifactId: string }).artifactId,
           ) ?? null
         );
+      case 'read_spec_artifacts':
+        return (args as { artifactIds: string[] }).artifactIds.map(
+          (id) => FAKE_SPEC.artifacts.find((artifact) => artifact.id === id) ?? null,
+        );
       case 'list_assertion_decisions':
         return curation;
       case 'record_assertion_decision': {
