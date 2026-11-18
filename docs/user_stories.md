@@ -1018,6 +1018,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **AC-0589** Given the five synthetic #598 negative cases, the test-only captured coordinator accepts only manifest `cb54f13d` with exact per-case source and question bindings, domain-analyst@27, Cloud openai:gpt-6.1-sol and unchanged limits. Separate fixture identity leaves FrozenVendure closed. Production capture, admission, scoped consent, exclusive per-case attempt consumption and durable receipt reopen apply; no parent or evaluator ingestion is admitted. Scripted tests are transport mechanics only, not semantic acceptance evidence; manual execution remains owner-authorized.
 - **Trace:** H4 · `app` · — · T-0589
 
+- **AC-0725** Given an investigation that stops because a completed provider response failed action decoding, or because host input preparation was refused at a named boundary, when the failure is saved, then the task detail keeps a versioned closed failure record: `investigation-terminal-diagnostic@5` names the decode stage or semantic rule family and the error class, and `investigation-terminal-diagnostic@6` names the preparation phase. Neither carries response text, the admitted query, field values or error strings. The terminal message, status and existing diagnostics are unchanged; causes the worker does not classify keep the diagnostic absent, and historical records reopen unchanged (#1616).
+- **Trace:** H4 · `agents`, `app` · — · T-0725
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
