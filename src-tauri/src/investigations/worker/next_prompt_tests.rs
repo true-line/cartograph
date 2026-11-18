@@ -2,6 +2,8 @@
 //! response/refusal and terminal boundaries without a live provider.
 use super::*;
 
+/// The widest saved desktop active allowance, equal to the hard wall limit.
+const WALL_BOUNDED_ACTIVE_SECONDS: u64 = 3600;
 struct NextFixture {
     base: CompletionFixture,
     request: StagedObligationRequest,
@@ -12,6 +14,34 @@ struct NextFixture {
 impl NextFixture {
     fn new(provider: &dyn LlmProvider, specialist: SpecialistId) -> Self {
         Self::with_source_obligation(provider, specialist, false)
+    }
+    /// A long scripted run on the real running clock, saved with the widest
+    /// desktop active allowance so the hard wall limit is the only deadline.
+    /// Debug-build host work, not the script, dominates elapsed time, and a
+    /// slow shared runner otherwise crosses the 600 s default part-way through
+    /// (#1896). The request timeout stays at the default the provider asserts.
+    fn new_with_wall_bounded_active(provider: &dyn LlmProvider, specialist: SpecialistId) -> Self {
+        let base =
+            CompletionFixture::new(provider, SpecialistId::DomainAnalystV9, false, true, false);
+        let request = base.request.clone();
+        Self::from_completion_base_with_wall_bounded_active(provider, specialist, base, request)
+    }
+    fn from_completion_base_with_wall_bounded_active(
+        provider: &dyn LlmProvider,
+        specialist: SpecialistId,
+        base: CompletionFixture,
+        request: StagedObligationRequest,
+    ) -> Self {
+        Self::from_completion_base_with_limits(
+            provider,
+            specialist,
+            base,
+            request,
+            Some((
+                WALL_BOUNDED_ACTIVE_SECONDS,
+                CompletionLimits::default().values().request_timeout_ms,
+            )),
+        )
     }
     fn with_source_obligation(
         provider: &dyn LlmProvider,
