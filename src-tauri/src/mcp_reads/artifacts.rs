@@ -185,6 +185,37 @@ impl ReadSession {
             } else {
                 Vec::new()
             };
+            // D1 frames the derived Capabilities and caller roles beside its
+            // base sections (AC-0663); a refused overlay leaves it without
+            // them rather than failing the read.
+            let candidates = if id == D1_ID {
+                self.capabilities
+                    .iter()
+                    .map(|f| match &f.item {
+                        core_graph::overlay::OverlayItem::Node(capability) => {
+                            Some(spec::CapabilityStory {
+                                capability,
+                                cites: &f.cites,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            };
+            let knowledge = candidates
+                .filter(|c| !c.is_empty() || !self.actors.is_empty())
+                .and_then(|candidates| {
+                    spec::validate_knowledge_stories(
+                        &self.base,
+                        &candidates,
+                        &self.actors,
+                        self.basis.export_mode,
+                        &self.rejected_hashes,
+                    )
+                    .ok()
+                });
             spec::compile_spec_selected_supplied(
                 &self.base.graph.0,
                 &self.base.graph.1,
@@ -194,7 +225,7 @@ impl ReadSession {
                 &[id],
                 compile_limits,
                 spec::Supplied {
-                    knowledge: None,
+                    knowledge: knowledge.as_ref(),
                     coverage: if coverage { &self.recorded } else { &[] },
                     stale_coverage: &stale,
                     curated: if coverage {

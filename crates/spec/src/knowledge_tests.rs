@@ -1724,7 +1724,7 @@ fn vendure_like_bundle_renders_readable_derived_user_stories() {
     );
 }
 
-// #1443: the product specification's Actors (1.2) and Capabilities (1.3)
+// AC-0663, #1443: the product specification's Actors (1.2) and Capabilities (1.3)
 // frame the knowledge layer's derived facts, not "No `Capability` fact".
 #[test]
 fn product_specification_frames_derived_capabilities_and_caller_roles() {
