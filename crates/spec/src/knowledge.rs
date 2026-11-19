@@ -7,6 +7,7 @@ pub use business_flows::{
 mod controllers;
 pub use controllers::derive_controller_capabilities;
 pub(crate) mod actors;
+mod naming;
 pub use actors::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     derive_permission_actors,
@@ -21,12 +22,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Deterministic recipe naming a semantic resolver-group capability.
 pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver-group";
 /// Changed grouping, support or naming semantics require a new recipe version.
-pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
+pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "3";
 
 /// Deterministic recipe naming a controller class's HTTP operations.
 pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.http-controller";
 /// Changed grouping, support or naming semantics require a new recipe version.
-pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "3";
+pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "4";
 
 /// Deterministic recipe projecting a persistence model to a weak domain candidate.
 pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";
@@ -279,6 +280,8 @@ struct Group {
     class: String,
     cites: BTreeSet<BaseRef>,
     evidence: BTreeMap<EvidenceKey, EvidenceRef>,
+    /// Whether any grouped operation changes state; names the title's verb.
+    mutates: bool,
 }
 
 /// Derive Capability candidates from the existing import-proven TS resolver
@@ -370,6 +373,7 @@ pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> Capabi
                 class: class.to_owned(),
                 ..Group::default()
             });
+        group.mutates |= naming::mutating(operation);
         group.cites.extend([
             BaseRef::Node(endpoint.id.clone()),
             BaseRef::Node(handler.id.clone()),
@@ -399,7 +403,11 @@ pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> Capabi
             &resolver,
         ))
         .expect("string tuple serialization");
-        let title = format!("{api} GraphQL operations in {}", group.class);
+        let title = naming::title(
+            &naming::subject(&group.class),
+            Some(&naming::api_audience(&api)),
+            group.mutates,
+        );
         let fact = capability_fact(
             (CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION),
             "graphql-resolver-group",

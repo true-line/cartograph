@@ -414,10 +414,7 @@ fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {
     assert_eq!(facts.len(), 1);
     let node = capability(&facts[0]);
     assert_eq!(node.label, "Capability");
-    assert_eq!(
-        node.props["title"],
-        "shop GraphQL operations in ShopOrderResolver"
-    );
+    assert_eq!(node.props["title"], "Manage orders (shop API)");
     assert_eq!(node.props.as_object().unwrap().len(), 2); // no auth/business assertions
     let expected = [
         BaseRef::Node(format!("ep:{REPO}@graphql:shop:query:order")),
@@ -447,7 +444,7 @@ fn graphql_capability_groups_real_adapter_pairs_and_cites_every_support() {
         prov.method,
         ProducingMethod::Rule {
             rule: CAPABILITY_GRAPHQL_RULE.into(),
-            version: "2".into()
+            version: "3".into()
         }
     );
     let mut expected_evidence = BTreeMap::new();
@@ -536,7 +533,7 @@ fn graphql_capability_accepts_adapter_emitted_hyphenated_api_directory() {
     assert_eq!(report.facts.len(), 1);
     assert_eq!(
         capability(&report.facts[0]).props["title"],
-        "admin-api GraphQL operations in ShopOrderResolver"
+        "Manage orders (admin API)"
     );
     assert_eq!(base, before);
 
@@ -589,7 +586,13 @@ fn graphql_capability_accepts_adapter_dollar_and_unicode_identity_names() {
         );
         assert_eq!(
             capability(&report.facts[0]).props["title"],
-            format!("shop GraphQL operations in {class}")
+            format!(
+                "View {} (shop API)",
+                class
+                    .trim_start_matches('$')
+                    .trim_end_matches("Resolver")
+                    .to_lowercase()
+            )
         );
         assert_eq!(base, before);
     }
@@ -1392,17 +1395,11 @@ fn controller_capability_groups_real_adapter_routes_by_class() {
         .map(|fact| capability(fact).props["title"].as_str().unwrap().to_owned())
         .collect();
     titles.sort();
-    assert_eq!(
-        titles,
-        [
-            "HTTP operations in HealthController",
-            "HTTP operations in OrdersController"
-        ]
-    );
+    assert_eq!(titles, ["Manage orders", "View health"]);
     let orders = report
         .facts
         .iter()
-        .find(|fact| capability(fact).props["title"] == "HTTP operations in OrdersController")
+        .find(|fact| capability(fact).props["title"] == "Manage orders")
         .unwrap();
     let node = capability(orders);
     assert_eq!(node.label, "Capability");
@@ -1467,7 +1464,7 @@ fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
         titles.sort();
         titles
     };
-    let orders_only = ["HTTP operations in OrdersController"];
+    let orders_only = ["Manage orders"];
 
     // A second handler for the route.
     let mut two_handlers = base.clone();
@@ -1638,9 +1635,7 @@ fn vendure_like_bundle_renders_readable_derived_user_stories() {
     let content = &stories.content;
     assert!(!content.contains("No Capability facts"), "{content}");
     assert!(
-        content.contains(
-            "## US-R-0001 — Derived Capability: admin GraphQL operations in ProductResolver"
-        ),
+        content.contains("## US-R-0001 — Derived Capability: Manage products (admin API)"),
         "{content}"
     );
     assert!(
@@ -1752,7 +1747,7 @@ fn product_specification_frames_derived_capabilities_and_caller_roles() {
     assert!(!caps.contains("No `Capability` fact"), "{content}");
     assert!(caps.contains("Derived Capabilities: 1."), "{caps}");
     assert!(
-        caps.contains("| admin GraphQL operations in ProductResolver | 2 |"),
+        caps.contains("| Manage products (admin API) | 2 |"),
         "{caps}"
     );
     let roles = section(content, "## 1.2 ");

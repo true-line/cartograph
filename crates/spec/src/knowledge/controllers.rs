@@ -166,6 +166,7 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
             class: class.to_owned(),
             ..Group::default()
         });
+        group.mutates |= naming::mutating(method);
         group.cites.extend(cites);
         for prov in &supporting {
             for e in &prov.evidence {
@@ -182,7 +183,7 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
             }
         }
     }
-    let mut report = CapabilityReport::default();
+    let mut pending = Vec::new();
     for (controller, group) in groups {
         let key = serde_json::to_vec(&(
             CAPABILITY_CONTROLLER_RULE,
@@ -190,7 +191,23 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
             &controller,
         ))
         .expect("string tuple serialization");
-        let title = format!("HTTP operations in {}", group.class);
+        let title = naming::title(&naming::subject(&group.class), None, group.mutates);
+        let (path, class) = controller
+            .split_once('@')
+            .and_then(|(_, rest)| rest.rsplit_once('#'))
+            .map_or((String::new(), String::new()), |(path, class)| {
+                (path.to_owned(), class.to_owned())
+            });
+        pending.push(Pending {
+            title,
+            places: [path, class],
+            key,
+            group,
+        });
+    }
+    route_groups::derive(&nodes, &handles, &mut pending);
+    let mut report = CapabilityReport::default();
+    for (title, key, group) in disambiguated(pending) {
         let fact = capability_fact(
             (
                 CAPABILITY_CONTROLLER_RULE,
@@ -203,8 +220,47 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
         );
         retain_sized_fact(&mut report, fact);
     }
-    route_groups::derive(&nodes, &handles, &mut report);
     report
+}
+
+/// A controller or route group named but not yet titled apart from the
+/// others.
+struct Pending {
+    title: String,
+    /// What tells it apart when titles collide: its file, then its class,
+    /// Blueprint, package or module.
+    places: [String; 2],
+    key: Vec<u8>,
+    group: Group,
+}
+
+/// Titles that would collide across every controller and route group name
+/// their file after the title, and their class or group too when the file
+/// does not tell them apart (AC-0851).
+fn disambiguated(pending: Vec<Pending>) -> Vec<(String, Vec<u8>, Group)> {
+    let mut by_title: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut by_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for p in &pending {
+        *by_title.entry(&p.title).or_default() += 1;
+        *by_file.entry((&p.title, &p.places[0])).or_default() += 1;
+    }
+    let titles: Vec<String> = pending
+        .iter()
+        .map(|p| {
+            if by_title[p.title.as_str()] < 2 {
+                p.title.clone()
+            } else if by_file[&(p.title.as_str(), p.places[0].as_str())] < 2 {
+                format!("{} ({})", p.title, p.places[0])
+            } else {
+                format!("{} ({}, {})", p.title, p.places[0], p.places[1])
+            }
+        })
+        .collect();
+    pending
+        .into_iter()
+        .zip(titles)
+        .map(|(p, title)| (title, p.key, p.group))
+        .collect()
 }
 
 #[cfg(test)]
