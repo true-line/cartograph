@@ -29,6 +29,15 @@ fn showcase_app(profile: &Path) -> tauri::App<tauri::test::MockRuntime> {
     let app = tauri::test::mock_builder().build(context).unwrap();
     assert_eq!(app.path().app_data_dir().unwrap(), dirs[0]);
     let mut state = crate::registered_source_tests::app_state(&dirs[0]);
+    // T2 off, so the post-ingest background phase the stores below enable
+    // never probes a provider: no network and no embeddings, as this run
+    // promises, whether or not a local model is installed.
+    state
+        .settings
+        .lock()
+        .unwrap()
+        .set_enabled("T2", false)
+        .unwrap();
     // The knowledge overlay and embedding cache the desktop opens at startup,
     // bound to this profile's graph, so the knowledge phase can publish.
     let instance = state.graph.lock().unwrap().instance_id().unwrap();
