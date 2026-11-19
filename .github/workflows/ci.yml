@@ -237,6 +237,26 @@ jobs:
           case "$digest" in sha256:*) ;; *) echo "::error::No digest for $IMAGE"; exit 1 ;; esac
           echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
 
+      # Each Dockerfile or toolchain change pushes a new image, and nothing
+      # pulls the old ones again. Only main prunes: it keeps the newest three
+      # and never the tag this run uses. A pruned tag is rebuilt the next time
+      # a lane names it.
+      - name: Prune old CI images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.tag.outputs.image }}
+          KEEP: '3'
+          PACKAGE: orgs/${{ github.repository_owner }}/packages/container/cartograph-ci
+        run: |
+          export TAG="${IMAGE##*:}"
+          gh api --paginate "$PACKAGE/versions?per_page=100" \
+            --jq '.[] | select(.metadata.container.tags | any(.[]; . == env.TAG) | not) | "\(.updated_at) \(.id)"' |
+            sort -r | tail -n "+$KEEP" | while read -r _ id; do
+              echo "Deleting $PACKAGE version $id"
+              gh api -X DELETE "$PACKAGE/versions/$id"
+            done
+
   # Rust core: format, lint-as-error, tests. The pinned toolchain comes from
   # rust-toolchain.toml; the commands and stable context are unchanged.
   rust:
@@ -358,7 +378,7 @@ jobs:
           # The synthetic fixture uses tempfile's hidden .tmp directory prefix.
           include-hidden-files: true
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
   # Native lock, SQLite, and process-exit coverage uses the actual host modules
   # without building Tauri. This is an additional required complete-suite gate.
