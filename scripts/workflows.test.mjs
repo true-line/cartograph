@@ -123,9 +123,10 @@ test('queued PR lanes never cancel each other, and package installs serialize on
   // supersede a run.
   assert.doesNotMatch(workflow, /ci-lane-/u);
   assert.match(workflow, /format\('pr-\{0\}', github\.event\.pull_request\.number\)/u);
-  // Concurrent lanes share one runner host: every apt-get, including the
-  // one Playwright --with-deps runs itself, holds the same flock and waits
-  // for it within its bounded step timeout.
+  // Concurrent lanes share one runner host: a package install would hold the
+  // same flock and wait for it within its bounded step timeout. No lane
+  // installs packages per run: the Rust lanes use the CI image and the
+  // frontend lane Playwright's image.
   const calls = [
     ...workflow.matchAll(
       /executable: flock\n\s+arguments-json: '\["-w","(\d+)","\/tmp\/cartograph-ci-packages\.lock",(.*?)\]'\n\s+(?:working-directory: .*\n\s+)?timeout-seconds: '(\d+)'/gu,
@@ -133,8 +134,8 @@ test('queued PR lanes never cancel each other, and package installs serialize on
   ];
   for (const [, wait, , step] of calls) assert.ok(Number(wait) < Number(step));
   const locked = calls.map(([, , command]) => command);
-  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 7);
-  assert.equal(locked.filter((command) => command.includes('"--with-deps"')).length, 1);
+  assert.equal(locked.filter((command) => command.startsWith('"sudo","apt-get"')).length, 0);
+  assert.equal(locked.filter((command) => command.includes('"--with-deps"')).length, 0);
   assert.equal([...workflow.matchAll(/arguments-json: .*(?:"apt-get"|"--with-deps")/gu)].length, calls.length);
 });
 
@@ -265,7 +266,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 11);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 12);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -335,7 +336,7 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.equal([...rust.matchAll(/--exclude/gu)].length, 1);
   assert.ok(condition(shards));
   assert.equal(condition(shards), condition(rust));
-  assert.match(shards, /needs: \[policy, merge-evidence, preflight-evidence\]/u);
+  assert.match(shards, /needs: \[policy, merge-evidence, preflight-evidence, ci-image\]/u);
   assert.match(shards, /runs-on: ubuntu-latest$/mu);
   assert.match(shards, /^ {4}timeout-minutes: 60$/mu);
   assert.match(shards, /fail-fast: false/u);
@@ -583,6 +584,54 @@ test('release publication is reviewed, exact-evidence-only, and idempotent', () 
 
 // Credential-bearing workflows never share a persistent self-hosted runner
 // with pull-request builds, which run repository-controlled scripts (#619).
+
+test('Rust lanes run in the CI image their inputs name, built only when missing', () => {
+  // Every lane apt-installed ~150 packages per run, and an index from one
+  // mirror named archives another had replaced, failing every lane. The image
+  // carries the libraries and toolchain; its tag hashes its inputs, so a
+  // Dockerfile or toolchain change builds a new one and nothing else does.
+  const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const job = (name) => workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
+  const image = job('ci-image');
+  assert.match(image, /run: echo "image=\$\(node scripts\/ci-image-tag\.mjs\)" >> "\$GITHUB_OUTPUT"/u);
+  assert.match(image, /if docker manifest inspect "\$IMAGE" > \/dev\/null 2>&1; then/u);
+  assert.match(image, /tar -c ci\/linux\.Dockerfile rust-toolchain\.toml \|/u);
+  assert.match(image, /^ {6}packages: write$/mu);
+  for (const name of ['rust', 'rust-app-tests', 'compliance']) {
+    const lane = job(name);
+    assert.match(lane, /needs: \[[^\]]*\bci-image\b[^\]]*\]/u, name);
+    assert.match(lane, /container:\n(?: +#.*\n)* +image: \$\{\{ needs\.ci-image\.outputs\.image \}\} # zizmor: ignore\[unpinned-images\]\n/u, name);
+    assert.match(lane, /options: --user 1001\n/u, name);
+    assert.match(lane, /volumes:\n +- \/home\/runner\/work:\/home\/runner\/work\n/u, name);
+    assert.doesNotMatch(lane, /apt-get|apt-mirrors/u, name);
+  }
+  const complete = job('complete');
+  assert.match(complete, /needs: \[.*\bci-image\b.*\]/u);
+  assert.match(complete, /test "\$CI_IMAGE" = success/u);
+  assert.match(image, /echo "image=\$IMAGE@\$digest" >> "\$GITHUB_OUTPUT"/u);
+  // The frontend lane runs in Playwright's image, pinned by digest, whose
+  // version must be the locked one: its browsers are built for that release.
+  const frontend = job('frontend');
+  const lock = JSON.parse(readFileSync(path.join(root, 'ui/package-lock.json'), 'utf8'));
+  const playwright = lock.packages['node_modules/playwright'].version;
+  assert.match(frontend, new RegExp(`image: mcr\\.microsoft\\.com/playwright:v${playwright.replaceAll('.', '\\.')}-noble@sha256:[0-9a-f]{64}\n`, 'u'));
+  assert.doesNotMatch(frontend, /apt-get|apt-mirrors|playwright install/u);
+  // bounded-command needs the host work path itself, mounted, not linked.
+  assert.match(frontend, /volumes:\n +- \/home\/runner\/work:\/home\/runner\/work\n/u);
+  assert.doesNotMatch(workflow, /ln -s/u);
+  // Advanced CodeQL, Rust extraction included, runs in the CI image too.
+  const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
+  assert.match(codeql, /container:\n +image: \$\{\{ inputs\.image \}\} # zizmor: ignore\[unpinned-images\]\n/u);
+  assert.doesNotMatch(codeql, /apt-get/u);
+  assert.match(job('codeql'), /with:\n +image: \$\{\{ needs\.ci-image\.outputs\.image \}\}\n/u);
+  const dockerfile = readFileSync(path.join(root, 'ci/linux.Dockerfile'), 'utf8');
+  assert.match(dockerfile, /^FROM ubuntu:26\.04$/mu);
+  assert.match(dockerfile, /COPY rust-toolchain\.toml /u);
+  assert.match(dockerfile, /^USER 1001$/mu);
+  for (const pkg of ['libwebkit2gtk-4.1-dev', 'libxdo-dev', 'libssl-dev', 'libayatana-appindicator3-dev', 'librsvg2-dev', 'rustup', 'zstd']) {
+    assert.match(dockerfile, new RegExp(`\\b${pkg.replaceAll('.', '\\.')}\\b`, 'u'), pkg);
+  }
+});
 
 test('every job runs on GitHub-hosted runners except release packaging', () => {
   // The repository is public, so no job a pull request can start may run on

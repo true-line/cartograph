@@ -58,6 +58,8 @@ CLAUDE.md   @qwts
 build.rs              @qwts
 .cargo/               @qwts
 /rust-toolchain.toml  @qwts
+# The Linux CI image every Rust lane and CodeQL runs in (ci.yml ci-image).
+/ci/                  @qwts
 # Every config filename Vite (and the PostCSS it loads) auto-discovers.
 /ui/vite.config.*     @qwts
 /ui/postcss.config.*  @qwts

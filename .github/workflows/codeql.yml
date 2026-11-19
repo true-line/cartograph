@@ -4,6 +4,11 @@ name: CodeQL
 
 on:
   workflow_call:
+    inputs:
+      image:
+        description: Digest reference of the Linux CI image (ci.yml ci-image)
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -14,6 +19,22 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    # Rust extraction loads the workspace through cargo; the CI image carries
+    # the pinned toolchain and the Tauri libraries, so no language installs
+    # anything per run.
+    container:
+      image: ${{ inputs.image }} # zizmor: ignore[unpinned-images]
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --user 1001
+      # bounded-command runs `${{ github.action_path }}`, which the runner
+      # leaves as the host path in a container (actions/runner#716,
+      # true-line/trueline-agent-ci#8). Mount the work tree there too; a
+      # symlink would not do, as the script's main-module check compares
+      # real paths and silently skips the task.
+      volumes:
+        - /home/runner/work:/home/runner/work
     # Rust extraction outlived 45 minutes on every main push, so it never
     # produced an analysis while holding a heavy slot (#1373). The runtime
     # policy needs a literal timeout, so every language shares Rust's budget
@@ -49,29 +70,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-
-      # Rust extraction loads the workspace through cargo, which the
-      # organisation's Linux runner lacks; rustup from apt resolves the exact
-      # toolchain from rust-toolchain.toml, as in the CI Rust lane.
-      - name: Refresh apt metadata
-        if: matrix.language == 'rust'
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
-        with:
-          task: Refresh rustup apt metadata
-          executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
-          timeout-seconds: '120'
-          attempts: '2'
-          retry-delay-seconds: '5'
-
-      - name: Install rustup
-        if: matrix.language == 'rust'
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
-        with:
-          task: Install rustup
-          executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
-          timeout-seconds: '180'
 
       # Rust extraction builds the workspace on a host whose memory the
       # runners share; it waits for one of two heavy slots (#1242).
