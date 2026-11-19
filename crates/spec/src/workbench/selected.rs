@@ -818,6 +818,32 @@ pub fn compile_spec_selected_with_security(
         ),
     )
 }
+/// Selected compilation with security-output admission and supplied
+/// inputs: the MCP read of `security-view` frames its per-Capability access
+/// table with the overlay's derived Capabilities (AC-0853).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "additive security admission preserves the existing selected compiler arguments"
+)]
+pub fn compile_spec_selected_with_security_supplied(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+    requested_ids: &[&str],
+    limits: SelectedCompileLimits,
+    (security, supplied): (crate::SecurityLimits, Supplied<'_>),
+) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    compile_selected(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected,
+        (requested_ids, limits, Some(security), None, supplied),
+    )
+}
 fn compile_selected(
     nodes: &[Node],
     edges: &[Edge],

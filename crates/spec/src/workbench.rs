@@ -69,7 +69,8 @@ pub use selected::{
     ArtifactDescriptor, ArtifactSelectionError, SelectedArtifactLimit, SelectedArtifactOutcome,
     SelectedCompileLimits, StaleCoverage, Supplied, artifact_catalog, compile_spec_selected,
     compile_spec_selected_supplied, compile_spec_selected_with_coverage,
-    compile_spec_selected_with_security, project_recovered_facts,
+    compile_spec_selected_with_security, compile_spec_selected_with_security_supplied,
+    project_recovered_facts,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::{Borrow, Cow};
