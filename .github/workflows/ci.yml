@@ -661,6 +661,13 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      # bounded-command runs `${{ github.action_path }}`, the runner's host
+      # path, which is not translated in a container; it is mounted at /__w.
+      # (The CI image carries the same link.)
+      - name: Link the runner's host work path
+        working-directory: .
+        run: mkdir -p /home/runner && ln -sfn /__w /home/runner/work
+
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
