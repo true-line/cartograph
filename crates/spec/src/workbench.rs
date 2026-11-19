@@ -973,11 +973,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "b2aa1b6bea244020ce6c60c8c59dba463d29329a3b39317dcbd415e9dbff4818",
+                "7ae5da1de1de81a60bc637d35dd025383218714aa5ddf94981c2e511752371bd",
             ),
             (
                 ExportMode::BestEffort,
-                "9e2e3f47eab29167c58693ee6600dc9cc2eb65937363bbbba5d7bfb79b19dd56",
+                "b845258d5f879c988d45094cb4b95dd37ee3bde0cf4fd678d248c50d30e9b50a",
             ),
         ] {
             let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
@@ -998,7 +998,8 @@ mod tests {
             // coverage limit (#1820). data_model.md prints the citation id of
             // each fact it asserts (#1785, ADR-0058 decision 8): a node table,
             // and Confidence and Citation columns on its relation tables. That
-            // changes only the data-model artifact's bytes. The endpoint
+            // changes only the data-model artifact's bytes, as does its diagram
+            // drawing entities only and its section per entity (#1983). The endpoint
             // permission projection (#1787), the pipeline projection (#1818),
             // the configuration key projection (#1821), the boundary
             // projection (#1788), the environments projection (#1791), the
@@ -1333,6 +1334,101 @@ mod tests {
         );
         assert!(!data.content.contains("res:a"), "{}", data.content);
         assert!(data.assertions.len() >= 5);
+    }
+
+    // AC-0858: the diagram draws entities only; each entity has a section
+    // with its table, columns, related entities and its writers by name.
+    #[test]
+    fn data_model_has_a_section_per_entity_and_draws_entities_only() {
+        use serde_json::json;
+        let mut owner = node(
+            "data:app@sqlalchemy:owners",
+            "DataEntity",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        owner.props["name"] = json!("Owner");
+        owner.props["table"] = json!("owners");
+        let mut pet = node(
+            "data:app@sqlalchemy:pets",
+            "DataEntity",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        pet.props["name"] = json!("Pet");
+        pet.props["table"] = json!("pets");
+        pet.props["columns"] = json!([
+            {"name": "id", "type": "Integer", "primary_key": true},
+            {"name": "owner_id", "type": "Integer", "nullable": false},
+        ]);
+        let mut save = node(
+            "sym:app@pets/repo.py#PetRepository.save",
+            "Symbol",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        save.props["name"] = json!("save");
+        let nodes = vec![owner, pet, save];
+        let references = edge(
+            "data:app@sqlalchemy:pets",
+            "data:app@sqlalchemy:owners",
+            "REFERENCES",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        let mut writes = edge(
+            "sym:app@pets/repo.py#PetRepository.save",
+            "data:app@sqlalchemy:pets",
+            "WRITES",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        writes.props["operations"] = json!(["insert", "update"]);
+        let edges = vec![references.clone(), writes];
+        let bundle = compile_spec(
+            &nodes,
+            &edges,
+            &[],
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        let data = &bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "data-model")
+            .unwrap()
+            .content;
+        let diagram = &data[..data.find("```\n").unwrap()];
+        assert!(diagram.contains("[\"Pet\"]"), "{diagram}");
+        assert!(diagram.contains("-->|REFERENCES|"), "{diagram}");
+        assert!(!diagram.contains("Symbol"), "{diagram}");
+        assert!(!diagram.contains("WRITES"), "{diagram}");
+        let pets =
+            &data[data.find("\n### Pet\n").unwrap()..data.find("## Entities and related").unwrap()];
+        let cite = |key: FactKey| crate::workbench::fact_index::citation_id(&key);
+        for line in [
+            format!(
+                "Stored in `pets`. Cites {}.",
+                cite(FactKey::Node {
+                    id: "data:app@sqlalchemy:pets".into()
+                })
+            ),
+            "| `id` | Integer | primary |  |".to_owned(),
+            "| `owner_id` | Integer |  | false |".to_owned(),
+            format!(
+                "- **References:** Owner ({})",
+                cite(FactKey::Edge {
+                    source: references.src.clone(),
+                    label: references.label.clone(),
+                    destination: references.dst.clone(),
+                })
+            ),
+            "- **Written by** (1 callables): insert/update: `PetRepository.save`".to_owned(),
+        ] {
+            assert!(pets.contains(&line), "{line}\n{pets}");
+        }
+        let owners = &data[data.find("\n### Owner\n").unwrap()..data.find("\n### Pet\n").unwrap()];
+        assert!(owners.contains("- **Referenced by:** Pet ("), "{owners}");
     }
 
     // AC-0847: the data model lists each entity's own columns, cited.
