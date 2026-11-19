@@ -1442,8 +1442,16 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
     assert!(
         best_effort
             .content
-            .contains(&format!("unread callback: onUnread ({home_comp_sym})"))
+            .contains("unread callback: onUnread (`HomeScreen`)")
     );
+    // AC-0857: assumptions, unresolved items and unread callbacks read by
+    // name too; ids stay on the `Id` line.
+    let readable = &best_effort.content[..best_effort.content.find("## Assertions").unwrap()];
+    for line in readable.lines().filter(|l| !l.starts_with("- Id: ")) {
+        for id in ["screen:", "ep:", "sym:", "data:", "test:", "file:", "gap:"] {
+            assert!(!line.contains(id), "{line}\n{readable}");
+        }
+    }
 
     let verified_only = compile_spec(
         &nodes,
@@ -1605,7 +1613,7 @@ fn journey_candidates_cross_hilt_dispatch_as_an_assumption() {
     assert!(
         artifact
             .content
-            .contains(&format!("`{iface_sym} → {impl_sym}`"))
+            .contains("`CreationRemoteDatasource.create → CreationRemoteDatasourceImpl.create`")
     );
     assert!(artifact.content.contains("`hilt_dispatch`"));
 

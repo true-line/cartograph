@@ -1672,13 +1672,22 @@ pub(super) fn journeys(
             let mut unresolved_items: Vec<String> = step
                 .unresolved
                 .iter()
-                .map(|u| format!("{}: {} → {}", u.kind.as_str(), u.source, u.gap_id))
+                .map(|u| {
+                    format!(
+                        "{}: `{}` → {}",
+                        u.kind.as_str(),
+                        names.symbol(&u.source),
+                        names.name(&u.gap_id)
+                    )
+                })
                 .collect();
-            unresolved_items.extend(
-                step.unread_callbacks
-                    .iter()
-                    .map(|u| format!("unread callback: {} ({})", u.param, u.composable)),
-            );
+            unresolved_items.extend(step.unread_callbacks.iter().map(|u| {
+                format!(
+                    "unread callback: {} (`{}`)",
+                    u.param,
+                    names.symbol(&u.composable)
+                )
+            }));
             let unresolved_str = if unresolved_items.is_empty() {
                 "—".to_owned()
             } else {
@@ -1700,11 +1709,18 @@ pub(super) fn journeys(
             for assumption in &candidate.assumptions {
                 // A Hilt dispatch names the interface member it crossed from.
                 let symbol_str = match &assumption.interface {
-                    Some(interface) => format!("{interface} → {}", assumption.symbol),
-                    None => assumption.symbol.clone(),
+                    Some(interface) => format!(
+                        "{} → {}",
+                        names.symbol(interface),
+                        names.symbol(&assumption.symbol)
+                    ),
+                    None => names.symbol(&assumption.symbol),
                 };
                 let param_str = assumption.param.as_deref().unwrap_or("—");
-                let composable_str = assumption.composable.as_deref().unwrap_or("—");
+                let composable_str = assumption
+                    .composable
+                    .as_deref()
+                    .map_or_else(|| "—".to_owned(), |c| names.symbol(c));
                 let registration_str = assumption.registration.as_ref().map_or_else(
                     || "—".to_owned(),
                     |r| format!("{}:{}-{}", r.path, r.byte_start, r.byte_end),
@@ -1715,19 +1731,19 @@ pub(super) fn journeys(
                     assumption
                         .forwarded
                         .iter()
-                        .map(|h| format!("{}.{}", h.composable, h.param))
+                        .map(|h| format!("{}.{}", names.symbol(&h.composable), h.param))
                         .collect::<Vec<_>>()
                         .join(" → ")
                 };
                 writeln!(
                     content,
-                    "| {} | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |",
+                    "| {} | `{}` | {} | `{}` | {} | {} | {} | {} | {} |",
                     Safe(assumption.step),
                     Safe(assumption.kind.as_str()),
-                    Safe(&assumption.screen),
+                    Safe(names.screen(&assumption.screen)),
                     Safe(&symbol_str),
                     Safe(param_str),
-                    Safe(composable_str),
+                    Safe(&composable_str),
                     Safe(&registration_str),
                     Safe(&forwarded_str),
                     Safe(&assumption.limitation)
@@ -1744,7 +1760,7 @@ pub(super) fn journeys(
                 .map(|w| {
                     format!(
                         "`{}` → {}",
-                        names.name(&w.symbol),
+                        names.symbol(&w.symbol),
                         names.table(&w.data_entity)
                     )
                 })
@@ -1786,7 +1802,7 @@ pub(super) fn journeys(
         let tests_str = if candidate.tests.is_empty() {
             "—".to_owned()
         } else {
-            names.list(&candidate.tests, |id| format!("`{}`", names.name(id)))
+            names.list(&candidate.tests, |id| format!("`{}`", names.symbol(id)))
         };
         writeln!(
             content,
@@ -1889,7 +1905,17 @@ impl JourneyNames<'_> {
             Some(node) if matches!(node.label.as_str(), "File" | "Template") => {
                 format!("a link in `{}`", NodeName(node))
             }
-            _ => format!("`{}`", self.name(id)),
+            _ => format!("`{}`", self.symbol(id)),
+        }
+    }
+    /// A callable or test by its qualified name (`CreationRemoteDatasource.create`),
+    /// which its id carries after `#`; another fact by its name.
+    fn symbol(&self, id: &str) -> String {
+        match id.rsplit_once('#') {
+            Some((_, qualified)) if id.starts_with("sym:") || id.starts_with("test:") => {
+                qualified.to_owned()
+            }
+            _ => self.name(id),
         }
     }
     fn list(&self, ids: &[String], show: impl Fn(&str) -> String) -> String {
