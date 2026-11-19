@@ -19,6 +19,31 @@ pub(super) fn select(role: SpecialistId, mode: CompletionCallMode) -> Option<&'s
     })
 }
 
+/// Transport schema for a schema-4 completion role that otherwise sends none
+/// (#1989). Without it a provider may wrap the single JSON action in prose,
+/// which the strict decoder refuses. The host decoder remains authoritative.
+pub(super) fn select_completion(role: SpecialistId) -> Option<String> {
+    (role == SpecialistId::SectionWriterV1).then(|| section_writer_schema().to_owned())
+}
+
+/// The analyst@13 choice schema narrowed to what section-writer@1 offers:
+/// no replay_query action and no proposed_design claims.
+fn section_writer_schema() -> &'static str {
+    static SCHEMA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let mut schema: Value = serde_json::from_str(CHOICE).expect("compiled choice schema");
+        schema["anyOf"]
+            .as_array_mut()
+            .expect("choice actions")
+            .retain(|action| action["properties"]["type"]["const"] != "replay_query");
+        schema["$defs"]["finding"]["properties"]["claim_kind"]["enum"]
+            .as_array_mut()
+            .expect("claim kinds")
+            .retain(|kind| kind != "proposed_design");
+        serde_json::to_string(&schema).expect("schema serializes")
+    })
+}
+
 /// @14/@15 specialize only source fact identity; receipt guards still own ranges.
 /// All callers supply the validated private ledger, never a prompt projection.
 pub(super) fn select_admitted(

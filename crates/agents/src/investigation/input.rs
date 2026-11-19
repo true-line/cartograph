@@ -754,7 +754,7 @@ impl InvestigationInput {
             }
         }
         let mut payload = CompletionPayload {
-            response_schema: None,
+            response_schema: response_schema::select_completion(specialist),
             system: specialist.prompt(),
             prompt: String::new(),
             spans,

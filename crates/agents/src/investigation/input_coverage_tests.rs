@@ -636,5 +636,148 @@ fn selected_policy_input_binds_opt_in_role_contract_and_limits() {
     );
 }
 
+/// A schema-4 section-writer@1 input under the v1 policy (#1989).
+fn section_writer_input(specialist: SpecialistId) -> InvestigationInput {
+    use super::super::obligations::{
+        InventoryTarget, Obligation, ObligationEnvelope, StagedObligationRequest,
+    };
+    use super::super::staged_refusal::ProtectedCompletionMetadata;
+    let policy = &INVESTIGATION_V1_POLICY;
+    let ledger = initial();
+    let proof = ledger.coverage.as_ref().unwrap();
+    let repo = &proof.qualification.repos[0];
+    let mut obligation = Obligation::Inventory {
+        obligation_id: String::new(),
+        target: InventoryTarget {
+            context_id: proof.context_id.clone(),
+            repo: repo.repo.clone(),
+            inventory_hash: repo.inventory_hash.clone().unwrap(),
+        },
+    };
+    let id = obligation.content_id().unwrap();
+    if let Obligation::Inventory { obligation_id, .. } = &mut obligation {
+        *obligation_id = id;
+    }
+    let request = StagedObligationRequest {
+        schema_version: 4,
+        request_nonce: "section-schema".into(),
+        specialist_id: serde_json::to_value(specialist)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .into(),
+        obligations: ObligationEnvelope {
+            schema_version: 1,
+            contract: "investigation-completion-obligations@1".into(),
+            obligations: vec![obligation],
+        },
+        inspection_requirements: None,
+        question: "Draft D1 section 1.1".into(),
+        scope: InvestigationScope::All,
+        provider_mode: InvestigationProviderMode::Local,
+        limit_profile: policy.profile().into(),
+        expected_graph_revision: None,
+        expected_context_id: proof.context_id.clone(),
+        conversation_id: None,
+        parent_id: None,
+    };
+    let metadata = ProtectedCompletionMetadata {
+        schema_version: 1,
+        request_hash: request.intent_hash_with_policy(policy).unwrap(),
+        obligations_hash: request.obligations.fingerprint_with_policy(policy).unwrap(),
+        completed_attempt_ids: vec![],
+        refusal_count: 0,
+        last_refusal_id: None,
+        feedback: None,
+    };
+    let turn = basis(&ledger, None);
+    InvestigationInput::prepare_v7_with_policy(
+        &request.question,
+        specialist,
+        ledger,
+        &[],
+        &[],
+        &[],
+        &InvestigationUsage::default(),
+        &turn,
+        &request,
+        &metadata,
+        &[],
+        policy,
+    )
+    .unwrap()
+}
+
+// AC-0861: a section draft request carries a transport schema that admits
+// exactly the actions section-writer@1 offers, holds a provider to one bare
+// JSON object, travels on every bounded wire and seals unchanged; other
+// schema-4 roles still send none.
+#[test]
+fn section_writer_requests_carry_their_action_schema() {
+    let input = section_writer_input(SpecialistId::SectionWriterV1);
+    let raw = input
+        .payload
+        .response_schema
+        .clone()
+        .expect("section schema");
+    let schema: Value = serde_json::from_str(&raw).unwrap();
+    let actions: Vec<_> = schema["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| {
+            action["properties"]["type"]["const"]
+                .as_str()
+                .or_else(|| action["$ref"].as_str())
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "query_context",
+            "read_evidence",
+            "read_coverage_inventory",
+            "#/$defs/supported_wrapper",
+            "#/$defs/insufficient_wrapper",
+        ]
+    );
+    assert_eq!(
+        schema["$defs"]["finding"]["properties"]["claim_kind"]["enum"],
+        json!([
+            "implemented_behavior",
+            "documented_intent",
+            "inferred_interpretation"
+        ])
+    );
+    assert!(llm::bounded::anthropic_wire_schema(&raw).is_some());
+    assert!(llm::bounded::openai_cloud_wire_schema(&raw).is_some());
+    let provider = llm::OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test-model",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let prepared = llm::EgressFirewall::new(llm::EgressPolicy::default())
+        .prepare_bounded(
+            &provider,
+            &input.action("task:draft".into()).unwrap(),
+            &llm::bounded::CompletionLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.preview().egress.payload.response_schema.as_deref(),
+        Some(raw.as_str())
+    );
+    input.seal_disclosure(&prepared).unwrap();
+    assert!(
+        section_writer_input(SpecialistId::DomainAnalystV7)
+            .payload
+            .response_schema
+            .is_none()
+    );
+}
+
 #[path = "input_capacity_tests.rs"]
 mod capacity_tests;

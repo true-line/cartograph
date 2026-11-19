@@ -69,6 +69,7 @@ struct Scripted {
     cancel: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     copied: Mutex<Vec<String>>,
     prompts: Mutex<Vec<Value>>,
+    schema: bool,
 }
 impl Scripted {
     fn new(mode: Mode) -> Self {
@@ -78,12 +79,24 @@ impl Scripted {
             cancel: Mutex::new(None),
             copied: Mutex::new(vec![]),
             prompts: Mutex::new(vec![]),
+            schema: true,
+        }
+    }
+    /// A provider that cannot carry a bounded response schema.
+    fn without_schema(mode: Mode) -> Self {
+        Self {
+            schema: false,
+            ..Self::new(mode)
         }
     }
 }
 impl LlmProvider for Scripted {
     fn id(&self) -> &str {
         "local-scripted"
+    }
+    /// Like the Ollama endpoint it stands in for (#1989).
+    fn supports_bounded_response_schema(&self) -> bool {
+        self.schema
     }
     fn locality(&self) -> Locality {
         Locality::Local
