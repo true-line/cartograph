@@ -204,9 +204,12 @@ In version 1 of the table a frame is one of four things: every admitted
 non-Gap node of a label, each with its tier, confidence and citation id
 (§1.2 `Actor`, §1.3 `Capability`); a summary of the traced flows (§1.6); the
 count of Gap findings (§1.8); or a reference to the artifacts of the same
-export that hold the statements (§1.4, §1.5). A business rule is rendered
-only by the rule inventory, under its disclosure policy, and is never
-repeated in the document. `verified-only` prints no claim and states per
+export that hold the statements (§1.4, §1.5). A business rule's full
+observation is rendered only by the rule inventory, under its disclosure
+policy. When the export has derived Capabilities, §1.5 also lists, per
+Capability, the rejection exits its handlers reach (AC-0849): owner,
+stored sanitized conditions, outcome and citation, never dependencies or
+source text. `verified-only` prints no claim and states per
 section how many were left out. Existing artifacts are byte-identical,
 except the fact index: `fact-index.md` and `fact-index.json` name the
 document among the artifacts citing each fact its frames print.
