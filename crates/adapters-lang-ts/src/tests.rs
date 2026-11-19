@@ -5612,9 +5612,9 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
     );
 }
 
-// Test code yields no product Endpoint (#1250's rule for TS): Vendure's
-// `e2e/fixtures/test-plugins/*.ts` controllers and `*.e2e-spec.ts` files
-// were documented as the system's own routes.
+// AC-0848: test code yields no product Endpoint (#1250's rule for TS):
+// Vendure's `e2e/fixtures/test-plugins/*.ts` controllers and
+// `*.e2e-spec.ts` files were documented as the system's own routes.
 #[test]
 fn test_trees_yield_no_product_endpoints() {
     const CONTROLLER: &[u8] = br#"
@@ -5658,4 +5658,25 @@ export class TestController {
     ] {
         assert_eq!(endpoints(path), ["ep:qwtm/example@GET:/run-job"], "{path}");
     }
+}
+
+// AC-0848: a fixture that is itself a Next.js package routes nothing; its
+// deferred route sites are dropped, not completed at the walk's end.
+#[test]
+fn a_next_fixture_in_a_test_tree_routes_nothing() {
+    let package = r#"{ "dependencies": { "next": "15.0.0" } }"#;
+    let route = "export default function ping(req, res) { res.json({}); }\n";
+    let out = extract_tree(&[
+        ("__fixtures__/site/package.json", package),
+        ("__fixtures__/site/pages/api/ping.ts", route),
+        ("web/package.json", package),
+        ("web/pages/api/ping.ts", route),
+    ]);
+    let next: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint" && n.props["framework"] == "next")
+        .filter_map(|n| n.props["prov"]["evidence"][0]["path"].as_str())
+        .collect();
+    assert_eq!(next, ["web/pages/api/ping.ts"]);
 }

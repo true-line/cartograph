@@ -159,8 +159,9 @@ const TEST_TREES: &[&str] = &[
 ];
 
 /// Whether `path` is test code: a test file, or any file under a test tree
-/// directory. Its sources never ship, so it yields no product Endpoint, the
-/// rule JVM test source sets follow (#1250).
+/// directory. Its sources never ship, so it yields no product Endpoint
+/// (AC-0848, #1250). Unlike JVM source sets (AC-0431), a top-level `test`
+/// directory is a test tree here.
 pub(crate) fn in_test_tree(path: &str) -> bool {
     let mut segments: Vec<&str> = path.split(['/', '\\']).collect();
     segments.pop();
