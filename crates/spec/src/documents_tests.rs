@@ -228,6 +228,29 @@ fn the_bounds_hold_and_every_skip_is_counted_with_its_reason() {
 }
 
 #[test]
+fn references_that_differ_only_in_secret_text_stay_two_entries() {
+    let markdown = "# Shop\n\n[a](keys/password=aaaa1111.md) and \
+        [b](keys/password=bbbb2222.md)\n";
+    let (nodes, edges) = pass(markdown);
+    let drift: Vec<&Node> = nodes.iter().filter(|node| node.label == "Drift").collect();
+    assert_eq!(drift.len(), 2);
+    assert_ne!(drift[0].id, drift[1].id);
+    for node in &drift {
+        assert_eq!(node.props["occurrences"], 1, "{}", node.id);
+        assert_eq!(node.props["key"], drift[0].props["key"]);
+        for secret in ["aaaa1111", "bbbb2222"] {
+            assert!(!node.id.contains(secret), "{}", node.id);
+            assert!(!node.props.to_string().contains(secret), "{}", node.id);
+        }
+    }
+    for edge in &edges {
+        for secret in ["aaaa1111", "bbbb2222"] {
+            assert!(!edge.src.contains(secret), "{}", edge.src);
+        }
+    }
+}
+
+#[test]
 fn a_title_or_heading_holding_a_secret_is_stored_redacted() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

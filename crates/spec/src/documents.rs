@@ -934,11 +934,8 @@ pub fn documentation_drift(
         let Some((kind, key)) = found else {
             continue;
         };
-        // The route or path is stored and is part of the identity, so it is
-        // redacted like a heading (AC-0680).
-        let stored = core_redact::redact_text(&key).0;
         let finding = findings
-            .entry((reference.path.as_str(), kind, stored))
+            .entry((reference.path.as_str(), kind, key.clone()))
             .or_insert_with(|| Finding {
                 reference,
                 compared: key,
@@ -963,11 +960,25 @@ pub fn documentation_drift(
     };
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-    for ((document, kind, key), finding) in findings {
-        let id = format!(
-            "drift:documentation:{repo}@{document}:{}:{key}",
-            kind.code()
-        );
+    for ((document, kind, raw), finding) in findings {
+        // The route or path is stored and is part of the identity, so it is
+        // redacted like a heading (AC-0680). Two keys that differ only in
+        // secret text stay two entries: the id carries a digest of the key
+        // as compared, never the secret itself.
+        let key = core_redact::redact_text(&raw).0;
+        let id = if key == raw {
+            format!(
+                "drift:documentation:{repo}@{document}:{}:{key}",
+                kind.code()
+            )
+        } else {
+            let digest = blake3::hash(raw.as_bytes()).to_hex();
+            format!(
+                "drift:documentation:{repo}@{document}:{}:{}:{key}",
+                kind.code(),
+                &digest[..16]
+            )
+        };
         let cited: Vec<EvidenceRef> = finding
             .spans
             .iter()
@@ -1013,7 +1024,7 @@ pub fn documentation_drift(
                 "reference": core_redact::redact_text(&finding.reference.text).0,
                 "compared": core_redact::redact_text(&compared).0,
                 "occurrences": finding.spans.len(),
-                "prov": inferred(cited.clone(), &hashed(&(kind.code(), repo, document, &key))),
+                "prov": inferred(cited.clone(), &hashed(&(kind.code(), repo, document, if key == raw { &key } else { &id }))),
             }),
         });
         for section in finding.sections.iter().take(MAX_DRIFT_LINKS) {
