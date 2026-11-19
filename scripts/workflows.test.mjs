@@ -602,6 +602,7 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
     assert.match(lane, /needs: \[[^\]]*\bci-image\b[^\]]*\]/u, name);
     assert.match(lane, /container:\n(?: +#.*\n)* +image: \$\{\{ needs\.ci-image\.outputs\.image \}\} # zizmor: ignore\[unpinned-images\]\n/u, name);
     assert.match(lane, /options: --user 1001\n/u, name);
+    assert.match(lane, /volumes:\n +- \/home\/runner\/work:\/home\/runner\/work\n/u, name);
     assert.doesNotMatch(lane, /apt-get|apt-mirrors/u, name);
   }
   const complete = job('complete');
@@ -615,6 +616,9 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
   const playwright = lock.packages['node_modules/playwright'].version;
   assert.match(frontend, new RegExp(`image: mcr\\.microsoft\\.com/playwright:v${playwright.replaceAll('.', '\\.')}-noble@sha256:[0-9a-f]{64}\n`, 'u'));
   assert.doesNotMatch(frontend, /apt-get|apt-mirrors|playwright install/u);
+  // bounded-command needs the host work path itself, mounted, not linked.
+  assert.match(frontend, /volumes:\n +- \/home\/runner\/work:\/home\/runner\/work\n/u);
+  assert.doesNotMatch(workflow, /ln -s/u);
   // Advanced CodeQL, Rust extraction included, runs in the CI image too.
   const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
   assert.match(codeql, /container:\n +image: \$\{\{ inputs\.image \}\} # zizmor: ignore\[unpinned-images\]\n/u);

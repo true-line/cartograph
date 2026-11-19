@@ -28,6 +28,13 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ github.token }}
       options: --user 1001
+      # bounded-command runs `${{ github.action_path }}`, which the runner
+      # leaves as the host path in a container (actions/runner#716,
+      # true-line/trueline-agent-ci#8). Mount the work tree there too; a
+      # symlink would not do, as the script's main-module check compares
+      # real paths and silently skips the task.
+      volumes:
+        - /home/runner/work:/home/runner/work
     # Rust extraction outlived 45 minutes on every main push, so it never
     # produced an analysis while holding a heavy slot (#1373). The runtime
     # policy needs a literal timeout, so every language shares Rust's budget

@@ -31,9 +31,4 @@ RUN cd /opt/toolchain \
 # job writes to the mounted workspace stay owned by the runner.
 RUN useradd --uid 1001 --create-home ci \
  && chown -R 1001:1001 "$RUSTUP_HOME"
-
-# Composite actions that run `${{ github.action_path }}` get the runner's
-# host path (/home/runner/work/_actions/...), which the runner does not
-# translate for container jobs; the same tree is mounted at /__w.
-RUN mkdir -p /home/runner && ln -s /__w /home/runner/work
 USER 1001
