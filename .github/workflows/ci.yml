@@ -183,17 +183,18 @@ jobs:
   ci-image:
     name: Linux CI image
     needs: [policy, merge-evidence, preflight-evidence]
+    # Advanced CodeQL runs in the image too, and on every full or post-merge
+    # lane, so the image is named whenever CodeQL runs.
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
-      ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
-      (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
+      (needs.policy.outputs.run_post_merge == 'true' || needs.policy.outputs.run_full == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     outputs:
-      image: ${{ steps.tag.outputs.image }}
+      image: ${{ steps.image.outputs.image }}
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -216,19 +217,25 @@ jobs:
           TOKEN: ${{ github.token }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
 
-      # The build context is the two inputs the tag hashes, nothing else.
+      # The build context is the two inputs the tag hashes, nothing else. The
+      # lanes get the image by digest, so a re-pushed tag never changes what
+      # an in-flight run executes.
       - name: Build and push the image when its tag is missing
+        id: image
         env:
           IMAGE: ${{ steps.tag.outputs.image }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
         run: |
           if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
             echo "Reusing $IMAGE"
-            exit 0
+          else
+            tar -c ci/linux.Dockerfile rust-toolchain.toml |
+              docker build --label "org.opencontainers.image.source=$SOURCE" -f ci/linux.Dockerfile -t "$IMAGE" -
+            docker push "$IMAGE"
           fi
-          tar -c ci/linux.Dockerfile rust-toolchain.toml |
-            docker build --label "org.opencontainers.image.source=$SOURCE" -f ci/linux.Dockerfile -t "$IMAGE" -
-          docker push "$IMAGE"
+          digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE")
+          case "$digest" in sha256:*) ;; *) echo "::error::No digest for $IMAGE"; exit 1 ;; esac
+          echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
 
   # Rust core: format, lint-as-error, tests. The pinned toolchain comes from
   # rust-toolchain.toml; the commands and stable context are unchanged.
@@ -243,7 +250,8 @@ jobs:
     # with the CI image (see ci-image).
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.ci-image.outputs.image }}
+      # A digest reference: ci-image resolves the hashed tag to its digest.
+      image: ${{ needs.ci-image.outputs.image }} # zizmor: ignore[unpinned-images]
       credentials:
         username: ${{ github.actor }}
         password: ${{ github.token }}
@@ -262,9 +270,8 @@ jobs:
     # No repo-wide lane group: GitHub keeps one pending job per group, so a
     # third queued PR cancelled the one already waiting (#669). The
     # workflow-level group supersedes a PR's own older run; across PRs the
-    # self-hosted pool is the backpressure. The runners share one host, so
-    # every package-manager step (apt, Playwright --with-deps) holds one
-    # host-wide flock, waiting for it within the step's timeout.
+    # self-hosted pool is the backpressure. No lane installs packages per
+    # run; the libraries come with the CI image.
     # Several runners share one host's memory; cargo's default of one rustc
     # per CPU exhausts it while compiling the workspace.
     env:
@@ -457,7 +464,8 @@ jobs:
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.ci-image.outputs.image }}
+      # A digest reference: ci-image resolves the hashed tag to its digest.
+      image: ${{ needs.ci-image.outputs.image }} # zizmor: ignore[unpinned-images]
       credentials:
         username: ${{ github.actor }}
         password: ${{ github.token }}
@@ -520,7 +528,8 @@ jobs:
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.ci-image.outputs.image }}
+      # A digest reference: ci-image resolves the hashed tag to its digest.
+      image: ${{ needs.ci-image.outputs.image }} # zizmor: ignore[unpinned-images]
       credentials:
         username: ${{ github.actor }}
         password: ${{ github.token }}
@@ -634,8 +643,12 @@ jobs:
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
       (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
     runs-on: ubuntu-latest
-    # Playwright's --with-deps runs apt + a CDN download — same hang risk
-    # as the Tauri dependency step (#343).
+    # Playwright's own image carries Chromium and its system libraries, so
+    # the lane runs no apt and no browser download. Its tag must match the
+    # locked playwright version (scripts/workflows.test.mjs checks it).
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.0-noble@sha256:9beb546099e11f52d62e505537914870e01a67e0e6b00ae41da4775324e73dbe
+      options: --ipc=host
     timeout-minutes: 30
     # No repo-wide lane group, as for the Rust lane (#669).
     defaults:
@@ -666,34 +679,6 @@ jobs:
           attempts: '2'
           retry-delay-seconds: '5'
 
-      # The image's mirror list starts with the region's EC2 mirror, which
-      # stalled on single archives (#1924); list the primary archive alone, so
-      # the index apt-get update reads and the archives it fetches come from
-      # one mirror (two mirrors at different freshness gave 404s).
-      # Playwright's --with-deps calls apt-get without our options, so set
-      # them in apt.conf.d: a retry waits for a timed-out attempt's dpkg
-      # lock instead of failing at once (#1924).
-      - name: Prefer faster Ubuntu mirrors
-        working-directory: .
-        run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf '%s\n' http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
-            sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
-          fi
-          printf '%s\n' 'DPkg::Lock::Timeout "180";' 'Acquire::Retries "5";' 'Acquire::ForceIPv4 "true";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > "$RUNNER_TEMP/99-ci-apt"
-          sudo cp "$RUNNER_TEMP/99-ci-apt" /etc/apt/apt.conf.d/99-ci-apt
-
-      - name: Install Playwright browser (for story tests)
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
-        with:
-          task: Install Playwright Chromium and system dependencies
-          executable: flock
-          arguments-json: '["-w","150","/tmp/cartograph-ci-packages.lock","npx","playwright","install","--with-deps","chromium"]'
-          working-directory: ui
-          timeout-seconds: '300'
-          attempts: '2'
-          retry-delay-seconds: '5'
-
       - name: Lint
         run: npm run lint
 
@@ -711,7 +696,7 @@ jobs:
   # check rollup, which never includes the preflight run's contexts (#440).
   codeql:
     name: Advanced CodeQL
-    needs: [policy, merge-evidence, preflight-evidence]
+    needs: [policy, merge-evidence, preflight-evidence, ci-image]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
       (needs.policy.outputs.run_post_merge == 'true' || needs.policy.outputs.run_full == 'true')
@@ -721,6 +706,8 @@ jobs:
       packages: read
       security-events: write
     uses: ./.github/workflows/codeql.yml
+    with:
+      image: ${{ needs.ci-image.outputs.image }}
 
   workflow-runtime:
     name: Workflow runtime policy
