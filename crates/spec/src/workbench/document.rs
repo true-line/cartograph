@@ -42,6 +42,7 @@
 //! nodes and edges finds the cited facts; with no such draft nothing is
 //! indexed or walked.
 
+use super::capabilities::{Stories, Story, Support};
 use super::catalogue::{
     CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
     catalogue_sections,
@@ -611,11 +612,129 @@ impl Drafted<'_, '_> {
     }
 }
 
+/// The Endpoints a derived story cites, in citation order.
+fn cited_endpoints<'s, 'a>(story: &'s Story<'a>) -> impl Iterator<Item = &'a Node> + 's {
+    story.support.iter().filter_map(|(_, fact)| match fact {
+        Support::Node(node) if node.label == "Endpoint" => Some(*node),
+        _ => None,
+    })
+}
+
+/// The knowledge layer's derived facts of `label` (#1443): Capabilities as
+/// one row each with the operations they group, Actor caller sets grouped
+/// by the permissions they list. Each printed fact is cited once. They are
+/// Semantic / InferredWeak: derived by rule from the cited base facts.
+fn derived_frame(
+    label: &str,
+    knowledge: &Stories<'_>,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    let stories: Vec<&Story<'_>> = knowledge
+        .included
+        .iter()
+        .filter(|s| s.node.label == label)
+        .collect();
+    for story in &stories {
+        let id = citation_id(&FactKey::Node {
+            id: story.node.id.clone(),
+        });
+        if asserted.insert(id) {
+            assertions.node(story.node, None)?;
+        }
+    }
+    if label == "Actor" {
+        // Caller sets by the permissions they list: one role per set.
+        let operations: BTreeMap<&str, &Node> = knowledge
+            .included
+            .iter()
+            .flat_map(cited_endpoints)
+            .map(|endpoint| (endpoint.id.as_str(), endpoint))
+            .collect();
+        let mut roles: BTreeMap<Vec<&str>, Vec<String>> = BTreeMap::new();
+        for story in &stories {
+            let any_of: Vec<&str> = story.node.props["any_of"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            let endpoint = story.node.props["endpoint_id"].as_str().unwrap_or_default();
+            let operation = operations
+                .get(endpoint)
+                .map_or_else(|| endpoint.to_owned(), |n| NodeName(n).to_string());
+            let listed = roles.entry(any_of).or_default();
+            if !listed.contains(&operation) {
+                listed.push(operation);
+            }
+        }
+        writeln!(
+            out,
+            "Derived caller roles: {} permission sets over {} guarded operations. A caller \
+             holding any one listed permission is admitted. Assumed from each guard's \
+             convention (Semantic / InferredWeak), not effective runtime authorization or an \
+             identified user; `user_stories.md` lists each operation's caller set.\n",
+            roles.len(),
+            stories.len()
+        )?;
+        out.push_str("| Any of | Operations | Examples |\n|---|---|---|\n")?;
+        for (any_of, operations) in &roles {
+            let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
+            let more = operations.len() - shown.len();
+            writeln!(
+                out,
+                "| {} | {} | {}{} |",
+                Literal(any_of.join(", ")),
+                operations.len(),
+                Literal(shown.join("; ")),
+                if more > 0 {
+                    format!("; and {more} more")
+                } else {
+                    String::new()
+                }
+            )?;
+        }
+    } else {
+        writeln!(
+            out,
+            "Derived Capabilities: {}. Each groups the operations one controller or resolver \
+             serves (Semantic / InferredWeak, derived by rule from the cited facts); \
+             `user_stories.md` states them as stories.\n",
+            stories.len()
+        )?;
+        out.push_str("| Capability | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
+        for story in &stories {
+            let operations: Vec<String> = cited_endpoints(story)
+                .map(|n| NodeName(n).to_string())
+                .collect();
+            let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
+            let more = operations.len() - shown.len();
+            writeln!(
+                out,
+                "| {} | {} | {}{} | {} |",
+                Literal(NodeName(story.node)),
+                operations.len(),
+                Literal(shown.join("; ")),
+                if more > 0 {
+                    format!("; and {more} more")
+                } else {
+                    String::new()
+                },
+                citation_id(&FactKey::Node {
+                    id: story.node.id.clone(),
+                })
+            )?;
+        }
+    }
+    Ok(stories.len())
+}
+
 pub(super) fn d1(
     (nodes, edges): (&[&Node], &[&Edge]),
     flows: &[Flow],
     gaps: usize,
     (curated, graph_content_hash): (Curated<'_>, Option<&str>),
+    knowledge: Option<&Stories<'_>>,
     mode: ExportMode,
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
@@ -687,13 +806,37 @@ pub(super) fn d1(
             section.kind.mark()
         )?;
         if let Some(source) = section.frame {
-            cited += frame(
-                section,
-                source,
-                (nodes, flows, gaps),
-                (&mut assertions, &mut drafted.asserted),
-                &mut content,
-            )?;
+            // The knowledge layer's derived Capabilities and Actor caller
+            // sets frame 1.2 and 1.3 beside the base facts (#1443).
+            let derived = match source {
+                SectionFrame::Nodes(label) => knowledge.map_or(0, |k| {
+                    k.included.iter().filter(|s| s.node.label == label).count()
+                }),
+                _ => 0,
+            };
+            let base = match source {
+                SectionFrame::Nodes(label) => framed(nodes, label).len(),
+                _ => 0,
+            };
+            if derived == 0 || base > 0 {
+                cited += frame(
+                    section,
+                    source,
+                    (nodes, flows, gaps),
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
+            }
+            if let (SectionFrame::Nodes(label), Some(knowledge)) = (source, knowledge)
+                && derived > 0
+            {
+                cited += derived_frame(
+                    label,
+                    knowledge,
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
+            }
         }
         match section.kind {
             SectionKind::Projected => {}

@@ -299,6 +299,24 @@ Helm values files (the coverage document lists each kind it found as present
 and not read); Terraform resources per environment; the combined result of
 several Compose files; which environment is production; and live state.
 
+## Bundle manifest
+
+Every export includes **bundle-manifest.md**. Open it first when you hand an
+export to someone else. No model is involved.
+
+- **As-of** says what the export was made from: the document catalogue
+  version, the export mode, the graph content hash, the curated revision,
+  and each source with the revision it was read at. Two exports with the
+  same as-of hold the same files.
+- **Parts** lists every file of the export once, under the part of the
+  handoff bundle it belongs to: documents, rules, the traceability matrix,
+  the gap register, the fact index and the as-of.
+
+The manifest says nothing about your system and cites no fact. Work packets
+are not listed, because you generate and export each one on its own. When
+the app reads one file on its own without the review store, a value it did
+not read is shown as "not supplied".
+
 ## Documentation evidence
 
 Every export includes **documentation-evidence.md**. It lists the
@@ -386,6 +404,11 @@ product specification is listed with its kind and every draft stored for it.
   the same consent and limits as any investigation.
 - A draft shows its claims, each marked **T3 / InferredWeak** with its
   citation ids. Selecting a citation id opens the fact index.
+- A run stores no draft when one of its statements spells out a file path
+  or a code name (such as `create_order` or `OrderService`) of a fact that
+  statement cites. A requirement says what the system does, not where the
+  code is; the code stays in the citation. Run the draft again. Routes,
+  field names and message names may be stated.
 - **Accept**, **Reject** and **Return** record your decision with an
   optional note. A decision changes no claim. If the draft changed since the
   view was read, the decision is refused and the view is read again.

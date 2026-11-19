@@ -66,6 +66,9 @@ const D1_ID: &str = "d1-product-specification";
 
 /// The two projections of the stored coverage inventories (AC-0592).
 const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];
+/// The bundle manifest, which states the graph hash, curated revision and
+/// source revisions the export was compiled from (AC-0682).
+const MANIFEST_ID: &str = "bundle-manifest";
 
 /// The artifacts an MCP reader may select: the compiler's catalogue without
 /// the ids in [`NOT_READABLE`], and the structured form of the curated
@@ -171,11 +174,16 @@ impl ReadSession {
                 },
             )
             .map_err(|_| ReadError::Storage)?
-        } else if id == curated_read::ARTIFACT_ID || id == D1_ID || COVERAGE_IDS.contains(&id) {
+        } else if id == curated_read::ARTIFACT_ID
+            || id == D1_ID
+            || id == MANIFEST_ID
+            || COVERAGE_IDS.contains(&id)
+        {
             // The selected compiler the desktop single-artifact read uses,
             // supplied as the export supplies it. `curated.md` and the D1
             // document read the projection this session computed and no
-            // coverage inventory.
+            // coverage inventory, as does the bundle manifest, which states
+            // the graph hash, curated revision and source revisions.
             // The coverage artifacts (#1814, AC-0657) read the inventories
             // of this session's own bounded read, borrowed, and no
             // projection. Neither reads a security projection.
@@ -185,6 +193,37 @@ impl ReadSession {
             } else {
                 Vec::new()
             };
+            // D1 frames the derived Capabilities and caller roles beside its
+            // base sections (AC-0663); a refused overlay leaves it without
+            // them rather than failing the read.
+            let candidates = if id == D1_ID {
+                self.capabilities
+                    .iter()
+                    .map(|f| match &f.item {
+                        core_graph::overlay::OverlayItem::Node(capability) => {
+                            Some(spec::CapabilityStory {
+                                capability,
+                                cites: &f.cites,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            };
+            let knowledge = candidates
+                .filter(|c| !c.is_empty() || !self.actors.is_empty())
+                .and_then(|candidates| {
+                    spec::validate_knowledge_stories(
+                        &self.base,
+                        &candidates,
+                        &self.actors,
+                        self.basis.export_mode,
+                        &self.rejected_hashes,
+                    )
+                    .ok()
+                });
             spec::compile_spec_selected_supplied(
                 &self.base.graph.0,
                 &self.base.graph.1,
@@ -194,7 +233,7 @@ impl ReadSession {
                 &[id],
                 compile_limits,
                 spec::Supplied {
-                    knowledge: None,
+                    knowledge: knowledge.as_ref(),
                     coverage: if coverage { &self.recorded } else { &[] },
                     stale_coverage: &stale,
                     curated: if coverage {
@@ -204,6 +243,8 @@ impl ReadSession {
                     },
                     // The D1 header states it, computed or not (AC-0663).
                     graph_content_hash: (!coverage).then_some(self.graph_content_hash.as_str()),
+                    // The bundle manifest states them (AC-0682).
+                    source_revisions: (!coverage).then_some(self.source_revisions.as_slice()),
                 },
             )
             .map_err(|_| ReadError::InvalidRequest)?

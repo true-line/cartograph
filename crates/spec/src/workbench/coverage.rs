@@ -1403,6 +1403,7 @@ mod tests {
                     stale_coverage: stale,
                     curated: crate::Curated::NotSupplied,
                     graph_content_hash: None,
+                    source_revisions: None,
                 },
             )
             .unwrap()

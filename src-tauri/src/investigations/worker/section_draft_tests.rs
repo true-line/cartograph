@@ -333,6 +333,121 @@ fn a_stale_accepted_draft_is_re_drafted_as_its_successor() {
     assert_eq!(replaced(&state), Some(staged.draft_id.clone()));
 }
 
+// AC-0684 (T-0684): an outside agent starts `section-writer@1` over the
+// granted MCP adapter under the same address check, and the result read
+// says whether the run staged a draft. Reading again stages nothing more.
+#[test]
+fn an_mcp_session_starts_a_drafting_run_and_reads_its_outcome() {
+    use crate::investigations::mcp_dispatch::TaskDispatcher;
+    use crate::mcp_reads::{ReadError, task_reservation::TaskReservations};
+    use agents::investigation::McpTaskActivation;
+    use mcp_local::work_budget::{WorkBudget, WorkLimits};
+    use mcp_wire::tools::TaskTool;
+    use serde_json::{Value, json};
+
+    let provider = Arc::new(Scripted::new(Mode::CompletionSupported));
+    let question =
+        drafting_question(spec::CATALOGUE_VERSION, "D1", "1.5", spec::SYSTEM_SCOPE).unwrap();
+    let fixture = CompletionFixture::with_question(
+        &*provider,
+        SpecialistId::SectionWriterV1,
+        true,
+        true,
+        &question,
+    );
+    // The start below dispatches a detached worker.
+    fixture.base.app.retain_for_external_use();
+    let app = fixture.base.app.handle();
+    let state = app.state::<AppState>();
+    // Retire the fixture's own task: the session starts its own.
+    {
+        let mut jobs = state.jobs.lock().unwrap();
+        jobs.cancel_investigation(&fixture.id).unwrap();
+        let revision = jobs.investigation(&fixture.id).unwrap().summary.revision;
+        jobs.advance_investigation(
+            &fixture.execution,
+            revision,
+            InvestigationTransition::StopWithElapsed {
+                reason: InvestigationStopReason::Cancelled,
+                active_milliseconds: 0,
+            },
+        )
+        .unwrap();
+    }
+    state.investigations.remove(&fixture.id);
+    let mut request = fixture.request.clone();
+    request.request_nonce = "mcp-drafting-start".into();
+    state
+        .investigations
+        .set_test_provider(request.provider_mode, provider.clone());
+
+    let one = std::num::NonZeroUsize::new(1).unwrap();
+    let client = state
+        .jobs
+        .lock()
+        .unwrap()
+        .create_mcp_client(std::num::NonZeroUsize::new(2).unwrap())
+        .unwrap();
+    let grant = McpTaskActivation::granted(client, one);
+    let budget = WorkBudget::new(WorkLimits {
+        max_workers: one,
+        max_reserved_bytes: one,
+        max_cumulative_read_bytes: 0,
+    });
+    let dispatcher = TaskDispatcher::new(
+        grant.session(),
+        TaskReservations::from(Arc::new(budget.try_acquire(one, 0).unwrap())),
+    );
+    let call = |tool, args: Value| {
+        dispatcher.call(
+            app,
+            &json!("request"),
+            tool,
+            args.as_object().unwrap().clone(),
+            crate::mcp_reads::worker::tests::task_read_limits(),
+            256 * 1024,
+        )
+    };
+
+    // A question that names no drafted section is refused before a task.
+    let mut unaddressed = request.clone();
+    unaddressed.question = "Draft something about checkout.".into();
+    assert_eq!(
+        call(TaskTool::Start, json!({ "request": unaddressed })),
+        Err(ReadError::InvalidRequest)
+    );
+
+    let started = call(TaskTool::Start, json!({ "request": request })).unwrap();
+    let id = started["result"]["structuredContent"]["investigation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while status(&state, &id) != InvestigationStatus::Completed {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            status(&state, &id)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let reply = call(TaskTool::Result, json!({ "task_id": id })).unwrap();
+    let drafts = stored(&state);
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].origin.role, "section-writer@1");
+    assert_eq!(
+        reply["result"]["structuredContent"]["drafting"],
+        json!({ "outcome": "staged", "draft_id": drafts[0].draft_id })
+    );
+    assert!(reply["result"]["structuredContent"]["result"].is_object());
+    assert_eq!(
+        call(TaskTool::Result, json!({ "task_id": id })).unwrap(),
+        reply
+    );
+    assert_eq!(stored(&state), drafts);
+}
+
 // AC-0668: a draft is staged only against the graph snapshot its run froze.
 // A cited fact that keeps its id but changes content after the run (a
 // re-ingest, or a retry after the store failed) stages nothing.

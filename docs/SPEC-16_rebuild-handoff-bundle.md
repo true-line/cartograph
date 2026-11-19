@@ -47,11 +47,13 @@ is a correct bundle. A bundle that hides a gap is not.
 | 5. Gap register | D11 §11.2, `gap_register.md` and `gap_register.json`, plus each document's known gaps and `coverage.md` for what was read and skipped | Exported |
 | 6. Fact index | D11 §11.7, `fact-index.md` and `fact-index.json`: one row per cited fact with its tier, confidence, method and source span | Exported; export fails if a cited id has no row |
 | 7. Work packets | Zero or more SPEC-11 packets, each exported as its own file beside the bundle | Generated locally on request. Execution state is `Unoffered`: a packet in a bundle is a proposal and grants no authority |
-| 8. As-of | The values above | The D1 header prints the catalogue version, export mode, graph content hash and curated revision; `curated.md` prints the curated revision and the graph basis |
+| 8. As-of | The values above, and the list of files by part | `bundle-manifest.md` states all five values and lists every exported file under its part (AC-0682). The D1 header and `curated.md` repeat the hash and the curated revision |
 
 The bundle is what the existing export writes, read under this definition.
-No new file is required for a bundle to exist. A manifest that lists the
-parts in one place is an open item.
+`bundle-manifest.md` lists the parts and the as-of in one place. It is a
+listing: it reads no fact, asserts nothing about the system and cites
+nothing, and a value the host did not supply is stated as not supplied.
+Work packets are not in it, because the export does not write them.
 
 ## Rules for every statement
 
@@ -79,8 +81,19 @@ parts in one place is an open item.
 6. **Rationale is not invented.** Why a decision was made is written only
    where a target document states it (catalogue default 2).
 
-Rule 3 is checked by review today. A deterministic check that a drafted
-statement contains no path or symbol of the cited source is an open item.
+Rule 3 has one deterministic check (AC-0683). When a drafting run ends, a
+draft is not staged if any statement spells out, as a whole token, an
+identifier of a fact that statement cites: a path of the fact's evidence,
+the file name of that path, or the name of a cited code declaration when
+the name is shaped like code (it holds `_`, `::`, `.`, `#` or `(`, or a
+lower-case letter directly followed by an upper-case one). The run reports
+`statement_names_source` and nothing is stored. A documentation file a
+claim reports on is not an implementation identifier.
+
+The check decides only what a rule can decide. A single plain word is not
+told apart from a domain term, framework terms are not listed, and an
+identifier of a fact the statement does not cite is not compared. Those
+remain for the reviewer, under question 15.
 
 ## Sufficiency checklist
 
@@ -134,10 +147,10 @@ sections. Question 4 is asked of the alias lifecycle capability set.
 - D2 to D10 are not compiled as catalogue documents. Until they are, a
   reviewer finds their content under the current artifact names, and
   questions 7 to 11 are answered from those files.
-- The bundle has no manifest file listing its parts and its as-of in one
-  place.
 - Work packets are exported one at a time; nothing collects the packets
   that belong to one bundle.
-- Rule 3 has no deterministic check.
+- The rule 3 check covers paths and code-shaped symbol names of cited
+  facts only. Plain-word symbol names and framework terms are left to
+  review.
 - The D1 header does not yet carry the system name or source revisions
-  (SPEC-15 open items); the as-of is complete only with `curated.md`.
+  (SPEC-15 open items); the complete as-of is in `bundle-manifest.md`.

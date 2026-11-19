@@ -231,7 +231,7 @@ The existing documents do not print the id beside each statement yet; that
 is added one document at a time. Until a document prints its citations, it
 may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's twenty-seven artifacts go
+## 3. Where today's twenty-eight artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -256,9 +256,10 @@ may only make statements whose evidence one of §11.1 to §11.5 already holds.
 | `documentation-evidence.md` | No section of its own. It lists the target's documentation files, their sections and the facts each names (SPEC-18, ADR-0065); D1 §1.1, D3 §3.4 and D10 §10.2 draw on those sections through `documented_intent` claims |
 | `curated.md` | No section of its own. It lists the accepted proposals and their states (SPEC-12, ADR-0061); the A and P+A sections draw on them once drafting exists (#1748) |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
+| `bundle-manifest.md` | No section of its own. It states the export's as-of and lists every exported file under its handoff-bundle part (SPEC-16, AC-0682) |
 | `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The twenty-seven files keep being exported under their current names until each
+The twenty-eight files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today

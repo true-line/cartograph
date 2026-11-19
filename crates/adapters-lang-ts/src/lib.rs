@@ -2014,6 +2014,24 @@ fn extract_source_recording(
             // A class may also be a controller: its HTTP routes follow.
             graphql_resolvers::operations(&cx, &mut out, body, &from_graphql, &bindings);
         }
+        // TypeORM entities: the data model, proven through `typeorm`.
+        let from_typeorm = |site: TsNode<'_>, local: &str| {
+            (bindings.imported(site, local)
+                && import_modules.get(local).map(String::as_str) == Some(typeorm::MODULE))
+            .then(|| {
+                imported_names
+                    .get(local)
+                    .cloned()
+                    .unwrap_or_else(|| local.to_string())
+            })
+        };
+        typeorm::entity(
+            &cx,
+            &mut out,
+            (class_node, body, root),
+            &from_typeorm,
+            &imported_types,
+        );
         let controller = leading_decorators(class_node)
             .into_iter()
             .filter_map(|decorator| decorator_call(&cx, decorator))
@@ -3631,6 +3649,7 @@ mod rule_evidence;
 mod service_worker;
 mod source_expression;
 pub mod target_tests;
+mod typeorm;
 pub mod vue;
 pub mod webextension;
 

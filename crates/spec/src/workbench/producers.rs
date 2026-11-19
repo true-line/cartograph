@@ -156,6 +156,98 @@ fn readable_stories(
         .collect()
 }
 
+/// The source file of each handler a derived Capability cites, with the
+/// handler members in that file, in path order: only the Symbols a cited
+/// `HANDLES` edge ends at, never a cited class or other support. Read from
+/// each handler's own evidence; nothing new is inferred.
+fn handler_files<'a>(story: &capabilities::Story<'a>) -> BTreeMap<String, Vec<String>> {
+    let handlers: BTreeSet<&str> = story
+        .support
+        .iter()
+        .filter_map(|(_, fact)| match fact {
+            capabilities::Support::Edge(edge) if edge.label == "HANDLES" => Some(edge.dst.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (_, fact) in &story.support {
+        if let capabilities::Support::Node(node) = fact
+            && node.label == "Symbol"
+            && handlers.contains(node.id.as_str())
+            && let Some(evidence) = provenance(&node.props, &node.id).evidence.first()
+        {
+            let member = node.props["name"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| node.id.rsplit('#').next().map(str::to_owned))
+                .unwrap_or_default();
+            let members = files.entry(evidence.path.clone()).or_default();
+            if !member.is_empty() && !members.contains(&member) {
+                members.push(member);
+            }
+        }
+    }
+    files
+}
+
+/// The Actor caller sets, as one table: who may call each operation, by the
+/// permissions its guard lists. Assumed from the guard's convention, never
+/// effective runtime authorization (Semantic / InferredWeak).
+fn caller_sets(
+    content: &mut Text,
+    included: &[capabilities::Story<'_>],
+) -> Result<(), RenderLimit> {
+    let mut endpoints: BTreeMap<&str, &Node> = BTreeMap::new();
+    for story in included {
+        for (_, fact) in &story.support {
+            if let capabilities::Support::Node(node) = fact
+                && node.label == "Endpoint"
+            {
+                endpoints.insert(node.id.as_str(), node);
+            }
+        }
+    }
+    let mut rows: Vec<(Vec<&str>, String, String)> = included
+        .iter()
+        .filter(|s| s.node.label == "Actor")
+        .map(|s| {
+            let endpoint = s.node.props["endpoint_id"].as_str().unwrap_or_default();
+            let operation = endpoints
+                .get(endpoint)
+                .map_or_else(|| endpoint.to_owned(), |n| NodeName(n).to_string());
+            let file = s.node.props["permission_site"]["prov"]["evidence"][0]["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            (strings(s.node, "any_of"), operation, file)
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    rows.sort();
+    rows.dedup();
+    content.push_str("## Caller permission sets\n\n")?;
+    content.push_str(
+        "Who may call each operation, by the permissions its guard lists: a caller holding any \
+         one of them is admitted. Assumed caller sets (Semantic / InferredWeak), read from the \
+         guard's convention; not effective runtime authorization or an identified user, role \
+         or principal.\n\n",
+    )?;
+    content.push_str("| Any of | Operation | Guard in |\n|---|---|---|\n")?;
+    for (any_of, operation, file) in &rows {
+        writeln!(
+            content,
+            "| {} | {} | {} |",
+            render::Literal(any_of.join(", ")),
+            render::Literal(operation),
+            render::Literal(file)
+        )?;
+    }
+    content.push_str("\n")?;
+    Ok(())
+}
+
 pub(super) fn stories(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
     stories_with_support(nodes, None, max)
 }
@@ -188,63 +280,92 @@ pub(super) fn stories_with_support(
     if capabilities.is_empty() && !stories.is_some_and(|s| s.filtered > 0) {
         content.push_str("No Capability facts have been recovered yet.\n")?;
     }
+    // Derived stories read as prose: the readable stories and the source
+    // files that hold each operation (#1443). Each story's exact identity
+    // and support stay JSON text, in the appendix below, never in the body.
+    let included = stories.map_or(&[][..], |s| &s.included[..]);
     for (index, node) in capabilities.iter().enumerate() {
-        if let Some(story) = stories.and_then(|s| {
-            index
-                .checked_sub(base_count)
-                .and_then(|i| s.included.get(i))
-        }) {
-            if node.label == "Actor" {
-                writeln!(
-                    content,
-                    "## Actor caller set — Semantic / InferredWeak convention\n\n    {}\n",
-                    render::Serialized(&(
-                        &node.id,
-                        &node.props["any_of"],
-                        &node.props["assumption"],
-                        &node.props["permission_site"]["prov"]["evidence"]
-                    ))
-                )?;
-                content.push_str("Assumed caller set; not effective runtime authorization or an identified user, role or principal.\n\n")?;
-            } else {
-                // Legacy headings are unchanged. New sidecar prose is JSON text,
-                // never executable Markdown/HTML or a new redaction policy.
+        match index.checked_sub(base_count).and_then(|i| included.get(i)) {
+            // Actors render as one table after the stories.
+            Some(_) if node.label == "Actor" => {}
+            Some(story) => {
+                // Legacy headings are unchanged.
                 writeln!(
                     content,
                     "## US-R-{:04} — Derived Capability: {}\n",
                     index + 1,
                     render::Literal(NodeName(node))
                 )?;
-                // Readable stories, one per cited operation (#1443). Every
-                // recovered name is literal text; the JSON lines below stay
-                // the story's exact identity and support.
-                for line in readable_stories(story, stories.map_or(&[][..], |s| &s.included)) {
+                // Every recovered name is literal text.
+                for line in readable_stories(story, included) {
                     writeln!(content, "{line}")?;
+                }
+                let files = handler_files(story);
+                if !files.is_empty() {
+                    content.push_str("\nImplemented in:\n\n")?;
+                    for (file, members) in &files {
+                        writeln!(
+                            content,
+                            "- {} ({})",
+                            render::Literal(file),
+                            render::Literal(members.join(", "))
+                        )?;
+                    }
                 }
                 writeln!(
                     content,
-                    "\n    {}\n",
-                    render::Serialized(&(&node.id, render::DisplayValue(&NodeName(node))))
+                    "\nIdentity and support: `US-R-{:04}` under Story identities and support.\n",
+                    index + 1
                 )?;
             }
-            for (cite, _) in &story.support {
-                writeln!(
-                    content,
-                    "    {}",
-                    render::Serialized(&(capabilities::support_id(&node.id, cite), cite))
-                )?;
-            }
-            content.push_str("\n")?;
-        } else {
             // Recovered names and ids are literal text, never Markdown/HTML (#1453).
-            writeln!(
+            None => writeln!(
                 content,
                 "## US-R-{:04} — {}\n\n- Recovered capability assertion: {}\n",
                 index + 1,
                 render::Literal(NodeName(node)),
                 render::Literal(&node.id)
+            )?,
+        }
+    }
+    caller_sets(&mut content, included)?;
+    if !included.is_empty() {
+        content.push_str("## Story identities and support\n\n")?;
+        content.push_str(
+            "The exact identity of each derived story and every fact it cites, as JSON text.\n\n",
+        )?;
+    }
+    for (index, node) in capabilities.iter().enumerate() {
+        let Some(story) = index.checked_sub(base_count).and_then(|i| included.get(i)) else {
+            continue;
+        };
+        if node.label == "Actor" {
+            writeln!(
+                content,
+                "### Actor caller set — Semantic / InferredWeak convention\n\n    {}\n",
+                render::Serialized(&(
+                    &node.id,
+                    &node.props["any_of"],
+                    &node.props["assumption"],
+                    &node.props["permission_site"]["prov"]["evidence"]
+                ))
+            )?;
+        } else {
+            writeln!(
+                content,
+                "### US-R-{:04}\n\n    {}\n",
+                index + 1,
+                render::Serialized(&(&node.id, render::DisplayValue(&NodeName(node))))
             )?;
         }
+        for (cite, _) in &story.support {
+            writeln!(
+                content,
+                "    {}",
+                render::Serialized(&(capabilities::support_id(&node.id, cite), cite))
+            )?;
+        }
+        content.push_str("\n")?;
     }
     if let Some(stories) = stories.filter(|s| s.filtered > 0) {
         writeln!(
@@ -485,6 +606,47 @@ pub(super) fn data(
                 prov.confidence_tier,
                 node_citation(n)
             )?;
+        }
+    }
+    // Each entity's own columns, as its adapter recorded them: `columns`
+    // (SQLAlchemy, TypeORM) or `fields` (JPA). A column is a property of
+    // its entity, so it cites that entity.
+    let column_rows = |n: &Node| {
+        n.props
+            .get("columns")
+            .or_else(|| n.props.get("fields"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    if entities.iter().any(|n| column_rows(n) > 0) {
+        content.push_str(
+            "\n## Entity columns\n\n| Entity | Column | Type | Key | Nullable | Stored as | Citation |\n|---|---|---|---|---|---|---|\n",
+        )?;
+        for n in entities.iter().filter(|n| column_rows(n) > 0) {
+            let cite = node_citation(n);
+            let columns = n
+                .props
+                .get("columns")
+                .or_else(|| n.props.get("fields"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten();
+            for column in columns {
+                let key = column["primary_key"]
+                    .as_bool()
+                    .or_else(|| column["id"].as_bool())
+                    .unwrap_or(false);
+                writeln!(
+                    content,
+                    "| {} | `{}` | {} | {} | {} | {} | {cite} |",
+                    Safe(NodeName(n)),
+                    Safe(relation_value(&column["name"])),
+                    Safe(relation_value(&column["type"])),
+                    if key { "primary" } else { "" },
+                    Safe(relation_value(&column["nullable"])),
+                    Safe(relation_value(&column["column"])),
+                )?;
+            }
         }
     }
     if !mappings.is_empty() {

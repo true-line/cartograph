@@ -93,13 +93,14 @@ fn official_stories_preserve_producer_support_provenance_and_old_pages() {
     for descriptor in current
         .artifact_catalog()
         .into_iter()
-        // The curated artifacts and the D1 document read the session's
-        // projection, which this bare compile is not supplied with
-        // (AC-0654, AC-0667).
+        // The curated artifacts, the D1 document and the bundle manifest
+        // read the session's projection and basis, which this bare compile
+        // is not supplied with (AC-0654, AC-0667, AC-0682).
         .filter(|a| {
             a.id != "user-stories"
                 && !a.id.starts_with("curated")
                 && a.id != "d1-product-specification"
+                && a.id != "bundle-manifest"
         })
     {
         let ArtifactCompilation::Produced(actual) = current
@@ -793,7 +794,7 @@ fn capture_admits_exactly_the_serialized_base_graph_bytes() {
     ));
 }
 
-// AC-0535: through the official session, the Actor renders its exact named,
+// AC-0535, AC-0513: through the official session, the Actor renders its exact named,
 // versioned assumption, keeps the decorator's permission order, cites exactly
 // its Endpoint, and says it is not effective authorization.
 #[test]
@@ -824,9 +825,21 @@ fn session_actor_stories_keep_assumption_order_and_endpoint_citation() {
         "[{},[\"UpdateOrder\",\"Owner\"],{assumption}",
         json!(actor.id)
     )));
+    // AC-0513: the Capability names the handler that implements it (the
+    // HANDLES destination, not its class), and the JSON identity lines move
+    // to the appendix (#1443).
     assert!(artifact.content.contains(
-        "Assumed caller set; not effective runtime authorization or an identified user, role or principal."
+        "Implemented in:\n\n- packages/core/src/api/resolvers/shop/shop-order.resolver.ts (ShopOrderResolver.activeOrder)\n"
     ));
+    assert!(artifact.content.contains("## Story identities and support"));
+    // The caller sets read as one table; each keeps its disclaimer (#1443).
+    assert!(artifact.content.contains("## Caller permission sets"));
+    assert!(artifact.content.contains("| UpdateOrder, Owner |"));
+    assert!(
+        artifact.content.contains(
+            "not effective runtime authorization or an identified user, role or principal."
+        )
+    );
     let kinds: Vec<_> = artifact
         .assertions
         .iter()
@@ -982,4 +995,21 @@ fn desktop_export_renders_overlay_stories_like_the_mcp_read() {
             .content
             .contains("No Capability facts have been recovered yet.")
     );
+}
+
+// AC-0663: the D1 document read alone frames the overlay's derived
+// Capabilities, and reads as before when the overlay supplies none.
+#[test]
+fn d1_read_alone_frames_overlay_capabilities() {
+    let f = Fixture::new();
+    let d1 = |session: &ReadSession| match session
+        .compile_artifact("d1-product-specification", trace_limits(), compile_limits())
+        .unwrap()
+    {
+        ArtifactCompilation::Produced(a) => a.artifact.content,
+        ArtifactCompilation::Limited { .. } => panic!("fixture fits"),
+    };
+    assert!(!d1(&f.best()).contains("Derived Capabilities:"));
+    f.publish(f.facts.clone());
+    assert!(d1(&f.best()).contains("Derived Capabilities: 1."));
 }

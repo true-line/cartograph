@@ -248,6 +248,25 @@ pub(crate) fn redraft_question(state: &AppState, draft_id: &str) -> Result<Strin
     .map_err(str::to_owned)
 }
 
+/// The outcome of a task when it is a drafting run, and none for a task of
+/// any other role. The MCP result read reports it to the session that
+/// started the run.
+pub(crate) fn outcome_of_drafting_run(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<DraftingOutcome>, String> {
+    let drafting = {
+        let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let summary = jobs.investigation(id).map_err(|e| e.to_string())?.summary;
+        summary.specialist_id == SpecialistId::SectionWriterV1
+    };
+    if drafting {
+        stage(state, id).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// The draft already stored for the drafting job `job_id`, if any. A job
 /// produces at most one draft, so a reread must return it rather than
 /// recompute a predecessor, which changes with later reviews.
@@ -344,6 +363,17 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         Ok(draft) => draft,
         Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
     };
+    // SPEC-16 rule 3 (AC-0683): a statement that spells out a file path or
+    // a code symbol of a fact it cites is not staged. The identifiers stay
+    // in the citation and the fact index.
+    let source = spec::SourceIdentifiers::of(&nodes, &edges, &cited);
+    let claims = draft
+        .claims
+        .iter()
+        .map(|claim| (claim.statement.as_str(), claim.citations.as_slice()));
+    if source.first_naming(claims).is_some() {
+        return Ok(DraftingOutcome::none("statement_names_source"));
+    }
     let origin = DraftOrigin {
         role: SECTION_WRITER_ROLE.to_owned(),
         role_definition: SpecialistId::SectionWriterV1

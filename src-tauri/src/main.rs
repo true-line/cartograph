@@ -1075,6 +1075,18 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
         .collect()
 }
 
+/// The source registrations `nodes` cite and the revision of each, ordered
+/// by registry key: the `sources` of a graph basis (AC-0593).
+fn source_revisions_of(nodes: &[Node]) -> Vec<spec::SourceRevision> {
+    system_contents_of(nodes)
+        .into_iter()
+        .map(|entry| spec::SourceRevision {
+            repo: entry.repo,
+            commit: entry.commit,
+        })
+        .collect()
+}
+
 /// What an export was compiled from (#1765, AC-0593): the content hash of
 /// the whole base graph and the source revisions it holds, both taken from
 /// the snapshot the export itself read. Curation decisions and overlay facts
@@ -1082,13 +1094,7 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
 fn graph_basis_of(nodes: &[Node], edges: &[Edge]) -> spec::GraphBasis {
     spec::GraphBasis {
         content_hash: spec::graph_content_hash(nodes, edges),
-        sources: system_contents_of(nodes)
-            .into_iter()
-            .map(|entry| spec::SourceRevision {
-                repo: entry.repo,
-                commit: entry.commit,
-            })
-            .collect(),
+        sources: source_revisions_of(nodes),
     }
 }
 
@@ -6609,6 +6615,10 @@ impl SpecInputs {
                 .graph_basis
                 .as_ref()
                 .map(|basis| basis.content_hash.as_str()),
+            source_revisions: self
+                .graph_basis
+                .as_ref()
+                .map(|basis| basis.sources.as_slice()),
         }
     }
 
@@ -6861,17 +6871,26 @@ fn compile_spec_artifacts(
     };
     // Only `user-stories` renders the overlay's stories, and the fact index
     // cites them; any other selection neither reads nor validates them, so a
-    // refused overlay fact cannot fail an unrelated read.
-    let reads_knowledge = artifact_ids
+    // refused overlay fact cannot fail an unrelated read. The D1 document
+    // frames the derived Capabilities and caller roles too (AC-0663), but
+    // only as context: a refused overlay leaves it with its base sections.
+    let requires_knowledge = artifact_ids
         .iter()
         .any(|id| matches!(*id, "user-stories" | "fact-index" | "fact-index-json"));
-    let candidates = if reads_knowledge {
-        inputs.candidates()?
+    let frames_knowledge = artifact_ids.contains(&"d1-product-specification");
+    let candidates = if requires_knowledge || frames_knowledge {
+        match inputs.candidates() {
+            Ok(candidates) => candidates,
+            Err(_) if !requires_knowledge => Vec::new(),
+            Err(error) => return Err(error),
+        }
     } else {
         Vec::new()
     };
-    let knowledge = if reads_knowledge {
+    let knowledge = if requires_knowledge {
         inputs.knowledge(&candidates, mode)?
+    } else if frames_knowledge {
+        inputs.knowledge(&candidates, mode).ok().flatten()
     } else {
         None
     };
