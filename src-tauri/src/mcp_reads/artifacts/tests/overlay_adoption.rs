@@ -794,7 +794,7 @@ fn capture_admits_exactly_the_serialized_base_graph_bytes() {
     ));
 }
 
-// AC-0535: through the official session, the Actor renders its exact named,
+// AC-0535, AC-0513: through the official session, the Actor renders its exact named,
 // versioned assumption, keeps the decorator's permission order, cites exactly
 // its Endpoint, and says it is not effective authorization.
 #[test]
@@ -825,9 +825,21 @@ fn session_actor_stories_keep_assumption_order_and_endpoint_citation() {
         "[{},[\"UpdateOrder\",\"Owner\"],{assumption}",
         json!(actor.id)
     )));
+    // AC-0513: the Capability names the handler that implements it (the
+    // HANDLES destination, not its class), and the JSON identity lines move
+    // to the appendix (#1443).
     assert!(artifact.content.contains(
-        "Assumed caller set; not effective runtime authorization or an identified user, role or principal."
+        "Implemented in:\n\n- packages/core/src/api/resolvers/shop/shop-order.resolver.ts (ShopOrderResolver.activeOrder)\n"
     ));
+    assert!(artifact.content.contains("## Story identities and support"));
+    // The caller sets read as one table; each keeps its disclaimer (#1443).
+    assert!(artifact.content.contains("## Caller permission sets"));
+    assert!(artifact.content.contains("| UpdateOrder, Owner |"));
+    assert!(
+        artifact.content.contains(
+            "not effective runtime authorization or an identified user, role or principal."
+        )
+    );
     let kinds: Vec<_> = artifact
         .assertions
         .iter()

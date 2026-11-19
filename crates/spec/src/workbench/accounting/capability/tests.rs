@@ -21,7 +21,7 @@ fn inputs() -> (TraceGraphBound, TraceLimits, SelectedCompileLimits) {
             max_output_bytes: 8192,
         },
         SelectedCompileLimits {
-            max_bytes: 32768,
+            max_bytes: 40960,
             adr: crate::AdrLimits {
                 max_rows: 30,
                 max_output_bytes: 4096,
