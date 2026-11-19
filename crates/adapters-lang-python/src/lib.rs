@@ -343,7 +343,6 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     auth_guards::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
     flask_admin::retarget(extraction, commit);
-    flask_pages::retarget(extraction, commit);
 }
 
 fn normalize_path(path: PathBuf) -> Option<String> {
