@@ -209,7 +209,10 @@ observation is rendered only by the rule inventory, under its disclosure
 policy. When the export has derived Capabilities, §1.5 also lists, per
 Capability, the rejection exits its handlers reach (AC-0849): owner,
 stored sanitized conditions, outcome and citation, never dependencies or
-source text. `verified-only` prints no claim and states per
+source text. §1.4 likewise lists, per Capability, the recovered tests that
+request one of its operations (AC-0850): the test's qualified name, file,
+the operations it requests and each reference's citation; a reference is
+static and does not show that the test runs or passes. `verified-only` prints no claim and states per
 section how many were left out. Existing artifacts are byte-identical,
 except the fact index: `fact-index.md` and `fact-index.json` name the
 document among the artifacts citing each fact its frames print.

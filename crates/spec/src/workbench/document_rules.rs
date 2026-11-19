@@ -43,18 +43,69 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `new FooError(...)` or `new FooException(...)`, whatever whitespace
-/// separates `new` from the constructor.
+/// The byte index of the `)` closing the `(` that `text` starts with.
+/// Delimiters inside a `'…'`, `"…"` or `` `…` `` literal do not count; a
+/// backslash escapes the next character in one.
+fn closing(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Exactly one construction `new FooError(...)` or `new FooException(...)`,
+/// possibly parenthesized, whatever whitespace separates `new` from the
+/// constructor: a `new_expression` or `parenthesized_expression` whose whole
+/// stored display is that construction, so `new FooError() || fallback` is
+/// not one.
 fn constructs_error(value: &SourceExpression) -> bool {
-    let mut words = value.display.as_str().split_whitespace();
-    words.next() == Some("new")
-        && words.next().is_some_and(|rest| {
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
-                .collect();
-            name.ends_with("Error") || name.ends_with("Exception")
-        })
+    if !matches!(
+        value.syntax_kind.as_str(),
+        "new_expression" | "parenthesized_expression"
+    ) {
+        return false;
+    }
+    let mut text = value.display.as_str().trim();
+    while text.starts_with('(') && closing(text) == Some(text.len() - 1) {
+        text = text[1..text.len() - 1].trim();
+    }
+    let Some(rest) = text.strip_prefix("new") else {
+        return false;
+    };
+    if !rest.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let rest = rest.trim_start();
+    let name_len = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(rest.len());
+    let (name, args) = rest.split_at(name_len);
+    let args = args.trim();
+    (name.ends_with("Error") || name.ends_with("Exception"))
+        && (args.is_empty() || (args.starts_with('(') && closing(args) == Some(args.len() - 1)))
 }
 
 fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
@@ -334,6 +385,15 @@ function checkQuantity(qty: number) {
   if (qty > 10) {
     return new  OrderLimitError({ max: 10 });
   }
+  if (qty > 20) {
+    return (new OrderLimitError({ max: 20 }));
+  }
+  if (qty > 30) {
+    return new OrderLimitError() || qty;
+  }
+  if (qty > 40) {
+    return (new OrderLimitError(\")\"));
+  }
   return qty;
 }
 ";
@@ -416,8 +476,8 @@ function checkQuantity(qty: number) {
     #[test]
     fn rejections_are_listed_under_the_capability_that_reaches_them() {
         let (text, printed, cited) = render(1, true);
-        assert_eq!(printed, 2, "{text}");
-        assert_eq!(cited, 2);
+        assert_eq!(printed, 4, "{text}");
+        assert_eq!(cited, 4);
         assert!(text.contains("### Orders 0"), "{text}");
         assert!(
             text.contains("| checkQuantity | (qty &lt; 0) | throws new NegativeQuantityError() |"),
@@ -427,6 +487,20 @@ function checkQuantity(qty: number) {
             text.contains(
                 "| checkQuantity | (qty &gt; 10) | returns new OrderLimitError({ max: 10 }) |"
             ),
+            "{text}"
+        );
+        // A parenthesized construction is one; a construction or-ed with
+        // another value is not.
+        assert!(
+            text.contains(
+                "| checkQuantity | (qty &gt; 20) | returns (new OrderLimitError({ max: 20 })) |"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("|| qty"), "{text}");
+        // A delimiter inside a string literal does not end the arguments.
+        assert!(
+            text.contains("| (qty &gt; 40) | returns (new OrderLimitError("),
             "{text}"
         );
         assert!(!text.contains("returns qty"), "{text}");
@@ -456,7 +530,7 @@ function checkQuantity(qty: number) {
     #[test]
     fn rejections_reached_by_many_capabilities_are_listed_once_as_shared() {
         let (text, printed, cited) = render(SHARED_AFTER + 1, true);
-        assert_eq!((printed, cited), (2, 2), "{text}");
+        assert_eq!((printed, cited), (4, 4), "{text}");
         assert!(!text.contains("### Orders"), "{text}");
         assert!(text.contains("### Shared rejections"), "{text}");
         let (_, printed, _) = render(0, true);

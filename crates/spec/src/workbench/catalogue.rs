@@ -109,6 +109,8 @@ const SECTIONS: &[CatalogueSection] = &[
         title: "Acceptance criteria per capability",
         kind: SectionKind::Framed,
         subject: Some("Capability"),
+        // With derived Capabilities, D1 lists the tests that request each
+        // one's operations (AC-0850).
         frame: Some(SectionFrame::Artifacts(&[
             "rule-evidence.md",
             "test_arrangements.md",
