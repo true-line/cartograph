@@ -327,10 +327,7 @@ fn derived_capabilities_publish_without_a_provider() {
     else {
         panic!("one Capability")
     };
-    assert_eq!(
-        capability.props["title"],
-        "shop GraphQL operations in ShopOrderResolver"
-    );
+    assert_eq!(capability.props["title"], "Manage orders (shop API)");
     let flows: Vec<_> = nodes.iter().filter(|n| n.label == "BusinessFlow").collect();
     assert_eq!(flows.len(), 2);
     assert!(facts.iter().all(|fact| !fact.cites.is_empty()));

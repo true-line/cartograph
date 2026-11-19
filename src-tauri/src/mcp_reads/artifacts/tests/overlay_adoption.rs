@@ -939,9 +939,9 @@ fn desktop_export_renders_overlay_stories_like_the_mcp_read() {
     let derived = desktop(ExportMode::BestEffort);
     assert!(derived.verify_identity());
     assert!(
-        derived.content.contains(
-            "## US-R-0001 — Derived Capability: shop GraphQL operations in ShopOrderResolver"
-        ),
+        derived
+            .content
+            .contains("## US-R-0001 — Derived Capability: View orders (shop API)"),
         "{}",
         derived.content
     );
