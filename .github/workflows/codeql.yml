@@ -59,7 +59,7 @@ jobs:
         with:
           task: Refresh rustup apt metadata
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          arguments-json: '["apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '120'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -70,7 +70,7 @@ jobs:
         with:
           task: Install rustup
           executable: sudo
-          arguments-json: '["apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
+          arguments-json: '["apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
           timeout-seconds: '180'
 
       # Rust extraction builds the workspace on a host whose memory the
