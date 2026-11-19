@@ -1,0 +1,1244 @@
+//! Guarded local exits in Python functions as cited source observations,
+//! never business verdicts (SPEC-02, #1973).
+//!
+//! A `return` or `raise` under same-function `if` / `elif` / `else`
+//! branches becomes a `BusinessRule` carrying [`GuardedExitEvidence`], owned
+//! by the enclosing function Symbol through `GOVERNS`. The branch conditions
+//! and the exit value are stored as sanitized displays; the execution
+//! predicate and the consumer effect stay unestablished, and every reason
+//! they do is a Gap the rule `DEPENDS_ON`. The caps, omission Gaps and gap
+//! vocabulary follow the TypeScript producer.
+
+use super::{Extraction, FileCx, file_id, qualified_function_name, symbol_id};
+use core_graph::rules::*;
+use core_graph::{Edge, Node};
+use core_prov::{ConfidenceTier, EvidenceRef};
+use core_redact::{SecretKind, is_sensitive_name, is_token_shaped, recognized_secrets};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use tree_sitter::Node as TsNode;
+
+const MAX_DEPENDENCIES: usize = 128;
+const MAX_CONDITIONS: usize = 32;
+const MAX_ANCESTOR_STEPS: usize = 256;
+const MAX_EXPRESSION_BYTES: usize = 8 * 1024;
+const MAX_EXPRESSION_NODES: usize = 1024;
+const MAX_CONTEXT_ANCESTORS: usize = 128;
+const MAX_RULE_BYTES: usize = 64 * 1024;
+const MAX_FILE_RULE_BYTES: usize = 1024 * 1024;
+const MAX_RULES_PER_FILE: usize = 256;
+const WITHHELD: &str = "[REDACTED]";
+const UNSUPPORTED: &str = "[UNSUPPORTED EXPRESSION]";
+
+fn source(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
+    cx.evidence(&node)
+}
+
+fn reason_key(reason: RuleGapReason) -> String {
+    serde_json::to_value(reason)
+        .expect("fixed reason serializes")
+        .as_str()
+        .expect("reason is a string")
+        .into()
+}
+
+fn reason_description(reason: &str) -> &'static str {
+    match reason {
+        "execution_predicate_unknown" => {
+            "The complete execution predicate has not been established."
+        }
+        "consumer_semantics_unknown" => {
+            "The caller's interpretation of this local return or raise is unknown."
+        }
+        "unresolved_call" => {
+            "A call prerequisite lacks a proven target or behavioral interpretation."
+        }
+        "unresolved_binding" => "A value prerequisite lacks a stable scope-proven declaration.",
+        "preceding_exit" => {
+            "An earlier exit is present; its effect on reachability has not been analyzed."
+        }
+        "mutation" => {
+            "Mutation is present in the callable; value changes have not been interpreted."
+        }
+        "loop_dependency" => {
+            "Loop or accumulator behavior in the callable has not been interpreted."
+        }
+        "switch_control" => "Match control flow in the callable has not been interpreted.",
+        "exception_control" => {
+            "Exception, finally or context-manager behavior in the callable has not been interpreted."
+        }
+        "redacted_expression" => "An expression was withheld or incompletely captured.",
+        "dependency_limit" => {
+            "The dependency observation limit was reached; additional prerequisites remain unanalyzed."
+        }
+        "analysis_limit" => {
+            "A source-rule capture limit was reached; additional analysis remains incomplete."
+        }
+        "unsupported_rule_syntax" => {
+            "Incomplete source syntax prevented supported rule analysis; remaining file analysis was omitted."
+        }
+        _ => "Source-rule interpretation remains incomplete.",
+    }
+}
+
+/// Where a callable boundary stops ownership: a function owns what it
+/// encloses; a lambda or class body between the node and its function runs
+/// at another time and owns nothing here.
+fn owner_function(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut parent = node.parent();
+    while let Some(current) = parent {
+        match current.kind() {
+            "function_definition" => return Some(current),
+            "lambda" | "class_definition" => return None,
+            _ => {}
+        }
+        parent = current.parent();
+    }
+    None
+}
+
+fn owner_id(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+    let function = owner_function(node)?;
+    let name = qualified_function_name(cx, function)?;
+    Some(symbol_id(cx.id.repo, cx.path, &name))
+}
+
+/// A function's parameter names, each with its declaring node.
+fn parameters<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> BTreeMap<String, TsNode<'t>> {
+    let mut out = BTreeMap::new();
+    let Some(list) = function.child_by_field_name("parameters") else {
+        return out;
+    };
+    let mut cursor = list.walk();
+    for parameter in list.named_children(&mut cursor) {
+        let name = match parameter.kind() {
+            "identifier" => Some(parameter),
+            "typed_parameter" => {
+                let mut cursor = parameter.walk();
+                parameter
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "identifier")
+            }
+            "default_parameter" | "typed_default_parameter" => parameter
+                .child_by_field_name("name")
+                .filter(|name| name.kind() == "identifier"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            out.insert(cx.text(&name).to_owned(), name);
+        }
+    }
+    out
+}
+
+/// Names a function body rebinds: assignment and augmented-assignment
+/// targets, `for` / `with` / `except` targets, walrus, `del`, `global` and
+/// `nonlocal`. A parameter among them is not a stable declaration.
+fn rebound(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(body) = function.child_by_field_name("body") else {
+        return out;
+    };
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        let targets: Vec<TsNode<'_>> = match node.kind() {
+            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+                node.child_by_field_name("left").into_iter().collect()
+            }
+            "named_expression" => node.child_by_field_name("name").into_iter().collect(),
+            "as_pattern" | "delete_statement" | "global_statement" | "nonlocal_statement"
+            | "except_clause" => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor).collect()
+            }
+            _ => Vec::new(),
+        };
+        for target in targets {
+            let mut inner = vec![target];
+            while let Some(t) = inner.pop() {
+                if t.kind() == "identifier" {
+                    out.insert(cx.text(&t).to_owned());
+                } else if matches!(
+                    t.kind(),
+                    "pattern_list"
+                        | "tuple_pattern"
+                        | "list_pattern"
+                        | "list_splat_pattern"
+                        | "as_pattern_target"
+                        | "expression_list"
+                        | "tuple"
+                        | "list"
+                ) {
+                    let mut cursor = t.walk();
+                    inner.extend(t.named_children(&mut cursor));
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    out
+}
+
+struct RuleBuilder<'cx, 'src, 'tree> {
+    cx: &'cx FileCx<'src>,
+    rule_id: String,
+    gaps: BTreeMap<String, (String, TsNode<'tree>)>,
+    dependencies: Vec<RuleDependency>,
+}
+
+impl<'tree> RuleBuilder<'_, '_, 'tree> {
+    fn gap(&mut self, reason: RuleGapReason, at: TsNode<'tree>) -> String {
+        let key = reason_key(reason);
+        self.gaps
+            .entry(key.clone())
+            .or_insert_with(|| (format!("gap:{}:{key}", self.rule_id), at))
+            .0
+            .clone()
+    }
+
+    fn control_gap(&mut self, reason: RuleGapReason, at: TsNode<'tree>) {
+        let gap_id = self.gap(reason, at);
+        if self.dependencies.len() >= MAX_DEPENDENCIES {
+            return;
+        }
+        if !self.dependencies.iter().any(|dependency| {
+            dependency.resolution
+                == DependencyResolution::Unresolved {
+                    gap_id: gap_id.clone(),
+                }
+        }) {
+            self.dependencies.push(RuleDependency {
+                role: DependencyRole::ControlFlow,
+                source: source(self.cx, at),
+                resolution: DependencyResolution::Unresolved { gap_id },
+            });
+        }
+    }
+
+    /// The calls and names `expression` reads. A call to a function this
+    /// file defines at top level is a Target; a parameter the body never
+    /// rebinds is a Binding; anything else is Unresolved.
+    fn dependencies(
+        &mut self,
+        expression: TsNode<'tree>,
+        role: DependencyRole,
+        scope: &Scope<'_, 'tree>,
+        targets: &BTreeSet<String>,
+    ) {
+        let mut stack = vec![expression];
+        while let Some(node) = stack.pop() {
+            if self.dependencies.len() >= MAX_DEPENDENCIES {
+                self.control_gap(RuleGapReason::DependencyLimit, expression);
+                return;
+            }
+            // A lambda body or comprehension scope runs later or elsewhere.
+            if matches!(
+                node.kind(),
+                "lambda"
+                    | "list_comprehension"
+                    | "set_comprehension"
+                    | "dictionary_comprehension"
+                    | "generator_expression"
+            ) {
+                self.control_gap(RuleGapReason::ExecutionPredicateUnknown, node);
+                continue;
+            }
+            let resolution = if node.kind() == "call" {
+                node.child_by_field_name("function")
+                    .filter(|callee| callee.kind() == "identifier")
+                    .and_then(|callee| scope.locals.get(self.cx.text(&callee)))
+                    .filter(|target| targets.contains(*target))
+                    .map(|node_id| DependencyResolution::Target {
+                        node_id: node_id.clone(),
+                    })
+                    .or_else(|| {
+                        Some(DependencyResolution::Unresolved {
+                            gap_id: self.gap(RuleGapReason::UnresolvedCall, node),
+                        })
+                    })
+            } else if is_value_identifier(node) {
+                let name = self.cx.text(&node);
+                Some(
+                    scope
+                        .parameters
+                        .get(name)
+                        .filter(|_| !scope.rebound.contains(name))
+                        .map(|declaration| DependencyResolution::Binding {
+                            binding_id: format!(
+                                "binding:{}@{}#declaration@{}",
+                                self.cx.id.repo,
+                                self.cx.path,
+                                declaration.start_byte()
+                            ),
+                            declaration: source(self.cx, *declaration),
+                        })
+                        .unwrap_or_else(|| DependencyResolution::Unresolved {
+                            gap_id: self.gap(RuleGapReason::UnresolvedBinding, node),
+                        }),
+                )
+            } else {
+                None
+            };
+            if let Some(resolution) = resolution {
+                self.dependencies.push(RuleDependency {
+                    role,
+                    source: source(self.cx, node),
+                    resolution,
+                });
+            }
+            let mut cursor = node.walk();
+            stack.extend(
+                node.named_children(&mut cursor)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+        }
+    }
+}
+
+struct Scope<'a, 'tree> {
+    locals: &'a HashMap<String, String>,
+    parameters: BTreeMap<String, TsNode<'tree>>,
+    rebound: BTreeSet<String>,
+}
+
+fn is_value_identifier(node: TsNode<'_>) -> bool {
+    if node.kind() != "identifier" {
+        return false;
+    }
+    !node.parent().is_some_and(|parent| {
+        (parent.kind() == "keyword_argument" && parent.child_by_field_name("name") == Some(node))
+            || (parent.kind() == "attribute"
+                && parent.child_by_field_name("attribute") == Some(node))
+    })
+}
+
+type Branch<'t> = (TsNode<'t>, TsNode<'t>, BranchPolarity);
+
+/// The `if` / `elif` / `else` branches around `exit` up to its function,
+/// outermost first: the taken branch's condition truthy, and every earlier
+/// condition of the same `if` falsy.
+fn branches(mut exit: TsNode<'_>) -> (Vec<Branch<'_>>, bool) {
+    let mut conditions: Vec<Branch<'_>> = Vec::new();
+    let mut steps = 0;
+    while let Some(parent) = exit.parent() {
+        if matches!(
+            parent.kind(),
+            "function_definition" | "lambda" | "class_definition"
+        ) {
+            break;
+        }
+        steps += 1;
+        if steps > MAX_ANCESTOR_STEPS || conditions.len() >= MAX_CONDITIONS {
+            return (conditions, true);
+        }
+        let statement = match parent.kind() {
+            "if_statement" => Some(parent),
+            "elif_clause" | "else_clause" => parent.parent(),
+            _ => None,
+        };
+        if let Some(statement) = statement {
+            let mut taken = Vec::new();
+            // Walk the clauses in order up to the one holding the exit.
+            if parent.kind() == "if_statement" {
+                if parent.child_by_field_name("consequence") == Some(exit)
+                    && let Some(condition) = parent.child_by_field_name("condition")
+                {
+                    taken.push((parent, condition, BranchPolarity::TruthyBranch));
+                }
+            } else {
+                if let Some(condition) = statement.child_by_field_name("condition") {
+                    taken.push((statement, condition, BranchPolarity::FalsyBranch));
+                }
+                let mut cursor = statement.walk();
+                for clause in statement.children_by_field_name("alternative", &mut cursor) {
+                    if clause == parent {
+                        break;
+                    }
+                    if let Some(condition) = clause.child_by_field_name("condition") {
+                        taken.push((clause, condition, BranchPolarity::FalsyBranch));
+                    }
+                }
+                if parent.kind() == "elif_clause"
+                    && parent.child_by_field_name("consequence") == Some(exit)
+                    && let Some(condition) = parent.child_by_field_name("condition")
+                {
+                    taken.push((parent, condition, BranchPolarity::TruthyBranch));
+                }
+            }
+            // Ancestors are visited innermost first; reversed at the end.
+            conditions.extend(taken.into_iter().rev());
+            if parent.kind() != "if_statement" {
+                // Skip the `if_statement` itself: its clauses are taken.
+                exit = statement;
+                continue;
+            }
+        }
+        exit = parent;
+    }
+    conditions.reverse();
+    let limited = conditions.len() > MAX_CONDITIONS;
+    conditions.truncate(MAX_CONDITIONS);
+    (conditions, limited)
+}
+
+/// The value a `return` returns or a `raise` raises; `None` for a bare one.
+fn exit_value(exit: TsNode<'_>) -> Option<TsNode<'_>> {
+    let cause = exit.child_by_field_name("cause");
+    let mut cursor = exit.walk();
+    exit.named_children(&mut cursor)
+        .find(|node| node.kind() != "comment" && Some(*node) != cause)
+}
+
+fn omission_gap(
+    cx: &FileCx<'_>,
+    at: TsNode<'_>,
+    owner: &str,
+    reason: RuleGapReason,
+    out: &mut Extraction,
+) {
+    let id = format!(
+        "gap:{}@{}#rule-analysis@{}",
+        cx.id.repo,
+        cx.path,
+        at.start_byte()
+    );
+    let reason = reason_key(reason);
+    let props = serde_json::json!({
+        "rule_evidence_gap": true,
+        "reason_code": reason,
+        "reason": reason_description(&reason),
+        "scope": "rule_or_remaining_file_analysis",
+        "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {id}")),
+    });
+    out.nodes.push(Node {
+        id: id.clone(),
+        label: "Gap".into(),
+        props: props.clone(),
+    });
+    out.edges.push(Edge {
+        src: owner.into(),
+        dst: id,
+        label: "DEPENDS_ON".into(),
+        props,
+    });
+}
+
+fn control_reason(node: TsNode<'_>) -> Option<RuleGapReason> {
+    match node.kind() {
+        "for_statement" | "while_statement" => Some(RuleGapReason::LoopDependency),
+        "match_statement" => Some(RuleGapReason::SwitchControl),
+        "try_statement" | "except_clause" | "finally_clause" | "with_statement" => {
+            Some(RuleGapReason::ExceptionControl)
+        }
+        "augmented_assignment" => Some(RuleGapReason::Mutation),
+        // Rebinding a plain name is not a mutation; writing through an
+        // attribute or subscript is.
+        "assignment" => node
+            .child_by_field_name("left")
+            .filter(|left| matches!(left.kind(), "attribute" | "subscript"))
+            .map(|_| RuleGapReason::Mutation),
+        "delete_statement" => Some(RuleGapReason::Mutation),
+        _ => None,
+    }
+}
+
+pub(super) fn extract(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    locals: &HashMap<String, String>,
+    out: &mut Extraction,
+) {
+    let targets: BTreeSet<String> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Symbol")
+        .map(|node| node.id.clone())
+        .collect();
+    // Recovered syntax cannot establish an exit or its branches: one
+    // omission Gap, and no rules from this file.
+    if root.has_error() {
+        let mut at = root;
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.is_error() || node.is_missing() {
+                at = node;
+                break;
+            }
+            let mut cursor = node.walk();
+            stack.extend(
+                node.children(&mut cursor)
+                    .filter(|child| child.has_error() || child.is_missing())
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+        }
+        let at = omission_source(at);
+        let owner = owner_id(cx, at)
+            .filter(|owner| targets.contains(owner))
+            .unwrap_or_else(|| file_id(cx.id.repo, cx.path));
+        omission_gap(cx, at, &owner, RuleGapReason::UnsupportedRuleSyntax, out);
+        return;
+    }
+    let mut exits: BTreeMap<String, Vec<TsNode<'_>>> = BTreeMap::new();
+    let mut functions: BTreeMap<String, TsNode<'_>> = BTreeMap::new();
+    let mut controls: BTreeMap<String, BTreeMap<String, (RuleGapReason, TsNode<'_>)>> =
+        BTreeMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(
+            node.named_children(&mut cursor)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev(),
+        );
+        if matches!(node.kind(), "return_statement" | "raise_statement") {
+            if let Some(owner) = owner_id(cx, node)
+                && let Some(function) = owner_function(node)
+            {
+                functions.entry(owner.clone()).or_insert(function);
+                exits.entry(owner).or_default().push(node);
+            }
+        } else if let Some(reason) = control_reason(node)
+            && let Some(owner) = owner_id(cx, node)
+        {
+            controls
+                .entry(owner)
+                .or_default()
+                .entry(reason_key(reason))
+                .or_insert((reason, node));
+        }
+    }
+    let mut rule_count = 0;
+    let mut file_bytes = 0;
+    for (owner_id, owner_exits) in exits {
+        if !targets.contains(&owner_id) {
+            continue;
+        }
+        let function = functions[&owner_id];
+        let scope = Scope {
+            locals,
+            parameters: parameters(cx, function),
+            rebound: rebound(cx, function),
+        };
+        for (order, exit) in owner_exits.iter().copied().enumerate() {
+            let (ancestors, limited) = branches(exit);
+            if ancestors.is_empty() && !limited {
+                continue;
+            }
+            let value = exit_value(exit);
+            // A bare `raise` re-raises what is being handled: not a guard's
+            // own outcome.
+            if exit.kind() == "raise_statement" && value.is_none() {
+                continue;
+            }
+            if limited || rule_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
+                omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
+                return;
+            }
+            let rule_id = format!("rule:{}@{}#exit@{}", cx.id.repo, cx.path, exit.start_byte());
+            let mut builder = RuleBuilder {
+                cx,
+                rule_id: rule_id.clone(),
+                gaps: BTreeMap::new(),
+                dependencies: Vec::new(),
+            };
+            builder.control_gap(RuleGapReason::ExecutionPredicateUnknown, exit);
+            builder.control_gap(RuleGapReason::ConsumerSemanticsUnknown, exit);
+            if let Some(prior) = order.checked_sub(1).map(|index| owner_exits[index]) {
+                builder.control_gap(RuleGapReason::PrecedingExit, prior);
+            }
+            if let Some(controls) = controls.get(&owner_id) {
+                for (reason, at) in controls.values() {
+                    builder.control_gap(*reason, *at);
+                }
+            }
+            let mut redactions = Vec::new();
+            let mut conditions = Vec::new();
+            for (branch, condition, polarity) in ancestors {
+                let (expression, mut withheld) = capture(cx, condition);
+                if expression.capture != ExpressionCapture::CompleteSyntax {
+                    builder.control_gap(RuleGapReason::RedactedExpression, condition);
+                }
+                redactions.append(&mut withheld);
+                if condition.byte_range().len() <= MAX_EXPRESSION_BYTES {
+                    builder.dependencies(condition, DependencyRole::Condition, &scope, &targets);
+                } else {
+                    builder.control_gap(RuleGapReason::AnalysisLimit, condition);
+                }
+                conditions.push(BranchCondition {
+                    branch_source: source(cx, branch),
+                    expression,
+                    polarity,
+                });
+            }
+            let value = value.map(|node| {
+                let (expression, mut withheld) = capture(cx, node);
+                if expression.capture != ExpressionCapture::CompleteSyntax {
+                    builder.control_gap(RuleGapReason::RedactedExpression, node);
+                }
+                redactions.append(&mut withheld);
+                if node.byte_range().len() <= MAX_EXPRESSION_BYTES {
+                    builder.dependencies(node, DependencyRole::ExitValue, &scope, &targets);
+                } else {
+                    builder.control_gap(RuleGapReason::AnalysisLimit, node);
+                }
+                expression
+            });
+            let effect = match value {
+                Some(value) if exit.kind() == "raise_statement" => LocalExit::Throw { value },
+                value => LocalExit::Return { value },
+            };
+            let evidence = GuardedExitEvidence {
+                schema_version: RULE_EVIDENCE_SCHEMA_VERSION,
+                kind: RuleKind::GuardedExit,
+                owner_id: owner_id.clone(),
+                exit_source: source(cx, exit),
+                source_order: order as u32,
+                conditions,
+                effect,
+                dependencies: builder.dependencies,
+                local_definitions: Some(Vec::new()),
+                interpretation: Interpretation {
+                    execution_predicate: InterpretationStatus::NotEstablished,
+                    consumer_effect: InterpretationStatus::NotEstablished,
+                    gap_ids: builder.gaps.values().map(|(id, _)| id.clone()).collect(),
+                },
+                redactions,
+            };
+            if let Err(error) = evidence.validate() {
+                omission_gap(
+                    cx,
+                    exit,
+                    &owner_id,
+                    if matches!(error, RuleValidationError::Limit(_)) {
+                        RuleGapReason::AnalysisLimit
+                    } else {
+                        RuleGapReason::UnsupportedRuleSyntax
+                    },
+                    out,
+                );
+                return;
+            }
+            let payload = serde_json::to_value(evidence).expect("rule serializes");
+            let canonical = serde_json::to_string(&payload).expect("rule serializes");
+            if canonical.len() > MAX_RULE_BYTES
+                || file_bytes + canonical.len() > MAX_FILE_RULE_BYTES
+            {
+                omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
+                return;
+            }
+            file_bytes += canonical.len();
+            rule_count += 1;
+            out.nodes.push(Node {
+                id: rule_id.clone(),
+                label: "BusinessRule".into(),
+                props: serde_json::json!({
+                    "name": format!("Guarded local exit at {}:{}", cx.path, exit.start_position().row + 1),
+                    "observation": "guarded_exit",
+                    "rule": payload,
+                    "prov": cx.prov(&exit, &canonical),
+                }),
+            });
+            out.edges.push(Edge {
+                src: rule_id.clone(),
+                dst: owner_id.clone(),
+                label: "GOVERNS".into(),
+                props: serde_json::json!({"observation": "lexical_owner", "prov": cx.prov(&exit, &format!("GOVERNS {rule_id} -> {owner_id}"))}),
+            });
+            for (reason, (gap_id, at)) in builder.gaps {
+                let props = serde_json::json!({
+                    "rule_evidence_gap": true,
+                    "reason_code": reason,
+                    "reason": reason_description(&reason),
+                    "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+                });
+                out.nodes.push(Node {
+                    id: gap_id.clone(),
+                    label: "Gap".into(),
+                    props: props.clone(),
+                });
+                out.edges.push(Edge {
+                    src: rule_id.clone(),
+                    dst: gap_id,
+                    label: "DEPENDS_ON".into(),
+                    props,
+                });
+            }
+        }
+    }
+}
+
+fn omission_source(mut node: TsNode<'_>) -> TsNode<'_> {
+    // Missing parser nodes can be zero-width. Cite the enclosing source that
+    // failed to parse instead of manufacturing an empty span.
+    for _ in 0..MAX_ANCESTOR_STEPS {
+        if !node.byte_range().is_empty() {
+            break;
+        }
+        let Some(parent) = node.parent() else {
+            break;
+        };
+        node = parent;
+    }
+    node
+}
+
+/// Cached unchanged source still belongs to the revision being ingested now.
+pub(super) fn retarget(extraction: &mut Extraction, commit: &str) {
+    for node in &mut extraction.nodes {
+        if node.label != "BusinessRule" {
+            continue;
+        }
+        let props = &mut node.props;
+        let Some(payload) = props.get("rule").cloned() else {
+            continue;
+        };
+        let Ok(mut rule) = GuardedExitEvidence::from_value(payload) else {
+            continue;
+        };
+        rule.visit_sources_mut(|source| source.commit_sha = commit.into());
+        props["rule"] = serde_json::to_value(rule).expect("rule serializes");
+        props["prov"]["content_hash"] = serde_json::json!(core_prov::content_hash(
+            &serde_json::to_vec(&props["rule"]).expect("rule serializes")
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sanitized capture (SPEC-02, AC-0124): decoded literals are inspected with
+// the shared `core-redact` recognizers, comments are removed, and a form
+// outside the supported set withholds the whole display.
+
+struct Replacement {
+    start: usize,
+    end: usize,
+    text: &'static str,
+}
+
+fn capture(cx: &FileCx<'_>, node: TsNode<'_>) -> (SourceExpression, Vec<SourceRedaction>) {
+    let source = source(cx, node);
+    let mut result = SourceExpression {
+        source: source.clone(),
+        syntax_kind: node.kind().into(),
+        display: SanitizedDisplay::from_sanitized(UNSUPPORTED.into()),
+        capture: ExpressionCapture::Unsupported,
+        literal: None,
+    };
+    if node.byte_range().len() > MAX_EXPRESSION_BYTES {
+        result.display =
+            SanitizedDisplay::from_sanitized("[expression omitted: analysis limit]".into());
+        return (
+            result,
+            vec![SourceRedaction {
+                source,
+                reason: RedactionReason::UnsupportedSyntax,
+            }],
+        );
+    }
+    let Some(bytes) = cx.source.get(node.byte_range()) else {
+        return withheld(result, source, RedactionReason::UnsupportedSyntax);
+    };
+    let Ok(raw) = std::str::from_utf8(bytes) else {
+        return withheld(result, source, RedactionReason::UnsupportedDecoding);
+    };
+    if node.has_error() || node.is_missing() {
+        return withheld(result, source, RedactionReason::UnsupportedSyntax);
+    }
+    let mut replacements = vec![];
+    let mut redactions = vec![];
+    let mut stack = vec![node];
+    let mut visited = 0;
+    while let Some(current) = stack.pop() {
+        visited += 1;
+        if visited > MAX_EXPRESSION_NODES {
+            return withheld(result, source, RedactionReason::UnsupportedSyntax);
+        }
+        match current.kind() {
+            "comment" => {
+                replacements.push(Replacement {
+                    start: current.start_byte(),
+                    end: current.end_byte(),
+                    text: " ",
+                });
+                redactions.push(SourceRedaction {
+                    source: cx.evidence(&current),
+                    reason: RedactionReason::RemovedComment,
+                });
+                continue;
+            }
+            "true" | "false" | "none" => {
+                if current == node {
+                    result.literal = Some(LiteralEvidence::Known {
+                        value: match current.kind() {
+                            "true" => KnownLiteral::Boolean(true),
+                            "false" => KnownLiteral::Boolean(false),
+                            _ => KnownLiteral::Null,
+                        },
+                    });
+                }
+                continue;
+            }
+            "integer" | "float" => {
+                // Python numerals are not secrets; only plain decimal forms
+                // are decoded into a literal value.
+                if current == node
+                    && let Ok(value) = decode_number(cx.text(&current))
+                {
+                    result.literal = Some(LiteralEvidence::Known {
+                        value: KnownLiteral::Number(value),
+                    });
+                }
+                continue;
+            }
+            "string" => {
+                let Ok(context) = sensitive_context(cx, current) else {
+                    return withheld(result, source, RedactionReason::UnsupportedSyntax);
+                };
+                match string_parts(cx, current) {
+                    Err(reason) => {
+                        if current == node {
+                            result.literal = Some(LiteralEvidence::Withheld {
+                                kind: LiteralKind::String,
+                                reasons: vec![reason],
+                            });
+                        }
+                        return withheld(result, source, reason);
+                    }
+                    Ok(StringParts::Plain(decoded)) => {
+                        let mut reasons = secret_reasons(&decoded);
+                        if context && !reasons.contains(&RedactionReason::CredentialValue) {
+                            reasons.push(RedactionReason::CredentialValue);
+                        }
+                        if reasons.is_empty() {
+                            if current == node {
+                                result.literal = Some(LiteralEvidence::Known {
+                                    value: KnownLiteral::String(decoded),
+                                });
+                            }
+                        } else {
+                            replacements.push(Replacement {
+                                start: current.start_byte(),
+                                end: current.end_byte(),
+                                text: WITHHELD,
+                            });
+                            for reason in &reasons {
+                                redactions.push(SourceRedaction {
+                                    source: cx.evidence(&current),
+                                    reason: *reason,
+                                });
+                            }
+                            if current == node {
+                                result.literal = Some(LiteralEvidence::Withheld {
+                                    kind: LiteralKind::String,
+                                    reasons,
+                                });
+                            }
+                        }
+                    }
+                    Ok(StringParts::Formatted {
+                        chunks,
+                        expressions,
+                    }) => {
+                        // An f-string: each literal chunk is inspected on its
+                        // own, each interpolated expression as any other.
+                        for chunk in chunks {
+                            let text = cx.text(&chunk);
+                            let mut reasons = secret_reasons(text);
+                            if context && !reasons.contains(&RedactionReason::CredentialValue) {
+                                reasons.push(RedactionReason::CredentialValue);
+                            }
+                            if !reasons.is_empty() {
+                                replacements.push(Replacement {
+                                    start: chunk.start_byte(),
+                                    end: chunk.end_byte(),
+                                    text: WITHHELD,
+                                });
+                                for reason in reasons {
+                                    redactions.push(SourceRedaction {
+                                        source: cx.evidence(&chunk),
+                                        reason,
+                                    });
+                                }
+                            }
+                        }
+                        stack.extend(expressions);
+                    }
+                }
+                continue;
+            }
+            "identifier" => {
+                let text = cx.text(&current);
+                if text.is_empty() || !text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return withheld(result, source, RedactionReason::UnsupportedSyntax);
+                }
+                let reasons = recognized_secrets(text);
+                if !reasons.is_empty() {
+                    replacements.push(Replacement {
+                        start: current.start_byte(),
+                        end: current.end_byte(),
+                        text: WITHHELD,
+                    });
+                    for reason in reasons {
+                        redactions.push(SourceRedaction {
+                            source: cx.evidence(&current),
+                            reason: redaction_reason(reason),
+                        });
+                    }
+                }
+                continue;
+            }
+            kind if current.is_named() && supported_container(kind) => {}
+            kind if !current.is_named() && supported_token(kind) => continue,
+            _ => return withheld(result, source, RedactionReason::UnsupportedSyntax),
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.children(&mut cursor));
+    }
+    replacements.sort_by_key(|replacement| replacement.start);
+    redactions.sort_by_key(|redaction| (redaction.source.byte_start, redaction.source.byte_end));
+    let mut display = String::new();
+    let mut copied_to = 0;
+    for replacement in replacements {
+        let start = replacement.start.saturating_sub(node.start_byte());
+        let end = replacement.end.saturating_sub(node.start_byte());
+        let Some(prefix) = raw.get(copied_to..start) else {
+            return withheld(result, source, RedactionReason::UnsupportedSyntax);
+        };
+        display.push_str(prefix);
+        display.push_str(replacement.text);
+        copied_to = end;
+    }
+    let Some(tail) = raw.get(copied_to..) else {
+        return withheld(result, source, RedactionReason::UnsupportedSyntax);
+    };
+    display.push_str(tail);
+    result.display = SanitizedDisplay::from_sanitized(display);
+    result.capture = if redactions.is_empty() {
+        ExpressionCapture::CompleteSyntax
+    } else {
+        ExpressionCapture::Redacted
+    };
+    (result, redactions)
+}
+
+fn withheld(
+    mut expression: SourceExpression,
+    source: EvidenceRef,
+    reason: RedactionReason,
+) -> (SourceExpression, Vec<SourceRedaction>) {
+    expression.display = SanitizedDisplay::from_sanitized(UNSUPPORTED.into());
+    expression.capture = ExpressionCapture::Unsupported;
+    (expression, vec![SourceRedaction { source, reason }])
+}
+
+fn redaction_reason(kind: SecretKind) -> RedactionReason {
+    match kind {
+        SecretKind::PrivateKey => RedactionReason::PrivateKey,
+        SecretKind::BearerToken => RedactionReason::BearerToken,
+        SecretKind::ProviderToken => RedactionReason::ProviderToken,
+        SecretKind::AwsAccessKey => RedactionReason::AwsAccessKey,
+        SecretKind::CredentialAssignment => RedactionReason::CredentialValue,
+    }
+}
+
+fn secret_reasons(value: &str) -> Vec<RedactionReason> {
+    let mut reasons: Vec<_> = recognized_secrets(value)
+        .into_iter()
+        .map(redaction_reason)
+        .collect();
+    if is_token_shaped(value) {
+        reasons.push(RedactionReason::TokenShaped);
+    }
+    reasons
+}
+
+fn supported_container(kind: &str) -> bool {
+    matches!(
+        kind,
+        "parenthesized_expression"
+            | "boolean_operator"
+            | "not_operator"
+            | "comparison_operator"
+            | "binary_operator"
+            | "unary_operator"
+            | "conditional_expression"
+            | "attribute"
+            | "subscript"
+            | "slice"
+            | "call"
+            | "argument_list"
+            | "keyword_argument"
+            | "list"
+            | "tuple"
+            | "set"
+            | "dictionary"
+            | "pair"
+            | "expression_list"
+            | "list_splat"
+            | "dictionary_splat"
+            | "await"
+            | "concatenated_string"
+    )
+}
+
+fn supported_token(kind: &str) -> bool {
+    matches!(
+        kind,
+        "(" | ")"
+            | "["
+            | "]"
+            | "{"
+            | "}"
+            | "."
+            | ","
+            | ":"
+            | "="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "//"
+            | "%"
+            | "**"
+            | "@"
+            | "~"
+            | "&"
+            | "|"
+            | "^"
+            | "<<"
+            | ">>"
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "=="
+            | "!="
+            | "<>"
+            | "and"
+            | "or"
+            | "not"
+            | "in"
+            | "is"
+            | "is not"
+            | "not in"
+            | "if"
+            | "else"
+            | "await"
+    )
+}
+
+enum StringParts<'t> {
+    /// The decoded value of a plain string.
+    Plain(String),
+    /// An f-string's literal chunks and interpolated expressions.
+    Formatted {
+        chunks: Vec<TsNode<'t>>,
+        expressions: Vec<TsNode<'t>>,
+    },
+}
+
+fn string_parts<'t>(
+    cx: &FileCx<'_>,
+    string: TsNode<'t>,
+) -> Result<StringParts<'t>, RedactionReason> {
+    let mut cursor = string.walk();
+    let children: Vec<_> = string.named_children(&mut cursor).collect();
+    let start = children
+        .iter()
+        .find(|child| child.kind() == "string_start")
+        .map(|start| cx.text(start))
+        .ok_or(RedactionReason::UnsupportedSyntax)?;
+    let prefix: String = start
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let raw = prefix.contains('r');
+    if prefix.contains('b') || prefix.contains('t') {
+        return Err(RedactionReason::UnsupportedDecoding);
+    }
+    if prefix.contains('f') {
+        let mut chunks = Vec::new();
+        let mut expressions = Vec::new();
+        for child in children {
+            match child.kind() {
+                "string_start" | "string_end" => {}
+                "string_content" => chunks.push(child),
+                "interpolation" => {
+                    if child.child_by_field_name("format_specifier").is_some() {
+                        return Err(RedactionReason::UnsupportedSyntax);
+                    }
+                    let Some(expression) = child.child_by_field_name("expression") else {
+                        return Err(RedactionReason::UnsupportedSyntax);
+                    };
+                    expressions.push(expression);
+                }
+                _ => return Err(RedactionReason::UnsupportedSyntax),
+            }
+        }
+        return Ok(StringParts::Formatted {
+            chunks,
+            expressions,
+        });
+    }
+    let mut value = String::new();
+    for child in children {
+        match child.kind() {
+            "string_start" | "string_end" => {}
+            "string_content" => {
+                let text = cx.text(&child);
+                if raw {
+                    value.push_str(text);
+                } else {
+                    value.push_str(
+                        &decode_escapes(text).map_err(|()| RedactionReason::UnsupportedDecoding)?,
+                    );
+                }
+            }
+            _ => return Err(RedactionReason::UnsupportedSyntax),
+        }
+    }
+    Ok(StringParts::Plain(value))
+}
+
+fn decode_escapes(text: &str) -> Result<String, ()> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next().ok_or(())? {
+            '\n' => {}
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '"' => out.push('"'),
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            '0' => out.push('\0'),
+            'a' => out.push('\u{7}'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{c}'),
+            'v' => out.push('\u{b}'),
+            'x' => out.push(read_hex(&mut chars, 2)?),
+            'u' => out.push(read_hex(&mut chars, 4)?),
+            'U' => out.push(read_hex(&mut chars, 8)?),
+            // Octal and named escapes are not decoded here.
+            _ => return Err(()),
+        }
+    }
+    Ok(out)
+}
+
+fn read_hex(chars: &mut std::str::Chars<'_>, count: usize) -> Result<char, ()> {
+    let mut value = 0u32;
+    for _ in 0..count {
+        value = value * 16 + chars.next().and_then(|c| c.to_digit(16)).ok_or(())?;
+    }
+    char::from_u32(value).ok_or(())
+}
+
+fn decode_number(raw: &str) -> Result<serde_json::Number, ()> {
+    if (raw.starts_with('0') && raw.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
+        || !raw
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+    {
+        return Err(());
+    }
+    if raw.chars().all(|c| c.is_ascii_digit()) {
+        return raw
+            .parse::<u64>()
+            .map(serde_json::Number::from)
+            .map_err(|_| ());
+    }
+    serde_json::Number::from_f64(raw.parse::<f64>().map_err(|_| ())?).ok_or(())
+}
+
+/// Whether a string literal is the value of a sensitive name: assigned to
+/// it, passed as its keyword, keyed by it, or compared with it.
+fn sensitive_context(cx: &FileCx<'_>, mut child: TsNode<'_>) -> Result<bool, ()> {
+    for _ in 0..MAX_CONTEXT_ANCESTORS {
+        let Some(parent) = child.parent() else {
+            return Ok(false);
+        };
+        match parent.kind() {
+            "function_definition" | "lambda" | "class_definition" | "block" => return Ok(false),
+            "assignment" | "augmented_assignment" => {
+                if parent.child_by_field_name("right") == Some(child)
+                    && let Some(key) = parent.child_by_field_name("left")
+                    && sensitive_key(cx, key)?
+                {
+                    return Ok(true);
+                }
+            }
+            "keyword_argument" => {
+                if parent.child_by_field_name("value") == Some(child)
+                    && let Some(key) = parent.child_by_field_name("name")
+                    && sensitive_key(cx, key)?
+                {
+                    return Ok(true);
+                }
+            }
+            "pair" => {
+                if parent.child_by_field_name("value") == Some(child)
+                    && let Some(key) = parent.child_by_field_name("key")
+                    && sensitive_key(cx, key)?
+                {
+                    return Ok(true);
+                }
+            }
+            "comparison_operator" => {
+                let mut cursor = parent.walk();
+                for operand in parent.named_children(&mut cursor) {
+                    if operand != child && sensitive_key(cx, operand)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        child = parent;
+    }
+    Err(())
+}
+
+fn sensitive_key(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Result<bool, ()> {
+    for _ in 0..MAX_CONTEXT_ANCESTORS {
+        match node.kind() {
+            "identifier" => return Ok(is_sensitive_name(cx.text(&node))),
+            "string" => {
+                return Ok(match string_parts(cx, node) {
+                    Ok(StringParts::Plain(value)) => is_sensitive_name(&value),
+                    _ => false,
+                });
+            }
+            "attribute" => node = node.child_by_field_name("attribute").ok_or(())?,
+            "subscript" => {
+                let key = node.child_by_field_name("subscript").ok_or(())?;
+                if key.kind() != "string" {
+                    return Ok(false);
+                }
+                node = key;
+            }
+            "parenthesized_expression" => {
+                let mut cursor = node.walk();
+                node = node
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() != "comment")
+                    .ok_or(())?;
+            }
+            _ => return Ok(false),
+        }
+    }
+    Err(())
+}
+
+#[cfg(test)]
+mod tests;

@@ -669,7 +669,9 @@ def update_alias(alias_id, user):
             "{text}"
         );
         assert!(
-            text.contains("| update\\_alias | alias.disabled | throws AliasDisabled(\"disabled\") |"),
+            text.contains(
+                "| update\\_alias | alias.disabled | throws AliasDisabled(\"disabled\") |"
+            ),
             "{text}"
         );
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
