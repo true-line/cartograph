@@ -95,11 +95,15 @@ fn official_stories_preserve_producer_support_provenance_and_old_pages() {
         .into_iter()
         // The curated artifacts, the D1 document and the bundle manifest
         // read the session's projection and basis, which this bare compile
-        // is not supplied with (AC-0654, AC-0667, AC-0682).
+        // is not supplied with (AC-0654, AC-0667, AC-0682); the security
+        // view frames the adopted Capabilities, as
+        // `security_view_read_alone_lists_access_per_overlay_capability`
+        // checks (AC-0853).
         .filter(|a| {
             a.id != "user-stories"
                 && !a.id.starts_with("curated")
                 && a.id != "d1-product-specification"
+                && a.id != "security-view"
                 && a.id != "bundle-manifest"
         })
     {
