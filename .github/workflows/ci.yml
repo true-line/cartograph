@@ -240,9 +240,12 @@ jobs:
       # Each Dockerfile or toolchain change pushes a new image, and nothing
       # pulls the old ones again. Only main prunes: it keeps the newest three
       # and never the tag this run uses. A pruned tag is rebuilt the next time
-      # a lane names it.
+      # a lane names it. Pruning is housekeeping and never fails the job: two
+      # concurrent main runs may list the same versions, and one finds a
+      # version the other already removed.
       - name: Prune old CI images
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: ${{ steps.tag.outputs.image }}
@@ -254,7 +257,7 @@ jobs:
             --jq '.[] | select(.metadata.container.tags | any(.[]; . == env.TAG) | not) | "\(.updated_at) \(.id)"' |
             sort -r | tail -n "+$KEEP" | while read -r _ id; do
               echo "Deleting $PACKAGE version $id"
-              gh api -X DELETE "$PACKAGE/versions/$id"
+              gh api -X DELETE "$PACKAGE/versions/$id" || echo "Version $id is already gone"
             done
 
   # Rust core: format, lint-as-error, tests. The pinned toolchain comes from

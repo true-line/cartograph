@@ -602,6 +602,9 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
   assert.match(image, /- name: Prune old CI images\n +if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'\n/u);
   assert.match(image, /select\(\.metadata\.container\.tags \| any\(\.\[\]; \. == env\.TAG\) \| not\)/u);
   assert.match(image, /KEEP: '3'/u);
+  // A concurrent main run may already have removed a listed version.
+  assert.match(image, /- name: Prune old CI images\n +if: [^\n]+\n +continue-on-error: true\n/u);
+  assert.match(image, /gh api -X DELETE "\$PACKAGE\/versions\/\$id" \|\| echo/u);
   for (const name of ['rust', 'rust-app-tests', 'compliance']) {
     const lane = job(name);
     assert.match(lane, /needs: \[[^\]]*\bci-image\b[^\]]*\]/u, name);
