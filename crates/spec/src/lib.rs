@@ -115,8 +115,8 @@ pub use workbench::{
     validate_knowledge_stories,
 };
 pub use workbench::{
-    CATALOGUE_VERSION, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
-    SectionScopeError, catalogue_section, catalogue_sections, drafted_section,
+    CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
+    SectionScopeError, SourceIdentifiers, catalogue_section, catalogue_sections, drafted_section,
     section_citation_set,
 };
 

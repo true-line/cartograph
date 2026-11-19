@@ -25,10 +25,12 @@ pub(crate) mod diagrams;
 mod document;
 mod documentation;
 mod manifest;
+mod neutrality;
 pub use document::{
     SYSTEM_SCOPE, SectionScopeError, cited_fact_digests, cited_fact_hashes, drafted_section,
     section_citation_set,
 };
+pub use neutrality::{CODE_LABELS, SourceIdentifiers};
 mod endpoint_inventory;
 mod endpoint_permissions;
 mod environments;

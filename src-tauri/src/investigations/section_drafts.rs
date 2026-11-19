@@ -344,6 +344,17 @@ pub(crate) fn stage(state: &AppState, id: &str) -> Result<DraftingOutcome, Strin
         Ok(draft) => draft,
         Err(refusal) => return Ok(DraftingOutcome::none(refusal.code())),
     };
+    // SPEC-16 rule 3 (AC-0683): a statement that spells out a file path or
+    // a code symbol of a fact it cites is not staged. The identifiers stay
+    // in the citation and the fact index.
+    let source = spec::SourceIdentifiers::of(&nodes, &edges, &cited);
+    let claims = draft
+        .claims
+        .iter()
+        .map(|claim| (claim.statement.as_str(), claim.citations.as_slice()));
+    if source.first_naming(claims).is_some() {
+        return Ok(DraftingOutcome::none("statement_names_source"));
+    }
     let origin = DraftOrigin {
         role: SECTION_WRITER_ROLE.to_owned(),
         role_definition: SpecialistId::SectionWriterV1
