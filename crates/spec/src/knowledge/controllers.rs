@@ -166,6 +166,7 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
             class: class.to_owned(),
             ..Group::default()
         });
+        group.mutates |= naming::mutating(method);
         group.cites.extend(cites);
         for prov in &supporting {
             for e in &prov.evidence {
@@ -190,7 +191,7 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
             &controller,
         ))
         .expect("string tuple serialization");
-        let title = format!("HTTP operations in {}", group.class);
+        let title = naming::title(&naming::subject(&group.class), None, group.mutates);
         let fact = capability_fact(
             (
                 CAPABILITY_CONTROLLER_RULE,

@@ -27,14 +27,21 @@ fn group_shape(endpoint: &serde_json::Value) -> Option<(&'static str, GroupBy)> 
     }
 }
 
-/// The group's identity tag, its name and its title, from what the adapter
+/// What a group's title is made of: the subject its name speaks of and, for
+/// a nested Blueprint, the parents it is served under.
+struct Naming {
+    subject: String,
+    audience: Option<String>,
+}
+
+/// The group's identity tag, its name and its naming, from what the adapter
 /// recorded on the endpoint and its handler in `path`.
 fn group_name(
     by: GroupBy,
     endpoint: &serde_json::Value,
     handler: &serde_json::Value,
     path: &str,
-) -> Option<(&'static str, String, String)> {
+) -> Option<(&'static str, String, Naming)> {
     let part = |name: &str| !name.is_empty() && !name.chars().any(char::is_whitespace);
     match by {
         GroupBy::FlaskBlueprint => {
@@ -44,11 +51,40 @@ fn group_name(
             let (blueprint, own) = endpoint["endpoint_name"].as_str()?.rsplit_once('.')?;
             // Flask allows any non-empty name, spaces included.
             (!own.is_empty() && blueprint.split('.').all(|name| !name.is_empty())).then(|| {
-                (
-                    "flask-blueprint",
-                    blueprint.to_owned(),
-                    format!("HTTP operations in blueprint {blueprint}"),
-                )
+                // One Blueprint often spans many files, each about one
+                // subject (`api` with `alias.py`, `mailbox.py`): the file
+                // names the subject and the Blueprint who it is served to. A
+                // generic file (`views.py`) leaves the subject to the
+                // Blueprint's last segment, served under its parents.
+                let stem = path
+                    .rsplit('/')
+                    .next()
+                    .and_then(|file| file.split('.').next())
+                    .unwrap_or("");
+                let naming = if naming::generic(stem) {
+                    let (parent, own) = blueprint
+                        .rsplit_once('.')
+                        .map_or((None, blueprint), |(p, o)| (Some(p), o));
+                    Naming {
+                        subject: naming::file_subject(own),
+                        audience: parent.map(naming::spelled_words),
+                    }
+                } else {
+                    let subject = naming::file_subject(stem);
+                    // `admin.abuser_lookup` with `abuser_lookup.py` is served
+                    // under `admin`: the Blueprint's own words repeat the file.
+                    let audience = naming::spelled_words(blueprint);
+                    let audience = audience
+                        .strip_suffix(&naming::spelled_words(stem))
+                        .unwrap_or(&audience)
+                        .trim()
+                        .to_owned();
+                    Naming {
+                        audience: (!audience.is_empty()).then_some(audience),
+                        subject,
+                    }
+                };
+                ("flask-blueprint", blueprint.to_owned(), naming)
             })
         }
         GroupBy::GoPackage => {
@@ -57,11 +93,19 @@ fn group_name(
             let dir = handler["package_dir"].as_str()?;
             let file_dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
             (handler["name"] == handler["simple_name"] && dir == file_dir).then(|| {
-                let shown = if dir.is_empty() { "." } else { dir };
+                // The root package has no name of its own.
+                let last = dir
+                    .rsplit('/')
+                    .next()
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or("operations");
                 (
                     "go-package",
                     dir.to_owned(),
-                    format!("HTTP operations in package {shown}"),
+                    Naming {
+                        subject: naming::subject(last),
+                        audience: None,
+                    },
                 )
             })
         }
@@ -79,9 +123,16 @@ fn group_name(
             {
                 return None;
             }
-            let name = module.to_owned();
-            let title = format!("HTTP operations in module {name}");
-            Some(("rust-module", name, title))
+            // The crate root, like Go's root package, has no name of its own.
+            let last = module
+                .split_once("::")
+                .and_then(|(_, rest)| rest.rsplit("::").next())
+                .unwrap_or("operations");
+            let naming = Naming {
+                subject: naming::subject(last),
+                audience: None,
+            };
+            Some(("rust-module", module.to_owned(), naming))
         }
     }
 }
@@ -115,7 +166,7 @@ pub(super) fn derive(
     report: &mut CapabilityReport,
 ) {
     type Key = (&'static str, String, String, String);
-    let mut groups: BTreeMap<Key, (String, Group)> = BTreeMap::new();
+    let mut groups: BTreeMap<Key, (Naming, Group)> = BTreeMap::new();
     for endpoint in nodes.values().filter_map(|n| *n) {
         let props = &endpoint.props;
         if endpoint.label != "Endpoint" {
@@ -165,13 +216,14 @@ pub(super) fn derive(
         {
             continue;
         }
-        let Some((tag, group_name, title)) = group_name(by, props, &handler.props, &owner.path)
+        let Some((tag, group_name, naming)) = group_name(by, props, &handler.props, &owner.path)
         else {
             continue;
         };
         let (_, group) = groups
             .entry((tag, owner.repo.clone(), owner.path.clone(), group_name))
-            .or_insert_with(|| (title, Group::default()));
+            .or_insert_with(|| (naming, Group::default()));
+        group.mutates |= naming::mutating(method);
         group.cites.extend([
             BaseRef::Node(endpoint.id.clone()),
             BaseRef::Node(handler.id.clone()),
@@ -192,8 +244,15 @@ pub(super) fn derive(
             }
         }
     }
+    let titled: Vec<(Key, String, Group)> = groups
+        .into_iter()
+        .map(|(key, (naming, group))| {
+            let title = naming::title(&naming.subject, naming.audience.as_deref(), group.mutates);
+            (key, title, group)
+        })
+        .collect();
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
-    for (title, _) in groups.values() {
+    for (_, title, _) in &titled {
         *seen.entry(title.as_str()).or_default() += 1;
     }
     let shared: BTreeSet<String> = seen
@@ -201,7 +260,7 @@ pub(super) fn derive(
         .filter(|(_, n)| *n > 1)
         .map(|(title, _)| title.to_owned())
         .collect();
-    for ((tag, repo, path, name), (title, group)) in groups {
+    for ((tag, repo, path, name), title, group) in titled {
         let title = if shared.contains(&title) {
             format!("{title} ({path})")
         } else {

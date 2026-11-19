@@ -30,7 +30,7 @@ class Views:
 // A second Blueprint that shares the name, never registered.
 const LEGACY: &str = "from flask import Blueprint
 old = Blueprint('users', __name__, url_prefix='/legacy')
-@old.get('/all')
+@old.post('/all')
 def everyone():
     return []
 ";
@@ -58,7 +58,7 @@ def everyone():
     )
     .unwrap();
     let report = derive_controller_capabilities(&revisioned(facts.nodes, facts.edges));
-    assert_eq!(titles(&report), ["HTTP operations in blueprint user admin"]);
+    assert_eq!(titles(&report), ["View user"]);
 }
 
 fn snapshot() -> RevisionedSnapshot {
@@ -111,15 +111,9 @@ fn controller_capability_groups_real_flask_blueprint_routes() {
     assert_eq!(report.oversized_groups, 0);
     // Two Blueprints named `users` in two files stay two candidates, and the
     // application route that spells its endpoint `users.ready` is in neither.
-    // AC-0801: the two would share a title, so each names its handler file.
+    // AC-0851: each file names its subject, served under the Blueprint.
     assert_eq!(report.facts.len(), 2);
-    assert_eq!(
-        titles(&report),
-        [
-            "HTTP operations in blueprint users (legacy.py)",
-            "HTTP operations in blueprint users (users.py)"
-        ]
-    );
+    assert_eq!(titles(&report), ["Manage legacy (users)", "Manage users"]);
     assert_ne!(
         capability(&report.facts[0]).id,
         capability(&report.facts[1]).id
@@ -163,7 +157,7 @@ fn controller_capability_groups_real_flask_blueprint_routes() {
     assert_eq!(paths, BTreeSet::from(["app.py", "users.py"]));
 
     let legacy = from_file(&report, "legacy.py").unwrap();
-    let all = format!("ep:{REPO}@GET:/legacy/all");
+    let all = format!("ep:{REPO}@POST:/legacy/all");
     let handler = format!("sym:{REPO}@legacy.py#everyone");
     let expected: BTreeSet<_> = [
         BaseRef::Node(all.clone()),
@@ -400,23 +394,14 @@ fn controller_capability_groups_real_go_and_rust_routes_by_module() {
     let before = go.clone();
     let report = derive_controller_capabilities(&go);
     assert_eq!(go, before);
-    assert_eq!(
-        titles(&report),
-        [
-            "HTTP operations in package .",
-            "HTTP operations in package internal/orders"
-        ]
-    );
+    assert_eq!(titles(&report), ["Manage orders", "View operations"]);
     let orders = orders_group(
         &report,
         "internal/orders/handlers.go",
         ("List", "Create"),
         "main.go",
     );
-    assert_eq!(
-        capability(orders).props["title"],
-        "HTTP operations in package internal/orders"
-    );
+    assert_eq!(capability(orders).props["title"], "Manage orders");
     let mut reversed = go.clone();
     reversed.graph.0.reverse();
     reversed.graph.1.reverse();
@@ -426,23 +411,14 @@ fn controller_capability_groups_real_go_and_rust_routes_by_module() {
     let before = rust.clone();
     let report = derive_controller_capabilities(&rust);
     assert_eq!(rust, before);
-    assert_eq!(
-        titles(&report),
-        [
-            "HTTP operations in module shop",
-            "HTTP operations in module shop::routes::orders"
-        ]
-    );
+    assert_eq!(titles(&report), ["Manage orders", "View operations"]);
     let orders = orders_group(
         &report,
         "src/routes/orders.rs",
         ("list", "create"),
         "src/main.rs",
     );
-    assert_eq!(
-        capability(orders).props["title"],
-        "HTTP operations in module shop::routes::orders"
-    );
+    assert_eq!(capability(orders).props["title"], "Manage orders");
     let mut reversed = rust.clone();
     reversed.graph.0.reverse();
     reversed.graph.1.reverse();
