@@ -157,13 +157,23 @@ fn readable_stories(
 }
 
 /// The source file of each handler a derived Capability cites, with the
-/// handler members in that file, in path order. Read from each handler's
-/// own evidence; nothing new is inferred.
+/// handler members in that file, in path order: only the Symbols a cited
+/// `HANDLES` edge ends at, never a cited class or other support. Read from
+/// each handler's own evidence; nothing new is inferred.
 fn handler_files<'a>(story: &capabilities::Story<'a>) -> BTreeMap<String, Vec<String>> {
+    let handlers: BTreeSet<&str> = story
+        .support
+        .iter()
+        .filter_map(|(_, fact)| match fact {
+            capabilities::Support::Edge(edge) if edge.label == "HANDLES" => Some(edge.dst.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (_, fact) in &story.support {
         if let capabilities::Support::Node(node) = fact
             && node.label == "Symbol"
+            && handlers.contains(node.id.as_str())
             && let Some(evidence) = provenance(&node.props, &node.id).evidence.first()
         {
             let member = node.props["name"]
