@@ -218,7 +218,10 @@ jobs:
       # stalled for minutes on single archives and timed out the apt step on
       # most lanes (#1924). apt only moves on errors, never on slowness, and
       # the image's list outranked entries we prepended, so replace the list
-      # with the Azure and primary archives only.
+      # with the Azure and primary archives only. apt-get below forces IPv4
+      # and retries 5 times: on 2026-11-19 every IPv6 address of both
+      # archives was unreachable from the runners and each fetch spent its
+      # retries there (#1966).
       - name: Prefer faster Ubuntu mirrors
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
@@ -231,7 +234,7 @@ jobs:
         with:
           task: Refresh Tauri apt metadata
           executable: flock
-          arguments-json: '["-w","120","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          arguments-json: '["-w","120","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '240'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -241,7 +244,7 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: flock
-          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
           # A slow hosted mirror timed out three Rust lanes in 20 minutes
           # (#1924). Downloaded archives stay in apt's cache, so a retry resumes;
@@ -298,7 +301,7 @@ jobs:
         with:
           task: Install pinned-runtime archive support
           executable: flock
-          arguments-json: '["-w","60","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","zstd"]'
+          arguments-json: '["-w","60","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","zstd"]'
           timeout-seconds: '120'
 
       - name: Run explicit local-provider acceptance
@@ -465,7 +468,7 @@ jobs:
         with:
           task: Refresh Tauri apt metadata
           executable: flock
-          arguments-json: '["-w","120","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          arguments-json: '["-w","120","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '240'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -475,7 +478,7 @@ jobs:
         with:
           task: Install Tauri system dependencies
           executable: flock
-          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
+          arguments-json: '["-w","210","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","-o","DPkg::Lock::Timeout=180","install","-y","libwebkit2gtk-4.1-dev","build-essential","curl","wget","file","libxdo-dev","libssl-dev","libayatana-appindicator3-dev","librsvg2-dev","pkg-config","rustup"]'
           timeout-seconds: '420'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -549,7 +552,7 @@ jobs:
         with:
           task: Refresh rustup apt metadata
           executable: flock
-          arguments-json: '["-w","60","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
+          arguments-json: '["-w","60","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","update"]'
           timeout-seconds: '120'
           attempts: '2'
           retry-delay-seconds: '5'
@@ -559,7 +562,7 @@ jobs:
         with:
           task: Install rustup
           executable: flock
-          arguments-json: '["-w","90","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=3","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
+          arguments-json: '["-w","90","/tmp/cartograph-ci-packages.lock","sudo","apt-get","-o","Acquire::Retries=5","-o","Acquire::ForceIPv4=true","-o","Acquire::http::Timeout=30","-o","Acquire::https::Timeout=30","install","-y","rustup"]'
           timeout-seconds: '180'
 
       - name: Install cargo-about
@@ -683,7 +686,7 @@ jobs:
             printf '%s\n' http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/ > "$RUNNER_TEMP/apt-mirrors.txt"
             sudo cp "$RUNNER_TEMP/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
           fi
-          printf '%s\n' 'DPkg::Lock::Timeout "180";' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > "$RUNNER_TEMP/99-ci-apt"
+          printf '%s\n' 'DPkg::Lock::Timeout "180";' 'Acquire::Retries "5";' 'Acquire::ForceIPv4 "true";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > "$RUNNER_TEMP/99-ci-apt"
           sudo cp "$RUNNER_TEMP/99-ci-apt" /etc/apt/apt.conf.d/99-ci-apt
 
       - name: Install Playwright browser (for story tests)
