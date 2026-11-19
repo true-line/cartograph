@@ -973,11 +973,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "7ae5da1de1de81a60bc637d35dd025383218714aa5ddf94981c2e511752371bd",
+                "44eabfb6dea221d40c7f9c4ba7b3adb98655cbf724f594fb86a43889db9a6649",
             ),
             (
                 ExportMode::BestEffort,
-                "b845258d5f879c988d45094cb4b95dd37ee3bde0cf4fd678d248c50d30e9b50a",
+                "cb8eb8bca5c5790b172fa07e9e0c1fd2561e8e7c8deb88239b93e17f872ba33c",
             ),
         ] {
             let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
@@ -1384,7 +1384,15 @@ mod tests {
             ConfidenceTier::Confirmed,
         );
         writes.props["operations"] = json!(["insert", "update"]);
-        let edges = vec![references.clone(), writes];
+        // A repository bound to its entity is not a related entity.
+        let binding = edge(
+            "sym:app@pets/repo.py#PetRepository.save",
+            "data:app@sqlalchemy:pets",
+            "REFERENCES",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        let edges = vec![references.clone(), writes, binding];
         let bundle = compile_spec(
             &nodes,
             &edges,
@@ -1427,6 +1435,7 @@ mod tests {
         ] {
             assert!(pets.contains(&line), "{line}\n{pets}");
         }
+        assert!(!pets.contains("Referenced by"), "{pets}");
         let owners = &data[data.find("\n### Owner\n").unwrap()..data.find("\n### Pet\n").unwrap()];
         assert!(owners.contains("- **Referenced by:** Pet ("), "{owners}");
     }

@@ -893,6 +893,14 @@ fn entity_sections(
                 .iter()
                 .filter(|e| e.label == "REFERENCES" || e.label == "MAPS_TO")
                 .filter(|e| if outgoing { e.src == id } else { e.dst == id })
+                // Entity to entity only: a repository's binding to its
+                // entity is not a relation between entities.
+                .filter(|e| {
+                    let other = if outgoing { &e.dst } else { &e.src };
+                    by_id
+                        .get(other.as_str())
+                        .is_some_and(|n| n.label == "DataEntity")
+                })
                 .collect()
         };
         for (title, outgoing) in [("References", true), ("Referenced by", false)] {
