@@ -992,6 +992,32 @@ fn documentation_evidence_lists_sections_and_mentions_with_citations_that_resolv
 }
 
 #[test]
+fn a_document_title_holding_markup_stays_literal_in_documentation_evidence() {
+    let markdown = "# ![diagram](https://example.com/image.png) <b>Shop</b>\n\n\
+        `GET /orders/{id}` is served.\n";
+    let (nodes, edges) = evidenced(markdown);
+    for mode in [
+        crate::ExportMode::BestEffort,
+        crate::ExportMode::VerifiedOnly,
+    ] {
+        let bundle = crate::compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
+        let content = &bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "documentation-evidence")
+            .unwrap()
+            .content;
+        let provenance = content
+            .split("## Assertions and inline provenance")
+            .nth(1)
+            .unwrap();
+        assert!(provenance.contains("diagram"), "{content}");
+        assert!(!content.contains("![diagram]("), "{content}");
+        assert!(!content.contains("<b>"), "{content}");
+    }
+}
+
+#[test]
 fn a_bundle_with_no_documentation_states_that_and_cites_nothing() {
     let bundle = crate::compile_spec(
         &[],
