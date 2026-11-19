@@ -1195,12 +1195,12 @@ fn curated_export_cost_measurement() {
             let inputs_ms = ms(at);
             let at = Instant::now();
             let bundle = spec::try_compile_spec_supplied(
-                &inputs.nodes,
-                &inputs.edges,
+                &inputs.base.graph.0,
+                &inputs.base.graph.1,
                 &inputs.flows,
                 mode,
                 &inputs.rejected_hashes,
-                inputs.supplied(),
+                inputs.supplied(None),
             )
             .unwrap();
             let compile_ms = ms(at);

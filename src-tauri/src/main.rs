@@ -6482,14 +6482,59 @@ fn persist_semantic_preview(
 /// artifact (AC-0592); the curated projection is computed over that same
 /// snapshot (SPEC-12, AC-0653).
 struct SpecInputs {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
+    /// The graph rows and the store revision they were read at.
+    base: core_graph::RevisionedSnapshot,
+    /// Overlay Capabilities and Actors current for `base` (#1443).
+    knowledge: KnowledgeInput,
     coverage: Vec<core_graph::coverage::StoredCoverage>,
     flows: Vec<flowtracer::Flow>,
     rejected_hashes: std::collections::BTreeSet<String>,
     curated: CuratedInput,
     /// `None` only when the projection was not read.
     graph_basis: Option<spec::GraphBasis>,
+}
+
+/// The knowledge-layer facts `user-stories` renders beside the base
+/// Capabilities (ADR-0051, #1443): the overlay's Capability and Actor nodes,
+/// read only when the overlay is current for the compiled revision. Empty
+/// when there is no overlay or it is stale, so the artifact keeps its
+/// base-only bytes.
+#[derive(Default)]
+struct KnowledgeInput {
+    capabilities: Vec<core_graph::overlay::OverlayFact>,
+    actors: Vec<core_graph::overlay::OverlayFact>,
+}
+
+impl KnowledgeInput {
+    /// The overlay's Capabilities and Actors, when it is current for
+    /// `revision`. The caller holds no graph lock.
+    fn read(
+        overlay: Option<&Mutex<core_graph::overlay::OverlayStore>>,
+        revision: &core_graph::StoreRevision,
+    ) -> Result<Self, String> {
+        use core_graph::overlay::{MAX_BYTES, MAX_FACTS, OverlayItem, OverlayRead};
+        let Some(overlay) = overlay else {
+            return Ok(Self::default());
+        };
+        let read = overlay
+            .lock()
+            .map_err(|error| error.to_string())?
+            .read_capabilities_and_actors_bounded(revision, MAX_FACTS, MAX_BYTES)
+            .map_err(|error| format!("The knowledge overlay could not be read: {error}"))?;
+        let OverlayRead::Current { mut facts, .. } = read else {
+            return Ok(Self::default());
+        };
+        let actors = facts
+            .extract_if(
+                ..,
+                |f| matches!(&f.item, OverlayItem::Node(n) if n.label == "Actor"),
+            )
+            .collect();
+        Ok(Self {
+            capabilities: facts,
+            actors,
+        })
+    }
 }
 
 /// The curated projection of one compilation (SPEC-12, AC-0653).
@@ -6507,8 +6552,49 @@ enum CuratedInput {
 }
 
 impl SpecInputs {
-    fn supplied(&self) -> spec::Supplied<'_> {
+    /// The overlay Capabilities as story candidates, borrowed.
+    fn candidates(&self) -> Result<Vec<spec::CapabilityStory<'_>>, String> {
+        self.knowledge
+            .capabilities
+            .iter()
+            .map(|fact| match &fact.item {
+                core_graph::overlay::OverlayItem::Node(capability) => Ok(spec::CapabilityStory {
+                    capability,
+                    cites: &fact.cites,
+                }),
+                _ => Err("The knowledge overlay holds a Capability that is not a node.".into()),
+            })
+            .collect()
+    }
+
+    /// The knowledge stories validated against this compilation's graph
+    /// under `mode`, or none when the overlay supplied nothing. An invalid
+    /// overlay fact refuses the compilation, as the MCP read does.
+    fn knowledge<'a>(
+        &'a self,
+        candidates: &[spec::CapabilityStory<'a>],
+        mode: spec::ExportMode,
+    ) -> Result<Option<spec::KnowledgeStories<'a>>, String> {
+        if candidates.is_empty() && self.knowledge.actors.is_empty() {
+            return Ok(None);
+        }
+        spec::validate_knowledge_stories(
+            &self.base,
+            candidates,
+            &self.knowledge.actors,
+            mode,
+            &self.rejected_hashes,
+        )
+        .map(Some)
+        .map_err(|error| format!("The knowledge overlay was refused: {error}"))
+    }
+
+    fn supplied<'a>(
+        &'a self,
+        knowledge: Option<&'a spec::KnowledgeStories<'a>>,
+    ) -> spec::Supplied<'a> {
         spec::Supplied {
+            knowledge,
             coverage: &self.coverage,
             // The export compares no inventory with a current registration.
             stale_coverage: &[],
@@ -6548,6 +6634,8 @@ struct SpecRead {
     edges: Vec<Edge>,
     coverage: Vec<core_graph::coverage::StoredCoverage>,
     assertion_decisions: Vec<agents::AssertionDecisionRecord>,
+    /// Read after the graph and decision locks are released (#1443).
+    knowledge: KnowledgeInput,
 }
 
 #[cfg(test)]
@@ -6577,18 +6665,32 @@ fn read_spec(
         edges,
         coverage,
         assertion_decisions,
+        knowledge: KnowledgeInput::default(),
     })
 }
 
 /// [`read_spec`] under the application's graph and decision locks, both
-/// released on return.
+/// released before the knowledge overlay is read for the same revision.
 fn read_spec_locked(state: &AppState) -> Result<SpecRead, String> {
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    read_spec(&graph, &decisions)
+    let read = {
+        let graph = state.graph.lock().map_err(|error| error.to_string())?;
+        let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+        read_spec(&graph, &decisions)?
+    };
+    read.with_knowledge(state.knowledge_overlay.as_deref())
 }
 
 impl SpecRead {
+    /// This read with the overlay's Capabilities and Actors when the overlay
+    /// is current for its revision (#1443). Hold no graph lock.
+    fn with_knowledge(
+        mut self,
+        overlay: Option<&Mutex<core_graph::overlay::OverlayStore>>,
+    ) -> Result<Self, String> {
+        self.knowledge = KnowledgeInput::read(overlay, &self.revision)?;
+        Ok(self)
+    }
+
     /// The flow trace and, with a `review`, the curated projection of what
     /// was read. No store is read and no lock is needed.
     fn inputs(self, review: Option<&curated::CuratedReview>) -> SpecInputs {
@@ -6598,6 +6700,7 @@ impl SpecRead {
             edges,
             coverage,
             assertion_decisions,
+            knowledge,
         } = self;
         let flows = flowtracer::trace(&nodes, &edges);
         let rejected_hashes = assertion_decisions
@@ -6629,8 +6732,11 @@ impl SpecRead {
             None => (CuratedInput::NotRead, None),
         };
         SpecInputs {
-            nodes,
-            edges,
+            base: core_graph::RevisionedSnapshot {
+                revision,
+                graph: (nodes, edges),
+            },
+            knowledge,
             coverage,
             flows,
             rejected_hashes,
@@ -6668,16 +6774,20 @@ fn compile_spec_bundle(
     inputs: SpecInputs,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
-    // An export whose citations do not resolve is refused (ADR-0058).
-    let mut bundle = spec::try_compile_spec_supplied(
-        &inputs.nodes,
-        &inputs.edges,
-        &inputs.flows,
-        mode,
-        &inputs.rejected_hashes,
-        inputs.supplied(),
-    )
-    .map_err(|error| error.to_string())?;
+    let mut bundle = {
+        let candidates = inputs.candidates()?;
+        let knowledge = inputs.knowledge(&candidates, mode)?;
+        // An export whose citations do not resolve is refused (ADR-0058).
+        spec::try_compile_spec_supplied(
+            &inputs.base.graph.0,
+            &inputs.base.graph.1,
+            &inputs.flows,
+            mode,
+            &inputs.rejected_hashes,
+            inputs.supplied(knowledge.as_ref()),
+        )
+        .map_err(|error| error.to_string())?
+    };
     inputs.stamp(&mut bundle);
     Ok(bundle)
 }
@@ -6749,15 +6859,17 @@ fn compile_spec_artifacts(
             max_output_bytes: usize::MAX,
         },
     };
+    let candidates = inputs.candidates()?;
+    let knowledge = inputs.knowledge(&candidates, mode)?;
     let outcomes = spec::compile_spec_selected_supplied(
-        &inputs.nodes,
-        &inputs.edges,
+        &inputs.base.graph.0,
+        &inputs.base.graph.1,
         &inputs.flows,
         mode,
         &inputs.rejected_hashes,
         artifact_ids,
         unbounded,
-        inputs.supplied(),
+        inputs.supplied(knowledge.as_ref()),
     )
     .map_err(|spec::ArtifactSelectionError::UnknownArtifact { index }| {
         format!("unknown spec artifact id: {}", artifact_ids[index])
@@ -6867,16 +6979,20 @@ fn compile_spec_with_views_and_curated(
 > {
     let curated = curated_workbench::CuratedWorkbenchRead::of(&inputs.curated, mode)
         .ok_or("The curated projection was not read.")?;
-    // An export whose citations do not resolve is refused (ADR-0058).
-    let (mut bundle, views) = spec::try_compile_spec_with_views_supplied(
-        &inputs.nodes,
-        &inputs.edges,
-        &inputs.flows,
-        mode,
-        &inputs.rejected_hashes,
-        inputs.supplied(),
-    )
-    .map_err(|error| error.to_string())?;
+    let (mut bundle, views) = {
+        let candidates = inputs.candidates()?;
+        let knowledge = inputs.knowledge(&candidates, mode)?;
+        // An export whose citations do not resolve is refused (ADR-0058).
+        spec::try_compile_spec_with_views_supplied(
+            &inputs.base.graph.0,
+            &inputs.base.graph.1,
+            &inputs.flows,
+            mode,
+            &inputs.rejected_hashes,
+            inputs.supplied(knowledge.as_ref()),
+        )
+        .map_err(|error| error.to_string())?
+    };
     inputs.stamp(&mut bundle);
     Ok((bundle, views, curated))
 }

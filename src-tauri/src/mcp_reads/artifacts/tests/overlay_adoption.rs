@@ -883,3 +883,84 @@ fn a_canonical_invalid_session_actor_returns_storage() {
         Err(crate::mcp_reads::ReadError::Storage)
     ));
 }
+
+// #1443: the desktop export (Spec Workbench, export bundle and single
+// artifact reads) renders the overlay's stories too, with the MCP read's
+// bytes. Before, it compiled the base graph alone and user stories were
+// empty on Vendure.
+#[test]
+fn desktop_export_renders_overlay_stories_like_the_mcp_read() {
+    let f = Fixture::with_allow("Permission.ReadOrder, Permission.Owner");
+    let desktop = |mode| {
+        let read = {
+            let graph = f.graph.lock().unwrap();
+            let decisions = f.decisions.lock().unwrap();
+            crate::read_spec(&graph, &decisions).unwrap()
+        };
+        let inputs = read.with_knowledge(Some(&f.overlay)).unwrap().inputs(None);
+        let bundle = crate::compile_spec_bundle(inputs, mode).unwrap();
+        bundle
+            .artifacts
+            .into_iter()
+            .find(|a| a.id == "user-stories")
+            .unwrap()
+    };
+    let single = |mode| {
+        let read = {
+            let graph = f.graph.lock().unwrap();
+            let decisions = f.decisions.lock().unwrap();
+            crate::read_spec(&graph, &decisions).unwrap()
+        };
+        let inputs = read.with_knowledge(Some(&f.overlay)).unwrap().inputs(None);
+        crate::compile_spec_artifact(inputs, mode, "user-stories").unwrap()
+    };
+    // Nothing published: the base-only artifact, as before.
+    let empty = desktop(ExportMode::BestEffort);
+    assert!(
+        empty
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+
+    f.publish(f.facts.clone());
+    let derived = desktop(ExportMode::BestEffort);
+    assert!(derived.verify_identity());
+    assert!(
+        derived.content.contains(
+            "## US-R-0001 — Derived Capability: shop GraphQL operations in ShopOrderResolver"
+        ),
+        "{}",
+        derived.content
+    );
+    assert!(
+        derived.content.contains(
+            "- As a shop API caller holding ReadOrder or Owner, I can view active order (QUERY shop.activeOrder)."
+        ),
+        "{}",
+        derived.content
+    );
+    assert_eq!(single(ExportMode::BestEffort), derived);
+    // The same bytes and identity as the MCP read of the same stores.
+    let current = f.best();
+    assert_eq!(stories(&current, compile_limits()).artifact, derived);
+    // A verified-only export withholds the weak stories and says so.
+    let strict = desktop(ExportMode::VerifiedOnly);
+    assert!(strict.assertions.is_empty());
+    assert!(strict.content.contains("derived stories omitted"));
+
+    // A graph write makes the overlay stale: base-only bytes again.
+    f.graph
+        .lock()
+        .unwrap()
+        .put_node(&core_graph::Node {
+            id: "res:unrelated".into(),
+            label: "Resource".into(),
+            props: serde_json::json!({}),
+        })
+        .unwrap();
+    assert!(
+        desktop(ExportMode::BestEffort)
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+}
