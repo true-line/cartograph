@@ -822,7 +822,8 @@ pub(super) fn d1(
             };
             let arranged = matches!(source, SectionFrame::Artifacts(_))
                 && section.subject == Some("BusinessRule")
-                && knowledge.is_some_and(|k| !k.included.is_empty());
+                && knowledge
+                    .is_some_and(|k| k.included.iter().any(|s| s.node.label == "Capability"));
             if arranged && let Some(knowledge) = knowledge {
                 // Arranged per capability (#1443); the inventory keeps every
                 // observation with its dependencies.
@@ -898,7 +899,7 @@ pub(super) fn d1(
 }
 
 #[path = "document_rules.rs"]
-mod rules;
+pub(super) mod rules;
 
 #[cfg(test)]
 #[path = "document_tests.rs"]
