@@ -611,6 +611,7 @@ fn produce(
             flows,
             gaps,
             (beside.curated, beside.graph_content_hash),
+            beside.knowledge,
             mode,
             max,
         )?,

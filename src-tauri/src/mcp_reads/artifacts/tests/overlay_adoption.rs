@@ -984,3 +984,20 @@ fn desktop_export_renders_overlay_stories_like_the_mcp_read() {
             .contains("No Capability facts have been recovered yet.")
     );
 }
+
+// AC-0663: the D1 document read alone frames the overlay's derived
+// Capabilities, and reads as before when the overlay supplies none.
+#[test]
+fn d1_read_alone_frames_overlay_capabilities() {
+    let f = Fixture::new();
+    let d1 = |session: &ReadSession| match session
+        .compile_artifact("d1-product-specification", trace_limits(), compile_limits())
+        .unwrap()
+    {
+        ArtifactCompilation::Produced(a) => a.artifact.content,
+        ArtifactCompilation::Limited { .. } => panic!("fixture fits"),
+    };
+    assert!(!d1(&f.best()).contains("Derived Capabilities:"));
+    f.publish(f.facts.clone());
+    assert!(d1(&f.best()).contains("Derived Capabilities: 1."));
+}

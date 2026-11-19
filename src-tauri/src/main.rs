@@ -6871,17 +6871,26 @@ fn compile_spec_artifacts(
     };
     // Only `user-stories` renders the overlay's stories, and the fact index
     // cites them; any other selection neither reads nor validates them, so a
-    // refused overlay fact cannot fail an unrelated read.
-    let reads_knowledge = artifact_ids
+    // refused overlay fact cannot fail an unrelated read. The D1 document
+    // frames the derived Capabilities and caller roles too (AC-0663), but
+    // only as context: a refused overlay leaves it with its base sections.
+    let requires_knowledge = artifact_ids
         .iter()
         .any(|id| matches!(*id, "user-stories" | "fact-index" | "fact-index-json"));
-    let candidates = if reads_knowledge {
-        inputs.candidates()?
+    let frames_knowledge = artifact_ids.contains(&"d1-product-specification");
+    let candidates = if requires_knowledge || frames_knowledge {
+        match inputs.candidates() {
+            Ok(candidates) => candidates,
+            Err(_) if !requires_knowledge => Vec::new(),
+            Err(error) => return Err(error),
+        }
     } else {
         Vec::new()
     };
-    let knowledge = if reads_knowledge {
+    let knowledge = if requires_knowledge {
         inputs.knowledge(&candidates, mode)?
+    } else if frames_knowledge {
+        inputs.knowledge(&candidates, mode).ok().flatten()
     } else {
         None
     };
