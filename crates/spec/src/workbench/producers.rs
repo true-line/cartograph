@@ -487,6 +487,47 @@ pub(super) fn data(
             )?;
         }
     }
+    // Each entity's own columns, as its adapter recorded them: `columns`
+    // (SQLAlchemy, TypeORM) or `fields` (JPA). A column is a property of
+    // its entity, so it cites that entity.
+    let column_rows = |n: &Node| {
+        n.props
+            .get("columns")
+            .or_else(|| n.props.get("fields"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    if entities.iter().any(|n| column_rows(n) > 0) {
+        content.push_str(
+            "\n## Entity columns\n\n| Entity | Column | Type | Key | Nullable | Stored as | Citation |\n|---|---|---|---|---|---|---|\n",
+        )?;
+        for n in entities.iter().filter(|n| column_rows(n) > 0) {
+            let cite = node_citation(n);
+            let columns = n
+                .props
+                .get("columns")
+                .or_else(|| n.props.get("fields"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten();
+            for column in columns {
+                let key = column["primary_key"]
+                    .as_bool()
+                    .or_else(|| column["id"].as_bool())
+                    .unwrap_or(false);
+                writeln!(
+                    content,
+                    "| {} | `{}` | {} | {} | {} | {} | {cite} |",
+                    Safe(NodeName(n)),
+                    Safe(relation_value(&column["name"])),
+                    Safe(relation_value(&column["type"])),
+                    if key { "primary" } else { "" },
+                    Safe(relation_value(&column["nullable"])),
+                    Safe(relation_value(&column["column"])),
+                )?;
+            }
+        }
+    }
     if !mappings.is_empty() {
         content.push_str(
             "\n## Access and mapping relations\n\n| Source | Relation | Target | Confidence | Citation |\n|---|---|---|---|---|\n",

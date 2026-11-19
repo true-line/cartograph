@@ -1329,6 +1329,68 @@ mod tests {
     }
 
     #[test]
+    fn data_model_lists_each_entity_column() {
+        // A rebuild needs the columns, not only entity names: `columns`
+        // (SQLAlchemy, TypeORM) and `fields` (JPA) both render, each row
+        // citing its entity.
+        let mut product = node(
+            "data:product",
+            "DataEntity",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        product.props["name"] = "Product".into();
+        product.props["columns"] = serde_json::json!([
+            {"name": "id", "type": "number", "primary_key": true},
+            {"name": "deletedAt", "type": "Date | null", "nullable": true, "column": "deleted_at"},
+        ]);
+        let mut ticket = node(
+            "data:ticket",
+            "DataEntity",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        );
+        ticket.props["name"] = "Ticket".into();
+        ticket.props["fields"] = serde_json::json!([{"name": "id", "type": "Long", "id": true}]);
+        let bundle = compile_spec(
+            &[product, ticket],
+            &[],
+            &[],
+            ExportMode::VerifiedOnly,
+            &BTreeSet::new(),
+        );
+        let data = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "data-model")
+            .unwrap();
+        let cite = |id: &str| citation_id(&FactKey::Node { id: id.to_owned() });
+        let content = &data.content;
+        assert!(content.contains("## Entity columns"), "{content}");
+        assert!(
+            content.contains(&format!(
+                "| Product | `id` | number | primary |  |  | {} |",
+                cite("data:product")
+            )),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!(
+                "| Product | `deletedAt` | Date \\| null |  | true | deleted_at | {} |",
+                cite("data:product")
+            )),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!(
+                "| Ticket | `id` | Long | primary |  |  | {} |",
+                cite("data:ticket")
+            )),
+            "{content}"
+        );
+    }
+
+    #[test]
     fn data_model_lists_every_relation_field_of_an_aggregated_relation() {
         // AC-0284 (#239, #702 review): several relation fields to the same
         // target entity are one fact — one edge — so data_model.md lists
