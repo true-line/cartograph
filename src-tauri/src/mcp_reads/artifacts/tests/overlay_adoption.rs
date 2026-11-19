@@ -940,6 +940,25 @@ fn desktop_export_renders_overlay_stories_like_the_mcp_read() {
         derived.content
     );
     assert_eq!(single(ExportMode::BestEffort), derived);
+    // An unrelated single-artifact read neither reads nor validates the
+    // overlay: a refused overlay fact fails only what renders it.
+    let refused = || {
+        let read = {
+            let graph = f.graph.lock().unwrap();
+            let decisions = f.decisions.lock().unwrap();
+            crate::read_spec(&graph, &decisions).unwrap()
+        };
+        let mut read = read.with_knowledge(Some(&f.overlay)).unwrap();
+        let OverlayItem::Node(capability) = &mut read.knowledge.capabilities[0].item else {
+            unreachable!()
+        };
+        capability.props["prov"] = serde_json::json!({});
+        read.inputs(None)
+    };
+    assert!(crate::compile_spec_artifact(refused(), ExportMode::BestEffort, "topology").is_ok());
+    assert!(
+        crate::compile_spec_artifact(refused(), ExportMode::BestEffort, "user-stories").is_err()
+    );
     // The same bytes and identity as the MCP read of the same stores.
     let current = f.best();
     assert_eq!(stories(&current, compile_limits()).artifact, derived);

@@ -6859,8 +6859,22 @@ fn compile_spec_artifacts(
             max_output_bytes: usize::MAX,
         },
     };
-    let candidates = inputs.candidates()?;
-    let knowledge = inputs.knowledge(&candidates, mode)?;
+    // Only `user-stories` renders the overlay's stories, and the fact index
+    // cites them; any other selection neither reads nor validates them, so a
+    // refused overlay fact cannot fail an unrelated read.
+    let reads_knowledge = artifact_ids
+        .iter()
+        .any(|id| matches!(*id, "user-stories" | "fact-index" | "fact-index-json"));
+    let candidates = if reads_knowledge {
+        inputs.candidates()?
+    } else {
+        Vec::new()
+    };
+    let knowledge = if reads_knowledge {
+        inputs.knowledge(&candidates, mode)?
+    } else {
+        None
+    };
     let outcomes = spec::compile_spec_selected_supplied(
         &inputs.base.graph.0,
         &inputs.base.graph.1,
