@@ -8181,7 +8181,7 @@ SOFTWARE.
 
 Used by:
 - tree-sitter-language 0.1.9 — https://github.com/tree-sitter/tree-sitter
-- tree-sitter 0.27.1 — https://github.com/tree-sitter/tree-sitter
+- tree-sitter 0.27.2 — https://github.com/tree-sitter/tree-sitter
 
 ```
 The MIT License (MIT)
@@ -10010,7 +10010,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## cytoscape 3.34.4
+## cytoscape 3.35.0
 
 License: MIT
 
@@ -10036,7 +10036,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## material-symbols 0.48.2
+## material-symbols 0.48.3
 
 License: Apache-2.0
 
@@ -10357,7 +10357,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## zustand 5.0.16
+## zustand 5.1.0
 
 License: MIT
 

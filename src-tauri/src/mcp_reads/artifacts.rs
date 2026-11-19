@@ -194,6 +194,7 @@ impl ReadSession {
                 &[id],
                 compile_limits,
                 spec::Supplied {
+                    knowledge: None,
                     coverage: if coverage { &self.recorded } else { &[] },
                     stale_coverage: &stale,
                     curated: if coverage {

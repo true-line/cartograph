@@ -113,7 +113,11 @@ jobs:
   package:
     name: macOS universal bundle
     needs: evidence
-    runs-on: macos-latest
+    # The owner's self-hosted Mac packages in about 15 minutes; a hosted
+    # macos-latest runner needed over 90 for the universal compile (v0.71.0).
+    # This workflow has no pull_request trigger, so fork code never reaches
+    # the runner: only a tag push to Release or a maintainer's dispatch does.
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 90
     outputs:
       signing_mode: ${{ steps.signing.outputs.mode }}

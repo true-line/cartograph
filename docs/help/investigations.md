@@ -14,6 +14,15 @@ does not inspect activity entries, raw responses, source text or arbitrary chat 
 saved-investigation list. Opening an older investigation preserves the version
 and basis that were originally saved.
 
+Each saved finding has two separate reviews. **Use for follow-up** selects it
+for later work and changes nothing else. **Accept as curated** lets the curated
+reads show it: a best-effort export, the Spec Workbench and the read-only MCP
+list it as a cited statement while every fact it cites is unchanged. The finding
+stays T3 / InferredWeak, nothing is written to the graph, and a verified-only
+export never shows it. **Reject as curated** withdraws an acceptance. If a
+curation review cannot be saved or confirmed, choose **Refresh curation
+reviews** and decide again; nothing is retried for you.
+
 From a selected saved task, open **Conversation turns** to browse its persisted
 follow-ups. Turns are loaded in bounded newest-first pages; a selected task stays
 visible even when it falls outside the current page. Parent links identify the
