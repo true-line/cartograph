@@ -76,6 +76,8 @@ fn projection(drafts: &[ReviewedDraft], nodes: &[Node]) -> CuratedProjection {
         current_assertion_hashes: &BTreeSet::new(),
         drafts,
         cited_fact_hashes: &cited_fact_hashes(nodes, &[edge()], &cited),
+        findings: &[],
+        cited_fact_digests: &std::collections::BTreeMap::new(),
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()
@@ -93,6 +95,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            knowledge: None,
             coverage: &[],
             stale_coverage: &[],
             curated: Curated::Computed(projection),
@@ -374,6 +377,7 @@ fn one_changed_fact_marks_exactly_the_citing_drafts_twice_the_same() {
                     *mode,
                     &BTreeSet::new(),
                     Supplied {
+                        knowledge: None,
                         coverage: &[],
                         stale_coverage: &[],
                         curated: Curated::Computed(&projection),
@@ -507,6 +511,36 @@ fn cited_fact_hashes_reads_only_the_cited_facts() {
     );
     assert!(hashes.contains_key(&edge_id));
     assert!(cited_fact_hashes(&nodes(), &[edge()], &BTreeSet::new()).is_empty());
+}
+
+// AC-0844: the digest a finding's citations are compared with.
+#[test]
+fn cited_fact_digests_reads_only_the_cited_facts_and_follows_every_field() {
+    let edge_id = citation_id(&edge_key(&edge()));
+    let cited = BTreeSet::from([
+        id("cap:checkout"),
+        edge_id.clone(),
+        "F-0000000000000000".to_owned(),
+    ]);
+    let digests = crate::cited_fact_digests(&nodes(), &[edge()], &cited);
+    assert_eq!(digests.len(), 2);
+    // The digest an investigation records for a fact it reads.
+    assert_eq!(
+        digests[&id("cap:checkout")],
+        core_graph::source::node_digest(&nodes()[0]).unwrap()
+    );
+    assert_eq!(
+        digests[&edge_id],
+        core_graph::source::edge_digest(&edge()).unwrap()
+    );
+    assert!(crate::cited_fact_digests(&nodes(), &[edge()], &BTreeSet::new()).is_empty());
+
+    // Any field of the fact moves it, not only its provenance.
+    let mut changed = nodes();
+    changed[0].props["note"] = serde_json::json!("changed");
+    let moved = crate::cited_fact_digests(&changed, &[edge()], &cited);
+    assert_ne!(moved[&id("cap:checkout")], digests[&id("cap:checkout")]);
+    assert_eq!(moved[&edge_id], digests[&edge_id]);
 }
 
 // AC-0668 (T-0668): only a drafted section of this catalogue version can be

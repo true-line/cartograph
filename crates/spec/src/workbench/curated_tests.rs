@@ -115,6 +115,8 @@ fn projection(records: &[ReviewedProposal]) -> CuratedProjection {
         current_assertion_hashes: &BTreeSet::new(),
         drafts: &[],
         cited_fact_hashes: &std::collections::BTreeMap::new(),
+        findings: &[],
+        cited_fact_digests: &std::collections::BTreeMap::new(),
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()
@@ -143,6 +145,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            knowledge: None,
             coverage: &[],
             stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
@@ -241,6 +244,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
     for (failure, code) in failures {
         assert_eq!(json!(failure)["reason"], code);
         let supplied = Supplied {
+            knowledge: None,
             coverage: &[],
             stale_coverage: &[],
             curated: Curated::NotComputed(failure),
@@ -308,6 +312,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             ExportMode::BestEffort,
             &BTreeSet::new(),
             Supplied {
+                knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
                 curated: Curated::NotComputed(CuratedFailure::TooManyAccepted { limit: 256 }),
@@ -557,6 +562,7 @@ fn curated_is_deterministic_selected_alone_and_bounded() {
                 ids,
                 limits(max_bytes),
                 Supplied {
+                    knowledge: None,
                     coverage: &[],
                     stale_coverage: &[],
                     curated: Curated::Computed(&projection),

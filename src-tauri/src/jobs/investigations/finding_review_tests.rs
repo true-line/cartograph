@@ -897,3 +897,72 @@ fn finding_review_defensive_global_capacity_failure_rolls_back() {
     );
     assert_eq!(reopened.investigation_result(&id).unwrap(), Some(result));
 }
+
+// AC-0844: a curation review records what this resolves, and resolving
+// reads the saved result without writing anything.
+#[test]
+fn finding_resolution_reads_the_saved_finding_and_its_citations_only() {
+    let mut fixture = Fixture::new();
+    let (id, result) = completed_review_fixture(&mut fixture, "curation-resolve");
+    let (other_id, other_result) = completed_review_fixture(&mut fixture, "curation-other");
+    let reviews = fixture
+        .store
+        .investigation_finding_reviews(&id, &result.result_id)
+        .unwrap();
+    let before = non_review_rows(&fixture.store);
+    let detail = fixture.store.investigation(&id).unwrap();
+
+    for (index, review) in reviews.reviews.iter().enumerate() {
+        let resolved = fixture
+            .store
+            .resolve_investigation_finding(&review.subject)
+            .unwrap();
+        assert_eq!(resolved.subject, review.subject);
+        assert_eq!(resolved.finding, result.findings[index]);
+        assert_eq!(
+            serde_json::json!(resolved.role),
+            serde_json::to_value(detail.specialist.id).unwrap()
+        );
+        // One saved citation per citation id of the finding, in its order.
+        assert_eq!(
+            resolved
+                .citations
+                .iter()
+                .map(|citation| citation.citation_id.as_str())
+                .collect::<Vec<_>>(),
+            ["citation:graph"]
+        );
+        assert!(detail.citations.contains(&resolved.citations[0]));
+    }
+
+    // A subject the store would not compute for that finding is refused.
+    let other = fixture
+        .store
+        .investigation_finding_reviews(&other_id, &other_result.result_id)
+        .unwrap();
+    let mut mixed = reviews.reviews[0].subject.clone();
+    mixed.subject_id = other.reviews[0].subject.subject_id.clone();
+    assert_eq!(
+        fixture.store.resolve_investigation_finding(&mixed),
+        Err(FindingReviewError::SubjectChanged)
+    );
+    let mut mixed = reviews.reviews[0].subject.clone();
+    mixed.result_id = other_result.result_id.clone();
+    assert!(fixture.store.resolve_investigation_finding(&mixed).is_err());
+    let mut mixed = reviews.reviews[0].subject.clone();
+    mixed.finding_id = "finding-missing".into();
+    assert!(fixture.store.resolve_investigation_finding(&mixed).is_err());
+
+    // Nothing was written: no review row, and no other table moved.
+    assert_eq!(non_review_rows(&fixture.store), before);
+    let count: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM investigation_finding_reviews",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}

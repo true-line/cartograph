@@ -3089,12 +3089,18 @@ fn stitch_http_bindings(
 /// the relinked edge count and republished with the patch, so a cross-repo
 /// decision is never counted as linking nothing (#1847). Returns each
 /// rescanned repo's found-ADR edge count.
+///
+/// Documentation is read only for `documented`, the repositories this
+/// operation publishes: a document is a fact about one repository's own
+/// files, so another repository's documents stay as its own publication
+/// read them, matching the counts its stored inventory carries.
 fn relink_found_adrs(
     state: &AppState,
     operation: &SourceOperation,
     execution: &JobExecution,
     facts: &mut OperationFacts,
     recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
+    documented: &std::collections::BTreeSet<String>,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
     let snapshot = state
@@ -3112,7 +3118,19 @@ fn relink_found_adrs(
     let (mut patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
     // The same pass reads each repository's documentation files as
     // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1).
-    let documents = collect_documents(&snapshot.0, |repo| {
+    let published_repos = snapshot
+        .0
+        .iter()
+        .filter(|node| {
+            node.label == "Repo"
+                && node
+                    .id
+                    .strip_prefix("repo:")
+                    .is_some_and(|repo| documented.contains(repo))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let documents = collect_documents(&published_repos, |repo| {
         ensure_running_job(state, execution)?;
         operation.root(repo)
     })?;
@@ -3278,7 +3296,7 @@ fn collect_documents<'a>(
             facts.edges.extend(mentions);
             // Whether a repo-relative path is in the tree: an existence
             // check only, and a link is never followed out of it.
-            let exists = |path: &str| root.join(path).symlink_metadata().is_ok();
+            let exists = |path: &str| tree_has_path(root, path);
             let (drift, compared) =
                 spec::documentation_drift(repo, commit, &facts.references, &index, &exists);
             facts.nodes.extend(drift);
@@ -3286,6 +3304,26 @@ fn collect_documents<'a>(
             Ok((repo.to_owned(), facts))
         })
         .collect()
+}
+
+/// Whether `path` names an entry of the tree under `root`, read component
+/// by component without following a symbolic link. A link on the way is
+/// itself the entry the tree holds: what it points at, possibly outside the
+/// repository, never decides the answer.
+fn tree_has_path(root: &std::path::Path, path: &str) -> bool {
+    let mut at = root.to_path_buf();
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        if part == ".." {
+            return false;
+        }
+        at.push(part);
+        match at.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Add each repository's documentation facts to `patch`, and remove the
@@ -5188,6 +5226,7 @@ fn run_ingest<R: tauri::Runtime>(
         execution,
         &mut published,
         &mut Default::default(),
+        &std::collections::BTreeSet::from([repo.clone()]),
     )
     .map_err(&fail)?;
 
@@ -5637,6 +5676,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &execution,
         &mut published,
         &mut Default::default(),
+        &std::collections::BTreeSet::from([source.repo_key.clone()]),
     )
     .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -5981,12 +6021,14 @@ fn add_system_blocking<R: tauri::Runtime>(
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
     }
+    let documented = recorded.keys().cloned().collect();
     let relinked = relink_found_adrs(
         &state,
         &operation,
         &execution,
         &mut published,
         &mut recorded,
+        &documented,
     )
     .map_err(&fail)?;
     for (_, coverage) in &mut proofs {
@@ -6440,14 +6482,59 @@ fn persist_semantic_preview(
 /// artifact (AC-0592); the curated projection is computed over that same
 /// snapshot (SPEC-12, AC-0653).
 struct SpecInputs {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
+    /// The graph rows and the store revision they were read at.
+    base: core_graph::RevisionedSnapshot,
+    /// Overlay Capabilities and Actors current for `base` (#1443).
+    knowledge: KnowledgeInput,
     coverage: Vec<core_graph::coverage::StoredCoverage>,
     flows: Vec<flowtracer::Flow>,
     rejected_hashes: std::collections::BTreeSet<String>,
     curated: CuratedInput,
     /// `None` only when the projection was not read.
     graph_basis: Option<spec::GraphBasis>,
+}
+
+/// The knowledge-layer facts `user-stories` renders beside the base
+/// Capabilities (ADR-0051, #1443): the overlay's Capability and Actor nodes,
+/// read only when the overlay is current for the compiled revision. Empty
+/// when there is no overlay or it is stale, so the artifact keeps its
+/// base-only bytes.
+#[derive(Default)]
+struct KnowledgeInput {
+    capabilities: Vec<core_graph::overlay::OverlayFact>,
+    actors: Vec<core_graph::overlay::OverlayFact>,
+}
+
+impl KnowledgeInput {
+    /// The overlay's Capabilities and Actors, when it is current for
+    /// `revision`. The caller holds no graph lock.
+    fn read(
+        overlay: Option<&Mutex<core_graph::overlay::OverlayStore>>,
+        revision: &core_graph::StoreRevision,
+    ) -> Result<Self, String> {
+        use core_graph::overlay::{MAX_BYTES, MAX_FACTS, OverlayItem, OverlayRead};
+        let Some(overlay) = overlay else {
+            return Ok(Self::default());
+        };
+        let read = overlay
+            .lock()
+            .map_err(|error| error.to_string())?
+            .read_capabilities_and_actors_bounded(revision, MAX_FACTS, MAX_BYTES)
+            .map_err(|error| format!("The knowledge overlay could not be read: {error}"))?;
+        let OverlayRead::Current { mut facts, .. } = read else {
+            return Ok(Self::default());
+        };
+        let actors = facts
+            .extract_if(
+                ..,
+                |f| matches!(&f.item, OverlayItem::Node(n) if n.label == "Actor"),
+            )
+            .collect();
+        Ok(Self {
+            capabilities: facts,
+            actors,
+        })
+    }
 }
 
 /// The curated projection of one compilation (SPEC-12, AC-0653).
@@ -6465,8 +6552,49 @@ enum CuratedInput {
 }
 
 impl SpecInputs {
-    fn supplied(&self) -> spec::Supplied<'_> {
+    /// The overlay Capabilities as story candidates, borrowed.
+    fn candidates(&self) -> Result<Vec<spec::CapabilityStory<'_>>, String> {
+        self.knowledge
+            .capabilities
+            .iter()
+            .map(|fact| match &fact.item {
+                core_graph::overlay::OverlayItem::Node(capability) => Ok(spec::CapabilityStory {
+                    capability,
+                    cites: &fact.cites,
+                }),
+                _ => Err("The knowledge overlay holds a Capability that is not a node.".into()),
+            })
+            .collect()
+    }
+
+    /// The knowledge stories validated against this compilation's graph
+    /// under `mode`, or none when the overlay supplied nothing. An invalid
+    /// overlay fact refuses the compilation, as the MCP read does.
+    fn knowledge<'a>(
+        &'a self,
+        candidates: &[spec::CapabilityStory<'a>],
+        mode: spec::ExportMode,
+    ) -> Result<Option<spec::KnowledgeStories<'a>>, String> {
+        if candidates.is_empty() && self.knowledge.actors.is_empty() {
+            return Ok(None);
+        }
+        spec::validate_knowledge_stories(
+            &self.base,
+            candidates,
+            &self.knowledge.actors,
+            mode,
+            &self.rejected_hashes,
+        )
+        .map(Some)
+        .map_err(|error| format!("The knowledge overlay was refused: {error}"))
+    }
+
+    fn supplied<'a>(
+        &'a self,
+        knowledge: Option<&'a spec::KnowledgeStories<'a>>,
+    ) -> spec::Supplied<'a> {
         spec::Supplied {
+            knowledge,
             coverage: &self.coverage,
             // The export compares no inventory with a current registration.
             stale_coverage: &[],
@@ -6506,6 +6634,8 @@ struct SpecRead {
     edges: Vec<Edge>,
     coverage: Vec<core_graph::coverage::StoredCoverage>,
     assertion_decisions: Vec<agents::AssertionDecisionRecord>,
+    /// Read after the graph and decision locks are released (#1443).
+    knowledge: KnowledgeInput,
 }
 
 #[cfg(test)]
@@ -6535,18 +6665,32 @@ fn read_spec(
         edges,
         coverage,
         assertion_decisions,
+        knowledge: KnowledgeInput::default(),
     })
 }
 
 /// [`read_spec`] under the application's graph and decision locks, both
-/// released on return.
+/// released before the knowledge overlay is read for the same revision.
 fn read_spec_locked(state: &AppState) -> Result<SpecRead, String> {
-    let graph = state.graph.lock().map_err(|error| error.to_string())?;
-    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
-    read_spec(&graph, &decisions)
+    let read = {
+        let graph = state.graph.lock().map_err(|error| error.to_string())?;
+        let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+        read_spec(&graph, &decisions)?
+    };
+    read.with_knowledge(state.knowledge_overlay.as_deref())
 }
 
 impl SpecRead {
+    /// This read with the overlay's Capabilities and Actors when the overlay
+    /// is current for its revision (#1443). Hold no graph lock.
+    fn with_knowledge(
+        mut self,
+        overlay: Option<&Mutex<core_graph::overlay::OverlayStore>>,
+    ) -> Result<Self, String> {
+        self.knowledge = KnowledgeInput::read(overlay, &self.revision)?;
+        Ok(self)
+    }
+
     /// The flow trace and, with a `review`, the curated projection of what
     /// was read. No store is read and no lock is needed.
     fn inputs(self, review: Option<&curated::CuratedReview>) -> SpecInputs {
@@ -6556,6 +6700,7 @@ impl SpecRead {
             edges,
             coverage,
             assertion_decisions,
+            knowledge,
         } = self;
         let flows = flowtracer::trace(&nodes, &edges);
         let rejected_hashes = assertion_decisions
@@ -6587,8 +6732,11 @@ impl SpecRead {
             None => (CuratedInput::NotRead, None),
         };
         SpecInputs {
-            nodes,
-            edges,
+            base: core_graph::RevisionedSnapshot {
+                revision,
+                graph: (nodes, edges),
+            },
+            knowledge,
             coverage,
             flows,
             rejected_hashes,
@@ -6626,16 +6774,20 @@ fn compile_spec_bundle(
     inputs: SpecInputs,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
-    // An export whose citations do not resolve is refused (ADR-0058).
-    let mut bundle = spec::try_compile_spec_supplied(
-        &inputs.nodes,
-        &inputs.edges,
-        &inputs.flows,
-        mode,
-        &inputs.rejected_hashes,
-        inputs.supplied(),
-    )
-    .map_err(|error| error.to_string())?;
+    let mut bundle = {
+        let candidates = inputs.candidates()?;
+        let knowledge = inputs.knowledge(&candidates, mode)?;
+        // An export whose citations do not resolve is refused (ADR-0058).
+        spec::try_compile_spec_supplied(
+            &inputs.base.graph.0,
+            &inputs.base.graph.1,
+            &inputs.flows,
+            mode,
+            &inputs.rejected_hashes,
+            inputs.supplied(knowledge.as_ref()),
+        )
+        .map_err(|error| error.to_string())?
+    };
     inputs.stamp(&mut bundle);
     Ok(bundle)
 }
@@ -6707,15 +6859,31 @@ fn compile_spec_artifacts(
             max_output_bytes: usize::MAX,
         },
     };
+    // Only `user-stories` renders the overlay's stories, and the fact index
+    // cites them; any other selection neither reads nor validates them, so a
+    // refused overlay fact cannot fail an unrelated read.
+    let reads_knowledge = artifact_ids
+        .iter()
+        .any(|id| matches!(*id, "user-stories" | "fact-index" | "fact-index-json"));
+    let candidates = if reads_knowledge {
+        inputs.candidates()?
+    } else {
+        Vec::new()
+    };
+    let knowledge = if reads_knowledge {
+        inputs.knowledge(&candidates, mode)?
+    } else {
+        None
+    };
     let outcomes = spec::compile_spec_selected_supplied(
-        &inputs.nodes,
-        &inputs.edges,
+        &inputs.base.graph.0,
+        &inputs.base.graph.1,
         &inputs.flows,
         mode,
         &inputs.rejected_hashes,
         artifact_ids,
         unbounded,
-        inputs.supplied(),
+        inputs.supplied(knowledge.as_ref()),
     )
     .map_err(|spec::ArtifactSelectionError::UnknownArtifact { index }| {
         format!("unknown spec artifact id: {}", artifact_ids[index])
@@ -6825,16 +6993,20 @@ fn compile_spec_with_views_and_curated(
 > {
     let curated = curated_workbench::CuratedWorkbenchRead::of(&inputs.curated, mode)
         .ok_or("The curated projection was not read.")?;
-    // An export whose citations do not resolve is refused (ADR-0058).
-    let (mut bundle, views) = spec::try_compile_spec_with_views_supplied(
-        &inputs.nodes,
-        &inputs.edges,
-        &inputs.flows,
-        mode,
-        &inputs.rejected_hashes,
-        inputs.supplied(),
-    )
-    .map_err(|error| error.to_string())?;
+    let (mut bundle, views) = {
+        let candidates = inputs.candidates()?;
+        let knowledge = inputs.knowledge(&candidates, mode)?;
+        // An export whose citations do not resolve is refused (ADR-0058).
+        spec::try_compile_spec_with_views_supplied(
+            &inputs.base.graph.0,
+            &inputs.base.graph.1,
+            &inputs.flows,
+            mode,
+            &inputs.rejected_hashes,
+            inputs.supplied(knowledge.as_ref()),
+        )
+        .map_err(|error| error.to_string())?
+    };
     inputs.stamp(&mut bundle);
     Ok((bundle, views, curated))
 }
@@ -7515,6 +7687,8 @@ fn main() {
             investigations::commands::get_investigation_chat,
             investigations::finding_review_commands::get_investigation_finding_reviews,
             investigations::finding_review_commands::review_investigation_finding,
+            investigations::finding_curation_commands::get_investigation_finding_curations,
+            investigations::finding_curation_commands::curate_investigation_finding,
             investigations::commands::investigation_consent,
             investigations::commands::approve_investigation_step,
             investigations::commands::decline_investigation_step,
@@ -8661,6 +8835,26 @@ resource "aws_sqs_queue" "orders" {
                     .any(|edge| edge.src == importer && edge.dst == "mod:foo")
             );
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_documented_path_is_checked_in_the_tree_without_following_a_link() {
+        // AC-0679 (T-0679): what a symlink points at, possibly outside the
+        // repository, never decides whether a documented path exists.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("docs/guide.md"), "# Guide\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        assert!(crate::tree_has_path(&root, "docs/guide.md"));
+        assert!(!crate::tree_has_path(&root, "docs/gone.md"));
+        assert!(!crate::tree_has_path(&root, "../outside"));
+        let before = crate::tree_has_path(&root, "linked/guide.md");
+        std::fs::write(outside.join("guide.md"), "# Elsewhere\n").unwrap();
+        assert_eq!(crate::tree_has_path(&root, "linked/guide.md"), before);
     }
 
     #[test]
@@ -13001,6 +13195,56 @@ export function App() {
             serde_json::from_str(&stored.record.inventory_json).unwrap();
         assert_eq!(adr_row(&inventory), (1, 1, 1));
         assert_eq!(inventory, summary.coverage[0]);
+    }
+
+    #[test]
+    fn another_systems_recovery_leaves_a_repos_documents_as_its_inventory_counts() {
+        // AC-0677 (T-0677): ingesting one system re-reads only its own
+        // repositories' documentation, so a repository published earlier keeps
+        // the documents its stored inventory counts, even after its files change.
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        for (root, name) in [(&first, "a"), (&second, "b")] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("README.md"), "# Readme\n").unwrap();
+            std::fs::write(
+                root.join("cartograph.system.toml"),
+                format!("[[repos]]\nurl = \"{name}\"\n"),
+            )
+            .unwrap();
+        }
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        let manifest = |root: &std::path::Path| {
+            root.join("cartograph.system.toml")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let summary = super::add_system_blocking(manifest(&first), handle.clone()).unwrap();
+        let repo = summary.coverage[0].repo.clone();
+        std::fs::write(first.join("a/GUIDE.md"), "# Guide\n").unwrap();
+
+        super::add_system_blocking(manifest(&second), handle.clone()).unwrap();
+
+        let graph = state.graph.lock().unwrap();
+        let (nodes, _) = graph.read_snapshot().unwrap();
+        let documents = nodes
+            .iter()
+            .filter(|node| node.label == "Document" && node.id.starts_with(&format!("doc:{repo}@")))
+            .count();
+        let stored = graph
+            .coverage_records()
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.record.repo_key == repo)
+            .unwrap();
+        let inventory: ingest::coverage::RepoCoverage =
+            serde_json::from_str(&stored.record.inventory_json).unwrap();
+        assert_eq!(documents, 1);
+        assert_eq!(inventory.documents.map(|counted| counted.read), Some(1));
     }
 
     #[test]

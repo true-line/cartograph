@@ -18,13 +18,15 @@ mod coverage;
 pub use coverage::{COVERAGE_DETAIL_REPO_LIMIT, logical_coverage_render_bound};
 mod curated;
 pub use curated::{
-    Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_reason_sentence,
+    Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_finding_reason_sentence,
+    curated_finding_shown, curated_reason_sentence,
 };
 pub(crate) mod diagrams;
 mod document;
 mod documentation;
 pub use document::{
-    SYSTEM_SCOPE, SectionScopeError, cited_fact_hashes, drafted_section, section_citation_set,
+    SYSTEM_SCOPE, SectionScopeError, cited_fact_digests, cited_fact_hashes, drafted_section,
+    section_citation_set,
 };
 mod endpoint_inventory;
 mod endpoint_permissions;
@@ -35,12 +37,12 @@ pub use endpoint_permissions::{
 };
 pub(crate) mod fact_index;
 pub use capabilities::{
-    ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
+    ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError, KnowledgeStories,
     KnowledgeStoryCompileWorkspaceBound, compile_capability_user_stories,
     compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, logical_actor_story_workspace_bound,
-    logical_knowledge_story_compile_bound,
+    logical_knowledge_story_compile_bound, validate_knowledge_stories,
 };
 pub use fact_index::{
     FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
@@ -726,6 +728,7 @@ pub fn try_compile_spec_with_coverage(
         mode,
         rejected_hashes,
         Supplied {
+            knowledge: None,
             coverage,
             stale_coverage: &[],
             curated: crate::Curated::NotSupplied,
