@@ -106,7 +106,9 @@ fn group_name(
 /// the handler's file is part of the identity: two groups that share a name
 /// are never merged across files, and one group whose handlers sit in two
 /// files gives a candidate for each. An endpoint's support may cite its
-/// registration in other files of the same repository and commit.
+/// registration in other files of the same repository and commit. When two
+/// such candidates would share a title, each of them names its handler file
+/// after the group, so a reader can tell them apart.
 pub(super) fn derive(
     nodes: &BTreeMap<&str, Option<&Node>>,
     handles: &BTreeMap<&str, Vec<&core_graph::Edge>>,
@@ -190,7 +192,21 @@ pub(super) fn derive(
             }
         }
     }
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (title, _) in groups.values() {
+        *seen.entry(title.as_str()).or_default() += 1;
+    }
+    let shared: BTreeSet<String> = seen
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(title, _)| title.to_owned())
+        .collect();
     for ((tag, repo, path, name), (title, group)) in groups {
+        let title = if shared.contains(&title) {
+            format!("{title} ({path})")
+        } else {
+            title
+        };
         let key = serde_json::to_vec(&(
             CAPABILITY_CONTROLLER_RULE,
             CAPABILITY_CONTROLLER_RULE_VERSION,

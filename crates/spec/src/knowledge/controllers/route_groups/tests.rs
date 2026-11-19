@@ -111,11 +111,14 @@ fn controller_capability_groups_real_flask_blueprint_routes() {
     assert_eq!(report.oversized_groups, 0);
     // Two Blueprints named `users` in two files stay two candidates, and the
     // application route that spells its endpoint `users.ready` is in neither.
+    // AC-0801: the two would share a title, so each names its handler file.
     assert_eq!(report.facts.len(), 2);
-    assert!(
-        report.facts.iter().all(|fact| {
-            capability(fact).props["title"] == "HTTP operations in blueprint users"
-        })
+    assert_eq!(
+        titles(&report),
+        [
+            "HTTP operations in blueprint users (legacy.py)",
+            "HTTP operations in blueprint users (users.py)"
+        ]
     );
     assert_ne!(
         capability(&report.facts[0]).id,
