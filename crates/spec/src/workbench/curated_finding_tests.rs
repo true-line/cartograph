@@ -136,6 +136,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            knowledge: None,
             coverage: &[],
             stale_coverage: &[],
             curated: Curated::Computed(projection),
