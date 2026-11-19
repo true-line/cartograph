@@ -248,6 +248,25 @@ pub(crate) fn redraft_question(state: &AppState, draft_id: &str) -> Result<Strin
     .map_err(str::to_owned)
 }
 
+/// The outcome of a task when it is a drafting run, and none for a task of
+/// any other role. The MCP result read reports it to the session that
+/// started the run.
+pub(crate) fn outcome_of_drafting_run(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<DraftingOutcome>, String> {
+    let drafting = {
+        let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let summary = jobs.investigation(id).map_err(|e| e.to_string())?.summary;
+        summary.specialist_id == SpecialistId::SectionWriterV1
+    };
+    if drafting {
+        stage(state, id).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// The draft already stored for the drafting job `job_id`, if any. A job
 /// produces at most one draft, so a reread must return it rather than
 /// recompute a predecessor, which changes with later reviews.

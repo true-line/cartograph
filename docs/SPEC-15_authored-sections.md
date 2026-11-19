@@ -71,7 +71,9 @@ fingerprint. No other role's definition changes.
   role is refused before anything durable unless the question names a
   drafted (A or P+A) section of the table under its catalogue title, for
   `system` or, where the section is written per subject, for one citation
-  id. The role is not startable over MCP.
+  id. An outside agent starts the role over MCP through
+  `cartograph_task_start` under the same check and the session's task
+  grant (ADR-0066).
 - *Claims.* The role returns one finding per claim. The existing finish
   admission applies unchanged (shape, bounds, citation membership in the
   run's ledger, replay and privacy checks) and additionally refuses a
@@ -217,7 +219,12 @@ document among the artifacts citing each fact its frames print.
   claims and their annotations; each citation opens its evidence. A section
   offers "Draft this section" and the review actions.
 - **MCP.** The artifact is readable as the export's bytes for the same
-  inputs and mode. Drafting and review are not exposed over MCP.
+  inputs and mode. A session with the task grant starts a drafting run of
+  `section-writer@1` with `cartograph_task_start`; for such a task
+  `cartograph_task_result` adds `drafting`, which is `staged` with the
+  draft id or `no_draft` with a closed reason code. The session submits no
+  draft text of its own, and the staged draft waits for human review in the
+  app. Review is not exposed over MCP.
 
 As built (slice 7): `section_document` returns the section table of a
 document with each section's kind and its stored drafts, system scope first,
