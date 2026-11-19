@@ -287,6 +287,13 @@ const ARTIFACTS: &[Artifact] = &[
         title: "Environments and the workloads they declare",
         format: "markdown",
     },
+    // After it, for the same reason (#1750).
+    Artifact {
+        id: documentation::ARTIFACT_ID,
+        file: "documentation-evidence.md",
+        title: "Documentation evidence",
+        format: "markdown",
+    },
     // After it, for the same reason (#1658).
     Artifact {
         id: "endpoint-inventory",
@@ -569,6 +576,10 @@ fn produce(
         "environments" => {
             environments::output(nodes, edges, (mode, beside.environments_withheld), max)?
         }
+        // Document and section facts in the admitted graph with the facts
+        // their exact references name, and the documentation drift counts
+        // (AC-0681). No stored inventory is read.
+        documentation::ARTIFACT_ID => documentation::output(nodes, edges, mode, max)?,
         // Endpoint facts in the admitted graph and the count the mode and
         // the rejections withheld. No stored inventory is read (AC-0694).
         "endpoint-inventory" => {
