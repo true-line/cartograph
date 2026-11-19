@@ -411,7 +411,7 @@ test('the native ownership harness includes production modules without a Tauri d
   assert.doesNotMatch(harness, /\b(?:fn|struct|enum|impl)\s|include_str!|include_bytes!|allow\(warnings\)/u);
   const guidance = readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(guidance, /native job ownership tests on Windows:\s+`cargo test --locked -p job-execution-tests --test ownership`/u);
-  assert.match(guidance, /no job runs on a\s+self-hosted runner/u);
+  assert.match(guidance, /no job a pull request can start runs on a\s+self-hosted runner/u);
 });
 
 test('workflow runtime policy is pinned and installer processes are centrally bounded', () => {
@@ -584,23 +584,25 @@ test('release publication is reviewed, exact-evidence-only, and idempotent', () 
 // Credential-bearing workflows never share a persistent self-hosted runner
 // with pull-request builds, which run repository-controlled scripts (#619).
 
-test('every job runs on GitHub-hosted runners', () => {
-  // The repository is public, so no job may run on a self-hosted runner
-  // (fork PRs would execute on it), and a workflow that reads secrets
-  // never runs pull-request code (#631).
+test('every job runs on GitHub-hosted runners except release packaging', () => {
+  // The repository is public, so no job a pull request can start may run on
+  // a self-hosted runner (fork PRs would execute on it), and a workflow that
+  // reads secrets never runs pull-request code (#631). macOS packaging alone
+  // runs on the owner's Mac; its workflow has no pull-request trigger.
   const dir = path.join(root, '.github/workflows');
   for (const name of readdirSync(dir).filter((file) => file.endsWith('.yml'))) {
     const workflow = readFileSync(path.join(dir, name), 'utf8');
     if (/secrets\.[A-Z]/u.test(workflow)) {
       assert.doesNotMatch(triggers(workflow), /pull_request/u, `${name}: secrets with a PR trigger`);
     }
-    assert.doesNotMatch(workflow, /self-hosted\]/u, `${name}: names a self-hosted runner`);
+    const hosted = /runs-on: (ubuntu|windows|macos)-latest$/u;
+    const packaging = /runs-on: \[self-hosted, macOS, ARM64\]$/u;
     for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
-      assert.match(
-        line,
-        /runs-on: (ubuntu|windows|macos)-latest$/u,
-        `${name}: ${line.trim()}`,
-      );
+      if (name === 'package.yml' && packaging.test(line)) {
+        assert.doesNotMatch(triggers(workflow), /pull_request|issue_comment/u, `${name}: self-hosted with a PR trigger`);
+        continue;
+      }
+      assert.match(line, hosted, `${name}: ${line.trim()}`);
     }
   }
 });
@@ -639,4 +641,14 @@ test('release symbols persist with versioned assets and short-lived Actions copi
       assert.equal(result.status, pass ? 0 : 1, result.stderr || result.stdout);
     }
   }
+});
+
+test('macOS release packaging runs on the owner\'s self-hosted Mac', () => {
+  // A hosted macos-latest runner did not finish the universal compile in 90
+  // minutes (v0.71.0); the self-hosted Mac packages in about 15.
+  const workflow = readFileSync(path.join(root, '.github/workflows/package.yml'), 'utf8');
+  const job = workflow.split(/\n(?= {2}[a-z][\w-]*:\n)/u).find((block) => block.startsWith('  package:')) ?? '';
+  assert.match(job, /^ {4}runs-on: \[self-hosted, macOS, ARM64\]$/mu);
+  assert.match(job, /^ {4}timeout-minutes: 90$/mu);
+  assert.doesNotMatch(triggers(workflow), /pull_request|issue_comment/u);
 });

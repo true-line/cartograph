@@ -16,9 +16,9 @@
 //!   to no fact in the current graph.
 //! - `stale`: a cited fact's current content hash differs from the hash the
 //!   draft recorded. This and nothing else makes a draft stale.
-//! - `conflicted`: another accepted draft has the same address and neither
-//!   replaces the other. Every accepted draft counts, whatever its own
-//!   state.
+//! - `conflicted`: another accepted draft has the same address and no
+//!   accepted draft replaces it. Every such draft counts, whatever its own
+//!   state; a draft a replacement chain has superseded does not.
 //! - `eligible`: none of the above.
 //!
 //! A pending or returned draft is not listed and does not enter the
@@ -118,7 +118,8 @@ pub enum DraftStateReason {
     CitedFactMissing,
     /// `stale`: a cited fact has another content hash than was recorded.
     CitedFactChanged,
-    /// `conflicted`: another accepted draft has the same address.
+    /// `conflicted`: another accepted draft that nothing replaces has the
+    /// same address.
     AnotherDraftAccepted,
     /// `eligible`: every condition holds.
     AllConditionsHold,
@@ -268,20 +269,20 @@ pub(super) fn project_drafts<'a>(
         .filter(|(_, decision)| *decision == DraftReview::Accepted)
         .map(|(draft, _)| (draft.draft_id.as_str(), *draft))
         .collect();
-    let mut per_address: HashMap<&DraftAddress, usize> = HashMap::new();
-    // Accepted drafts an accepted draft of the same address replaces, and
-    // how many accepted successors each has.
-    let mut superseded: HashSet<&str> = HashSet::new();
-    let mut successors: HashMap<&str, usize> = HashMap::new();
-    let replaced_accepted = |draft: &'a ReviewedDraft| {
-        let replaced = accepted.get(draft.replaces.as_deref()?)?;
-        (replaced.address == draft.address).then_some(replaced.draft_id.as_str())
-    };
+    // Accepted drafts an accepted draft of the same address replaces.
+    let superseded: HashSet<&str> = accepted
+        .values()
+        .filter_map(|draft| {
+            let replaced = accepted.get(draft.replaces.as_deref()?)?;
+            (replaced.address == draft.address).then_some(replaced.draft_id.as_str())
+        })
+        .collect();
+    // The accepted drafts of each address that no accepted draft replaces.
+    // A replacement chain A <- B <- C leaves only C, so C does not conflict.
+    let mut heads: HashMap<&DraftAddress, usize> = HashMap::new();
     for draft in accepted.values() {
-        *per_address.entry(&draft.address).or_default() += 1;
-        if let Some(replaced) = replaced_accepted(draft) {
-            superseded.insert(replaced);
-            *successors.entry(replaced).or_default() += 1;
+        if !superseded.contains(draft.draft_id.as_str()) {
+            *heads.entry(&draft.address).or_default() += 1;
         }
     }
 
@@ -293,14 +294,9 @@ pub(super) fn project_drafts<'a>(
             revision.push((draft.draft_id.as_str(), decision, None, None));
             continue;
         }
-        // The other accepted drafts of the address, less the one this draft
-        // replaces and the ones that replace it.
-        let linked = usize::from(replaced_accepted(draft).is_some())
-            + successors
-                .get(draft.draft_id.as_str())
-                .copied()
-                .unwrap_or(0);
-        let conflicted = per_address[&draft.address] - 1 > linked;
+        // Another accepted draft of the address that nothing replaces. A
+        // superseded draft takes that state first, so its count is moot.
+        let conflicted = heads.get(&draft.address).copied().unwrap_or(0) > 1;
         let (state, reason) = assign(draft, current, &superseded, conflicted);
         revision.push((draft.draft_id.as_str(), decision, Some(state), Some(reason)));
         counts.accepted += 1;

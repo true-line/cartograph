@@ -178,6 +178,15 @@ fn fenced_code_and_malformed_headings_are_not_sections() {
         .map(|section| (section.level, section.heading.as_str()))
         .collect();
     assert_eq!(headings, [(0, ""), (1, ""), (1, "Real")]);
+    // Inline code that starts with three backticks opens no fence.
+    let inline: Vec<(u8, String)> = markdown_sections("```literal```\n\n# Real heading\ntext\n")
+        .into_iter()
+        .map(|section| (section.level, section.heading))
+        .collect();
+    assert_eq!(
+        inline,
+        [(0, String::new()), (1, "Real heading".to_string())]
+    );
     // An unclosed fence runs to the end of the file.
     assert!(
         markdown_sections("```\n# a\n# b\n")
@@ -216,6 +225,29 @@ fn the_bounds_hold_and_every_skip_is_counted_with_its_reason() {
         node(&facts, "doc:local/shop@many.md").props["sections"],
         MAX_SECTIONS_PER_DOCUMENT
     );
+}
+
+#[test]
+fn references_that_differ_only_in_secret_text_stay_two_entries() {
+    let markdown = "# Shop\n\n[a](keys/password=aaaa1111.md) and \
+        [b](keys/password=bbbb2222.md)\n";
+    let (nodes, edges) = pass(markdown);
+    let drift: Vec<&Node> = nodes.iter().filter(|node| node.label == "Drift").collect();
+    assert_eq!(drift.len(), 2);
+    assert_ne!(drift[0].id, drift[1].id);
+    for node in &drift {
+        assert_eq!(node.props["occurrences"], 1, "{}", node.id);
+        assert_eq!(node.props["key"], drift[0].props["key"]);
+        for secret in ["aaaa1111", "bbbb2222"] {
+            assert!(!node.id.contains(secret), "{}", node.id);
+            assert!(!node.props.to_string().contains(secret), "{}", node.id);
+        }
+    }
+    for edge in &edges {
+        for secret in ["aaaa1111", "bbbb2222"] {
+            assert!(!edge.src.contains(secret), "{}", edge.src);
+        }
+    }
 }
 
 #[test]
@@ -429,6 +461,33 @@ fn references_are_read_in_offset_order_with_their_spans() {
             ("c".to_string(), false),
         ]
     );
+    // Balanced and escaped parentheses belong to a bare target; an
+    // angle-bracket target runs to its `>`.
+    let text = "[a](app/(shop)/page.tsx) [b](<my (file).md> \"t\") [c](x\\)y.md)\n";
+    let targets: Vec<String> = markdown_references(text)
+        .into_iter()
+        .map(|(reference, _, start, end)| {
+            assert_eq!(&text[start..end], reference);
+            reference
+        })
+        .collect();
+    assert_eq!(targets, ["app/(shop)/page.tsx", "my (file).md", "x\\)y.md"]);
+}
+
+#[test]
+fn a_reference_in_a_section_past_the_bound_is_not_credited_to_a_kept_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut text = String::from("# Top\n");
+    for index in 0..MAX_SECTIONS_PER_DOCUMENT {
+        text.push_str(&format!("## H{index}\n"));
+    }
+    text.push_str("`kept`\n");
+    fs::write(dir.path().join("many.md"), &text).unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    assert_eq!(facts.counts.sections_truncated, 1);
+    // The reference sits in the last `##` section, which the bound dropped;
+    // `# Top` still spans it but is not its innermost section.
+    assert!(facts.references.is_empty(), "{:?}", facts.references);
 }
 
 // AC-0679 (T-0679): documentation drift.
@@ -564,10 +623,17 @@ fn with_no_recovered_endpoint_a_route_reference_is_no_finding() {
 #[test]
 fn a_reference_to_a_file_that_does_not_exist_is_drift_with_the_path_looked_for() {
     let markdown = "# Shop\n\n[guide](docs/guide.md) [gone](docs/gone.md#setup) \
-        [web](https://example.com/x.md) [top](#shop)\n\n\
+        [web](https://example.com/x.md) [top](#shop) [setup](docs/setup%20guide.md)\n\n\
         `src/orders.ts` `src/missing.ts:10` `docs/guide.md` `lib/absent.ts` \
         `application/json` `src/*.ts` `src/<name>.ts` `sym:src/a.ts` `v1.2` `Makefile`\n";
-    let present = ["src", "docs", "src/orders.ts", "docs/guide.md"];
+    // A link target is percent-decoded before it is looked for.
+    let present = [
+        "src",
+        "docs",
+        "src/orders.ts",
+        "docs/guide.md",
+        "docs/setup guide.md",
+    ];
     let (drift, edges) = drifted(markdown, &present);
     assert_eq!(
         rows(&drift),

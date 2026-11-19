@@ -1,3 +1,4 @@
+import type { CurationDecision, FindingCuration } from '../findingCurations';
 import type { FindingReview, FindingReviewDecision } from '../findingReviews';
 import type {
   AdvisoryAudit, InvestigationCitation, InvestigationCitationRead, InvestigationFinding, InvestigationResult,
@@ -27,6 +28,14 @@ export interface InvestigationFindingsProps {
   reviewError?: string | null;
   onRefreshReviews?: () => void;
   onReview?: (id: string, decision: FindingReviewDecision) => void;
+  /** Curation reviews (ADR-0074): a second review, separate from follow-up.
+   *  The controls are drawn only when `onCurate` is given. */
+  curations?: FindingCuration[];
+  curationLoading?: boolean;
+  curationBusy?: boolean;
+  curationError?: string | null;
+  onRefreshCurations?: () => void;
+  onCurate?: (id: string, decision: CurationDecision) => void;
   result: InvestigationResult | null;
   citations: InvestigationCitation[];
   citationId: string | null;
@@ -37,7 +46,7 @@ export interface InvestigationFindingsProps {
   onClose: () => void;
 }
 
-export function InvestigationFindings({ advisoryAudit, result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, readOnly = false, producerId, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
+export function InvestigationFindings({ advisoryAudit, result, citations, citationId, read, loading, error, onRead, onClose, reviews = [], reviewLoading = false, reviewBusy = false, reviewError, onRefreshReviews, onReview, curations = [], curationLoading = false, curationBusy = false, curationError, onRefreshCurations, onCurate, readOnly = false, producerId, sectionId = 'investigation-findings' }: InvestigationFindingsProps) {
   const selected = citations.find((citation) => citation.citation_id === citationId);
   return <section id={sectionId} className="investigation-section" aria-label="Investigation findings">
     <h3>Findings <TierBadge tier="InferredWeak" /></h3>
@@ -57,7 +66,8 @@ export function InvestigationFindings({ advisoryAudit, result, citations, citati
         </li>)}</ul>}
     </aside>}
     <p className="muted">Every specialist finding is T3 / InferredWeak, including statements about implemented behavior.
-      Findings do not change confirmed facts, accepted proposals, context or exports.</p>
+      Findings do not change confirmed facts, accepted proposals or context. An export lists a finding only after
+      you accept it as curated, and then only as a marked InferredWeak statement.</p>
     {!result ? <p className="muted">No admitted result is available yet.</p> : <>
       {result.narrative && <article aria-label="Specialist final message">
         <h4>{producerId === 'gap-triager@2' ? 'Gap Triager' : producerId === 'spec-writer@2' ? 'Spec Writer' : 'Specialist'} final message · {producerId}</h4>
@@ -84,6 +94,14 @@ export function InvestigationFindings({ advisoryAudit, result, citations, citati
         {reviewLoading && <p role="status">Loading saved review decisions…</p>}
         {reviewError && <p role="alert">{reviewError}</p>}
       </>}
+      {!readOnly && onCurate && result.findings.length > 0 && <div aria-label="Curation reviews">
+        <p className="muted">Accepting a finding as curated is a second review, separate from follow-up. The finding stays T3 / InferredWeak and
+          nothing is written to the graph. A best-effort export, the Spec Workbench and the read-only MCP then show it as a cited statement while
+          every fact it cites is unchanged. A verified-only export never shows it.</p>
+        {onRefreshCurations && <button type="button" className="secondary-button" disabled={curationLoading || curationBusy} onClick={onRefreshCurations}>Refresh curation reviews</button>}
+        {curationLoading && <p role="status">Loading saved curation reviews…</p>}
+        {curationError && <p role="alert">{curationError}</p>}
+      </div>}
       <ul className="investigation-findings">
         {result.findings.map((finding) => <li key={finding.finding_id}>
           <div className="investigation-heading"><h4>{finding.title}</h4><span className="investigation-claim">{CLAIMS[finding.claim_kind]}</span></div>
@@ -96,6 +114,17 @@ export function InvestigationFindings({ advisoryAudit, result, citations, citati
               {review && <p>Review revision {review.revision}{review.reviewed_at && <> · <time>{review.reviewed_at}</time></>}</p>}
               {onReview && <><button type="button" disabled={!review || reviewLoading || reviewBusy || !!reviewError} onClick={() => onReview(finding.finding_id, 'accepted_for_follow_up')}>Use for follow-up</button>
                 <button type="button" className="secondary-button" disabled={!review || reviewLoading || reviewBusy || !!reviewError} onClick={() => onReview(finding.finding_id, 'rejected_for_follow_up')}>Do not use for follow-up</button></>}
+            </div>;
+          })()}
+          {!readOnly && onCurate && (() => {
+            const curation = curations.find((row) => row.finding_id === finding.finding_id);
+            const subject = reviews.find((row) => row.subject.finding_id === finding.finding_id);
+            const blocked = !subject || curationLoading || curationBusy || !!curationError;
+            return <div aria-label={`Curation review for ${finding.title}`}>
+              <p role="status">{curation ? curation.review_decision === 'accepted' ? 'Accepted as curated' : 'Rejected as curated' : curationLoading ? 'Loading curation review' : curationError ? 'Curation review state unavailable' : 'No curation review'}</p>
+              {curation && <p>Curation revision {curation.review_revision} · <time>{curation.reviewed_at}</time></p>}
+              <button type="button" disabled={blocked || curation?.review_decision === 'accepted'} onClick={() => onCurate(finding.finding_id, 'accepted')}>Accept as curated</button>
+              <button type="button" className="secondary-button" disabled={blocked || curation?.review_decision === 'rejected'} onClick={() => onCurate(finding.finding_id, 'rejected')}>Reject as curated</button>
             </div>;
           })()}
           {finding.limitations.length > 0 && <ul className="investigation-limitations">{finding.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>}

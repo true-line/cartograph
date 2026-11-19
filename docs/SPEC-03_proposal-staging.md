@@ -146,3 +146,8 @@ audit stream or notes in this slice. Rejected findings remain readable with thei
 citations. A later packet consumer must separately resolve this exact subject and
 revalidate evidence; this review cannot turn unavailable/invalid retained evidence
 into verified supplied evidence or authorize execution.
+
+ADR-0074 adds a separate curation review for a saved finding. It has its own
+store and decisions, and it is the only review that brings a finding into the
+curated projection (SPEC-12 "Findings"). The follow-up review above is
+unchanged by it.

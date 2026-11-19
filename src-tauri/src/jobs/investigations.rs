@@ -82,7 +82,7 @@ mod refusal_diagnostics;
 mod staged;
 #[path = "investigations/volatile_patch.rs"]
 mod volatile_patch;
-pub(crate) use finding_reviews::FindingReviewError;
+pub(crate) use finding_reviews::{FindingReviewError, ResolvedFinding};
 #[path = "investigations/semantic_audit_journal.rs"]
 mod semantic_audit_journal;
 #[path = "investigations/semantic_audit_receipt.rs"]

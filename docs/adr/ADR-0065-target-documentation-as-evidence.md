@@ -85,7 +85,9 @@ no cited record of stated intent, although a claim of kind
   not files of a registered source.
 - **Other formats.** PDF, Office and HTML.
 - **Meaning.** Whether a paragraph agrees with the code is a T2 or T3
-  question. Nothing here answers it.
+  question. Nothing here answers it. A model does not find references at
+  this tier either: structure and exact references are established at the
+  lowest tier that can.
 - **reStructuredText and AsciiDoc structure.** They are plain text to this
   reader: one section per file.
 
@@ -99,5 +101,3 @@ no cited record of stated intent, although a claim of kind
 3. Treat every unresolved code span as drift. Rejected: most code spans in
    prose are not references to the system, and the register would fill
    with findings no one can act on.
-4. Let a model find references. Rejected for this tier: structure and
-   exact references are established at the lowest tier that can.

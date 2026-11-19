@@ -109,9 +109,88 @@ impl ReviewInvestigationFindingRequest {
     }
 }
 
+/// Closed curation input (ADR-0074). It is not a follow-up request: it has
+/// its own decision type and its own store. As there, the caller names the
+/// finding and nothing else; the host resolves every other field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurateInvestigationFindingRequest {
+    /// Mutation wire version, currently one.
+    pub schema_version: u32,
+    /// Public identity only, never caller-supplied content or citations.
+    pub subject: FindingReviewSubjectV1,
+    /// Exact current curation revision; zero admits the first decision.
+    pub expected_revision: u64,
+    /// The next curation decision.
+    pub decision: crate::finding_curation::CurationDecision,
+}
+
+impl CurateInvestigationFindingRequest {
+    /// Admit bounded JSON before typed allocation, as the follow-up request
+    /// does.
+    pub fn decode(raw: &str) -> Result<Self, InvestigationError> {
+        strict::preflight(raw, MAX_ACTION_BYTES, 16, 4096, 32)?;
+        let request: Self =
+            serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidRequest)?;
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Validate input shape even for trusted typed callers, before any write.
+    pub fn validate(&self) -> Result<(), InvestigationError> {
+        if self.schema_version != 1 || self.expected_revision > i64::MAX as u64 {
+            return Err(InvestigationError::InvalidRequest);
+        }
+        self.subject.validate()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-0844: the curation request is its own closed wire shape.
+    #[test]
+    fn curation_request_is_strict_and_does_not_take_a_follow_up_decision() {
+        let raw = REQUEST.replace("accepted_for_follow_up", "accepted");
+        let request = CurateInvestigationFindingRequest::decode(&raw).unwrap();
+        assert_eq!(request.subject.finding_id, "finding-1");
+        assert_eq!(
+            request.decision,
+            crate::finding_curation::CurationDecision::Accepted
+        );
+        assert_eq!(serde_json::to_string(&request).unwrap(), raw);
+        assert_eq!(
+            CurateInvestigationFindingRequest::decode(&raw.replace("\"accepted\"", "\"rejected\""))
+                .unwrap()
+                .decision,
+            crate::finding_curation::CurationDecision::Rejected
+        );
+        let invalid = [
+            // A follow-up decision is not a curation decision.
+            REQUEST.to_owned(),
+            raw.replace("\"accepted\"", "\"returned\""),
+            raw.replacen("{", "{\"statement\":\"caller supplied\",", 1),
+            raw.replace("\"schema_version\":1", "\"schema_version\":2"),
+            raw.replace(
+                "\"expected_revision\":0",
+                "\"expected_revision\":9223372036854775808",
+            ),
+            raw.replace("\"expected_revision\":0", "\"expected_revision\":-1"),
+            raw.replace("finding-1", "finding/1"),
+            raw.replace(
+                "investigation-finding-review-v1:",
+                "investigation-finding-review-v2:",
+            ),
+            format!("{raw} {{}}"),
+        ];
+        for raw in invalid {
+            assert!(
+                CurateInvestigationFindingRequest::decode(&raw).is_err(),
+                "{raw}"
+            );
+        }
+    }
 
     const REQUEST: &str = concat!(
         r#"{"schema_version":1,"subject":{"investigation_id":"investigation-1","result_id":"result-1","finding_id":"finding-1","subject_id":"investigation-finding-review-v1:"#,
