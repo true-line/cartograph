@@ -260,13 +260,15 @@ fn trace_impl(
     // from an unrendered component must not make the server flow
     // disappear); channels nothing local publishes to are external events
     // entering the slice.
+    // A server-rendered page (AC-0854) is not an anchor: its GET route
+    // already traces the same handler.
     let mut anchors: Vec<&Node> = nodes
         .iter()
         .filter(|n| {
             matches!(
                 n.label.as_str(),
                 "Screen" | "ExtensionContext" | "Command" | "Schedule"
-            )
+            ) && n.props["server_rendered"].as_bool() != Some(true)
         })
         .collect();
     anchors.sort_by(|a, b| a.id.cmp(&b.id));

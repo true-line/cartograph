@@ -1732,3 +1732,115 @@ fn journey_goals_observe_writes_downstream_of_an_endpoint_inside_an_anchor_flow(
     assert_eq!(upstream.len(), 1);
     assert_eq!(upstream[0].goal.goal_basis, GoalBasis::MethodAssumed);
 }
+
+// AC-0855: server-rendered Flask pages from the real Python adapter are
+// walked like client screens: a page's handler, its templates and what they
+// include form its closure, a redirect or template link is a navigation, and
+// a form submission is a goal call.
+#[test]
+fn journey_candidates_walk_server_rendered_flask_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "app/main.py",
+        r#"
+from flask import Blueprint, Flask, jsonify, redirect, render_template, url_for
+
+auth_bp = Blueprint("auth", __name__)
+dashboard_bp = Blueprint("dashboard", __name__)
+
+@auth_bp.route("/login", methods=["GET", "POST"])
+def login():
+    if form.validate_on_submit():
+        return redirect(url_for("dashboard.index"))
+    return render_template("auth/login.html")
+
+@dashboard_bp.route("/")
+def index():
+    return render_template("dashboard/index.html")
+
+@dashboard_bp.route("/aliases", methods=["POST"])
+def create_alias():
+    return jsonify(ok=True)
+
+app = Flask(__name__)
+app.register_blueprint(auth_bp, url_prefix="/auth")
+app.register_blueprint(dashboard_bp, url_prefix="/dashboard")
+
+@app.route("/")
+def home():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard.index"))
+    return redirect(url_for("auth.login"))
+"#,
+    );
+    write(
+        "templates/base.html",
+        "<html>{% block content %}{% endblock %}</html>\n",
+    );
+    write(
+        "templates/auth/login.html",
+        "{% extends \"base.html\" %}{% block content %}<form method=\"post\"></form>{% endblock %}\n",
+    );
+    write(
+        "templates/dashboard/index.html",
+        "{% extends \"base.html\" %}{% block content %}\
+         <form action=\"{{ url_for('dashboard.create_alias') }}\" method=\"post\"></form>\
+         {% endblock %}\n",
+    );
+    let out = adapters_lang_python::extract_dir(
+        dir.path(),
+        &adapters_lang_python::SourceId {
+            repo: "local/pages",
+            commit: "abc123",
+        },
+    )
+    .unwrap();
+    let flows = flowtracer::trace(&out.nodes, &out.edges);
+    // A page is not a flow anchor: its GET route already traces its handler.
+    assert!(flows.iter().all(|f| !f.trigger.starts_with("screen:")));
+    let (nodes, edges) = refs(&out.nodes, &out.edges);
+    let search = search(&nodes, &edges, &flows, JourneyBudget::default());
+    let mut labels: Vec<(&str, Vec<&str>)> = search
+        .candidates
+        .iter()
+        .map(|c| {
+            (
+                c.label.as_str(),
+                c.steps.iter().map(|s| s.screen.as_str()).collect(),
+            )
+        })
+        .collect();
+    labels.sort();
+    assert_eq!(
+        labels,
+        [
+            (
+                "auth.login → POST /auth/login",
+                vec![
+                    "screen:local/pages@flask:/",
+                    "screen:local/pages@flask:/auth/login"
+                ],
+            ),
+            (
+                "dashboard.index → POST /dashboard/aliases",
+                vec![
+                    "screen:local/pages@flask:/",
+                    "screen:local/pages@flask:/dashboard/"
+                ],
+            ),
+        ]
+    );
+    // The submission cites the form in the template that renders it.
+    let login = &search.candidates[0];
+    let call = &login.steps[1].calls[0];
+    assert_eq!(call.method, "POST");
+    assert_eq!(
+        call.evidence.as_ref().unwrap().path,
+        "templates/auth/login.html"
+    );
+}

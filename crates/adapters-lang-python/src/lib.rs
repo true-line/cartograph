@@ -21,6 +21,7 @@ mod decorator_proof;
 mod flask_admin;
 mod flask_admin_access;
 mod flask_admin_library;
+mod flask_pages;
 pub mod observed_infra;
 mod queries;
 mod request_inputs;
@@ -102,6 +103,8 @@ pub struct Extraction {
     package_names: BTreeSet<(String, String)>,
     /// Flask-Admin views, classes and registrations (#1193).
     flask_admin: flask_admin::Facts,
+    /// Literal `render_template` / `redirect(url_for(…))` calls (AC-0854).
+    page_facts: Vec<flask_pages::PageFact>,
 }
 
 /// A module-level framework receiver: an application instance, or a Flask
@@ -341,6 +344,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     auth_guards::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
     flask_admin::retarget(extraction, commit);
+    flask_pages::retarget(extraction, commit);
     rule_evidence::retarget(extraction, commit);
 }
 
@@ -1792,6 +1796,7 @@ pub fn extract_source(
     auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
+    flask_pages::resolve(&mut out, id.repo, id.commit, None);
     Ok(out)
 }
 
@@ -1892,6 +1897,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     auth_guards::collect(
         &cx, root, &bindings, &resolver, &locals, &functions, &mut out,
     );
+    flask_pages::collect(&cx, root, &functions, &mut out);
     for (function, handler) in &functions {
         let Some(parent) = function
             .parent()
@@ -2269,6 +2275,7 @@ pub fn extract_dir_incremental_with_progress(
             }
             out.package_names.extend(extraction.package_names);
             out.flask_admin.extend(extraction.flask_admin);
+            out.page_facts.extend(extraction.page_facts);
             Ok(())
         },
     );
@@ -2304,6 +2311,7 @@ pub fn extract_dir_incremental_with_progress(
     auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
+    flask_pages::resolve(&mut out, id.repo, id.commit, Some(root));
     alembic::extract(root, id, &mut out)?;
     let local_names = local_module_names(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
