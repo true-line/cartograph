@@ -1,6 +1,8 @@
 //! Manual deterministic showcase run (#721): recover local checkouts through the
-//! production ingest path and write the official spec bundle plus the recovered
-//! endpoint inventory. No T2 embeddings, no provider calls, no network.
+//! production ingest path, run the knowledge phase's deterministic producers as
+//! the desktop does after an ingest (#1443), and write the official spec bundle
+//! through the desktop export path plus the recovered endpoint inventory. No T2
+//! embeddings, no provider calls, no network.
 use crate::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,7 +28,16 @@ fn showcase_app(profile: &Path) -> tauri::App<tauri::test::MockRuntime> {
     );
     let app = tauri::test::mock_builder().build(context).unwrap();
     assert_eq!(app.path().app_data_dir().unwrap(), dirs[0]);
-    app.manage(crate::registered_source_tests::app_state(&dirs[0]));
+    let mut state = crate::registered_source_tests::app_state(&dirs[0]);
+    // The knowledge overlay and embedding cache the desktop opens at startup,
+    // bound to this profile's graph, so the knowledge phase can publish.
+    let instance = state.graph.lock().unwrap().instance_id().unwrap();
+    let cache = semantic::embedding_cache::EmbeddingCache::open_disposable(&dirs[0]).unwrap();
+    let mut overlay = core_graph::overlay::OverlayStore::open_disposable(&dirs[0]).unwrap();
+    overlay.bind_instance(&instance).unwrap();
+    state.embedding_cache = Some(std::sync::Arc::new(std::sync::Mutex::new(cache)));
+    state.knowledge_overlay = Some(std::sync::Arc::new(std::sync::Mutex::new(overlay)));
+    app.manage(state);
     app.manage(crate::PreflightRuns::default());
     app
 }
@@ -70,19 +81,33 @@ fn showcase_recover_and_export() {
     )
     .unwrap();
 
-    let graph = state.graph.lock().unwrap();
-    let decisions = state.decisions.lock().unwrap();
+    // The knowledge phase the desktop starts after every ingest, run inline
+    // with T2 off: the deterministic producers publish Capabilities, Actors,
+    // BusinessFlows and DomainEntities into the overlay; nothing is embedded.
+    let knowledge = crate::knowledge_phase::run_for_setting(
+        &state.graph,
+        state.embedding_cache.as_ref().unwrap(),
+        state.knowledge_overlay.as_ref().unwrap(),
+        false,
+        || None,
+    )
+    .unwrap();
+    std::fs::write(
+        output.join("knowledge.json"),
+        serde_json::to_vec_pretty(&knowledge).unwrap(),
+    )
+    .unwrap();
+
     for (mode, dir) in [
         (spec::ExportMode::VerifiedOnly, "verified-only"),
         (spec::ExportMode::BestEffort, "best-effort"),
     ] {
-        let bundle = build_spec_bundle(
-            &graph,
-            &decisions,
-            &crate::curated::CuratedReview::default(),
-            mode,
-        )
-        .unwrap();
+        // The desktop export path: graph and decisions under their locks, then
+        // the overlay current for that revision (#1443).
+        let inputs = crate::read_spec_locked(&state)
+            .unwrap()
+            .inputs(Some(&crate::curated::CuratedReview::default()));
+        let bundle = crate::compile_spec_bundle(inputs, mode).unwrap();
         let root = output.join(dir);
         std::fs::create_dir(&root).unwrap();
         for artifact in &bundle.artifacts {
@@ -96,6 +121,7 @@ fn showcase_recover_and_export() {
         writer.flush().unwrap();
     }
 
+    let graph = state.graph.lock().unwrap();
     let (nodes, edges) = graph.read_snapshot().unwrap();
     // Client calls and where they landed: an endpoint, or a Gap with its reason.
     let reasons: std::collections::BTreeMap<&str, &serde_json::Value> = nodes
