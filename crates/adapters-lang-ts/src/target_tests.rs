@@ -146,6 +146,28 @@ pub(crate) fn is_test_file(path: &str) -> bool {
         .any(|marker| name.contains(marker))
 }
 
+/// Directory names that hold only test code in JavaScript/TypeScript
+/// repositories: end-to-end suites, Jest's `__tests__`/`__mocks__`, and
+/// conventional `test`/`tests` trees.
+const TEST_TREES: &[&str] = &[
+    "e2e",
+    "__tests__",
+    "__mocks__",
+    "__fixtures__",
+    "test",
+    "tests",
+];
+
+/// Whether `path` is test code: a test file, or any file under a test tree
+/// directory. Its sources never ship, so it yields no product Endpoint
+/// (AC-0848, #1250). Unlike JVM source sets (AC-0431), a top-level `test`
+/// directory is a test tree here.
+pub(crate) fn in_test_tree(path: &str) -> bool {
+    let mut segments: Vec<&str> = path.split(['/', '\\']).collect();
+    segments.pop();
+    is_test_file(path) || segments.iter().any(|segment| TEST_TREES.contains(segment))
+}
+
 /// What the file's imports and bindings prove at a site.
 pub(crate) struct Proofs<'a, 'tree> {
     pub bindings: &'a callable::Bindings<'tree>,

@@ -3599,6 +3599,75 @@ fn extract_tree(files: &[(&str, &str)]) -> Extraction {
     extract_dir(dir.path(), &id()).unwrap()
 }
 
+// AC-0848: test code yields no product Endpoint (#1250's rule for TS):
+// Vendure's `e2e/fixtures/test-plugins/*.ts` controllers and
+// `*.e2e-spec.ts` files were documented as the system's own routes.
+#[test]
+fn test_trees_yield_no_product_endpoints() {
+    const CONTROLLER: &[u8] = br#"
+import { Controller, Get } from '@nestjs/common';
+@Controller('run-job')
+export class TestController {
+  @Get()
+  runJob() {}
+}
+"#;
+    let endpoints = |path: &str| {
+        let out = extract_source(CONTROLLER, path, &id()).unwrap();
+        let ids: Vec<String> = out
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .map(|node| node.id.clone())
+            .collect();
+        assert!(
+            out.edges
+                .iter()
+                .all(|edge| !edge.src.starts_with("ep:") || ids.contains(&edge.src)),
+            "no edge outlives its endpoint"
+        );
+        ids
+    };
+    for path in [
+        "e2e/fixtures/test-plugins/with-job-queue.ts",
+        "e2e/error-handler-strategy.e2e-spec.ts",
+        "src/__tests__/job.controller.ts",
+        "packages/core/test/fixtures/job.controller.ts",
+        "src/job.controller.spec.ts",
+    ] {
+        assert!(endpoints(path).is_empty(), "{path}");
+    }
+    // Product code, including names that only contain "test", keeps its routes.
+    for path in [
+        "src/job.controller.ts",
+        "src/testing/job.controller.ts",
+        "src/latest/job.controller.ts",
+    ] {
+        assert_eq!(endpoints(path), ["ep:qwtm/example@GET:/run-job"], "{path}");
+    }
+}
+
+// AC-0848: a fixture that is itself a Next.js package routes nothing; its
+// deferred route sites are dropped, not completed at the walk's end.
+#[test]
+fn a_next_fixture_in_a_test_tree_routes_nothing() {
+    let package = r#"{ "dependencies": { "next": "15.0.0" } }"#;
+    let route = "export default function ping(req, res) { res.json({}); }\n";
+    let out = extract_tree(&[
+        ("__fixtures__/site/package.json", package),
+        ("__fixtures__/site/pages/api/ping.ts", route),
+        ("web/package.json", package),
+        ("web/pages/api/ping.ts", route),
+    ]);
+    let next: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint" && n.props["framework"] == "next")
+        .filter_map(|n| n.props["prov"]["evidence"][0]["path"].as_str())
+        .collect();
+    assert_eq!(next, ["web/pages/api/ping.ts"]);
+}
+
 /// `(boundary, tier, reason)` of placeholder `id`.
 fn placeholder(out: &Extraction, id: &str) -> (String, core_prov::ConfidenceTier, String) {
     let node = out

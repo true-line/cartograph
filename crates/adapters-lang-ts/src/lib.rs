@@ -3123,6 +3123,23 @@ fn extract_source_recording(
             },
         )?;
     }
+    // Endpoints are product facts: test code yields none (#1250, AC-0848).
+    // An e2e fixture's controller is not part of the system being
+    // documented, nor is a fixture Next.js route completed later.
+    if target_tests::in_test_tree(path) {
+        out.next_routes.clear();
+        let removed: BTreeSet<String> = out
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .map(|node| node.id.clone())
+            .collect();
+        if !removed.is_empty() {
+            out.nodes.retain(|node| !removed.contains(&node.id));
+            out.edges
+                .retain(|edge| !removed.contains(&edge.src) && !removed.contains(&edge.dst));
+        }
+    }
     Ok(out)
 }
 
