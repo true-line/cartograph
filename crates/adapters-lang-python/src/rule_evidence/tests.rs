@@ -254,3 +254,79 @@ fn cached_rules_are_retargeted_to_the_ingested_commit() {
         ))
     );
 }
+
+/// Whether the guarded exit in `source` resolves the parameter its
+/// condition reads to a Binding (true) or leaves it Unresolved (false).
+fn binds(source: &str) -> bool {
+    let out = recover(source);
+    let rules = rules(&out);
+    assert_eq!(rules.len(), 1, "{source}");
+    let deps: Vec<_> = rules[0]
+        .1
+        .dependencies
+        .iter()
+        .filter(|d| d.role == DependencyRole::Condition)
+        .collect();
+    let bound = deps
+        .iter()
+        .any(|d| matches!(d.resolution, DependencyResolution::Binding { .. }));
+    let unresolved = deps.iter().any(|d| {
+        matches!(
+            &d.resolution,
+            DependencyResolution::Unresolved { gap_id } if gap_id.ends_with(":unresolved_binding")
+        )
+    });
+    assert_ne!(bound, unresolved, "{source}: {deps:?}");
+    bound
+}
+
+// AC-0852: a parameter is a stable Binding only when the function never
+// rebinds it, counting imports and nested definitions, and not counting
+// bindings that belong to nested scopes.
+#[test]
+fn parameter_bindings_follow_python_scopes() {
+    // `*args` / `**kwargs`, typed or not, are parameters.
+    assert!(binds(
+        "def f(*args):\n    if args:\n        raise ValueError()\n"
+    ));
+    assert!(binds(
+        "def f(**kw: int):\n    if kw:\n        raise ValueError()\n"
+    ));
+    // An import or a nested def rebinds the parameter.
+    for rebinding in [
+        "import config",
+        "import config.sub",
+        "import other as config",
+        "from pkg import config",
+        "from pkg import other as config",
+        "def config(): pass",
+        "class config: pass",
+    ] {
+        let source = format!(
+            "def f(config):\n    {rebinding}\n    if config.disabled:\n        raise ValueError()\n"
+        );
+        assert!(!binds(&source), "{rebinding}");
+    }
+    // Bindings inside nested scopes are their own.
+    for nested in [
+        "def inner():\n        config = 1",
+        "g = lambda config: config",
+        "xs = [config for config in range(3)]",
+        "class C:\n        config = 1",
+    ] {
+        let source = format!(
+            "def f(config):\n    {nested}\n    if config.disabled:\n        raise ValueError()\n"
+        );
+        assert!(binds(&source), "{nested}");
+    }
+    // ... except `nonlocal`, and a walrus in a comprehension.
+    for rebinding in [
+        "def inner():\n        nonlocal config\n        config = 1",
+        "xs = [(config := y) for y in range(3)]",
+    ] {
+        let source = format!(
+            "def f(config):\n    {rebinding}\n    if config.disabled:\n        raise ValueError()\n"
+        );
+        assert!(!binds(&source), "{rebinding}");
+    }
+}

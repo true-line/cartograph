@@ -110,43 +110,72 @@ fn parameters<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> BTreeMap<String, TsN
     };
     let mut cursor = list.walk();
     for parameter in list.named_children(&mut cursor) {
-        let name = match parameter.kind() {
-            "identifier" => Some(parameter),
-            "typed_parameter" => {
-                let mut cursor = parameter.walk();
-                parameter
-                    .named_children(&mut cursor)
-                    .find(|child| child.kind() == "identifier")
-            }
-            "default_parameter" | "typed_default_parameter" => parameter
-                .child_by_field_name("name")
-                .filter(|name| name.kind() == "identifier"),
-            _ => None,
-        };
-        if let Some(name) = name {
+        if let Some(name) = parameter_name(parameter) {
             out.insert(cx.text(&name).to_owned(), name);
         }
     }
     out
 }
 
+/// The identifier a parameter declares: plain, typed, defaulted, or the
+/// `*args` / `**kwargs` splat forms (typed or not).
+fn parameter_name(parameter: TsNode<'_>) -> Option<TsNode<'_>> {
+    match parameter.kind() {
+        "identifier" => Some(parameter),
+        "typed_parameter" | "list_splat_pattern" | "dictionary_splat_pattern" => {
+            let mut cursor = parameter.walk();
+            let inner = parameter.named_children(&mut cursor).find(|child| {
+                matches!(
+                    child.kind(),
+                    "identifier" | "list_splat_pattern" | "dictionary_splat_pattern"
+                )
+            });
+            inner.and_then(parameter_name)
+        }
+        "default_parameter" | "typed_default_parameter" => parameter
+            .child_by_field_name("name")
+            .filter(|name| name.kind() == "identifier"),
+        _ => None,
+    }
+}
+
 /// Names a function body rebinds: assignment and augmented-assignment
-/// targets, `for` / `with` / `except` targets, walrus, `del`, `global` and
-/// `nonlocal`. A parameter among them is not a stable declaration.
+/// targets, `for` / `with` / `except` targets, walrus, `del`, `global`,
+/// `nonlocal`, imports, and nested `def` / `class` names. A parameter among
+/// them is not a stable declaration. Nested functions, lambdas, classes and
+/// comprehensions are their own scopes: only a `nonlocal` there (or a walrus
+/// in a comprehension, which binds in the enclosing function) rebinds here.
 fn rebound(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Scope {
+        Own,
+        Comprehension,
+        Nested,
+    }
     let mut out = BTreeSet::new();
     let Some(body) = function.child_by_field_name("body") else {
         return out;
     };
-    let mut stack = vec![body];
-    while let Some(node) = stack.pop() {
-        let targets: Vec<TsNode<'_>> = match node.kind() {
-            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+    let mut stack = vec![(body, Scope::Own)];
+    while let Some((node, scope)) = stack.pop() {
+        let kind = node.kind();
+        let targets: Vec<TsNode<'_>> = match (kind, scope) {
+            ("nonlocal_statement", _) => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor).collect()
+            }
+            ("named_expression", Scope::Own | Scope::Comprehension) => {
+                node.child_by_field_name("name").into_iter().collect()
+            }
+            (_, Scope::Comprehension | Scope::Nested) => Vec::new(),
+            ("assignment" | "augmented_assignment" | "for_statement", _) => {
                 node.child_by_field_name("left").into_iter().collect()
             }
-            "named_expression" => node.child_by_field_name("name").into_iter().collect(),
-            "as_pattern" | "delete_statement" | "global_statement" | "nonlocal_statement"
-            | "except_clause" => {
+            ("function_definition" | "class_definition", _) => {
+                node.child_by_field_name("name").into_iter().collect()
+            }
+            ("import_statement" | "import_from_statement", _) => imported(node),
+            ("as_pattern" | "delete_statement" | "global_statement" | "except_clause", _) => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor).collect()
             }
@@ -173,10 +202,41 @@ fn rebound(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
                 }
             }
         }
+        let child_scope = match kind {
+            "function_definition" | "lambda" | "class_definition" => Scope::Nested,
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+                if scope == Scope::Own =>
+            {
+                Scope::Comprehension
+            }
+            _ => scope,
+        };
         let mut cursor = node.walk();
-        stack.extend(node.named_children(&mut cursor));
+        stack.extend(node.named_children(&mut cursor).map(|c| (c, child_scope)));
     }
     out
+}
+
+/// The names an `import` / `from ... import` statement binds: the alias
+/// when there is one, else the first segment of `import a.b` or the
+/// imported name of `from m import n`.
+fn imported(statement: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let from = statement.kind() == "import_from_statement";
+    let mut cursor = statement.walk();
+    statement
+        .children_by_field_name("name", &mut cursor)
+        .filter_map(|name| match name.kind() {
+            "aliased_import" => name.child_by_field_name("alias"),
+            "dotted_name" if from => {
+                name.named_child(u32::try_from(name.named_child_count().checked_sub(1)?).ok()?)
+            }
+            "dotted_name" => name.named_child(0),
+            _ => None,
+        })
+        .collect()
 }
 
 struct RuleBuilder<'cx, 'src, 'tree> {
