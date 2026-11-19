@@ -400,3 +400,20 @@ fn versioned_history_ledger_admission_bounds() {
             .unwrap()
     );
 }
+
+// AC-0860: a whole-system query on a graph larger than a cursor can page
+// through is admitted with its full match count; only the page is bounded.
+#[test]
+fn ledger_admits_a_query_matching_more_facts_than_a_cursor_pages() {
+    for policy in [&INVESTIGATION_V1_POLICY, &INVESTIGATION_V2_POLICY] {
+        let mut large = ledger();
+        large.queries[0].total_selected = 84_625;
+        large.validate_with_policy(policy).unwrap();
+        let mut forged = ledger();
+        forged.queries[0].total_selected = forged.queries[0].returned_facts - 1;
+        assert_eq!(
+            forged.validate_with_policy(policy),
+            Err(InvestigationError::InvalidInput)
+        );
+    }
+}
