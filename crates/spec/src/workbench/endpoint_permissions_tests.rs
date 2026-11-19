@@ -643,3 +643,108 @@ fn security_and_endpoint_permissions_word_a_missing_check_alike() {
         assert!(!security.contains("GET /orders |"));
     }
 }
+
+/// `security.md` with one Capability citing the `HANDLES` edge of each
+/// endpoint in `fixture`.
+fn security_with_capability(fixture: &Fixture, mode: ExportMode) -> String {
+    use crate::workbench::capabilities::{Stories, Story, Support};
+    use core_graph::overlay::BaseRef;
+    let handles: Vec<&Edge> = fixture
+        .edges
+        .iter()
+        .filter(|e| e.label == "HANDLES")
+        .collect();
+    let cites: Vec<BaseRef> = handles
+        .iter()
+        .map(|e| BaseRef::Edge(e.src.clone(), e.dst.clone(), e.label.clone()))
+        .collect();
+    let capability = Node {
+        id: "capability:test:orders".into(),
+        label: "Capability".into(),
+        props: json!({ "title": "Manage orders (shop API)" }),
+    };
+    let knowledge = Stories {
+        included: vec![Story {
+            node: &capability,
+            support: cites
+                .iter()
+                .zip(&handles)
+                .map(|(cite, edge)| (cite, Support::Edge(edge)))
+                .collect(),
+        }],
+        filtered: 0,
+    };
+    let nodes: Vec<&Node> = fixture.nodes.iter().collect();
+    let edges: Vec<&Edge> = fixture.edges.iter().collect();
+    crate::workbench::producers::security(
+        (&nodes, &edges),
+        Some(&knowledge),
+        (mode, &BTreeSet::new()),
+        None,
+    )
+    .unwrap()
+    .content
+}
+
+// AC-0853: security.md lists under each Capability who may call each of its
+// operations, as the recovered site states: a Flask guard, a NestJS Allow
+// permission set, none recovered, or not established outside recovery.
+#[test]
+fn security_lists_access_control_per_capability() {
+    let mut fixture = three_routes();
+    let ts = adapters_lang_ts::extract_source(
+        b"import { Query, Resolver } from '@nestjs/graphql';\n\
+          import { Permission } from '@vendure/common/lib/generated-shop-types';\n\
+          import { Allow } from '../../decorators/allow.decorator';\n\
+          @Resolver() export class ShopOrderResolver {\n\
+          @Query()\n@Allow(Permission.Owner, Permission.UpdateOrder)\nactiveOrder() {}\n}",
+        "src/api/resolvers/shop/shop-order.resolver.ts",
+        &adapters_lang_ts::SourceId {
+            repo: "acme/shop",
+            commit: "0123abc",
+        },
+    )
+    .unwrap();
+    fixture.nodes.extend(ts.nodes);
+    fixture.edges.extend(ts.edges);
+    let content = security_with_capability(&fixture, ExportMode::BestEffort);
+    let section = section(&content, "Access control per capability");
+    assert!(
+        section.contains("### Manage orders (shop API)"),
+        "{section}"
+    );
+    assert!(
+        section.contains(
+            "2 with a recovered guard or permission set, 1 with none recovered, 1 not established"
+        ),
+        "{section}"
+    );
+    let line = |op: &str| {
+        section
+            .lines()
+            .find(|l| l.starts_with(&format!("| {op} |")))
+            .unwrap_or_else(|| panic!("{op}: {section}"))
+            .to_owned()
+    };
+    assert!(line("GET /me").contains("| flask_login.login_required |"));
+    assert!(line("GET /health").contains("| none recovered |"));
+    assert!(line("GET /orders").contains("| not established: outside permission-site recovery |"));
+    assert!(line("QUERY shop.activeOrder").contains("| any of Owner, UpdateOrder |"));
+    // Each row cites its endpoint fact.
+    let id = citation_id(&FactKey::Node {
+        id: "ep:acme/shop@GET:/me".into(),
+    });
+    assert!(line("GET /me").ends_with(&format!("| {id} |")));
+    // Without derived Capabilities the section is not written.
+    let nodes: Vec<&Node> = fixture.nodes.iter().collect();
+    let edges: Vec<&Edge> = fixture.edges.iter().collect();
+    let plain = crate::workbench::producers::security(
+        (&nodes, &edges),
+        None,
+        (ExportMode::BestEffort, &BTreeSet::new()),
+        None,
+    )
+    .unwrap()
+    .content;
+    assert!(!plain.contains("Access control per capability"));
+}

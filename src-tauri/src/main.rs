@@ -6872,12 +6872,15 @@ fn compile_spec_artifacts(
     // Only `user-stories` renders the overlay's stories, and the fact index
     // cites them; any other selection neither reads nor validates them, so a
     // refused overlay fact cannot fail an unrelated read. The D1 document
-    // frames the derived Capabilities and caller roles too (AC-0663), but
-    // only as context: a refused overlay leaves it with its base sections.
+    // frames the derived Capabilities and caller roles too (AC-0663), and
+    // the security view lists access per derived Capability (AC-0853), but
+    // only as context: a refused overlay leaves them with their base sections.
     let requires_knowledge = artifact_ids
         .iter()
         .any(|id| matches!(*id, "user-stories" | "fact-index" | "fact-index-json"));
-    let frames_knowledge = artifact_ids.contains(&"d1-product-specification");
+    let frames_knowledge = artifact_ids
+        .iter()
+        .any(|id| matches!(*id, "d1-product-specification" | "security-view"));
     let candidates = if requires_knowledge || frames_knowledge {
         match inputs.candidates() {
             Ok(candidates) => candidates,

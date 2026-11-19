@@ -63,6 +63,7 @@ const NOT_READABLE: [&str; 2] = ["fact-index", "fact-index-json"];
 /// session's graph content hash; for the same inputs and export mode its
 /// bytes are the desktop export's.
 const D1_ID: &str = "d1-product-specification";
+const SECURITY_ID: &str = "security-view";
 
 /// The two projections of the stored coverage inventories (AC-0592).
 const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];
@@ -196,34 +197,7 @@ impl ReadSession {
             // D1 frames the derived Capabilities and caller roles beside its
             // base sections (AC-0663); a refused overlay leaves it without
             // them rather than failing the read.
-            let candidates = if id == D1_ID {
-                self.capabilities
-                    .iter()
-                    .map(|f| match &f.item {
-                        core_graph::overlay::OverlayItem::Node(capability) => {
-                            Some(spec::CapabilityStory {
-                                capability,
-                                cites: &f.cites,
-                            })
-                        }
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-            } else {
-                None
-            };
-            let knowledge = candidates
-                .filter(|c| !c.is_empty() || !self.actors.is_empty())
-                .and_then(|candidates| {
-                    spec::validate_knowledge_stories(
-                        &self.base,
-                        &candidates,
-                        &self.actors,
-                        self.basis.export_mode,
-                        &self.rejected_hashes,
-                    )
-                    .ok()
-                });
+            let knowledge = (id == D1_ID).then(|| self.framed_knowledge()).flatten();
             spec::compile_spec_selected_supplied(
                 &self.base.graph.0,
                 &self.base.graph.1,
@@ -252,7 +226,12 @@ impl ReadSession {
             .next()
             .ok_or(ReadError::Storage)?
         } else {
-            spec::compile_spec_selected_with_security(
+            // The security view lists access per derived Capability
+            // (AC-0853); a refused overlay leaves it with its base sections.
+            let knowledge = (id == SECURITY_ID)
+                .then(|| self.framed_knowledge())
+                .flatten();
+            spec::compile_spec_selected_with_security_supplied(
                 &self.base.graph.0,
                 &self.base.graph.1,
                 &flows,
@@ -260,10 +239,16 @@ impl ReadSession {
                 &self.rejected_hashes,
                 &[id],
                 compile_limits,
-                spec::SecurityLimits {
-                    max_rows: security.rows,
-                    max_output_bytes: security.bytes,
-                },
+                (
+                    spec::SecurityLimits {
+                        max_rows: security.rows,
+                        max_output_bytes: security.bytes,
+                    },
+                    spec::Supplied {
+                        knowledge: knowledge.as_ref(),
+                        ..spec::Supplied::default()
+                    },
+                ),
             )
             .map_err(|_| ReadError::InvalidRequest)?
             .into_iter()
@@ -288,6 +273,35 @@ impl ReadSession {
 }
 
 impl ReadSession {
+    /// The overlay's derived Capabilities and caller roles, validated, for
+    /// an artifact that frames them as context: the D1 document (AC-0663)
+    /// and the security view (AC-0853). A refused or empty overlay frames
+    /// nothing rather than failing the read.
+    fn framed_knowledge(&self) -> Option<spec::KnowledgeStories<'_>> {
+        let candidates = self
+            .capabilities
+            .iter()
+            .map(|f| match &f.item {
+                core_graph::overlay::OverlayItem::Node(capability) => Some(spec::CapabilityStory {
+                    capability,
+                    cites: &f.cites,
+                }),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if candidates.is_empty() && self.actors.is_empty() {
+            return None;
+        }
+        spec::validate_knowledge_stories(
+            &self.base,
+            &candidates,
+            &self.actors,
+            self.basis.export_mode,
+            &self.rejected_hashes,
+        )
+        .ok()
+    }
+
     /// The repositories whose stored inventory this session's coverage
     /// qualification does not hold as recorded under the current
     /// registration and plugin basis, with what it compared. Fail closed:

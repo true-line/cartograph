@@ -1107,7 +1107,12 @@ fn list(out: &mut Text, values: &[&str]) -> fmt::Result {
 }
 /// `security.md`. An endpoint finding states what was recovered, in the words
 /// `endpoint-permissions.md` uses for the same fact (#1820, AC-0656).
-pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
+pub(super) fn security(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    knowledge: Option<&super::capabilities::Stories<'_>>,
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
+    max: Option<usize>,
+) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
     let findings: Vec<_> = nodes
         .iter()
@@ -1146,7 +1151,116 @@ pub(super) fn security(nodes: &[&Node], max: Option<usize>) -> Result<Output, Re
     if findings.is_empty() {
         content.push_str("| — | — | — | — | — | No explicit security findings | — |\n")?;
     }
+    if let Some(knowledge) = knowledge {
+        access_per_capability(
+            (nodes, edges),
+            knowledge,
+            (mode, rejected),
+            &mut assertions,
+            &mut content,
+        )?;
+    }
     finish(content, assertions)
+}
+
+/// `security.md` "Access control per capability" (AC-0853): under each
+/// derived Capability, every operation it cites through `HANDLES` with who
+/// may call it as its recovered permission site states. Operations with no
+/// recovered site are counted in the lead and listed like the others.
+fn access_per_capability(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    knowledge: &super::capabilities::Stories<'_>,
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
+    assertions: &mut Assertions,
+    content: &mut Text,
+) -> Result<(), RenderLimit> {
+    use super::capabilities::Support;
+    use super::endpoint_permissions::{Access, AccessIndex};
+    let by_id: BTreeMap<&str, &Node> = nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint")
+        .map(|n| (n.id.as_str(), *n))
+        .collect();
+    let mut sections: Vec<(&Node, Vec<&Node>)> = Vec::new();
+    for story in knowledge
+        .included
+        .iter()
+        .filter(|s| s.node.label == "Capability")
+    {
+        let mut operations: Vec<&Node> = story
+            .support
+            .iter()
+            .filter_map(|(_, fact)| match fact {
+                Support::Edge(e) if e.label == "HANDLES" => by_id.get(e.src.as_str()).copied(),
+                _ => None,
+            })
+            .collect();
+        operations.sort_by(|a, b| a.id.cmp(&b.id));
+        operations.dedup_by(|a, b| a.id == b.id);
+        if !operations.is_empty() {
+            sections.push((story.node, operations));
+        }
+    }
+    if sections.is_empty() {
+        return Ok(());
+    }
+    let index = AccessIndex::new(nodes, edges);
+    let mut rows: Vec<(&Node, Vec<(&Node, Access)>)> = Vec::new();
+    let (mut guarded, mut none, mut open) = (0usize, 0usize, 0usize);
+    for (capability, operations) in sections {
+        let mut cells = Vec::new();
+        for endpoint in operations {
+            let access = index.access(endpoint, mode, rejected);
+            match &access {
+                Access::Guarded(_) => guarded += 1,
+                Access::NoneRecovered { .. } => none += 1,
+                Access::NotEstablished(_) => open += 1,
+            }
+            cells.push((endpoint, access));
+        }
+        rows.push((capability, cells));
+    }
+    write!(
+        content,
+        "\n## Access control per capability\n\nWho may call each operation of a derived \
+         Capability, as the permission site recovered on its endpoint states: {guarded} with a \
+         recovered guard or permission set, {none} with none recovered, {open} not established. \
+         A permission site records decorator or guard syntax (Deterministic), not effective \
+         runtime authorization; a check inside a handler body, in middleware or at a gateway is \
+         not visible here. `endpoint-permissions.md` gives each site's span and handler path.\n"
+    )?;
+    let mut cited: BTreeSet<&str> = BTreeSet::new();
+    for (capability, cells) in rows {
+        let title = capability.props["title"].as_str().unwrap_or(&capability.id);
+        writeln!(
+            content,
+            "\n### {}\n\n| Operation | Who may call | Citation |\n|---|---|---|",
+            Safe(title)
+        )?;
+        for (endpoint, access) in cells {
+            let who = match access {
+                Access::Guarded(text) => text,
+                Access::NoneRecovered { partial: false } => "none recovered".to_owned(),
+                Access::NoneRecovered { partial: true } => {
+                    "none recovered (handler path partial)".to_owned()
+                }
+                Access::NotEstablished(why) => format!("not established: {why}"),
+            };
+            let id = super::citation_id(&core_graph::FactKey::Node {
+                id: endpoint.id.clone(),
+            });
+            writeln!(
+                content,
+                "| {} | {} | {id} |",
+                Safe(NodeName(endpoint)),
+                Safe(&who)
+            )?;
+            if cited.insert(&endpoint.id) {
+                assertions.node(endpoint, None)?;
+            }
+        }
+    }
+    Ok(())
 }
 /// The Type cell of a `security.md` row. The stored category of an endpoint
 /// finding keeps its identity (`unauthenticated_endpoint`); the document names

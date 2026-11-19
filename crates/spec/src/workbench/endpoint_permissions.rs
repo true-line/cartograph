@@ -449,6 +449,56 @@ fn rows<'a>(
         .collect()
 }
 
+/// Who may call an endpoint, as its recovered permission site states, for
+/// the per-capability table in `security.md` (AC-0853).
+pub(super) enum Access {
+    /// The guard or permission set the site states, in a few words.
+    Guarded(String),
+    /// The adapter read the endpoint and recovered no site; `partial` when
+    /// its handler path was not read to the end.
+    NoneRecovered { partial: bool },
+    /// Neither: an unreadable or withheld site, or a framework outside
+    /// permission-site recovery.
+    NotEstablished(&'static str),
+}
+
+/// The handler-path index [`Access`] is read against, built once.
+pub(super) struct AccessIndex<'a>(Graph<'a>);
+
+impl<'a> AccessIndex<'a> {
+    pub(super) fn new(nodes: &[&'a Node], edges: &[&'a Edge]) -> Self {
+        Self(Graph::new(nodes, edges))
+    }
+
+    pub(super) fn access(
+        &self,
+        endpoint: &Node,
+        mode: ExportMode,
+        rejected: &BTreeSet<String>,
+    ) -> Access {
+        let Some(recovery) = recovery(endpoint) else {
+            return Access::NotEstablished("outside permission-site recovery");
+        };
+        match reading(endpoint, recovery) {
+            Reading::Site { provenance, .. } if !included(&provenance, mode, rejected) => {
+                Access::NotEstablished("site withheld in this export mode")
+            }
+            Reading::Site { .. } => {
+                let raw = &endpoint.props[recovery.property];
+                Access::Guarded(if recovery.property == "permission_site" {
+                    format!("any of {}", strings(&raw["arguments"]).join(", "))
+                } else {
+                    strings(&raw["guards"]).join(", ")
+                })
+            }
+            Reading::Absent { .. } => Access::NoneRecovered {
+                partial: Path::walk(&self.0, endpoint).partial(),
+            },
+            Reading::Incomplete(_) => Access::NotEstablished("site not readable"),
+        }
+    }
+}
+
 /// The first evidence span, and how many more the fact index lists.
 struct Span<'a>(&'a Provenance);
 impl fmt::Display for Span<'_> {

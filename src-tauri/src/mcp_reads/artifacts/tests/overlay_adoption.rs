@@ -95,11 +95,15 @@ fn official_stories_preserve_producer_support_provenance_and_old_pages() {
         .into_iter()
         // The curated artifacts, the D1 document and the bundle manifest
         // read the session's projection and basis, which this bare compile
-        // is not supplied with (AC-0654, AC-0667, AC-0682).
+        // is not supplied with (AC-0654, AC-0667, AC-0682); the security
+        // view frames the adopted Capabilities, as
+        // `security_view_read_alone_lists_access_per_overlay_capability`
+        // checks (AC-0853).
         .filter(|a| {
             a.id != "user-stories"
                 && !a.id.starts_with("curated")
                 && a.id != "d1-product-specification"
+                && a.id != "security-view"
                 && a.id != "bundle-manifest"
         })
     {
@@ -1012,4 +1016,27 @@ fn d1_read_alone_frames_overlay_capabilities() {
     assert!(!d1(&f.best()).contains("Derived Capabilities:"));
     f.publish(f.facts.clone());
     assert!(d1(&f.best()).contains("Derived Capabilities: 1."));
+}
+
+// AC-0853: the security view read alone lists access per the overlay's
+// derived Capabilities, and reads as before when the overlay supplies none.
+#[test]
+fn security_view_read_alone_lists_access_per_overlay_capability() {
+    let f = Fixture::new();
+    let security = |session: &ReadSession| match session
+        .compile_artifact("security-view", trace_limits(), compile_limits())
+        .unwrap()
+    {
+        ArtifactCompilation::Produced(a) => a.artifact.content,
+        ArtifactCompilation::Limited { .. } => panic!("fixture fits"),
+    };
+    let before = security(&f.best());
+    assert!(!before.contains("## Access control per capability"));
+    f.publish(f.facts.clone());
+    let after = security(&f.best());
+    assert!(
+        after.contains("## Access control per capability"),
+        "{after}"
+    );
+    assert!(after.contains("\n### "), "{after}");
 }
