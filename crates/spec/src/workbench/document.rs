@@ -875,7 +875,12 @@ pub(super) fn d1(
             }
             // Python callers by their recovered guards frame 1.2 (#1979).
             if matches!(source, SectionFrame::Nodes("Actor")) {
-                super::endpoint_permissions::callers_frame(nodes, (mode, rejected), &mut content)?;
+                cited += super::endpoint_permissions::callers_frame(
+                    nodes,
+                    (mode, rejected),
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
             }
         }
         match section.kind {

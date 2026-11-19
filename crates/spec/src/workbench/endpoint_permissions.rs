@@ -34,9 +34,11 @@
 //! whose site the mode withholds is omitted and counted, before any
 //! assertion is built (R-INT-5, ADR-0058).
 
+use super::fact_index::citation_id;
 use super::producers::Output;
 use super::render::{Assertions, Budget, Literal, NodeName, RenderLimit, Text};
 use super::{ExportMode, included, provenance};
+use core_graph::FactKey;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance};
 use serde::Deserialize;
@@ -516,19 +518,36 @@ pub(super) fn caller(
     mode: ExportMode,
     rejected: &BTreeSet<String>,
 ) -> Option<Caller> {
+    caller_reading(endpoint, mode, rejected).map(|(caller, _)| caller)
+}
+
+/// The caller and the confidence of the reading that names it. An absent
+/// reading with provenance passes the same admission as a guard: a rejected
+/// or withheld "no guard" observation names no caller.
+fn caller_reading(
+    endpoint: &Node,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> Option<(Caller, Option<ConfidenceTier>)> {
     let recovery = recovery(endpoint).filter(|r| r.property == "auth")?;
     match reading(endpoint, recovery) {
         Reading::Site { provenance, .. } if included(&provenance, mode, rejected) => {
             let guards = strings(&endpoint.props["auth"]["guards"]);
-            Some(Caller::Guarded {
-                role: role(recovery.framework, &guards),
-                guards: guards
-                    .into_iter()
-                    .map(|g| guard_name(g).to_owned())
-                    .collect(),
-            })
+            Some((
+                Caller::Guarded {
+                    role: role(recovery.framework, &guards),
+                    guards: guards
+                        .into_iter()
+                        .map(|g| guard_name(g).to_owned())
+                        .collect(),
+                },
+                Some(provenance.confidence_tier),
+            ))
         }
-        Reading::Absent { .. } => Some(Caller::Unguarded),
+        Reading::Absent { .. } => match site_provenance(&endpoint.props["auth"]) {
+            Some(provenance) if !included(&provenance, mode, rejected) => None,
+            provenance => Some((Caller::Unguarded, provenance.map(|p| p.confidence_tier))),
+        },
         _ => None,
     }
 }
@@ -536,15 +555,31 @@ pub(super) fn caller(
 /// D1 §1.2's frame of Python callers (#1979): one row per caller and guard
 /// set, with how many operations it admits and a few of them, then the
 /// operations with no guard recovered. Nothing is written when no endpoint
-/// carries an admitted Python guard reading.
+/// carries an admitted Python guard reading. Each operation a row counts is
+/// asserted once, so its tier and citation are in the document's statements;
+/// returns how many it asserted.
 pub(super) fn callers_frame(
     nodes: &[&Node],
     (mode, rejected): (ExportMode, &BTreeSet<String>),
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
     out: &mut Text,
-) -> Result<(), RenderLimit> {
+) -> Result<usize, RenderLimit> {
     let mut by_caller: BTreeMap<Caller, Vec<String>> = BTreeMap::new();
+    let mut confidence: BTreeMap<Caller, BTreeSet<String>> = BTreeMap::new();
+    let mut cited = 0;
     for endpoint in nodes.iter().filter(|n| n.label == "Endpoint") {
-        if let Some(caller) = caller(endpoint, mode, rejected) {
+        if let Some((caller, tier)) = caller_reading(endpoint, mode, rejected) {
+            let id = citation_id(&FactKey::Node {
+                id: endpoint.id.clone(),
+            });
+            if asserted.insert(id) {
+                assertions.node(endpoint, None)?;
+                cited += 1;
+            }
+            confidence
+                .entry(caller.clone())
+                .or_default()
+                .insert(tier.map_or_else(|| "not recorded".to_owned(), |t| format!("{t:?}")));
             by_caller
                 .entry(caller)
                 .or_default()
@@ -552,7 +587,7 @@ pub(super) fn callers_frame(
         }
     }
     if by_caller.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let guarded: usize = by_caller
         .iter()
@@ -569,7 +604,9 @@ pub(super) fn callers_frame(
          caller under its capability.\n",
         by_caller.len() - usize::from(unguarded > 0)
     )?;
-    out.push_str("| Caller | Guard | Operations | Examples |\n|---|---|---|---|\n")?;
+    out.push_str(
+        "| Caller | Guard | Reading confidence | Operations | Examples |\n|---|---|---|---|---|\n",
+    )?;
     let mut rows: Vec<(&Caller, &Vec<String>)> = by_caller.iter().collect();
     // Most operations first; any caller last.
     rows.sort_by_key(|(caller, ops)| (**caller == Caller::Unguarded, std::cmp::Reverse(ops.len())));
@@ -590,9 +627,14 @@ pub(super) fn callers_frame(
         let more = operations.len() - shown.len();
         writeln!(
             out,
-            "| {} | {} | {} | {}{} |",
+            "| {} | {} | {} | {} | {}{} |",
             Literal(&who),
             Literal(&guards),
+            confidence[caller]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
             operations.len(),
             Literal(shown.join("; ")),
             if more > 0 {
@@ -602,7 +644,7 @@ pub(super) fn callers_frame(
             }
         )?;
     }
-    Ok(())
+    Ok(cited)
 }
 
 /// Who may call an endpoint, as its recovered permission site states, for

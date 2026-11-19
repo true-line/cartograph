@@ -858,9 +858,9 @@ fn python_callers_are_named_by_their_recovered_guards() {
     assert_eq!(
         rows,
         [
-            "| Signed-in user | flask\\_login.login\\_required | 2 | GET /api/coupon; POST /api/coupon |",
-            "| Caller passing require\\_api\\_auth | require\\_api\\_auth | 1 | DELETE /api/aliases/&lt;int:alias\\_id&gt; |",
-            "| Any caller | none recovered | 1 | GET /api/health |",
+            "| Signed-in user | flask\\_login.login\\_required | Confirmed | 2 | GET /api/coupon; POST /api/coupon |",
+            "| Caller passing require\\_api\\_auth | require\\_api\\_auth | InferredStrong | 1 | DELETE /api/aliases/&lt;int:alias\\_id&gt; |",
+            "| Any caller | none recovered | InferredStrong | 1 | GET /api/health |",
         ],
         "{actors}"
     );
@@ -927,6 +927,32 @@ fn python_callers_are_named_by_their_recovered_guards() {
         .unwrap()
         .to_owned()]);
     assert!(super::caller(guard, ExportMode::BestEffort, &rejected).is_none());
+    // So does a rejected inferred "no guard" reading.
+    let open = endpoints
+        .iter()
+        .find(|n| n.props["path"] == "/api/health")
+        .unwrap();
+    assert_eq!(
+        super::caller(open, ExportMode::BestEffort, &BTreeSet::new()),
+        Some(super::Caller::Unguarded)
+    );
+    let rejected = BTreeSet::from([open.props["auth"]["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()]);
+    assert!(super::caller(open, ExportMode::BestEffort, &rejected).is_none());
+    // Every operation a caller row counts is a statement of D1, with its tier.
+    let statements = &d1[d1.find("## Statements in this document").unwrap()..];
+    assert!(
+        statements.contains("Cited facts printed in the frames above: 4."),
+        "{statements}"
+    );
+    for operation in ["GET /api/health", "GET /api/coupon", "POST /api/coupon"] {
+        assert!(
+            statements.contains(&format!("| Endpoint: {operation} | Deterministic |")),
+            "{statements}"
+        );
+    }
 
     // Guards by their own names, never graph ids.
     let permissions = &bundle
