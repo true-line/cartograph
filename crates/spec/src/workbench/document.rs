@@ -821,10 +821,27 @@ pub(super) fn d1(
                 _ => 0,
             };
             let arranged = matches!(source, SectionFrame::Artifacts(_))
-                && section.subject == Some("BusinessRule")
                 && knowledge
                     .is_some_and(|k| k.included.iter().any(|s| s.node.label == "Capability"));
-            if arranged && let Some(knowledge) = knowledge {
+            // §1.4 arranged per capability (AC-0850); with no requested
+            // operation it stays a pointer.
+            let (scenarios, scenario_facts) = match knowledge {
+                Some(knowledge) if arranged && section.subject == Some("Capability") => {
+                    acceptance::acceptance_per_capability(
+                        (nodes, edges),
+                        knowledge,
+                        (&mut assertions, &mut drafted.asserted),
+                        &mut content,
+                    )?
+                }
+                _ => (0, 0),
+            };
+            if scenarios > 0 {
+                cited += scenario_facts;
+            } else if arranged
+                && section.subject == Some("BusinessRule")
+                && let Some(knowledge) = knowledge
+            {
                 // Arranged per capability (#1443); the inventory keeps every
                 // observation with its dependencies.
                 content.push_str(
@@ -900,6 +917,9 @@ pub(super) fn d1(
 
 #[path = "document_rules.rs"]
 pub(super) mod rules;
+
+#[path = "document_acceptance.rs"]
+pub(super) mod acceptance;
 
 #[cfg(test)]
 #[path = "document_tests.rs"]
