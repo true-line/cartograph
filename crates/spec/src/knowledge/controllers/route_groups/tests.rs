@@ -491,3 +491,40 @@ fn controller_capability_omits_unproven_go_and_rust_routes() {
         ],
     );
 }
+
+// AC-0851: only whole words of the Blueprint that repeat the file name are
+// dropped from the audience.
+#[test]
+fn a_blueprint_ending_in_the_file_name_letters_keeps_its_audience() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, blueprint) in [
+        ("alias.py", "foalias"),
+        ("domain_check.py", "admin.domain_check"),
+    ] {
+        std::fs::write(
+            dir.path().join(name),
+            format!(
+                "from flask import Blueprint
+bp = Blueprint('{blueprint}', __name__)
+@bp.get('/{blueprint}')
+def show():
+    return []
+"
+            ),
+        )
+        .unwrap();
+    }
+    let facts = adapters_lang_python::extract_dir(
+        dir.path(),
+        &adapters_lang_python::SourceId {
+            repo: REPO,
+            commit: COMMIT,
+        },
+    )
+    .unwrap();
+    let report = derive_controller_capabilities(&revisioned(facts.nodes, facts.edges));
+    assert_eq!(
+        titles(&report),
+        ["View alias (foalias)", "View domain check (admin)"]
+    );
+}

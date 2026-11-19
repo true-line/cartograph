@@ -73,12 +73,21 @@ fn group_name(
                     let subject = naming::file_subject(stem);
                     // `admin.abuser_lookup` with `abuser_lookup.py` is served
                     // under `admin`: the Blueprint's own words repeat the file.
-                    let audience = naming::spelled_words(blueprint);
-                    let audience = audience
-                        .strip_suffix(&naming::spelled_words(stem))
-                        .unwrap_or(&audience)
-                        .trim()
-                        .to_owned();
+                    // Whole words only: `foalias` does not repeat `alias`.
+                    let mut audience: Vec<String> = naming::spelled_words(blueprint)
+                        .split(' ')
+                        .map(str::to_owned)
+                        .collect();
+                    let repeated: Vec<String> = naming::spelled_words(stem)
+                        .split(' ')
+                        .map(str::to_owned)
+                        .collect();
+                    if audience.len() > repeated.len() && audience.ends_with(&repeated) {
+                        audience.truncate(audience.len() - repeated.len());
+                    } else if audience == repeated {
+                        audience.clear();
+                    }
+                    let audience = audience.join(" ");
                     Naming {
                         audience: (!audience.is_empty()).then_some(audience),
                         subject,
@@ -163,7 +172,7 @@ fn group_name(
 pub(super) fn derive(
     nodes: &BTreeMap<&str, Option<&Node>>,
     handles: &BTreeMap<&str, Vec<&core_graph::Edge>>,
-    report: &mut CapabilityReport,
+    pending: &mut Vec<super::Pending>,
 ) {
     type Key = (&'static str, String, String, String);
     let mut groups: BTreeMap<Key, (Naming, Group)> = BTreeMap::new();
@@ -244,28 +253,8 @@ pub(super) fn derive(
             }
         }
     }
-    let titled: Vec<(Key, String, Group)> = groups
-        .into_iter()
-        .map(|(key, (naming, group))| {
-            let title = naming::title(&naming.subject, naming.audience.as_deref(), group.mutates);
-            (key, title, group)
-        })
-        .collect();
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
-    for (_, title, _) in &titled {
-        *seen.entry(title.as_str()).or_default() += 1;
-    }
-    let shared: BTreeSet<String> = seen
-        .into_iter()
-        .filter(|(_, n)| *n > 1)
-        .map(|(title, _)| title.to_owned())
-        .collect();
-    for ((tag, repo, path, name), title, group) in titled {
-        let title = if shared.contains(&title) {
-            format!("{title} ({path})")
-        } else {
-            title
-        };
+    for ((tag, repo, path, name), (naming, group)) in groups {
+        let title = naming::title(&naming.subject, naming.audience.as_deref(), group.mutates);
         let key = serde_json::to_vec(&(
             CAPABILITY_CONTROLLER_RULE,
             CAPABILITY_CONTROLLER_RULE_VERSION,
@@ -275,17 +264,12 @@ pub(super) fn derive(
             &name,
         ))
         .expect("string tuple serialization");
-        let fact = capability_fact(
-            (
-                CAPABILITY_CONTROLLER_RULE,
-                CAPABILITY_CONTROLLER_RULE_VERSION,
-            ),
-            "http-controller",
-            &key,
+        pending.push(super::Pending {
             title,
+            places: [path, name],
+            key,
             group,
-        );
-        retain_sized_fact(report, fact);
+        });
     }
 }
 

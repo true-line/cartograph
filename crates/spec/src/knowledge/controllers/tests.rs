@@ -436,3 +436,55 @@ fn controller_capability_groups_real_jaxrs_routes_by_class() {
         ["Manage invoices", "Manage orders", "View order audits"]
     );
 }
+
+// AC-0851: two controllers whose titles would collide each name their file,
+// whatever framework words told their classes apart.
+#[test]
+fn colliding_controller_titles_name_their_files() {
+    let source = |class: &str, prefix: &str| {
+        format!(
+            "package com.demo;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+@RestController
+@RequestMapping(\"/{prefix}/orders\")
+public class {class} {{
+    @GetMapping
+    public String list() {{ return \"x\"; }}
+}}
+"
+        )
+    };
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    for (class, prefix) in [
+        ("ShopOrderController", "shop"),
+        ("AdminOrderController", "admin"),
+    ] {
+        let facts = adapters_lang_java::extract_source(
+            source(class, prefix).as_bytes(),
+            &format!("src/main/java/com/demo/{class}.java"),
+            &adapters_lang_java::SourceId {
+                repo: REPO,
+                commit: COMMIT,
+            },
+        )
+        .unwrap();
+        nodes.extend(facts.nodes);
+        edges.extend(facts.edges);
+    }
+    let snapshot = RevisionedSnapshot {
+        revision: StoreRevision {
+            graph_instance: "fixture".into(),
+            generation: 1,
+        },
+        graph: (nodes, edges),
+    };
+    assert_eq!(
+        controller_titles(&snapshot),
+        [
+            "View orders (src/main/java/com/demo/AdminOrderController.java)",
+            "View orders (src/main/java/com/demo/ShopOrderController.java)"
+        ]
+    );
+}
