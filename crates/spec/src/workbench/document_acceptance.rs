@@ -113,7 +113,12 @@ fn write_row(
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
     let node = index.by_id.get(test).copied();
-    let scenario = node.and_then(|n| n.props["qualified_name"].as_str());
+    // Pytest cases carry only `name`; it reads as words too.
+    let scenario = node.and_then(|n| {
+        n.props["qualified_name"]
+            .as_str()
+            .or_else(|| n.props["name"].as_str())
+    });
     let file = node.and_then(|n| n.props["path"].as_str()).unwrap_or("—");
     match (scenario, node) {
         (Some(scenario), _) => write!(out, "| {} ", Literal(Readable(scenario)))?,

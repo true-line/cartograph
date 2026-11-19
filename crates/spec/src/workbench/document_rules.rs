@@ -44,10 +44,25 @@ fn one_line(text: &str) -> String {
 }
 
 /// The byte index of the `)` closing the `(` that `text` starts with.
+/// Delimiters inside a `'…'`, `"…"` or `` `…` `` literal do not count; a
+/// backslash escapes the next character in one.
 fn closing(text: &str) -> Option<usize> {
     let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
     for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
         match c {
+            '\'' | '"' | '`' => quote = Some(c),
             '(' => depth += 1,
             ')' => {
                 depth = depth.checked_sub(1)?;
@@ -376,6 +391,9 @@ function checkQuantity(qty: number) {
   if (qty > 30) {
     return new OrderLimitError() || qty;
   }
+  if (qty > 40) {
+    return (new OrderLimitError(\")\"));
+  }
   return qty;
 }
 ";
@@ -458,8 +476,8 @@ function checkQuantity(qty: number) {
     #[test]
     fn rejections_are_listed_under_the_capability_that_reaches_them() {
         let (text, printed, cited) = render(1, true);
-        assert_eq!(printed, 3, "{text}");
-        assert_eq!(cited, 3);
+        assert_eq!(printed, 4, "{text}");
+        assert_eq!(cited, 4);
         assert!(text.contains("### Orders 0"), "{text}");
         assert!(
             text.contains("| checkQuantity | (qty &lt; 0) | throws new NegativeQuantityError() |"),
@@ -480,6 +498,11 @@ function checkQuantity(qty: number) {
             "{text}"
         );
         assert!(!text.contains("|| qty"), "{text}");
+        // A delimiter inside a string literal does not end the arguments.
+        assert!(
+            text.contains("| (qty &gt; 40) | returns (new OrderLimitError("),
+            "{text}"
+        );
         assert!(!text.contains("returns qty"), "{text}");
         assert!(!text.contains("Shared rejections"), "{text}");
         // A cited Symbol that no cited HANDLES edge reaches seeds nothing.
@@ -507,7 +530,7 @@ function checkQuantity(qty: number) {
     #[test]
     fn rejections_reached_by_many_capabilities_are_listed_once_as_shared() {
         let (text, printed, cited) = render(SHARED_AFTER + 1, true);
-        assert_eq!((printed, cited), (3, 3), "{text}");
+        assert_eq!((printed, cited), (4, 4), "{text}");
         assert!(!text.contains("### Orders"), "{text}");
         assert!(text.contains("### Shared rejections"), "{text}");
         let (_, printed, _) = render(0, true);

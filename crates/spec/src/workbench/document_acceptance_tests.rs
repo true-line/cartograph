@@ -83,6 +83,12 @@ fn fixture() -> (Vec<Node>, Vec<Edge>) {
             json!({"name": "lists orders", "path": "e2e/order.e2e-spec.ts",
                    "qualified_name": "Orders > lists orders"}),
         ),
+        // A pytest case carries only its name.
+        node(
+            "test:d",
+            "TestCase",
+            json!({"name": "test_lists_orders_twice", "path": "tests/test_orders.py"}),
+        ),
         node(
             "test:c",
             "TestCase",
@@ -94,6 +100,7 @@ fn fixture() -> (Vec<Node>, Vec<Edge>) {
         edge("test:a", ADD, "REQUESTS"),
         edge("test:a", LIST, "REQUESTS"),
         edge("test:b", LIST, "REQUESTS"),
+        edge("test:d", LIST, "REQUESTS"),
         edge("test:c", OTHER, "REQUESTS"),
     ];
     (nodes, edges)
@@ -154,11 +161,11 @@ fn render(cited_handles: bool) -> (String, usize, usize, usize) {
 // citation of each REQUESTS edge; a test of another operation is not.
 #[test]
 fn tests_requesting_a_capability_operation_are_its_acceptance_scenarios() {
-    // Two rows; the first cites both of its references.
+    // Three rows; the first cites both of its references.
     let (text, printed, cited, asserted) = render(true);
-    assert_eq!((printed, cited, asserted), (2, 3, 3), "{text}");
+    assert_eq!((printed, cited, asserted), (3, 4, 4), "{text}");
     assert!(
-        text.contains("Acceptance scenarios per capability: 2."),
+        text.contains("Acceptance scenarios per capability: 3."),
         "{text}"
     );
     assert!(text.contains("### Orders\n"), "{text}");
@@ -172,6 +179,10 @@ fn tests_requesting_a_capability_operation_are_its_acceptance_scenarios() {
     );
     assert_eq!(both.matches("F-").count(), 2, "{both}");
     assert!(text.contains("| Orders &gt; lists orders | e2e/order.e2e-spec.ts | GET /orders |"));
+    assert!(
+        text.contains("| lists orders twice | tests/test\\_orders.py | GET /orders |"),
+        "{text}"
+    );
     assert!(!text.contains("healthy"), "{text}");
     assert!(!text.contains("/health"), "{text}");
     // Without a cited HANDLES edge a capability has no operations.
