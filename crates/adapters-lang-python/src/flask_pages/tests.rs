@@ -273,3 +273,94 @@ fn ambiguous_templates_record_nothing_and_single_files_keep_redirects() {
             .any(|n| n.label == "Screen" && n.props["route"] == "/")
     );
 }
+
+// AC-0854: a helper is Flask's only where the call is: a parameter, local
+// assignment or local import of the same name shadows it, a function-local
+// Flask import does not leak into another function, a template's
+// `safe_url_for(…)` is not `url_for`, and a non-identifier endpoint name
+// resolves.
+#[test]
+fn flask_helpers_resolve_at_the_call_site_and_endpoint_names_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/main.py",
+        r#"
+from flask import Flask, render_template
+
+app = Flask(__name__)
+
+def own_render(name):
+    return name
+
+@app.route("/a")
+def a(render_template):
+    return render_template("a.html")
+
+@app.route("/b")
+def b():
+    render_template = own_render
+    return render_template("b.html")
+
+@app.route("/c")
+def c():
+    from myapp.views import render_template
+    return render_template("c.html")
+
+@app.route("/d")
+def d():
+    from flask import redirect, url_for
+    return redirect(url_for("reset-password"))
+
+@app.route("/e")
+def e():
+    return redirect(url_for("reset-password"))
+
+@app.route("/f")
+def f():
+    return render_template("f.html")
+
+@app.route("/reset", endpoint="reset-password")
+def reset():
+    return render_template("f.html")
+"#,
+    );
+    write(
+        dir.path(),
+        "templates/f.html",
+        r#"<a href="{{ safe_url_for('a') }}">x</a>
+<a href="{{ url_for('reset-password') }}">reset</a>
+"#,
+    );
+    for name in ["a", "b", "c"] {
+        write(dir.path(), &format!("templates/{name}.html"), "<p></p>");
+    }
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let rendered: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "RENDERS_TEMPLATE")
+        .map(|e| e.src.rsplit('#').next().unwrap())
+        .collect();
+    assert_eq!(
+        rendered
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["f", "reset"].into()
+    );
+    edge(&out.edges, "#d", "NAVIGATES_TO", "@flask:/reset");
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.src.ends_with("#e") && e.label == "NAVIGATES_TO")
+    );
+    let from_template: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.src.starts_with("template:") && e.label == "NAVIGATES_TO")
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(from_template.len(), 1, "{from_template:?}");
+    assert!(from_template[0].ends_with("@flask:/reset"));
+}
