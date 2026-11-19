@@ -261,7 +261,9 @@ impl InvestigationInputLedger {
                 || query.response_bytes > query.query.max_bytes
                 || query.response_bytes == 0
                 || query.returned_facts > query.query.max_facts
-                || query.total_selected > 50_000
+                // `total_selected` counts every fact the selector matched; a
+                // large graph's whole-system query matches more than a cursor
+                // can page through (#1987), so only the page is bounded.
                 || query.returned_facts > query.total_selected
                 || query
                     .query

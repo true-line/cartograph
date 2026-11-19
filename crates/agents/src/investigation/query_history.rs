@@ -196,7 +196,8 @@ impl InvestigationQueryHistory {
                     // Actual scoped context identities are shorter than this.
                     snapshot_id: "\u{1}".repeat(128),
                     view: context_hub::ContextView::RecoveredGraph,
-                    total_selected: 50_000,
+                    // Unbounded by the selector: the widest decimal count.
+                    total_selected: usize::MAX,
                     next_cursor: Some(cursor),
                     fact_indexes: vec![maximum_inventory_index; MAX_QUERY_FACTS],
                 },

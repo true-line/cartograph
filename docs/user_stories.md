@@ -1068,6 +1068,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **AC-0835** Given captured acceptance preparation, then a frozen @28 definition is accepted with @27's local finish lane rule, and its receipt family is `request7-specialist28-prompt14-disclosure6-result7`, with any mismatch between the frozen and saved identity or role refused. @27's family and the #598 negative cases pinned to @27 are unchanged. No captured @28 run is claimed.
 - **Trace:** H4 · `app` · — · T-0830..0835
 
+- **AC-0860** Given an investigation query whose selector matches more facts than a cursor can page through (SimpleLogin: 84,625 for a whole-system query), when its manifest is admitted into the input ledger, then it is accepted with that full match count under both investigation policies, while a manifest that returns more facts than it matched is still refused, and the query-history transport bound sizes the count at its widest decimal (#1987).
+- **Trace:** H4 · `agents` · — · T-0860
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.
