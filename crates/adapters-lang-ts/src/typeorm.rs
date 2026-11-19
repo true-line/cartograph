@@ -8,7 +8,9 @@
 //! `REFERENCES` edge per target entity. Decorators are proven by import from
 //! `typeorm`, never by name alone. A relation target resolves to a class in
 //! the same file or to the file a relative import names; a target that does
-//! not resolve stays a relation field with no edge, never a same-name guess.
+//! not resolve is a `REFERENCES` edge to an explicit Gap, never a same-name
+//! guess. A `@ChildEntity` argument is its discriminator value, never a
+//! table: the subclass is stored in its parent's table.
 //! Inherited columns (a base class's `id`, `createdAt`) are not copied in:
 //! the base class states them, and the `extends` clause is recorded.
 
@@ -141,6 +143,7 @@ fn local_classes(cx: &FileCx, root: TsNode) -> Vec<String> {
 
 /// One relation field, before its edge is built.
 struct Relation<'t> {
+    /// Empty when the decorator names no class literally.
     target: String,
     field: serde_json::Value,
     site: TsNode<'t>,
@@ -159,24 +162,32 @@ pub(crate) fn entity<'t>(
     let entity = leading_decorators(class_node)
         .into_iter()
         .filter_map(|decorator| {
-            let (local, table, evidence) = decorator_call(cx, decorator)?;
-            matches!(
-                from_typeorm(evidence, &local).as_deref(),
-                Some("Entity" | "ChildEntity")
-            )
-            .then_some((table, decorator))
+            let (local, argument, evidence) = decorator_call(cx, decorator)?;
+            match from_typeorm(evidence, &local).as_deref() {
+                Some("Entity") => Some((argument, None, decorator)),
+                Some("ChildEntity") => Some((None, argument, decorator)),
+                _ => None,
+            }
         })
         .next();
-    let Some((explicit_table, decorator)) = entity else {
+    let Some((explicit_table, discriminator, decorator)) = entity else {
         return;
     };
+    let child = discriminator.is_some()
+        || decorator_call(cx, decorator).is_some_and(|(local, _, site)| {
+            from_typeorm(site, &local).as_deref() == Some("ChildEntity")
+        });
     let Some(name) = class_node.child_by_field_name("name") else {
         return;
     };
     let class = cx.text(&name).to_string();
     let id = entity_id(cx.id.repo, cx.path, &class);
     let table = explicit_table.or_else(|| {
-        decorator_expression(decorator).and_then(|call| string_option(cx, call, "name"))
+        (!child)
+            .then(|| {
+                decorator_expression(decorator).and_then(|call| string_option(cx, call, "name"))
+            })
+            .flatten()
     });
     let extends = {
         let mut cursor = class_node.walk();
@@ -213,14 +224,17 @@ pub(crate) fn entity<'t>(
                 continue;
             };
             let call = decorator_expression(decorator);
-            if let Some(primary) = column_kind(&exported) {
+            if let Some(by_decorator) = column_kind(&exported) {
                 evidence.push(decorator);
                 let mut column = serde_json::Map::new();
                 column.insert("name".into(), field_name.clone().into());
                 if let Some(ty) = spelled_type(cx, member) {
                     column.insert("type".into(), ty.into());
                 }
+                let mut primary = by_decorator;
                 if let Some(call) = call {
+                    // `@Column({ primary: true })` declares a key too.
+                    primary |= boolean_option(cx, call, "primary") == Some(true);
                     if let Some(db_name) = string_option(cx, call, "name") {
                         column.insert("column".into(), db_name.into());
                     }
@@ -235,9 +249,9 @@ pub(crate) fn entity<'t>(
                 column.insert("decorator".into(), exported.clone().into());
                 columns.push(serde_json::Value::Object(column));
             } else if let Some(cardinality) = cardinality(&exported) {
-                let Some(target) = call.and_then(|call| relation_target(cx, call)) else {
-                    continue;
-                };
+                let target = call
+                    .and_then(|call| relation_target(cx, call))
+                    .unwrap_or_default();
                 // The owning side holds the foreign key or join table.
                 let joins = leading_decorators(member).into_iter().any(|other| {
                     decorator_call(cx, other).is_some_and(|(local, _, site)| {
@@ -259,7 +273,7 @@ pub(crate) fn entity<'t>(
                         "relation": exported,
                         "cardinality": cardinality,
                         "owning": owning,
-                        "target": target,
+                        "target": (!target.is_empty()).then_some(target),
                     }),
                     site: member,
                 });
@@ -287,6 +301,12 @@ pub(crate) fn entity<'t>(
     if let Some(extends) = extends {
         props["extends"] = extends.into();
     }
+    if let Some(discriminator) = discriminator {
+        props["discriminator"] = discriminator.into();
+    }
+    if child {
+        props["inheritance"] = "single-table child".into();
+    }
     out.nodes.push(Node {
         id: id.clone(),
         label: "DataEntity".into(),
@@ -299,7 +319,9 @@ pub(crate) fn entity<'t>(
     let mut by_target: BTreeMap<String, (Vec<serde_json::Value>, Vec<TsNode<'t>>)> =
         BTreeMap::new();
     for relation in relations {
-        let target = if locals.contains(&relation.target) {
+        let target = if relation.target.is_empty() {
+            None
+        } else if locals.contains(&relation.target) {
             Some(entity_id(cx.id.repo, cx.path, &relation.target))
         } else {
             imported_types
@@ -307,6 +329,7 @@ pub(crate) fn entity<'t>(
                 .map(|(file, exported)| entity_id(cx.id.repo, file, exported))
         };
         let Some(target) = target else {
+            unresolved(cx, out, &id, relation);
             continue;
         };
         let entry = by_target.entry(target).or_default();
@@ -331,4 +354,59 @@ pub(crate) fn entity<'t>(
             }),
         });
     }
+}
+
+/// The explicit Gap of a relation whose target class is not proven: not a
+/// literal `() => Class`, or a class neither declared in this file nor
+/// imported by a relative path (a path alias, a package). The relation stays
+/// an edge, so the data model shows the hop as unresolved.
+fn unresolved(cx: &FileCx, out: &mut Extraction, entity: &str, relation: Relation<'_>) {
+    let reason = if relation.target.is_empty() {
+        "TypeORM relation target is not a literal class"
+    } else {
+        "TypeORM relation target is not a recovered entity"
+    };
+    let gap = format!(
+        "gap:typeorm:{}@{}@{}",
+        cx.id.repo,
+        cx.path,
+        relation.site.start_byte()
+    );
+    let mut props = serde_json::json!({
+        "reason": reason,
+        "attempted_tiers": ["T0"],
+        "framework": "typeorm",
+        "language": "typescript",
+        "field": relation.field["field"],
+        "prov": cx.prov_spanning(
+            &[relation.site],
+            core_prov::ConfidenceTier::Gap,
+            &format!("Gap {gap}"),
+        ),
+    });
+    if !relation.target.is_empty() {
+        props["target"] = relation.target.clone().into();
+    }
+    out.nodes.push(Node {
+        id: gap.clone(),
+        label: "Gap".into(),
+        props,
+    });
+    let fact = format!("REFERENCES {entity} -> {gap}");
+    out.edges.push(Edge {
+        src: entity.to_string(),
+        dst: gap,
+        label: "REFERENCES".into(),
+        props: serde_json::json!({
+            "relation": relation.field["relation"],
+            "cardinality": relation.field["cardinality"],
+            "field": relation.field["field"],
+            "owning": relation.field["owning"],
+            "relations": [relation.field],
+            "reason": reason,
+            "attempted_resolution": "entity-type",
+            "framework": "typeorm",
+            "prov": cx.prov_spanning(&[relation.site], core_prov::ConfidenceTier::Gap, &fact),
+        }),
+    });
 }

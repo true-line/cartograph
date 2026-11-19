@@ -5612,7 +5612,7 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
     );
 }
 
-// TypeORM entities are the data model: an import-proven `@Entity` class is a
+// AC-0847: TypeORM entities are the data model: an import-proven `@Entity` class is a
 // DataEntity with its own columns, and relation decorators are REFERENCES
 // edges to the entity the relative import (or the same file) names.
 #[test]
@@ -5697,4 +5697,52 @@ export class NotAnEntity {}
     let to_variant = refs("#Product", "#ProductVariant");
     assert_eq!(to_variant.props["relations"][0]["owning"], false);
     refs("#ProductVariant", "product.entity.ts#Product");
+}
+
+// AC-0847: an unproven relation target is a REFERENCES edge to an explicit
+// Gap, a `@ChildEntity` argument is a discriminator and never a table, and
+// `@Column({ primary: true })` is a primary key.
+#[test]
+fn typeorm_unresolved_targets_child_entities_and_primary_options() {
+    let out = extract_tree(&[(
+        "src/entity/photo.entity.ts",
+        r#"
+import { ChildEntity, Column, ManyToOne } from 'typeorm';
+import { Album } from '@app/album';
+@ChildEntity('photo')
+export class Photo {
+  @Column({ primary: true }) code: string;
+  @ManyToOne(() => Album) album: Album;
+  @ManyToOne(() => pick()) other: unknown;
+}
+"#,
+    )]);
+    let photo = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "data:qwtm/example@typeorm:src/entity/photo.entity.ts#Photo")
+        .expect("child entity");
+    assert!(photo.props.get("table").is_none(), "{}", photo.props);
+    assert_eq!(photo.props["discriminator"], "photo");
+    assert_eq!(photo.props["columns"][0]["primary_key"], true);
+    let gaps: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "REFERENCES" && e.src == photo.id)
+        .map(|e| {
+            let gap = out.nodes.iter().find(|n| n.id == e.dst).unwrap();
+            assert_eq!(gap.label, "Gap");
+            (
+                e.props["field"].as_str().unwrap(),
+                gap.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        [
+            ("album", "TypeORM relation target is not a recovered entity"),
+            ("other", "TypeORM relation target is not a literal class"),
+        ]
+    );
 }

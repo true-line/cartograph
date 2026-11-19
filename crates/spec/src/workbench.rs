@@ -1328,6 +1328,7 @@ mod tests {
         assert!(data.assertions.len() >= 5);
     }
 
+    // AC-0847: the data model lists each entity's own columns, cited.
     #[test]
     fn data_model_lists_each_entity_column() {
         // A rebuild needs the columns, not only entity names: `columns`
