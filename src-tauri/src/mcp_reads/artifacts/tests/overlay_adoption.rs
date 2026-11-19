@@ -824,9 +824,14 @@ fn session_actor_stories_keep_assumption_order_and_endpoint_citation() {
         "[{},[\"UpdateOrder\",\"Owner\"],{assumption}",
         json!(actor.id)
     )));
-    assert!(artifact.content.contains(
-        "Assumed caller set; not effective runtime authorization or an identified user, role or principal."
-    ));
+    // The caller sets read as one table; each keeps its disclaimer (#1443).
+    assert!(artifact.content.contains("## Caller permission sets"));
+    assert!(artifact.content.contains("| UpdateOrder, Owner |"));
+    assert!(
+        artifact.content.contains(
+            "not effective runtime authorization or an identified user, role or principal."
+        )
+    );
     let kinds: Vec<_> = artifact
         .assertions
         .iter()

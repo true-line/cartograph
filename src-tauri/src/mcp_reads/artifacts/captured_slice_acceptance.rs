@@ -604,7 +604,7 @@ fn captured_seventeen_file_capability_stories_without_provider() {
                         .contains("## Actor caller set — Semantic / InferredWeak convention")
                 );
                 assert!(artifact.artifact.content.contains(
-                    "Assumed caller set; not effective runtime authorization or an identified user, role or principal."
+                    "not effective runtime authorization or an identified user, role or principal."
                 ));
             } else {
                 rendered += 1;
