@@ -99,7 +99,7 @@ fn fixture() -> (Vec<Node>, Vec<Edge>) {
     (nodes, edges)
 }
 
-fn render(cited_handles: bool) -> (String, usize, usize) {
+fn render(cited_handles: bool) -> (String, usize, usize, usize) {
     let (nodes, edges) = fixture();
     let nodes: Vec<&Node> = nodes.iter().collect();
     let edges: Vec<&Edge> = edges.iter().collect();
@@ -139,14 +139,14 @@ fn render(cited_handles: bool) -> (String, usize, usize) {
     let mut assertions = Assertions::new(&budget);
     let mut asserted = BTreeSet::new();
     let mut out = Text::new(&budget, "").unwrap();
-    let printed = acceptance_per_capability(
+    let (printed, cited) = acceptance_per_capability(
         (&nodes, &edges),
         &knowledge,
         (&mut assertions, &mut asserted),
         &mut out,
     )
     .unwrap();
-    (out.finish(), printed, assertions.values.len())
+    (out.finish(), printed, cited, assertions.values.len())
 }
 
 // AC-0850: each test that requests a capability's operation is listed once
@@ -154,8 +154,9 @@ fn render(cited_handles: bool) -> (String, usize, usize) {
 // citation of each REQUESTS edge; a test of another operation is not.
 #[test]
 fn tests_requesting_a_capability_operation_are_its_acceptance_scenarios() {
-    let (text, printed, cited) = render(true);
-    assert_eq!((printed, cited), (2, 3), "{text}");
+    // Two rows; the first cites both of its references.
+    let (text, printed, cited, asserted) = render(true);
+    assert_eq!((printed, cited, asserted), (2, 3, 3), "{text}");
     assert!(
         text.contains("Acceptance scenarios per capability: 2."),
         "{text}"
@@ -174,7 +175,7 @@ fn tests_requesting_a_capability_operation_are_its_acceptance_scenarios() {
     assert!(!text.contains("healthy"), "{text}");
     assert!(!text.contains("/health"), "{text}");
     // Without a cited HANDLES edge a capability has no operations.
-    let (text, printed, _) = render(false);
+    let (text, printed, _, _) = render(false);
     assert_eq!((printed, text.as_str()), (0, ""));
 }
 
@@ -197,6 +198,7 @@ fn acceptance_arrangement_workspace_is_checked() {
 // AC-0850: a snake_case test name is shown as words; a written name is kept.
 #[test]
 fn test_names_read_as_words() {
+    let readable = |name: &str| Readable(name).to_string();
     assert_eq!(
         readable("test_link_callback_does_not_grant_sudo"),
         "link callback does not grant sudo"

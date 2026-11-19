@@ -825,7 +825,7 @@ pub(super) fn d1(
                     .is_some_and(|k| k.included.iter().any(|s| s.node.label == "Capability"));
             // §1.4 arranged per capability (AC-0850); with no requested
             // operation it stays a pointer.
-            let scenarios = match knowledge {
+            let (scenarios, scenario_facts) = match knowledge {
                 Some(knowledge) if arranged && section.subject == Some("Capability") => {
                     acceptance::acceptance_per_capability(
                         (nodes, edges),
@@ -834,10 +834,10 @@ pub(super) fn d1(
                         &mut content,
                     )?
                 }
-                _ => 0,
+                _ => (0, 0),
             };
             if scenarios > 0 {
-                cited += scenarios;
+                cited += scenario_facts;
             } else if arranged
                 && section.subject == Some("BusinessRule")
                 && let Some(knowledge) = knowledge

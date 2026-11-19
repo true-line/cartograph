@@ -67,23 +67,35 @@ impl<'a> Index<'a> {
     }
 }
 
-/// A test name as words: each `test_snake_case` segment of the qualified
-/// name is shown as `snake case`; a segment that already has spaces is kept.
-fn readable(qualified: &str) -> String {
-    qualified
-        .split(" > ")
-        .map(|segment| {
-            if segment.contains(char::is_whitespace) || !segment.contains('_') {
-                return segment.to_owned();
+/// Writes a test name as words: each `test_snake_case` segment of the
+/// qualified name is shown as `snake case`; a segment that already has
+/// spaces is kept. Written piece by piece, nothing collected.
+fn write_readable(out: &mut impl std::fmt::Write, qualified: &str) -> std::fmt::Result {
+    for (i, segment) in qualified.split(" > ").enumerate() {
+        if i > 0 {
+            out.write_str(" > ")?;
+        }
+        if segment.contains(char::is_whitespace) || !segment.contains('_') {
+            out.write_str(segment)?;
+            continue;
+        }
+        let bare = segment.strip_prefix("test_").unwrap_or(segment);
+        for (j, word) in bare.split('_').filter(|w| !w.is_empty()).enumerate() {
+            if j > 0 {
+                out.write_str(" ")?;
             }
-            let bare = segment.strip_prefix("test_").unwrap_or(segment);
-            bare.split('_')
-                .filter(|w| !w.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join(" > ")
+            out.write_str(word)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`write_readable`] as Markdown table text.
+struct Readable<'a>(&'a str);
+impl std::fmt::Display for Readable<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_readable(f, self.0)
+    }
 }
 
 fn edge_citation(edge: &Edge) -> String {
@@ -99,12 +111,12 @@ fn write_row(
     (test, references): (&str, &[&Edge]),
     (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
     out: &mut Text,
-) -> Result<(), RenderLimit> {
+) -> Result<usize, RenderLimit> {
     let node = index.by_id.get(test).copied();
     let scenario = node.and_then(|n| n.props["qualified_name"].as_str());
     let file = node.and_then(|n| n.props["path"].as_str()).unwrap_or("—");
     match (scenario, node) {
-        (Some(scenario), _) => write!(out, "| {} ", Literal(&readable(scenario)))?,
+        (Some(scenario), _) => write!(out, "| {} ", Literal(Readable(scenario)))?,
         (None, Some(node)) => write!(out, "| {} ", Literal(NodeName(node)))?,
         (None, None) => write!(out, "| {} ", Literal(test))?,
     }
@@ -119,6 +131,7 @@ fn write_row(
         }
     }
     out.push_str(" | ")?;
+    let mut cited = 0;
     for (i, edge) in references.iter().enumerate() {
         if i > 0 {
             out.push_str(", ")?;
@@ -127,16 +140,18 @@ fn write_row(
         out.push_str(&id)?;
         if asserted.insert(id) {
             assertions.edge(edge)?;
+            cited += 1;
         }
     }
     out.push_str(" |\n")?;
-    Ok(())
+    Ok(cited)
 }
 
 const HEADER: &str = "| Scenario | Test file | Operations | Citation |\n|---|---|---|---|\n";
 
 /// The test scenarios each Capability's operations are requested by.
-/// Returns the number of rows printed; prints nothing when no capability's
+/// Returns the rows printed and the facts newly cited by them (a row cites
+/// each of its references); prints nothing when no capability's
 /// operation is requested by a recovered test. The retained workspace is
 /// [`acceptance_per_capability_workspace`].
 pub(super) fn acceptance_per_capability(
@@ -144,10 +159,10 @@ pub(super) fn acceptance_per_capability(
     knowledge: &Stories<'_>,
     (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
     out: &mut Text,
-) -> Result<usize, RenderLimit> {
+) -> Result<(usize, usize), RenderLimit> {
     let index = Index::new(nodes, edges);
     if index.requests.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let capabilities = || {
         knowledge
@@ -158,7 +173,7 @@ pub(super) fn acceptance_per_capability(
     // Counted first so the lead states the total before any row.
     let total: usize = capabilities().map(|s| index.scenarios(s).len()).sum();
     if total == 0 {
-        return Ok(0);
+        return Ok((0, 0));
     }
     writeln!(
         out,
@@ -169,7 +184,7 @@ pub(super) fn acceptance_per_capability(
          reference is static: it is not evidence that the test runs or passes, and the test's \
          assertions are not restated here.\n"
     )?;
-    let mut printed = 0;
+    let (mut printed, mut cited) = (0, 0);
     for story in capabilities() {
         let scenarios = index.scenarios(story);
         if scenarios.is_empty() {
@@ -178,7 +193,7 @@ pub(super) fn acceptance_per_capability(
         writeln!(out, "### {}\n", Literal(NodeName(story.node)))?;
         out.push_str(HEADER)?;
         for (test, references) in &scenarios {
-            write_row(
+            cited += write_row(
                 &index,
                 (test, references),
                 (&mut *assertions, &mut *asserted),
@@ -188,7 +203,7 @@ pub(super) fn acceptance_per_capability(
         }
         out.push_str("\n")?;
     }
-    Ok(printed)
+    Ok((printed, cited))
 }
 
 /// Logical workspace of [`acceptance_per_capability`] beyond the borrowed
@@ -211,7 +226,8 @@ pub(crate) fn acceptance_per_capability_workspace(
         map_slots::<&str, Vec<&Edge>>(rows)?,
         slots::<&Edge>(rows)?,
     ])?;
-    // One row: the citation id hashed from the cloned edge key.
+    // One row: the cloned edge key and its citation id. The scenario name is
+    // written piece by piece, never collected.
     let row = graph.bytes.checked_mul(2)?;
     sum(&[index, capability, row])
 }
