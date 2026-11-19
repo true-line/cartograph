@@ -8890,6 +8890,95 @@ resource "aws_sqs_queue" "orders" {
     }
 
     #[test]
+    fn documentation_that_contradicts_the_code_changes_no_other_fact() {
+        // AC-0680 (T-0680): documentation is stated intent. A README that
+        // restates and contradicts what was recovered adds documents,
+        // sections and drift, and every other fact and edge keeps its
+        // content, tier, confidence and content hash; no fact holds the
+        // text of a section.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("app.ts"), "export function handle() {}\n").unwrap();
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        let extraction = crate::extract_tree(
+            root,
+            "local/shop",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        crate::load_into_graph(&mut store, &extraction, "local/shop", root, "workdir").unwrap();
+        let before = store.read_snapshot().unwrap();
+        assert!(!before.0.is_empty());
+
+        std::fs::write(
+            root.join("README.md"),
+            "# Shop\n\nThe handler in `app.ts` is written in Python and was removed. \
+             See [the old one](legacy.py).\n",
+        )
+        .unwrap();
+        let updates = crate::collect_documents(&before.0, |_| Ok(root)).unwrap();
+        let mut patch = core_graph::GraphPatch::default();
+        crate::document_patch(&before.0, &before.1, updates, &mut patch);
+        assert!(
+            store
+                .apply_patch_if_snapshot_matches(&before, &patch)
+                .unwrap()
+        );
+        let (nodes, edges) = store.read_snapshot().unwrap();
+
+        let documentation = |label: &str| matches!(label, "Document" | "DocSection" | "Drift");
+        let added: Vec<&str> = nodes
+            .iter()
+            .filter(|node| documentation(&node.label))
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            added,
+            [
+                "doc:local/shop@README.md",
+                "docsec:local/shop@README.md#0",
+                "drift:documentation:local/shop@README.md:doc-file-missing:legacy.py",
+            ]
+        );
+        let kept: Vec<&core_graph::Node> = nodes
+            .iter()
+            .filter(|node| !documentation(&node.label))
+            .collect();
+        assert_eq!(kept, before.0.iter().collect::<Vec<_>>());
+        let added_edge = |label: &str| {
+            matches!(
+                label,
+                "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
+            )
+        };
+        let kept: Vec<&core_graph::Edge> = edges
+            .iter()
+            .filter(|edge| !added_edge(&edge.label))
+            .collect();
+        assert_eq!(kept, before.1.iter().collect::<Vec<_>>());
+        assert!(edges.iter().any(|edge| edge.label == "MENTIONS"));
+        for node in &nodes {
+            assert!(
+                !node.props.to_string().contains("written in Python"),
+                "{}",
+                node.id
+            );
+        }
+        for edge in &edges {
+            assert!(
+                !edge.props.to_string().contains("written in Python"),
+                "{}",
+                edge.label
+            );
+        }
+    }
+
+    #[test]
     fn the_coverage_inventory_counts_the_documentation_the_reader_stores() {
         // AC-0677 (T-0677): the counts recorded with a repository's
         // inventory are those of the read that stores its documents.

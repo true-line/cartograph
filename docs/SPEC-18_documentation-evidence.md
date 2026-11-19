@@ -1,6 +1,6 @@
 # SPEC-18 — Target documentation as evidence
 
-- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 to 4 are implemented; the rest is not.
+- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). Slices 1 to 5 are implemented; the rest is not.
 - **Date:** 2026-11-17
 - **Scope:** US-0049 / AC-0676..0681; ROADMAP W16; v1.0.0 criterion 8.
 - **Decision:** [ADR-0065](adr/ADR-0065-target-documentation-as-evidence.md).
@@ -96,6 +96,21 @@ directory is in the tree, read from the repository root or from the
 document's directory. The tree is asked whether a path exists and nothing
 else: no file is read for this, and a missing directory is no finding.
 A re-ingest removes the entry of a reference that matches again.
+
+## Stated intent
+
+Documentation is what the target says about itself, not what it does. The
+pass yields `Document`, `DocSection` and `Drift` facts and the four edge
+kinds above, each starting at one of them. It writes no other fact and
+changes none: a document that restates or contradicts recovered code
+leaves every other fact's tier, confidence, content and content hash as
+they were, and the contradiction is at most a drift entry, which is below
+Confirmed.
+
+Everything the pass stores from a document's own words passes
+`core_redact::redact_text` first: the title, a heading, a reference as
+written, and the route or path of a drift entry, which is also part of the
+entry's identity. The text of a section is in no fact and no export.
 
 ## Coverage
 

@@ -881,6 +881,8 @@ fn checked_code_paths(document: &str, text: &str, exists: &dyn Fn(&str) -> bool)
 
 struct Finding<'r> {
     reference: &'r DocumentReference,
+    /// The route or path as compared, before redaction.
+    compared: String,
     sections: BTreeSet<&'r str>,
     spans: BTreeSet<(usize, usize)>,
 }
@@ -933,9 +935,10 @@ pub fn documentation_drift(
             continue;
         };
         let finding = findings
-            .entry((reference.path.as_str(), kind, key))
+            .entry((reference.path.as_str(), kind, key.clone()))
             .or_insert_with(|| Finding {
                 reference,
+                compared: key,
                 sections: BTreeSet::new(),
                 spans: BTreeSet::new(),
             });
@@ -957,18 +960,35 @@ pub fn documentation_drift(
     };
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-    for ((document, kind, key), finding) in findings {
-        let id = format!(
-            "drift:documentation:{repo}@{document}:{}:{key}",
-            kind.code()
-        );
+    for ((document, kind, raw), finding) in findings {
+        // The route or path is stored and is part of the identity, so it is
+        // redacted like a heading (AC-0680). Two keys that differ only in
+        // secret text stay two entries: the id carries a digest of the key
+        // as compared, never the secret itself.
+        let key = core_redact::redact_text(&raw).0;
+        let id = if key == raw {
+            format!(
+                "drift:documentation:{repo}@{document}:{}:{key}",
+                kind.code()
+            )
+        } else {
+            let digest = blake3::hash(raw.as_bytes()).to_hex();
+            format!(
+                "drift:documentation:{repo}@{document}:{}:{}:{key}",
+                kind.code(),
+                &digest[..16]
+            )
+        };
         let cited: Vec<EvidenceRef> = finding
             .spans
             .iter()
             .take(MAX_MENTION_EVIDENCE)
             .map(|(start, end)| evidence(repo, document, commit, *start, *end))
             .collect();
-        let served = key.split_once(' ').map_or("", |(_, path)| path);
+        let served = finding
+            .compared
+            .split_once(' ')
+            .map_or("", |(_, path)| path);
         let others: &[(String, &Node)] = match kind {
             DocumentationDrift::RouteMethodDiffers => {
                 index.paths.get(served).map_or(&[], Vec::as_slice)
@@ -1002,9 +1022,9 @@ pub fn documentation_drift(
                 "title": format!("{}: {key}", kind.code()),
                 "document": document,
                 "reference": core_redact::redact_text(&finding.reference.text).0,
-                "compared": compared,
+                "compared": core_redact::redact_text(&compared).0,
                 "occurrences": finding.spans.len(),
-                "prov": inferred(cited.clone(), &hashed(&(kind.code(), repo, document, &key))),
+                "prov": inferred(cited.clone(), &hashed(&(kind.code(), repo, document, if key == raw { &key } else { &id }))),
             }),
         });
         for section in finding.sections.iter().take(MAX_DRIFT_LINKS) {
