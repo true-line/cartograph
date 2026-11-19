@@ -1723,3 +1723,62 @@ fn vendure_like_bundle_renders_readable_derived_user_stories() {
         strict.content
     );
 }
+
+// #1443: the product specification's Actors (1.2) and Capabilities (1.3)
+// frame the knowledge layer's derived facts, not "No `Capability` fact".
+#[test]
+fn product_specification_frames_derived_capabilities_and_caller_roles() {
+    use crate::ExportMode::{BestEffort, VerifiedOnly};
+    let base = fixture_source(ADMIN_SOURCE, ADMIN_PATH, REPO);
+    let capabilities = derive_graphql_resolver_capabilities(&base).facts;
+    let actors = derive_permission_actors(&base).facts;
+    let d1_of = |bundle: &crate::SpecBundle| {
+        bundle
+            .artifacts
+            .iter()
+            .find(|a| a.id == "d1-product-specification")
+            .unwrap()
+            .clone()
+    };
+    let section = |content: &str, heading: &str| {
+        let start = content.find(heading).unwrap();
+        let rest = &content[start + heading.len()..];
+        rest[..rest.find("\n## ").unwrap_or(rest.len())].to_owned()
+    };
+    let d1 = d1_of(&knowledge_bundle(&base, &capabilities, &actors, BestEffort));
+    assert!(d1.verify_identity());
+    let content = &d1.content;
+    let caps = section(content, "## 1.3 ");
+    assert!(!caps.contains("No `Capability` fact"), "{content}");
+    assert!(caps.contains("Derived Capabilities: 1."), "{caps}");
+    assert!(
+        caps.contains("| admin GraphQL operations in ProductResolver | 2 |"),
+        "{caps}"
+    );
+    let roles = section(content, "## 1.2 ");
+    assert!(!roles.contains("No `Actor` fact"), "{content}");
+    assert!(
+        roles.contains("2 permission sets over 2 guarded operations"),
+        "{roles}"
+    );
+    assert!(
+        roles.contains("| CreateCatalog, CreateProduct | 1 | MUTATION admin.createProduct |"),
+        "{roles}"
+    );
+    // Every derived fact printed is cited, so the fact index resolves it.
+    for fact in capabilities.iter().chain(&actors) {
+        let OverlayItem::Node(node) = &fact.item else {
+            unreachable!()
+        };
+        let id = format!("node:{}", node.id);
+        assert!(d1.assertions.iter().any(|a| a.id == id), "{id}");
+    }
+    // Verified-only withholds the weak derived facts: the frame is the base one.
+    let strict = d1_of(&knowledge_bundle(
+        &base,
+        &capabilities,
+        &actors,
+        VerifiedOnly,
+    ));
+    assert!(section(&strict.content, "## 1.3 ").contains("No `Capability` fact"));
+}
