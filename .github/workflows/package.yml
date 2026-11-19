@@ -390,7 +390,7 @@ jobs:
           name: ${{ steps.metadata.outputs.artifact_name }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
 
       # Short-lived raw symbols for build diagnostics. The versioned ZIP in
       # dist/ is also published with the release for durable symbolication.
@@ -400,4 +400,4 @@ jobs:
           name: ${{ steps.metadata.outputs.artifact_name }}-dSYM
           path: ${{ steps.dsym.outputs.path }}
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1

@@ -597,6 +597,14 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
   assert.match(image, /if docker manifest inspect "\$IMAGE" > \/dev\/null 2>&1; then/u);
   assert.match(image, /tar -c ci\/linux\.Dockerfile rust-toolchain\.toml \|/u);
   assert.match(image, /^ {6}packages: write$/mu);
+  // Old images are pruned on main only, keeping the newest few and never
+  // the tag the run is using.
+  assert.match(image, /- name: Prune old CI images\n +if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'\n/u);
+  assert.match(image, /select\(\.metadata\.container\.tags \| any\(\.\[\]; \. == env\.TAG\) \| not\)/u);
+  assert.match(image, /KEEP: '3'/u);
+  // A concurrent main run may already have removed a listed version.
+  assert.match(image, /- name: Prune old CI images\n +if: [^\n]+\n +continue-on-error: true\n/u);
+  assert.match(image, /gh api -X DELETE "\$PACKAGE\/versions\/\$id" \|\| echo/u);
   for (const name of ['rust', 'rust-app-tests', 'compliance']) {
     const lane = job(name);
     assert.match(lane, /needs: \[[^\]]*\bci-image\b[^\]]*\]/u, name);
@@ -664,7 +672,7 @@ test('release symbols persist with versioned assets and short-lived Actions copi
   assert.ok(packaging.includes('"dist/Cartograph_${version}_universal_${SIGNING_MODE}.dSYM.zip"'));
   for (const name of ['Upload versioned artifacts', 'Upload dSYM']) {
     const block = packaging.split(`      - name: ${name}\n`)[1]?.split(/\n      - name:/u)[0] ?? '';
-    assert.match(block, /retention-days: 3(?:\n|$)/u);
+    assert.match(block, /retention-days: 1(?:\n|$)/u);
     assert.match(block, /if-no-files-found: error/u);
   }
   assert.match(release, /for extension in app\.zip dmg dSYM\.zip; do/u);
