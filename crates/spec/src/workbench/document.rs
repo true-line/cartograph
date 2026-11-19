@@ -854,6 +854,17 @@ pub(super) fn d1(
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;
+            } else if let (SectionFrame::Flows, Some(knowledge)) = (source, knowledge)
+                && let Some(flow_facts) = flows::flows_per_capability(
+                    (nodes, edges),
+                    flows,
+                    knowledge,
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?
+            {
+                // What each operation's flow does, per capability (#1985).
+                cited += flow_facts;
             } else if derived == 0 || base > 0 {
                 cited += frame(
                     section,
@@ -929,6 +940,9 @@ pub(super) mod rules;
 
 #[path = "document_acceptance.rs"]
 pub(super) mod acceptance;
+
+#[path = "document_flows.rs"]
+pub(super) mod flows;
 
 #[cfg(test)]
 #[path = "document_tests.rs"]
