@@ -818,6 +818,58 @@ def health():
     (out.nodes, out.edges)
 }
 
+/// The guarded Flask-Admin view endpoint from real Python adapter output: a
+/// `BaseView` whose `is_accessible` requires a signed-in user, on checked
+/// Flask-Admin and flask-login releases.
+fn flask_admin_view() -> Node {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, source) in [
+        (
+            "app.py",
+            r#"
+from flask import Flask
+from flask_admin import Admin, BaseView, expose
+from flask_login import current_user
+
+class Guarded(BaseView):
+    def is_accessible(self):
+        return current_user.is_authenticated
+
+class Reports(Guarded):
+    @expose("/")
+    def index(self):
+        return "ok"
+
+app = Flask(__name__)
+admin = Admin(app, url="/back")
+admin.add_view(Reports(endpoint="reports"))
+"#,
+        ),
+        (
+            "auth.py",
+            "from flask_login import LoginManager\n\nlogin_manager = LoginManager()\n",
+        ),
+        (
+            "uv.lock",
+            "[[package]]\nname = \"flask-admin\"\nversion = \"1.5.7\"\n\n[[package]]\nname = \"flask-login\"\nversion = \"0.5.0\"\n",
+        ),
+    ] {
+        std::fs::write(dir.path().join(path), source).unwrap();
+    }
+    let out = adapters_lang_python::extract_dir(
+        dir.path(),
+        &adapters_lang_python::SourceId {
+            repo: "acme/shop",
+            commit: "0123abc",
+        },
+    )
+    .unwrap();
+    out.nodes
+        .into_iter()
+        .find(|n| n.label == "Endpoint" && n.props["path"] == "/back/reports/")
+        .unwrap()
+}
+
 // AC-0856: a Python endpoint's guard reading names its caller in D1 §1.2,
 // in its user story and, by the guard's own name, in `security.md` and
 // `endpoint-permissions.md`.
@@ -953,6 +1005,17 @@ fn python_callers_are_named_by_their_recovered_guards() {
             "{statements}"
         );
     }
+
+    // A Flask-Admin view, recorded as a `flask` endpoint under the
+    // `flask_admin` mount, is admitted by its view's `is_accessible`.
+    let admin = flask_admin_view();
+    assert_eq!(
+        super::caller(&admin, ExportMode::BestEffort, &BTreeSet::new()),
+        Some(super::Caller::Guarded {
+            role: "signed-in user admitted by Guarded.is_accessible".into(),
+            guards: vec!["Guarded.is_accessible".into()],
+        })
+    );
 
     // Guards by their own names, never graph ids.
     let permissions = &bundle

@@ -490,8 +490,9 @@ impl Caller {
 /// The caller a guard admits, read from what the adapter recognized: a
 /// Flask-Login or Flask-JWT-Extended decorator by its library name, a
 /// Flask-Admin view by its `is_accessible`, and any other repository guard
-/// as the guard itself.
-fn role(framework: &str, guards: &[&str]) -> String {
+/// as the guard itself. The Python adapter records a Flask-Admin view as a
+/// `flask` endpoint with the `flask_admin` mount.
+fn role(endpoint: &Node, guards: &[&str]) -> String {
     let named = |guard: &str| match guard {
         "flask_login.login_required" => Some("signed-in user"),
         "flask_login.fresh_login_required" => Some("freshly signed-in user"),
@@ -499,7 +500,7 @@ fn role(framework: &str, guards: &[&str]) -> String {
         _ => None,
     };
     let names: Vec<&str> = guards.iter().map(|g| guard_name(g)).collect();
-    if framework == "flask_admin" {
+    if endpoint.props["framework"] == "flask_admin" || endpoint.props["mount"] == "flask_admin" {
         return format!("signed-in user admitted by {}", names.join(" and "));
     }
     match guards.iter().map(|g| named(g)).collect::<Option<Vec<_>>>() {
@@ -535,7 +536,7 @@ fn caller_reading(
             let guards = strings(&endpoint.props["auth"]["guards"]);
             Some((
                 Caller::Guarded {
-                    role: role(recovery.framework, &guards),
+                    role: role(endpoint, &guards),
                     guards: guards
                         .into_iter()
                         .map(|g| guard_name(g).to_owned())
