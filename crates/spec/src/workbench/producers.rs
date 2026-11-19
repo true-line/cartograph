@@ -1607,6 +1607,9 @@ pub(super) fn journeys(
         assertions.journey(candidate)?;
     }
     let mut content = Text::new(&budget, "# Journey candidates\n\n")?;
+    // Pages, handlers, operations and tables by name (#1981); the ids stay
+    // on each journey's `Id` line, in the fact index and in `bundle.json`.
+    let names = JourneyNames(nodes.iter().map(|n| (n.id.as_str(), *n)).collect());
     if mode == ExportMode::BestEffort && !search.entries.is_empty() {
         content.push_str(
             "## Search\n\n| Entry | Expanded | Candidates | Truncated | Assumed navigations | Unread callbacks |\n|---|---|---|---|---|---|\n",
@@ -1615,8 +1618,8 @@ pub(super) fn journeys(
             let trunc_str = entry.truncated.map_or("none", |t| t.as_str());
             writeln!(
                 content,
-                "| `{}` | {} | {} | `{}` | {} | {} |",
-                Safe(&entry.entry),
+                "| {} | {} | {} | `{}` | {} | {} |",
+                Safe(names.screen(&entry.entry)),
                 Safe(entry.expanded_states),
                 Safe(entry.candidates),
                 Safe(trunc_str),
@@ -1642,44 +1645,49 @@ pub(super) fn journeys(
             content.push_str("\n")?;
         }
         writeln!(content, "## {}\n", Safe(&candidate.label))?;
+        writeln!(content, "{}\n", Safe(names.path(candidate)))?;
         writeln!(
             content,
-            "- Id: `{}`\n- Support fingerprint: `{}`\n- Entry: `{}`\n\
+            "- Id: `{}`\n- Support fingerprint: `{}`\n- Entry: {}\n\
              - Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n",
             Safe(&candidate.id),
             Safe(&candidate.support_fingerprint),
-            Safe(&candidate.entry)
+            Safe(names.screen(&candidate.entry))
         )?;
         content.push_str("### Steps\n\n| # | Screen | Navigation | Client calls | Unresolved |\n|---|---|---|---|---|\n")?;
         for (idx, step) in candidate.steps.iter().enumerate() {
             let nav_str = match &step.navigation {
                 None => "—".to_owned(),
-                Some(nav) => format!(
-                    "{} → {} ({} site(s))",
-                    nav.source,
-                    nav.target,
-                    nav.sites_taken.len()
-                ),
+                Some(nav) => names.navigation(nav),
             };
             let calls_str = if step.calls.is_empty() {
                 "—".to_owned()
             } else {
                 step.calls
                     .iter()
-                    .map(|c| format!("{} {}", c.method, c.endpoint))
+                    .map(|c| names.operation(&c.endpoint))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
             let mut unresolved_items: Vec<String> = step
                 .unresolved
                 .iter()
-                .map(|u| format!("{}: {} → {}", u.kind.as_str(), u.source, u.gap_id))
+                .map(|u| {
+                    format!(
+                        "{}: `{}` → {}",
+                        u.kind.as_str(),
+                        names.symbol(&u.source),
+                        names.name(&u.gap_id)
+                    )
+                })
                 .collect();
-            unresolved_items.extend(
-                step.unread_callbacks
-                    .iter()
-                    .map(|u| format!("unread callback: {} ({})", u.param, u.composable)),
-            );
+            unresolved_items.extend(step.unread_callbacks.iter().map(|u| {
+                format!(
+                    "unread callback: {} (`{}`)",
+                    u.param,
+                    names.symbol(&u.composable)
+                )
+            }));
             let unresolved_str = if unresolved_items.is_empty() {
                 "—".to_owned()
             } else {
@@ -1687,8 +1695,8 @@ pub(super) fn journeys(
             };
             writeln!(
                 content,
-                "| {idx} | `{}` | {} | {} | {} |",
-                Safe(&step.screen),
+                "| {idx} | {} | {} | {} | {} |",
+                Safe(names.screen(&step.screen)),
                 Safe(&nav_str),
                 Safe(&calls_str),
                 Safe(&unresolved_str)
@@ -1701,11 +1709,18 @@ pub(super) fn journeys(
             for assumption in &candidate.assumptions {
                 // A Hilt dispatch names the interface member it crossed from.
                 let symbol_str = match &assumption.interface {
-                    Some(interface) => format!("{interface} → {}", assumption.symbol),
-                    None => assumption.symbol.clone(),
+                    Some(interface) => format!(
+                        "{} → {}",
+                        names.symbol(interface),
+                        names.symbol(&assumption.symbol)
+                    ),
+                    None => names.symbol(&assumption.symbol),
                 };
                 let param_str = assumption.param.as_deref().unwrap_or("—");
-                let composable_str = assumption.composable.as_deref().unwrap_or("—");
+                let composable_str = assumption
+                    .composable
+                    .as_deref()
+                    .map_or_else(|| "—".to_owned(), |c| names.symbol(c));
                 let registration_str = assumption.registration.as_ref().map_or_else(
                     || "—".to_owned(),
                     |r| format!("{}:{}-{}", r.path, r.byte_start, r.byte_end),
@@ -1716,19 +1731,19 @@ pub(super) fn journeys(
                     assumption
                         .forwarded
                         .iter()
-                        .map(|h| format!("{}.{}", h.composable, h.param))
+                        .map(|h| format!("{}.{}", names.symbol(&h.composable), h.param))
                         .collect::<Vec<_>>()
                         .join(" → ")
                 };
                 writeln!(
                     content,
-                    "| {} | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |",
+                    "| {} | `{}` | {} | `{}` | {} | {} | {} | {} | {} |",
                     Safe(assumption.step),
                     Safe(assumption.kind.as_str()),
-                    Safe(&assumption.screen),
+                    Safe(names.screen(&assumption.screen)),
                     Safe(&symbol_str),
                     Safe(param_str),
-                    Safe(composable_str),
+                    Safe(&composable_str),
                     Safe(&registration_str),
                     Safe(&forwarded_str),
                     Safe(&assumption.limitation)
@@ -1742,23 +1757,33 @@ pub(super) fn journeys(
                 .goal
                 .writes
                 .iter()
-                .map(|w| format!("{} → {}", w.symbol, w.data_entity))
+                .map(|w| {
+                    format!(
+                        "`{}` → {}",
+                        names.symbol(&w.symbol),
+                        names.table(&w.data_entity)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         };
         let result_str = match &candidate.result_step {
-            Some(res) => format!("{} (`{}`)", candidate.result.as_str(), res.screen),
+            Some(res) => format!(
+                "{} ({})",
+                candidate.result.as_str(),
+                names.screen(&res.screen)
+            ),
             None => candidate.result.as_str().to_owned(),
         };
         writeln!(
             content,
             "\n### Goal and result\n\n\
-             - Endpoint: `{}` ({})\n\
+             - Endpoint: {} ({})\n\
              - Goal basis: `{}`\n\
              - Write coverage: `{}`\n\
              - Writes: {}\n\
              - Result: {}\n",
-            Safe(&candidate.goal.endpoint),
+            Safe(names.operation(&candidate.goal.endpoint)),
             Safe(&candidate.goal.method),
             candidate.goal.goal_basis.as_str(),
             candidate
@@ -1772,12 +1797,12 @@ pub(super) fn journeys(
         let flows_str = if candidate.flows.is_empty() {
             "—".to_owned()
         } else {
-            candidate.flows.join(", ")
+            names.list(&candidate.flows, |id| names.operation(id))
         };
         let tests_str = if candidate.tests.is_empty() {
             "—".to_owned()
         } else {
-            candidate.tests.join(", ")
+            names.list(&candidate.tests, |id| format!("`{}`", names.symbol(id)))
         };
         writeln!(
             content,
@@ -1791,7 +1816,7 @@ pub(super) fn journeys(
             candidate
                 .earlier_assumed_goals
                 .iter()
-                .map(|g| format!("{} {} ({})", g.method, g.endpoint, g.write_coverage))
+                .map(|g| format!("{} ({})", names.operation(&g.endpoint), g.write_coverage))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1820,6 +1845,123 @@ pub(super) fn journeys(
         )?;
     }
     finish(content, assertions)
+}
+
+/// The names a journey prints for the facts it walks (#1981): a page by its
+/// route and view name, a handler by its name, an operation as `METHOD
+/// path`, a table by its name, and an id that resolves to no node as itself.
+struct JourneyNames<'a>(BTreeMap<&'a str, &'a Node>);
+
+impl JourneyNames<'_> {
+    /// Most tests or flows a journey lists before "and N more".
+    const LISTED: usize = 5;
+
+    fn name(&self, id: &str) -> String {
+        self.0
+            .get(id)
+            .map_or_else(|| id.to_owned(), |n| NodeName(n).to_string())
+    }
+    /// "`/auth/login` (auth.login)": the route a reader opens, then the
+    /// view's name when it says something the route does not.
+    fn screen(&self, id: &str) -> String {
+        let Some(node) = self.0.get(id) else {
+            return format!("`{id}`");
+        };
+        let route = node.props["route"].as_str();
+        let name = node.props["name"].as_str();
+        match (route, name) {
+            (Some(route), Some(name)) if name != route => format!("`{route}` ({name})"),
+            (Some(route), _) => format!("`{route}`"),
+            _ => format!("`{}`", NodeName(node)),
+        }
+    }
+    fn operation(&self, id: &str) -> String {
+        self.name(id)
+    }
+    fn table(&self, id: &str) -> String {
+        format!("`{}`", self.name(id))
+    }
+    fn navigation(&self, nav: &crate::rules::journey::StepNavigation) -> String {
+        let conditional = nav.sites_taken.iter().any(|s| s.conditional);
+        let sites = nav
+            .sites_taken
+            .iter()
+            .map(|s| format!("{} (byte {})", s.path, s.byte_start))
+            .collect::<Vec<_>>();
+        format!(
+            "from {}{} at {}",
+            self.via(&nav.source),
+            if conditional { ", conditionally," } else { "" },
+            if sites.is_empty() {
+                "no recorded site".to_owned()
+            } else {
+                sites.join(", ")
+            }
+        )
+    }
+    /// Where a navigation starts: a link in a template or file, or a handler.
+    fn via(&self, id: &str) -> String {
+        match self.0.get(id) {
+            Some(node) if matches!(node.label.as_str(), "File" | "Template") => {
+                format!("a link in `{}`", NodeName(node))
+            }
+            _ => format!("`{}`", self.symbol(id)),
+        }
+    }
+    /// A callable or test by its qualified name (`CreationRemoteDatasource.create`),
+    /// which its id carries after `#`; another fact by its name.
+    fn symbol(&self, id: &str) -> String {
+        match id.rsplit_once('#') {
+            Some((_, qualified)) if id.starts_with("sym:") || id.starts_with("test:") => {
+                qualified.to_owned()
+            }
+            _ => self.name(id),
+        }
+    }
+    fn list(&self, ids: &[String], show: impl Fn(&str) -> String) -> String {
+        let mut shown: Vec<String> = ids.iter().take(Self::LISTED).map(|id| show(id)).collect();
+        if ids.len() > Self::LISTED {
+            shown.push(format!("and {} more", ids.len() - Self::LISTED));
+        }
+        shown.join(", ")
+    }
+    /// One sentence a reader follows: each page in order, how it was
+    /// reached, then the goal call and what it writes.
+    fn path(&self, candidate: &crate::rules::journey::JourneyCandidate) -> String {
+        let mut text = String::from("**Path:** ");
+        for (i, step) in candidate.steps.iter().enumerate() {
+            if i > 0 {
+                text.push_str(" → ");
+            }
+            text.push_str(&self.screen(&step.screen));
+            if let Some(nav) = &step.navigation {
+                let conditional = nav.sites_taken.iter().any(|s| s.conditional);
+                let _ = write!(
+                    text,
+                    " (via {}{})",
+                    self.via(&nav.source),
+                    if conditional { ", conditional" } else { "" }
+                );
+            }
+        }
+        let _ = write!(text, ", then {}", self.operation(&candidate.goal.endpoint));
+        let tables: BTreeSet<String> = candidate
+            .goal
+            .writes
+            .iter()
+            .map(|w| self.table(&w.data_entity))
+            .collect();
+        if tables.is_empty() {
+            text.push('.');
+        } else {
+            let _ = write!(
+                text,
+                ", which writes {}.",
+                tables.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+        text
+    }
 }
 
 /// Base Capability references retained by stories_with_support. Appended

@@ -558,6 +558,31 @@ fn journey_candidates_recover_simplelogin_path_and_render_journeys_artifact() {
     ));
     assert!(artifact.content.contains(&candidate.id));
     assert!(artifact.content.contains(&candidate.support_fingerprint));
+
+    // AC-0857: a reader follows the journey by page, handler, operation and
+    // table names; graph ids stay on the `Id` line and in the fact index.
+    let content = &artifact.content;
+    for line in [
+        "**Path:** `/` → `/main` (via `SplashScreen`) → `/new-alias-result/` (via `Main`), then \
+         POST /api/v2/alias/custom/new, which writes `Alias`.",
+        "| 1 | `/main` | from `SplashScreen` at src/popup/components/SplashScreen.vue (byte 80) | \
+         POST /api/v2/aliases, POST /api/v2/alias/custom/new | — |",
+        "| 2 | `/new-alias-result/` | from `Main` at src/popup/components/Main.vue (byte 340) | — | — |",
+        "- Entry: `/`",
+        "- Writes: `new_custom_alias` → `Alias`",
+        "- Result: ordered (`/new-alias-result/`)",
+        "- Flows: POST /api/v2/alias/custom/new",
+        "- Tests: `test_create_custom_alias`",
+        "- Earlier assumed goals: POST /api/v2/aliases (unknown)",
+    ] {
+        assert!(content.contains(line), "{line}\n{content}");
+    }
+    let readable = &content[..content.find("## Assertions").unwrap()];
+    for line in readable.lines().filter(|l| !l.starts_with("- Id: ")) {
+        for id in ["screen:", "ep:", "sym:", "data:", "test:", "file:"] {
+            assert!(!line.contains(id), "{line}");
+        }
+    }
 }
 
 // AC-0352 (T-0352): ordering, cycle avoidance, budget truncation, identity, and support fingerprint.
@@ -1417,8 +1442,16 @@ fn journey_candidates_cross_navigation3_startup_and_entry_callbacks_as_assumptio
     assert!(
         best_effort
             .content
-            .contains(&format!("unread callback: onUnread ({home_comp_sym})"))
+            .contains("unread callback: onUnread (`HomeScreen`)")
     );
+    // AC-0857: assumptions, unresolved items and unread callbacks read by
+    // name too; ids stay on the `Id` line.
+    let readable = &best_effort.content[..best_effort.content.find("## Assertions").unwrap()];
+    for line in readable.lines().filter(|l| !l.starts_with("- Id: ")) {
+        for id in ["screen:", "ep:", "sym:", "data:", "test:", "file:", "gap:"] {
+            assert!(!line.contains(id), "{line}\n{readable}");
+        }
+    }
 
     let verified_only = compile_spec(
         &nodes,
@@ -1580,7 +1613,7 @@ fn journey_candidates_cross_hilt_dispatch_as_an_assumption() {
     assert!(
         artifact
             .content
-            .contains(&format!("`{iface_sym} → {impl_sym}`"))
+            .contains("`CreationRemoteDatasource.create → CreationRemoteDatasourceImpl.create`")
     );
     assert!(artifact.content.contains("`hilt_dispatch`"));
 
