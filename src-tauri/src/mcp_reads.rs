@@ -242,6 +242,9 @@ pub(crate) struct ReadSession {
     curated: CuratedRead,
     /// `spec::graph_content_hash` of `base`, as the D1 header states it.
     graph_content_hash: String,
+    /// The source revisions of `base`, as the bundle manifest states them
+    /// (AC-0682).
+    source_revisions: Vec<spec::SourceRevision>,
     #[cfg(test)]
     snapshot: Arc<ContextSnapshot>,
     qualified: CoverageContext,
@@ -375,6 +378,7 @@ impl ReadSession {
         // the snapshot this session keeps; an assessment that observed
         // another graph revision counts as failed (`curated::project`).
         let graph_content_hash = spec::graph_content_hash(&base.graph.0, &base.graph.1);
+        let source_revisions = crate::source_revisions_of(&base.graph.0);
         let curated = {
             let content_hash = &graph_content_hash;
             CuratedRead::of(curated::project(
@@ -445,6 +449,7 @@ impl ReadSession {
             rejected_hashes,
             curated,
             graph_content_hash,
+            source_revisions,
             #[cfg(test)]
             snapshot,
             qualified,

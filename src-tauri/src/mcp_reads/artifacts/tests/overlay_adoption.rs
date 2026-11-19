@@ -93,13 +93,14 @@ fn official_stories_preserve_producer_support_provenance_and_old_pages() {
     for descriptor in current
         .artifact_catalog()
         .into_iter()
-        // The curated artifacts and the D1 document read the session's
-        // projection, which this bare compile is not supplied with
-        // (AC-0654, AC-0667).
+        // The curated artifacts, the D1 document and the bundle manifest
+        // read the session's projection and basis, which this bare compile
+        // is not supplied with (AC-0654, AC-0667, AC-0682).
         .filter(|a| {
             a.id != "user-stories"
                 && !a.id.starts_with("curated")
                 && a.id != "d1-product-specification"
+                && a.id != "bundle-manifest"
         })
     {
         let ArtifactCompilation::Produced(actual) = current

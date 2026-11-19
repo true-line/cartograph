@@ -101,12 +101,14 @@ fn real_selected_compilation_and_catalog_match_official_compiler() {
             .iter()
             .any(|metadata| metadata.id == official.id && metadata.schema == official.schema)
     );
-    // The curated artifacts and the D1 document read the session's
-    // projection, which a bare compile is not supplied with;
-    // `curated_read::tests` and `curated::drafts_tests` compare them with
-    // the host export (AC-0654, AC-0667).
+    // The curated artifacts, the D1 document and the bundle manifest read
+    // the session's projection and basis, which a bare compile is not
+    // supplied with; `curated_read::tests` and `curated::drafts_tests`
+    // compare them with the host export (AC-0654, AC-0667, AC-0682).
     for descriptor in catalog.into_iter().filter(|descriptor| {
-        !descriptor.id.starts_with("curated") && descriptor.id != "d1-product-specification"
+        !descriptor.id.starts_with("curated")
+            && descriptor.id != "d1-product-specification"
+            && descriptor.id != "bundle-manifest"
     }) {
         let ArtifactCompilation::Produced(actual) = session
             .compile_artifact(descriptor.id, trace_limits(), compile_limits())

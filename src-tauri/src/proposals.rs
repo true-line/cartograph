@@ -339,7 +339,12 @@ mod tests {
             for (bare, failed) in bare.artifacts.iter().zip(&bundle.artifacts) {
                 assert_eq!(
                     bare == failed,
-                    !matches!(bare.id.as_str(), "curated" | "d1-product-specification"),
+                    // The bundle manifest states the graph basis the host
+                    // holds, which a bare compile is not given (AC-0682).
+                    !matches!(
+                        bare.id.as_str(),
+                        "curated" | "d1-product-specification" | "bundle-manifest"
+                    ),
                     "{}",
                     bare.id
                 );
@@ -710,8 +715,12 @@ mod tests {
             for (before, after) in before.artifacts.iter().zip(&after.artifacts) {
                 assert_eq!(
                     before == after,
-                    // The D1 header carries the curated revision (AC-0663).
-                    !matches!(before.id.as_str(), "curated" | "d1-product-specification"),
+                    // The D1 header carries the curated revision (AC-0663),
+                    // and the bundle manifest states it (AC-0682).
+                    !matches!(
+                        before.id.as_str(),
+                        "curated" | "d1-product-specification" | "bundle-manifest"
+                    ),
                     "{} in {mode:?}",
                     before.id
                 );

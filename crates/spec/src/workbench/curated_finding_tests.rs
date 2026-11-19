@@ -141,6 +141,7 @@ fn compile(
             stale_coverage: &[],
             curated: Curated::Computed(projection),
             graph_content_hash: None,
+            source_revisions: None,
         },
     )
     .unwrap()

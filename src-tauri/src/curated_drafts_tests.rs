@@ -147,6 +147,10 @@ fn artifact<'a>(bundle: &'a spec::SpecBundle, id: &str) -> &'a spec::SpecArtifac
 }
 
 fn read(session: &ReadSession) -> spec::SpecArtifact {
+    read_id(session, D1)
+}
+
+fn read_id(session: &ReadSession, id: &str) -> spec::SpecArtifact {
     let trace = flowtracer::TraceLimits {
         max_flows: 64,
         max_hops: 512,
@@ -159,7 +163,7 @@ fn read(session: &ReadSession) -> spec::SpecArtifact {
             max_output_bytes: 1024 * 1024,
         },
     };
-    match session.compile_artifact(D1, trace, compile).unwrap() {
+    match session.compile_artifact(id, trace, compile).unwrap() {
         ArtifactCompilation::Produced(artifact) => artifact.artifact().clone(),
         limited => panic!("{limited:?}"),
     }
@@ -221,6 +225,38 @@ fn export_prints_an_accepted_draft_and_the_mcp_read_returns_the_same_bytes() {
         // The MCP read is the export's artifact for the same inputs and mode.
         let session = fixture.acquire(mode).unwrap();
         assert_eq!(&read(&session), document, "{mode:?}");
+    }
+}
+
+#[test]
+fn the_mcp_read_of_the_bundle_manifest_is_the_exports_manifest() {
+    let fixture = fixture();
+    let draft = fixture.draft(
+        "1.1",
+        "The shop takes a cart to an order.",
+        &["cap:checkout"],
+    );
+    fixture.review(&draft, DraftDecision::Accepted);
+    for mode in MODES {
+        let bundle = fixture.export(mode);
+        let manifest = artifact(&bundle, "bundle-manifest");
+        assert!(manifest.content.contains(&format!(
+            "- Graph content hash: {}\n",
+            bundle.graph_basis.as_ref().unwrap().content_hash
+        )));
+        assert!(manifest.content.contains(&format!(
+            "- Curated revision: {}",
+            bundle.curated_basis.as_ref().unwrap().revision
+        )));
+        assert!(
+            !manifest
+                .content
+                .contains("not supplied to this compilation"),
+            "{}",
+            manifest.content
+        );
+        let session = fixture.acquire(mode).unwrap();
+        assert_eq!(&read_id(&session, "bundle-manifest"), manifest, "{mode:?}");
     }
 }
 
