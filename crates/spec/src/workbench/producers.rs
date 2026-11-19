@@ -488,7 +488,7 @@ pub(super) fn drift(
         .filter(|n| {
             !matches!(
                 n.props["kind"].as_str(),
-                Some("contract-drift" | "schema-drift" | "test-drift")
+                Some("contract-drift" | "schema-drift" | "test-drift" | "documentation-drift")
             )
         })
         .collect();
@@ -591,7 +591,48 @@ pub(super) fn drift(
     }
     schema_drift(nodes, &findings, &mut content, &mut assertions)?;
     test_drift(nodes, &findings, &mut content)?;
+    documentation_drift(&findings, &mut content)?;
     finish(content, assertions)
+}
+
+/// `## Documentation drift` (ADR-0065, AC-0679): route and file references
+/// in the target's own documentation that no longer match, each with what
+/// it was compared with. Written only when there is such a finding, so a
+/// register without one keeps its bytes.
+fn documentation_drift(findings: &[&Node], content: &mut Text) -> fmt::Result {
+    let mut drift: Vec<&Node> = findings
+        .iter()
+        .copied()
+        .filter(|n| n.props["kind"].as_str() == Some("documentation-drift"))
+        .collect();
+    if drift.is_empty() {
+        return Ok(());
+    }
+    let text = |n: &Node, key: &str| n.props[key].as_str().unwrap_or("—").to_string();
+    drift.sort_by_key(|n| {
+        (
+            text(n, "document"),
+            text(n, "drift_kind"),
+            text(n, "key"),
+            n.id.clone(),
+        )
+    });
+    content.push_str(
+        "\n## Documentation drift\n\nExact route and file references in the target's own documentation that no longer match what was recovered. A reference is stated intent: it changes no recovered fact.\n\n| Finding | Document | Reference | Compared with | Confidence |\n|---|---|---|---|---|\n",
+    )?;
+    for n in &drift {
+        let p = provenance(&n.props, &n.id);
+        writeln!(
+            content,
+            "| {} | `{}` | `{}` | {} | {:?} |",
+            Safe(text(n, "drift_kind")),
+            Safe(text(n, "document")),
+            Safe(text(n, "key")),
+            Safe(text(n, "compared")),
+            p.confidence_tier,
+        )?;
+    }
+    Ok(())
 }
 
 /// `## Test and contract drift` (#953): what target tests expect of an

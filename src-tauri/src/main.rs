@@ -3289,19 +3289,48 @@ fn collect_documents<'a>(
                 .strip_prefix("repo:")
                 .ok_or("invalid repository fact identity")?;
             let commit = node.props["commit"].as_str().unwrap_or("workdir");
-            let mut facts = spec::extract_documents(root_for(repo)?, repo, commit)
-                .map_err(|e| e.to_string())?;
+            let root = root_for(repo)?;
+            let mut facts =
+                spec::extract_documents(root, repo, commit).map_err(|e| e.to_string())?;
             let mentions = spec::link_references(repo, commit, &facts.references, &index);
             facts.edges.extend(mentions);
+            // Whether a repo-relative path is in the tree: an existence
+            // check only, and a link is never followed out of it.
+            let exists = |path: &str| tree_has_path(root, path);
+            let (drift, compared) =
+                spec::documentation_drift(repo, commit, &facts.references, &index, &exists);
+            facts.nodes.extend(drift);
+            facts.edges.extend(compared);
             Ok((repo.to_owned(), facts))
         })
         .collect()
 }
 
+/// Whether `path` names an entry of the tree under `root`, read component
+/// by component without following a symbolic link. A link on the way is
+/// itself the entry the tree holds: what it points at, possibly outside the
+/// repository, never decides the answer.
+fn tree_has_path(root: &std::path::Path, path: &str) -> bool {
+    let mut at = root.to_path_buf();
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        if part == ".." {
+            return false;
+        }
+        at.push(part);
+        match at.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// Add each repository's documentation facts to `patch`, and remove the
-/// documents, sections and `HAS_SECTION` and `MENTIONS` edges of that
-/// repository that the read no longer yields, so a re-ingest keeps no fact
-/// of a deleted file, section or reference.
+/// documents, sections, documentation drift entries and their edges of
+/// that repository that the read no longer yields, so a re-ingest keeps no
+/// fact of a deleted file, section or reference and no drift entry of a
+/// reference that matches again.
 fn document_patch(
     nodes: &[Node],
     edges: &[Edge],
@@ -3309,7 +3338,11 @@ fn document_patch(
     patch: &mut core_graph::GraphPatch,
 ) {
     for (repo, facts) in updates {
-        let prefixes = [format!("doc:{repo}@"), format!("docsec:{repo}@")];
+        let prefixes = [
+            format!("doc:{repo}@"),
+            format!("docsec:{repo}@"),
+            format!("drift:documentation:{repo}@"),
+        ];
         let owned = |id: &str| prefixes.iter().any(|prefix| id.starts_with(prefix));
         let current_ids = facts
             .nodes
@@ -3325,7 +3358,7 @@ fn document_patch(
             nodes
                 .iter()
                 .filter(|node| {
-                    matches!(node.label.as_str(), "Document" | "DocSection")
+                    matches!(node.label.as_str(), "Document" | "DocSection" | "Drift")
                         && owned(&node.id)
                         && !current_ids.contains(node.id.as_str())
                 })
@@ -3335,7 +3368,10 @@ fn document_patch(
             edges
                 .iter()
                 .filter(|edge| {
-                    matches!(edge.label.as_str(), "HAS_SECTION" | "MENTIONS") && owned(&edge.src)
+                    matches!(
+                        edge.label.as_str(),
+                        "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
+                    ) && owned(&edge.src)
                 })
                 .map(edge_key)
                 .filter(|key| !current_edges.contains(key)),
@@ -8672,6 +8708,26 @@ resource "aws_sqs_queue" "orders" {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_documented_path_is_checked_in_the_tree_without_following_a_link() {
+        // AC-0679 (T-0679): what a symlink points at, possibly outside the
+        // repository, never decides whether a documented path exists.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("docs/guide.md"), "# Guide\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        assert!(crate::tree_has_path(&root, "docs/guide.md"));
+        assert!(!crate::tree_has_path(&root, "docs/gone.md"));
+        assert!(!crate::tree_has_path(&root, "../outside"));
+        let before = crate::tree_has_path(&root, "linked/guide.md");
+        std::fs::write(outside.join("guide.md"), "# Elsewhere\n").unwrap();
+        assert_eq!(crate::tree_has_path(&root, "linked/guide.md"), before);
+    }
+
+    #[test]
     fn documentation_files_are_facts_and_a_reingest_drops_what_was_removed() {
         // AC-0676 (T-0676): the ingest pass stores each documentation file
         // as a Document with its DocSection facts; the same tree yields the
@@ -8769,6 +8825,68 @@ resource "aws_sqs_queue" "orders" {
             ]
         );
         assert_eq!(sections, (2, Vec::new()));
+    }
+
+    #[test]
+    fn a_broken_file_reference_is_drift_until_the_documentation_matches_again() {
+        // AC-0679 (T-0679): a relative link to a file that is not in the
+        // tree is a Drift fact from the ingest pass; once the link names a
+        // file that exists, a re-ingest leaves no entry.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("app.ts"), "export function handle() {}\n").unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "# Shop\n\n[code](app.ts) [gone](setup.md)\n",
+        )
+        .unwrap();
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        let extraction = crate::extract_tree(
+            root,
+            "local/shop",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        crate::load_into_graph(&mut store, &extraction, "local/shop", root, "workdir").unwrap();
+        let read = |store: &mut SqliteGraphStore| {
+            let snapshot = store.read_snapshot().unwrap();
+            let updates = crate::collect_documents(&snapshot.0, |_| Ok(root)).unwrap();
+            let mut patch = core_graph::GraphPatch::default();
+            crate::document_patch(&snapshot.0, &snapshot.1, updates, &mut patch);
+            assert!(
+                store
+                    .apply_patch_if_snapshot_matches(&snapshot, &patch)
+                    .unwrap()
+            );
+            let (nodes, edges) = store.read_snapshot().unwrap();
+            let drift: Vec<String> = nodes
+                .iter()
+                .filter(|node| node.label == "Drift")
+                .map(|node| node.id.clone())
+                .collect();
+            let documented = edges
+                .iter()
+                .filter(|edge| edge.label == "DOCUMENTED_AS")
+                .count();
+            (drift, documented)
+        };
+        assert_eq!(
+            read(&mut store),
+            (
+                vec![
+                    "drift:documentation:local/shop@README.md:doc-file-missing:setup.md"
+                        .to_string()
+                ],
+                1
+            )
+        );
+        std::fs::write(root.join("setup.md"), "# Setup\n").unwrap();
+        assert_eq!(read(&mut store), (Vec::new(), 0));
     }
 
     #[test]

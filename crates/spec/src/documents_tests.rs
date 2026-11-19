@@ -466,3 +466,233 @@ fn a_reference_in_a_section_past_the_bound_is_not_credited_to_a_kept_section() {
     // `# Top` still spans it but is not its innermost section.
     assert!(facts.references.is_empty(), "{:?}", facts.references);
 }
+
+// AC-0679 (T-0679): documentation drift.
+
+/// The drift of one README over [`system`], with `present` the paths that
+/// exist in the repository: (id, kind, key, compared), then the edges.
+fn drifted(markdown: &str, present: &[&str]) -> (Vec<Node>, Vec<Edge>) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), markdown).unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    let nodes = system();
+    let index = ReferenceIndex::new(&nodes);
+    let exists = |path: &str| present.contains(&path);
+    let (drift, edges) =
+        documentation_drift("local/shop", "c1", &facts.references, &index, &exists);
+    for node in &drift {
+        assert_eq!(node.label, "Drift");
+        assert_eq!(node.props["kind"], "documentation-drift");
+        let prov = prov(&node.props);
+        assert_eq!(prov.tier, Tier::Deterministic);
+        assert_eq!(prov.confidence_tier, ConfidenceTier::InferredStrong);
+        // The entry cites each occurrence of the reference in the document.
+        assert_eq!(node.props["occurrences"], prov.evidence.len());
+        let first = &prov.evidence[0];
+        assert_eq!(
+            &markdown[first.byte_start as usize..first.byte_end as usize],
+            node.props["reference"].as_str().unwrap()
+        );
+    }
+    for edge in &edges {
+        prov(&edge.props);
+    }
+    (drift, edges)
+}
+
+fn rows(drift: &[Node]) -> Vec<(&str, &str, &str)> {
+    drift
+        .iter()
+        .map(|node| {
+            (
+                node.props["drift_kind"].as_str().unwrap(),
+                node.props["key"].as_str().unwrap(),
+                node.props["compared"].as_str().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_readme_route_that_is_served_is_linked_and_one_that_is_not_is_drift() {
+    let markdown = "# Shop\n\n`GET /orders/{id}` lists an order. `GET /refunds/{id}` \
+        returns a refund.\n\n## Admin\n\n`DELETE /orders/:id` removes one, and \
+        `DELETE /orders/{order}` again. `GET /users` is served twice.\n";
+    let (drift, edges) = drifted(markdown, &[]);
+    assert_eq!(
+        rows(&drift),
+        [
+            (
+                "doc-route-method-differs",
+                "DELETE /orders/{}",
+                "the path is served as GET /orders/{}"
+            ),
+            (
+                "doc-route-not-served",
+                "GET /refunds/{}",
+                "none of the 3 recovered endpoints of the system serves this path"
+            ),
+        ]
+    );
+    assert_eq!(
+        drift[0].id,
+        "drift:documentation:local/shop@README.md:doc-route-method-differs:DELETE /orders/{}"
+    );
+    // Two spellings of one route in one document are one entry.
+    assert_eq!(drift[0].props["occurrences"], 2);
+    let linked: Vec<(&str, &str, &str)> = edges
+        .iter()
+        .map(|edge| (edge.src.as_str(), edge.label.as_str(), edge.dst.as_str()))
+        .collect();
+    assert_eq!(
+        linked,
+        [
+            (
+                drift[0].id.as_str(),
+                "DOCUMENTED_AS",
+                "docsec:local/shop@README.md#1"
+            ),
+            (drift[0].id.as_str(), "SERVED_AS", "ep:orders:list"),
+            (
+                drift[1].id.as_str(),
+                "DOCUMENTED_AS",
+                "docsec:local/shop@README.md#0"
+            ),
+        ]
+    );
+
+    // The served route is linked at T0 and is no finding.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), markdown).unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    let nodes = system();
+    let mentions = link_references(
+        "local/shop",
+        "c1",
+        &facts.references,
+        &ReferenceIndex::new(&nodes),
+    );
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].dst, "ep:orders:list");
+    assert_eq!(mentions[0].props["rule"], "route");
+}
+
+#[test]
+fn with_no_recovered_endpoint_a_route_reference_is_no_finding() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "`GET /refunds/{id}`\n").unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    let nodes = [fact(
+        "file:local/shop@src/orders.ts",
+        "File",
+        serde_json::json!({}),
+    )];
+    let (drift, edges) = documentation_drift(
+        "local/shop",
+        "c1",
+        &facts.references,
+        &ReferenceIndex::new(&nodes),
+        &|_| false,
+    );
+    assert!(drift.is_empty() && edges.is_empty());
+}
+
+#[test]
+fn a_reference_to_a_file_that_does_not_exist_is_drift_with_the_path_looked_for() {
+    let markdown = "# Shop\n\n[guide](docs/guide.md) [gone](docs/gone.md#setup) \
+        [web](https://example.com/x.md) [top](#shop) [setup](docs/setup%20guide.md)\n\n\
+        `src/orders.ts` `src/missing.ts:10` `docs/guide.md` `lib/absent.ts` \
+        `application/json` `src/*.ts` `src/<name>.ts` `sym:src/a.ts` `v1.2` `Makefile`\n";
+    // A link target is percent-decoded before it is looked for.
+    let present = [
+        "src",
+        "docs",
+        "src/orders.ts",
+        "docs/guide.md",
+        "docs/setup guide.md",
+    ];
+    let (drift, edges) = drifted(markdown, &present);
+    assert_eq!(
+        rows(&drift),
+        [
+            (
+                "doc-file-missing",
+                "docs/gone.md",
+                "no file at this path in local/shop@c1"
+            ),
+            (
+                "doc-file-missing",
+                "src/missing.ts",
+                "no file at this path in local/shop@c1"
+            ),
+        ]
+    );
+    // `lib/absent.ts` is not checked: no `lib` directory is in the tree.
+    assert_eq!(edges.len(), 2);
+    assert!(edges.iter().all(|edge| edge.label == "DOCUMENTED_AS"));
+
+    // A code span may be relative to the document's directory.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("docs")).unwrap();
+    fs::write(
+        dir.path().join("docs/guide.md"),
+        "`img/flow.png` `img/none.png`\n",
+    )
+    .unwrap();
+    let facts = extract_documents(dir.path(), "local/shop", "c1").unwrap();
+    let nodes = system();
+    let exists = |path: &str| ["docs/img", "docs/img/flow.png"].contains(&path);
+    let (drift, _) = documentation_drift(
+        "local/shop",
+        "c1",
+        &facts.references,
+        &ReferenceIndex::new(&nodes),
+        &exists,
+    );
+    assert_eq!(
+        rows(&drift),
+        [(
+            "doc-file-missing",
+            "docs/img/none.png",
+            "no file at this path in local/shop@c1"
+        )]
+    );
+}
+
+#[test]
+fn the_drift_register_lists_documentation_drift_with_what_it_was_compared_with() {
+    let markdown = "# Shop\n\n`GET /refunds/{id}` and [gone](docs/gone.md).\n";
+    let (drift, edges) = drifted(markdown, &[]);
+    let register = |nodes: &[Node], edges: &[Edge], mode| {
+        crate::compile_spec(nodes, edges, &[], mode, &BTreeSet::new())
+            .artifacts
+            .into_iter()
+            .find(|artifact| artifact.id == "drift-register")
+            .unwrap()
+            .content
+    };
+    for mode in [
+        crate::ExportMode::BestEffort,
+        crate::ExportMode::VerifiedOnly,
+    ] {
+        let content = register(&drift, &edges, mode);
+        assert!(
+            content.contains(
+                "\n## Documentation drift\n\nExact route and file references in the target's \
+                 own documentation that no longer match what was recovered. A reference is \
+                 stated intent: it changes no recovered fact.\n\n\
+                 | Finding | Document | Reference | Compared with | Confidence |\n\
+                 |---|---|---|---|---|\n\
+                 | doc-file-missing | `README.md` | `docs/gone.md` | no file at this path in \
+                 local/shop@c1 | InferredStrong |\n\
+                 | doc-route-not-served | `README.md` | `GET /refunds/{}` | none of the 3 \
+                 recovered endpoints of the system serves this path | InferredStrong |\n"
+            ),
+            "{content}"
+        );
+        // It is not listed as an ADR conflict.
+        assert!(content.contains("| — | No ADR/code conflicts recovered |"));
+    }
+    // A register without such a finding does not have the section.
+    assert!(!register(&[], &[], crate::ExportMode::BestEffort).contains("Documentation drift"));
+}

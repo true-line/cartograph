@@ -8,15 +8,21 @@
 //! An exact reference in a section (an inline code span or a link target)
 //! is linked to the one fact it names by a `MENTIONS` edge. A reference
 //! that names no fact, or more than one, is not linked and is no finding.
+//!
+//! Two reference forms assert something checkable: a route, and a path to
+//! a file of the same repository. One that no longer matches is a `Drift`
+//! fact citing the reference and what it was compared with (AC-0679).
 
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Deterministic extractor id for documentation files.
 pub const DOCUMENT_EXTRACTOR_ID: &str = "t0.documentation";
+/// Deterministic rule id for documentation drift.
+pub const DOCUMENTATION_DRIFT_EXTRACTOR_ID: &str = "t0.documentation-drift";
 /// A file larger than this is counted and not read.
 pub const MAX_DOCUMENT_BYTES: u64 = 1024 * 1024;
 /// Files read per repository, taken in path order.
@@ -576,6 +582,10 @@ pub struct ReferenceIndex<'a> {
     routes: BTreeMap<String, Vec<&'a str>>,
     /// Fact ids by `name`, for the named kinds.
     names: BTreeMap<&'a str, Vec<&'a str>>,
+    /// Endpoints by canonical path, whatever their method.
+    paths: BTreeMap<String, Vec<(String, &'a Node)>>,
+    /// Endpoints a route reference is compared with.
+    endpoints: usize,
 }
 
 impl<'a> ReferenceIndex<'a> {
@@ -595,11 +605,15 @@ impl<'a> ReferenceIndex<'a> {
                 && !method.trim().is_empty()
                 && !path.trim().is_empty()
             {
+                let route = crate::contract::canonical_endpoint(method, path);
+                let served = route.split_once(' ').map_or("", |(_, path)| path);
                 index
-                    .routes
-                    .entry(crate::contract::canonical_endpoint(method, path))
+                    .paths
+                    .entry(served.to_string())
                     .or_default()
-                    .push(&node.id);
+                    .push((route.clone(), node));
+                index.endpoints += 1;
+                index.routes.entry(route).or_default().push(&node.id);
             }
             if NAMED_LABELS.contains(&label)
                 && let Some(name) = node.props["name"].as_str()
@@ -624,7 +638,7 @@ impl<'a> ReferenceIndex<'a> {
                 .map(|(id, _)| (ReferenceRule::FilePath, *id))
         };
         if reference.link {
-            return file(link_path(&reference.path, text)?);
+            return file(local_link_path(&reference.path, text)?);
         }
         if let Some((id, _)) = self.labels.get_key_value(text) {
             return Some((ReferenceRule::FactId, *id));
@@ -672,6 +686,42 @@ fn code_path(text: &str) -> Option<String> {
 /// The repo-relative path a link target names, resolved against the
 /// directory of the document at `document`. `None` for an absolute URL, a
 /// bare fragment, or a target that leaves the repository.
+/// The repository path a Markdown link target names: as [`link_path`],
+/// after percent-decoding, so `setup%20guide.md` names `setup guide.md`. A
+/// target whose escapes do not decode to UTF-8 is taken as written.
+fn local_link_path(document: &str, target: &str) -> Option<String> {
+    link_path(document, &percent_decoded(target))
+}
+
+/// `text` with each `%XX` escape decoded, or `text` itself when the result
+/// is not UTF-8.
+fn percent_decoded(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('%') {
+        return text.into();
+    }
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escape = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escape {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_or(text.into(), Into::into)
+}
+
 fn link_path(document: &str, target: &str) -> Option<String> {
     if target.contains("://") || target.starts_with("mailto:") || target.starts_with("//") {
         return None;
@@ -768,6 +818,232 @@ pub fn link_references(
             }
         })
         .collect()
+}
+
+/// Sections and endpoints one drift entry links to.
+const MAX_DRIFT_LINKS: usize = 8;
+/// Characters no checked file path holds: globs, placeholders, ids, options.
+const NOT_A_PATH: [char; 18] = [
+    '*', '<', '>', '{', '}', '$', '|', ':', '@', '=', ',', ';', '(', ')', '[', ']', '"', '\'',
+];
+
+/// The kind of a documentation drift entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum DocumentationDrift {
+    /// The route's path is served, with no endpoint of its method.
+    RouteMethodDiffers,
+    /// No endpoint of the system serves the route's path.
+    RouteNotServed,
+    /// The path names no file of the repository at the commit.
+    FileMissing,
+}
+
+impl DocumentationDrift {
+    /// The closed kind code stored as `drift_kind`.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::RouteMethodDiffers => "doc-route-method-differs",
+            Self::RouteNotServed => "doc-route-not-served",
+            Self::FileMissing => "doc-file-missing",
+        }
+    }
+}
+
+/// The repo-relative paths a code span may name, when it is shaped like a
+/// path to a file: it has a directory and an extension, and that directory
+/// is in the tree. A path is read from the repository root and from the
+/// document's directory; only those whose directory exists are returned.
+fn checked_code_paths(document: &str, text: &str, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let path = without_position(text);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let shaped = path.contains('/')
+        && !path.contains(NOT_A_PATH)
+        && !path.contains(char::is_whitespace)
+        && name.rsplit_once('.').is_some_and(|(stem, extension)| {
+            !stem.is_empty()
+                && (1..=8).contains(&extension.len())
+                && extension.chars().all(|c| c.is_ascii_alphanumeric())
+        });
+    if !shaped {
+        return Vec::new();
+    }
+    let mut paths: Vec<String> = [link_path("", path), link_path(document, path)]
+        .into_iter()
+        .flatten()
+        .filter(|path| {
+            path.rsplit_once('/')
+                .is_some_and(|(directory, _)| exists(directory))
+        })
+        .collect();
+    paths.dedup();
+    paths
+}
+
+struct Finding<'r> {
+    reference: &'r DocumentReference,
+    sections: BTreeSet<&'r str>,
+    spans: BTreeSet<(usize, usize)>,
+}
+
+/// `Drift` facts for the route and file references that no longer match
+/// (AC-0679), with a `DOCUMENTED_AS` edge to each section that holds one
+/// and, for a route served with other methods, a `SERVED_AS` edge to those
+/// endpoints.
+///
+/// A reference [`link_references`] links yields nothing. A route is checked
+/// only when the system has a recovered endpoint. `exists` answers whether a
+/// repo-relative path is in the repository's tree. One document, kind and
+/// route or path are one entry, citing each occurrence.
+pub fn documentation_drift(
+    repo: &str,
+    commit: &str,
+    references: &[DocumentReference],
+    index: &ReferenceIndex<'_>,
+    exists: &dyn Fn(&str) -> bool,
+) -> (Vec<Node>, Vec<Edge>) {
+    let mut findings: BTreeMap<(&str, DocumentationDrift, String), Finding<'_>> = BTreeMap::new();
+    for reference in references {
+        if index.resolve(repo, reference).is_some() {
+            continue;
+        }
+        let text = reference.text.as_str();
+        let found = if reference.link {
+            local_link_path(&reference.path, text)
+                .filter(|path| !exists(path))
+                .map(|path| (DocumentationDrift::FileMissing, path))
+        } else if let Some(route) = route_key(text) {
+            let served = route.split_once(' ').map_or("", |(_, path)| path);
+            if index.routes.contains_key(&route) || index.endpoints == 0 {
+                None
+            } else if index.paths.contains_key(served) {
+                Some((DocumentationDrift::RouteMethodDiffers, route))
+            } else {
+                Some((DocumentationDrift::RouteNotServed, route))
+            }
+        } else {
+            let paths = checked_code_paths(&reference.path, text, exists);
+            let missing = !paths.iter().any(|path| exists(path));
+            paths
+                .into_iter()
+                .next()
+                .filter(|_| missing)
+                .map(|path| (DocumentationDrift::FileMissing, path))
+        };
+        let Some((kind, key)) = found else {
+            continue;
+        };
+        let finding = findings
+            .entry((reference.path.as_str(), kind, key))
+            .or_insert_with(|| Finding {
+                reference,
+                sections: BTreeSet::new(),
+                spans: BTreeSet::new(),
+            });
+        finding.sections.insert(reference.section.as_str());
+        finding.spans.insert((reference.start, reference.end));
+    }
+
+    let rule = || crate::spec_rule(DOCUMENTATION_DRIFT_EXTRACTOR_ID);
+    let inferred = |cited: Vec<EvidenceRef>, fact: &[u8]| {
+        Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::InferredStrong,
+            cited,
+            DOCUMENTATION_DRIFT_EXTRACTOR_ID,
+            fact,
+        )
+        .expect("InferredStrong is within the deterministic confidence ceiling")
+        .with_method(rule())
+    };
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for ((document, kind, key), finding) in findings {
+        let id = format!(
+            "drift:documentation:{repo}@{document}:{}:{key}",
+            kind.code()
+        );
+        let cited: Vec<EvidenceRef> = finding
+            .spans
+            .iter()
+            .take(MAX_MENTION_EVIDENCE)
+            .map(|(start, end)| evidence(repo, document, commit, *start, *end))
+            .collect();
+        let served = key.split_once(' ').map_or("", |(_, path)| path);
+        let others: &[(String, &Node)] = match kind {
+            DocumentationDrift::RouteMethodDiffers => {
+                index.paths.get(served).map_or(&[], Vec::as_slice)
+            }
+            _ => &[],
+        };
+        let compared = match kind {
+            DocumentationDrift::RouteMethodDiffers => {
+                let routes: BTreeSet<&str> =
+                    others.iter().map(|(route, _)| route.as_str()).collect();
+                format!(
+                    "the path is served as {}",
+                    routes.into_iter().collect::<Vec<_>>().join(", ")
+                )
+            }
+            DocumentationDrift::RouteNotServed => format!(
+                "none of the {} recovered endpoints of the system serves this path",
+                index.endpoints
+            ),
+            DocumentationDrift::FileMissing => {
+                format!("no file at this path in {repo}@{commit}")
+            }
+        };
+        nodes.push(Node {
+            id: id.clone(),
+            label: "Drift".into(),
+            props: serde_json::json!({
+                "kind": "documentation-drift",
+                "drift_kind": kind.code(),
+                "key": key,
+                "title": format!("{}: {key}", kind.code()),
+                "document": document,
+                "reference": core_redact::redact_text(&finding.reference.text).0,
+                "compared": compared,
+                "occurrences": finding.spans.len(),
+                "prov": inferred(cited.clone(), &hashed(&(kind.code(), repo, document, &key))),
+            }),
+        });
+        for section in finding.sections.iter().take(MAX_DRIFT_LINKS) {
+            edges.push(Edge {
+                src: id.clone(),
+                dst: (*section).to_string(),
+                label: "DOCUMENTED_AS".into(),
+                props: serde_json::json!({
+                    "prov": inferred(
+                        cited.clone(),
+                        format!("{id} DOCUMENTED_AS {section}").as_bytes(),
+                    ),
+                }),
+            });
+        }
+        let mut endpoints: Vec<&Node> = others.iter().map(|(_, node)| *node).collect();
+        endpoints.sort_by(|left, right| left.id.cmp(&right.id));
+        for endpoint in endpoints.into_iter().take(MAX_DRIFT_LINKS) {
+            // The endpoint's own evidence where it has any, else the
+            // reference it was compared with.
+            let served_at = Provenance::deserialize(&endpoint.props["prov"])
+                .ok()
+                .map(|prov| prov.evidence)
+                .filter(|evidence| !evidence.is_empty())
+                .unwrap_or_else(|| cited.clone());
+            edges.push(Edge {
+                src: id.clone(),
+                dst: endpoint.id.clone(),
+                label: "SERVED_AS".into(),
+                props: serde_json::json!({
+                    "prov": inferred(
+                        served_at,
+                        format!("{id} SERVED_AS {}", endpoint.id).as_bytes(),
+                    ),
+                }),
+            });
+        }
+    }
+    (nodes, edges)
 }
 
 #[cfg(test)]
