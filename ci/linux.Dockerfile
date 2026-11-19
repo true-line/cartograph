@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # always come from the same mirror.
 RUN apt-get -o Acquire::Retries=5 update \
  && apt-get -o Acquire::Retries=5 install -y \
-      ca-certificates git curl wget file xz-utils zstd \
+      ca-certificates git curl wget file xz-utils zstd jq \
       build-essential pkg-config \
       libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
       libayatana-appindicator3-dev librsvg2-dev \
