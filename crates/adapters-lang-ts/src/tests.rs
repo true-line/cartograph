@@ -5611,3 +5611,51 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         ))
     );
 }
+
+// Test code yields no product Endpoint (#1250's rule for TS): Vendure's
+// `e2e/fixtures/test-plugins/*.ts` controllers and `*.e2e-spec.ts` files
+// were documented as the system's own routes.
+#[test]
+fn test_trees_yield_no_product_endpoints() {
+    const CONTROLLER: &[u8] = br#"
+import { Controller, Get } from '@nestjs/common';
+@Controller('run-job')
+export class TestController {
+  @Get()
+  runJob() {}
+}
+"#;
+    let endpoints = |path: &str| {
+        let out = extract_source(CONTROLLER, path, &id()).unwrap();
+        let ids: Vec<String> = out
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .map(|node| node.id.clone())
+            .collect();
+        assert!(
+            out.edges
+                .iter()
+                .all(|edge| !edge.src.starts_with("ep:") || ids.contains(&edge.src)),
+            "no edge outlives its endpoint"
+        );
+        ids
+    };
+    for path in [
+        "e2e/fixtures/test-plugins/with-job-queue.ts",
+        "e2e/error-handler-strategy.e2e-spec.ts",
+        "src/__tests__/job.controller.ts",
+        "packages/core/test/fixtures/job.controller.ts",
+        "src/job.controller.spec.ts",
+    ] {
+        assert!(endpoints(path).is_empty(), "{path}");
+    }
+    // Product code, including names that only contain "test", keeps its routes.
+    for path in [
+        "src/job.controller.ts",
+        "src/testing/job.controller.ts",
+        "src/latest/job.controller.ts",
+    ] {
+        assert_eq!(endpoints(path), ["ep:qwtm/example@GET:/run-job"], "{path}");
+    }
+}
