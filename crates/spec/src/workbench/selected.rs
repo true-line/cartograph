@@ -491,7 +491,9 @@ fn produce(
         subjects,
     } = match a.id {
         "user-stories" => match stories.or(beside.knowledge) {
-            Some(stories) => producers::stories_with_support(nodes, Some(stories), max)?,
+            Some(stories) => {
+                producers::stories_with_support(nodes, Some(stories), (mode, rejected), max)?
+            }
             None => producers::stories(nodes, max)?,
         },
         "flow-dossiers" => producers::flow(nodes, edges, flows, max)?,
@@ -617,7 +619,7 @@ fn produce(
             gaps,
             (beside.curated, beside.graph_content_hash),
             beside.knowledge,
-            mode,
+            (mode, rejected),
             max,
         )?,
         // The official file list and what the host supplied as the as-of

@@ -737,7 +737,7 @@ pub(super) fn d1(
     gaps: usize,
     (curated, graph_content_hash): (Curated<'_>, Option<&str>),
     knowledge: Option<&Stories<'_>>,
-    mode: ExportMode,
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
@@ -869,6 +869,15 @@ pub(super) fn d1(
                 cited += derived_frame(
                     label,
                     knowledge,
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
+            }
+            // Python callers by their recovered guards frame 1.2 (#1979).
+            if matches!(source, SectionFrame::Nodes("Actor")) {
+                cited += super::endpoint_permissions::callers_frame(
+                    nodes,
+                    (mode, rejected),
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;

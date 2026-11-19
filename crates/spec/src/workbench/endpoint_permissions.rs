@@ -34,9 +34,11 @@
 //! whose site the mode withholds is omitted and counted, before any
 //! assertion is built (R-INT-5, ADR-0058).
 
+use super::fact_index::citation_id;
 use super::producers::Output;
 use super::render::{Assertions, Budget, Literal, NodeName, RenderLimit, Text};
 use super::{ExportMode, included, provenance};
+use core_graph::FactKey;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance};
 use serde::Deserialize;
@@ -160,7 +162,11 @@ fn reading<'a>(endpoint: &'a Node, recovery: &Recovery) -> Reading<'a> {
                 Some(provenance) if !guards.is_empty() => Reading::Site {
                     description: format!(
                         "guard: {} (basis: {})",
-                        guards.join(", "),
+                        guards
+                            .iter()
+                            .map(|g| guard_name(g))
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         strings(&raw["basis"]).join(", ")
                     ),
                     provenance,
@@ -449,6 +455,199 @@ fn rows<'a>(
         .collect()
 }
 
+/// A guard by its own name: a repository callable as its qualified name
+/// (`require_api_auth`, `BaseAdminView.is_accessible`), never its graph id;
+/// a library guard (`flask_login.login_required`) as recorded (#1979).
+pub(super) fn guard_name(guard: &str) -> &str {
+    match guard.strip_prefix("sym:") {
+        Some(rest) => rest.rsplit_once('#').map_or(guard, |(_, name)| name),
+        None => guard,
+    }
+}
+
+/// Who a Python endpoint's recovered guard reading admits (#1979): the
+/// caller a guard names, or any caller when the adapter read the endpoint
+/// and recovered no guard. Decorator or hook syntax, never effective
+/// runtime authorization.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Caller {
+    /// The caller in a few words, and the guards that admit it by name.
+    Guarded { role: String, guards: Vec<String> },
+    /// The adapter read the endpoint and recovered no guard.
+    Unguarded,
+}
+
+impl Caller {
+    /// The caller as a story's subject: "a signed-in user".
+    pub(super) fn subject(&self) -> String {
+        match self {
+            Self::Guarded { role, .. } => format!("a {role}"),
+            Self::Unguarded => "any caller (no guard recovered)".into(),
+        }
+    }
+}
+
+/// The caller a guard admits, read from what the adapter recognized: a
+/// Flask-Login or Flask-JWT-Extended decorator by its library name, a
+/// Flask-Admin view by its `is_accessible`, and any other repository guard
+/// as the guard itself. The Python adapter records a Flask-Admin view as a
+/// `flask` endpoint with the `flask_admin` mount.
+fn role(endpoint: &Node, guards: &[&str]) -> String {
+    let named = |guard: &str| match guard {
+        "flask_login.login_required" => Some("signed-in user"),
+        "flask_login.fresh_login_required" => Some("freshly signed-in user"),
+        "flask_jwt_extended.jwt_required" => Some("caller with a valid JWT"),
+        _ => None,
+    };
+    let names: Vec<&str> = guards.iter().map(|g| guard_name(g)).collect();
+    if endpoint.props["framework"] == "flask_admin" || endpoint.props["mount"] == "flask_admin" {
+        return format!("signed-in user admitted by {}", names.join(" and "));
+    }
+    match guards.iter().map(|g| named(g)).collect::<Option<Vec<_>>>() {
+        Some(roles) if roles.windows(2).all(|w| w[0] == w[1]) && !roles.is_empty() => {
+            roles[0].to_owned()
+        }
+        _ => format!("caller passing {}", names.join(" and ")),
+    }
+}
+
+/// The caller of `endpoint` as its guard reading states, when it is a
+/// Python reading the export admits; `None` for any other endpoint and for
+/// a reading that is withheld, unreadable or incomplete.
+pub(super) fn caller(
+    endpoint: &Node,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> Option<Caller> {
+    caller_reading(endpoint, mode, rejected).map(|(caller, _)| caller)
+}
+
+/// The caller and the confidence of the reading that names it. An absent
+/// reading with provenance passes the same admission as a guard: a rejected
+/// or withheld "no guard" observation names no caller.
+fn caller_reading(
+    endpoint: &Node,
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> Option<(Caller, Option<ConfidenceTier>)> {
+    let recovery = recovery(endpoint).filter(|r| r.property == "auth")?;
+    match reading(endpoint, recovery) {
+        Reading::Site { provenance, .. } if included(&provenance, mode, rejected) => {
+            let guards = strings(&endpoint.props["auth"]["guards"]);
+            Some((
+                Caller::Guarded {
+                    role: role(endpoint, &guards),
+                    guards: guards
+                        .into_iter()
+                        .map(|g| guard_name(g).to_owned())
+                        .collect(),
+                },
+                Some(provenance.confidence_tier),
+            ))
+        }
+        Reading::Absent { .. } => match site_provenance(&endpoint.props["auth"]) {
+            Some(provenance) if !included(&provenance, mode, rejected) => None,
+            provenance => Some((Caller::Unguarded, provenance.map(|p| p.confidence_tier))),
+        },
+        _ => None,
+    }
+}
+
+/// D1 §1.2's frame of Python callers (#1979): one row per caller and guard
+/// set, with how many operations it admits and a few of them, then the
+/// operations with no guard recovered. Nothing is written when no endpoint
+/// carries an admitted Python guard reading. Each operation a row counts is
+/// asserted once, so its tier and citation are in the document's statements;
+/// returns how many it asserted.
+pub(super) fn callers_frame(
+    nodes: &[&Node],
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    let mut by_caller: BTreeMap<Caller, Vec<String>> = BTreeMap::new();
+    let mut confidence: BTreeMap<Caller, BTreeSet<String>> = BTreeMap::new();
+    let mut cited = 0;
+    for endpoint in nodes.iter().filter(|n| n.label == "Endpoint") {
+        if let Some((caller, tier)) = caller_reading(endpoint, mode, rejected) {
+            let id = citation_id(&FactKey::Node {
+                id: endpoint.id.clone(),
+            });
+            if asserted.insert(id) {
+                assertions.node(endpoint, None)?;
+                cited += 1;
+            }
+            confidence
+                .entry(caller.clone())
+                .or_default()
+                .insert(tier.map_or_else(|| "not recorded".to_owned(), |t| format!("{t:?}")));
+            by_caller
+                .entry(caller)
+                .or_default()
+                .push(NodeName(endpoint).to_string());
+        }
+    }
+    if by_caller.is_empty() {
+        return Ok(0);
+    }
+    let guarded: usize = by_caller
+        .iter()
+        .filter(|(c, _)| **c != Caller::Unguarded)
+        .map(|(_, ops)| ops.len())
+        .sum();
+    let unguarded = by_caller.get(&Caller::Unguarded).map_or(0, Vec::len);
+    writeln!(
+        out,
+        "\nCallers by recovered guard: {} callers over {guarded} guarded operations; \
+         {unguarded} operations with no guard recovered. Read from each operation's guard \
+         decorators or Flask-Admin `is_accessible` (decorator or hook syntax), not effective \
+         runtime authorization or an identified user; `security.md` lists each operation's \
+         caller under its capability.\n",
+        by_caller.len() - usize::from(unguarded > 0)
+    )?;
+    out.push_str(
+        "| Caller | Guard | Reading confidence | Operations | Examples |\n|---|---|---|---|---|\n",
+    )?;
+    let mut rows: Vec<(&Caller, &Vec<String>)> = by_caller.iter().collect();
+    // Most operations first; any caller last.
+    rows.sort_by_key(|(caller, ops)| (**caller == Caller::Unguarded, std::cmp::Reverse(ops.len())));
+    for (caller, operations) in rows {
+        let (who, guards) = match caller {
+            Caller::Guarded { role, guards } => {
+                let mut who = role.clone();
+                if let Some(first) = who.get_mut(0..1) {
+                    first.make_ascii_uppercase();
+                }
+                (who, guards.join(", "))
+            }
+            Caller::Unguarded => ("Any caller".to_owned(), "none recovered".to_owned()),
+        };
+        let mut operations = operations.clone();
+        operations.sort();
+        let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
+        let more = operations.len() - shown.len();
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {}{} |",
+            Literal(&who),
+            Literal(&guards),
+            confidence[caller]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            operations.len(),
+            Literal(shown.join("; ")),
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            }
+        )?;
+    }
+    Ok(cited)
+}
+
 /// Who may call an endpoint, as its recovered permission site states, for
 /// the per-capability table in `security.md` (AC-0853).
 pub(super) enum Access {
@@ -488,7 +687,11 @@ impl<'a> AccessIndex<'a> {
                 Access::Guarded(if recovery.property == "permission_site" {
                     format!("any of {}", strings(&raw["arguments"]).join(", "))
                 } else {
-                    strings(&raw["guards"]).join(", ")
+                    strings(&raw["guards"])
+                        .into_iter()
+                        .map(guard_name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 })
             }
             Reading::Absent { .. } => Access::NoneRecovered {

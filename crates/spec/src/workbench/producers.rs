@@ -84,9 +84,120 @@ fn operation_phrase(endpoint: &Node, handler: Option<&Node>) -> Option<String> {
     }
     let name = handler?.props["name"].as_str()?;
     let member = name.rsplit(['.', '#']).next().unwrap_or(name);
-    let member = words(member);
-    (!member.is_empty()).then_some(member)
+    let mut member = words(member);
+    // A handler named for its subject (`coupon_route`, `lifetime_licence`)
+    // reads with its method's verb (#1979): the trailing framework word
+    // goes, and an action word that starts the name stays the verb.
+    for tail in [" route", " view", " handler", " endpoint", " page"] {
+        if let Some(head) = member.strip_suffix(tail)
+            && !head.is_empty()
+        {
+            member = head.to_owned();
+            break;
+        }
+    }
+    if member.is_empty() {
+        return None;
+    }
+    let first = member.split(' ').next().unwrap_or_default();
+    if HANDLER_ACTIONS.contains(&first) {
+        return Some(member);
+    }
+    let verb = match endpoint.props["method"]
+        .as_str()
+        .map(str::to_ascii_uppercase)
+    {
+        Some(m) if m == "GET" || m == "HEAD" => "view",
+        Some(m) if m == "POST" => "submit",
+        Some(m) if m == "PUT" || m == "PATCH" => "update",
+        Some(m) if m == "DELETE" => "delete",
+        _ => return Some(member),
+    };
+    Some(format!("{verb} {member}"))
 }
+
+/// Words a handler name starts with when it already says what the caller
+/// does (`delete_alias`, `reset_password`, `get_settings`).
+const HANDLER_ACTIONS: &[&str] = &[
+    "accept",
+    "activate",
+    "add",
+    "apply",
+    "approve",
+    "authorize",
+    "block",
+    "buy",
+    "cancel",
+    "change",
+    "check",
+    "claim",
+    "clone",
+    "close",
+    "confirm",
+    "connect",
+    "create",
+    "delete",
+    "disable",
+    "disconnect",
+    "download",
+    "edit",
+    "enable",
+    "enter",
+    "exit",
+    "export",
+    "fetch",
+    "forgot",
+    "generate",
+    "get",
+    "handle",
+    "import",
+    "invite",
+    "join",
+    "link",
+    "list",
+    "login",
+    "logout",
+    "manage",
+    "mark",
+    "open",
+    "pay",
+    "process",
+    "publish",
+    "redeem",
+    "refresh",
+    "register",
+    "reject",
+    "remove",
+    "rename",
+    "request",
+    "resend",
+    "reset",
+    "restore",
+    "retry",
+    "revoke",
+    "save",
+    "search",
+    "send",
+    "set",
+    "setup",
+    "show",
+    "sign",
+    "start",
+    "stop",
+    "submit",
+    "subscribe",
+    "sync",
+    "toggle",
+    "transfer",
+    "unblock",
+    "unlink",
+    "unsubscribe",
+    "update",
+    "upload",
+    "validate",
+    "verify",
+    "view",
+];
 
 /// "As <caller>, I can <operation> (<METHOD path>)." for each Endpoint a
 /// derived Capability cites. The caller is the Actor caller set derived for
@@ -95,6 +206,7 @@ fn operation_phrase(endpoint: &Node, handler: Option<&Node>) -> Option<String> {
 fn readable_stories(
     story: &capabilities::Story<'_>,
     included: &[capabilities::Story<'_>],
+    (mode, rejected): (ExportMode, &BTreeSet<String>),
 ) -> Vec<String> {
     use core_graph::overlay::BaseRef;
     let mut endpoints = Vec::new();
@@ -144,7 +256,9 @@ fn readable_stories(
                     any_of.join(" or ")
                 ),
                 (_, Some(api)) => format!("{} {api} API caller", article(api)),
-                (_, None) => "an API caller".to_owned(),
+                // A Python endpoint's caller as its guard reading states (#1979).
+                (_, None) => super::endpoint_permissions::caller(endpoint, mode, rejected)
+                    .map_or_else(|| "an API caller".to_owned(), |c| c.subject()),
             };
             Some(format!(
                 "- As {}, I can {} ({}).",
@@ -249,11 +363,12 @@ fn caller_sets(
 }
 
 pub(super) fn stories(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
-    stories_with_support(nodes, None, max)
+    stories_with_support(nodes, None, (ExportMode::BestEffort, &BTreeSet::new()), max)
 }
 pub(super) fn stories_with_support(
     nodes: &[&Node],
     stories: Option<&capabilities::Stories<'_>>,
+    policy: (ExportMode, &BTreeSet<String>),
     max: Option<usize>,
 ) -> Result<Output, RenderLimit> {
     let budget = Budget::new(max)?;
@@ -297,7 +412,7 @@ pub(super) fn stories_with_support(
                     render::Literal(NodeName(node))
                 )?;
                 // Every recovered name is literal text.
-                for line in readable_stories(story, included) {
+                for line in readable_stories(story, included, policy) {
                     writeln!(content, "{line}")?;
                 }
                 let files = handler_files(story);
