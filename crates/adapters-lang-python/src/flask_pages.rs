@@ -29,10 +29,10 @@
 //! route answers record nothing. `INCLUDES`, `RENDERS_TEMPLATE` and
 //! `SUBMITS` are read only by journey recovery, so traced server flows and
 //! other artifacts are unchanged.
-use crate::{Extraction, FileCx, ImportBinding, literal_string, prov_from};
+use crate::{Extraction, FileCx, literal_string, prov_from};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::Node as TsNode;
 
@@ -53,22 +53,89 @@ enum PageKind {
     Redirect(String),
 }
 
-/// Local names Flask's `render_template`, `redirect` and `url_for` go by.
-fn flask_names(bindings: &HashMap<String, ImportBinding>) -> BTreeMap<String, &'static str> {
-    const NAMES: [&str; 3] = ["render_template", "redirect", "url_for"];
+const NAMES: [&str; 3] = ["render_template", "redirect", "url_for"];
+
+/// True for nodes that open a scope of their own: their bindings and
+/// imports are not the enclosing scope's.
+fn opens_scope(node: TsNode<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "function_definition"
+            | "lambda"
+            | "class_definition"
+            | "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+    )
+}
+
+/// The statements of `scope` itself, not of the scopes nested in it.
+fn own_nodes<'t>(scope: TsNode<'t>) -> Vec<TsNode<'t>> {
+    let mut out = Vec::new();
+    let mut stack = vec![scope];
+    while let Some(node) = stack.pop() {
+        out.push(node);
+        let mut cursor = node.walk();
+        stack.extend(
+            node.named_children(&mut cursor)
+                .filter(|child| !opens_scope(*child)),
+        );
+    }
+    out
+}
+
+/// Names `scope`'s own imports bind: each to the Flask helper it is, or
+/// `None` when it binds something else. A `flask` module alias binds
+/// `alias.render_template` and its siblings.
+fn scope_imports(cx: &FileCx<'_>, scope: TsNode<'_>) -> BTreeMap<String, Option<&'static str>> {
     let mut out = BTreeMap::new();
-    for (local, binding) in bindings {
-        match binding {
-            ImportBinding::Symbol {
-                module, exported, ..
-            } if module == "flask" || module == "flask.helpers" || module == "flask.templating" => {
-                if let Some(name) = NAMES.iter().find(|n| **n == exported) {
-                    out.insert(local.clone(), *name);
+    for node in own_nodes(scope) {
+        match node.kind() {
+            "import_from_statement" => {
+                let module = node
+                    .child_by_field_name("module_name")
+                    .map(|m| cx.text(&m))
+                    .unwrap_or_default();
+                let flask = matches!(module, "flask" | "flask.helpers" | "flask.templating");
+                let mut cursor = node.walk();
+                for name in node.children_by_field_name("name", &mut cursor) {
+                    let (exported, local) = match name.kind() {
+                        "aliased_import" => (
+                            name.child_by_field_name("name").map(|n| cx.text(&n)),
+                            name.child_by_field_name("alias").map(|n| cx.text(&n)),
+                        ),
+                        _ => (Some(cx.text(&name)), Some(cx.text(&name))),
+                    };
+                    let (Some(exported), Some(local)) = (exported, local) else {
+                        continue;
+                    };
+                    let helper = NAMES.iter().find(|n| **n == exported).copied();
+                    out.insert(local.to_owned(), helper.filter(|_| flask));
                 }
             }
-            ImportBinding::Module { module } if module == "flask" => {
-                for name in NAMES {
-                    out.insert(format!("{local}.{name}"), name);
+            "import_statement" => {
+                let mut cursor = node.walk();
+                for name in node.children_by_field_name("name", &mut cursor) {
+                    let (module, local) = match name.kind() {
+                        "aliased_import" => (
+                            name.child_by_field_name("name").map(|n| cx.text(&n)),
+                            name.child_by_field_name("alias").map(|n| cx.text(&n)),
+                        ),
+                        _ => {
+                            let text = cx.text(&name);
+                            (Some(text), text.split('.').next())
+                        }
+                    };
+                    let (Some(module), Some(local)) = (module, local) else {
+                        continue;
+                    };
+                    out.insert(local.to_owned(), None);
+                    if module == "flask" {
+                        for helper in NAMES {
+                            out.insert(format!("{local}.{helper}"), Some(helper));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -77,32 +144,135 @@ fn flask_names(bindings: &HashMap<String, ImportBinding>) -> BTreeMap<String, &'
     out
 }
 
+/// The identifiers an assignment, loop or `as` target binds.
+fn target_names<'s>(cx: &'s FileCx<'s>, target: TsNode<'_>, out: &mut BTreeSet<&'s str>) {
+    match target.kind() {
+        "identifier" => {
+            out.insert(cx.text(&target));
+        }
+        "pattern_list"
+        | "tuple_pattern"
+        | "list_pattern"
+        | "tuple"
+        | "list"
+        | "parenthesized_expression"
+        | "list_splat_pattern"
+        | "list_splat"
+        | "as_pattern_target" => {
+            let mut cursor = target.walk();
+            for child in target.named_children(&mut cursor) {
+                target_names(cx, child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Names `function` binds itself other than by import: its parameters,
+/// assignment, loop, `with` / `except` and walrus targets, and the
+/// functions and classes it defines.
+fn rebound<'s>(cx: &'s FileCx<'s>, function: TsNode<'_>) -> BTreeSet<&'s str> {
+    let mut out = BTreeSet::new();
+    if let Some(parameters) = function.child_by_field_name("parameters") {
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            let name = match parameter.kind() {
+                "identifier" => Some(parameter),
+                "default_parameter" | "typed_default_parameter" => {
+                    parameter.child_by_field_name("name")
+                }
+                _ => {
+                    let mut inner = parameter.walk();
+                    let found = parameter.named_children(&mut inner).find(|c| {
+                        c.kind() == "identifier"
+                            || matches!(c.kind(), "list_splat_pattern" | "dictionary_splat_pattern")
+                    });
+                    found.and_then(|c| {
+                        if c.kind() == "identifier" {
+                            Some(c)
+                        } else {
+                            let mut deeper = c.walk();
+                            c.named_children(&mut deeper)
+                                .find(|d| d.kind() == "identifier")
+                        }
+                    })
+                }
+            };
+            if let Some(name) = name {
+                out.insert(cx.text(&name));
+            }
+        }
+    }
+    let Some(body) = function.child_by_field_name("body") else {
+        return out;
+    };
+    for node in own_nodes(body) {
+        match node.kind() {
+            "assignment" | "augmented_assignment" | "for_statement" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    target_names(cx, left, &mut out);
+                }
+            }
+            "named_expression" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    target_names(cx, name, &mut out);
+                }
+            }
+            "as_pattern" => {
+                if let Some(alias) = node.child_by_field_name("alias") {
+                    target_names(cx, alias, &mut out);
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if matches!(child.kind(), "function_definition" | "class_definition")
+                && let Some(name) = child.child_by_field_name("name")
+            {
+                out.insert(cx.text(&name));
+            }
+        }
+    }
+    out
+}
+
 /// Record each function's literal `render_template` and
 /// `redirect(url_for(…))` calls, skipping nested functions, lambdas and
-/// classes, which are their own owners.
+/// classes, which are their own owners. A helper is Flask's where the call
+/// is: imported from Flask at module level or in the function itself, and
+/// not rebound by the function (AC-0854).
 pub(crate) fn collect(
     cx: &FileCx<'_>,
-    bindings: &HashMap<String, ImportBinding>,
+    root: TsNode<'_>,
     functions: &[(TsNode<'_>, String)],
     out: &mut Extraction,
 ) {
-    let names = flask_names(bindings);
-    if names.is_empty() {
-        return;
-    }
-    let flask = |call: TsNode<'_>| {
-        let callee = call.child_by_field_name("function")?;
-        names.get(cx.text(&callee)).copied()
-    };
-    let first_literal = |call: TsNode<'_>| {
-        let arguments = call.child_by_field_name("arguments")?;
-        let mut cursor = arguments.walk();
-        let first = arguments.named_children(&mut cursor).next()?;
-        literal_string(cx, first)
-    };
+    let module = scope_imports(cx, root);
     for (function, symbol) in functions {
         let Some(body) = function.child_by_field_name("body") else {
             continue;
+        };
+        let mut names = module.clone();
+        for name in rebound(cx, *function) {
+            names.retain(|key, _| key != name && !key.starts_with(&format!("{name}.")));
+        }
+        for (local, helper) in scope_imports(cx, body) {
+            names.retain(|key, _| key != &local && !key.starts_with(&format!("{local}.")));
+            names.insert(local, helper);
+        }
+        if names.values().all(Option::is_none) {
+            continue;
+        }
+        let flask = |call: TsNode<'_>| {
+            let callee = call.child_by_field_name("function")?;
+            names.get(cx.text(&callee)).copied().flatten()
+        };
+        let first_literal = |call: TsNode<'_>| {
+            let arguments = call.child_by_field_name("arguments")?;
+            let mut cursor = arguments.walk();
+            let first = arguments.named_children(&mut cursor).next()?;
+            literal_string(cx, first)
         };
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
@@ -223,19 +393,26 @@ fn template_files(root: &Path) -> BTreeMap<String, Vec<String>> {
     out
 }
 
-/// The literal endpoint name of the first `url_for(…)` in `text`.
+/// The literal endpoint name of the first `url_for(…)` call in `text`: the
+/// name itself, not the tail of a longer one such as `safe_url_for` or
+/// `helpers.url_for`. Any non-empty literal is a name; only a route that
+/// declares it resolves (AC-0854).
 fn url_for_name(text: &str) -> Option<String> {
-    let at = text.find("url_for(")?;
-    let rest = text[at + "url_for(".len()..].trim_start();
+    const CALL: &str = "url_for(";
+    let mut from = 0;
+    let rest = loop {
+        let at = from + text[from..].find(CALL)?;
+        from = at + CALL.len();
+        let before = text[..at].bytes().next_back();
+        if !before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.') {
+            break text[from..].trim_start();
+        }
+    };
     let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
     let rest = &rest[1..];
     let end = rest.find(quote)?;
     let name = &rest[..end];
-    (!name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'))
-    .then(|| name.to_owned())
+    (!name.is_empty() && !name.contains(['\\', '{', '}'])).then(|| name.to_owned())
 }
 
 /// The value of attribute `name` in a tag's text, quoted or bare.

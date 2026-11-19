@@ -1895,7 +1895,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     auth_guards::collect(
         &cx, root, &bindings, &resolver, &locals, &functions, &mut out,
     );
-    flask_pages::collect(&cx, &bindings, &functions, &mut out);
+    flask_pages::collect(&cx, root, &functions, &mut out);
     for (function, handler) in &functions {
         let Some(parent) = function
             .parent()
