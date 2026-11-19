@@ -499,7 +499,12 @@ fn produce(
         "data-model" => producers::data(nodes, edges, max)?,
         "adrs" => producers::adrs(nodes, edges, max)?,
         "drift-register" => producers::drift(nodes, edges, max)?,
-        "security-view" => producers::security(nodes, max)?,
+        "security-view" => producers::security(
+            (nodes, edges),
+            stories.or(beside.knowledge),
+            (mode, rejected),
+            max,
+        )?,
         "toolchain" => producers::toolchain(nodes, edges, max)?,
         "test-arrangements" => producers::tests(nodes, edges, max)?,
         // Journeys are derived after curation, so mode and rejection apply
