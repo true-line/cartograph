@@ -748,3 +748,196 @@ fn security_lists_access_control_per_capability() {
     .content;
     assert!(!plain.contains("Access control per capability"));
 }
+
+/// A Flask application from real Python adapter output: a repository guard
+/// returning 401, Flask-Login, and an unguarded route (#1979).
+fn flask_callers() -> (Vec<Node>, Vec<Edge>) {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, source: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    };
+    write(
+        "app/base.py",
+        r#"
+from functools import wraps
+from flask import Blueprint, jsonify
+
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+def authorize():
+    if missing():
+        return jsonify(error="Wrong api key"), 401
+    return None
+
+def require_api_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        error_return = authorize()
+        if error_return:
+            return error_return
+        return f(*args, **kwargs)
+    return decorated
+"#,
+    );
+    write(
+        "app/views.py",
+        r#"
+from flask import jsonify, render_template
+from flask_login import login_required
+from app.base import api_bp, require_api_auth
+
+@api_bp.route("/aliases/<int:alias_id>", methods=["DELETE"])
+@require_api_auth
+def delete_alias(alias_id):
+    return jsonify(deleted=True)
+
+@api_bp.route("/coupon", methods=["GET", "POST"])
+@login_required
+def coupon_route():
+    return render_template("coupon.html")
+
+@api_bp.route("/health")
+def health():
+    return jsonify(ok=True)
+"#,
+    );
+    write(
+        "app/main.py",
+        "from flask import Flask\nfrom app.base import api_bp\napp = Flask(__name__)\napp.register_blueprint(api_bp)\n",
+    );
+    let out = adapters_lang_python::extract_dir(
+        dir.path(),
+        &adapters_lang_python::SourceId {
+            repo: "acme/shop",
+            commit: "0123abc",
+        },
+    )
+    .unwrap();
+    (out.nodes, out.edges)
+}
+
+// AC-0856: a Python endpoint's guard reading names its caller in D1 §1.2,
+// in its user story and, by the guard's own name, in `security.md` and
+// `endpoint-permissions.md`.
+#[test]
+fn python_callers_are_named_by_their_recovered_guards() {
+    use crate::workbench::capabilities::{Stories, Story, Support};
+    use core_graph::overlay::BaseRef;
+    let (nodes, edges) = flask_callers();
+    let endpoints: Vec<&Node> = nodes.iter().filter(|n| n.label == "Endpoint").collect();
+    assert_eq!(endpoints.len(), 4, "{endpoints:?}");
+
+    // D1 §1.2: one row per caller, most operations first, any caller last.
+    let bundle = compile_spec(
+        &nodes,
+        &edges,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    );
+    let d1 = &bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "d1-product-specification")
+        .unwrap()
+        .content;
+    let actors = &d1[d1.find("## 1.2 ").unwrap()..d1.find("## 1.3 ").unwrap()];
+    assert!(
+        actors.contains(
+            "Callers by recovered guard: 2 callers over 3 guarded operations; 1 operations with \
+             no guard recovered."
+        ),
+        "{actors}"
+    );
+    let rows: Vec<&str> = actors
+        .lines()
+        .filter(|l| l.starts_with("| ") && !l.starts_with("| Caller |"))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "| Signed-in user | flask\\_login.login\\_required | 2 | GET /api/coupon; POST /api/coupon |",
+            "| Caller passing require\\_api\\_auth | require\\_api\\_auth | 1 | DELETE /api/aliases/&lt;int:alias\\_id&gt; |",
+            "| Any caller | none recovered | 1 | GET /api/health |",
+        ],
+        "{actors}"
+    );
+
+    // User stories: the caller from the guard reading, the method's verb for
+    // a handler named for its subject, an action word kept as the verb.
+    let cited_nodes: Vec<(BaseRef, &Node)> = nodes
+        .iter()
+        .filter(|n| n.label == "Endpoint" || n.label == "Symbol")
+        .map(|n| (BaseRef::Node(n.id.clone()), n))
+        .collect();
+    let cited_edges: Vec<(BaseRef, &Edge)> = edges
+        .iter()
+        .filter(|e| e.label == "HANDLES")
+        .map(|e| {
+            (
+                BaseRef::Edge(e.src.clone(), e.dst.clone(), e.label.clone()),
+                e,
+            )
+        })
+        .collect();
+    let capability = Node {
+        id: "capability:test:api".into(),
+        label: "Capability".into(),
+        props: json!({ "title": "Manage API" }),
+    };
+    let knowledge = Stories {
+        included: vec![Story {
+            node: &capability,
+            support: cited_nodes
+                .iter()
+                .map(|(c, n)| (c, Support::Node(n)))
+                .chain(cited_edges.iter().map(|(c, e)| (c, Support::Edge(e))))
+                .collect(),
+        }],
+        filtered: 0,
+    };
+    let refs: Vec<&Node> = nodes.iter().collect();
+    let stories = crate::workbench::producers::stories_with_support(
+        &refs,
+        Some(&knowledge),
+        (ExportMode::BestEffort, &BTreeSet::new()),
+        None,
+    )
+    .unwrap()
+    .content;
+    for line in [
+        "- As a signed-in user, I can view coupon (GET /api/coupon).",
+        "- As a signed-in user, I can submit coupon (POST /api/coupon).",
+        "- As a caller passing require\\_api\\_auth, I can delete alias (DELETE /api/aliases/&lt;int:alias\\_id&gt;).",
+        "- As any caller (no guard recovered), I can view health (GET /api/health).",
+    ] {
+        assert!(stories.contains(line), "{line}\n{stories}");
+    }
+
+    // A rejected inferred guard reading names no caller.
+    let guard = endpoints
+        .iter()
+        .find(|n| n.props["method"] == "DELETE")
+        .unwrap();
+    assert!(super::caller(guard, ExportMode::BestEffort, &BTreeSet::new()).is_some());
+    let rejected = BTreeSet::from([guard.props["auth"]["prov"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()]);
+    assert!(super::caller(guard, ExportMode::BestEffort, &rejected).is_none());
+
+    // Guards by their own names, never graph ids.
+    let permissions = &bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == ID)
+        .unwrap()
+        .content;
+    assert!(
+        permissions.contains("guard: require\\_api\\_auth (basis: "),
+        "{permissions}"
+    );
+    assert!(!permissions.contains("guard: sym:"), "{permissions}");
+}
