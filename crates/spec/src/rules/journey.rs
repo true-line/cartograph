@@ -428,9 +428,15 @@ fn is_dispatch_edge(edge: &Edge) -> bool {
     edge.label == "CALLS" && edge.props["resolution"].as_str() == Some("hilt-binds")
 }
 
-/// A proven call: crossed by every closure without an assumption.
+/// A proven call: crossed by every closure without an assumption. A
+/// function's rendered template and a template's `extends` / `include`
+/// count as calls (AC-0855).
 fn is_proven_call(edge: &Edge, by_id: &BTreeMap<&str, &Node>) -> bool {
-    edge.label == "CALLS" && !is_dispatch_edge(edge) && !is_gap_edge(edge, by_id)
+    matches!(
+        edge.label.as_str(),
+        "CALLS" | "RENDERS_TEMPLATE" | "INCLUDES"
+    ) && !is_dispatch_edge(edge)
+        && !is_gap_edge(edge, by_id)
 }
 
 /// The `hilt_dispatch` assumption a dispatch edge records, citing the
@@ -658,6 +664,12 @@ fn endpoint_path<'a>(endpoint: &'a Node, method: &str) -> &'a str {
 }
 
 fn screen_display_label(screen: &Node, renders_by_screen: &BTreeMap<&str, Vec<&Node>>) -> String {
+    // A server-rendered page is named by its route's endpoint name.
+    if screen.props["server_rendered"].as_bool() == Some(true)
+        && let Some(name) = screen.props["name"].as_str()
+    {
+        return name.to_owned();
+    }
     if let Some(targets) = renders_by_screen.get(screen.id.as_str()) {
         for target in targets {
             let raw = target.props["path"]
@@ -733,7 +745,11 @@ fn try_visit_symbol<'a>(
     let Some((&sym_id, &sym_node)) = by_id.get_key_value(sym_id) else {
         return;
     };
-    if sym_node.label != "Symbol" || is_gap_node(sym_node) || !same_repo(repo, sym_node) {
+    // A server-rendered page's templates are walked like its code (AC-0855).
+    if !matches!(sym_node.label.as_str(), "Symbol" | "Template")
+        || is_gap_node(sym_node)
+        || !same_repo(repo, sym_node)
+    {
         return;
     }
     if visited.len() >= budget.max_calls_per_screen {
@@ -1052,7 +1068,8 @@ fn build_screen_closure<'a>(
                 continue;
             }
             match edge.label.as_str() {
-                "FETCHES" => {
+                // A server-rendered form `SUBMITS` like a client call (AC-0855).
+                "FETCHES" | "SUBMITS" => {
                     if let Some(dst) = by_id.get(edge.dst.as_str()).copied() {
                         if is_gap_node(dst) || edge_confidence(edge) == ConfidenceTier::Gap {
                             unresolved.push(UnresolvedStepItem {
