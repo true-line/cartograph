@@ -516,6 +516,8 @@ pub fn logical_knowledge_story_compile_bound(
         super::document::rules::rules_per_capability_workspace(graph)?,
         // D1 §1.4 arranges test scenarios per Capability (AC-0850).
         super::document::acceptance::acceptance_per_capability_workspace(graph)?,
+        // D1 §1.6 describes each operation's flow per Capability (AC-0859).
+        super::document::flows::flows_per_capability_workspace(graph)?,
     ])?;
     Some(KnowledgeStoryCompileWorkspaceBound {
         capability_validation_bytes,

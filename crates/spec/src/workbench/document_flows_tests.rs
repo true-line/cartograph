@@ -106,7 +106,10 @@ fn fixture() -> (Vec<Node>, Vec<Edge>) {
 }
 
 fn render() -> (String, usize, usize) {
-    let (nodes, edges) = fixture();
+    render_with(fixture())
+}
+
+fn render_with((nodes, edges): (Vec<Node>, Vec<Edge>)) -> (String, usize, usize) {
     let flows = flowtracer::trace(&nodes, &edges);
     let nodes: Vec<&Node> = nodes.iter().collect();
     let edges: Vec<&Edge> = edges.iter().collect();
@@ -190,4 +193,47 @@ fn business_flows_describe_each_operation_per_capability() {
     for id in ["ep:", "sym:", "data:"] {
         assert!(!text.contains(id), "{id} in {text}");
     }
+}
+
+// AC-0859: a callee that shares its handler's name is still listed, and a
+// Gap-confidence edge is counted as unresolved, not named as reached.
+#[test]
+fn business_flows_keep_same_named_callees_and_count_gap_edges() {
+    let (mut nodes, mut edges) = fixture();
+    let twin = "sym:acme/mail@app/jobs.py#delete_user";
+    let lost = "sym:acme/mail@app/lost.py#notify";
+    nodes.push(node(twin, "Symbol", json!({"name": "delete_user"})));
+    nodes.push(node(lost, "Symbol", json!({"name": "notify"})));
+    edges.push(edge(DELETE_USER, twin, "CALLS", json!({})));
+    let mut gap = edge(DELETE_USER, lost, "CALLS", json!({}));
+    gap.props["prov"]["confidence_tier"] = json!("Gap");
+    edges.push(gap);
+    let (text, _, _) = render_with((nodes, edges));
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("- **DELETE /api/user**"))
+        .expect(&text);
+    assert!(line.contains("(Partial)"), "{line}");
+    assert!(
+        line.contains("; calls emit\\_user\\_audit\\_log, delete\\_user"),
+        "{line}"
+    );
+    assert!(!line.contains("notify"), "{line}");
+    assert!(line.contains("; 1 hop is unresolved"), "{line}");
+}
+
+// AC-0859: the workspace is charged at the graph ceilings and refuses
+// overflow.
+#[test]
+fn flow_arrangement_workspace_is_checked() {
+    let graph = |bytes, rows, values| flowtracer::TraceGraphBound {
+        bytes,
+        rows,
+        values,
+    };
+    let small = flows_per_capability_workspace(graph(1 << 10, 16, 64)).unwrap();
+    let large = flows_per_capability_workspace(graph(1 << 20, 1 << 10, 1 << 12)).unwrap();
+    assert!(small > 0 && large > small);
+    assert!(flows_per_capability_workspace(graph(usize::MAX, 1, 1)).is_none());
+    assert!(flows_per_capability_workspace(graph(1, usize::MAX, 1)).is_none());
 }

@@ -15,7 +15,7 @@
 //! tracer's traversal order, not an execution order, and a reached callable
 //! is not shown to run on every request.
 
-use crate::workbench::capabilities::{Stories, Support};
+use crate::workbench::capabilities::{Stories, Story, Support};
 use crate::workbench::citation_id;
 use crate::workbench::render::{Assertions, Literal, NodeName, RenderLimit, Text};
 use core_graph::{Edge, FactKey, Node};
@@ -79,8 +79,9 @@ fn operations(edge: &Edge) -> String {
 
 /// One flow, read for its line.
 struct Reading<'a> {
-    handlers: Vec<&'a str>,
-    calls: Vec<&'a str>,
+    /// `(node id, display name)` of each handler and further callable.
+    handlers: Vec<(&'a str, &'a str)>,
+    calls: Vec<(&'a str, &'a str)>,
     /// Entity name → (label → operations).
     data: BTreeMap<String, BTreeMap<&'a str, BTreeSet<String>>>,
     cites: Vec<&'a Edge>,
@@ -99,18 +100,24 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
     let mut participants: Vec<&str> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for hop in &flow.hops {
-        if hop.gap_reason.is_some() {
+        // A Gap destination or a Gap-confidence edge is unresolved: its
+        // destination is not named as a reached callable.
+        if hop.gap_reason.is_some() || hop.confidence == "Gap" {
             reading.gaps += 1;
             continue;
         }
         let (src, label, dst) = hop.stored_edge();
         if hop.label == "HANDLES" && hop.src == flow.trigger {
-            reading.handlers.push(hop.dst_name.as_str());
+            reading
+                .handlers
+                .push((hop.dst.as_str(), hop.dst_name.as_str()));
             if let Some(edge) = index.edges.get(&(src, label, dst)) {
                 reading.cites.push(edge);
             }
         } else if seen.insert(hop.dst.as_str()) && hop.label == "CALLS" {
-            reading.calls.push(hop.dst_name.as_str());
+            reading
+                .calls
+                .push((hop.dst.as_str(), hop.dst_name.as_str()));
         }
         participants.push(hop.dst.as_str());
     }
@@ -134,19 +141,26 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
             reading.cites.push(edge);
         }
     }
-    reading.calls.retain(|c| !reading.handlers.contains(c));
+    // By node identity: another callable may share a handler's name.
+    reading
+        .calls
+        .retain(|(id, _)| !reading.handlers.iter().any(|(h, _)| h == id));
     reading
 }
 
-fn list(out: &mut Text, names: &[&str]) -> Result<(), RenderLimit> {
-    for (i, name) in names.iter().take(LISTED).enumerate() {
+fn list<'n>(
+    out: &mut Text,
+    names: impl ExactSizeIterator<Item = &'n str>,
+) -> Result<(), RenderLimit> {
+    let total = names.len();
+    for (i, name) in names.take(LISTED).enumerate() {
         if i > 0 {
             out.push_str(", ")?;
         }
         write!(out, "{}", Literal(name))?;
     }
-    if names.len() > LISTED {
-        write!(out, " and {} more", names.len() - LISTED)?;
+    if total > LISTED {
+        write!(out, " and {} more", total - LISTED)?;
     }
     Ok(())
 }
@@ -186,13 +200,10 @@ pub(super) fn flows_per_capability(
     out: &mut Text,
 ) -> Result<Option<usize>, RenderLimit> {
     let by_trigger: BTreeMap<&str, &Flow> = flows.iter().map(|f| (f.trigger.as_str(), f)).collect();
-    let mut sections: Vec<(&Node, Vec<&Flow>)> = Vec::new();
-    let mut placed: BTreeSet<&str> = BTreeSet::new();
-    for story in knowledge
-        .included
-        .iter()
-        .filter(|s| s.node.label == "Capability")
-    {
+    // A capability's operations with a traced flow, in citation order. Built
+    // per capability, once to count and once to render, so no capability's
+    // list outlives its own section.
+    let operations_of = |story: &Story<'_>| -> Vec<&Flow> {
         let mut operations: Vec<&Flow> = Vec::new();
         for (_, fact) in &story.support {
             if let Support::Edge(e) = fact
@@ -203,13 +214,24 @@ pub(super) fn flows_per_capability(
                 operations.push(flow);
             }
         }
-        if operations.is_empty() {
-            continue;
+        operations
+    };
+    let capabilities = || {
+        knowledge
+            .included
+            .iter()
+            .filter(|s| s.node.label == "Capability")
+    };
+    let mut placed: BTreeSet<&str> = BTreeSet::new();
+    let mut sections = 0usize;
+    for story in capabilities() {
+        let operations = operations_of(story);
+        if !operations.is_empty() {
+            sections += 1;
+            placed.extend(operations.iter().map(|f| f.trigger.as_str()));
         }
-        placed.extend(operations.iter().map(|f| f.trigger.as_str()));
-        sections.push((story.node, operations));
     }
-    if sections.is_empty() {
+    if sections == 0 {
         return Ok(None);
     }
     let index = Index::new(nodes, edges);
@@ -221,11 +243,15 @@ pub(super) fn flows_per_capability(
          the operations each relation records. Every hop, with its tier, confidence and \
          citation, is in `flow_dossiers.md`.\n",
         placed.len(),
-        sections.len()
+        sections
     )?;
     let mut cited = 0usize;
-    for (capability, operations) in sections {
-        writeln!(out, "### {}\n", Literal(NodeName(capability)))?;
+    for story in capabilities() {
+        let operations = operations_of(story);
+        if operations.is_empty() {
+            continue;
+        }
+        writeln!(out, "### {}\n", Literal(NodeName(story.node)))?;
         let mut handled_only: Vec<String> = Vec::new();
         for flow in operations {
             let reading = read(&index, flow);
@@ -237,11 +263,11 @@ pub(super) fn flows_per_capability(
             write!(out, "- **{}** ({})", Literal(&name), flow.status.as_str())?;
             if !reading.handlers.is_empty() {
                 out.push_str(": handled by ")?;
-                list(out, &reading.handlers)?;
+                list(out, reading.handlers.iter().map(|(_, name)| *name))?;
             }
             if !reading.calls.is_empty() {
                 out.push_str("; calls ")?;
-                list(out, &reading.calls)?;
+                list(out, reading.calls.iter().map(|(_, name)| *name))?;
             }
             data_clause(out, &reading, "WRITES")?;
             data_clause(out, &reading, "READS")?;
@@ -275,9 +301,8 @@ pub(super) fn flows_per_capability(
             out.push_str("\n")?;
         }
         if !handled_only.is_empty() {
-            let names: Vec<&str> = handled_only.iter().map(String::as_str).collect();
             out.push_str("- Handled with nothing further traced: ")?;
-            list(out, &names)?;
+            list(out, handled_only.iter().map(String::as_str))?;
             out.push_str(".\n")?;
         }
         out.push_str("\n")?;
@@ -303,6 +328,49 @@ pub(super) fn flows_per_capability(
         }
     }
     Ok(Some(cited))
+}
+
+/// Logical workspace of [`flows_per_capability`] beyond the borrowed graph,
+/// flows, stories and output: the borrowed id, data-relation and edge
+/// indexes, the trigger map and placed set, one capability's operation list,
+/// and one flow's reading, citation ids and handler-only names. A flow's hops
+/// and an entity's operations are graph rows; names and operations are graph
+/// bytes. Charged at the graph's row and byte ceilings; no allocator or RSS
+/// claim. `None` on overflow.
+pub(crate) fn flows_per_capability_workspace(graph: flowtracer::TraceGraphBound) -> Option<usize> {
+    use crate::workbench::accounting::{map_slots, set_slots, slots, sum};
+    let rows = graph.rows;
+    let index = sum(&[
+        map_slots::<&str, &Node>(rows)?,
+        map_slots::<&str, Vec<&Edge>>(rows)?,
+        slots::<&Edge>(rows)?,
+        map_slots::<(&str, &str, &str), &Edge>(rows)?,
+    ])?;
+    let placement = sum(&[
+        map_slots::<&str, &Flow>(rows)?,
+        set_slots::<&str>(rows)?,
+        slots::<&Flow>(rows)?,
+    ])?;
+    // One flow: handlers, calls and participants, the seen and cited sets,
+    // the entity map with its label maps and operation sets, the cited edges
+    // and their ids, then the handler-only names of the section.
+    let reading = sum(&[
+        slots::<(&str, &str)>(rows)?.checked_mul(2)?,
+        slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?.checked_mul(2)?,
+        map_slots::<String, BTreeMap<&str, BTreeSet<String>>>(rows)?,
+        map_slots::<&str, BTreeSet<String>>(rows)?,
+        set_slots::<String>(rows)?,
+        graph.bytes.checked_mul(2)?,
+        slots::<&Edge>(rows)?,
+        slots::<String>(rows)?,
+        // `F-` plus 16 hex digits, and one cloned fact key at a time.
+        rows.checked_mul(18)?,
+        graph.bytes,
+        slots::<String>(rows)?,
+        graph.bytes,
+    ])?;
+    sum(&[index, placement, reading])
 }
 
 fn by_name(index: &Index<'_>, flow: &Flow) -> String {
