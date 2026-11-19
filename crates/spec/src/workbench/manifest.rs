@@ -271,6 +271,7 @@ mod tests {
             curated: Curated::NotComputed(CuratedFailure::ReviewsUnavailable),
             graph_content_hash: Some("graph-hash-1"),
             source_revisions: sources,
+            knowledge: None,
         }
     }
 

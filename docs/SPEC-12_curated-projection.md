@@ -13,7 +13,7 @@ curated revision, in the Spec Workbench, a `best-effort` export and an MCP
 read. Every other accepted record is listed with the reason it does not
 appear. Base facts, their tiers and the base graph hash do not change.
 
-Not in this specification: a fact shape for investigation findings; any write
+Not in this specification: any write
 to the base graph; agent-authored document sections; re-drafting on drift;
 MCP or ACP execution; extending captured evidence (#385).
 
@@ -76,11 +76,13 @@ A proposal that is pending or rejected has no state and is not listed.
 
 ### Curated revision
 
-`revision = digest("curated-revision-v2", policy_version, graph_content_hash,
+`revision = digest("curated-revision-v3", policy_version, graph_content_hash,
 [(record_id, review_decision, state, reason)…], [(draft_id, review_decision,
-state, reason)…], assertion_decision_digest)`, with the record list and the
-draft list each in identity order. Version 2 adds the section drafts of
-SPEC-15 (ADR-0064 decision 7); the policy version is `curated-policy-v2`. A rejected record enters with
+state, reason)…], [(finding_ref, review_decision, state, reason)…],
+assertion_decision_digest)`, with the record list, the draft list and the
+finding list each in identity order. Version 2 added the section drafts of
+SPEC-15 (ADR-0064 decision 7). Version 3 adds findings accepted as curated
+(ADR-0074 decision 6); the policy version is `curated-policy-v3`. A rejected record enters with
 its decision and no state, so any review gives a new revision; a pending
 record does not enter. The assertion-decision digest covers the rejections
 applied and the decisions that match no current assertion. Review notes,
@@ -93,6 +95,78 @@ Per read: `view`, `revision`, `graph_basis`. Per item and per listed record:
 `record_id`, `tier` and `confidence` as produced, `review_status`,
 `source_support` (count of captured items and of unverified items), `state`
 and `reason`.
+
+## Findings
+
+[ADR-0074](adr/ADR-0074-curated-findings.md) makes an investigation finding
+the third record kind. It is built in three slices: the projection core
+(AC-0843, implemented), the curation review (AC-0844, implemented), the
+reads (AC-0845, implemented) and the screens (AC-0846, implemented).
+
+- **Two reviews.** The follow-up review of SPEC-03 is unchanged and is not
+  curation. A separate curation review, `accepted` or `rejected`, is what
+  the projection reads. A finding with no curation review is not listed and
+  does not enter the revision.
+- **Input.** Per finding: its complete identity (the SPEC-03 review
+  subject id), the investigation, result and finding ids, the producing
+  role, the claim kind, title, statement and limitations, and for each
+  cited fact its ADR-0058 citation id with the fact digest the producing
+  run recorded. The host also passes the current digest of each cited fact
+  that is in the graph.
+- **States.** Each accepted finding gets the first that applies:
+
+  | State | Condition |
+  |---|---|
+  | `unresolvable` | It cites no fact, or a cited id has no current digest |
+  | `stale` | A cited fact's current digest differs from the recorded one |
+  | `eligible` | Neither |
+
+  Findings do not conflict and do not supersede one another. The changed
+  and the missing ids are reported whatever the state.
+- **DR-4 fields.** `finding_ref`, `tier` Agentic and `confidence`
+  InferredWeak, `review_status`, `source_support` (citations that rest on
+  captured primary-source evidence, and those that do not), `state` and
+  `reason`. Source support is reported and does not decide the state.
+- **Result.** `findings` lists every accepted finding in identity order and
+  `finding_counts` totals them by state. Two findings with one identity
+  fail the projection.
+- **Curation review (as built).** `curate_investigation_finding(requestJson)`
+  takes `{schema_version: 1, subject, expected_revision, decision}` with
+  `decision` `accepted` or `rejected`, and
+  `get_investigation_finding_curations(investigationId, expectedResultId)`
+  returns the current review of each reviewed finding of a result. The
+  host resolves the finding from the saved result under the investigation
+  store's lock, releases it, and then writes under the section draft
+  store's lock: the curation table `curated_findings` lives in that store's
+  file, so the read that gathers drafts gathers findings under the same
+  lock. The first review stores the finding with one entry per cited fact;
+  a trigger refuses any change to that content and any delete. A failure
+  has one closed code: `invalid_request`, `invalid_record`, `not_found`,
+  `subject_changed`, `conflict` with the current revision, `busy` or
+  `storage_unavailable`. A committed review emits
+  `investigation-curation://changed`. The host reads at most 4,096
+  reviewed findings and 256 accepted ones; more leaves the projection not
+  computed, with the reason.
+- **Current digests.** `spec::cited_fact_digests` gives, for the cited ids,
+  the canonical digest of every field of each node or edge of the snapshot
+  the read took. It is the digest an investigation records for a fact it
+  reads, so a finding is eligible exactly while its facts are as the run
+  read them.
+- **Reads (as built).** `curated.md` gains a section, "Findings accepted
+  as curated", written only when a finding is accepted. `best-effort`
+  prints each eligible finding as one numbered statement with its title,
+  claim kind, `T3 / InferredWeak`, producing role, source support, identity
+  and citation ids, then its limitations. Each cited node or edge is an
+  assertion of the artifact, once, so every printed id has a row in the
+  fact index. An eligible finding that cites a fact the export does not
+  admit is named and not printed. `verified-only` prints none and states
+  how many it left out. Every accepted finding that is not eligible is in
+  a table with its state, reason and changed and missing ids, the same in
+  both modes, and its statement and title are printed nowhere. The
+  Workbench read and `curated-json` carry the same split as data:
+  `findings` (shown), `findings_omitted`, `findings_listed` (identity,
+  role, state, reason and ids only) and `finding_counts`. One rule,
+  `spec::curated_finding_shown`, decides what every read shows.
 
 ## Surfaces
 
@@ -157,7 +231,12 @@ AC-0108 is realised when slices 1 to 4 are merged and MT-H3-01 has been run.
 
 ## Open items
 
-- Findings (#1746 requirement 2) need a fact shape before they can enter.
+- Findings (#1746 requirement 2): the projection core admits them, the
+  host stores and reads their curation reviews, and the export, the
+  Workbench read and the MCP reads list them (ADR-0074, AC-0843 to
+  AC-0845). The Investigations surface offers the curation review beside
+  the follow-up review, and the Workbench curated section draws the list
+  (AC-0846).
 - Cardinality is one accepted edge per Gap until slot cardinality can be
   proven from the graph.
 - The Gap predicate is duplicated in `context-hub` and `spec`; a parity test

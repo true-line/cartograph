@@ -58,8 +58,10 @@ pub struct SourceIdentifiers {
     by_citation: BTreeMap<String, BTreeSet<String>>,
 }
 
-fn word(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+/// Whether `c` continues an identifier: a letter or digit of any script,
+/// or `_`. Punctuation such as typographic quotes or dashes does not.
+fn word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Whether `name` is shaped like code and not like a plain word.
@@ -181,11 +183,10 @@ impl SourceIdentifiers {
 }
 
 fn contains_token(text: &str, token: &str) -> bool {
-    let bytes = text.as_bytes();
     text.match_indices(token).any(|(start, matched)| {
         let end = start + matched.len();
-        let before = start == 0 || !word(bytes[start - 1]);
-        let after = end == bytes.len() || !word(bytes[end]);
+        let before = !text[..start].chars().next_back().is_some_and(word);
+        let after = !text[end..].chars().next().is_some_and(word);
         before && after
     })
 }
@@ -267,9 +268,13 @@ mod tests {
             "OrderService stores an order.",
             "An order is stored (see src/orders/service.py).",
             "The logic is in service.py.",
+            "Orders are created by \u{201c}create_order\u{201d}.",
+            "Orders are created by create_order\u{2014}then stored.",
         ] {
             assert!(names.named_in(statement, &citations), "{statement}");
         }
+        // A letter of another script still continues the token.
+        assert!(!names.named_in("The create_orderé helper.", &citations));
         assert_eq!(
             names.first_naming([
                 ("A signed-in customer can place an order.", &citations[..]),

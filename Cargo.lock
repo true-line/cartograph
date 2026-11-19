@@ -2548,7 +2548,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
 dependencies = [
  "io-lifetimes 3.0.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4646,8 +4646,11 @@ dependencies = [
 name = "spec"
 version = "0.71.0"
 dependencies = [
+ "adapters-lang-go",
  "adapters-lang-java",
  "adapters-lang-kotlin",
+ "adapters-lang-python",
+ "adapters-lang-rust",
  "adapters-lang-ts",
  "blake3",
  "context-hub",
@@ -5442,9 +5445,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.27.1"
+version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5129de2ccc97808c4583d48f1fb44576d015cf241e432800572bda11ef30c3b"
+checksum = "37b2bed8f39a73439f3b0b7ed8f452be5d2911b5e9da69d352ef113bb7448fb8"
 dependencies = [
  "cc",
  "regex",

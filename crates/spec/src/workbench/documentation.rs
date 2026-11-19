@@ -22,7 +22,7 @@
 //! citation id is printed that the fact index does not resolve.
 
 use super::producers::Output;
-use super::render::{Assertions, Budget, Literal, RenderLimit, Text, inline};
+use super::render::{Assertions, Budget, Literal, RenderLimit, Text, inline_literal};
 use super::{ExportMode, citation_id};
 use crate::documents::{DocumentationDrift, ReferenceRule};
 use core_graph::{Edge, FactKey, Node};
@@ -302,7 +302,7 @@ pub(super) fn output(
         content.push_str("\n")?;
     }
 
-    inline(&mut content, &assertions.values)?;
+    inline_literal(&mut content, &assertions.values)?;
     Ok(Output {
         content: content.finish(),
         assertions: assertions.values,

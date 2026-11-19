@@ -33,16 +33,57 @@ impl std::fmt::Display for CapabilityStoryInputError {
 }
 impl std::error::Error for CapabilityStoryInputError {}
 
-pub(super) enum Support<'a> {
+/// Knowledge stories validated against one base snapshot, ready to supply to
+/// a whole-bundle or selected compilation ([`crate::Supplied::knowledge`]).
+/// Built only by [`validate_knowledge_stories`], so every supplied story
+/// passed the same checks as the MCP read's (#1443).
+pub struct KnowledgeStories<'a>(pub(super) Stories<'a>);
+
+impl std::fmt::Debug for KnowledgeStories<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KnowledgeStories")
+            .field("included", &self.0.included.len())
+            .field("filtered", &self.0.filtered)
+            .finish()
+    }
+}
+
+impl KnowledgeStories<'_> {
+    /// Stories the export mode and rejections keep.
+    pub fn included(&self) -> usize {
+        self.0.included.len()
+    }
+    /// Stories withheld because they or their support are filtered.
+    pub fn filtered(&self) -> usize {
+        self.0.filtered
+    }
+}
+
+/// Validate overlay Capability candidates and Actors against `base` under one
+/// export policy, as [`compile_knowledge_user_stories`] does, for a host that
+/// compiles the whole bundle or a selection rather than `user-stories` alone.
+/// `base` must be the snapshot the compilation reads; the caller proves the
+/// overlay is current for its revision. Invalid input fails atomically.
+pub fn validate_knowledge_stories<'a>(
+    base: &'a RevisionedSnapshot,
+    candidates: &[CapabilityStory<'a>],
+    actors: &'a [core_graph::overlay::OverlayFact],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> Result<KnowledgeStories<'a>, CapabilityStoryInputError> {
+    validated_stories(base, candidates, actors, mode, rejected).map(KnowledgeStories)
+}
+
+pub(crate) enum Support<'a> {
     Node(&'a Node),
     Edge(&'a Edge),
 }
-pub(super) struct Story<'a> {
+pub(crate) struct Story<'a> {
     pub node: &'a Node,
     pub support: Vec<(&'a BaseRef, Support<'a>)>,
 }
 #[derive(Default)]
-pub(super) struct Stories<'a> {
+pub(crate) struct Stories<'a> {
     pub included: Vec<Story<'a>>,
     pub filtered: usize,
 }

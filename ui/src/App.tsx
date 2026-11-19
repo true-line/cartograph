@@ -351,13 +351,20 @@ export default function App() {
         const { listen } = await import('@tauri-apps/api/event');
         const stopReviews = await listen<import('./findingReviews').FindingReviewChanged>('investigation-review://changed', (event) =>
           useInvestigationStore.getState().invalidateReview(event.payload));
-        if (disposed) stopReviews(); else unlisten = stopReviews;
+        // ADR-0074: a curation review changes what the curated reads show,
+        // so a bundle on screen is read again.
+        const stopCurations = await listen<import('./findingCurations').FindingCurationChanged>('investigation-curation://changed', (event) => {
+          useInvestigationStore.getState().invalidateCuration(event.payload);
+          if (useAppStore.getState().specBundle) void useAppStore.getState().reloadSpec();
+        });
+        const stopReviewEvents = () => { stopReviews(); stopCurations(); };
+        if (disposed) stopReviewEvents(); else unlisten = stopReviewEvents;
         const stop = await listen<InvestigationChanged>('investigation://changed', (event) => {
           useInvestigationStore.getState().invalidate(event.payload);
           useSpecialistActivityStore.getState().invalidate();
           useSavedResultNoticeStore.getState().observe(event.payload);
         });
-        if (disposed) stop(); else unlisten = () => { stop(); stopReviews(); };
+        if (disposed) stop(); else unlisten = () => { stop(); stopReviewEvents(); };
       } catch { /* Browser previews have no event bridge. */ }
     })();
     return () => { disposed = true; unlisten?.(); };

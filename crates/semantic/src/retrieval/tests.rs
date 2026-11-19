@@ -416,3 +416,62 @@ fn the_vector_index_is_rebuilt_with_the_units_and_only_proposes_candidates() {
     large.vector_index = None;
     assert_eq!(large.search("q 1600", Some(&Spread), 5).unwrap(), hits);
 }
+
+// AC-0501: a derived flow is a ranked unit whose hit cites the base facts
+// the flow was traced from, by text and by vector.
+#[test]
+fn a_derived_flow_is_ranked_and_cites_its_base_facts() {
+    let (nodes, edges) = base();
+    let cites: BTreeSet<BaseRef> = [
+        BaseRef::Node("ep:pay".into()),
+        BaseRef::Node("sym:pay".into()),
+        BaseRef::Edge("ep:pay".into(), "sym:pay".into(), "HANDLES".into()),
+    ]
+    .into_iter()
+    .collect();
+    let flow = |id: &str, hop: &str| OverlayFact {
+        item: OverlayItem::Node(node(
+            id,
+            "BusinessFlow",
+            serde_json::json!({
+                "name": "Traced flow from POST /pay",
+                "trace": {"trigger_kind": "Endpoint", "trigger_name": "POST /pay", "status": "Verified",
+                    "hops": [{"label": "HANDLES", "src_name": "POST /pay", "dst_name": hop}]},
+            }),
+        )),
+        cites: cites.clone(),
+    };
+    let derived = vec![
+        flow("business-flow:a", "refund ledger"),
+        // Not a flow, and a flow that takes a base node's id: neither is a
+        // flow unit.
+        OverlayFact {
+            item: OverlayItem::Node(node(
+                "capability:x",
+                "Capability",
+                serde_json::json!({"title": "refund ledger"}),
+            )),
+            cites: cites.clone(),
+        },
+        flow("sym:charge", "refund ledger"),
+    ];
+    let mut index = Retrieval::build_with_flows(&nodes, &edges, &derived).unwrap();
+    let hits = index.search("refund ledger", None, 10).unwrap();
+    assert_eq!(ids(&hits), [("business-flow:a", Reason::Ranked)]);
+    assert_eq!(hits[0].cites, cites.iter().cloned().collect::<Vec<_>>());
+    assert_eq!(hits[0].tier, Tier::Semantic);
+    // A flow is never an anchor: its name ranks it, and the base node of
+    // the same id keeps its own citation.
+    let named = index
+        .search("Traced flow from POST /pay", None, 10)
+        .unwrap();
+    assert!(named.iter().all(|h| h.reason == Reason::Ranked));
+    let charge = index.search("card charge", None, 10).unwrap();
+    assert_eq!(charge[0].cites, vec![BaseRef::Node("sym:charge".into())]);
+    // The vector leg holds the flow as well.
+    index.embed_units(&Pinned::new()).unwrap();
+    assert_eq!(index.indexed_vectors(), Some(6));
+    // Without derived facts the index is the base index.
+    let plain = Retrieval::build(&nodes, &edges).unwrap();
+    assert!(plain.search("refund ledger", None, 10).unwrap().is_empty());
+}

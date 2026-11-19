@@ -503,7 +503,12 @@ Limits today:
   export's own read of the graph, the proposal is listed as stale for that
   export. Export again.
 - Investigation findings accepted for follow-up are not listed. A finding
-  has no relation to show.
+  is listed only after you accept it as curated in its investigation, which
+  is a separate review. A best-effort export then prints it as a cited
+  statement marked InferredWeak while every fact it cites is unchanged, and
+  the **Curated items** section of the Workbench lists it. A verified-only
+  export prints none and says how many it left out. A finding whose cited
+  fact changed or is gone is listed with the reason, without its text.
 - A work packet cannot select this document. A complete-session MCP client
   can read it (see **Read-only MCP** in Settings).
 
