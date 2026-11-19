@@ -66,6 +66,9 @@ const D1_ID: &str = "d1-product-specification";
 
 /// The two projections of the stored coverage inventories (AC-0592).
 const COVERAGE_IDS: [&str; 2] = ["coverage", "coverage-index"];
+/// The bundle manifest, which states the graph hash, curated revision and
+/// source revisions the export was compiled from (AC-0682).
+const MANIFEST_ID: &str = "bundle-manifest";
 
 /// The artifacts an MCP reader may select: the compiler's catalogue without
 /// the ids in [`NOT_READABLE`], and the structured form of the curated
@@ -171,11 +174,16 @@ impl ReadSession {
                 },
             )
             .map_err(|_| ReadError::Storage)?
-        } else if id == curated_read::ARTIFACT_ID || id == D1_ID || COVERAGE_IDS.contains(&id) {
+        } else if id == curated_read::ARTIFACT_ID
+            || id == D1_ID
+            || id == MANIFEST_ID
+            || COVERAGE_IDS.contains(&id)
+        {
             // The selected compiler the desktop single-artifact read uses,
             // supplied as the export supplies it. `curated.md` and the D1
             // document read the projection this session computed and no
-            // coverage inventory.
+            // coverage inventory, as does the bundle manifest, which states
+            // the graph hash, curated revision and source revisions.
             // The coverage artifacts (#1814, AC-0657) read the inventories
             // of this session's own bounded read, borrowed, and no
             // projection. Neither reads a security projection.
