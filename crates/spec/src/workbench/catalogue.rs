@@ -120,9 +120,9 @@ const SECTIONS: &[CatalogueSection] = &[
         title: "Business rules",
         kind: SectionKind::Framed,
         subject: Some("BusinessRule"),
-        // A rule's text is rendered only by the rule inventory, under its own
-        // disclosure policy, so the frame is that artifact and never a
-        // second rendering of the rule.
+        // A rule's full observation is rendered only by the rule inventory,
+        // under its own disclosure policy. With derived Capabilities, D1 also
+        // lists the rejection exits each one reaches (AC-0849).
         frame: Some(SectionFrame::Artifacts(&["rule-evidence.md"])),
     },
     CatalogueSection {

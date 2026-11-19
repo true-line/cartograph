@@ -512,6 +512,8 @@ pub fn logical_knowledge_story_compile_bound(
         capability_render
             .current_bytes
             .max(actor_render.current_bytes),
+        // D1 §1.5 arranges rules per Capability while rendering (AC-0849).
+        super::document::rules::rules_per_capability_workspace(graph)?,
     ])?;
     Some(KnowledgeStoryCompileWorkspaceBound {
         capability_validation_bytes,

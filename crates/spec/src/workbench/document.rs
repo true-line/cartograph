@@ -29,7 +29,9 @@
 //! (ADR-0058). The flow frame summarizes the traced flows and the gap frame
 //! counts the Gap findings; `flow_dossiers.md` and `gap_register.md` hold
 //! and cite each one. An artifact frame names the artifacts of the same
-//! export that hold the statements; they are not repeated here.
+//! export that hold the statements; they are not repeated here. With
+//! derived Capabilities, §1.5 lists the rejection exits each one reaches
+//! (`document_rules.rs`, AC-0849).
 //!
 //! **Header.** The catalogue version and the export mode always. The graph
 //! content hash is the one the host supplies, or the supplied curated
@@ -818,7 +820,24 @@ pub(super) fn d1(
                 SectionFrame::Nodes(label) => framed(nodes, label).len(),
                 _ => 0,
             };
-            if derived == 0 || base > 0 {
+            let arranged = matches!(source, SectionFrame::Artifacts(_))
+                && section.subject == Some("BusinessRule")
+                && knowledge
+                    .is_some_and(|k| k.included.iter().any(|s| s.node.label == "Capability"));
+            if arranged && let Some(knowledge) = knowledge {
+                // Arranged per capability (#1443); the inventory keeps every
+                // observation with its dependencies.
+                content.push_str(
+                    "Every rule observation, with its tier, confidence, citation and \
+                     dependencies, is in `rule-evidence.md` of this export.\n",
+                )?;
+                cited += rules::rules_per_capability(
+                    (nodes, edges),
+                    knowledge,
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
+            } else if derived == 0 || base > 0 {
                 cited += frame(
                     section,
                     source,
@@ -878,6 +897,9 @@ pub(super) fn d1(
         subjects: assertions.subjects,
     })
 }
+
+#[path = "document_rules.rs"]
+pub(super) mod rules;
 
 #[cfg(test)]
 #[path = "document_tests.rs"]
