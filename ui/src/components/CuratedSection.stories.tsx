@@ -2,8 +2,8 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { CuratedSection } from './CuratedSection';
 import {
-  CURATED_GRAPH_BASIS, CURATED_REVISION, NOT_COMPUTED_READ, UNVERIFIED_RECORD,
-  curatedReadFixture, emptyCuratedRead,
+  CURATED_GRAPH_BASIS, CURATED_REVISION, ELIGIBLE_FINDING, NOT_COMPUTED_READ, STALE_FINDING,
+  UNVERIFIED_RECORD, curatedFindingsReadFixture, curatedReadFixture, emptyCuratedRead,
 } from '../curatedFixtures';
 
 // SPEC-12 slice 3 (ADR-0061), AC-0655: the Workbench shows the curated
@@ -170,5 +170,76 @@ export const NotRead: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByTestId('curated-unread')).toHaveTextContent('has not been read');
     await expect(canvas.queryByRole('button')).not.toBeInTheDocument();
+  },
+};
+
+export const FindingsAcceptedAsCurated: Story = {
+  // AC-0846: a best-effort read lists each eligible finding with its
+  // statement, marks and citation ids, and every other accepted finding
+  // with its state and reason and without its statement.
+  args: { read: curatedFindingsReadFixture() },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('heading', { level: 4, name: 'Findings accepted as curated' })).toBeVisible();
+    const counts = canvas.getByLabelText('Curated finding counts');
+    await expect(counts).toHaveTextContent('Accepted2');
+    await expect(counts).toHaveTextContent('Eligible1');
+    await expect(counts).toHaveTextContent('Stale1');
+    await expect(counts).toHaveTextContent('Unresolvable0');
+
+    const shown = within(canvas.getByRole('list', { name: 'Curated findings (1)' }));
+    await expect(shown.getByText(ELIGIBLE_FINDING.title)).toBeVisible();
+    await expect(shown.getByText(ELIGIBLE_FINDING.statement)).toBeVisible();
+    await expect(shown.getByText('Agentic')).toBeVisible();
+    await expect(shown.getByText('Inferred (weak)')).toHaveClass('tier-badge', 'tier-inferredweak');
+    await expect(shown.getByText(/human-reviewed: accepted as curated/)).toHaveTextContent('T3 / InferredWeak');
+    await expect(shown.getByText(/human-reviewed: accepted as curated/)).toHaveTextContent(
+      'source support: captured 1, unverified 1',
+    );
+    await expect(shown.getByText('domain-analyst@2')).toBeVisible();
+    for (const id of ELIGIBLE_FINDING.citations) await expect(shown.getByText(id)).toBeVisible();
+    await expect(shown.getByText('Limitation: Partial refunds were not read.')).toBeVisible();
+
+    const listed = within(canvas.getByRole('table', { name: /Accepted findings that are not eligible \(1\)/ }));
+    const row = within(listed.getByRole('row', { name: /F2/ }));
+    await expect(row.getByText('stale')).toBeVisible();
+    await expect(row.getByText(`${STALE_FINDING.reason_sentence} (cited_fact_changed)`)).toBeVisible();
+    await expect(row.getByText('F-00000000000000c1')).toBeVisible();
+    await expect(canvas.queryByTestId('curated-findings-omitted')).not.toBeInTheDocument();
+  },
+};
+
+export const VerifiedOnlyShowsNoFinding: Story = {
+  // AC-0846: a verified-only read shows no finding and the number left out;
+  // the findings that are not eligible stay listed.
+  args: { read: curatedFindingsReadFixture('verified-only') },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('curated-findings-omitted')).toHaveTextContent(
+      'Eligible findings left out: 1.',
+    );
+    await expect(canvas.queryByText(ELIGIBLE_FINDING.statement)).not.toBeInTheDocument();
+    await expect(canvas.queryByText(ELIGIBLE_FINDING.title)).not.toBeInTheDocument();
+    await expect(canvas.queryByRole('list', { name: /Curated findings/ })).not.toBeInTheDocument();
+    await expect(canvas.getByRole('table', { name: /Accepted findings that are not eligible \(1\)/ })).toBeVisible();
+  },
+};
+
+export const NoFindingAccepted: Story = {
+  // AC-0846: a read with no accepted finding says so; a read from a host
+  // that sends no finding fields draws no findings section.
+  args: {
+    read: {
+      ...emptyCuratedRead(),
+      findings: [],
+      findings_omitted: 0,
+      findings_listed: [],
+      finding_counts: { accepted: 0, eligible: 0, unresolvable: 0, stale: 0 },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('curated-findings-empty')).toBeVisible();
+    await expect(canvas.queryByRole('list', { name: /Curated findings/ })).not.toBeInTheDocument();
   },
 };

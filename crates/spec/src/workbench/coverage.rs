@@ -1398,6 +1398,7 @@ mod tests {
                     },
                 },
                 crate::Supplied {
+                    knowledge: None,
                     coverage: &records,
                     stale_coverage: stale,
                     curated: crate::Curated::NotSupplied,

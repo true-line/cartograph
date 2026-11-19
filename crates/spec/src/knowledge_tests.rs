@@ -1028,7 +1028,9 @@ fn capability_stories_preserve_base_bytes_and_filter_whole_derived_story() {
     let (derived_base_stories, derived_story) = derived_stories
         .split_once("## US-R-0002 — Derived Capability")
         .unwrap();
-    assert!(derived_story.starts_with("\n\n    "));
+    // A readable title, then the story's exact JSON identity (#1443).
+    assert!(derived_story.starts_with(": "));
+    assert!(derived_story.contains("\n\n    [\""));
     let derived_table = derived_table
         .split_once("\n## Derived assertions and provenance")
         .unwrap()
@@ -1551,4 +1553,173 @@ fn controller_capability_omits_ambiguous_foreign_and_unproven_routes() {
     );
     // Unchanged, both controllers are named.
     assert_eq!(titles(&base).len(), 2);
+}
+
+// #1443: a Vendure-shaped admin resolver, through the real TypeScript
+// adapter, yields readable user stories in the whole-bundle export the
+// desktop compiles, not only in the MCP single-artifact read.
+const ADMIN_PATH: &str = "packages/core/src/api/resolvers/admin/product.resolver.ts";
+const ADMIN_SOURCE: &[u8] = br#"
+import { Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Permission } from '@vendure/common/lib/generated-types';
+import { Allow } from '../../decorators/allow.decorator';
+@Resolver()
+export class ProductResolver {
+  @Query()
+  @Allow(Permission.ReadCatalog, Permission.ReadProduct)
+  products() {}
+  @Mutation()
+  @Allow(Permission.CreateCatalog, Permission.CreateProduct)
+  createProduct() {}
+}
+"#;
+fn knowledge_bundle(
+    base: &RevisionedSnapshot,
+    capabilities: &[OverlayFact],
+    actors: &[OverlayFact],
+    mode: crate::ExportMode,
+) -> crate::SpecBundle {
+    let candidates: Vec<_> = capabilities
+        .iter()
+        .map(|fact| crate::CapabilityStory {
+            capability: capability(fact),
+            cites: &fact.cites,
+        })
+        .collect();
+    let knowledge =
+        crate::validate_knowledge_stories(base, &candidates, actors, mode, &BTreeSet::new())
+            .unwrap();
+    crate::try_compile_spec_supplied(
+        &base.graph.0,
+        &base.graph.1,
+        &[],
+        mode,
+        &BTreeSet::new(),
+        crate::Supplied {
+            knowledge: Some(&knowledge),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+#[test]
+fn vendure_like_bundle_renders_readable_derived_user_stories() {
+    use crate::ExportMode::{BestEffort, VerifiedOnly};
+    let base = fixture_source(ADMIN_SOURCE, ADMIN_PATH, REPO);
+    let capabilities = derive_graphql_resolver_capabilities(&base).facts;
+    let actors = derive_permission_actors(&base).facts;
+    assert_eq!(capabilities.len(), 1);
+    assert_eq!(actors.len(), 2);
+    // No base Capability: before #1443 the desktop export said so.
+    let bare = crate::compile_spec(
+        &base.graph.0,
+        &base.graph.1,
+        &[],
+        BestEffort,
+        &BTreeSet::new(),
+    );
+    let stories_of = |bundle: &crate::SpecBundle| {
+        bundle
+            .artifacts
+            .iter()
+            .find(|a| a.id == "user-stories")
+            .unwrap()
+            .clone()
+    };
+    assert!(
+        stories_of(&bare)
+            .content
+            .contains("No Capability facts have been recovered yet.")
+    );
+
+    let bundle = knowledge_bundle(&base, &capabilities, &actors, BestEffort);
+    let stories = stories_of(&bundle);
+    assert!(stories.verify_identity());
+    let content = &stories.content;
+    assert!(!content.contains("No Capability facts"), "{content}");
+    assert!(
+        content.contains(
+            "## US-R-0001 — Derived Capability: admin GraphQL operations in ProductResolver"
+        ),
+        "{content}"
+    );
+    assert!(
+        content.contains(
+            "- As an admin API caller holding CreateCatalog or CreateProduct, I can create product (MUTATION admin.createProduct)."
+        ),
+        "{content}"
+    );
+    assert!(
+        content.contains(
+            "- As an admin API caller holding ReadCatalog or ReadProduct, I can view products (QUERY admin.products)."
+        ),
+        "{content}"
+    );
+    // The bundle's artifact equals the selected one and the MCP read's, and
+    // the selected fact index (which resolves every citation) is the bundle's.
+    let candidates: Vec<_> = capabilities
+        .iter()
+        .map(|fact| crate::CapabilityStory {
+            capability: capability(fact),
+            cites: &fact.cites,
+        })
+        .collect();
+    let mcp = citation_artifact(
+        crate::compile_knowledge_user_stories(
+            &base,
+            &candidates,
+            &actors,
+            BestEffort,
+            &BTreeSet::new(),
+            citation_limits(usize::MAX),
+        )
+        .unwrap(),
+    );
+    assert_eq!(mcp, stories);
+    let knowledge = crate::validate_knowledge_stories(
+        &base,
+        &candidates,
+        &actors,
+        BestEffort,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    let selected = crate::compile_spec_selected_supplied(
+        &base.graph.0,
+        &base.graph.1,
+        &[],
+        BestEffort,
+        &BTreeSet::new(),
+        &["user-stories", "fact-index"],
+        citation_limits(usize::MAX),
+        crate::Supplied {
+            knowledge: Some(&knowledge),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(citation_artifact(selected[0].clone()), stories);
+    let bundle_index = bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "fact-index")
+        .unwrap();
+    assert_eq!(&citation_artifact(selected[1].clone()), bundle_index);
+    if std::env::var_os("PRINT_STORIES").is_some() {
+        println!("{content}");
+    }
+
+    // A verified-only export withholds the weak derived stories and says so.
+    let strict = stories_of(&knowledge_bundle(
+        &base,
+        &capabilities,
+        &actors,
+        VerifiedOnly,
+    ));
+    assert!(strict.assertions.is_empty());
+    assert!(
+        strict.content.contains("derived stories omitted"),
+        "{}",
+        strict.content
+    );
 }

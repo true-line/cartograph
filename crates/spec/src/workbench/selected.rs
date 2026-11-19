@@ -85,6 +85,10 @@ pub struct Supplied<'a> {
     /// recovered at, when the host has them. The bundle manifest states
     /// them (AC-0682); no other artifact reads them.
     pub source_revisions: Option<&'a [crate::SourceRevision]>,
+    /// The knowledge-layer Capability and Actor stories the host validated
+    /// against this graph (#1443). When present, `user-stories` renders them
+    /// beside the base Capabilities, exactly as the MCP read does.
+    pub knowledge: Option<&'a capabilities::KnowledgeStories<'a>>,
 }
 
 /// One stored inventory the host compared with the repository's current
@@ -122,6 +126,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) graph_content_hash: Option<&'a str>,
     /// The source revisions the host supplied, if any.
     pub(crate) source_revisions: Option<&'a [crate::SourceRevision]>,
+    /// Validated knowledge stories the host supplied, if any (#1443).
+    pub(crate) knowledge: Option<&'a capabilities::Stories<'a>>,
 }
 
 impl<'a> Beside<'a> {
@@ -145,6 +151,7 @@ impl<'a> Beside<'a> {
             curated: supplied.curated,
             graph_content_hash: supplied.graph_content_hash,
             source_revisions: supplied.source_revisions,
+            knowledge: supplied.knowledge.map(|k| &k.0),
         }
     }
 }
@@ -483,7 +490,7 @@ fn produce(
         assertions,
         subjects,
     } = match a.id {
-        "user-stories" => match stories {
+        "user-stories" => match stories.or(beside.knowledge) {
             Some(stories) => producers::stories_with_support(nodes, Some(stories), max)?,
             None => producers::stories(nodes, max)?,
         },
@@ -593,9 +600,10 @@ fn produce(
         "endpoint-inventory" => {
             endpoint_inventory::output(nodes, (mode, beside.endpoints_withheld), max)?
         }
-        // The curated projection the host supplied, and the admitted nodes
-        // its items cite (AC-0653). No stored inventory is read.
-        curated::ARTIFACT_ID => curated::output(nodes, beside.curated, mode, max)?,
+        // The curated projection the host supplied, the admitted nodes its
+        // items cite and the admitted facts its findings cite (AC-0653,
+        // AC-0845). No stored inventory is read.
+        curated::ARTIFACT_ID => curated::output((nodes, edges), beside.curated, mode, max)?,
         // The catalogue's D1 over the admitted nodes and flows, the gap
         // count and the supplied projection's revision (AC-0663).
         document::D1_ARTIFACT_ID => document::d1(
@@ -733,6 +741,7 @@ pub fn compile_spec_selected_with_coverage(
         requested_ids,
         limits,
         Supplied {
+            knowledge: None,
             coverage,
             stale_coverage: &[],
             curated: Curated::NotSupplied,

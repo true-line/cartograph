@@ -15,6 +15,12 @@
 //! either form, only the number left out (R-INT-5). Listed records and
 //! assertion decisions assert nothing and are the same in both modes.
 //!
+//! Findings accepted as curated (ADR-0074, AC-0845) follow the same rule:
+//! `curated.md` prints them as the export does, and `curated-json` carries
+//! `findings` (the eligible ones, in `best-effort` only), `findings_omitted`,
+//! `findings_listed` (every other accepted finding, without its statement)
+//! and `finding_counts`, the split the Workbench reads.
+//!
 //! A projection that was not computed is stated with its reason in both
 //! forms. Nothing here writes a fact or changes a tier (R-INT-1, R-INT-3).
 
@@ -120,6 +126,7 @@ impl CuratedRead {
                     items: shown,
                     items_omitted: projection.items.len() - shown.len(),
                     listed: &projection.listed,
+                    findings: crate::curated_workbench::FindingsRead::of(projection, mode),
                     assertion_decisions: &projection.assertion_decisions,
                     counts: projection.counts,
                 })
@@ -176,6 +183,10 @@ struct Computed<'a> {
     /// Curated items the export mode leaves out.
     items_omitted: usize,
     listed: &'a [CuratedRecord],
+    /// `findings`, `findings_omitted`, `findings_listed` and
+    /// `finding_counts` (ADR-0074 decision 11).
+    #[serde(flatten)]
+    findings: crate::curated_workbench::FindingsRead,
     assertion_decisions: &'a AssertionDecisionSummary,
     counts: CuratedCounts,
 }
