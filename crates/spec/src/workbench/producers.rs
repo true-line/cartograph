@@ -684,7 +684,9 @@ pub(super) fn data(
         &budget,
         "# Recovered data model\n\n```mermaid\nflowchart LR\n",
     )?;
-    for n in &model_nodes {
+    // The diagram draws the entities and the relations between them; the
+    // callables that read or write each one are listed under it (#1983).
+    for n in model_nodes.iter().filter(|n| n.label == "DataEntity") {
         writeln!(
             content,
             "    d{}[\"{}\"]",
@@ -692,7 +694,10 @@ pub(super) fn data(
             Replace(ModelName(n), &[('\r', " "), ('\n', " "), ('"', "'")])
         )?;
     }
-    for e in &mappings {
+    for e in mappings
+        .iter()
+        .filter(|e| entity_ids.contains(e.src.as_str()) && entity_ids.contains(e.dst.as_str()))
+    {
         writeln!(
             content,
             "    d{} -->|{}| d{}",
@@ -704,6 +709,9 @@ pub(super) fn data(
     content.push_str("```\n")?;
     if entities.is_empty() {
         content.push_str("\nNo DataEntity facts have been recovered yet.\n")?;
+    }
+    if !entities.is_empty() {
+        entity_sections(&entities, &mappings, &by_id, &mut content)?;
     }
     if !model_nodes.is_empty() {
         content.push_str(DATA_CITATIONS)?;
@@ -811,6 +819,153 @@ pub(super) fn data(
         }
     }
     finish(content, assertions)
+}
+/// One section per entity (#1983): its table, its columns, the entities it
+/// references and is referenced by, and the callables that write and read
+/// it, by name and operation. The entity and its relations to other
+/// entities cite their facts; each writer and reader relation is cited in
+/// the relations table after it, which keeps every fact with its ids.
+fn entity_sections(
+    entities: &[&Node],
+    mappings: &[&Edge],
+    by_id: &BTreeMap<&str, &Node>,
+    out: &mut Text,
+) -> Result<(), RenderLimit> {
+    /// Most callables listed per operation before "and N more".
+    const LISTED: usize = 8;
+    let name = |id: &str| -> String {
+        match by_id.get(id) {
+            Some(n) if n.label == "Symbol" => id
+                .rsplit_once('#')
+                .map_or_else(|| NodeName(n).to_string(), |(_, q)| q.to_owned()),
+            Some(n) => NodeName(n).to_string(),
+            None => id.to_owned(),
+        }
+    };
+    let cites = |edges: &[&&Edge]| -> String {
+        edges
+            .iter()
+            .map(|e| edge_citation(e))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    out.push_str("\n## Entities\n")?;
+    for entity in entities {
+        writeln!(out, "\n### {}\n", Safe(NodeName(entity)))?;
+        let store = text_prop(entity, &["table", "store", "collection"]);
+        writeln!(
+            out,
+            "{}Cites {}.\n",
+            store.map_or_else(String::new, |t| format!("Stored in `{}`. ", Safe(t))),
+            node_citation(entity)
+        )?;
+        let columns: Vec<&serde_json::Value> = entity
+            .props
+            .get("columns")
+            .or_else(|| entity.props.get("fields"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .collect();
+        if !columns.is_empty() {
+            out.push_str("| Column | Type | Key | Nullable |\n|---|---|---|---|\n")?;
+            for column in columns {
+                let key = column["primary_key"]
+                    .as_bool()
+                    .or_else(|| column["id"].as_bool())
+                    .unwrap_or(false);
+                writeln!(
+                    out,
+                    "| `{}` | {} | {} | {} |",
+                    Safe(relation_value(&column["name"])),
+                    Safe(relation_value(&column["type"])),
+                    if key { "primary" } else { "" },
+                    Safe(relation_value(&column["nullable"])),
+                )?;
+            }
+            out.push_str("\n")?;
+        }
+        let id = entity.id.as_str();
+        let related = |outgoing: bool| -> Vec<&&Edge> {
+            mappings
+                .iter()
+                .filter(|e| e.label == "REFERENCES" || e.label == "MAPS_TO")
+                .filter(|e| if outgoing { e.src == id } else { e.dst == id })
+                // Entity to entity only: a repository's binding to its
+                // entity is not a relation between entities.
+                .filter(|e| {
+                    let other = if outgoing { &e.dst } else { &e.src };
+                    by_id
+                        .get(other.as_str())
+                        .is_some_and(|n| n.label == "DataEntity")
+                })
+                .collect()
+        };
+        for (title, outgoing) in [("References", true), ("Referenced by", false)] {
+            let edges = related(outgoing);
+            if edges.is_empty() {
+                continue;
+            }
+            let others: BTreeSet<String> = edges
+                .iter()
+                .map(|e| name(if outgoing { &e.dst } else { &e.src }))
+                .collect();
+            writeln!(
+                out,
+                "- **{title}:** {} ({})",
+                Safe(others.into_iter().collect::<Vec<_>>().join(", ")),
+                cites(&edges)
+            )?;
+        }
+        for (title, label) in [("Written by", "WRITES"), ("Read by", "READS")] {
+            let edges: Vec<&&Edge> = mappings
+                .iter()
+                .filter(|e| e.label == label && e.dst == id)
+                .collect();
+            if edges.is_empty() {
+                continue;
+            }
+            // Callables grouped by the operations their relation records.
+            let mut by_operation: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for e in &edges {
+                let operations = e.props["operations"]
+                    .as_array()
+                    .map(|ops| {
+                        ops.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .filter(|ops| !ops.is_empty())
+                    .or_else(|| e.props["operation"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unspecified".to_owned());
+                by_operation
+                    .entry(operations)
+                    .or_default()
+                    .insert(format!("`{}`", name(&e.src)));
+            }
+            let groups: Vec<String> = by_operation
+                .into_iter()
+                .map(|(operation, callers)| {
+                    let total = callers.len();
+                    let mut shown: Vec<String> = callers.into_iter().take(LISTED).collect();
+                    if total > LISTED {
+                        shown.push(format!("and {} more", total - LISTED));
+                    }
+                    format!("{operation}: {}", shown.join(", "))
+                })
+                .collect();
+            writeln!(
+                out,
+                "- **{title}** ({} callables): {}",
+                edges.len(),
+                Safe(groups.join("; "))
+            )?;
+        }
+    }
+    Ok(())
 }
 pub(super) fn adrs(
     nodes: &[&Node],
