@@ -163,15 +163,12 @@ fn controller_capability_groups_real_spring_routes_by_class() {
     // The nested class is a controller of its own; the interface is not one.
     assert_eq!(
         controller_titles(&java),
-        [
-            "HTTP operations in OrderController",
-            "HTTP operations in OrderController.Audit"
-        ]
+        ["Manage orders", "View order audits"]
     );
     let orders = report
         .facts
         .iter()
-        .find(|fact| capability(fact).props["title"] == "HTTP operations in OrderController")
+        .find(|fact| capability(fact).props["title"] == "Manage orders")
         .unwrap();
     let node = capability(orders);
     assert!(node.id.starts_with("capability:http-controller:"));
@@ -215,10 +212,7 @@ fn controller_capability_groups_real_spring_routes_by_class() {
     // Kotlin: the class is a controller; the object is not a plain class.
     let kotlin = spring_snapshot(false);
     let report = derive_controller_capabilities(&kotlin);
-    assert_eq!(
-        controller_titles(&kotlin),
-        ["HTTP operations in StockController"]
-    );
+    assert_eq!(controller_titles(&kotlin), ["Manage stocks"]);
     let sym = |name: &str| format!("sym:{REPO}@{SPRING_KOTLIN_PATH}#{name}");
     let list = format!("ep:{REPO}@GET:/stock");
     let reserve = format!("ep:{REPO}@POST:/stock/{{sku}}/reserve");
@@ -255,10 +249,10 @@ fn controller_capability_groups_real_spring_routes_by_class() {
     assert_eq!(
         controller_titles(&all),
         [
-            "HTTP operations in HealthController",
-            "HTTP operations in OrderController",
-            "HTTP operations in OrderController.Audit",
-            "HTTP operations in StockController"
+            "Manage orders",
+            "Manage stocks",
+            "View health",
+            "View order audits"
         ]
     );
 }
@@ -268,7 +262,7 @@ fn controller_capability_groups_real_spring_routes_by_class() {
 #[test]
 fn controller_capability_omits_unproven_spring_routes() {
     let java = spring_snapshot(true);
-    let audit_only = ["HTTP operations in OrderController.Audit"];
+    let audit_only = ["View order audits"];
     let class = format!("sym:{REPO}@{SPRING_JAVA_PATH}#OrderController");
     let list = format!("sym:{REPO}@{SPRING_JAVA_PATH}#OrderController.list()");
     let endpoints = [
@@ -330,7 +324,7 @@ fn controller_capability_omits_unproven_spring_routes() {
         let facts = derive_controller_capabilities(snapshot).facts;
         let orders = facts
             .iter()
-            .find(|fact| capability(fact).props["title"] == "HTTP operations in OrderController")
+            .find(|fact| capability(fact).props["title"] == "Manage orders")
             .unwrap();
         !orders.cites.contains(&BaseRef::Node(list.clone()))
             && orders.cites.contains(&BaseRef::Node(endpoints[1].clone()))
@@ -369,10 +363,7 @@ fn controller_capability_groups_real_jaxrs_routes_by_class() {
     let before = jaxrs.clone();
     let report = derive_controller_capabilities(&jaxrs);
     assert_eq!(jaxrs, before);
-    assert_eq!(
-        controller_titles(&jaxrs),
-        ["HTTP operations in InvoiceResource"]
-    );
+    assert_eq!(controller_titles(&jaxrs), ["Manage invoices"]);
     let sym = |name: &str| format!("sym:{REPO}@{JAXRS_PATH}#{name}");
     let list = format!("ep:{REPO}@GET:/invoices");
     let cancel = format!("ep:{REPO}@POST:/invoices/{{id}}/void");
@@ -442,10 +433,58 @@ fn controller_capability_groups_real_jaxrs_routes_by_class() {
     all.graph.1.extend(jaxrs.graph.1.clone());
     assert_eq!(
         controller_titles(&all),
+        ["Manage invoices", "Manage orders", "View order audits"]
+    );
+}
+
+// AC-0851: two controllers whose titles would collide each name their file,
+// whatever framework words told their classes apart.
+#[test]
+fn colliding_controller_titles_name_their_files() {
+    let source = |class: &str, prefix: &str| {
+        format!(
+            "package com.demo;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+@RestController
+@RequestMapping(\"/{prefix}/orders\")
+public class {class} {{
+    @GetMapping
+    public String list() {{ return \"x\"; }}
+}}
+"
+        )
+    };
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    for (class, prefix) in [
+        ("ShopOrderController", "shop"),
+        ("AdminOrderController", "admin"),
+    ] {
+        let facts = adapters_lang_java::extract_source(
+            source(class, prefix).as_bytes(),
+            &format!("src/main/java/com/demo/{class}.java"),
+            &adapters_lang_java::SourceId {
+                repo: REPO,
+                commit: COMMIT,
+            },
+        )
+        .unwrap();
+        nodes.extend(facts.nodes);
+        edges.extend(facts.edges);
+    }
+    let snapshot = RevisionedSnapshot {
+        revision: StoreRevision {
+            graph_instance: "fixture".into(),
+            generation: 1,
+        },
+        graph: (nodes, edges),
+    };
+    assert_eq!(
+        controller_titles(&snapshot),
         [
-            "HTTP operations in InvoiceResource",
-            "HTTP operations in OrderController",
-            "HTTP operations in OrderController.Audit"
+            "View orders (src/main/java/com/demo/AdminOrderController.java)",
+            "View orders (src/main/java/com/demo/ShopOrderController.java)"
         ]
     );
 }
