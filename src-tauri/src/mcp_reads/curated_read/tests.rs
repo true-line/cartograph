@@ -237,10 +237,14 @@ fn uncomputed_curated_projection_fails_no_mcp_read_and_states_its_reason() {
         assert_ne!(session.basis_id().unwrap(), computed.basis_id().unwrap());
         for descriptor in crate::mcp_reads::artifacts::readable_catalog() {
             let id = descriptor.id;
-            // The D1 header gives the reason in place of the revision.
+            // The D1 header and the bundle manifest give the reason in
+            // place of the revision.
             assert_eq!(
                 read(&session, id) == read(&computed, id),
-                !matches!(id, ARTIFACT_ID | JSON_ARTIFACT_ID | D1_ID),
+                !matches!(
+                    id,
+                    ARTIFACT_ID | JSON_ARTIFACT_ID | D1_ID | "bundle-manifest"
+                ),
                 "{id}"
             );
         }
