@@ -81,6 +81,10 @@ pub struct Supplied<'a> {
     /// it. It is supplied apart from `curated`, so a document header can
     /// state it when no projection was computed (AC-0663).
     pub graph_content_hash: Option<&'a str>,
+    /// The knowledge-layer Capability and Actor stories the host validated
+    /// against this graph (#1443). When present, `user-stories` renders them
+    /// beside the base Capabilities, exactly as the MCP read does.
+    pub knowledge: Option<&'a capabilities::KnowledgeStories<'a>>,
 }
 
 /// One stored inventory the host compared with the repository's current
@@ -116,6 +120,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) curated: Curated<'a>,
     /// The graph content hash the host supplied, if any.
     pub(crate) graph_content_hash: Option<&'a str>,
+    /// Validated knowledge stories the host supplied, if any (#1443).
+    pub(crate) knowledge: Option<&'a capabilities::Stories<'a>>,
 }
 
 impl<'a> Beside<'a> {
@@ -138,6 +144,7 @@ impl<'a> Beside<'a> {
             endpoints_withheld: endpoint_inventory::withheld(nodes, mode, rejected),
             curated: supplied.curated,
             graph_content_hash: supplied.graph_content_hash,
+            knowledge: supplied.knowledge.map(|k| &k.0),
         }
     }
 }
@@ -461,7 +468,7 @@ fn produce(
         assertions,
         subjects,
     } = match a.id {
-        "user-stories" => match stories {
+        "user-stories" => match stories.or(beside.knowledge) {
             Some(stories) => producers::stories_with_support(nodes, Some(stories), max)?,
             None => producers::stories(nodes, max)?,
         },
@@ -693,6 +700,7 @@ pub fn compile_spec_selected_with_coverage(
         requested_ids,
         limits,
         Supplied {
+            knowledge: None,
             coverage,
             stale_coverage: &[],
             curated: Curated::NotSupplied,

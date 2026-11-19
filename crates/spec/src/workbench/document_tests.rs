@@ -97,6 +97,7 @@ fn compile(mode: ExportMode, curated: Option<&CuratedProjection>) -> SpecBundle 
         mode,
         &BTreeSet::new(),
         Supplied {
+            knowledge: None,
             coverage: &[],
             stale_coverage: &[],
             curated: curated.map_or(Curated::NotSupplied, Curated::Computed),
@@ -297,6 +298,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
             mode,
             &BTreeSet::new(),
             Supplied {
+                knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
                 curated: Curated::NotComputed(crate::CuratedFailure::ReviewsUnavailable),
@@ -320,6 +322,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
             mode,
             &BTreeSet::new(),
             Supplied {
+                knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
                 curated: Curated::Computed(&projection),

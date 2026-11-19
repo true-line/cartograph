@@ -95,6 +95,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            knowledge: None,
             coverage: &[],
             stale_coverage: &[],
             curated: Curated::Computed(projection),
@@ -376,6 +377,7 @@ fn one_changed_fact_marks_exactly_the_citing_drafts_twice_the_same() {
                     *mode,
                     &BTreeSet::new(),
                     Supplied {
+                        knowledge: None,
                         coverage: &[],
                         stale_coverage: &[],
                         curated: Curated::Computed(&projection),

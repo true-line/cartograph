@@ -43,6 +43,119 @@ fn relation_value(value: &serde_json::Value) -> String {
     }
 }
 
+/// `createProduct` -> `create product`; `products` -> `products`.
+fn words(identifier: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower = false;
+    for c in identifier.chars() {
+        if c == '_' || c == '-' {
+            if !out.ends_with(' ') && !out.is_empty() {
+                out.push(' ');
+            }
+            previous_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && previous_lower {
+            out.push(' ');
+        }
+        previous_lower = c.is_lowercase() || c.is_ascii_digit();
+        out.extend(c.to_lowercase());
+    }
+    out.trim().to_owned()
+}
+
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// What a caller of `endpoint` does, in words: a GraphQL field, or the
+/// handler method that serves an HTTP route.
+fn operation_phrase(endpoint: &Node, handler: Option<&Node>) -> Option<String> {
+    if let Some(field) = endpoint.props["field"].as_str() {
+        let field = words(field);
+        return Some(match endpoint.props["operation"].as_str() {
+            Some("query") => format!("view {field}"),
+            _ => field,
+        });
+    }
+    let name = handler?.props["name"].as_str()?;
+    let member = name.rsplit(['.', '#']).next().unwrap_or(name);
+    let member = words(member);
+    (!member.is_empty()).then_some(member)
+}
+
+/// "As <caller>, I can <operation> (<METHOD path>)." for each Endpoint a
+/// derived Capability cites. The caller is the Actor caller set derived for
+/// that endpoint when one is included, else the API it belongs to. Nothing
+/// here is a new fact: it restates the cited facts and included Actors.
+fn readable_stories(
+    story: &capabilities::Story<'_>,
+    included: &[capabilities::Story<'_>],
+) -> Vec<String> {
+    use core_graph::overlay::BaseRef;
+    let mut endpoints = Vec::new();
+    let mut handlers = BTreeMap::new();
+    for (cite, fact) in &story.support {
+        if let (BaseRef::Node(_), capabilities::Support::Node(node)) = (cite, fact) {
+            if node.label == "Endpoint" {
+                endpoints.push(*node);
+            } else if node.label == "Symbol" {
+                handlers.insert(node.id.as_str(), *node);
+            }
+        }
+    }
+    let mut handled_by = BTreeMap::new();
+    for (cite, _) in &story.support {
+        if let BaseRef::Edge(src, dst, label) = cite
+            && label == "HANDLES"
+            && let Some(handler) = handlers.get(dst.as_str())
+        {
+            handled_by.insert(src.as_str(), *handler);
+        }
+    }
+    let callers: BTreeMap<&str, Vec<&str>> = included
+        .iter()
+        .filter(|s| s.node.label == "Actor")
+        .filter_map(|s| {
+            Some((
+                s.node.props["endpoint_id"].as_str()?,
+                strings(s.node, "any_of"),
+            ))
+        })
+        .collect();
+    endpoints
+        .into_iter()
+        .filter_map(|endpoint| {
+            let phrase = operation_phrase(endpoint, handled_by.get(endpoint.id.as_str()).copied())?;
+            let caller = match (
+                callers.get(endpoint.id.as_str()),
+                endpoint.props["api"].as_str(),
+            ) {
+                (Some(any_of), api) if !any_of.is_empty() => format!(
+                    "{} caller holding {}",
+                    api.map_or_else(
+                        || "a".to_owned(),
+                        |api| format!("{} {api} API", article(api))
+                    ),
+                    any_of.join(" or ")
+                ),
+                (_, Some(api)) => format!("{} {api} API caller", article(api)),
+                (_, None) => "an API caller".to_owned(),
+            };
+            Some(format!(
+                "- As {}, I can {} ({}).",
+                render::Literal(caller),
+                render::Literal(phrase),
+                render::Literal(NodeName(endpoint))
+            ))
+        })
+        .collect()
+}
+
 pub(super) fn stories(nodes: &[&Node], max: Option<usize>) -> Result<Output, RenderLimit> {
     stories_with_support(nodes, None, max)
 }
@@ -98,8 +211,19 @@ pub(super) fn stories_with_support(
                 // never executable Markdown/HTML or a new redaction policy.
                 writeln!(
                     content,
-                    "## US-R-{:04} — Derived Capability\n\n    {}\n",
+                    "## US-R-{:04} — Derived Capability: {}\n",
                     index + 1,
+                    render::Literal(NodeName(node))
+                )?;
+                // Readable stories, one per cited operation (#1443). Every
+                // recovered name is literal text; the JSON lines below stay
+                // the story's exact identity and support.
+                for line in readable_stories(story, stories.map_or(&[][..], |s| &s.included)) {
+                    writeln!(content, "{line}")?;
+                }
+                writeln!(
+                    content,
+                    "\n    {}\n",
                     render::Serialized(&(&node.id, render::DisplayValue(&NodeName(node))))
                 )?;
             }

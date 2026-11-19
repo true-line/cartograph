@@ -95,7 +95,7 @@ pub use workbench::{
     CapabilityStory, CapabilityStoryInputError, CompileWorkspaceBound, Curated, CuratedBasis,
     CuratedFailure, DATA_PARTITION_EDGE_LABELS, ENDPOINT_PATH_MAX_DEPTH,
     ENDPOINT_PATH_MAX_RELATIONS, ENDPOINT_PATH_MAX_SYMBOLS, ExportMode, FACT_INDEX_SCHEMA,
-    FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
+    FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord, KnowledgeStories,
     KnowledgeStoryCompileWorkspaceBound, PartitionAcquisition, PartitionArtifact,
     PartitionArtifactKind, PartitionError, PartitionWorkspaceBound, SelectedArtifactLimit,
     SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle,
@@ -112,6 +112,7 @@ pub use workbench::{
     logical_actor_story_workspace_bound, logical_capability_compile_bound, logical_compile_bound,
     logical_coverage_render_bound, logical_knowledge_story_compile_bound, logical_partition_bound,
     project_recovered_facts, provenance, try_compile_spec_supplied, try_compile_spec_with_coverage,
+    validate_knowledge_stories,
 };
 pub use workbench::{
     CATALOGUE_VERSION, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,

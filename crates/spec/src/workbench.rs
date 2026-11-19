@@ -36,12 +36,12 @@ pub use endpoint_permissions::{
 };
 pub(crate) mod fact_index;
 pub use capabilities::{
-    ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError,
+    ActorStoryWorkspaceBound, CapabilityStory, CapabilityStoryInputError, KnowledgeStories,
     KnowledgeStoryCompileWorkspaceBound, compile_capability_user_stories,
     compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, logical_actor_story_workspace_bound,
-    logical_knowledge_story_compile_bound,
+    logical_knowledge_story_compile_bound, validate_knowledge_stories,
 };
 pub use fact_index::{
     FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
@@ -727,6 +727,7 @@ pub fn try_compile_spec_with_coverage(
         mode,
         rejected_hashes,
         Supplied {
+            knowledge: None,
             coverage,
             stale_coverage: &[],
             curated: crate::Curated::NotSupplied,
