@@ -175,9 +175,11 @@ run does not account for exactly the tests it selected.
 The complete CI suite also requires native job ownership tests on Windows:
 `cargo test --locked -p job-execution-tests --test ownership`. Every run uses
 the GitHub-hosted `windows-latest` runner, a native Windows host, never WSL.
-The repository is public, so every job runs on GitHub-hosted runners
-(`ubuntu-latest`, `windows-latest`, `macos-latest`); no job runs on a
-self-hosted runner, because fork PRs would execute on it.
+The repository is public, so every CI job runs on GitHub-hosted runners
+(`ubuntu-latest`, `windows-latest`); no job a pull request can start runs on a
+self-hosted runner, because fork PRs would execute on it. The one exception is
+macOS release packaging (`package.yml`), which runs on the owner's self-hosted
+Mac (`self-hosted, macOS, ARM64`) and has no pull-request trigger.
 The harness imports the production job modules and their existing tests without
 building Tauri. Local workspace tests run the same harness on the local platform;
 only a successful exact-SHA Windows lane establishes its Windows runtime result.

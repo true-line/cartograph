@@ -26,7 +26,7 @@ pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "2";
 /// Deterministic recipe naming a controller class's HTTP operations.
 pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.http-controller";
 /// Changed grouping, support or naming semantics require a new recipe version.
-pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "1";
+pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "2";
 
 /// Deterministic recipe projecting a persistence model to a weak domain candidate.
 pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";
