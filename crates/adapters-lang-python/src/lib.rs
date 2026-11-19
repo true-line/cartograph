@@ -26,6 +26,7 @@ pub mod observed_infra;
 mod queries;
 mod request_inputs;
 mod responses;
+mod rule_evidence;
 mod sqlalchemy;
 mod sqlalchemy_writes;
 mod target_tests;
@@ -343,6 +344,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     auth_guards::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
     flask_admin::retarget(extraction, commit);
+    rule_evidence::retarget(extraction, commit);
 }
 
 fn normalize_path(path: PathBuf) -> Option<String> {
@@ -2024,6 +2026,8 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             }
         }
     }
+
+    rule_evidence::extract(&cx, root, &locals, &mut out);
 
     let call_query =
         crate::queries::query("(call function: [(identifier) (attribute)] @callee) @call");
