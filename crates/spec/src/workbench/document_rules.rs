@@ -5,11 +5,12 @@
 //! edges reach are followed along admitted `CALLS` edges to Symbols, at
 //! most [`CALL_DEPTH`] hops. Every
 //! admitted rule observation that `GOVERNS` a reached callable and whose
-//! local exit rejects (a `throw`, or a `return` of a constructed `…Error` or
-//! `…Exception`) is listed under the capability with its owner, the stored
-//! same-callable branch conditions and the exit. A callable that more than
-//! [`SHARED_AFTER`] capabilities reach is shared plumbing: its rejections are
-//! listed once, after the capabilities.
+//! local exit rejects (a `throw` or Python `raise`, a `return` of a
+//! constructed `…Error` or `…Exception`, or a Python response tuple ending
+//! in a 4xx or 5xx status) is listed under the capability with its owner,
+//! the stored same-callable branch conditions and the exit. A callable that
+//! more than [`SHARED_AFTER`] capabilities reach is shared plumbing: its
+//! rejections are listed once, after the capabilities.
 //!
 //! Only the stored, sanitized displays the rule inventory renders are shown
 //! (SPEC-02); nothing is read from source. The rows are observations: the
@@ -108,11 +109,61 @@ fn constructs_error(value: &SourceExpression) -> bool {
         && (args.is_empty() || (args.starts_with('(') && closing(args) == Some(args.len() - 1)))
 }
 
+/// A Python response tuple whose last element is an error status:
+/// `jsonify(error="Forbidden"), 403` or `("gone", 410)`. Commas inside
+/// brackets or quoted literals do not count.
+fn returns_error_status(value: &SourceExpression) -> bool {
+    let mut text = value.display.as_str().trim();
+    match value.syntax_kind.as_str() {
+        "expression_list" => {}
+        "tuple" if text.starts_with('(') && closing(text) == Some(text.len() - 1) => {
+            text = &text[1..text.len() - 1];
+        }
+        _ => return false,
+    }
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut last = None;
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => last = Some(i),
+            _ => {}
+        }
+    }
+    let Some(last) = last else {
+        return false;
+    };
+    let mut tail = text[last + 1..].trim();
+    if tail.is_empty() {
+        // A trailing comma: the element before it.
+        let head = text[..last].trim_end();
+        tail = head.rsplit(',').next().unwrap_or(head).trim();
+    }
+    tail.parse::<u16>()
+        .is_ok_and(|status| (400..600).contains(&status))
+}
+
 fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
     let outcome = match &parsed.effect {
         LocalExit::Throw { value } => format!("throws {}", one_line(value.display.as_str())),
-        LocalExit::Return { value: Some(value) } if constructs_error(value) => {
+        LocalExit::Return { value: Some(value) }
+            if constructs_error(value) || returns_error_status(value) =>
+        {
             format!("returns {}", one_line(value.display.as_str()))
         }
         LocalExit::Return { .. } => return None,
@@ -299,12 +350,13 @@ pub(super) fn rules_per_capability(
     }
     writeln!(
         out,
-        "\nRejection exits per capability: {total}. Each is a stored `throw`, or a `return` of a \
-         constructed error, in a callable the capability's handlers reach within {CALL_DEPTH} \
-         call hops (Deterministic observations). The branch conditions are the ones around the \
-         exit in its own callable; the complete execution predicate and what the caller does \
-         with the outcome are not established. A callable more than {SHARED_AFTER} \
-         capabilities reach is listed once under shared rejections.\n"
+        "\nRejection exits per capability: {total}. Each is a stored `throw` or `raise`, or a \
+         `return` of a constructed error or an error-status response, in a callable the \
+         capability's handlers reach within {CALL_DEPTH} call hops (Deterministic \
+         observations). The branch conditions are the ones around the exit in its own \
+         callable; the complete execution predicate and what the caller does with the outcome \
+         are not established. A callable more than {SHARED_AFTER} capabilities reach is listed \
+         once under shared rejections.\n"
     )?;
     let mut printed = 0;
     for story in capabilities() {
@@ -535,5 +587,93 @@ function checkQuantity(qty: number) {
         assert!(text.contains("### Shared rejections"), "{text}");
         let (_, printed, _) = render(0, true);
         assert_eq!(printed, 0);
+    }
+
+    // AC-0852: a Flask handler's guarded `raise` and error-status returns are
+    // its rejections; a success tuple and a plain return are not.
+    #[test]
+    fn python_raises_and_error_status_returns_are_rejections() {
+        let source = r#"
+from flask import jsonify
+
+def update_alias(alias_id, user):
+    alias = Alias.get(alias_id)
+    if not alias or alias.user_id != user.id:
+        return jsonify(error="Forbidden, really"), 403
+    if alias.disabled:
+        raise AliasDisabled("disabled")
+    if alias.pending:
+        return ("pending", 409,)
+    if alias.ok:
+        return jsonify(alias=alias.email), 200
+    if alias.empty:
+        return None
+    return jsonify(ok=True)
+"#;
+        let facts = adapters_lang_python::extract_source(
+            source.as_bytes(),
+            "app/api/alias.py",
+            &adapters_lang_python::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let handler = nodes
+            .iter()
+            .copied()
+            .find(|n| n.label == "Symbol" && n.props["name"] == "update_alias")
+            .unwrap();
+        let handles = Edge {
+            src: "ep:repo@PUT:/api/aliases/<int:alias_id>".into(),
+            dst: handler.id.clone(),
+            label: "HANDLES".into(),
+            props: serde_json::json!({}),
+        };
+        let cite = BaseRef::Edge(
+            handles.src.clone(),
+            handles.dst.clone(),
+            handles.label.clone(),
+        );
+        let cap = Node {
+            id: "capability:test:alias".into(),
+            label: "Capability".into(),
+            props: serde_json::json!({ "title": "Manage alias (API)" }),
+        };
+        let knowledge = Stories {
+            included: vec![crate::workbench::capabilities::Story {
+                node: &cap,
+                support: vec![(&cite, Support::Edge(&handles))],
+            }],
+            filtered: 0,
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        let printed = rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        assert_eq!(printed, 3, "{text}");
+        assert!(
+            text.contains(
+                "| update\\_alias | not alias or alias.user\\_id \\!= user.id | returns jsonify(error=\"Forbidden, really\"), 403 |"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("| update\\_alias | alias.disabled | throws AliasDisabled(\"disabled\") |"),
+            "{text}"
+        );
+        assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
+        assert!(!text.contains("200"), "{text}");
+        assert!(!text.contains("returns None"), "{text}");
     }
 }
