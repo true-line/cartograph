@@ -5611,3 +5611,138 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         ))
     );
 }
+
+// AC-0847: TypeORM entities are the data model: an import-proven `@Entity` class is a
+// DataEntity with its own columns, and relation decorators are REFERENCES
+// edges to the entity the relative import (or the same file) names.
+#[test]
+fn typeorm_entities_and_relations_are_recovered() {
+    let out = extract_tree(&[
+        (
+            "src/entity/product.entity.ts",
+            r#"
+import { Column, Entity, JoinTable, ManyToMany, ManyToOne, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
+import { VendureEntity } from './base.entity';
+import { Asset } from './asset.entity';
+@Entity('product')
+export class Product extends VendureEntity {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ nullable: true }) deletedAt: Date | null;
+  @Column({ name: 'is_enabled', default: true }) enabled: boolean;
+  @ManyToOne(type => Asset, { onDelete: 'SET NULL' }) featuredAsset: Asset;
+  @ManyToMany(() => Asset) @JoinTable() assets: Asset[];
+  @OneToMany(type => ProductVariant, variant => variant.product) variants: ProductVariant[];
+  notPersisted: string;
+}
+@Entity()
+export class ProductVariant {
+  @Column() sku: string;
+  @ManyToOne(type => Product, product => product.variants) product: Product;
+}
+"#,
+        ),
+        (
+            "src/entity/asset.entity.ts",
+            r#"
+import { Column, Entity } from 'typeorm';
+@Entity()
+export class Asset { @Column() name: string; }
+"#,
+        ),
+        (
+            "src/fake.ts",
+            r#"
+function Entity() { return (_: unknown) => {}; }
+@Entity()
+export class NotAnEntity {}
+"#,
+        ),
+    ]);
+    let entity = |id: &str| {
+        out.nodes
+            .iter()
+            .find(|node| node.label == "DataEntity" && node.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+    };
+    let product = entity("data:qwtm/example@typeorm:src/entity/product.entity.ts#Product");
+    entity("data:qwtm/example@typeorm:src/entity/product.entity.ts#ProductVariant");
+    entity("data:qwtm/example@typeorm:src/entity/asset.entity.ts#Asset");
+    assert_eq!(
+        out.nodes.iter().filter(|n| n.label == "DataEntity").count(),
+        3,
+        "a lookalike @Entity proves nothing"
+    );
+    assert_eq!(product.props["table"], "product");
+    assert_eq!(product.props["extends"], "VendureEntity");
+    let columns = product.props["columns"].as_array().unwrap();
+    assert_eq!(columns.len(), 3, "{columns:?}");
+    assert_eq!(columns[0]["primary_key"], true);
+    assert_eq!(columns[1]["name"], "deletedAt");
+    assert_eq!(columns[1]["type"], "Date | null");
+    assert_eq!(columns[1]["nullable"], true);
+    assert_eq!(columns[2]["column"], "is_enabled");
+    let refs = |src: &str, dst: &str| {
+        out.edges
+            .iter()
+            .find(|e| e.label == "REFERENCES" && e.src.ends_with(src) && e.dst.ends_with(dst))
+            .unwrap_or_else(|| panic!("missing {src} -> {dst}"))
+    };
+    // Two relations to Asset are one edge with both fields.
+    let to_asset = refs("#Product", "asset.entity.ts#Asset");
+    let fields = to_asset.props["relations"].as_array().unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0]["cardinality"], "many-to-one");
+    assert_eq!(fields[1]["relation"], "ManyToMany");
+    assert_eq!(fields[1]["owning"], true);
+    let to_variant = refs("#Product", "#ProductVariant");
+    assert_eq!(to_variant.props["relations"][0]["owning"], false);
+    refs("#ProductVariant", "product.entity.ts#Product");
+}
+
+// AC-0847: an unproven relation target is a REFERENCES edge to an explicit
+// Gap, a `@ChildEntity` argument is a discriminator and never a table, and
+// `@Column({ primary: true })` is a primary key.
+#[test]
+fn typeorm_unresolved_targets_child_entities_and_primary_options() {
+    let out = extract_tree(&[(
+        "src/entity/photo.entity.ts",
+        r#"
+import { ChildEntity, Column, ManyToOne } from 'typeorm';
+import { Album } from '@app/album';
+@ChildEntity('photo')
+export class Photo {
+  @Column({ primary: true }) code: string;
+  @ManyToOne(() => Album) album: Album;
+  @ManyToOne(() => pick()) other: unknown;
+}
+"#,
+    )]);
+    let photo = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "data:qwtm/example@typeorm:src/entity/photo.entity.ts#Photo")
+        .expect("child entity");
+    assert!(photo.props.get("table").is_none(), "{}", photo.props);
+    assert_eq!(photo.props["discriminator"], "photo");
+    assert_eq!(photo.props["columns"][0]["primary_key"], true);
+    let gaps: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "REFERENCES" && e.src == photo.id)
+        .map(|e| {
+            let gap = out.nodes.iter().find(|n| n.id == e.dst).unwrap();
+            assert_eq!(gap.label, "Gap");
+            (
+                e.props["field"].as_str().unwrap(),
+                gap.props["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        [
+            ("album", "TypeORM relation target is not a recovered entity"),
+            ("other", "TypeORM relation target is not a literal class"),
+        ]
+    );
+}
