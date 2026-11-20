@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import type { CuratedRead } from './store';
 import { invokeOr } from './tauri';
+import type { EgressPreview } from './components/EgressConsentDialog';
 
 export type SectionKindMark = 'P' | 'A' | 'P+A' | 'H';
 export type DraftDecision = 'accepted' | 'rejected' | 'returned';
@@ -156,6 +157,65 @@ export async function sectionDraftQuestion(address: SectionAddress): Promise<str
   });
   if (!question) throw new Error('The core did not return a drafting request.');
   return question;
+}
+
+/** What a composition staged (#1991, AC-0862): a draft for review, or the
+ *  closed reason there is none, with how many claims were staged and left
+ *  out. */
+export type ComposeOutcome =
+  | { outcome: 'staged'; draft_id: string; claims: number; left_out: number }
+  | { outcome: 'no_draft'; reason: string; claims: number; left_out: number };
+
+/** Why a composition staged nothing, by its closed code. */
+export const COMPOSE_REFUSAL: Record<string, string> = {
+  composition_system_scope_only: 'A section is composed for the whole system only.',
+  composition_d1_only: 'Only sections of the product specification (D1) are composed.',
+  section_not_compiled: 'The export compiled no such section.',
+  no_citable_fact: 'The compiled section cites no fact, so there is nothing to compose from.',
+  reply_not_the_schema: 'The model did not reply with the composition schema. Nothing was staged.',
+  no_admissible_claim: 'No claim in the reply kept the citation and statement rules.',
+  statement_names_source: 'Every claim named a source file or code symbol, so none was staged.',
+  graph_changed: 'The graph changed while the section was being composed. Compose it again.',
+};
+
+/** The exact payload a cloud composition of the address would send. */
+export async function sectionComposePreview(address: SectionAddress): Promise<EgressPreview> {
+  const preview = await invokeOr<EgressPreview | null>('section_compose_preview', null, {
+    catalogueVersion: address.catalogue_version,
+    document: address.document,
+    section: address.section,
+    scope: address.scope,
+  });
+  if (!preview) throw new Error('The core did not return a composition preview.');
+  return preview;
+}
+
+/** Compose the address in the cloud for the payload the user approved. */
+export async function runSectionCompose(
+  address: SectionAddress,
+  preview: EgressPreview,
+): Promise<ComposeOutcome> {
+  const outcome = await invokeOr<ComposeOutcome | null>('run_section_compose', null, {
+    catalogueVersion: address.catalogue_version,
+    document: address.document,
+    section: address.section,
+    scope: address.scope,
+    mode: 'cloud',
+    approvedPayloadHash: preview.payload_hash,
+  });
+  if (!outcome) throw new Error('The core did not return a composition outcome.');
+  return outcome;
+}
+
+/** One line for the user about a composition's outcome. */
+export function composeOutcomeText(outcome: ComposeOutcome): string {
+  const left = outcome.left_out > 0
+    ? ` ${outcome.left_out} ${outcome.left_out === 1 ? 'claim was' : 'claims were'} left out.`
+    : '';
+  if (outcome.outcome === 'staged') {
+    return `Composed ${outcome.claims} ${outcome.claims === 1 ? 'claim' : 'claims'} for review.${left}`;
+  }
+  return `${COMPOSE_REFUSAL[outcome.reason] ?? outcome.reason}${left}`;
 }
 
 /** Why the host refuses a re-draft, by its closed code (SPEC-17). */

@@ -16,6 +16,10 @@ mod configuration;
 pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;
 pub use coverage::{COVERAGE_DETAIL_REPO_LIMIT, logical_coverage_render_bound};
+mod composition;
+pub use composition::{
+    CompositionFact, CompositionFacts, DerivedGroup, composition_facts, section_text,
+};
 mod curated;
 pub use curated::{
     Curated, CuratedBasis, CuratedFailure, curated_basis_summary, curated_finding_reason_sentence,

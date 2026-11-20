@@ -17,6 +17,8 @@ export interface SectionDocumentViewProps {
   curated: CuratedRead | null;
   busy?: boolean;
   error?: string | null;
+  /** A status line about the last request, such as a composition. */
+  notice?: string | null;
   /** Whether the core is reachable, so a review or a request can be sent. */
   canReview: boolean;
   onReload?: () => void;
@@ -24,6 +26,10 @@ export interface SectionDocumentViewProps {
   /** Request a re-draft of a stale or unresolvable accepted draft. The
    *  host checks the state and names this draft as the one replaced. */
   onRedraft?: (draft: StoredSectionDraft) => void;
+  /** Compose a D1 section for the whole system in one model call from its
+   *  compiled text and the facts it cites (#1991). The caller shows the
+   *  exact payload for consent first. */
+  onCompose?: (address: SectionAddress) => void;
   onReview: (draft: StoredSectionDraft, decision: DraftDecision, note: string | null) => void;
   onOpenCitation?: (citationId: string) => void;
 }
@@ -312,12 +318,13 @@ function DraftCard({
   );
 }
 
-function DraftRequest({ document, section, busy, canReview, onDraft }: {
+function DraftRequest({ document, section, busy, canReview, onDraft, onCompose }: {
   document: SectionDocument;
   section: DocumentSection;
   busy: boolean;
   canReview: boolean;
-  onDraft: (address: SectionAddress) => void;
+  onDraft?: (address: SectionAddress) => void;
+  onCompose?: (address: SectionAddress) => void;
 }) {
   const [subject, setSubject] = useState('');
   const scope = subject.trim();
@@ -346,24 +353,43 @@ function DraftRequest({ document, section, busy, canReview, onDraft }: {
           )}
         </>
       )}
-      <button
-        type="button"
-        disabled={busy || !canReview || invalid}
-        onClick={() => onDraft({
-          catalogue_version: document.catalogue_version,
-          document: document.document,
-          section: section.number,
-          scope: scope === '' ? SYSTEM_SCOPE : scope,
-        })}
-      >
-        Draft this section
-      </button>
+      {onDraft && (
+        <button
+          type="button"
+          disabled={busy || !canReview || invalid}
+          onClick={() => onDraft({
+            catalogue_version: document.catalogue_version,
+            document: document.document,
+            section: section.number,
+            scope: scope === '' ? SYSTEM_SCOPE : scope,
+          })}
+        >
+          Draft this section
+        </button>
+      )}
+      {onCompose && document.document === 'D1' && (
+        <button
+          type="button"
+          className="secondary-button"
+          title="One model call over the compiled section and the facts it cites, for the whole system. You review the exact payload first."
+          disabled={busy || !canReview || scope !== ''}
+          onClick={() => onCompose({
+            catalogue_version: document.catalogue_version,
+            document: document.document,
+            section: section.number,
+            scope: SYSTEM_SCOPE,
+          })}
+        >
+          Compose from the knowledge graph
+        </button>
+      )}
     </div>
   );
 }
 
 function Section({
-  document, section, states, stated, busy, canReview, onDraft, onRedraft, onReview, onOpenCitation,
+  document, section, states, stated, busy, canReview, onDraft, onRedraft, onCompose, onReview,
+  onOpenCitation,
 }: {
   document: SectionDocument;
   section: DocumentSection;
@@ -373,6 +399,7 @@ function Section({
   canReview: boolean;
   onDraft?: (address: SectionAddress) => void;
   onRedraft?: (draft: StoredSectionDraft) => void;
+  onCompose?: (address: SectionAddress) => void;
   onReview: SectionDocumentViewProps['onReview'];
   onOpenCitation?: (citationId: string) => void;
 }) {
@@ -408,13 +435,14 @@ function Section({
           onOpenCitation={onOpenCitation}
         />
       ))}
-      {section.drafted && onDraft && (
+      {section.drafted && (onDraft || onCompose) && (
         <DraftRequest
           document={document}
           section={section}
           busy={busy}
           canReview={canReview}
           onDraft={onDraft}
+          onCompose={onCompose}
         />
       )}
     </section>
@@ -429,8 +457,8 @@ function Section({
  * T3 / InferredWeak and never as a recovered fact (R-INT-2, R-INT-3).
  */
 export function SectionDocumentView({
-  document, curated, busy = false, error = null, canReview, onReload, onDraft, onRedraft,
-  onReview, onOpenCitation,
+  document, curated, busy = false, error = null, notice = null, canReview, onReload, onDraft,
+  onRedraft, onCompose, onReview, onOpenCitation,
 }: SectionDocumentViewProps) {
   const states = curatedDraftStates(curated);
   const stated = curatedReadStatesDrafts(curated);
@@ -456,6 +484,7 @@ export function SectionDocumentView({
       </header>
 
       {error && <p className="error" role="alert">{error}</p>}
+      {notice && <p className="curated-notice" role="status">{notice}</p>}
 
       {document === null ? (
         <p className="muted" data-testid="document-unread">
@@ -483,6 +512,7 @@ export function SectionDocumentView({
               canReview={canReview}
               onDraft={onDraft}
               onRedraft={onRedraft}
+              onCompose={onCompose}
               onReview={onReview}
               onOpenCitation={onOpenCitation}
             />
