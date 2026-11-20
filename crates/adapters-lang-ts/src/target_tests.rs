@@ -254,6 +254,9 @@ enum TestCall<'tree> {
         /// callback a wrapper such as `assertThrows(async () => …)` takes.
         body: Vec<TsNode<'tree>>,
         modifier: Option<String>,
+        /// Whether the call's binding is `node:test`'s, which names the
+        /// framework of this test, not the file's other imports.
+        node_test: bool,
     },
 }
 
@@ -285,6 +288,7 @@ fn test_call<'tree>(
         _ => return None,
     };
     let local = cx.text(&base);
+    let node_test = matches!(proofs.import(call, local), Some(("node:test", _)));
     let exported = match proofs.import(call, local) {
         // `import test from 'node:test'`: the default export is `test`.
         Some(("node:test", _)) if !proofs.imported_names.contains_key(local) => "test",
@@ -310,6 +314,7 @@ fn test_call<'tree>(
             name,
             body: arguments.iter().skip(1).copied().collect(),
             modifier,
+            node_test,
         }),
         _ => None,
     }
@@ -491,6 +496,7 @@ pub(crate) fn extract<'tree>(
             name,
             body: arguments,
             modifier,
+            node_test,
         }) = test_call(cx, proofs, call)
         else {
             continue;
@@ -526,7 +532,7 @@ pub(crate) fn extract<'tree>(
         let mut props = serde_json::json!({
             "name": name,
             "qualified_name": qualified,
-            "framework": if proofs.import_modules.values().any(|m| m == "node:test") {
+            "framework": if node_test {
                 "node-test"
             } else {
                 "vitest-jest"

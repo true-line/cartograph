@@ -5825,7 +5825,7 @@ export class Photo {
 #[test]
 fn node_test_runner_calls_are_tests() {
     // AC-0920 (#2008): `node:test` proves `test`/`it`/`describe`/`suite`,
-    // named or as its default export; a lookalike module does not.
+    // named or as its default export; a lookalike module does not. The framework follows the binding that proved the call.
     let dir = tempfile::tempdir().unwrap();
     let write = |path: &str, text: &str| {
         let path = dir.path().join(path);
@@ -5844,6 +5844,10 @@ fn node_test_runner_calls_are_tests() {
         "tests/fake.test.mjs",
         "import { test } from './not-node-test.mjs';\ntest('ignored', () => {});\n",
     );
+    write(
+        "tests/mixed.test.ts",
+        "import { test } from 'vitest';\nimport { mock } from 'node:test';\ntest('vitest case', () => { mock.fn(); });\n",
+    );
     let out = extract_dir(dir.path(), &id()).unwrap();
     let mut names: Vec<&str> = out
         .nodes
@@ -5858,8 +5862,20 @@ fn node_test_runner_calls_are_tests() {
             "default export",
             "group > inside",
             "hq > admits a soul",
-            "later"
+            "later",
+            "vitest case"
         ],
         "{names:?}"
     );
+    // The framework follows the binding that proved the call, not the
+    // file's other imports.
+    let framework = |name: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "TestCase" && n.props["qualified_name"] == name)
+            .map(|n| n.props["framework"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    assert_eq!(framework("vitest case"), "vitest-jest");
+    assert_eq!(framework("hq > admits a soul"), "node-test");
 }
