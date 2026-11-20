@@ -2941,7 +2941,7 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             text.find(needle)
                 .unwrap_or_else(|| panic!("missing {needle}\n{text}"))
         };
-        assert!(text.contains("State machines (#2067): 1."));
+        assert!(text.contains("State machines (#2067): 1."), "{text}");
         assert!(at("### Order\n") < at("#### State machine: configureDefaultOrderProcess"));
         assert!(
             at("#### State machine: configureDefaultOrderProcess")
