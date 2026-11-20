@@ -1,7 +1,7 @@
 # SPEC-16 — Rebuild handoff bundle
 
-- **Status:** Proposed for [#1752](https://github.com/true-line/cartograph/issues/1752). This is a definition. It changes no shipped behaviour, adds no export file and does not change the work packet execution state `Unoffered`. The pilot bundle and its review are not done.
-- **Date:** 2026-11-17
+- **Status:** Proposed for [#1752](https://github.com/true-line/cartograph/issues/1752). This is a definition. It changes no shipped behaviour, adds no export file and does not change the work packet execution state `Unoffered`. Review 1 of the pilot (a bundle with no drafted section) is recorded and found the bundle not sufficient; the review after drafting is not done.
+- **Date:** 2026-11-17, revised 2026-11-20 after review 1 (sufficiency floor, entry points, probe)
 - **Scope:** process, no user story; ROADMAP W17; v1.0.0 criterion 9; VISION V4 and V6.
 - **Decision:** [ADR-0036](adr/ADR-0036-lifecycle-reconstruction-direction.md) decision 6 (the work packet is the handoff unit), [ADR-0056](adr/ADR-0056-documentation-reconstruction-pipeline.md) (NG2).
 - **Builds on:** `docs/DOCUMENT-CATALOGUE.md` version 1.0 (the document set), [SPEC-15](SPEC-15_authored-sections.md) (authored sections), [SPEC-12](SPEC-12_curated-projection.md) (curated revision), [SPEC-11](SPEC-11_local-work-packets.md) (work packets), ADR-0058 (citation ids).
@@ -25,6 +25,11 @@ Cartograph enables that work and does not perform it:
 
 A bundle is not a claim of completeness. A bundle with a long gap register
 is a correct bundle. A bundle that hides a gap is not.
+
+Correct is not sufficient. A bundle can cite every statement, hide nothing
+and still carry too little to rebuild from: every question answered with a
+list, or every question answered "not known". The checklist below therefore
+has a floor that honesty alone does not meet.
 
 ## Terms
 
@@ -67,7 +72,11 @@ Work packets are not in it, because the export does not write them.
 3. **Language-neutral statement, source as evidence.** A requirement or a
    rule states behaviour in domain terms: who can do what, under which
    condition, with which result. It does not say how the source implements
-   it. Identifiers of the source implementation (file paths, function and
+   it. This holds for a projected frame as much as for drafted prose: a
+   condition or an outcome copied from the source as an expression is
+   evidence, and the requirement is the sentence that says what it means.
+   Until a section has that sentence, its frame is evidence without a
+   requirement. Identifiers of the source implementation (file paths, function and
    class names, framework terms, decorator or annotation names) appear only
    in the citation and the fact index, never as the subject of the
    requirement. HTTP methods, paths, status codes, field names and message
@@ -101,16 +110,24 @@ A reviewer answers each question from the bundle alone, without the source
 repository and without asking anyone. Each answer is one of:
 
 - **answered**: the bundle states it, with citations that resolve;
-- **stated unknown**: the bundle says it is not known, in the gap register
-  or as an H blank;
-- **silent**: the bundle neither answers nor says it is unknown.
+- **stated unknown**: the bundle says it is not known and why: a gap
+  register row, an H blank, or a document's own sentence naming what it
+  does not cover;
+- **silent**: the bundle neither answers nor says it is unknown. A section
+  that reads "Not drafted" is silent: nothing was tried, so nothing is
+  known to be unrecoverable.
+
+An answer counts as **answered** only if the reviewer could act on it
+without reading the source. A list of names copied from the code, or a
+condition printed as a source expression, is not an answer to a question
+about behaviour; the reviewer records it as silent and says what was there.
 
 | # | Question | Where the answer should be |
 |---|---|---|
 | 1 | What is the system for, and what is outside it? | D1 §1.1, §1.7 |
 | 2 | Who uses it, in which roles, and what may each role do? | D1 §1.2, D6 §6.3 |
 | 3 | What can each actor do? List the capabilities. | D1 §1.3 |
-| 4 | For each capability in the sample: what must be true for it to succeed, and what happens when it is refused? | D1 §1.4, §1.5 |
+| 4 | For each capability in the sample: what must be true for it to succeed, what does success return and change, and what happens when it is refused? | D1 §1.4, §1.5 |
 | 5 | Which business rules apply, and what evidence supports each? | D1 §1.5, D11 §11.4 |
 | 6 | Which steps make up each main flow, and across which components? | D1 §1.6, D9, D11 §11.5 |
 | 7 | Which data does it hold, with which fields and relations? | D5 |
@@ -123,12 +140,61 @@ repository and without asking anyone. Each answer is one of:
 | 14 | For five statements chosen by the reviewer: does each citation resolve to a source span that shows it? | D11 §11.7 |
 | 15 | Does any requirement or rule depend on knowing the source language or framework to be understood? | Rule 3 |
 | 16 | Does the bundle contain code for the new system, or an instruction to write to the source? | NG1, NG2: it must not |
+| 17 | Through which entry points does work reach the system (requests, scheduled jobs, messages and mail received, queue and job workers, commands, webhooks), and is each entry point of the held-out list either in a bundle document or in the gap register? | D1 §1.3, D2, D7 §7.4, D11 §11.2, §11.6, scored against the held-out list |
+| 18 | Of the expected statements written from the source for the sample, how many does the bundle state? | The rebuild probe below |
 
-A bundle is **sufficient** when no question is silent, question 14 resolves
-for all five statements, and questions 15 and 16 are answered no. "Stated
-unknown" does not fail a bundle; it is the bundle doing its job. The review
-records how many answers were stated unknown, so a reader sees how much of
-the system the bundle actually carries.
+A bundle is **sufficient** when all of these hold:
+
+1. No question is silent.
+2. Questions 3, 4 and 5 are answered, not stated unknown, for the sample
+   capability set. A bundle that says "not known" about what the sample
+   does and under which rules is honest and is not a handoff.
+3. Question 14 resolves for all five statements.
+4. Questions 15 and 16 are answered no.
+5. Every entry point of the held-out list is in a bundle document or in
+   the gap register.
+6. The rebuild probe meets its pass values.
+
+Elsewhere "stated unknown" does not fail a bundle; it is the bundle doing
+its job. The review records how many answers were stated unknown, so a
+reader sees how much of the system the bundle actually carries.
+
+Question 17 cannot be answered from the bundle alone: an entry point the
+bundle leaves out of every document and of the gap register is not there
+to be listed. It is scored against a held-out list of entry points,
+written by hand from the source before the run and kept from the reviewer
+until the rest of the checklist is answered, as the expected set of the
+probe is. The reviewer first lists the entry points the bundle shows,
+then opens the list and marks each of its rows. The pilot's list is
+[`docs/acceptance/w17/entry-points.md`](acceptance/w17/entry-points.md).
+
+### Rebuild probe
+
+The checklist asks whether the bundle speaks. The probe asks whether what
+it says is enough. It uses an expected set: statements about the sample
+capability set, written by hand from the source before the run and kept out
+of every model input. The W13 set (`docs/acceptance/w13/expected.json`, 26
+statements on the alias lifecycle) is the pilot's.
+
+The reviewer answers the checklist first, then opens the expected set and
+marks each item, from the bundle alone:
+
+- **stated**: the bundle says it in domain terms, with a citation;
+- **partly**: the bundle gives some of it, or gives it only as a source
+  expression;
+- **absent**: the bundle does not say it. The reviewer notes whether a gap
+  row accounts for it.
+
+| Measure | Proposed pass |
+|---|---|
+| Expected capabilities (1.3) stated | all |
+| Expected actor and rule items (1.2, 1.5) stated | at least 14 of 20 |
+| Absent items with no gap row | 0 |
+
+The pass values are those of the W13 pilot and are a proposal until the
+owner freezes them. The counts are recorded whatever they are. An absent
+item with no gap row is the failure this specification exists to prevent:
+the bundle is silent and looks complete.
 
 ## Pilot
 
@@ -140,9 +206,36 @@ committed whatever it is.
 
 The pilot uses a `best-effort` export after the W13 pilot's drafts are
 reviewed (SPEC-15, `docs/acceptance/w13/`), so that D1 carries authored
-sections. Question 4 is asked of the alias lifecycle capability set.
+sections. Questions 4 and 18 are asked of the alias lifecycle capability
+set.
+
+**Review 1** ([`review.md`](acceptance/w17/review.md), 2026-11-20) took a
+`best-effort` export with no drafted section, the state of `main` before
+any draft is accepted. Result: not sufficient. Questions 1, 4 and 8 were
+silent and question 15 was yes. The probe found 1 of 26 expected statements
+stated, 14 partly (5 of them complete but printed as a source expression)
+and 11 absent, none of the absent in a gap row. Two of eight entry points
+are in the bundle. Mail forwarding, the system's main job, is in no
+capability and no gap row. Questions 17 and 18, the floor on
+questions 3 to 5 and the reading of "Not drafted" as silent were added
+because of that review. The review after drafting is still owed.
 
 ## Open items
+
+- Capabilities are derived from HTTP controllers. Work that enters another
+  way (mail received, a job or queue worker, an event listener, a command)
+  is under no capability, and nothing records the omission as a gap
+  (review 1, finding 2). Scheduled jobs are recovered as flows and are
+  under no capability either.
+- A recovered rule is a rejection exit. What a successful operation
+  returns and changes, limits set by a decorator or by configuration, and
+  defaults are not recovered as rules and have no gap row (review 1,
+  finding 4).
+- The frames of D1 §1.2, §1.3 and §1.5 print guard names, controller names
+  and source expressions. Rule 3 is met only where accepted prose restates
+  them.
+- Request inputs and response shapes are recovered and are in no exported
+  document, so question 8 is silent on them.
 
 - D2 to D10 are not compiled as catalogue documents. Until they are, a
   reviewer finds their content under the current artifact names, and
