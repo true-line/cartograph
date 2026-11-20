@@ -168,6 +168,10 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for pending in &mut extraction.pending_endpoints {
         retarget_props_commit(&mut pending.node.props, commit);
         retarget_props_commit(&mut pending.edge.props, commit);
+        let (endpoint, gap, handles) = &mut pending.gap;
+        retarget_props_commit(&mut endpoint.props, commit);
+        retarget_props_commit(&mut gap.props, commit);
+        retarget_props_commit(&mut handles.props, commit);
     }
 }
 
@@ -357,34 +361,144 @@ fn framework_type(text: &str, bindings: &HashMap<String, ImportBinding>) -> Opti
     }
 }
 
+/// One declaration of a local name: the scope it is visible in, where it
+/// is declared, and the router its type or factory proves, if any.
+#[derive(Debug, Clone, Copy)]
+struct Declaration {
+    scope: (usize, usize),
+    at: usize,
+    file_scope: bool,
+    framework: Option<Framework>,
+}
+
+/// Router receivers, resolved lexically (#2006): a name proves a router only
+/// where its innermost visible declaration does, so a same-named local of
+/// another type in another function, or a shadowing one, proves nothing.
+#[derive(Debug, Default)]
+struct Receivers {
+    declarations: HashMap<String, Vec<Declaration>>,
+}
+
+impl Receivers {
+    fn visible(&self, name: &str, at: usize) -> Option<(usize, &Declaration)> {
+        self.declarations
+            .get(name)?
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.scope.0 <= at && at < d.scope.1 && (d.file_scope || d.at <= at))
+            .min_by_key(|(_, d)| (d.scope.1 - d.scope.0, std::cmp::Reverse(d.at)))
+    }
+
+    fn get(&self, name: &str, at: usize) -> Option<Framework> {
+        self.visible(name, at)?.1.framework
+    }
+}
+
+/// The scope a declaration at `node` is visible in: its function for a
+/// parameter, else the nearest enclosing block, statement header or case.
+fn declaration_scope(node: TsNode<'_>, parameter: bool) -> (usize, usize, bool) {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        let found = if parameter {
+            matches!(
+                parent.kind(),
+                "function_declaration" | "method_declaration" | "func_literal"
+            )
+        } else {
+            matches!(
+                parent.kind(),
+                "block"
+                    | "if_statement"
+                    | "for_statement"
+                    | "expression_switch_statement"
+                    | "type_switch_statement"
+                    | "expression_case"
+                    | "type_case"
+                    | "default_case"
+                    | "communication_case"
+                    | "source_file"
+            )
+        };
+        if found {
+            return (
+                parent.start_byte(),
+                parent.end_byte(),
+                parent.kind() == "source_file",
+            );
+        }
+        current = parent;
+    }
+    (node.start_byte(), node.end_byte(), true)
+}
+
 /// Router receivers proven by a parameter's or variable's declared type
-/// (`func routes(mux *http.ServeMux)`, `var mux *http.ServeMux`, #2006), or
-/// by a `var x = http.NewServeMux()` / `x = http.NewServeMux()` binding.
-fn typed_receivers(
+/// (`func routes(mux *http.ServeMux)`, `var mux *http.ServeMux`, #2006), by a
+/// `mux := http.NewServeMux()` / `var mux = …` binding, or by a later
+/// `mux = http.NewServeMux()` assignment to an untyped declaration. Every
+/// other declaration is recorded too, so it shadows.
+fn assignment_receivers(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
-    receivers: &mut HashMap<String, Framework>,
-) {
+) -> Receivers {
+    let factory_of = |value: Option<TsNode<'_>>| {
+        value
+            .filter(|v| v.kind() == "call_expression")
+            .and_then(|v| v.child_by_field_name("function"))
+            .and_then(|f| framework_factory(cx.text(&f), bindings))
+    };
+    let mut receivers = Receivers::default();
+    let mut assignments = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
         stack.extend(node.named_children(&mut walk));
+        let mut declare = |name: TsNode<'_>, parameter: bool, framework: Option<Framework>| {
+            let (start, end, file_scope) = declaration_scope(node, parameter);
+            receivers
+                .declarations
+                .entry(cx.text(&name).to_string())
+                .or_default()
+                .push(Declaration {
+                    scope: (start, end),
+                    at: name.start_byte(),
+                    file_scope,
+                    framework,
+                });
+        };
         match node.kind() {
             "parameter_declaration" | "var_spec" => {
                 let typed = node
                     .child_by_field_name("type")
                     .and_then(|t| framework_type(cx.text(&t), bindings));
-                let factory = node
-                    .child_by_field_name("value")
-                    .and_then(|v| v.named_child(0))
-                    .filter(|v| v.kind() == "call_expression")
-                    .and_then(|v| v.child_by_field_name("function"))
-                    .and_then(|f| framework_factory(cx.text(&f), bindings));
-                if let Some(framework) = typed.or(factory) {
-                    let mut walk = node.walk();
-                    for name in node.children_by_field_name("name", &mut walk) {
-                        receivers.insert(cx.text(&name).to_string(), framework);
+                let values = node.child_by_field_name("value");
+                let single = values.filter(|v| v.named_child_count() == 1);
+                let framework = typed.or_else(|| factory_of(single.and_then(|v| v.named_child(0))));
+                let mut walk = node.walk();
+                let names: Vec<_> = node.children_by_field_name("name", &mut walk).collect();
+                let framework = if names.len() == 1 || typed.is_some() {
+                    framework
+                } else {
+                    None
+                };
+                for name in names {
+                    declare(name, node.kind() == "parameter_declaration", framework);
+                }
+            }
+            "short_var_declaration" => {
+                let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                ) else {
+                    continue;
+                };
+                let framework = (left.named_child_count() == 1 && right.named_child_count() == 1)
+                    .then(|| factory_of(right.named_child(0)))
+                    .flatten();
+                let mut walk = left.walk();
+                for name in left.named_children(&mut walk) {
+                    if name.kind() == "identifier" {
+                        declare(name, false, framework);
                     }
                 }
             }
@@ -398,45 +512,23 @@ fn typed_receivers(
                     continue;
                 };
                 if left.kind() == "identifier"
-                    && right.kind() == "call_expression"
-                    && let Some(framework) = right
-                        .child_by_field_name("function")
-                        .and_then(|f| framework_factory(cx.text(&f), bindings))
+                    && let Some(framework) = factory_of(Some(right))
                 {
-                    receivers.insert(cx.text(&left).to_string(), framework);
+                    assignments.push((cx.text(&left).to_string(), left.start_byte(), framework));
                 }
             }
             _ => {}
         }
     }
-}
-
-fn assignment_receivers(
-    cx: &FileCx<'_>,
-    root: TsNode<'_>,
-    bindings: &HashMap<String, ImportBinding>,
-) -> HashMap<String, Framework> {
-    let query = crate::queries::query("(short_var_declaration) @assignment");
-    let mut receivers = HashMap::new();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, root, cx.source);
-    while let Some(found) = matches.next() {
-        let assignment = found.captures()[0].node;
-        let raw = cx.text(&assignment);
-        let Some((left, right)) = raw.split_once(":=") else {
+    for (name, at, framework) in assignments {
+        let Some((index, declaration)) = receivers.visible(&name, at) else {
             continue;
         };
-        let variable = left.trim();
-        let callee = right.trim().split('(').next().unwrap_or("").trim();
-        if variable
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-            && let Some(framework) = framework_factory(callee, bindings)
-        {
-            receivers.insert(variable.to_string(), framework);
+        if declaration.framework.is_none() {
+            receivers.declarations.get_mut(&name).expect("visible")[index].framework =
+                Some(framework);
         }
     }
-    typed_receivers(cx, root, bindings, &mut receivers);
     receivers
 }
 
@@ -458,7 +550,7 @@ fn endpoint_registration<'t>(
     call: TsNode<'t>,
     callee: &str,
     bindings: &HashMap<String, ImportBinding>,
-    receivers: &HashMap<String, Framework>,
+    receivers: &Receivers,
 ) -> Option<(String, String, TsNode<'t>, &'static str)> {
     let (base, member) = callee.split_once('.')?;
     let arguments = call_arguments(call);
@@ -473,8 +565,8 @@ fn endpoint_registration<'t>(
         let (method, path) = route_pattern(route);
         return Some((method, path, handler, "net/http"));
     }
-    let framework = receivers.get(base)?;
-    match framework {
+    let framework = receivers.get(base, call.start_byte())?;
+    match &framework {
         Framework::HttpMux if matches!(member, "Handle" | "HandleFunc") => {
             let (method, path) = route_pattern(route);
             Some((method, path, handler, "net/http"))
@@ -937,6 +1029,40 @@ fn extract_source_with_module(
         });
     }
 
+    // Func literals that route handlers resolve to are callables of their
+    // own (#2007). Register them before any call or literal is attributed,
+    // so the calls inside a closure are owned by it, not by its encloser.
+    {
+        let scope = HandlerScope {
+            bindings: &bindings,
+            locals: &locals,
+            closures: &closures,
+        };
+        let call_query = crate::queries::query("(call_expression) @call");
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(call_query, root, source);
+        let mut literals = Vec::new();
+        while let Some(found) = matches.next() {
+            let call = found.captures()[0].node;
+            let Some(function) = call.child_by_field_name("function") else {
+                continue;
+            };
+            if let Some((_, _, handler_node, _)) =
+                endpoint_registration(&cx, call, cx.text(&function), &bindings, &receivers)
+                && let (_, Some(literal)) = handler_target(&cx, handler_node, &scope, 0)
+            {
+                literals.push(literal);
+            }
+        }
+        // Outer literals first, so a nested one is named inside its encloser.
+        literals.sort_by_key(|literal| literal.start_byte());
+        literals.dedup_by_key(|literal| literal.start_byte());
+        for literal in literals {
+            let symbol = literal_symbol(&cx, literal, &functions_by_start, &mut out);
+            functions_by_start.insert(literal.start_byte(), symbol);
+        }
+    }
+
     // SDK request and config structs (AC-0462).
     let literal_query = crate::queries::query("(composite_literal) @literal");
     let mut cursor = QueryCursor::new();
@@ -968,14 +1094,10 @@ fn extract_source_with_module(
             };
             let (mut handler, literal) = handler_target(&cx, handler_node, &scope, 0);
             if let Some(literal) = literal {
-                let symbol = match functions_by_start.get(&literal.start_byte()) {
-                    Some(symbol) => symbol.clone(),
-                    None => {
-                        let symbol = literal_symbol(&cx, literal, &functions_by_start, &mut out);
-                        functions_by_start.insert(literal.start_byte(), symbol.clone());
-                        symbol
-                    }
-                };
+                let symbol = functions_by_start
+                    .get(&literal.start_byte())
+                    .expect("handler literals are registered before calls")
+                    .clone();
                 handler = HandlerTarget::Resolved(symbol);
             }
             let endpoint = format!("ep:{}@{method}:{route}", id.repo);

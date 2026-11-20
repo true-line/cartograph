@@ -1094,8 +1094,12 @@ func (s *Service) webAPI(mux *http.ServeMux) {
     mux.HandleFunc("GET /api/web/session", func(w http.ResponseWriter, r *http.Request) {
         s.session(w)
     })
-    fleet := func(w http.ResponseWriter, r *http.Request) {}
+    fleet := func(w http.ResponseWriter, r *http.Request) { s.save(w) }
     mux.HandleFunc("GET /devices", fleet)
+    {
+        mux := newFake()
+        mux.HandleFunc("/shadowed", fleet)
+    }
     mux.HandleFunc("GET /api/web/catalog", s.catalog)
     mux.HandleFunc("POST /api/daemon/pull", wrap("POST", s.pull))
     mux.HandleFunc("POST /api/web/relay-rules", relayWrite(true))
@@ -1103,6 +1107,12 @@ func (s *Service) webAPI(mux *http.ServeMux) {
 }
 
 func (s *Service) session(w http.ResponseWriter) {}
+func (s *Service) save(w http.ResponseWriter) {}
+func other() {
+    mux := newFake()
+    mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {})
+}
+func newFake() *Fake { return nil }
 func wrap(method string, h func(context.Context) int) http.HandlerFunc { return nil }
 func relayWrite(on bool) http.HandlerFunc { return nil }
 "#,
@@ -1144,6 +1154,45 @@ func relayWrite(on bool) http.HandlerFunc { return nil }
         edge_pairs(&extraction, "CALLS")
             .contains(&(literal, sym("webapi.go", "Service.session").as_str()))
     );
+    // So are a bound closure's, though its body precedes its registration.
+    let closure = handles[ep("GET", "/devices").as_str()];
+    assert!(
+        edge_pairs(&extraction, "CALLS")
+            .contains(&(closure, sym("webapi.go", "Service.save").as_str()))
+    );
     let node = extraction.nodes.iter().find(|n| n.id == literal).unwrap();
     assert_eq!(node.props["package_dir"], "pkg/device");
+    // A receiver is proven lexically: a shadowing local or a same-named
+    // local in another function is not the router.
+    assert!(!handles.contains_key(ep("ANY", "/shadowed").as_str()));
+    assert!(!handles.contains_key(ep("ANY", "/elsewhere").as_str()));
+}
+
+#[test]
+fn a_reused_files_unresolved_handler_fallback_carries_the_new_commit() {
+    // AC-0918: the Gap fallback kept for a package handler is retargeted
+    // with the rest of a reused file's facts.
+    let source = br#"package main
+
+import (
+    "net/http"
+    "example.com/bot/handlers"
+)
+
+func routes(mux *http.ServeMux) {
+    mux.HandleFunc("/x", handlers.Missing)
+}
+"#;
+    let mut extraction =
+        extract_source_with_module(source, "main.go", &id(), Some("example.com/bot")).unwrap();
+    assert_eq!(extraction.pending_endpoints.len(), 1);
+    retarget_commit(&mut extraction, "def456");
+    let (endpoint, gap, handles) = &extraction.pending_endpoints[0].gap;
+    for props in [&endpoint.props, &gap.props, &handles.props] {
+        let text = props.to_string();
+        assert!(
+            text.contains("def456") && !text.contains("abc123"),
+            "{text}"
+        );
+    }
 }
