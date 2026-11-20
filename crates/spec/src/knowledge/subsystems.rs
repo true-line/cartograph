@@ -1346,9 +1346,16 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
     // A repository's key is random per registration (ADR-0023): the names
     // follow the files, never the order of the repositories.
     grouped.sort_by(|a, b| {
-        let a = a.units.iter().map(|unit| unit.path);
-        let b = b.units.iter().map(|unit| unit.path);
-        a.cmp(b)
+        let paths = |g: &Grouped<'_>| {
+            g.units
+                .iter()
+                .map(|unit| unit.path.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let commit = |g: &Grouped<'_>| g.units.first().map(|unit| unit.evidence.commit_sha.clone());
+        paths(a)
+            .cmp(&paths(b))
+            .then_with(|| commit(a).cmp(&commit(b)))
     });
     // A subject two repositories both have is one group in each. The one
     // with the most files keeps the name, and the others are named with
