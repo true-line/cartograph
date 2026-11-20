@@ -2464,6 +2464,7 @@ fn responses_cited(
 #[test]
 fn flask_handlers_record_literal_response_statuses_and_keys() {
     // #721: statuses and top-level JSON keys a handler's own returns prove,
+    // each key under the status of its return (AC-0902, T-0902),
     // with the reason whenever a response is built elsewhere.
     let source = r#"
 from flask import Flask, jsonify, redirect, render_template
@@ -2512,6 +2513,7 @@ def nothing():
             "kinds": ["json"],
             "statuses": [200, 400, 403, 410],
             "keys": ["api_key", "email", "error", "ok", "reason"],
+            "keys_by_status": {"200": ["api_key", "email"], "400": ["error"], "403": ["error"], "410": ["ok", "reason"]},
             "scope": "handler_body",
         })
     );
@@ -2666,6 +2668,7 @@ def unrelated(other):
             "kinds": ["html", "json"],
             "statuses": [200, 201],
             "keys": ["ok"],
+            "keys_by_status": {"201": ["ok"]},
             "scope": "handler_body",
         })
     );
@@ -2676,6 +2679,7 @@ def unrelated(other):
             "kinds": ["json"],
             "statuses": [200],
             "keys": ["msg"],
+            "keys_by_status": {"200": ["msg"]},
             "scope": "handler_body",
         })
     );
@@ -3021,6 +3025,7 @@ def b():
             "kinds": ["json"],
             "statuses": [200],
             "keys": ["ok"],
+            "keys_by_status": {"200": ["ok"]},
             "scope": "handler_body",
         })
     );
@@ -3270,6 +3275,7 @@ def loose():
             "kinds": ["json"],
             "statuses": [200, 401, 440],
             "keys": ["error", "mfa_key", "name"],
+            "keys_by_status": {"200": ["mfa_key", "name"], "401": ["error"], "440": ["error"]},
             "followed": [
                 "sym:local/python-service@app/base.py#authorize",
                 "sym:local/python-service@app/base.py#require_auth",
@@ -3298,6 +3304,7 @@ def loose():
             "kinds": ["json"],
             "statuses": [200],
             "keys": ["a", "b"],
+            "keys_by_status": {"200": ["a", "b"]},
             "scope": "handler_body",
         })
     );
@@ -8018,4 +8025,104 @@ fn a_self_call_in_a_method_reaches_the_class_method() {
     assert!(calls[0].dst.ends_with("app/models.py#User.can_create_num"));
     assert_eq!(calls[0].props["resolution"], "self-method");
     assert_eq!(calls[0].props["prov"]["confidence_tier"], "InferredStrong");
+}
+
+#[test]
+fn a_delete_through_a_query_returning_classmethod_is_an_inferred_delete() {
+    // AC-0900 (T-0900): `Model.filter(...).delete()` / `.update(...)`, where
+    // the first class in Model's MRO defining `filter` is a classmethod whose
+    // every return is `<proven session>.query(cls)` followed by query
+    // builders, is an InferredStrong write of Model via that helper; a
+    // classmethod returning a row (`.first()`), a chain with a row-returning
+    // step after the helper or a query of another model is not.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/db.py",
+        r#"
+from sqlalchemy.orm import scoped_session, sessionmaker
+Session = scoped_session(sessionmaker())
+"#,
+    );
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+from sqlalchemy import Column, Integer
+from sqlalchemy.orm import declarative_base
+from app.db import Session
+
+Base = declarative_base()
+
+class ModelMixin(object):
+    @classmethod
+    def filter(cls, *args, **kw):
+        return Session.query(cls).filter(*args, **kw)
+
+    @classmethod
+    def get_by(cls, **kw):
+        return Session.query(cls).filter_by(**kw).first()
+
+class Other(Base):
+    __tablename__ = "other"
+    id = Column(Integer, primary_key=True)
+
+class Alias(Base, ModelMixin):
+    __tablename__ = "alias"
+    id = Column(Integer, primary_key=True)
+
+    @classmethod
+    def others(cls):
+        return Session.query(Other)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/utils.py",
+        r#"
+from app.models import Alias
+
+def remove(alias_id):
+    Alias.filter(Alias.id == alias_id).delete()
+
+def bump(alias_id):
+    Alias.filter(Alias.id == alias_id).order_by(Alias.id).update({"id": 1})
+
+def via_row(alias_id):
+    Alias.get_by(id=alias_id).delete()
+
+def via_other():
+    Alias.others().delete()
+
+def via_first(alias_id):
+    Alias.filter(Alias.id == alias_id).first().delete()
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let writes = |function: &str| -> Vec<&Edge> {
+        out.edges
+            .iter()
+            .filter(|e| e.label == "WRITES" && e.src.ends_with(&format!("app/utils.py#{function}")))
+            .collect()
+    };
+    for (function, op) in [("remove", "delete"), ("bump", "update")] {
+        let found = writes(function);
+        assert_eq!(found.len(), 1, "{function}: {found:?}");
+        assert!(
+            found[0].dst.ends_with(":alias"),
+            "{function}: {}",
+            found[0].dst
+        );
+        assert_eq!(found[0].props["operation"], op);
+        assert_eq!(found[0].props["resolution"], "model-helper");
+        assert_eq!(found[0].props["via"], "ModelMixin.filter");
+        assert_eq!(found[0].props["prov"]["confidence_tier"], "InferredStrong");
+    }
+    for function in ["via_row", "via_other", "via_first"] {
+        assert!(
+            writes(function).is_empty(),
+            "{function}: {:?}",
+            writes(function)
+        );
+    }
 }

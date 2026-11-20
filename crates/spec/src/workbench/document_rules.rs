@@ -19,6 +19,11 @@
 //! `↳` and as matched by name; otherwise a `↳` row names the predicate and
 //! why it was not followed, so the condition is never left unexplained.
 //!
+//! A configuration constant a row names (`config.MAX_NB_EMAIL_FREE_PLAN`) is
+//! stated under it (#1998, AC-0904) when exactly one `ConfigRead` records a
+//! literal default bound to a module constant of that name: the default and
+//! the environment variable that replaces it, as a `↳` row matched by name.
+//!
 //! Only the stored, sanitized displays the rule inventory renders are shown
 //! (SPEC-02); nothing is read from source. The rows are observations: the
 //! complete execution predicate and the consumer effect stay unestablished,
@@ -265,6 +270,9 @@ struct Index<'a> {
     /// Symbols by the last segment of their name, for following a
     /// predicate a condition calls (#1998).
     by_name: BTreeMap<&'a str, Vec<&'a str>>,
+    /// Configuration reads with a recorded literal default, by the module
+    /// constant bound to them (#1998, AC-0904).
+    constants: BTreeMap<&'a str, Vec<(&'a Node, &'a serde_json::Value)>>,
 }
 
 impl<'a> Index<'a> {
@@ -288,6 +296,17 @@ impl<'a> Index<'a> {
                 _ => {}
             }
         }
+        let mut constants: BTreeMap<&str, Vec<(&Node, &serde_json::Value)>> = BTreeMap::new();
+        for node in nodes.iter().filter(|n| n.label == "ConfigRead") {
+            for default in node.props["defaults"].as_array().into_iter().flatten() {
+                if let Some(name) = default["constant"].as_str() {
+                    constants
+                        .entry(name)
+                        .or_default()
+                        .push((node, &default["value"]));
+                }
+            }
+        }
         let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for node in nodes.iter().filter(|n| n.label == "Symbol") {
             if let Some(name) = node.props["name"].as_str() {
@@ -300,7 +319,60 @@ impl<'a> Index<'a> {
             calls,
             governs,
             by_name,
+            constants,
         }
+    }
+
+    /// A `↳` row for each configuration constant `row` names (by an
+    /// identifier token equal to the constant), once per `explained` set:
+    /// its default and environment variable when exactly one recorded read
+    /// binds that name, else why it is not stated (#1998, AC-0904).
+    fn explain_constants(
+        &self,
+        row: &Rejection<'_>,
+        explained: &mut BTreeSet<String>,
+        assertions: &mut Assertions,
+        asserted: &mut BTreeSet<String>,
+        out: &mut Text,
+    ) -> Result<(), RenderLimit> {
+        let text = format!("{} {}", row.when, row.outcome);
+        let tokens = text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty());
+        for token in tokens {
+            let Some(found) = self.constants.get(token) else {
+                continue;
+            };
+            if !explained.insert(token.to_owned()) {
+                continue;
+            }
+            let [(read, value)] = found[..] else {
+                writeln!(
+                    out,
+                    "| ↳ {} | configuration constant not stated: {} recorded reads bind this \
+                     name | — | — |",
+                    Literal(token),
+                    found.len()
+                )?;
+                continue;
+            };
+            let key = read.props["key"].as_str().unwrap_or(token);
+            let id = citation_id(&FactKey::Node {
+                id: read.id.clone(),
+            });
+            writeln!(
+                out,
+                "| ↳ {} | configuration constant (matched by name, inferred) | {} unless the \
+                 environment variable {} is set | {id} |",
+                Literal(token),
+                Literal(value.to_string()),
+                Literal(key),
+            )?;
+            if asserted.insert(id) {
+                assertions.node(read, None)?;
+            }
+        }
+        Ok(())
     }
 
     /// The governed callables a capability's handlers reach, nearest first.
@@ -415,7 +487,7 @@ impl<'a> Index<'a> {
     fn follow(
         &self,
         row: &Rejection<'_>,
-        followed: &mut BTreeSet<String>,
+        (followed, explained): &mut (&mut BTreeSet<String>, &mut BTreeSet<String>),
         assertions: &mut Assertions,
         asserted: &mut BTreeSet<String>,
         out: &mut Text,
@@ -491,6 +563,7 @@ impl<'a> Index<'a> {
                         ..exit
                     };
                     write_row_prefixed(&indented, "↳ ", assertions, asserted, out)?;
+                    self.explain_constants(&indented, explained, assertions, asserted, out)?;
                 }
             }
             if printed == 0 {
@@ -594,7 +667,9 @@ pub(super) fn rules_per_capability(
          are not established. A callable more than {SHARED_AFTER} capabilities reach is listed \
          once under shared rejections. A function a condition calls is followed by name \
          (`↳` rows, inferred): the guarded exits of the one repository function of that name \
-         and of what it calls within {PREDICATE_DEPTH} hops, or why it was not followed.\n"
+         and of what it calls within {PREDICATE_DEPTH} hops, or why it was not followed. A \
+         configuration constant a row names is stated with its recorded default and \
+         environment variable (`↳` rows, matched by name, inferred).\n"
     )?;
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
@@ -611,9 +686,17 @@ pub(super) fn rules_per_capability(
         )?;
         out.push_str(HEADER)?;
         let mut followed = BTreeSet::new();
+        let mut explained = BTreeSet::new();
         printed += index.each(reached.into_iter(), |row| {
             write_row(&row, assertions, asserted, out)?;
-            index.follow(&row, &mut followed, assertions, asserted, out)
+            index.explain_constants(&row, &mut explained, assertions, asserted, out)?;
+            index.follow(
+                &row,
+                &mut (&mut followed, &mut explained),
+                assertions,
+                asserted,
+                out,
+            )
         })?;
         out.push_str("\n")?;
     }
@@ -621,10 +704,176 @@ pub(super) fn rules_per_capability(
         out.push_str("### Shared rejections\n\n")?;
         out.push_str(HEADER)?;
         let mut followed = BTreeSet::new();
+        let mut explained = BTreeSet::new();
         printed += index.each(shared(), |row| {
             write_row(&row, assertions, asserted, out)?;
-            index.follow(&row, &mut followed, assertions, asserted, out)
+            index.explain_constants(&row, &mut explained, assertions, asserted, out)?;
+            index.follow(
+                &row,
+                &mut (&mut followed, &mut explained),
+                assertions,
+                asserted,
+                out,
+            )
         })?;
+        out.push_str("\n")?;
+    }
+    Ok(printed)
+}
+
+/// Call hops followed from a guard and the functions nested in it.
+pub(super) const GUARD_DEPTH: usize = 2;
+/// Rows printed for one guard.
+pub(super) const MAX_GUARD_ROWS: usize = 12;
+
+impl<'a> Index<'a> {
+    /// The governed callables of `guard`: the guard, the functions nested
+    /// in it (`guard.decorated`) and what they call within [`GUARD_DEPTH`]
+    /// hops, nearest first.
+    fn guard_owners(&self, guard: &'a str) -> Vec<&'a str> {
+        let nested = format!("{guard}.");
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut front: Vec<&str> = std::iter::once(guard)
+            .chain(
+                self.by_id
+                    .range::<str, _>((std::ops::Bound::Excluded(guard), std::ops::Bound::Unbounded))
+                    .map(|(id, _)| *id)
+                    .take_while(|id| id.starts_with(guard))
+                    .filter(|id| id.starts_with(nested.as_str())),
+            )
+            .filter(|id| self.by_id.get(id).is_some_and(|n| n.label == "Symbol"))
+            .filter(|id| seen.insert(id))
+            .collect();
+        let mut order = front.clone();
+        for _ in 0..GUARD_DEPTH {
+            let mut next = Vec::new();
+            for id in &front {
+                for callee in self.calls.get(id).into_iter().flatten() {
+                    if seen.insert(callee) {
+                        next.push(*callee);
+                    }
+                }
+            }
+            order.extend(&next);
+            front = next;
+        }
+        order.retain(|id| self.governs.contains_key(id));
+        order
+    }
+
+    /// Each guarded exit of `owners`, rejection or not, one at a time.
+    fn each_exit(
+        &self,
+        owners: &[&'a str],
+        mut row: impl FnMut(Rejection<'a>) -> Result<(), RenderLimit>,
+    ) -> Result<usize, RenderLimit> {
+        let mut n = 0;
+        for owner in owners {
+            let name = self
+                .by_id
+                .get(owner)
+                .and_then(|n| n.props["name"].as_str())
+                .unwrap_or(owner);
+            for rule in self.governs.get(owner).into_iter().flatten() {
+                if let Some(found) = guarded(rule, name, true) {
+                    n += 1;
+                    row(found)?;
+                }
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// D1 §1.2: what each repository guard of the callers frame checks (#1998,
+/// AC-0901). For every guard Symbol in `guards`, the guarded exits of the
+/// guard, the functions nested in it and what they call within
+/// [`GUARD_DEPTH`] hops are listed under the guard's name, at most
+/// [`MAX_GUARD_ROWS`] per guard, and a predicate a condition calls is
+/// followed by name as in §1.5. A guard with no guarded exit is not listed.
+/// Returns the number of exit rows printed.
+pub(super) fn guard_checks(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    guards: &BTreeSet<String>,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    if guards.is_empty() {
+        return Ok(0);
+    }
+    let index = Index::new(nodes, edges);
+    let listed: Vec<(&str, Vec<&str>)> = guards
+        .iter()
+        .filter_map(|g| index.by_id.get_key_value(g.as_str()))
+        .filter(|(_, n)| n.label == "Symbol")
+        .map(|(id, _)| (*id, index.guard_owners(id)))
+        .filter(|(_, owners)| !owners.is_empty())
+        .collect();
+    let mut total = 0;
+    for (_, owners) in &listed {
+        total += index.each_exit(owners, |_| Ok(()))?;
+    }
+    if total == 0 {
+        return Ok(0);
+    }
+    writeln!(
+        out,
+        "\n### What each guard checks\n\nGuarded exits of the repository guards above: \
+         {total}. Each is a stored `return` or `raise` under a condition in the guard, a \
+         function nested in it, or what they call within {GUARD_DEPTH} call hops \
+         (Deterministic observations). An exit returning an error response or raising refuses \
+         the caller; the conditions are the ones around the exit in its own callable, and the \
+         complete execution predicate is not established. A function a condition calls is \
+         followed by name, and a configuration constant a row names is stated with its \
+         recorded default (`↳` rows, inferred). At most {MAX_GUARD_ROWS} exits are listed per \
+         guard; `rule-evidence.md` has every observation.\n"
+    )?;
+    let mut printed = 0;
+    for (guard, owners) in &listed {
+        if index.each_exit(owners, |_| Ok(()))? == 0 {
+            continue;
+        }
+        let name = index
+            .by_id
+            .get(guard)
+            .and_then(|n| n.props["name"].as_str())
+            .unwrap_or(guard);
+        writeln!(out, "#### {}\n", Literal(name))?;
+        out.push_str(HEADER)?;
+        // A function the guard's own rows already list is not followed again.
+        let mut followed: BTreeSet<String> = owners
+            .iter()
+            .filter_map(|id| index.by_id.get(id)?.props["name"].as_str())
+            .map(|name| name.rsplit('.').next().unwrap_or(name).to_owned())
+            .collect();
+        let mut explained = BTreeSet::new();
+        let mut shown = 0usize;
+        let mut omitted = 0usize;
+        index.each_exit(owners, |row| {
+            if shown == MAX_GUARD_ROWS {
+                omitted += 1;
+                return Ok(());
+            }
+            shown += 1;
+            write_row(&row, assertions, asserted, out)?;
+            index.explain_constants(&row, &mut explained, assertions, asserted, out)?;
+            index.follow(
+                &row,
+                &mut (&mut followed, &mut explained),
+                assertions,
+                asserted,
+                out,
+            )
+        })?;
+        if omitted > 0 {
+            writeln!(
+                out,
+                "| {} | {omitted} more guarded exits not listed; `rule-evidence.md` has them \
+                 | — | — |",
+                Literal(name)
+            )?;
+        }
+        printed += shown;
         out.push_str("\n")?;
     }
     Ok(printed)
@@ -646,6 +895,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         slots::<&Node>(rows)?,
         // Symbols by name, and one followed predicate's traversal (#1998).
         map_slots::<&str, Vec<&str>>(rows)?,
+        // Configuration constants by name and one table's explained set.
+        map_slots::<&str, Vec<(&Node, &serde_json::Value)>>(rows)?,
+        set_slots::<String>(rows)?,
         slots::<&str>(rows)?,
         set_slots::<&str>(rows)?,
         slots::<&str>(rows)?.checked_mul(3)?,
@@ -668,7 +920,17 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         text.checked_mul(2)?,
         graph.bytes,
     ])?;
-    sum(&[index, reach_count, traversal, row])
+    // What each guard checks (#1998): the guard ids, each guard's owners
+    // and one guard's traversal and nested-name prefix, held with the index.
+    let guards = sum(&[
+        set_slots::<String>(rows)?,
+        graph.bytes,
+        slots::<(&str, Vec<&str>)>(rows)?,
+        slots::<&str>(rows)?.checked_mul(3)?,
+        set_slots::<&str>(rows)?,
+        graph.bytes,
+    ])?;
+    sum(&[index, reach_count, traversal, row, guards])
 }
 
 #[cfg(test)]
@@ -1034,5 +1296,202 @@ def login(user, password):
             ),
             "{text}"
         );
+    }
+
+    // AC-0901 (T-0901): a repository guard's own exits, those of the
+    // function nested in it and of what that calls are listed under the
+    // guard, with a predicate followed by name; a guard id that is not a
+    // recovered Symbol, or a guard with no guarded exit, is not listed.
+    #[test]
+    fn each_guard_lists_the_exits_it_and_its_wrapper_reach() {
+        let source = r#"
+from functools import wraps
+from flask import jsonify, g, request
+
+def authorize_request():
+    api_key = request.headers.get("Authentication")
+    if not api_key:
+        return jsonify(error="Wrong api key"), 401
+    if g.user.disabled:
+        return jsonify(error="Disabled account"), 403
+    if not g.user.is_active():
+        return jsonify(error="Account does not exist"), 401
+    return None
+
+class User:
+    def is_active(self):
+        if self.delete_on is not None:
+            return False
+        return True
+
+def require_api_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        error_return = authorize_request()
+        if error_return:
+            return error_return
+        return f(*args, **kwargs)
+    return decorated
+
+def plain(f):
+    return f
+"#;
+        let facts = adapters_lang_python::extract_source(
+            source.as_bytes(),
+            "app/api/base.py",
+            &adapters_lang_python::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let id_of = |name: &str| {
+            nodes
+                .iter()
+                .find(|n| n.label == "Symbol" && n.props["name"] == name)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let guards: BTreeSet<String> = [
+            id_of("require_api_auth"),
+            id_of("plain"),
+            "sym:repo@app/api/base.py#missing".to_owned(),
+        ]
+        .into();
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        let printed = guard_checks(
+            (&nodes, &edges),
+            &guards,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        assert_eq!(printed, 4, "{text}");
+        assert!(text.contains("### What each guard checks"), "{text}");
+        assert!(text.contains("#### require\\_api\\_auth\n"), "{text}");
+        assert!(!text.contains("#### plain"), "{text}");
+        assert!(!text.contains("missing"), "{text}");
+        for row in [
+            "| require\\_api\\_auth.decorated | error\\_return | returns error\\_return |",
+            "| authorize\\_request | not api\\_key | returns jsonify(error=\"Wrong api key\"), 401 |",
+            "| authorize\\_request | g.user.disabled | returns jsonify(error=\"Disabled account\"), \
+             403 |",
+            "| authorize\\_request | not g.user.is\\_active() | returns \
+             jsonify(error=\"Account does not exist\"), 401 |",
+            "| ↳ is\\_active() | followed into User.is\\_active (matched by name, inferred)",
+            "| ↳ User.is\\_active | self.delete\\_on is not None | returns False |",
+        ] {
+            assert!(text.contains(row), "missing {row}\n{text}");
+        }
+    }
+
+    // AC-0904 (T-0904): a configuration constant a row or a followed row
+    // names is stated once per table with its recorded default and
+    // environment variable; a name two reads bind is not stated.
+    #[test]
+    fn a_configuration_constant_a_row_names_is_stated_with_its_default() {
+        let source = r#"
+from flask import jsonify
+import config
+
+class User:
+    def max_alias(self):
+        if self.old:
+            return config.MAX_OLD
+        return config.MAX_FREE
+
+def create(user):
+    if user.count() >= user.max_alias():
+        return jsonify(error="quota"), 400
+    if user.count() > config.MAX_FREE:
+        return jsonify(error="over"), 400
+    if user.trash > config.TWICE:
+        return jsonify(error="x"), 400
+"#;
+        let mut facts = adapters_lang_python::extract_source(
+            source.as_bytes(),
+            "app/api/alias.py",
+            &adapters_lang_python::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let read = |key: &str, path: &str, value: serde_json::Value| Node {
+            id: format!("cfgread:repo@{path}:env:{key}"),
+            label: "ConfigRead".into(),
+            props: serde_json::json!({
+                "key": key,
+                "source": "env",
+                "defaults": [{ "constant": key, "value": value, "byte_start": 0, "byte_end": 1 }],
+            }),
+        };
+        facts
+            .nodes
+            .push(read("MAX_FREE", "app/config.py", 5.into()));
+        facts
+            .nodes
+            .push(read("MAX_OLD", "app/config.py", 15.into()));
+        facts.nodes.push(read("TWICE", "app/config.py", 1.into()));
+        facts.nodes.push(read("TWICE", "app/other.py", 2.into()));
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let handler = nodes
+            .iter()
+            .find(|n| n.label == "Symbol" && n.props["name"] == "create")
+            .unwrap();
+        let handles = Edge {
+            src: "ep:repo@POST:/api/alias".into(),
+            dst: handler.id.clone(),
+            label: "HANDLES".into(),
+            props: serde_json::json!({}),
+        };
+        let cite = BaseRef::Edge(
+            handles.src.clone(),
+            handles.dst.clone(),
+            handles.label.clone(),
+        );
+        let cap = Node {
+            id: "capability:test:alias".into(),
+            label: "Capability".into(),
+            props: serde_json::json!({ "title": "Manage alias (API)" }),
+        };
+        let knowledge = Stories {
+            included: vec![crate::workbench::capabilities::Story {
+                node: &cap,
+                support: vec![(&cite, Support::Edge(&handles))],
+            }],
+            filtered: 0,
+            areas: BTreeMap::new(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        for row in [
+            "| ↳ MAX\\_OLD | configuration constant (matched by name, inferred) | 15 unless the \
+             environment variable MAX\\_OLD is set | ",
+            "| ↳ MAX\\_FREE | configuration constant (matched by name, inferred) | 5 unless the \
+             environment variable MAX\\_FREE is set | ",
+            "| ↳ TWICE | configuration constant not stated: 2 recorded reads bind this name | — | — |",
+        ] {
+            assert!(text.contains(row), "missing {row}\n{text}");
+        }
+        assert_eq!(text.matches("| ↳ MAX\\_FREE |").count(), 1, "{text}");
     }
 }

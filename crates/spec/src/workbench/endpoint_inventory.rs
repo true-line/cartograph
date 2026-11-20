@@ -220,6 +220,44 @@ pub(super) fn strings(value: &serde_json::Value) -> Vec<&str> {
         .collect()
 }
 
+/// The top-level JSON keys a `responses` shape records for `status`, when
+/// the adapter tied keys to statuses (#1998, AC-0902).
+pub(super) fn status_keys(raw: &serde_json::Value, status: u64) -> Vec<&str> {
+    strings(&raw["keys_by_status"][status.to_string()])
+}
+
+/// The JSON keys cell: `200: id, name; 400: error` when the keys are tied to
+/// their statuses, with any key whose status is computed after them, or the
+/// keys alone for a fact recorded before keys were tied to statuses.
+fn json_keys(raw: &serde_json::Value) -> String {
+    let keys = strings(&raw["keys"]);
+    let Some(by_status) = raw["keys_by_status"].as_object().filter(|m| !m.is_empty()) else {
+        return if keys.is_empty() {
+            "—".to_owned()
+        } else {
+            keys.join(", ")
+        };
+    };
+    let mut statuses: Vec<(u64, Vec<&str>)> = by_status
+        .iter()
+        .filter_map(|(status, keys)| Some((status.parse().ok()?, strings(keys))))
+        .collect();
+    statuses.sort();
+    let tied: std::collections::BTreeSet<&str> = statuses
+        .iter()
+        .flat_map(|(_, keys)| keys.iter().copied())
+        .collect();
+    let mut parts: Vec<String> = statuses
+        .iter()
+        .map(|(status, keys)| format!("{status}: {}", keys.join(", ")))
+        .collect();
+    let untied: Vec<&str> = keys.into_iter().filter(|k| !tied.contains(k)).collect();
+    if !untied.is_empty() {
+        parts.push(format!("status computed: {}", untied.join(", ")));
+    }
+    parts.join("; ")
+}
+
 /// A plain statement of a reason an adapter recorded for a partial shape.
 pub(super) fn reason(key: &str) -> &str {
     match key {
@@ -369,12 +407,7 @@ fn contract(
                     (false, true) => statuses.join(", "),
                     (false, false) => format!("{} ({})", statuses.join(", "), kinds.join(", ")),
                 };
-                let keys = strings(&raw["keys"]);
-                let keys = if keys.is_empty() {
-                    "—".to_owned()
-                } else {
-                    keys.join(", ")
-                };
+                let keys = json_keys(raw);
                 let id = format!("responses:{}", endpoint.id);
                 assertions.derived(
                     &id,

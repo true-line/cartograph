@@ -218,6 +218,7 @@ pub(crate) struct OrmClassDecl {
     relationships: Vec<RelationshipDecl>,
     pub(crate) defined_members: BTreeSet<String>,
     pub(crate) classmethods: BTreeMap<String, Vec<sqlalchemy_writes::ClassMethodWrite>>,
+    pub(crate) query_methods: BTreeMap<String, String>,
     evidence: EvidenceRef,
 }
 
@@ -1218,8 +1219,11 @@ pub(crate) fn extract(
             }
         }
 
-        let (defined_members, classmethods) =
-            sqlalchemy_writes::extract_class_methods(cx, class, &module_shadowed_imports, bindings);
+        let sqlalchemy_writes::ClassMethods {
+            defined_members,
+            classmethods,
+            query_methods,
+        } = sqlalchemy_writes::extract_class_methods(cx, class, &module_shadowed_imports, bindings);
 
         file.classes.push(OrmClassDecl {
             key: (cx.path.to_string(), name.clone()),
@@ -1234,6 +1238,7 @@ pub(crate) fn extract(
             relationships,
             defined_members,
             classmethods,
+            query_methods,
             evidence: cx.evidence(&class),
         });
     }

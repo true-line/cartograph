@@ -994,9 +994,17 @@ pub(super) fn d1(
             }
             // Python callers by their recovered guards frame 1.2 (#1979).
             if matches!(source, SectionFrame::Nodes("Actor")) {
+                let mut guards = BTreeSet::new();
                 cited += super::endpoint_permissions::callers_frame(
                     nodes,
                     (mode, rejected),
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut guards,
+                    &mut content,
+                )?;
+                cited += rules::guard_checks(
+                    (nodes, edges),
+                    &guards,
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;

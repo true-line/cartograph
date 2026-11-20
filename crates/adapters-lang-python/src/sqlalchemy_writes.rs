@@ -11,6 +11,13 @@
 //! not otherwise rebound in the function, and the attribute is a column the
 //! model class itself declares. The session flush is not proven, so the edge
 //! is InferredStrong with resolution `attribute-assignment`.
+//!
+//! `Model.meth(...)…delete()` / `.update(...)` is a write of `Model` (#1998,
+//! AC-0900) when the first class in Model's MRO defining `meth` is a
+//! `@classmethod` whose every `return` is `<proven session>.query(cls)`
+//! followed only by query builders (`filter`, `filter_by`, `order_by`, …).
+//! It is InferredStrong with resolution `model-helper` and `via` naming the
+//! defining class and method.
 
 use super::sqlalchemy::{
     BaseExpr, OrmClassDecl, OrmFile, call_arguments, is_dotted_identifier, resolve_imported_symbol,
@@ -63,6 +70,14 @@ pub(crate) enum WriteCandidate {
     ModelHelper {
         class_expr: String,
         method: String,
+        evidence: EvidenceRef,
+    },
+    /// `X.meth(...)...delete()` / `.update()` where `meth` is a classmethod
+    /// returning a query of its class.
+    QueryHelper {
+        class_expr: String,
+        method: String,
+        op: WriteOp,
         evidence: EvidenceRef,
     },
     /// Column assignment on an instance annotated as model `class_expr`.
@@ -161,6 +176,7 @@ pub(crate) fn retarget_file(file: &mut OrmFile, commit: &str) {
             match candidate {
                 WriteCandidate::Session { evidence, .. }
                 | WriteCandidate::ModelHelper { evidence, .. }
+                | WriteCandidate::QueryHelper { evidence, .. }
                 | WriteCandidate::Attribute { evidence, .. } => {
                     evidence.commit_sha = commit.into();
                 }
@@ -271,12 +287,22 @@ fn first_positional_arg(call: TsNode<'_>) -> Option<TsNode<'_>> {
     None
 }
 
+/// The innermost receiver of a `.delete(...)` / `.update(...)` call chain.
+enum ChainRoot<'t> {
+    /// `<session>.query(<model>)`.
+    Session {
+        session: TsNode<'t>,
+        model: TsNode<'t>,
+    },
+    /// `<Model>.<method>(...)`: a model classmethod that may return a query
+    /// of the model (#1998, AC-0900).
+    Helper { class: TsNode<'t>, method: String },
+}
+
 /// Match a call chain whose innermost receiver is `<session>.query(<model>)`
-/// and whose outermost method is `.delete(...)` or `.update(...)`.
-fn query_chain_target<'t>(
-    cx: &FileCx<'_>,
-    call: TsNode<'t>,
-) -> Option<(TsNode<'t>, TsNode<'t>, WriteOp)> {
+/// or `<Model>.<method>(...)` and whose outermost method is `.delete(...)` or
+/// `.update(...)`.
+fn query_chain_target<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<(ChainRoot<'t>, WriteOp)> {
     if let Some(parent) = call.parent()
         && parent.kind() == "attribute"
         && parent.child_by_field_name("object") == Some(call)
@@ -299,6 +325,9 @@ fn query_chain_target<'t>(
     if curr.kind() != "call" {
         return None;
     }
+    // Whether every step between the root and `.delete()` is a query
+    // builder: a row-returning step (`.first()`) leaves no proven query.
+    let mut only_builders = true;
     while curr.kind() == "call" {
         let inner_callee = curr.child_by_field_name("function")?;
         if inner_callee.kind() != "attribute" {
@@ -312,16 +341,35 @@ fn query_chain_target<'t>(
             if attr == "query" {
                 return None;
             }
+            only_builders &= QUERY_BUILDERS.contains(&attr);
             curr = obj;
         } else {
-            if attr != "query" || !is_dotted_identifier(obj) {
+            if !is_dotted_identifier(obj) {
                 return None;
+            }
+            if attr != "query" {
+                if !only_builders {
+                    return None;
+                }
+                return Some((
+                    ChainRoot::Helper {
+                        class: obj,
+                        method: attr.to_string(),
+                    },
+                    op,
+                ));
             }
             let model_arg = first_positional_arg(curr)?;
             if !is_dotted_identifier(model_arg) {
                 return None;
             }
-            return Some((obj, model_arg, op));
+            return Some((
+                ChainRoot::Session {
+                    session: obj,
+                    model: model_arg,
+                },
+                op,
+            ));
         }
     }
     None
@@ -493,15 +541,31 @@ fn analyze_function_body(
         if node.kind() != "call" {
             continue;
         }
-        if let Some((session_node, model_node, op)) = query_chain_target(cx, node) {
-            record_session_write(
-                &mut candidates,
-                cx.text(&session_node).trim(),
-                cx.text(&model_node).trim(),
-                op,
-                cx.evidence(&node),
-            );
-            continue;
+        match query_chain_target(cx, node) {
+            Some((ChainRoot::Session { session, model }, op)) => {
+                record_session_write(
+                    &mut candidates,
+                    cx.text(&session).trim(),
+                    cx.text(&model).trim(),
+                    op,
+                    cx.evidence(&node),
+                );
+                continue;
+            }
+            Some((ChainRoot::Helper { class, method }, op)) => {
+                let class_expr = cx.text(&class).trim();
+                let head = class_expr.split('.').next().unwrap_or(class_expr);
+                if active_first_param != Some(class_expr) && !is_locally_bound(cx, function, head) {
+                    candidates.push(WriteCandidate::QueryHelper {
+                        class_expr: class_expr.to_string(),
+                        method,
+                        op,
+                        evidence: cx.evidence(&node),
+                    });
+                }
+                continue;
+            }
+            None => {}
         }
         let Some(callee) = node.child_by_field_name("function") else {
             continue;
@@ -718,11 +782,16 @@ pub(crate) fn extract_class_methods(
     class: TsNode<'_>,
     shadowed_for_import: &BTreeSet<String>,
     bindings: &HashMap<String, ImportBinding>,
-) -> (BTreeSet<String>, BTreeMap<String, Vec<ClassMethodWrite>>) {
+) -> ClassMethods {
     let mut defined_members = BTreeSet::new();
     let mut classmethods = BTreeMap::new();
+    let mut query_methods = BTreeMap::new();
     let Some(body) = class.child_by_field_name("body") else {
-        return (defined_members, classmethods);
+        return ClassMethods {
+            defined_members,
+            classmethods,
+            query_methods,
+        };
     };
     let mut walk = body.walk();
     for stmt in body.named_children(&mut walk) {
@@ -755,6 +824,9 @@ pub(crate) fn extract_class_methods(
                     && let Some(first_param) = first_parameter_name(cx, inner)
                 {
                     let (_, writes) = analyze_function_body(cx, inner, Some(first_param));
+                    if let Some(session) = returned_own_query(cx, inner, first_param) {
+                        query_methods.insert(method_name.clone(), session);
+                    }
                     classmethods.insert(method_name, writes);
                 }
             }
@@ -779,7 +851,94 @@ pub(crate) fn extract_class_methods(
             _ => {}
         }
     }
-    (defined_members, classmethods)
+    ClassMethods {
+        defined_members,
+        classmethods,
+        query_methods,
+    }
+}
+
+/// What a class body defines: member names, `@classmethod` session writes on
+/// the class, and classmethods that return a query of the class.
+pub(crate) struct ClassMethods {
+    pub(crate) defined_members: BTreeSet<String>,
+    pub(crate) classmethods: BTreeMap<String, Vec<ClassMethodWrite>>,
+    /// Classmethod name -> the session expression of the query it returns.
+    pub(crate) query_methods: BTreeMap<String, String>,
+}
+
+/// SQLAlchemy `Query` methods that return another `Query`.
+const QUERY_BUILDERS: &[&str] = &[
+    "filter",
+    "filter_by",
+    "order_by",
+    "join",
+    "outerjoin",
+    "options",
+    "where",
+    "limit",
+    "offset",
+    "distinct",
+    "group_by",
+    "having",
+    "enable_eagerloads",
+    "yield_per",
+    "execution_options",
+    "select_from",
+    "with_for_update",
+];
+
+/// The session expression `S` when every `return` of the classmethod
+/// `function` returns `S.query(<first_param>)` followed only by query
+/// builder calls, and `first_param` is never rebound (#1998, AC-0900).
+fn returned_own_query(cx: &FileCx<'_>, function: TsNode<'_>, first_param: &str) -> Option<String> {
+    if !scope_binding(cx, function, first_param).writes.is_empty() {
+        return None;
+    }
+    let body = function.child_by_field_name("body")?;
+    let mut nodes = Vec::new();
+    collect_body_nodes(body, &mut nodes);
+    let mut session = None;
+    let mut returns = 0;
+    for node in nodes {
+        if node.kind() != "return_statement" {
+            continue;
+        }
+        returns += 1;
+        let mut curr = node.named_child(0)?;
+        let found = loop {
+            if curr.kind() != "call" {
+                break None;
+            }
+            let callee = curr.child_by_field_name("function")?;
+            if callee.kind() != "attribute" {
+                break None;
+            }
+            let obj = callee.child_by_field_name("object")?;
+            let attr = cx.text(&callee.child_by_field_name("attribute")?).trim();
+            if obj.kind() == "call" {
+                if !QUERY_BUILDERS.contains(&attr) {
+                    break None;
+                }
+                curr = obj;
+                continue;
+            }
+            if attr != "query" || !is_dotted_identifier(obj) {
+                break None;
+            }
+            let model = first_positional_arg(curr)?;
+            if model.kind() != "identifier" || cx.text(&model) != first_param {
+                break None;
+            }
+            break Some(cx.text(&obj).trim().to_string());
+        };
+        let found = found?;
+        if session.as_ref().is_some_and(|s| s != &found) {
+            return None;
+        }
+        session = Some(found);
+    }
+    (returns > 0).then_some(session).flatten()
 }
 
 /// Collect per-function write candidates across the file.
@@ -964,6 +1123,37 @@ fn resolve_mro_helper<'a>(
     MroOutcome::NotFound
 }
 
+/// The first class in `class`'s C3 order that defines `method` decides: a
+/// classmethod returning a query of its class through a proven session gives
+/// that defining class's name; anything else gives none.
+fn resolve_mro_query<'a>(
+    class: &'a OrmClassDecl,
+    method: &str,
+    scope: &MroScope<'a, '_>,
+    proven_sessions: &BTreeSet<(String, String)>,
+) -> Option<&'a str> {
+    let order = linearize(class, scope, &mut Vec::new())?;
+    for entry in order {
+        let MroEntry::Class(defining) = entry else {
+            continue;
+        };
+        if !defining.defined_members.contains(method) {
+            continue;
+        }
+        let session = defining.query_methods.get(method)?;
+        return is_proven_session(
+            &defining.key.0,
+            session,
+            scope.imports_by_file,
+            scope.known_files,
+            proven_sessions,
+            scope.proven_flask_dbs,
+        )
+        .then_some(defining.name.as_str());
+    }
+    None
+}
+
 /// Resolve all per-function write candidates across files and emit `WRITES` edges.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_writes(
@@ -1090,6 +1280,37 @@ pub(crate) fn resolve_writes(
                                     evidence: evidence.clone(),
                                 });
                             }
+                        }
+                    }
+                    WriteCandidate::QueryHelper {
+                        class_expr,
+                        method,
+                        op,
+                        evidence,
+                    } => {
+                        let Some(model_key) =
+                            resolve_symbol(&file_path, &class_expr, imports_by_file, known_files)
+                        else {
+                            continue;
+                        };
+                        let Some(entity_id) = by_class_key.get(&model_key) else {
+                            continue;
+                        };
+                        let Some(model_class) = classes_by_key.get(&model_key).copied() else {
+                            continue;
+                        };
+                        if let Some(defining) =
+                            resolve_mro_query(model_class, &method, &scope, proven_sessions)
+                        {
+                            resolved_by_pair
+                                .entry((src.clone(), entity_id.clone()))
+                                .or_default()
+                                .push(ResolvedWrite {
+                                    op,
+                                    via: Some(format!("{defining}.{method}")),
+                                    attribute: false,
+                                    evidence,
+                                });
                         }
                     }
                     WriteCandidate::Attribute {

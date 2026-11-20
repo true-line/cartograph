@@ -7,8 +7,10 @@
 //! whose evidence is the span of every read of that key in that file in byte
 //! order. A read whose key is not a string literal is a dynamic read: one
 //! node per file, id `cfgread:{repo}@{path}:env:?`, `dynamic: true` and no
-//! `key`. Only the key name and the spans are recorded, never a value, a
-//! default or a fallback.
+//! `key`. Only the key name and the spans are recorded here, never a value,
+//! a default or a fallback; an adapter may add a numeric or boolean literal
+//! `defaults` list to an assembled node (ADR-0059 decision 5 as amended,
+//! #1998).
 //!
 //! The adapter decides what a proven read is (ADR-0059 decision 4): a site
 //! reaches this module only when the call is provably the language's own
