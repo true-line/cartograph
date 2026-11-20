@@ -491,3 +491,95 @@ fn stores_hold_data_and_stay_in_their_repository() {
     );
     assert!(md.contains("Data stores: 2."));
 }
+
+/// AC-0943: the app's Architecture view is the model `architecture.md` was
+/// drawn from: the same element ids and names, bound to the artifact's
+/// identity, and every fact it shows is a graph fact with that fact's
+/// provenance.
+#[test]
+fn the_app_view_is_the_model_the_markdown_draws() {
+    let f = system();
+    let nodes: Vec<&Node> = f.nodes.iter().collect();
+    let edges: Vec<&Edge> = f.edges.iter().collect();
+    let flows = flowtracer::trace(&f.nodes, &f.edges);
+    let names = names();
+    let model = Model::new(
+        &nodes,
+        &edges,
+        &flows,
+        &Supplied {
+            knowledge: None,
+            repo_names: &names,
+            mode: ExportMode::BestEffort,
+        },
+    );
+    let output = markdown(&model, ExportMode::BestEffort, None).unwrap();
+    let mut artifact = crate::SpecArtifact {
+        id: "architecture".into(),
+        file_name: "architecture.md".into(),
+        title: "Architecture".into(),
+        format: "markdown".into(),
+        schema: crate::SpecArtifact::expected_schema("architecture"),
+        content_id: String::new(),
+        content: output.content,
+        assertions: output.assertions,
+    };
+    artifact.content_id = artifact.compute_content_id();
+    let view = view(&model, &artifact, ExportMode::BestEffort);
+    assert_eq!(view.artifact_id, artifact.id);
+    assert_eq!(view.schema, artifact.schema);
+    assert_eq!(view.content_id, artifact.content_id);
+    assert_eq!(view.system, "acme");
+    assert!(!view.elements.is_empty());
+    for element in &view.elements {
+        let drawn = artifact
+            .content
+            .lines()
+            .find(|line| {
+                let line = line.trim_start();
+                line.starts_with(&format!("{}[", element.id))
+                    || line.starts_with(&format!("{}(", element.id))
+            })
+            .unwrap_or_else(|| panic!("{} is drawn", element.id));
+        assert!(
+            drawn.contains(&element.name),
+            "{drawn} names {}",
+            element.name
+        );
+        assert!(element.facts.len() <= MAX_CITED);
+        assert!(element.facts_total >= element.facts.len());
+    }
+    assert_eq!(view.relations.len(), model.relations.len());
+    let ids: Vec<&str> = view.elements.iter().map(|e| e.id.as_str()).collect();
+    for relation in &view.relations {
+        assert!(ids.contains(&relation.from.as_str()) && ids.contains(&relation.to.as_str()));
+    }
+    let facts = view
+        .elements
+        .iter()
+        .flat_map(|e| &e.facts)
+        .chain(view.relations.iter().flat_map(|r| &r.facts));
+    let mut seen = 0;
+    for fact in facts {
+        seen += 1;
+        let props = f
+            .nodes
+            .iter()
+            .find(|n| n.id == fact.id)
+            .map(|n| &n.props)
+            .or_else(|| {
+                f.edges
+                    .iter()
+                    .find(|e| crate::workbench::edge_identity(e) == fact.id)
+                    .map(|e| &e.props)
+            })
+            .unwrap_or_else(|| panic!("{} is a graph fact", fact.id));
+        assert_eq!(
+            serde_json::to_value(fact.provenance.confidence_tier).unwrap(),
+            props["prov"]["confidence_tier"],
+            "{}",
+            fact.id
+        );
+    }
+    assert!(seen > 0);
+}

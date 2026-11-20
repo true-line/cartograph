@@ -355,6 +355,10 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 - **Trace:** R2 · `spec`, `app` · — · T-0941
 - **AC-0942** Given a spec export, then `architecture.dsl` is a Structurizr DSL workspace of the same model: the people, the external systems, the software system with its containers, stores and components, every relationship with its technology, a confidence property on each element, and a system context, container and component view per level (#2049).
 - **Trace:** R2 · `spec` · — · T-0942
+- **AC-0943** Given a spec export, then the host returns with it the C4 model `architecture.md` was drawn from, bound to that artifact's id, schema and content identity: every element and relationship with the ids, names, technology and confidence the Markdown and DSL use, the containers' components, and per box and arrow up to twelve of the facts it rests on, each with its provenance and the count of all of them (#2049).
+- **Trace:** R2 · `spec`, `app` · — · T-0943
+- **AC-0944** Given the Spec Workbench with `architecture.md` selected, then the Architecture view draws C4 level 1 (people, the system as one box, outside systems), level 2 (containers and stores inside the system boundary) and level 3 (one container's components with what calls in and what they call), opens a level by tab or by double-clicking the system or a container with components, shows for a selected box or arrow its kind, technology, confidence and the facts it rests on with their tier and source span, draws a Gap box or arrow apart, and refuses to draw a model whose identity does not match the artifact (#2049).
+- **Trace:** R2 · `ui` · — · T-0944
 
 ### US-0013 — ADR recovery and drift detection
 - **Actor:** Engine

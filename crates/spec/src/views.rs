@@ -92,6 +92,100 @@ pub struct SpecViewBundle {
     pub flows: SpecDiagramView,
     /// Data model and access relations view (`data_model.md`).
     pub data_model: SpecDiagramView,
+    /// The C4 model `architecture.md` draws (#2049): the app's
+    /// Architecture view, levels 1 to 3 with the facts under each box.
+    pub architecture: ArchitectureView,
+}
+
+/// The C4 model of `architecture.md`, for the app's Architecture view
+/// (#2049). Element ids are `e{n}` and component ids `e{n}c{m}`, the same
+/// ids `architecture.dsl` uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureView {
+    /// Always `architecture`.
+    pub artifact_id: String,
+    /// Schema of the `architecture.md` artifact this view was compiled beside.
+    pub schema: String,
+    /// Content identity of that artifact.
+    pub content_id: String,
+    /// R-INT-5 projection applied.
+    pub mode: ExportMode,
+    /// The software system's name.
+    pub system: String,
+    /// People, containers, data stores and external systems.
+    pub elements: Vec<ArchitectureElement>,
+    /// Relationships among `elements`.
+    pub relations: Vec<ArchitectureRelation>,
+    /// Per container, its components and their relationships.
+    pub components: Vec<ArchitectureComponents>,
+    /// Whether subsystem areas were supplied, so components could be drawn.
+    pub areas_supplied: bool,
+}
+
+/// One C4 element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureElement {
+    /// `e{n}`, or `e{n}c{m}` for a component of container `e{n}`.
+    pub id: String,
+    /// `person`, `container`, `store`, `external` or `component`.
+    pub kind: String,
+    /// Display name.
+    pub name: String,
+    /// Technology, empty when none was recovered.
+    pub technology: String,
+    /// What it is, from the facts.
+    pub description: String,
+    /// The lowest confidence of the facts it rests on.
+    pub confidence: ConfidenceTier,
+    /// The facts it rests on, at most twelve.
+    pub facts: Vec<ArchitectureFact>,
+    /// How many facts it rests on.
+    pub facts_total: usize,
+}
+
+/// One C4 relationship.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureRelation {
+    /// Source element id.
+    pub from: String,
+    /// Target element id.
+    pub to: String,
+    /// The relationship as `architecture.md` labels it.
+    pub label: String,
+    /// Protocol or technology, empty when none.
+    pub technology: String,
+    /// The lowest confidence of the facts it rests on.
+    pub confidence: ConfidenceTier,
+    /// The facts it rests on, at most twelve.
+    pub facts: Vec<ArchitectureFact>,
+    /// How many facts it rests on.
+    pub facts_total: usize,
+}
+
+/// One fact an element or relationship rests on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureFact {
+    /// Node id, or the `src LABEL dst` identity of an edge.
+    pub id: String,
+    /// Node label or edge label.
+    pub kind: String,
+    /// A short readable name.
+    pub label: String,
+    /// Tier, confidence and evidence spans.
+    pub provenance: Provenance,
+}
+
+/// The components of one container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectureComponents {
+    /// The container's element id.
+    pub container: String,
+    /// Its components, largest first.
+    pub elements: Vec<ArchitectureElement>,
+    /// Relationships among them and with the model's elements.
+    pub relations: Vec<ArchitectureRelation>,
+    /// Files the container owns that are in no area.
+    pub unassigned_files: usize,
 }
 
 fn deployment_role_for(resource: &Node, edges: &[Edge]) -> Option<DeploymentRole> {
@@ -453,6 +547,16 @@ pub fn try_compile_spec_with_views_supplied(
     let beside = selected::Beside::new(nodes, edges, mode, rejected_hashes, supplied);
     let filtered_nodes = filter_nodes(&projection.nodes, mode, rejected_hashes);
     let filtered_edges = filter_edges(&projection.edges, mode, rejected_hashes);
+    let architecture_model = crate::workbench::architecture::Model::new(
+        &filtered_nodes,
+        &filtered_edges,
+        &projection.flows,
+        &crate::workbench::architecture::Supplied {
+            knowledge: beside.knowledge,
+            repo_names: beside.repo_names,
+            mode,
+        },
+    );
     let bundle = selected::try_bundle_from_filtered(
         &filtered_nodes,
         &filtered_edges,
@@ -472,6 +576,11 @@ pub fn try_compile_spec_with_views_supplied(
     let topology_artifact = artifact_for("topology");
     let flow_artifact = artifact_for("flow-dossiers");
     let data_artifact = artifact_for("data-model");
+    let architecture = crate::workbench::architecture::view(
+        &architecture_model,
+        artifact_for("architecture"),
+        mode,
+    );
 
     let by_id: BTreeMap<&str, &Node> = filtered_nodes
         .iter()
@@ -584,6 +693,7 @@ pub fn try_compile_spec_with_views_supplied(
             Vec::new(),
             false,
         ),
+        architecture,
     };
     Ok((bundle, views))
 }

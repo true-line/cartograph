@@ -375,6 +375,13 @@ GitHub, GitLab and most Markdown viewers render. `architecture.dsl` holds
 the same model as a Structurizr DSL workspace, for teams that keep their
 architecture in Structurizr.
 
+In the Spec Workbench, select **architecture.md** to open the
+**Architecture view**. It opens at level 1; use the level tabs, or
+double-click the system or a container with a yellow outline, to go down a
+level. Select any box or arrow to see its kind, technology, confidence and
+the facts it rests on, each with its tier and source location. The Markdown
+source stays one click away under the diagram.
+
 ## Product specification
 
 Every export includes **product-specification.md**. It is the first document

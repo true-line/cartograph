@@ -24,6 +24,7 @@ import { CuratedSection } from './CuratedSection';
 import { SectionDocumentView } from './SectionDocumentView';
 import type { SectionDocumentViewProps } from './SectionDocumentView';
 import { AreaExpertPanel } from './AreaExpertPanel';
+import { ArchitectureCanvas } from './ArchitectureCanvas';
 import type { AreaExpertPanelProps } from './AreaExpertPanel';
 
 export interface SpecWorkbenchProps {
@@ -178,6 +179,8 @@ export function SpecWorkbench({
     if (selected.id === 'data-model') return views.data_model ?? null;
     return null;
   }, [selected, isDiagramArtifact, views]);
+  const architectureView =
+    selected?.id === 'architecture' && views?.architecture ? views.architecture : null;
   const hasValidDiagramView = Boolean(
     selectedDiagramView && verifyDiagramViewIdentity(selectedDiagramView, selected),
   );
@@ -344,7 +347,21 @@ export function SpecWorkbench({
                   be curated (R-INT-1).
                 </p>
 
-                {selectedDiagramView ? (
+                {architectureView ? (
+                  <>
+                    <ArchitectureCanvas
+                      key={`${selected.id}:${selected.content_id}`}
+                      view={architectureView}
+                      artifact={selected}
+                    />
+                    <details className="spec-artifact-source-details">
+                      <summary>Copyable Mermaid / Markdown source</summary>
+                      <pre className="spec-artifact-source" data-testid="spec-artifact-source">
+                        {selected.content}
+                      </pre>
+                    </details>
+                  </>
+                ) : selectedDiagramView ? (
                   <>
                     <SpecDiagramCanvas
                       key={`${selected.id}:${selected.content_id}`}

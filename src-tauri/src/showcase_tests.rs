@@ -251,6 +251,14 @@ fn showcase_recover_and_export() {
             std::io::BufWriter::new(std::fs::File::create(root.join("bundle.json")).unwrap());
         serde_json::to_writer(&mut writer, &bundle).unwrap();
         writer.flush().unwrap();
+        // #2049: the structured views the Workbench draws, for screenshots
+        // of the app's diagrams from the same run.
+        let preview = crate::export_spec_with_views_blocking(mode, &state).unwrap();
+        std::fs::write(
+            root.join("views.json"),
+            serde_json::to_vec(&preview.views).unwrap(),
+        )
+        .unwrap();
     }
 
     let graph = state.graph.lock().unwrap();

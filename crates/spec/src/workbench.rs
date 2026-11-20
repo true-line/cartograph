@@ -6,7 +6,7 @@ pub use accounting::{
     COMPILE_WORKSPACE_MODEL, CapabilityCompileWorkspaceBound, CompileWorkspaceBound,
     logical_capability_compile_bound, logical_compile_bound,
 };
-mod architecture;
+pub(crate) mod architecture;
 mod capabilities;
 mod catalogue;
 pub use catalogue::{
