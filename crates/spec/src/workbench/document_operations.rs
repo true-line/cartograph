@@ -1,4 +1,4 @@
-//! D1 §1.3 and §1.5 beyond refusals (#1998, AC-0882): what each operation of
+//! D1 §1.3 and §1.5 beyond refusals (#1998, AC-0892): what each operation of
 //! a capability takes, returns on success and changes, and the rate limits
 //! that bound it.
 //!
@@ -551,7 +551,7 @@ def ping():
         ),
     ];
 
-    // AC-0882: an operation states what it takes, its success statuses and
+    // AC-0892: an operation states what it takes, its success statuses and
     // the entities it writes through the functions it calls, and names each
     // class the graph holds nothing for.
     #[test]
@@ -580,7 +580,7 @@ def ping():
         );
     }
 
-    // AC-0882: the workspace bound grows with the graph and refuses overflow.
+    // AC-0892: the workspace bound grows with the graph and refuses overflow.
     #[test]
     fn operations_workspace_is_checked() {
         let graph = |rows, bytes, values| flowtracer::TraceGraphBound {
@@ -595,7 +595,7 @@ def ping():
         assert!(operations_per_capability_workspace(graph(1, usize::MAX, 1)).is_none());
     }
 
-    // AC-0882: §1.5 lists each operation's rate limit with its value read
+    // AC-0892: §1.5 lists each operation's rate limit with its value read
     // through configuration, and says what refuses the requests past it.
     #[test]
     fn rate_limits_are_listed_per_capability_with_their_configuration_default() {

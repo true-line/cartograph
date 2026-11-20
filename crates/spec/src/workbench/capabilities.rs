@@ -518,7 +518,7 @@ pub fn logical_knowledge_story_compile_bound(
         super::document::acceptance::acceptance_per_capability_workspace(graph)?,
         // D1 §1.6 describes each operation's flow per Capability (AC-0859).
         super::document::flows::flows_per_capability_workspace(graph)?,
-        // D1 §1.3 and §1.5 state operations and rate limits (AC-0882).
+        // D1 §1.3 and §1.5 state operations and rate limits (AC-0892).
         super::document::operations::operations_per_capability_workspace(graph)?,
     ])?;
     Some(KnowledgeStoryCompileWorkspaceBound {

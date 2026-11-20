@@ -1,4 +1,4 @@
-//! flask-limiter rate limits on Flask route handlers (#1998, AC-0881):
+//! flask-limiter rate limits on Flask route handlers (#1998, AC-0891):
 //! `props.rate_limits` on the Endpoint, computed after every file is read.
 //!
 //! A decorator `@<limiter>.limit(<value>, …)` or `.shared_limit(…)` below the
@@ -459,7 +459,7 @@ pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
 mod tests {
     use super::*;
 
-    // AC-0881 (T-0881): flask-limiter's notation parses; anything else does not.
+    // AC-0891 (T-0891): flask-limiter's notation parses; anything else does not.
     #[test]
     fn parses_flask_limiter_notation() {
         let parsed = parse("100/day;50/hour;5/minute").unwrap();

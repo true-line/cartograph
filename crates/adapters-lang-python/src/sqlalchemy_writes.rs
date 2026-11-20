@@ -5,7 +5,7 @@
 //! model-helper methods resolved along class MRO.
 //!
 //! An assignment to a mapped column of a model instance (`alias.enabled =
-//! False`) is an update of that model (#1998, AC-0884) when the instance is
+//! False`) is an update of that model (#1998, AC-0894) when the instance is
 //! a parameter annotated with the model class (`alias: Alias`) or a local
 //! bound once by an annotated assignment (`alias: Alias = …`), the name is
 //! not otherwise rebound in the function, and the attribute is a column the
