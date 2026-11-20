@@ -308,3 +308,33 @@ fn console_script_enters_its_proven_function() {
         format!("file:{REPO}@app/cli.py")
     );
 }
+
+// AC-0881 review (#2011): option values are not the application or the
+// script, and a non-ASCII string beside a LISTEN is read safely.
+#[test]
+fn option_values_are_skipped_and_strings_are_read_by_character() {
+    let out = extract(&[
+        (
+            "Procfile",
+            "web: gunicorn --bind 0.0.0.0:8000 -k uvicorn.workers:Worker app:app\nworker: python -W ignore -X dev worker.py\n",
+        ),
+        ("app.py", "app = None\n"),
+        ("worker.py", "print('x')\n"),
+        (
+            "listener.py",
+            "A = \"éééé LISTEN\"\nB = \"LISTEN chan\"\nif __name__ == \"__main__\":\n    run()\n",
+        ),
+    ]);
+    assert_eq!(
+        entry_edge(&out, "Procfile", "web").dst,
+        format!("file:{REPO}@app.py")
+    );
+    assert_eq!(
+        entry_edge(&out, "Procfile", "worker").dst,
+        format!("file:{REPO}@worker.py")
+    );
+    assert_eq!(
+        entry(&out, "listener.py", "main").props["kind"],
+        "database-listener"
+    );
+}

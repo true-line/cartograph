@@ -219,3 +219,30 @@ fn unproven_entry_points_are_not_capabilities() {
     );
     assert!(caps.contains_key("Receive mail over SMTP"));
 }
+
+// AC-0883 review (#2011): two processes of one Procfile with the same kind
+// are told apart by their key.
+#[test]
+fn colliding_titles_in_one_file_name_their_entry() {
+    let mut base = snapshot();
+    for key in ["web", "api"] {
+        let (node, edge) = entry(
+            "Procfile",
+            key,
+            "http-server",
+            "Procfile process",
+            "file:repo@email_handler.py",
+        );
+        base.graph.0.push(node);
+        base.graph.1.push(edge);
+    }
+    let caps = capabilities(&derive_entry_point_capabilities(&base));
+    assert!(
+        caps.contains_key("Serve HTTP requests (Procfile web)"),
+        "{caps:?}"
+    );
+    assert!(
+        caps.contains_key("Serve HTTP requests (Procfile api)"),
+        "{caps:?}"
+    );
+}

@@ -506,7 +506,9 @@ fn listen_in(text: &str) -> Option<(u64, u64)> {
     let found = find(tree.root_node(), &|n| {
         n.kind() == "string_content" && {
             let value = text[n.byte_range()].trim_start();
-            value.len() >= 7 && value[..7].eq_ignore_ascii_case("listen ")
+            value
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("listen "))
         }
     })?;
     let string = found.parent().unwrap_or(found);
@@ -642,6 +644,24 @@ fn exec(rest: &str) -> Exec {
     Exec::Words(rest.split_whitespace().map(str::to_string).collect())
 }
 
+/// Server options whose value is the next argument.
+const SERVER_VALUE_OPTIONS: &[&str] = &[
+    "-b",
+    "--bind",
+    "-c",
+    "--config",
+    "-k",
+    "--worker-class",
+    "--host",
+    "--port",
+    "--chdir",
+    "--env",
+    "-e",
+    "--name",
+    "-n",
+    "--app-dir",
+];
+
 /// WSGI and ASGI servers that take the application as `module:object`.
 const APP_SERVERS: &[&str] = &[
     "gunicorn",
@@ -694,16 +714,30 @@ fn resolve_command(words: &[String], files: &BTreeSet<String>) -> (&'static str,
     let base = program.rsplit('/').next().unwrap_or(program);
     let args = &words[1..];
     if APP_SERVERS.contains(&base) {
-        let app = args.iter().find(|arg| {
-            !arg.starts_with('-')
-                && arg.split_once(':').is_some_and(|(module, object)| {
-                    !module.is_empty()
-                        && !object.is_empty()
-                        && module
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-                })
-        });
+        // The application is the last positional `module:object` whose
+        // parts are identifiers: a bind address (`0.0.0.0:8000`,
+        // `localhost:8000`) is not one, nor is the value of an option.
+        let identifier = |part: &str| {
+            part.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+        };
+        let app = args
+            .iter()
+            .enumerate()
+            .filter(|(i, arg)| {
+                !arg.starts_with('-')
+                    && !(*i > 0 && SERVER_VALUE_OPTIONS.contains(&args[i - 1].as_str()))
+                    && arg.split_once(':').is_some_and(|(module, object)| {
+                        identifier(module)
+                            && identifier(object)
+                            && module
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                    })
+            })
+            .map(|(_, arg)| arg)
+            .next_back();
         let Some(app) = app else {
             return (
                 "http-server",
@@ -728,6 +762,11 @@ fn resolve_command(words: &[String], files: &BTreeSet<String>) -> (&'static str,
             }
             if arg == "-c" {
                 return ("process", Target::Gap("inline code (`-c`)".into()));
+            }
+            // `-W ignore`, `-X dev`: the option's operand is not the script.
+            if matches!(arg.as_str(), "-W" | "-X") {
+                rest.next();
+                continue;
             }
             if arg.starts_with('-') {
                 continue;

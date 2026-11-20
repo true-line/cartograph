@@ -154,13 +154,22 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
     for (title, ..) in &named {
         *by_title.entry(title).or_default() += 1;
     }
+    // Titles that still collide after naming their file (two processes of
+    // one Procfile) also name the entry point's key in that file.
+    let mut by_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for (title, file, ..) in &named {
+        *by_file.entry((title, file)).or_default() += 1;
+    }
     let titles: Vec<String> = named
         .iter()
-        .map(|(title, file, ..)| {
-            if by_title[title.as_str()] > 1 && !file.is_empty() {
+        .map(|(title, file, (_, id), _)| {
+            if by_title[title.as_str()] < 2 || file.is_empty() {
+                title.clone()
+            } else if by_file[&(title.as_str(), file.as_str())] < 2 {
                 format!("{title} ({file})")
             } else {
-                title.clone()
+                let entry = id.rsplit_once('#').map_or(id.as_str(), |(_, key)| key);
+                format!("{title} ({file} {entry})")
             }
         })
         .collect();
