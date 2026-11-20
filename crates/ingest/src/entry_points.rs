@@ -2,7 +2,7 @@
 //! starts becomes an `EntryPoint` flow trigger with an `ENTRY` into the
 //! file (or the declared function) it runs, or a `Gap` that names it.
 //!
-//! Four readers share one node shape:
+//! Five readers share one node shape:
 //!
 //! - a Python module with a top-level `if __name__ == "__main__":` block,
 //!   or a script under an operator directory (`commands/`, `scripts/`,
@@ -13,6 +13,9 @@
 //! - `[project.scripts]` and `[tool.poetry.scripts]` in `pyproject.toml`
 //!   are declared console scripts;
 //! - `bin` in a `package.json` is a declared command.
+//! - a `.js`/`.mjs`/`.cjs` script behind a `node` shebang is a process
+//!   start, and each subcommand it dispatches on `process.argv` a command
+//!   (`node.rs`).
 //!
 //! What starts a Python process is read from the module and the repository
 //! modules it imports, never guessed from its name, and recorded as `kind`
@@ -153,6 +156,12 @@ pub fn extract_dir(
         } else if file.name == "pyproject.toml" {
             let Some(text) = read(rel) else { continue };
             starts.extend(console_scripts(rel, &text, &files, id, symbols));
+        } else if node::candidate(rel) && !rel.contains("node_modules/") {
+            if scheduled.contains(rel) {
+                continue;
+            }
+            let Some(text) = read(rel) else { continue };
+            starts.extend(node::node_starts(rel, &text));
         } else if file.name == "package.json" && !rel.contains("node_modules/") {
             let Some(text) = read(rel) else { continue };
             starts.extend(package_bins(rel, &text, &files));
@@ -1176,6 +1185,8 @@ fn emit(
         }
     }
 }
+
+mod node;
 
 #[cfg(test)]
 mod tests;

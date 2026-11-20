@@ -338,3 +338,128 @@ fn option_values_are_skipped_and_strings_are_read_by_character() {
         "database-listener"
     );
 }
+
+const NODE_CLI: &str = r#"#!/usr/bin/env node
+import { homedir } from 'node:os';
+
+function parse(argv) {
+  const args = { cmd: argv[0], json: false };
+  for (let i = 1; i < argv.length; i++) {
+    if (argv[i] === '--json') args.json = true;
+  }
+  return args;
+}
+
+function unrelated(args) {
+  if (args.cmd === 'nope') return 1;
+}
+
+async function ask(op) {
+  return send(op);
+}
+
+function line(g) {
+  return g.state === 'pending' ? 'wait' : 'done';
+}
+
+async function main(argv) {
+  if (argv[0] === 'machine') return;
+  const args = parse(argv);
+  if (args.cmd === 'run') return;
+  const res = await request('device.status', { harnesses: args.harnesses });
+  if (res.state === 'approved') return;
+  const made = rekey(args.home);
+  if (made.key_storage === 'hardware') return;
+  const answer = await ask(args.cmd === 'status' ? 'status' : 'souls.list');
+  console.log(line(answer));
+  if (args.sub !== 'rekey') return;
+  switch (args.cmd) {
+    case 'status':
+    case 'souls':
+      return;
+  }
+}
+
+main(process.argv.slice(2));
+unrelated({ cmd: 'x' });
+"#;
+
+#[test]
+fn a_node_scripts_subcommands_are_commands() {
+    // AC-0921: a `node` shebang script that dispatches on `process.argv`
+    // has one command per subcommand it compares the command line with;
+    // flags, `!==` and an unrelated `args` are not commands. A shebang
+    // script without dispatch is one process, an operator directory's a
+    // command, and a test fixture none.
+    let out = extract(&[
+        ("hq/main.mjs", NODE_CLI),
+        (
+            "helpers/signer.mjs",
+            "#!/usr/bin/env node\nprocess.stdin.pipe(process.stdout);\n",
+        ),
+        (
+            "scripts/build.mjs",
+            "#!/usr/bin/env node\nconsole.log(1);\n",
+        ),
+        (
+            "tests/fixture.mjs",
+            "#!/usr/bin/env node\nconsole.log(1);\n",
+        ),
+        ("lib/plain.mjs", "export const x = 1;\n"),
+    ]);
+    let commands: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint" && n.props["file"] == "hq/main.mjs")
+        .map(|n| n.props["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        commands,
+        BTreeSet::from(["machine", "run", "souls", "status"])
+    );
+    let run = entry(&out, "hq/main.mjs", "run");
+    assert_eq!(run.props["kind"], "command");
+    assert_eq!(run.props["how"], "subcommand");
+    assert_eq!(run.props["name"], "Command (hq/main.mjs: run)");
+    assert_eq!(
+        entry_edge(&out, "hq/main.mjs", "run").dst,
+        format!("file:{REPO}@hq/main.mjs")
+    );
+    assert_eq!(
+        entry(&out, "helpers/signer.mjs", "main").props["kind"],
+        "process"
+    );
+    assert_eq!(
+        entry(&out, "scripts/build.mjs", "main").props["kind"],
+        "command"
+    );
+    assert!(!out.nodes.iter().any(|n| n.id.contains("tests/fixture.mjs")));
+    // Assignment and destructuring carry the command line; a helper
+    // resolves in its own scope.
+    let other = extract(&[(
+        "bin/tool.mjs",
+        r#"#!/usr/bin/env node
+let args;
+args = process.argv.slice(2);
+if (args[0] === 'deploy') {}
+const [, , command] = process.argv;
+if (command === 'build') {}
+function a() {
+  function pick(v) { return v; }
+  if (pick(process.argv)[2] === 'lint') {}
+}
+function b() {
+  function pick(v) { return 'fixed'; }
+  if (pick(process.argv) === 'nope') {}
+}
+"#,
+    )]);
+    let commands: BTreeSet<&str> = other
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.props["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(commands, BTreeSet::from(["build", "deploy", "lint"]));
+    assert!(!out.nodes.iter().any(|n| n.id.contains("lib/plain.mjs")));
+}
