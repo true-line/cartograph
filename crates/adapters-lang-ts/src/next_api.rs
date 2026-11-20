@@ -80,15 +80,11 @@ fn candidate(path: &str) -> (bool, bool, bool) {
     let Some(stem) = path.rsplit('/').next().and_then(stem_of) else {
         return (false, false, false);
     };
-    // A Vercel function file: `api/**` at the repository root, neither a
-    // declaration (`x.d.ts`) nor under a `_`- or `.`-prefixed segment, which
-    // Vercel does not serve. It exports a default handler or per-method
-    // handlers, like a pages- and an app-router file at once.
-    if let Some(rest) = path.strip_prefix("api/") {
-        let vercel = !stem.contains('.')
-            && !rest
-                .split('/')
-                .any(|s| s.is_empty() || s.starts_with(['_', '.']));
+    // A Vercel function file (`api/**` at the repository root) exports a
+    // default handler or per-method handlers, like a pages- and an
+    // app-router file at once.
+    if path.starts_with("api/") {
+        let vercel = adapters_fw::vercel::node_function_route(path).is_some();
         return (false, false, vercel);
     }
     let dirs: Vec<&str> = path.split('/').collect();
@@ -591,14 +587,15 @@ fn push_endpoint(
     edges: &mut Vec<Edge>,
 ) {
     let ep = format!("ep:{}@{method}:{path}", id.repo);
-    if !seen.insert(ep.clone()) {
-        return;
+    // An endpoint another route already holds keeps its node, and the
+    // function still handles it.
+    if seen.insert(ep.clone()) {
+        nodes.push(Node {
+            id: ep.clone(),
+            label: "Endpoint".into(),
+            props,
+        });
     }
-    nodes.push(Node {
-        id: ep.clone(),
-        label: "Endpoint".into(),
-        props,
-    });
     edges.push(Edge {
         src: ep,
         dst: handler.to_string(),
@@ -1581,8 +1578,15 @@ mod tests {
         write(root, "api/_lib/db.ts", "export default function db() {}\n");
         write(
             root,
-            "api/types.d.ts",
-            "export default function t(): void;\n",
+            "api/foo.bar.ts",
+            "export default function handler(req, res) { res.end(); }\n",
+        );
+        // A second function at a path already held keeps the one node and
+        // still handles it.
+        write(
+            root,
+            "api/foo.bar/index.js",
+            "export default function other(req, res) { res.end(); }\n",
         );
         let out = extract_dir(root, &id("abc123")).unwrap();
         let mut endpoints: Vec<_> = out
@@ -1601,6 +1605,7 @@ mod tests {
         assert_eq!(
             endpoints,
             [
+                ("ep:qwtm/example@ALL:/api/foo.bar", "typescript", None),
                 ("ep:qwtm/example@ALL:/api/hooks", "typescript", None),
                 (
                     "ep:qwtm/example@ALL:/hooks/*",
@@ -1613,6 +1618,12 @@ mod tests {
         assert!(out.edges.iter().any(|e| e.label == "HANDLES"
             && e.src == "ep:qwtm/example@ALL:/api/hooks"
             && e.dst.contains("api/hooks.ts")));
+        let held = out
+            .edges
+            .iter()
+            .filter(|e| e.label == "HANDLES" && e.src == "ep:qwtm/example@ALL:/api/foo.bar")
+            .count();
+        assert_eq!(held, 2);
         assert!(out.nodes.iter().any(|n| n.label == "Gap"
             && n.props["kind"] == "vercel-function-handler-unproven"
             && n.props["method"] == "POST"));

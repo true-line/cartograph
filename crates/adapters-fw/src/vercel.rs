@@ -34,12 +34,12 @@ pub fn rewrites(config: &[u8]) -> Vec<Rewrite> {
         else {
             continue;
         };
-        // Cite the rewrite's own `source` entry in `vercel.json`.
+        // Cite the rewrite's own `source` entry in `vercel.json`: the next
+        // `"source"` key whose value is this string, so an equal string in
+        // another field (an earlier destination) is never the one cited.
         let needle = serde_json::to_string(source).expect("string serializes");
-        let start = text[searched_from..]
-            .find(&needle)
-            .map(|at| searched_from + at)
-            .or_else(|| text.find(&needle))
+        let start = source_value(&text, searched_from, &needle)
+            .or_else(|| source_value(&text, 0, &needle))
             .unwrap_or(0);
         searched_from = start + needle.len();
         let target = destination.split(['?', '#']).next().unwrap_or(destination);
@@ -52,6 +52,25 @@ pub fn rewrites(config: &[u8]) -> Vec<Rewrite> {
         });
     }
     out
+}
+
+/// Where the value `needle` of a `"source"` key starts in `text`, at or
+/// after `from`.
+fn source_value(text: &str, from: usize, needle: &str) -> Option<usize> {
+    const KEY: &str = "\"source\"";
+    let mut at = from;
+    while let Some(found) = text.get(at..)?.find(KEY) {
+        let after = at + found + KEY.len();
+        let rest = &text[after..];
+        let value = rest.trim_start().strip_prefix(':').map(str::trim_start);
+        if let Some(value) = value
+            && value.starts_with(needle)
+        {
+            return Some(text.len() - value.len());
+        }
+        at = after;
+    }
+    None
 }
 
 /// A `vercel.json` rewrite source as concrete route paths: `(a|b)` gives
@@ -134,25 +153,29 @@ fn literal(text: &str) -> bool {
 /// adapter recovers under `api/`.
 pub const NODE_FUNCTION_EXTENSIONS: [&str; 4] = ["ts", "tsx", "js", "jsx"];
 
-/// Whether a JavaScript or TypeScript function file under `root` is served
-/// at `target` (`/api/x` from `api/x.ts` or `api/x/index.ts`), so a rewrite
-/// onto it is that adapter's to read, not a missing function.
-pub fn node_function_serves(root: &std::path::Path, target: &str) -> bool {
-    let Some(rest) = target.strip_prefix('/') else {
-        return false;
-    };
-    if !(rest == "api" || rest.starts_with("api/"))
-        || rest.split('/').any(|s| s.is_empty() || s == "..")
+/// The path Vercel serves the repository file `rel` at when it is a
+/// JavaScript or TypeScript function: under the top-level `api/`, with a
+/// [`NODE_FUNCTION_EXTENSIONS`] extension, not a declaration (`x.d.ts`) and
+/// under no `_`- or `.`-prefixed segment, which Vercel does not serve.
+/// `api/x.ts` and `api/x/index.ts` are both `/api/x`. Both the TypeScript
+/// adapter, which recovers the function, and the Go adapter, which leaves a
+/// rewrite onto it alone, decide with this.
+pub fn node_function_route(rel: &str) -> Option<String> {
+    let rest = rel.strip_prefix("api/")?;
+    let (stem, ext) = rest.rsplit_once('.')?;
+    if !NODE_FUNCTION_EXTENSIONS.contains(&ext)
+        || stem.ends_with(".d")
+        || rest
+            .split('/')
+            .any(|s| s.is_empty() || s.starts_with(['_', '.']))
     {
-        return false;
+        return None;
     }
-    NODE_FUNCTION_EXTENSIONS.iter().any(|ext| {
-        [format!("{rest}.{ext}"), format!("{rest}/index.{ext}")]
-            .iter()
-            .any(|file| {
-                std::fs::symlink_metadata(root.join(file))
-                    .is_ok_and(|meta| meta.file_type().is_file())
-            })
+    let route = stem.strip_suffix("/index").unwrap_or(stem);
+    Some(if route == "index" {
+        "/api".to_owned()
+    } else {
+        format!("/api/{route}")
     })
 }
 
@@ -181,6 +204,32 @@ mod tests {
         assert_eq!(found[0].target, "/api/a");
         assert_eq!(found[1].target, "/api/b");
         assert!(found[1].start > found[0].start, "the second `/a` is cited");
+        // A source equal to an earlier destination cites its own field.
+        let config = br#"{"rewrites": [{"source": "/a", "destination": "/b"}, {"source": "/b", "destination": "/api/b"}]}"#;
+        let found = rewrites(config);
+        let text = std::str::from_utf8(config).unwrap();
+        assert!(text[..found[1].start].ends_with("\"source\": "));
         assert!(rewrites(b"not json").is_empty());
+    }
+
+    #[test]
+    fn node_functions_are_served_at_their_path() {
+        assert_eq!(
+            node_function_route("api/hooks.ts").as_deref(),
+            Some("/api/hooks")
+        );
+        assert_eq!(
+            node_function_route("api/a/index.js").as_deref(),
+            Some("/api/a")
+        );
+        assert_eq!(node_function_route("api/index.ts").as_deref(), Some("/api"));
+        assert_eq!(
+            node_function_route("api/foo.bar.ts").as_deref(),
+            Some("/api/foo.bar")
+        );
+        assert_eq!(node_function_route("api/types.d.ts"), None);
+        assert_eq!(node_function_route("api/_lib/db.ts"), None);
+        assert_eq!(node_function_route("api/x.go"), None);
+        assert_eq!(node_function_route("src/api/x.ts"), None);
     }
 }

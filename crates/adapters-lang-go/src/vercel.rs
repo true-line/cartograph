@@ -15,7 +15,7 @@
 use super::{Extraction, FileCx, ImportBinding};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use tree_sitter::Node as TsNode;
 
@@ -162,6 +162,20 @@ fn read_config(root: &Path) -> Option<Vec<u8>> {
 
 const CONFIG: &str = "vercel.json";
 
+/// The paths the repository's JavaScript and TypeScript functions are served
+/// at: the files the TypeScript adapter's own walk reads (`.gitignore`
+/// honored, `node_modules`, `dist` and dot directories skipped) that are Vercel
+/// functions, so a rewrite onto one is that adapter's to read. A walk that
+/// fails leaves none, and the rewrite stays a Gap.
+fn node_function_routes(root: &Path) -> BTreeSet<String> {
+    let skip = |name: &str| name.starts_with('.') || matches!(name, "node_modules" | "dist");
+    source_walk::files(root, &skip, source_walk::Gitignores::Honor)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|file| adapters_fw::vercel::node_function_route(&file.rel))
+        .collect()
+}
+
 /// The functions' and rewrites' Endpoints, when `root` is a Vercel project.
 pub(super) fn routes(
     root: &Path,
@@ -201,6 +215,7 @@ pub(super) fn routes(
         out.edges.push(edge);
         served.insert(route, function);
     }
+    let node_routes = std::cell::OnceCell::new();
     for rewrite in adapters_fw::vercel::rewrites(&config) {
         let (source, destination, target) = (
             rewrite.source.as_str(),
@@ -240,7 +255,10 @@ pub(super) fn routes(
             }
             (None, _) if !target.starts_with("/api") => {}
             // A JavaScript or TypeScript function's rewrite is that adapter's.
-            (None, _) if adapters_fw::vercel::node_function_serves(root, target) => {}
+            (None, _)
+                if node_routes
+                    .get_or_init(|| node_function_routes(root))
+                    .contains(target) => {}
             (function, _) => {
                 let reason = if function.is_none() {
                     "Vercel rewrite destination is not a recovered function"
@@ -312,10 +330,14 @@ func helper(x int) int { return x }
         write("pkg/web/server.go", DOCS);
         // A TypeScript function's rewrite is the TS adapter's (AC-0927).
         write("api/hooks.ts", "export default function h(req, res) {}\n");
+        // One the TS walk does not read (ignored) is no function of its own.
+        write("api/secret.ts", "export default function s(req, res) {}\n");
+        write(".gitignore", "api/secret.ts\n");
         write(
             "vercel.json",
             r#"{"rewrites": [
   {"source": "/hooks", "destination": "/api/hooks"},
+  {"source": "/secret", "destination": "/api/secret"},
   {"source": "/", "destination": "/api/docs"},
   {"source": "/docs", "destination": "/api/docs"},
   {"source": "/docs/(.*)", "destination": "/api/docs?x=1"},
@@ -373,9 +395,10 @@ func helper(x int) int { return x }
             gaps,
             [
                 "Vercel rewrite destination is not a recovered function",
+                "Vercel rewrite destination is not a recovered function",
                 "Vercel rewrite source pattern is not read",
             ],
-            "the missing /api/devices function and the lookahead source are Gaps; the static fallback is not"
+            "the missing /api/devices and ignored /api/secret functions and the lookahead source are Gaps; the static fallback is not"
         );
 
         // A reused file's function still routes, at the new commit.
