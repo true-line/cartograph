@@ -84,13 +84,20 @@ pub(crate) fn vercel_front_doors<'a>(
     if functions.is_empty() {
         return BTreeMap::new();
     }
+    // The repository directories each file imports, as the Go adapter
+    // resolved them against the module's own path (`package_dir`).
     let imports: BTreeSet<(&str, &str)> = edges
         .into_iter()
         .filter(|e| e.label == "IMPORTS")
-        .filter_map(|e| Some((e.src.strip_prefix("file:")?, e.dst.strip_prefix("mod:")?)))
+        .filter_map(|e| {
+            Some((
+                e.src.strip_prefix("file:")?,
+                e.props["package_dir"].as_str()?,
+            ))
+        })
         .collect();
     // The function's file (`sym:<repo>@<file>#<name>`) is in `dir`'s package
-    // or imports it (`mod:<module>/<dir>`).
+    // or imports it.
     let reaches = |handler: &str, repo: &str, dir: &str| {
         let Some(file) = handler
             .strip_prefix("sym:")
@@ -103,11 +110,7 @@ pub(crate) fn vercel_front_doors<'a>(
             .strip_prefix(repo)
             .and_then(|f| f.strip_prefix('@'))
             .map(|f| f.rsplit_once('/').map_or("", |(d, _)| d));
-        own == Some(dir)
-            || (!dir.is_empty()
-                && imports.iter().any(|(src, module)| {
-                    *src == file && (*module == dir || module.ends_with(&format!("/{dir}")))
-                }))
+        own == Some(dir) || imports.contains(&(file, dir))
     };
     let mut served: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for (repo, path, dir) in routes {
@@ -198,13 +201,25 @@ mod tests {
                 "pkg/device/pages.go",
             ),
             endpoint("GET", "/healthz", "net/http", "sym:d", "pkg/device/web.go"),
+            endpoint(
+                "GET",
+                "/api/web/pages",
+                "net/http",
+                "sym:e",
+                "pkg/pages/web.go",
+            ),
         ];
-        let imports = [Edge {
+        let import = |dst: &str, dir: Option<&str>| Edge {
             src: "file:org/bot@api/web/index.go".into(),
-            dst: "mod:example.com/bot/pkg/device".into(),
+            dst: dst.into(),
             label: "IMPORTS".into(),
-            props: json!({}),
-        }];
+            props: dir.map_or(json!({}), |d| json!({"package_dir": d})),
+        };
+        // An outside package whose path ends like a local one proves nothing.
+        let imports = [
+            import("mod:example.com/bot/pkg/device", Some("pkg/device")),
+            import("mod:github.com/vendor/pkg/pages", None),
+        ];
         let doors = vercel_front_doors(&nodes, &imports);
         assert_eq!(
             doors.into_iter().collect::<Vec<_>>(),

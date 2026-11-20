@@ -249,14 +249,20 @@ fn parse_imports(
                 },
             );
         }
+        let mut props = serde_json::json!({
+            "specifier": import_path,
+            "prov": cx.prov(&spec, &format!("IMPORTS {}", cx.text(&spec))),
+        });
+        // A package of this module: its directory in the repository, so a
+        // consumer need not guess it from the import path (#2010).
+        if let Some(dir) = local_package_dir(&import_path, module_path) {
+            props["package_dir"] = dir.into();
+        }
         out.edges.push(Edge {
             src: file_id(cx.id.repo, cx.path),
             dst: format!("mod:{import_path}"),
             label: "IMPORTS".into(),
-            props: serde_json::json!({
-                "specifier": import_path,
-                "prov": cx.prov(&spec, &format!("IMPORTS {}", cx.text(&spec))),
-            }),
+            props,
         });
     }
     bindings
