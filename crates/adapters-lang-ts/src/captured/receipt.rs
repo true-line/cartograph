@@ -641,6 +641,11 @@ fn inventory(
             }
             LocalExit::Return { value: None } => {}
             LocalExit::Throw { value } => push(RangeRole::ThrowValue, 0, &value.source)?,
+            // The TypeScript producer records exits only; a captured receipt
+            // never covers a guarded effect (#1998).
+            LocalExit::Assign { .. } | LocalExit::Call { .. } => {
+                return Err(CapturedError::Invalid("rule source inventory"));
+            }
         }
         for (index, dependency) in rule.dependencies.iter().enumerate() {
             push(RangeRole::Dependency, index, &dependency.source)?;

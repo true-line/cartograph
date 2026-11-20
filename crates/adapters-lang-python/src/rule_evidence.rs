@@ -26,6 +26,9 @@ const MAX_CONTEXT_ANCESTORS: usize = 128;
 const MAX_RULE_BYTES: usize = 64 * 1024;
 const MAX_FILE_RULE_BYTES: usize = 1024 * 1024;
 const MAX_RULES_PER_FILE: usize = 256;
+/// Guarded effects (#1998) have their own per-file budget, so they never
+/// crowd out a file's exits.
+const MAX_EFFECTS_PER_FILE: usize = 128;
 const WITHHELD: &str = "[REDACTED]";
 const UNSUPPORTED: &str = "[UNSUPPORTED EXPRESSION]";
 
@@ -543,6 +546,8 @@ pub(super) fn extract(
         return;
     }
     let mut exits: BTreeMap<String, Vec<TsNode<'_>>> = BTreeMap::new();
+    let mut effects: BTreeMap<String, Vec<Effect<'_>>> = BTreeMap::new();
+    let modules = module_imports(cx, root);
     let mut functions: BTreeMap<String, TsNode<'_>> = BTreeMap::new();
     let mut controls: BTreeMap<String, BTreeMap<String, (RuleGapReason, TsNode<'_>)>> =
         BTreeMap::new();
@@ -555,6 +560,13 @@ pub(super) fn extract(
                 .into_iter()
                 .rev(),
         );
+        if let Some(effect) = effect_statement(cx, node, &modules)
+            && let Some(owner) = owner_id(cx, node)
+            && let Some(function) = owner_function(node)
+        {
+            functions.entry(owner.clone()).or_insert(function);
+            effects.entry(owner).or_default().push(effect);
+        }
         if matches!(node.kind(), "return_statement" | "raise_statement") {
             if let Some(owner) = owner_id(cx, node)
                 && let Some(function) = owner_function(node)
@@ -574,7 +586,9 @@ pub(super) fn extract(
     }
     let mut rule_count = 0;
     let mut file_bytes = 0;
-    for (owner_id, owner_exits) in exits {
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let exits_by_owner = exits.clone();
+    'exits: for (owner_id, owner_exits) in exits {
         if !targets.contains(&owner_id) {
             continue;
         }
@@ -597,7 +611,7 @@ pub(super) fn extract(
             }
             if limited || rule_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
                 omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
-                return;
+                break 'exits;
             }
             let rule_id = format!("rule:{}@{}#exit@{}", cx.id.repo, cx.path, exit.start_byte());
             let mut builder = RuleBuilder {
@@ -669,67 +683,392 @@ pub(super) fn extract(
                 },
                 redactions,
             };
-            if let Err(error) = evidence.validate() {
-                omission_gap(
-                    cx,
-                    exit,
-                    &owner_id,
-                    if matches!(error, RuleValidationError::Limit(_)) {
-                        RuleGapReason::AnalysisLimit
-                    } else {
-                        RuleGapReason::UnsupportedRuleSyntax
-                    },
-                    out,
-                );
-                return;
-            }
-            let payload = serde_json::to_value(evidence).expect("rule serializes");
-            let canonical = serde_json::to_string(&payload).expect("rule serializes");
+            let Some(canonical) = admitted(cx, &evidence, exit, &owner_id, out) else {
+                break 'exits;
+            };
             if canonical.len() > MAX_RULE_BYTES
                 || file_bytes + canonical.len() > MAX_FILE_RULE_BYTES
             {
                 omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
-                return;
+                break 'exits;
             }
             file_bytes += canonical.len();
             rule_count += 1;
-            out.nodes.push(Node {
-                id: rule_id.clone(),
-                label: "BusinessRule".into(),
-                props: serde_json::json!({
-                    "name": format!("Guarded local exit at {}:{}", cx.path, exit.start_position().row + 1),
-                    "observation": "guarded_exit",
-                    "rule": payload,
-                    "prov": cx.prov(&exit, &canonical),
-                }),
-            });
-            out.edges.push(Edge {
-                src: rule_id.clone(),
-                dst: owner_id.clone(),
-                label: "GOVERNS".into(),
-                props: serde_json::json!({"observation": "lexical_owner", "prov": cx.prov(&exit, &format!("GOVERNS {rule_id} -> {owner_id}"))}),
-            });
-            for (reason, (gap_id, at)) in builder.gaps {
-                let props = serde_json::json!({
-                    "rule_evidence_gap": true,
-                    "reason_code": reason,
-                    "reason": reason_description(&reason),
-                    "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
-                });
-                out.nodes.push(Node {
-                    id: gap_id.clone(),
-                    label: "Gap".into(),
-                    props: props.clone(),
-                });
-                out.edges.push(Edge {
-                    src: rule_id.clone(),
-                    dst: gap_id,
-                    label: "DEPENDS_ON".into(),
-                    props,
-                });
-            }
+            emit(
+                cx,
+                (&rule_id, &owner_id),
+                (evidence, canonical),
+                exit,
+                "guarded_exit",
+                format!(
+                    "Guarded local exit at {}:{}",
+                    cx.path,
+                    exit.start_position().row + 1
+                ),
+                builder.gaps,
+                &mut emitted,
+                out,
+            );
         }
     }
+
+    // Guarded effects (#1998): assignments through an attribute and call
+    // statements, with the branches around them (possibly none).
+    let mut effect_count = 0;
+    let mut effect_bytes = 0;
+    for (owner_id, owner_effects) in effects {
+        if !targets.contains(&owner_id) {
+            continue;
+        }
+        let function = functions[&owner_id];
+        let scope = Scope {
+            locals,
+            parameters: parameters(cx, function),
+            rebound: rebound(cx, function),
+        };
+        let owner_exits = exits_by_owner.get(&owner_id).map_or(&[][..], Vec::as_slice);
+        for (order, effect) in owner_effects.iter().enumerate() {
+            let at = effect.statement;
+            let (ancestors, limited) = branches(at);
+            if limited
+                || effect_count == MAX_EFFECTS_PER_FILE
+                || effect_bytes >= MAX_FILE_RULE_BYTES
+            {
+                omission_gap(cx, at, &owner_id, RuleGapReason::AnalysisLimit, out);
+                return;
+            }
+            let rule_id = format!("rule:{}@{}#effect@{}", cx.id.repo, cx.path, at.start_byte());
+            let mut builder = RuleBuilder {
+                cx,
+                // One set of interpretation Gaps per function's effects,
+                // not per effect: they state the same reasons (#1998).
+                rule_id: format!("{owner_id}#effects"),
+                gaps: BTreeMap::new(),
+                dependencies: Vec::new(),
+            };
+            builder.control_gap(RuleGapReason::ExecutionPredicateUnknown, at);
+            builder.control_gap(RuleGapReason::ConsumerSemanticsUnknown, at);
+            // The last exit before the effect may leave the callable first.
+            if let Some(prior) = owner_exits
+                .iter()
+                .rev()
+                .find(|exit| exit.end_byte() <= at.start_byte())
+            {
+                builder.control_gap(RuleGapReason::PrecedingExit, *prior);
+            }
+            if let Some(controls) = controls.get(&owner_id) {
+                for (reason, at) in controls.values() {
+                    builder.control_gap(*reason, *at);
+                }
+            }
+            let mut redactions = Vec::new();
+            let mut conditions = Vec::new();
+            for (branch, condition, polarity) in ancestors {
+                let (expression, mut withheld) = capture(cx, condition);
+                if expression.capture != ExpressionCapture::CompleteSyntax {
+                    builder.control_gap(RuleGapReason::RedactedExpression, condition);
+                }
+                redactions.append(&mut withheld);
+                if condition.byte_range().len() <= MAX_EXPRESSION_BYTES {
+                    builder.dependencies(condition, DependencyRole::Condition, &scope, &targets);
+                } else {
+                    builder.control_gap(RuleGapReason::AnalysisLimit, condition);
+                }
+                conditions.push(BranchCondition {
+                    branch_source: source(cx, branch),
+                    expression,
+                    polarity,
+                });
+            }
+            let local = match effect.kind {
+                EffectKind::Assign { target, value } => LocalExit::Assign {
+                    target: captured(cx, target, &mut builder, &mut redactions),
+                    value: captured(cx, value, &mut builder, &mut redactions),
+                },
+                EffectKind::Call { call } => LocalExit::Call {
+                    value: captured(cx, call, &mut builder, &mut redactions),
+                },
+            };
+            let read = match effect.kind {
+                EffectKind::Assign { value, .. } => value,
+                EffectKind::Call { call } => call,
+            };
+            if read.byte_range().len() <= MAX_EXPRESSION_BYTES {
+                builder.dependencies(read, DependencyRole::ExitValue, &scope, &targets);
+            } else {
+                builder.control_gap(RuleGapReason::AnalysisLimit, read);
+            }
+            let evidence = GuardedExitEvidence {
+                schema_version: RULE_EVIDENCE_SCHEMA_VERSION,
+                kind: RuleKind::GuardedEffect,
+                owner_id: owner_id.clone(),
+                exit_source: source(cx, at),
+                source_order: order as u32,
+                conditions,
+                effect: local,
+                dependencies: builder.dependencies,
+                local_definitions: Some(Vec::new()),
+                interpretation: Interpretation {
+                    execution_predicate: InterpretationStatus::NotEstablished,
+                    consumer_effect: InterpretationStatus::NotEstablished,
+                    gap_ids: builder.gaps.values().map(|(id, _)| id.clone()).collect(),
+                },
+                redactions,
+            };
+            let Some(canonical) = admitted(cx, &evidence, at, &owner_id, out) else {
+                return;
+            };
+            if canonical.len() > MAX_RULE_BYTES
+                || effect_bytes + canonical.len() > MAX_FILE_RULE_BYTES
+            {
+                omission_gap(cx, at, &owner_id, RuleGapReason::AnalysisLimit, out);
+                return;
+            }
+            effect_bytes += canonical.len();
+            effect_count += 1;
+            emit(
+                cx,
+                (&rule_id, &owner_id),
+                (evidence, canonical),
+                at,
+                "guarded_effect",
+                format!(
+                    "Guarded local effect at {}:{}",
+                    cx.path,
+                    at.start_position().row + 1
+                ),
+                builder.gaps,
+                &mut emitted,
+                out,
+            );
+        }
+    }
+}
+
+/// One captured effect expression, its redactions and capture Gap.
+fn captured<'t>(
+    cx: &FileCx<'_>,
+    node: TsNode<'t>,
+    builder: &mut RuleBuilder<'_, '_, 't>,
+    redactions: &mut Vec<SourceRedaction>,
+) -> SourceExpression {
+    let (expression, mut withheld) = capture(cx, node);
+    if expression.capture != ExpressionCapture::CompleteSyntax {
+        builder.control_gap(RuleGapReason::RedactedExpression, node);
+    }
+    redactions.append(&mut withheld);
+    expression
+}
+
+/// Validate and serialize a rule payload; on failure, the omission Gap.
+fn admitted(
+    cx: &FileCx<'_>,
+    evidence: &GuardedExitEvidence,
+    at: TsNode<'_>,
+    owner_id: &str,
+    out: &mut Extraction,
+) -> Option<String> {
+    if let Err(error) = evidence.validate() {
+        omission_gap(
+            cx,
+            at,
+            owner_id,
+            if matches!(error, RuleValidationError::Limit(_)) {
+                RuleGapReason::AnalysisLimit
+            } else {
+                RuleGapReason::UnsupportedRuleSyntax
+            },
+            out,
+        );
+        return None;
+    }
+    let payload = serde_json::to_value(evidence).expect("rule serializes");
+    Some(serde_json::to_string(&payload).expect("rule serializes"))
+}
+
+/// The `BusinessRule`, its `GOVERNS` edge and its Gaps.
+#[allow(clippy::too_many_arguments)]
+fn emit(
+    cx: &FileCx<'_>,
+    (rule_id, owner_id): (&str, &str),
+    (evidence, canonical): (GuardedExitEvidence, String),
+    at: TsNode<'_>,
+    observation: &str,
+    name: String,
+    gaps: BTreeMap<String, (String, TsNode<'_>)>,
+    emitted: &mut BTreeSet<String>,
+    out: &mut Extraction,
+) {
+    let payload = serde_json::to_value(evidence).expect("rule serializes");
+    out.nodes.push(Node {
+        id: rule_id.to_owned(),
+        label: "BusinessRule".into(),
+        props: serde_json::json!({
+            "name": name,
+            "observation": observation,
+            "rule": payload,
+            "prov": cx.prov(&at, &canonical),
+        }),
+    });
+    out.edges.push(Edge {
+        src: rule_id.to_owned(),
+        dst: owner_id.to_owned(),
+        label: "GOVERNS".into(),
+        props: serde_json::json!({"observation": "lexical_owner", "prov": cx.prov(&at, &format!("GOVERNS {rule_id} -> {owner_id}"))}),
+    });
+    for (reason, (gap_id, gap_at)) in gaps {
+        let fresh = emitted.insert(gap_id.clone());
+        let props = serde_json::json!({
+            "rule_evidence_gap": true,
+            "reason_code": reason,
+            "reason": reason_description(&reason),
+            "prov": cx.prov_with_confidence(&gap_at, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+        });
+        if fresh {
+            out.nodes.push(Node {
+                id: gap_id.clone(),
+                label: "Gap".into(),
+                props: props.clone(),
+            });
+        }
+        out.edges.push(Edge {
+            src: rule_id.to_owned(),
+            dst: gap_id,
+            label: "DEPENDS_ON".into(),
+            props,
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EffectKind<'t> {
+    Assign {
+        target: TsNode<'t>,
+        value: TsNode<'t>,
+    },
+    Call {
+        call: TsNode<'t>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct Effect<'t> {
+    statement: TsNode<'t>,
+    kind: EffectKind<'t>,
+}
+
+/// Names bound by the module's top-level imports.
+fn module_imports(cx: &FileCx<'_>, root: TsNode<'_>) -> BTreeSet<String> {
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .filter(|n| matches!(n.kind(), "import_statement" | "import_from_statement"))
+        .flat_map(imported)
+        .map(|name| cx.text(&name).to_owned())
+        .collect()
+}
+
+/// Logging receivers and verbs: a call to one is a diagnostic, not an effect.
+const LOGGING: &[&str] = &[
+    "LOG", "log", "logger", "logging", "LOGGER", "_logger", "_log",
+];
+const LOG_VERBS: &[&str] = &[
+    "debug",
+    "info",
+    "warning",
+    "warn",
+    "error",
+    "exception",
+    "critical",
+    "d",
+    "i",
+    "w",
+    "e",
+];
+
+/// Python builtins a call statement to is not an effect of interest.
+const BUILTINS: &[&str] = &[
+    "print",
+    "len",
+    "isinstance",
+    "setattr",
+    "getattr",
+    "delattr",
+    "super",
+    "next",
+    "iter",
+    "sorted",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "breakpoint",
+];
+
+/// A statement that is a guarded effect (#1998): `x.attr = value` (one
+/// attribute target), or a call statement (optionally awaited) to a
+/// function name that is not a builtin, to a method on `self` or `cls`, or
+/// to a function of an imported lowercase module (`alias_utils.delete(…)`).
+/// Logging calls and `__init__` bodies are not effects.
+fn effect_statement<'t>(
+    cx: &FileCx<'_>,
+    node: TsNode<'t>,
+    modules: &BTreeSet<String>,
+) -> Option<Effect<'t>> {
+    if node.kind() != "expression_statement" || node.named_child_count() != 1 {
+        return None;
+    }
+    if owner_function(node)
+        .and_then(|f| f.child_by_field_name("name"))
+        .is_some_and(|name| cx.text(&name) == "__init__")
+    {
+        return None;
+    }
+    let inner = node.named_child(0)?;
+    let kind = match inner.kind() {
+        "assignment" => {
+            let target = inner.child_by_field_name("left")?;
+            let value = inner.child_by_field_name("right")?;
+            if target.kind() != "attribute" || inner.child_by_field_name("type").is_some() {
+                return None;
+            }
+            EffectKind::Assign { target, value }
+        }
+        "call" => EffectKind::Call { call: inner },
+        "await" => {
+            let call = inner.named_child(0).filter(|c| c.kind() == "call")?;
+            EffectKind::Call { call }
+        }
+        _ => return None,
+    };
+    if let EffectKind::Call { call } = kind {
+        let callee = call.child_by_field_name("function")?;
+        let admitted = match callee.kind() {
+            "identifier" => !BUILTINS.contains(&cx.text(&callee)),
+            "attribute" => {
+                let object = callee.child_by_field_name("object")?;
+                let verb = cx.text(&callee.child_by_field_name("attribute")?);
+                let receiver = cx.text(&object);
+                object.kind() == "identifier"
+                    && !LOGGING.contains(&receiver)
+                    && !LOG_VERBS.contains(&verb)
+                    && (matches!(receiver, "self" | "cls")
+                        || (modules.contains(receiver)
+                            && receiver.starts_with(|c: char| c.is_ascii_lowercase())))
+            }
+            _ => false,
+        };
+        if !admitted {
+            return None;
+        }
+    }
+    Some(Effect {
+        statement: node,
+        kind,
+    })
 }
 
 fn omission_source(mut node: TsNode<'_>) -> TsNode<'_> {

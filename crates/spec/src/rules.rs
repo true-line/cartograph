@@ -370,6 +370,18 @@ fn render_observation(
             )?;
             expression(output, value)?;
         }
+        LocalExit::Assign { target, value } => {
+            output.write_str("Assignment; the callable continues.\n\nAssigned place:\n\n")?;
+            expression(output, target)?;
+            output.write_str("Assigned value:\n\n")?;
+            expression(output, value)?;
+        }
+        LocalExit::Call { value } => {
+            output.write_str(
+                "Call statement; its result is unused and the callable continues.\n\n",
+            )?;
+            expression(output, value)?;
+        }
     }
     output.write_str("### Dependencies\n\n| Role | Resolution | Source |\n|---|---|---|\n")?;
     for dependency in &rule.dependencies {
