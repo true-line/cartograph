@@ -185,14 +185,15 @@ marks each item, from the bundle alone:
 - **absent**: the bundle does not say it. The reviewer notes whether a gap
   row accounts for it.
 
-| Measure | Proposed pass |
+| Measure | Pass |
 |---|---|
 | Expected capabilities (1.3) stated | all |
 | Expected actor and rule items (1.2, 1.5) stated | at least 14 of 20 |
 | Absent items with no gap row | 0 |
 
-The pass values are those of the W13 pilot and are a proposal until the
-owner freezes them. The counts are recorded whatever they are. An absent
+The pass values are those of the W13 pilot. The owner froze them for this
+probe on 2026-11-20; changing one is the owner's decision. The counts are
+recorded whatever they are. An absent
 item with no gap row is the failure this specification exists to prevent:
 the bundle is silent and looks complete.
 
@@ -226,16 +227,16 @@ because of that review. The review after drafting is still owed.
   way (mail received, a job or queue worker, an event listener, a command)
   is under no capability, and nothing records the omission as a gap
   (review 1, finding 2). Scheduled jobs are recovered as flows and are
-  under no capability either.
+  under no capability either. Tracked in #1997.
 - A recovered rule is a rejection exit. What a successful operation
   returns and changes, limits set by a decorator or by configuration, and
   defaults are not recovered as rules and have no gap row (review 1,
-  finding 4).
+  finding 4). Tracked in #1998.
 - The frames of D1 §1.2, §1.3 and §1.5 print guard names, controller names
   and source expressions. Rule 3 is met only where accepted prose restates
-  them.
+  them. Tracked in #1999.
 - Request inputs and response shapes are recovered and are in no exported
-  document, so question 8 is silent on them.
+  document, so question 8 is silent on them. Tracked in #1998.
 
 - D2 to D10 are not compiled as catalogue documents. Until they are, a
   reviewer finds their content under the current artifact names, and
