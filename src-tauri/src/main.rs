@@ -331,6 +331,8 @@ struct LayerBreakdown {
     webext: LayerSummary,
     tools: LayerSummary,
     schedules: LayerSummary,
+    /// Process starts beyond HTTP: listeners, workers, commands (#1997).
+    entry_points: LayerSummary,
     /// Ordered workflow and Dockerfile steps (#1790).
     pipelines: LayerSummary,
     /// Environments and workloads from Compose files (#1791).
@@ -351,6 +353,7 @@ impl LayerBreakdown {
         self.webext.add(other.webext);
         self.tools.add(other.tools);
         self.schedules.add(other.schedules);
+        self.entry_points.add(other.entry_points);
         self.pipelines.add(other.pipelines);
         self.environments.add(other.environments);
         self.events.add(other.events);
@@ -1418,6 +1421,10 @@ fn repo_coverage(
                 count(&layers.schedules),
             ),
             (
+                ingest::entry_points::ENTRY_POINT_EXTRACTOR_ID,
+                count(&layers.entry_points),
+            ),
+            (
                 ingest::pipelines::PIPELINE_EXTRACTOR_ID,
                 count(&layers.pipelines),
             ),
@@ -2186,6 +2193,13 @@ fn extract_tree_packed(
             nodes: distinct_node_count(&schedule_facts.nodes),
             edges: distinct_edge_count(&schedule_facts.edges),
         };
+        // Files a job enters are that job's entry, not another (#1997).
+        let scheduled: std::collections::BTreeSet<String> = schedule_facts
+            .nodes
+            .iter()
+            .filter(|node| node.label == "File")
+            .filter_map(|node| node.props["path"].as_str().map(str::to_owned))
+            .collect();
         let known_files = unplaceholdered_set(&facts, "File")?;
         facts
             .extend(
@@ -2194,6 +2208,29 @@ fn extract_tree_packed(
                     .into_iter()
                     .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
                 schedule_facts.edges,
+            )
+            .map_err(pack_err)?;
+        // Entry points beyond HTTP (#1997): each process start (a Python
+        // `__main__` or operator script, the container command, a Procfile
+        // process, a declared console script or `bin`) becomes an
+        // EntryPoint flow trigger with an ENTRY into the file it runs, or a
+        // Gap naming it. An adapter's File node supersedes the reader's.
+        let entry_facts =
+            ingest::entry_points::extract_dir(root, &schedule_id, &symbols, &scheduled)
+                .map_err(|e| e.to_string())?;
+        layers.entry_points = LayerSummary {
+            files: entry_facts.files,
+            nodes: distinct_node_count(&entry_facts.nodes),
+            edges: distinct_edge_count(&entry_facts.edges),
+        };
+        let known_files = unplaceholdered_set(&facts, "File")?;
+        facts
+            .extend(
+                entry_facts
+                    .nodes
+                    .into_iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
+                entry_facts.edges,
             )
             .map_err(pack_err)?;
     }

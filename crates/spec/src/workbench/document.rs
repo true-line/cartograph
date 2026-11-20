@@ -653,7 +653,12 @@ impl<'a> AreaHeadings<'a> {
 /// The Endpoints a derived story cites, in citation order.
 fn cited_endpoints<'s, 'a>(story: &'s Story<'a>) -> impl Iterator<Item = &'a Node> + 's {
     story.support.iter().filter_map(|(_, fact)| match fact {
-        Support::Node(node) if node.label == "Endpoint" => Some(*node),
+        // An HTTP operation, or a process start or scheduled job (#1997).
+        Support::Node(node)
+            if matches!(node.label.as_str(), "Endpoint" | "EntryPoint" | "Schedule") =>
+        {
+            Some(*node)
+        }
         _ => None,
     })
 }
@@ -738,7 +743,8 @@ fn derived_frame(
         writeln!(
             out,
             "Derived Capabilities: {}. Each groups the operations one controller or resolver \
-             serves (Semantic / InferredWeak, derived by rule from the cited facts); \
+             serves, or the process starts and scheduled jobs that begin work no HTTP request \
+             starts (Semantic / InferredWeak, derived by rule from the cited facts); \
              `user_stories.md` states them as stories.\n",
             stories.len()
         )?;

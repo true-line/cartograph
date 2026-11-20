@@ -6,6 +6,11 @@ pub use business_flows::{
 };
 mod controllers;
 pub use controllers::derive_controller_capabilities;
+mod entry_points;
+pub use entry_points::{
+    CAPABILITY_ENTRY_POINT_RULE, CAPABILITY_ENTRY_POINT_RULE_VERSION,
+    derive_entry_point_capabilities,
+};
 pub(crate) mod actors;
 mod naming;
 mod subsystems;

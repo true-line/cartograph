@@ -476,6 +476,11 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         None,
     ),
     (
+        crate::entry_points::ENTRY_POINT_EXTRACTOR_ID,
+        "process entry points",
+        None,
+    ),
+    (
         crate::pipelines::PIPELINE_EXTRACTOR_ID,
         "build and deployment pipeline",
         None,
