@@ -97,82 +97,6 @@ fn served_path(path: &str) -> Option<String> {
     })
 }
 
-/// A `vercel.json` rewrite source as concrete route paths: `(a|b)` gives
-/// one path per alternative, `:name` is `{name}`, a trailing `:name*` or
-/// `(.*)` is `{path...}`. `None` for any other pattern syntax.
-fn source_paths(source: &str) -> Option<Vec<String>> {
-    if !source.starts_with('/') {
-        return None;
-    }
-    if source == "/" {
-        return Some(vec!["/".to_owned()]);
-    }
-    let mut paths = vec![String::new()];
-    // Split on `/` outside parentheses: `(revoke|admin/migrate)` is one.
-    let mut segments: Vec<&str> = Vec::new();
-    let (mut depth, mut start) = (0usize, 1);
-    for (i, c) in source.char_indices().skip(1) {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.checked_sub(1)?,
-            '/' if depth == 0 => {
-                segments.push(&source[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if depth != 0 {
-        return None;
-    }
-    segments.push(&source[start..]);
-    for (index, segment) in segments.iter().enumerate() {
-        let last = index + 1 == segments.len();
-        let options: Vec<String> = if *segment == "(.*)" && last {
-            vec!["{path...}".to_owned()]
-        } else if let Some(name) = segment.strip_prefix(':') {
-            let (name, rest) = match name.strip_suffix('*') {
-                Some(name) if last => (name, "..."),
-                Some(_) => return None,
-                None => (name, ""),
-            };
-            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return None;
-            }
-            vec![format!("{{{name}{rest}}}")]
-        } else if let Some(inner) = segment.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-            let options: Vec<String> = inner.split('|').map(str::to_owned).collect();
-            if options.iter().any(|o| !literal(o)) {
-                return None;
-            }
-            options
-        } else if literal(segment) {
-            vec![(*segment).to_owned()]
-        } else {
-            return None;
-        };
-        paths = paths
-            .iter()
-            .flat_map(|path| options.iter().map(move |o| format!("{path}/{o}")))
-            .collect();
-        if paths.len() > MAX_REWRITE_PATHS {
-            return None;
-        }
-    }
-    Some(paths)
-}
-
-const MAX_REWRITE_PATHS: usize = 64;
-
-/// A plain path text: segments of letters, digits and `-_.~`, possibly
-/// several joined by `/` inside an alternative.
-fn literal(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/'))
-}
-
 fn provenance(evidence: EvidenceRef, confidence: ConfidenceTier, fact: &str) -> serde_json::Value {
     serde_json::to_value(
         Provenance::new(
@@ -231,17 +155,9 @@ fn endpoint(
 }
 
 /// The root `vercel.json`, read only when it is a regular, non-ignored file
-/// of the captured source: an ignored or symlinked one is absent, so a file
-/// outside the commit can't change its facts (ADR-0030, ADR-0034).
+/// of the captured source (ADR-0030, ADR-0034).
 fn read_config(root: &Path) -> Option<Vec<u8>> {
-    if super::root_gitignore(root).ok()?.is_ignored(CONFIG, false) {
-        return None;
-    }
-    let path = root.join(CONFIG);
-    if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
-        return None;
-    }
-    std::fs::read(path).ok()
+    source_walk::root_file(root, CONFIG)
 }
 
 const CONFIG: &str = "vercel.json";
@@ -285,36 +201,22 @@ pub(super) fn routes(
         out.edges.push(edge);
         served.insert(route, function);
     }
-    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&config) else {
-        return;
-    };
-    let text = String::from_utf8_lossy(&config);
-    let mut searched_from = 0;
-    for rewrite in parsed["rewrites"].as_array().into_iter().flatten() {
-        let (Some(source), Some(destination)) =
-            (rewrite["source"].as_str(), rewrite["destination"].as_str())
-        else {
-            continue;
-        };
-        // Cite the rewrite's own `source` entry in `vercel.json`.
-        let needle = serde_json::to_string(source).expect("string serializes");
-        let start = text[searched_from..]
-            .find(&needle)
-            .map(|at| searched_from + at)
-            .or_else(|| text.find(&needle))
-            .unwrap_or(0);
-        searched_from = start + needle.len();
+    for rewrite in adapters_fw::vercel::rewrites(&config) {
+        let (source, destination, target) = (
+            rewrite.source.as_str(),
+            rewrite.destination.as_str(),
+            rewrite.target.as_str(),
+        );
+        let start = rewrite.start;
         let evidence = EvidenceRef {
             repo: repo.into(),
             path: CONFIG.into(),
-            byte_start: start as u64,
-            byte_end: (start + needle.len().max(1)) as u64,
+            byte_start: rewrite.start as u64,
+            byte_end: rewrite.end as u64,
             commit_sha: commit.into(),
         };
-        let target = destination.split(['?', '#']).next().unwrap_or(destination);
-        let target = target.trim_end_matches('/');
         let function = served.get(target).copied();
-        let paths = source_paths(source);
+        let paths = adapters_fw::vercel::source_paths(source);
         match (function, paths) {
             (Some(function), Some(paths)) => {
                 for path in paths {
@@ -337,6 +239,8 @@ pub(super) fn routes(
                 }
             }
             (None, _) if !target.starts_with("/api") => {}
+            // A JavaScript or TypeScript function's rewrite is that adapter's.
+            (None, _) if adapters_fw::vercel::node_function_serves(root, target) => {}
             (function, _) => {
                 let reason = if function.is_none() {
                     "Vercel rewrite destination is not a recovered function"
@@ -406,9 +310,12 @@ func helper(x int) int { return x }
             DOCS.replace("Docs", "TestDocs").as_str(),
         );
         write("pkg/web/server.go", DOCS);
+        // A TypeScript function's rewrite is the TS adapter's (AC-0927).
+        write("api/hooks.ts", "export default function h(req, res) {}\n");
         write(
             "vercel.json",
             r#"{"rewrites": [
+  {"source": "/hooks", "destination": "/api/hooks"},
   {"source": "/", "destination": "/api/docs"},
   {"source": "/docs", "destination": "/api/docs"},
   {"source": "/docs/(.*)", "destination": "/api/docs?x=1"},
@@ -532,18 +439,5 @@ func helper(x int) int { return x }
         assert_eq!(served_path("api/hooks/index_test.go"), None);
         assert_eq!(served_path("api/_lib/util.go"), None);
         assert_eq!(served_path("pkg/api/index.go"), None);
-    }
-
-    #[test]
-    fn rewrite_sources_are_route_paths() {
-        assert_eq!(
-            source_paths("/devices/(revoke|tags|admin/migrate)").unwrap(),
-            ["/devices/revoke", "/devices/tags", "/devices/admin/migrate"]
-        );
-        assert_eq!(source_paths("/docs/(.*)").unwrap(), ["/docs/{path...}"]);
-        assert_eq!(source_paths("/u/:id/x").unwrap(), ["/u/{id}/x"]);
-        assert_eq!(source_paths("/f/:rest*").unwrap(), ["/f/{rest...}"]);
-        assert_eq!(source_paths("/(.*)/x"), None);
-        assert_eq!(source_paths("/a/(?!b).*"), None);
     }
 }

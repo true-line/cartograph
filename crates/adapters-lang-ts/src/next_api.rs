@@ -54,6 +54,9 @@ pub(crate) struct Site {
     app: bool,
     /// `None` for the pages-router default export (every method).
     method: Option<String>,
+    /// A Vercel function under the repository's top-level `api/` (#2010),
+    /// routed by `vercel.json`'s presence rather than a Next manifest.
+    vercel: bool,
     /// The handler symbol, or `None` for an unproven binding (a Gap).
     handler: Option<String>,
     evidence: EvidenceRef,
@@ -73,15 +76,26 @@ fn stem_of(name: &str) -> Option<&str> {
 /// Whether the path could be an app-router route file and whether it could
 /// be a pages-router API file; which one it is (if either) is decided
 /// against the package directory at completion.
-fn candidate(path: &str) -> (bool, bool) {
+fn candidate(path: &str) -> (bool, bool, bool) {
     let Some(stem) = path.rsplit('/').next().and_then(stem_of) else {
-        return (false, false);
+        return (false, false, false);
     };
+    // A Vercel function file: `api/**` at the repository root, neither a
+    // declaration (`x.d.ts`) nor under a `_`- or `.`-prefixed segment, which
+    // Vercel does not serve. It exports a default handler or per-method
+    // handlers, like a pages- and an app-router file at once.
+    if let Some(rest) = path.strip_prefix("api/") {
+        let vercel = !stem.contains('.')
+            && !rest
+                .split('/')
+                .any(|s| s.is_empty() || s.starts_with(['_', '.']));
+        return (false, false, vercel);
+    }
     let dirs: Vec<&str> = path.split('/').collect();
     let dirs = &dirs[..dirs.len() - 1];
     let app = stem == "route" && dirs.contains(&"app");
     let pages = dirs.windows(2).any(|w| w == ["pages", "api"]);
-    (app, pages)
+    (app, pages, false)
 }
 
 fn evidence(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
@@ -119,16 +133,18 @@ fn bound(
 
 /// Every route export in this file, when its path is a route candidate.
 pub(crate) fn sites(cx: &FileCx<'_>, root: TsNode<'_>, bindings: &Bindings<'_>) -> Vec<Site> {
-    let (app, pages) = candidate(cx.path);
+    let (app, pages, vercel) = candidate(cx.path);
     let mut out = Vec::new();
-    if !app && !pages {
+    if !app && !pages && !vercel {
         return out;
     }
+    let (app, pages) = (app || vercel, pages || vercel);
     let mut push = |app: bool, method: Option<&str>, handler: Option<String>, node: TsNode<'_>| {
         out.push(Site {
             file: cx.path.to_string(),
             app,
             method: method.map(str::to_string),
+            vercel,
             handler,
             evidence: evidence(cx, node),
         });
@@ -310,7 +326,23 @@ pub(crate) fn complete(
     // Endpoints already held that another site also routes: each with the
     // site's matching, checked in site order once they are decoded.
     let mut held = Vec::new();
+    let vercel_config = sites
+        .iter()
+        .any(|site| site.vercel)
+        .then(|| source_walk::root_file(root, VERCEL_CONFIG))
+        .flatten();
+    // Each Vercel function's path, for the rewrites onto it.
+    let mut functions: Vec<(String, String, String)> = Vec::new();
     for site in sites {
+        if site.vercel {
+            // Vercel serves `api/` itself only outside a Next project, whose
+            // own `pages/api` is the API.
+            if vercel_config.is_none() || index.declaring_manifest(&site.file, "next").is_some() {
+                continue;
+            }
+            vercel_site(site, id, &mut seen, &mut nodes, &mut edges, &mut functions);
+            continue;
+        }
         let Some((dir, manifest, span)) = index.declaring_manifest(&site.file, "next") else {
             continue;
         };
@@ -407,6 +439,9 @@ pub(crate) fn complete(
             }),
         });
     }
+    if let Some(config) = &vercel_config {
+        vercel_rewrites(config, &functions, id, &mut seen, &mut nodes, &mut edges);
+    }
     let ids: HashSet<&str> = held.iter().map(|(ep, _)| ep.as_str()).collect();
     facts.edit_nodes(
         |id, _| ids.contains(id),
@@ -420,6 +455,242 @@ pub(crate) fn complete(
         },
     )?;
     facts.append(Vec::new(), edges)
+}
+
+/// Framework label on a Vercel function's endpoints (#2010).
+pub const VERCEL_FRAMEWORK: &str = "vercel";
+/// Gap reason for a Vercel function export this module cannot bind.
+pub const VERCEL_UNPROVEN_REASON: &str = "Vercel function export is not a local function";
+const VERCEL_CONFIG: &str = "vercel.json";
+
+fn provenance(
+    evidence: Vec<EvidenceRef>,
+    confidence: ConfidenceTier,
+    fact: &str,
+) -> serde_json::Value {
+    let prov = Provenance::new(
+        Tier::Deterministic,
+        confidence,
+        evidence,
+        EXTRACTOR_ID,
+        fact.as_bytes(),
+    )
+    .expect("Deterministic within ceiling");
+    serde_json::to_value(prov).expect("provenance serializes")
+}
+
+/// The language a function file is written in, by its extension.
+fn language(file: &str) -> &'static str {
+    if file.ends_with(".ts") || file.ends_with(".tsx") {
+        "typescript"
+    } else {
+        "javascript"
+    }
+}
+
+/// One Vercel function export as an Endpoint at the path Vercel serves its
+/// file at (`api/users/[id].ts` at `/api/users/:id`, `index` at its
+/// directory), or a Gap when the export binds no local function.
+fn vercel_site(
+    site: Site,
+    id: &SourceId,
+    seen: &mut HashSet<String>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+    functions: &mut Vec<(String, String, String)>,
+) {
+    // Vercel's file routing is the pages router's, rooted at `api/`.
+    let Some((path, prefix)) = route(&format!("pages/{}", site.file), false, false) else {
+        return;
+    };
+    let evidence = vec![site.evidence.clone()];
+    let method = site.method.clone().unwrap_or_else(|| "ALL".into());
+    let Some(handler) = site.handler else {
+        let gap = format!(
+            "gap:vercel-route:{}@{}@{}",
+            id.repo, site.file, site.evidence.byte_start
+        );
+        if seen.insert(gap.clone()) {
+            nodes.push(Node {
+                id: gap.clone(),
+                label: "Gap".into(),
+                props: serde_json::json!({
+                    "kind": "vercel-function-handler-unproven",
+                    "reason": VERCEL_UNPROVEN_REASON,
+                    "method": method,
+                    "path": path,
+                    "attempted_tiers": ["T0"],
+                    "prov": provenance(evidence.clone(), ConfidenceTier::Gap, &format!("Gap {gap}")),
+                }),
+            });
+            edges.push(Edge {
+                src: file_id(id.repo, &site.file),
+                dst: gap.clone(),
+                label: "DEPENDS_ON".into(),
+                props: serde_json::json!({
+                    "reason": VERCEL_UNPROVEN_REASON,
+                    "prov": provenance(evidence, ConfidenceTier::Gap, &format!("DEPENDS_ON {gap}")),
+                }),
+            });
+        }
+        return;
+    };
+    if prefix.is_none() {
+        functions.push((path.clone(), method.clone(), handler.clone()));
+    }
+    let props = vercel_props(
+        &method,
+        &path,
+        prefix,
+        &site.file,
+        &handler,
+        provenance(
+            evidence.clone(),
+            ConfidenceTier::Confirmed,
+            &format!("Endpoint {method} {path}"),
+        ),
+    );
+    push_endpoint(
+        id, &method, &path, &handler, props, evidence, seen, nodes, edges,
+    );
+}
+
+fn vercel_props(
+    method: &str,
+    path: &str,
+    prefix: Option<&str>,
+    file: &str,
+    handler: &str,
+    prov: serde_json::Value,
+) -> serde_json::Value {
+    let mut props = serde_json::json!({
+        "method": method,
+        "path": path,
+        "framework": VERCEL_FRAMEWORK,
+        "language": language(file),
+        "handler_sym": handler,
+        "prov": prov,
+    });
+    if let Some(kind) = prefix {
+        props["match"] = serde_json::json!("prefix");
+        props["prefix_kind"] = serde_json::json!(kind);
+    }
+    props
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_endpoint(
+    id: &SourceId,
+    method: &str,
+    path: &str,
+    handler: &str,
+    props: serde_json::Value,
+    evidence: Vec<EvidenceRef>,
+    seen: &mut HashSet<String>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    let ep = format!("ep:{}@{method}:{path}", id.repo);
+    if !seen.insert(ep.clone()) {
+        return;
+    }
+    nodes.push(Node {
+        id: ep.clone(),
+        label: "Endpoint".into(),
+        props,
+    });
+    edges.push(Edge {
+        src: ep,
+        dst: handler.to_string(),
+        label: "HANDLES".into(),
+        props: serde_json::json!({
+            "prov": provenance(evidence, ConfidenceTier::Confirmed, &format!("HANDLES {method} {path}")),
+        }),
+    });
+}
+
+/// A rewrite source path in this module's route syntax: `{name}` is
+/// `:name`, a final `{name...}` a zero-or-more prefix (`/*`).
+fn rewrite_route(path: &str) -> (String, Option<&'static str>) {
+    let mut parts = Vec::new();
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        match segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+            Some(name) if name.ends_with("...") => {
+                return (
+                    format!("/{}", [parts, vec!["*".to_string()]].concat().join("/")),
+                    Some("segments*"),
+                );
+            }
+            Some(name) => parts.push(format!(":{name}")),
+            None => parts.push(segment.to_string()),
+        }
+    }
+    (format!("/{}", parts.join("/")), None)
+}
+
+/// Each `vercel.json` rewrite onto a function served at a fixed path is an
+/// Endpoint at its source handled by the same function, marked
+/// `rewrite_of`, citing the rewrite. A rewrite onto anything else is left to
+/// the language adapter whose function it names, or to none.
+fn vercel_rewrites(
+    config: &[u8],
+    functions: &[(String, String, String)],
+    id: &SourceId,
+    seen: &mut HashSet<String>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    for rewrite in adapters_fw::vercel::rewrites(config) {
+        let Some(paths) = adapters_fw::vercel::source_paths(&rewrite.source) else {
+            continue;
+        };
+        let evidence = vec![EvidenceRef {
+            repo: id.repo.into(),
+            path: VERCEL_CONFIG.into(),
+            byte_start: rewrite.start as u64,
+            byte_end: rewrite.end as u64,
+            commit_sha: id.commit.into(),
+        }];
+        for (served, method, handler) in functions.iter().filter(|(p, _, _)| *p == rewrite.target) {
+            for source in &paths {
+                let (path, prefix) = rewrite_route(source);
+                if path == *served {
+                    continue;
+                }
+                let mut props = vercel_props(
+                    method,
+                    &path,
+                    prefix,
+                    "",
+                    handler,
+                    provenance(
+                        evidence.clone(),
+                        ConfidenceTier::Confirmed,
+                        &format!("Endpoint {method} {path} rewrites to {served}"),
+                    ),
+                );
+                props["rewrite_of"] = serde_json::json!(served);
+                props["language"] = serde_json::json!(
+                    nodes
+                        .iter()
+                        .find(|n| n.props["handler_sym"] == handler.as_str())
+                        .and_then(|n| n.props["language"].as_str())
+                        .unwrap_or("javascript")
+                );
+                push_endpoint(
+                    id,
+                    method,
+                    &path,
+                    handler,
+                    props,
+                    evidence.clone(),
+                    seen,
+                    nodes,
+                    edges,
+                );
+            }
+        }
+    }
 }
 
 /// Producers that disagree on one endpoint's matching (overlapping
@@ -1200,6 +1471,7 @@ mod tests {
             file: file.into(),
             app: true,
             method: Some(method.into()),
+            vercel: false,
             handler: handler.map(str::to_string),
             evidence: EvidenceRef {
                 repo: "r".into(),
@@ -1280,5 +1552,73 @@ mod tests {
                 ("HANDLES", "sym:users2"),
             ]
         );
+    }
+
+    // AC-0927 (#2010): with a root `vercel.json`, `api/**` functions are
+    // endpoints at their served path, rewrites onto them are endpoints at
+    // their source, private and declaration files are not routed, an
+    // unbound export is a Gap, and without `vercel.json` nothing is routed.
+    #[test]
+    fn vercel_functions_become_endpoints_with_their_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "vercel.json",
+            r#"{"rewrites": [{"source": "/hooks/(.*)", "destination": "/api/hooks"}, {"source": "/u/:id", "destination": "/api/users/[id]"}]}"#,
+        );
+        write(
+            root,
+            "api/hooks.ts",
+            "export default function handler(req, res) { res.status(200).end(); }\n",
+        );
+        write(
+            root,
+            "api/users/[id].js",
+            "export function GET(request) { return new Response('ok'); }\n\
+             export { other as POST } from './other';\n",
+        );
+        write(root, "api/_lib/db.ts", "export default function db() {}\n");
+        write(
+            root,
+            "api/types.d.ts",
+            "export default function t(): void;\n",
+        );
+        let out = extract_dir(root, &id("abc123")).unwrap();
+        let mut endpoints: Vec<_> = out
+            .nodes
+            .iter()
+            .filter(|n| n.label == "Endpoint" && n.props["framework"] == "vercel")
+            .map(|n| {
+                (
+                    n.id.as_str(),
+                    n.props["language"].as_str().unwrap(),
+                    n.props["rewrite_of"].as_str(),
+                )
+            })
+            .collect();
+        endpoints.sort();
+        assert_eq!(
+            endpoints,
+            [
+                ("ep:qwtm/example@ALL:/api/hooks", "typescript", None),
+                (
+                    "ep:qwtm/example@ALL:/hooks/*",
+                    "typescript",
+                    Some("/api/hooks")
+                ),
+                ("ep:qwtm/example@GET:/api/users/:id", "javascript", None),
+            ]
+        );
+        assert!(out.edges.iter().any(|e| e.label == "HANDLES"
+            && e.src == "ep:qwtm/example@ALL:/api/hooks"
+            && e.dst.contains("api/hooks.ts")));
+        assert!(out.nodes.iter().any(|n| n.label == "Gap"
+            && n.props["kind"] == "vercel-function-handler-unproven"
+            && n.props["method"] == "POST"));
+
+        std::fs::remove_file(root.join("vercel.json")).unwrap();
+        let out = extract_dir(root, &id("abc123")).unwrap();
+        assert!(!out.nodes.iter().any(|n| n.props["framework"] == "vercel"));
     }
 }

@@ -243,3 +243,38 @@ impl Walk<'_> {
 
 #[cfg(test)]
 mod tests;
+
+/// Largest root configuration file [`root_file`] reads.
+pub const MAX_ROOT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The bytes of the file `name` at the walk root, when it is a regular file
+/// the root `.gitignore` does not ignore and within [`MAX_ROOT_FILE_BYTES`].
+/// A symlinked, ignored, oversized or missing one is `None`, so a file
+/// outside the captured source can't change what an adapter recovers
+/// (ADR-0030, ADR-0034). Used for `vercel.json` (#2010).
+#[must_use]
+pub fn root_file(root: &Path, name: &str) -> Option<Vec<u8>> {
+    let regular = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|meta| meta.file_type().is_file())
+    };
+    let gitignore = root.join(GITIGNORE);
+    let rules = if regular(&gitignore) {
+        let bytes = read_gitignore(std::fs::File::open(&gitignore).ok()?).ok()?;
+        IgnoreRules::default().descend("", Some(&bytes))
+    } else {
+        IgnoreRules::default()
+    };
+    let path = root.join(name);
+    if rules.is_ignored(name, false) || !regular(&path) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)
+        .ok()?
+        .take(MAX_ROOT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_ROOT_FILE_BYTES).then_some(bytes)
+}
