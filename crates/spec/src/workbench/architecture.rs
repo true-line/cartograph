@@ -2261,7 +2261,7 @@ pub(super) fn dsl(model: &Model<'_>, max: Option<usize>) -> Result<Output, Rende
     let budget = Budget::new(max)?;
     let mut out = Text::new(
         &budget,
-        "/*\n * C4 model recovered by Cartograph from the ingested sources (architecture.md).\n * Deterministic: no model call. Confidence is in each element's properties.\n */\n",
+        "/*\n * C4 model recovered by Cartograph from the ingested sources (architecture.md).\n * Deterministic: no model call. Confidence is in each element's and relationship's properties.\n */\n",
     )?;
     writeln!(
         out,
@@ -2346,15 +2346,27 @@ pub(super) fn dsl(model: &Model<'_>, max: Option<usize>) -> Result<Output, Rende
         }
     }
     out.push_str("        }\n\n")?;
-    for r in &model.relations {
+    // Each relationship keeps its confidence: a property, and a tag the
+    // views style dashed, as the Mermaid diagrams draw it.
+    let relation = |out: &mut Text, from: &str, to: &str, r: &Relation<'_>| -> fmt::Result {
+        let confidence = r.confidence();
+        let tag = match confidence {
+            ConfidenceTier::Gap => "Relationship,Gap",
+            ConfidenceTier::InferredWeak => "Relationship,InferredWeak",
+            _ => "Relationship",
+        };
         writeln!(
             out,
-            "        e{} -> e{} {} {}",
-            r.from,
-            r.to,
+            "        {from} -> {to} {} {} {} {{\n            properties {{\n                \"confidence\" {}\n                \"facts\" \"{}\"\n            }}\n        }}",
             Quoted(&r.label()),
-            Quoted(&r.technology)
-        )?;
+            Quoted(&r.technology),
+            Quoted(tag),
+            Quoted(confidence_word(confidence)),
+            r.facts.len()
+        )
+    };
+    for r in &model.relations {
+        relation(&mut out, &format!("e{}", r.from), &format!("e{}", r.to), r)?;
     }
     for parts in &model.components {
         let id = |i: usize| {
@@ -2365,14 +2377,7 @@ pub(super) fn dsl(model: &Model<'_>, max: Option<usize>) -> Result<Output, Rende
             }
         };
         for r in &parts.relations {
-            writeln!(
-                out,
-                "        {} -> {} {} {}",
-                id(r.from),
-                id(r.to),
-                Quoted(&r.label()),
-                Quoted(&r.technology)
-            )?;
+            relation(&mut out, &id(r.from), &id(r.to), r)?;
         }
     }
     out.push_str("    }\n\n    views {\n        systemContext sys \"SystemContext\" {\n            include *\n            autolayout tb\n        }\n        container sys \"Containers\" {\n            include *\n            autolayout tb\n        }\n")?;
@@ -2386,7 +2391,7 @@ pub(super) fn dsl(model: &Model<'_>, max: Option<usize>) -> Result<Output, Rende
             parts.container
         )?;
     }
-    out.push_str("        styles {\n            element \"Person\" {\n                shape Person\n                background #08427b\n                color #ffffff\n            }\n            element \"Software System\" {\n                background #1168bd\n                color #ffffff\n            }\n            element \"Container\" {\n                background #438dd5\n                color #ffffff\n            }\n            element \"Component\" {\n                background #85bbf0\n                color #000000\n            }\n            element \"Database\" {\n                shape Cylinder\n            }\n            element \"External\" {\n                background #8c8c8c\n                color #ffffff\n            }\n            element \"Gap\" {\n                background #ffffff\n                color #222222\n                stroke #c0392b\n                border dashed\n            }\n        }\n    }\n}\n")?;
+    out.push_str("        styles {\n            element \"Person\" {\n                shape Person\n                background #08427b\n                color #ffffff\n            }\n            element \"Software System\" {\n                background #1168bd\n                color #ffffff\n            }\n            element \"Container\" {\n                background #438dd5\n                color #ffffff\n            }\n            element \"Component\" {\n                background #85bbf0\n                color #000000\n            }\n            element \"Database\" {\n                shape Cylinder\n            }\n            element \"External\" {\n                background #8c8c8c\n                color #ffffff\n            }\n            element \"Gap\" {\n                background #ffffff\n                color #222222\n                stroke #c0392b\n                border dashed\n            }\n            relationship \"InferredWeak\" {\n                style dashed\n            }\n            relationship \"Gap\" {\n                style dashed\n                color #c0392b\n            }\n        }\n    }\n}\n")?;
     Ok(Output {
         content: out.finish(),
         assertions: Vec::new(),

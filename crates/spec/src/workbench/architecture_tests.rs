@@ -440,7 +440,15 @@ fn the_dsl_workspace_holds_every_element_and_relationship() {
     assert!(dsl.contains("\"Database\""));
     assert!(dsl.contains("person \"Operator\""));
     assert!(dsl.contains("softwareSystem \"api.vendor.example\""));
-    assert!(dsl.contains("\"Calls 1 API endpoint\" \"HTTPS\""));
+    assert!(dsl.contains("\"Calls 1 API endpoint\" \"HTTPS\" \"Relationship\" {"));
+    // A relationship keeps its confidence, and an inferred one is styled
+    // apart from an evidenced one.
+    assert!(
+        dsl.contains("\"Uses\" \"\" \"Relationship,InferredWeak\" {"),
+        "{dsl}"
+    );
+    assert!(dsl.contains("\"Relationship,Gap\""));
+    assert!(dsl.contains("relationship \"InferredWeak\" {"));
     assert!(dsl.contains("systemContext sys \"SystemContext\""));
     assert!(dsl.contains("container sys \"Containers\""));
     assert!(dsl.contains("\"confidence\" \"Gap\""));
