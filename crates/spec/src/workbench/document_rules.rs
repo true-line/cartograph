@@ -1370,6 +1370,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         set_slots::<&str>(rows)?,
         slots::<&str>(rows)?.checked_mul(3)?,
         set_slots::<String>(rows)?,
+        // The endpoints each handler handles, by handler id (#2009).
+        map_slots::<&str, Vec<&Node>>(rows)?,
+        slots::<&Node>(rows)?,
     ])?;
     let reach_count = map_slots::<&str, usize>(rows)?;
     // One capability's seen set and order/front/next (or retained reach).
@@ -1379,7 +1382,8 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
     ])?;
     // One row: the cloned payload and its typed decode, the whitespace
     // split, and the condition and outcome text (each at most the payload
-    // plus a four-byte `not ` or ` and ` per value), then its citation id.
+    // plus a four-byte `not ` or ` and ` per value), then its citation id
+    // and the place it names (#2009).
     let text = graph.bytes.checked_add(graph.values.checked_mul(5)?)?;
     let row = sum(&[
         json(graph.bytes, graph.values)?.checked_mul(2)?,
@@ -1387,6 +1391,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         slots::<String>(graph.values)?,
         text.checked_mul(2)?,
         graph.bytes,
+        // `place`: the handled routes' names, sorted, and the place itself.
+        slots::<String>(rows)?,
+        graph.bytes.checked_mul(2)?.checked_add(64)?,
     ])?;
     // What each guard checks (#1998): the guard ids, each guard's owners
     // and one guard's traversal and nested-name prefix, held with the index.
