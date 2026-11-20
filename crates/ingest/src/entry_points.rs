@@ -82,6 +82,8 @@ struct Start {
     kind: Kind,
     /// Default listening port, when the start declares one.
     port: Option<u64>,
+    /// Further facts the declaration states, set on the entry point as is.
+    extra: Vec<(&'static str, String)>,
     target: Target,
 }
 
@@ -153,6 +155,9 @@ pub fn extract_dir(
         } else if file.name == "Procfile" {
             let Some(text) = read(rel) else { continue };
             starts.extend(procfile_starts(rel, &text, &files));
+        } else if wrangler::config(&file.name) && !rel.contains("node_modules/") {
+            let Some(text) = read(rel) else { continue };
+            starts.extend(wrangler::worker_start(rel, &file.name, &text, &files));
         } else if file.name == "pyproject.toml" {
             let Some(text) = read(rel) else { continue };
             starts.extend(console_scripts(rel, &text, &files, id, symbols));
@@ -253,6 +258,7 @@ fn python_start(
         command: None,
         kind,
         port,
+        extra: Vec::new(),
         target: Target::File {
             rel: rel.to_string(),
             function: None,
@@ -711,6 +717,7 @@ fn command_start(
             evidence: None,
         },
         port: None,
+        extra: Vec::new(),
         target,
     }
 }
@@ -1001,6 +1008,7 @@ fn declared(
             evidence: None,
         },
         port: None,
+        extra: Vec::new(),
         target,
     }
 }
@@ -1030,6 +1038,7 @@ fn started_by(kind: &str) -> &'static str {
         "polling-loop" => "its own loop, which runs until the process stops",
         "http-server" => "an HTTP request",
         "command" => "a person runs the command",
+        "edge-worker" => "an HTTP request at the edge",
         _ => "the process is started",
     }
 }
@@ -1043,6 +1052,7 @@ fn display(start: &Start) -> String {
         "polling-loop" => "Polling loop",
         "http-server" => "HTTP server",
         "command" => "Command",
+        "edge-worker" => "Edge worker",
         _ => "Process",
     };
     let at = match (&start.command, start.how.as_str()) {
@@ -1105,6 +1115,9 @@ fn emit(
     }
     if let Some(port) = start.port {
         props["port"] = port.into();
+    }
+    for (key, value) in &start.extra {
+        props[*key] = value.clone().into();
     }
     if let Some((path, _)) = &start.kind.evidence {
         props["kind_evidence"] = path.clone().into();
@@ -1187,6 +1200,7 @@ fn emit(
 }
 
 mod node;
+mod wrangler;
 
 #[cfg(test)]
 mod tests;

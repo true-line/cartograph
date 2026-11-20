@@ -66,6 +66,7 @@ pub(super) fn node_starts(rel: &str, text: &str) -> Vec<Start> {
                 evidence: None,
             },
             port: None,
+            extra: Vec::new(),
             target: file,
         }];
     }
@@ -82,6 +83,7 @@ pub(super) fn node_starts(rel: &str, text: &str) -> Vec<Start> {
                 evidence: None,
             },
             port: None,
+            extra: Vec::new(),
             target: file.clone(),
         })
         .collect()

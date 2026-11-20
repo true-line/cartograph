@@ -138,8 +138,11 @@ impl<'a> Proof<'a> {
         }
     }
 
-    /// The method and URL of a proven client call.
-    pub(super) fn site(&self, call: TsNode<'_>) -> Option<(String, IdentityExpr)> {
+    /// The method and URL of a proven client call, with the URL argument.
+    pub(super) fn site_and_url<'t>(
+        &self,
+        call: TsNode<'t>,
+    ) -> Option<(String, IdentityExpr, TsNode<'t>)> {
         let callee = call.child_by_field_name("function")?;
         if callee.kind() != "selector_expression" {
             return None;
@@ -156,24 +159,29 @@ impl<'a> Proof<'a> {
             && (self.is_http(operand, call)
                 || self.http_member(operand, call) == Some("DefaultClient"))
         {
-            return Some((method.to_string(), self.url(*args.first()?)));
+            let url = *args.first()?;
+            return Some((method.to_string(), self.url(url), url));
         }
         if !self.is_http(operand, call) {
             return None;
         }
-        match member {
-            "NewRequest" => Some((self.method(*args.first()?, call), self.url(*args.get(1)?))),
-            "NewRequestWithContext" => {
-                Some((self.method(*args.get(1)?, call), self.url(*args.get(2)?)))
-            }
-            _ => None,
-        }
+        let (method, url) = match member {
+            "NewRequest" => (*args.first()?, *args.get(1)?),
+            "NewRequestWithContext" => (*args.get(1)?, *args.get(2)?),
+            _ => return None,
+        };
+        Some((self.method(method, call), self.url(url), url))
     }
 
-    /// A fetch site for `call` owned by `symbol`, if it is a client call.
-    pub(super) fn fetch_site(&self, call: TsNode<'_>, symbol: Option<String>) -> Option<FetchSite> {
-        let (method, url) = self.site(call)?;
-        Some(FetchSite {
+    /// A fetch site for `call` owned by `symbol`, if it is a client call,
+    /// with the URL argument's node.
+    pub(super) fn fetch_site_and_url<'t>(
+        &self,
+        call: TsNode<'t>,
+        symbol: Option<String>,
+    ) -> Option<(FetchSite, TsNode<'t>)> {
+        let (method, url, node) = self.site_and_url(call)?;
+        let site = FetchSite {
             straight_line: None,
             method,
             url,
@@ -183,6 +191,12 @@ impl<'a> Proof<'a> {
             byte_end: call.end_byte() as u64,
             base: None,
             entry: None,
-        })
+        };
+        Some((site, node))
+    }
+
+    /// Classify a URL expression as [`Self::fetch_site`] does.
+    pub(super) fn classify(&self, node: TsNode<'_>) -> IdentityExpr {
+        self.url(node)
     }
 }

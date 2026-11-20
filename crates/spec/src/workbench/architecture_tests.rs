@@ -583,3 +583,69 @@ fn the_app_view_is_the_model_the_markdown_draws() {
     }
     assert!(seen > 0);
 }
+
+/// AC-0948: a Cloudflare Worker entry point is its own container, named for
+/// the worker and described by the module it runs and the route it serves.
+#[test]
+fn an_edge_worker_is_a_container_named_for_the_worker() {
+    let mut f = system();
+    let entry = f.node(
+        &format!("entry:{TOOLS}@edge/wrangler.jsonc#worker"),
+        "EntryPoint",
+        json!({"kind": "edge-worker", "name": "Edge worker (edge/wrangler.jsonc)",
+               "how": "Cloudflare Worker", "file": "edge/wrangler.jsonc",
+               "worker": "agent-events", "route": "events.example.com"}),
+        (TOOLS, "edge/wrangler.jsonc"),
+    );
+    let module = format!("file:{TOOLS}@edge/src/index.ts");
+    f.node(
+        &module,
+        "File",
+        json!({"path": "edge/src/index.ts"}),
+        (TOOLS, "edge/src/index.ts"),
+    );
+    f.edge(
+        &entry,
+        "ENTRY",
+        &module,
+        (TOOLS, "edge/wrangler.jsonc"),
+        json!({}),
+    );
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert!(l2.contains("<b>Agent events</b>"), "{l2}");
+    assert!(
+        l2.contains("[Container: TypeScript, Cloudflare Worker]"),
+        "{l2}"
+    );
+    assert!(
+        l2.contains("Runs `edge/src/index.ts` on Cloudflare's edge; serves `events.example.com`"),
+        "{l2}"
+    );
+}
+
+/// AC-0947: a store known only by its URL variable, read in one place with
+/// a fallback variable of the same provider, is drawn once.
+#[test]
+fn a_store_read_through_a_fallback_variable_is_one_store() {
+    let mut f = system();
+    let reader = f.code(SERVER, "app/kv.py", "from_env");
+    for env in ["KV_REST_API_URL", "UPSTASH_REDIS_REST_URL"] {
+        let store = f.node(
+            &format!("res:{SERVER}@observed:redis:env:{env}"),
+            "Resource",
+            json!({"kind": "sdk-client", "provider": "redis", "observed": true,
+                   "env_key": env, "store_from_env_key": true,
+                   "logical_id": format!("observed:redis:env:{env}")}),
+            (SERVER, "app/kv.py"),
+        );
+        f.edge(&reader, "USES", &store, (SERVER, "app/kv.py"), json!({}));
+    }
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert_eq!(l2.matches("<b>Redis</b>").count(), 1, "{l2}");
+    assert!(
+        l2.contains("Located by `KV_REST_API_URL` or `UPSTASH_REDIS_REST_URL`"),
+        "{l2}"
+    );
+}

@@ -656,12 +656,26 @@ impl<'a> Model<'a> {
                     operator.push(entry);
                     continue;
                 }
-                let file = entry.props["file"].as_str().unwrap_or_default();
+                let mut file = entry.props["file"].as_str().unwrap_or_default();
+                if kind == "edge-worker" {
+                    // The module the worker config names, not the config.
+                    if let Some(module) = index
+                        .edges("ENTRY")
+                        .iter()
+                        .find(|e| e.src == entry.id)
+                        .and_then(|e| e.dst.strip_prefix("file:"))
+                        .and_then(|dst| dst.split_once('@'))
+                        .map(|(_, path)| path)
+                    {
+                        file = module;
+                    }
+                }
                 let what = match kind {
                     "smtp-listener" => "SMTP listener",
                     "database-listener" => "Database listener",
                     "queue-consumer" => "Queue consumer",
                     "polling-loop" => "Polling loop",
+                    "edge-worker" => "Cloudflare Worker",
                     _ => "Process",
                 };
                 let mut technology = language(file).map(str::to_string).unwrap_or_default();
@@ -680,6 +694,12 @@ impl<'a> Model<'a> {
                     }
                     "queue-consumer" => format!("Runs `{file}`; consumes queue messages"),
                     "polling-loop" => format!("Runs `{file}` in a loop until it is stopped"),
+                    "edge-worker" => match entry.props["route"].as_str() {
+                        Some(route) => {
+                            format!("Runs `{file}` on Cloudflare's edge; serves `{route}`")
+                        }
+                        None => format!("Runs `{file}` on Cloudflare's edge"),
+                    },
                     _ => format!("Runs `{file}` as its own process{port}"),
                 };
                 let at = push(
@@ -687,7 +707,10 @@ impl<'a> Model<'a> {
                     &mut owners,
                     Element {
                         kind: Kind::Container,
-                        name: stem_title(file),
+                        name: entry.props["worker"]
+                            .as_str()
+                            .filter(|_| kind == "edge-worker")
+                            .map_or_else(|| stem_title(file), stem_title),
                         technology,
                         description,
                         repo: Some(repo),
@@ -1089,12 +1112,30 @@ impl<'a> Model<'a> {
                 // A logical id names a store within its repository: two
                 // repositories reading the same variable name are two
                 // stores unless binding evidence says otherwise.
-                let key = format!(
-                    "{}|{}",
-                    repo_of(&node.id),
-                    node.props["logical_id"].as_str().unwrap_or(&node.id)
-                );
+                // A store known only by its URL variable, read where another
+                // variable of the same provider is read as its fallback, is
+                // one store located by either.
+                let fallback = node.props["store_from_env_key"] == true;
+                let key = if fallback {
+                    let mut readers: Vec<&str> = users.iter().map(|e| e.src.as_str()).collect();
+                    readers.sort_unstable();
+                    format!(
+                        "{}|env-store|{}|{}",
+                        repo_of(&node.id),
+                        node.props["provider"].as_str().unwrap_or_default(),
+                        readers.join(",")
+                    )
+                } else {
+                    format!(
+                        "{}|{}",
+                        repo_of(&node.id),
+                        node.props["logical_id"].as_str().unwrap_or(&node.id)
+                    )
+                };
                 let at = if let Some(&at) = store_of.get(&key) {
+                    if let (true, Some(env)) = (fallback, node.props["env_key"].as_str()) {
+                        let _ = write!(elements[at].description, " or `{env}`");
+                    }
                     elements[at].facts.push(Fact::Node(node));
                     at
                 } else {

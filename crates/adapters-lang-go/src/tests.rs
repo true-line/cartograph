@@ -1210,3 +1210,121 @@ func routes(mux *http.ServeMux) {
         );
     }
 }
+
+/// AC-0946 (#2065): a URL read from a struct field or package constant is
+/// joined to the one literal the package binds it to, across files; two
+/// literals, an unproven binding or a test file's binding leave it computed.
+#[test]
+fn a_base_url_held_in_a_field_or_constant_joins_across_the_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("pkg/gh");
+    std::fs::create_dir_all(&gh).unwrap();
+    std::fs::write(
+        gh.join("client.go"),
+        r#"package gh
+import "net/http"
+type Client struct { API string; OAuth string; Hook string; Other string }
+func New() *Client { return &Client{API: "https://api.github.com", OAuth: oauthURL} }
+func (c *Client) Get(path string) { http.NewRequest(http.MethodGet, c.API+path, nil) }
+func (c *Client) Token() { http.NewRequest(http.MethodPost, c.OAuth, nil) }
+func (c *Client) Ping() { http.Get(Status + "/ping") }
+func (c *Client) Hooked() { http.NewRequest(http.MethodPost, c.Hook, nil) }
+func (c *Client) Mixed() { http.NewRequest(http.MethodPost, c.Other, nil) }
+func (c *Client) Local(Status string) { http.Get(Status + "/x") }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gh.join("consts.go"),
+        r#"package gh
+const (
+    oauthURL = "https://github.com/login/oauth/access_token"
+    Status = "https://www.githubstatus.com"
+)
+type Other struct{ Other string }
+var a = &Client{Hook: hookURL()}
+var b = &Client{Other: "https://one.example"}
+var c = &Other{Other: "https://two.example"}
+func hookURL() string { return "" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gh.join("client_test.go"),
+        "package gh\nvar t = &Client{API: \"http://127.0.0.1\"}\n",
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let mut rows: Vec<(String, String)> = x
+        .fetch_sites
+        .iter()
+        .map(|site| {
+            let url = match (&site.url, &site.base) {
+                (url, Some(base)) => format!("{:?} + {:?}", base.url, url),
+                (url, None) => format!("{url:?}"),
+            };
+            (site.symbol.clone().unwrap_or_default(), url)
+        })
+        .collect();
+    rows.sort();
+    let row = |name: &str| {
+        rows.iter()
+            .find(|(symbol, _)| symbol.ends_with(&format!("Client.{name}")))
+            .map(|(_, url)| url.as_str())
+            .unwrap()
+    };
+    assert_eq!(
+        row("Get"),
+        "Literal(\"https://api.github.com\") + Computed(\"path\")"
+    );
+    assert_eq!(
+        row("Token"),
+        "Literal(\"https://github.com/login/oauth/access_token\")"
+    );
+    assert_eq!(
+        row("Ping"),
+        "Literal(\"https://www.githubstatus.com\") + Literal(\"/ping\")"
+    );
+    // A call result is no proven binding.
+    assert_eq!(row("Hooked"), "Computed(\"c.Hook\")");
+    // The receiver's type picks its own literal out of two.
+    assert_eq!(row("Mixed"), "Literal(\"https://one.example\")");
+    // A parameter shadows the package constant.
+    assert_eq!(row("Local"), "Computed(\"Status + \\\"/x\\\"\")");
+}
+
+/// AC-0947 (#2065): a read of a store's conventional URL key is an observed
+/// store of that provider, InferredStrong and marked, used by the reading
+/// function; a token key and an unlisted key are not.
+#[test]
+fn a_store_reached_through_its_conventional_url_key_is_observed() {
+    let source = br#"
+package store
+import "os"
+func FromEnv() string {
+    u := os.Getenv("KV_REST_API_URL")
+    _ = os.Getenv("KV_REST_API_TOKEN")
+    _ = os.Getenv("BASE_URL")
+    return u
+}
+"#;
+    let x = extract_source(source, "store.go", &id()).unwrap();
+    let resources: Vec<_> = x.nodes.iter().filter(|n| n.label == "Resource").collect();
+    let [store] = resources.as_slice() else {
+        panic!("one store: {resources:?}")
+    };
+    assert_eq!(
+        store.id,
+        "res:local/go-service@observed:redis:env:KV_REST_API_URL"
+    );
+    assert_eq!(store.props["provider"], "redis");
+    assert_eq!(store.props["kind"], "sdk-client");
+    assert_eq!(store.props["env_key"], "KV_REST_API_URL");
+    assert_eq!(store.props["store_from_env_key"], true);
+    assert_eq!(store.props["prov"]["confidence_tier"], "InferredStrong");
+    assert!(
+        x.edges
+            .iter()
+            .any(|e| e.label == "USES" && e.dst == store.id && e.src.ends_with("#FromEnv"))
+    );
+}

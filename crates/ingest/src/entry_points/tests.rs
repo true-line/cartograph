@@ -463,3 +463,43 @@ function b() {
     assert_eq!(commands, BTreeSet::from(["build", "deploy", "lint"]));
     assert!(!out.nodes.iter().any(|n| n.id.contains("lib/plain.mjs")));
 }
+
+/// AC-0948: a Cloudflare Worker config enters the module it names, relative
+/// to the config, and records the worker name and route.
+#[test]
+fn a_wrangler_config_enters_its_worker_module() {
+    const JSONC: &str = r#"{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "events",
+  "main": "src/index.ts", // the module Cloudflare runs
+  /* routes */
+  "routes": [{ "pattern": "events.example.com", "custom_domain": true }],
+  "vars": { "URL": "https://example.com/x" },
+}"#;
+    let out = extract(&[
+        ("edge/wrangler.jsonc", JSONC),
+        ("edge/src/index.ts", "export default {};\n"),
+        (
+            "other/wrangler.toml",
+            "name = \"cron\"\nmain = \"missing.ts\"\n",
+        ),
+    ]);
+    let worker = entry(&out, "edge/wrangler.jsonc", "worker");
+    assert_eq!(worker.props["kind"], "edge-worker");
+    assert_eq!(worker.props["how"], "Cloudflare Worker");
+    assert_eq!(worker.props["worker"], "events");
+    assert_eq!(worker.props["route"], "events.example.com");
+    let edge = entry_edge(&out, "edge/wrangler.jsonc", "worker");
+    assert_eq!(edge.dst, format!("file:{REPO}@edge/src/index.ts"));
+    assert_eq!(confidence(&edge.props), "Confirmed");
+    let missing = entry_edge(&out, "other/wrangler.toml", "worker");
+    assert!(
+        missing.dst.starts_with("gap:entry-point:"),
+        "{}",
+        missing.dst
+    );
+    assert_eq!(
+        entry(&out, "other/wrangler.toml", "worker").props["worker"],
+        "cron"
+    );
+}
