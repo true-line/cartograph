@@ -200,6 +200,7 @@ fn a_tested_error_names_the_call_that_failed() {
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 func (s *Service) save(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +213,15 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) {
 	// stored
 	if err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
+		return
+	}
+	n, err := strconv.Atoi(r.FormValue("n"))
+	if err != nil {
+		http.Error(w, "bad n", http.StatusBadRequest)
+		return
+	}
+	if err := s.pendingByID(n); err != nil {
+		http.Error(w, "not pending", http.StatusNotFound)
 		return
 	}
 	if d.Name == "" {
@@ -244,6 +254,8 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) {
         vec![
             serde_json::json!(["Decode"]),
             serde_json::json!(["Store.Save"]),
+            serde_json::json!(["strconv.Atoi"]),
+            serde_json::json!(["pendingByID"]),
             serde_json::json!([null]),
         ]
     );

@@ -42,9 +42,14 @@ pub(super) fn words(identifier: &str) -> String {
             parts.push(chunk.to_ascii_lowercase());
             continue;
         }
+        // A run of capitals is one word (`ByID`, `HTTPServer`): a capital
+        // starts a word after a lower-case letter, or before one.
+        let chars: Vec<char> = chunk.chars().collect();
         let mut current = String::new();
-        for c in chunk.chars() {
-            if c.is_ascii_uppercase() && !current.is_empty() {
+        for (i, &c) in chars.iter().enumerate() {
+            let after_lower = i > 0 && !chars[i - 1].is_ascii_uppercase();
+            let before_lower = chars.get(i + 1).is_some_and(char::is_ascii_lowercase);
+            if c.is_ascii_uppercase() && !current.is_empty() && (after_lower || before_lower) {
                 parts.push(std::mem::take(&mut current).to_ascii_lowercase());
             }
             current.push(c);
@@ -1708,6 +1713,11 @@ mod tests {
             failed("err != nil", BranchPolarity::FalsyBranch, "Decode").as_deref(),
             Some("the “decode” call succeeds")
         );
+        assert_eq!(
+            failed("err != nil", truthy, "pendingByID").as_deref(),
+            Some("the “pending by ID” call fails")
+        );
+        assert_eq!(words("HTTPServerURL"), "HTTP server URL");
     }
 
     #[test]
