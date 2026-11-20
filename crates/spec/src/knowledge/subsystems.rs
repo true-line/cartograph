@@ -587,9 +587,12 @@ fn title(
         let second = &second.word;
         let (mut either, mut forward, mut backward) = (0usize, 0usize, 0usize);
         for &file in members {
-            let mut seen = (false, false, false);
+            let mut seen = (
+                raw[file].contains_key(first) || raw[file].contains_key(second),
+                false,
+                false,
+            );
             for phrase in &units[file].phrases {
-                seen.0 |= phrase.iter().any(|w| w == first || w == second);
                 for pair in phrase.windows(2) {
                     seen.1 |= &pair[0] == first && &pair[1] == second;
                     seen.2 |= &pair[0] == second && &pair[1] == first;
