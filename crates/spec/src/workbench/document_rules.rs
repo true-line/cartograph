@@ -233,6 +233,15 @@ fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
     guarded(rule, owner, false)
 }
 
+/// A guarded effect (an assignment or a call statement, #1998) as a row.
+fn effect<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
+    let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+    if parsed.effect.exits() {
+        return None;
+    }
+    guarded(rule, owner, true)
+}
+
 /// A guarded exit as a row; with `any`, every exit, not only rejections.
 fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
@@ -245,6 +254,13 @@ fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a
         }
         LocalExit::Return { value: None } if any => "returns nothing".to_owned(),
         LocalExit::Return { .. } => return None,
+        LocalExit::Assign { target, value } if any => format!(
+            "sets {} to {}",
+            one_line(target.display.as_str()),
+            one_line(value.display.as_str())
+        ),
+        LocalExit::Call { value } if any => format!("calls {}", one_line(value.display.as_str())),
+        LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
     };
     let when = if parsed.conditions.is_empty() {
         "always".to_owned()
@@ -418,6 +434,16 @@ impl<'a> Index<'a> {
     fn each(
         &self,
         owners: impl Iterator<Item = &'a str>,
+        row: impl FnMut(Rejection<'a>) -> Result<(), RenderLimit>,
+    ) -> Result<usize, RenderLimit> {
+        self.each_picked(owners, rejection, row)
+    }
+
+    /// Each rule of `owners` that `pick` makes a row of, in order.
+    fn each_picked(
+        &self,
+        owners: impl Iterator<Item = &'a str>,
+        pick: fn(&'a Node, &'a str) -> Option<Rejection<'a>>,
         mut row: impl FnMut(Rejection<'a>) -> Result<(), RenderLimit>,
     ) -> Result<usize, RenderLimit> {
         let mut n = 0;
@@ -428,7 +454,7 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(found) = rejection(rule, name) {
+                if let Some(found) = pick(rule, name) {
                     n += 1;
                     row(found)?;
                 }
@@ -620,12 +646,17 @@ fn write_row_prefixed(
     // The statement is the rule; the stored condition and outcome are its
     // source, kept beside it as evidence (#1999).
     let rule = row.statement.as_deref().unwrap_or(NOT_STATED);
+    let when = if row.when == "always" {
+        "always".to_owned()
+    } else {
+        format!("when {}", row.when)
+    };
     writeln!(
         out,
-        "| {prefix}{} | {} | when {}: {} | {id} |",
+        "| {prefix}{} | {} | {}: {} | {id} |",
         Literal(row.owner),
         Literal(rule),
-        Literal(&row.when),
+        Literal(&when),
         Literal(&row.outcome),
     )?;
     if asserted.insert(id) {
@@ -678,12 +709,17 @@ pub(super) fn rules_per_capability(
             .filter(|(_, n)| **n > SHARED_AFTER)
             .map(|(id, _)| *id)
     };
-    // Counted first so the lead states the total before any row.
+    // Counted first so the lead states the totals before any row.
     let mut total = index.each(shared(), |_| Ok(()))?;
+    let mut changes = index.each_picked(shared(), effect, |_| Ok(()))?;
     for story in capabilities() {
         total += index.each(index.reached(story).into_iter().filter(own), |_| Ok(()))?;
+        changes +=
+            index.each_picked(index.reached(story).into_iter().filter(own), effect, |_| {
+                Ok(())
+            })?;
     }
-    if total == 0 {
+    if total + changes == 0 {
         return Ok(0);
     }
     writeln!(
@@ -698,13 +734,22 @@ pub(super) fn rules_per_capability(
          (`↳` rows, inferred): the guarded exits of the one repository function of that name \
          and of what it calls within {PREDICATE_DEPTH} hops, or why it was not followed. A \
          configuration constant a row names is stated with its recorded default and \
-         environment variable (`↳` rows, matched by name, inferred). {RULE_COLUMNS}\n"
+         environment variable (`↳` rows, matched by name, inferred). {RULE_COLUMNS}\n\n\
+         State changes and calls per capability: {changes} (#1998). Under each capability, \
+         “Changes” lists each stored assignment through an attribute (`x.field = value`) and \
+         each call statement whose result is unused, in the same reached callables, with the \
+         branch conditions around it (`always` when there are none). Logging calls, builtins \
+         and constructors are not listed. Whether a statement runs on a given request, and \
+         what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
+         capability, nearest callable first.\n"
     )?;
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
     for &(area, story) in &listed {
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
-        if index.each(reached.iter().copied(), |_| Ok(()))? == 0 {
+        let rejections = index.each(reached.iter().copied(), |_| Ok(()))?;
+        let changed = index.each_picked(reached.iter().copied(), effect, |_| Ok(()))?;
+        if rejections + changed == 0 {
             continue;
         }
         let marks = headings.before(area, out)?;
@@ -713,28 +758,32 @@ pub(super) fn rules_per_capability(
             "{marks} {}\n",
             Literal(crate::workbench::render::NodeName(story.node))
         )?;
-        out.push_str(HEADER)?;
         let mut followed = BTreeSet::new();
         let mut explained = BTreeSet::new();
-        printed += index.each(reached.into_iter(), |row| {
-            write_row(&row, assertions, asserted, out)?;
-            index.explain_constants(&row, &mut explained, assertions, asserted, out)?;
-            index.follow(
-                &row,
-                &mut (&mut followed, &mut explained),
-                assertions,
-                asserted,
-                out,
-            )
-        })?;
-        out.push_str("\n")?;
+        if rejections > 0 {
+            out.push_str(HEADER)?;
+            printed += index.each(reached.iter().copied(), |row| {
+                write_row(&row, assertions, asserted, out)?;
+                index.explain_constants(&row, &mut explained, assertions, asserted, out)?;
+                index.follow(
+                    &row,
+                    &mut (&mut followed, &mut explained),
+                    assertions,
+                    asserted,
+                    out,
+                )
+            })?;
+            out.push_str("\n")?;
+        }
+        printed += index.changes(&reached, &mut explained, assertions, asserted, out)?;
     }
-    if index.each(shared(), |_| Ok(()))? > 0 {
+    let shared: Vec<&str> = shared().collect();
+    if index.each(shared.iter().copied(), |_| Ok(()))? > 0 {
         out.push_str("### Shared rejections\n\n")?;
         out.push_str(HEADER)?;
         let mut followed = BTreeSet::new();
         let mut explained = BTreeSet::new();
-        printed += index.each(shared(), |row| {
+        printed += index.each(shared.iter().copied(), |row| {
             write_row(&row, assertions, asserted, out)?;
             index.explain_constants(&row, &mut explained, assertions, asserted, out)?;
             index.follow(
@@ -747,7 +796,55 @@ pub(super) fn rules_per_capability(
         })?;
         out.push_str("\n")?;
     }
+    if index.each_picked(shared.iter().copied(), effect, |_| Ok(()))? > 0 {
+        out.push_str("### Shared changes\n\n")?;
+        printed += index.changes(&shared, &mut BTreeSet::new(), assertions, asserted, out)?;
+    }
     Ok(printed)
+}
+
+/// Change rows printed per capability (#1998).
+pub(super) const MAX_EFFECT_ROWS: usize = 16;
+
+impl<'a> Index<'a> {
+    /// The “Changes” table of `owners`: their guarded effects (#1998,
+    /// AC-0910), at most [`MAX_EFFECT_ROWS`], with a configuration constant
+    /// a row names stated once per `explained` set. Prints nothing when
+    /// there is none; returns the rows printed.
+    fn changes(
+        &self,
+        owners: &[&'a str],
+        explained: &mut BTreeSet<String>,
+        assertions: &mut Assertions,
+        asserted: &mut BTreeSet<String>,
+        out: &mut Text,
+    ) -> Result<usize, RenderLimit> {
+        if self.each_picked(owners.iter().copied(), effect, |_| Ok(()))? == 0 {
+            return Ok(0);
+        }
+        out.push_str("Changes:\n\n")?;
+        out.push_str(HEADER)?;
+        let mut shown = 0usize;
+        let mut omitted = 0usize;
+        self.each_picked(owners.iter().copied(), effect, |row| {
+            if shown == MAX_EFFECT_ROWS {
+                omitted += 1;
+                return Ok(());
+            }
+            shown += 1;
+            write_row(&row, assertions, asserted, out)?;
+            self.explain_constants(&row, explained, assertions, asserted, out)
+        })?;
+        if omitted > 0 {
+            writeln!(
+                out,
+                "| — | {omitted} more state changes and calls are not listed; \
+                 `rule-evidence.md` has them. | — | — |"
+            )?;
+        }
+        out.push_str("\n")?;
+        Ok(shown)
+    }
 }
 
 /// Call hops followed from a guard and the functions nested in it.
@@ -848,10 +945,12 @@ pub(super) fn guard_checks(
     writeln!(
         out,
         "\n### What each guard checks\n\nGuarded exits of the repository guards above: \
-         {total}. Each is a stored `return` or `raise` under a condition in the guard, a \
-         function nested in it, or what they call within {GUARD_DEPTH} call hops \
-         (Deterministic observations). An exit returning an error response or raising refuses \
-         the caller; the conditions are the ones around the exit in its own callable, and the \
+         {total}. Each is a stored `return` or `raise` under a condition, or an assignment \
+         through an attribute or a call statement with the conditions around it (`always` \
+         when there are none; an assignment to `g.user` states whom the request acts as, \
+         #1998), in the guard, a function nested in it, or what they call within \
+         {GUARD_DEPTH} call hops (Deterministic observations). An exit returning an error \
+         response or raising refuses the caller; the conditions are the ones around the exit in its own callable, and the \
          complete execution predicate is not established. A function a condition calls is \
          followed by name, and a configuration constant a row names is stated with its \
          recorded default (`↳` rows, inferred). At most {MAX_GUARD_ROWS} exits are listed per \
@@ -1221,6 +1320,63 @@ def update_alias(alias_id, user):
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
         assert!(!text.contains("200"), "{text}");
         assert!(!text.contains("returns None"), "{text}");
+    }
+
+    // AC-0911 (T-0911): the guarded effects of the callables a capability
+    // reaches are its "Changes" rows, after its rejections, each restated in
+    // domain terms with the stored statement as Source; a capability with
+    // changes and no rejection is still listed.
+    #[test]
+    fn what_a_capability_changes_is_listed_under_it() {
+        let source = r#"
+from flask import jsonify
+
+def delete_alias_view(alias_id, user):
+    alias = Alias.get(alias_id)
+    if not alias:
+        return jsonify(error="Forbidden"), 403
+    delete_alias(alias, user)
+    return jsonify(deleted=True), 200
+
+def delete_alias(alias, user):
+    if alias.delete_on is not None:
+        perform_alias_deletion(alias, user)
+    else:
+        move_alias_to_trash(alias, user)
+
+def move_alias_to_trash(alias, user):
+    alias.delete_on = arrow.now().shift(days=+ALIAS_TRASH_DAYS)
+    alias.enabled = False
+
+def perform_alias_deletion(alias, user):
+    alias.note = compute(alias)
+"#;
+        let (text, printed) = python_rows(source, "delete_alias_view");
+        assert!(
+            text.contains("State changes and calls per capability: 6"),
+            "{text}"
+        );
+        let rejections = text
+            .find("returns jsonify(error=\"Forbidden\"), 403")
+            .unwrap();
+        let changes = text.find("Changes:").unwrap();
+        assert!(rejections < changes, "{text}");
+        for line in [
+            "| delete\\_alias | When the alias's delete on is set, it runs “perform alias deletion”. | \
+             when alias.delete\\_on is not None: calls perform\\_alias\\_deletion(alias, user) |",
+            "| move\\_alias\\_to\\_trash | The alias is no longer enabled. | always: sets alias.enabled to False |",
+            "| move\\_alias\\_to\\_trash | The alias's delete on is set to the configured alias trash days from now. |",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        // A value outside the rendering rules is a Gap, with its source kept.
+        assert!(
+            text.contains(&format!(
+                "{NOT_STATED} | always: sets alias.note to compute(alias) |"
+            )),
+            "{text}"
+        );
+        assert_eq!(printed, 1 + 6, "{text}");
     }
 
     // AC-0886: a function a rejection's condition calls is followed by name

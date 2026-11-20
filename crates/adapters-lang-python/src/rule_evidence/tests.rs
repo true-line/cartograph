@@ -43,7 +43,120 @@ fn value(rule: &GuardedExitEvidence) -> (&'static str, String) {
                 .map(|v| v.display.as_str().to_owned())
                 .unwrap_or_default(),
         ),
+        LocalExit::Assign { target, value } => (
+            "assign",
+            format!("{} = {}", target.display.as_str(), value.display.as_str()),
+        ),
+        LocalExit::Call { value } => ("call", value.display.as_str().to_owned()),
     }
+}
+
+#[test]
+fn state_changes_and_calls_are_guarded_effects() {
+    // AC-0910 (T-0910): an attribute assignment and a call statement to a
+    // function, a `self` method or an imported lowercase module's function
+    // are guarded effects with the branches around them (possibly none);
+    // logging, builtins, an upper-case receiver, a local's method, a plain
+    // name and a constructor body are not.
+    let code = r#"
+from flask import g, current_user
+from app import alias_utils
+from app.log import LOG
+from app.db import Session
+
+def authorize(api_key):
+    if not api_key:
+        if current_user.is_authenticated:
+            g.user = current_user
+    else:
+        api_key.times += 1
+        g.user = api_key.user
+    if g.user.disabled:
+        return "disabled", 403
+
+def delete_alias(alias, user):
+    if alias.delete_on is not None:
+        perform_alias_deletion(alias, user)
+    else:
+        move_alias_to_trash(alias, user)
+    LOG.i("deleted")
+    print("x")
+    Session.commit()
+    alias.save()
+    alias_utils.audit(alias)
+    total = 1
+
+def move_alias_to_trash(alias, user):
+    alias.enabled = False
+
+def perform_alias_deletion(alias, user):
+    pass
+
+class Box:
+    def __init__(self):
+        self.size = 1
+
+    def reset(self):
+        self.clear()
+"#;
+    let out = recover(code);
+    type Found<'a> = (String, (&'a str, String), Vec<(String, BranchPolarity)>);
+    let found: Vec<Found<'_>> = rules(&out)
+        .into_iter()
+        .filter(|(_, r)| r.kind == RuleKind::GuardedEffect)
+        .map(|(node, r)| {
+            assert_eq!(node.props["observation"], "guarded_effect");
+            assert!(node.id.contains("#effect@"), "{}", node.id);
+            (
+                r.owner_id.rsplit('#').next().unwrap().to_owned(),
+                value(&r),
+                shown(&r),
+            )
+        })
+        .collect();
+    let t = BranchPolarity::TruthyBranch;
+    let f = BranchPolarity::FalsyBranch;
+    let names: Vec<(&str, &str, &str)> = found
+        .iter()
+        .map(|(owner, (kind, shown), _)| (owner.as_str(), *kind, shown.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("Box.reset", "call", "self.clear()"),
+            ("authorize", "assign", "g.user = current_user"),
+            ("authorize", "assign", "g.user = api_key.user"),
+            (
+                "delete_alias",
+                "call",
+                "perform_alias_deletion(alias, user)"
+            ),
+            ("delete_alias", "call", "move_alias_to_trash(alias, user)"),
+            ("delete_alias", "call", "alias_utils.audit(alias)"),
+            ("move_alias_to_trash", "assign", "alias.enabled = False"),
+        ],
+        "{found:?}"
+    );
+    let conditions = |i: usize| found[i].2.clone();
+    assert_eq!(
+        conditions(1),
+        [
+            ("not api_key".to_owned(), t),
+            ("current_user.is_authenticated".to_owned(), t)
+        ]
+    );
+    assert_eq!(conditions(2), [("not api_key".to_owned(), f)]);
+    assert_eq!(
+        conditions(4),
+        [("alias.delete_on is not None".to_owned(), f)]
+    );
+    assert!(conditions(5).is_empty());
+    // The exit after the effects is still a guarded exit.
+    assert!(
+        rules(&out)
+            .iter()
+            .any(|(_, r)| r.kind == RuleKind::GuardedExit && r.owner_id.ends_with("#authorize"))
+    );
 }
 
 #[test]

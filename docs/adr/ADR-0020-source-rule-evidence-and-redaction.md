@@ -44,6 +44,23 @@ Existing model consent hashes and toolchain omission behavior need regression
 coverage during relocation. Rule storage, context serialization and export tests
 must prove synthetic secrets absent, including escaped values and comments.
 
+## Amendment (2026-11-20, #1998): guarded effects
+
+Refusals are not the only rules a rebuild needs: who a request acts as, what
+a delete does and which state a branch sets are assignments and calls, not
+exits. `RuleKind` gains `guarded_effect` and `LocalExit` gains `assign`
+(target and value) and `call`, under the same schema version, owner,
+branch-condition, dependency, redaction and Gap contract. A guarded effect
+may have no conditions. Kind and effect must agree: an exit under the effect
+kind, or an effect under the exit kind, is malformed, so no reader that
+counts exits mistakes a state change for a refusal. The Python producer
+records attribute assignments and call statements to functions, `self`/`cls`
+methods and imported lower-case modules' functions, never logging calls,
+builtins or constructor bodies, within a per-file budget separate from exits.
+The TypeScript producer and captured receipts are unchanged and refuse an
+effect. Interpretation stays not established: an effect is a source
+observation, not a proof it runs on a given request.
+
 ## Alternatives
 
 1. Depend on `llm` from the T0 adapter: couples deterministic storage to provider

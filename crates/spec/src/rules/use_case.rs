@@ -436,6 +436,24 @@ fn row(
             display: Some(value.display.as_str().to_owned()),
             capture: Some(value.capture),
         },
+        LocalExit::Assign { target, value } => RowOutcome {
+            kind: "assign".into(),
+            display: Some(format!(
+                "{} = {}",
+                target.display.as_str(),
+                value.display.as_str()
+            )),
+            capture: Some(if target.capture == ExpressionCapture::CompleteSyntax {
+                value.capture
+            } else {
+                target.capture
+            }),
+        },
+        LocalExit::Call { value } => RowOutcome {
+            kind: "call".into(),
+            display: Some(value.display.as_str().to_owned()),
+            capture: Some(value.capture),
+        },
     };
     let id = format!("row:{}", node.id);
     let row_prov = Provenance::new(
