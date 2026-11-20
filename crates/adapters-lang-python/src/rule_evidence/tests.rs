@@ -56,13 +56,17 @@ fn state_changes_and_calls_are_guarded_effects() {
     // AC-0910 (T-0910): an attribute assignment and a call statement to a
     // function, a `self` method or an imported lowercase module's function
     // are guarded effects with the branches around them (possibly none);
-    // logging, builtins, an upper-case receiver, a local's method, a plain
-    // name and a constructor body are not.
+    // logging (also a verb imported directly), builtins, a constructor call,
+    // an upper-case receiver, a local's method, a module name a parameter
+    // shadows, a plain name and a constructor body are not; a module
+    // imported inside the function counts.
     let code = r#"
 from flask import g, current_user
 from app import alias_utils
 from app.log import LOG
 from app.db import Session
+from logging import info
+import service
 
 def authorize(api_key):
     if not api_key:
@@ -85,6 +89,15 @@ def delete_alias(alias, user):
     alias.save()
     alias_utils.audit(alias)
     total = 1
+
+def more(alias, service):
+    hasattr(alias, "x")
+    max([1])
+    User()
+    info("x")
+    service.save()
+    import mailer
+    mailer.send(alias)
 
 def move_alias_to_trash(alias, user):
     alias.enabled = False
@@ -133,6 +146,7 @@ class Box:
             ),
             ("delete_alias", "call", "move_alias_to_trash(alias, user)"),
             ("delete_alias", "call", "alias_utils.audit(alias)"),
+            ("more", "call", "mailer.send(alias)"),
             ("move_alias_to_trash", "assign", "alias.enabled = False"),
         ],
         "{found:?}"
