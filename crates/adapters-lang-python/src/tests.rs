@@ -8033,8 +8033,8 @@ fn a_delete_through_a_query_returning_classmethod_is_an_inferred_delete() {
     // the first class in Model's MRO defining `filter` is a classmethod whose
     // every return is `<proven session>.query(cls)` followed by query
     // builders, is an InferredStrong write of Model via that helper; a
-    // classmethod returning a row (`.first()`) or a query of another model is
-    // not.
+    // classmethod returning a row (`.first()`), a chain with a row-returning
+    // step after the helper or a query of another model is not.
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -8093,6 +8093,9 @@ def via_row(alias_id):
 
 def via_other():
     Alias.others().delete()
+
+def via_first(alias_id):
+    Alias.filter(Alias.id == alias_id).first().delete()
 "#,
     );
     let out = extract_dir(dir.path(), &id()).unwrap();
@@ -8115,7 +8118,7 @@ def via_other():
         assert_eq!(found[0].props["via"], "ModelMixin.filter");
         assert_eq!(found[0].props["prov"]["confidence_tier"], "InferredStrong");
     }
-    for function in ["via_row", "via_other"] {
+    for function in ["via_row", "via_other", "via_first"] {
         assert!(
             writes(function).is_empty(),
             "{function}: {:?}",

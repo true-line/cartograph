@@ -325,6 +325,9 @@ fn query_chain_target<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<(ChainRoo
     if curr.kind() != "call" {
         return None;
     }
+    // Whether every step between the root and `.delete()` is a query
+    // builder: a row-returning step (`.first()`) leaves no proven query.
+    let mut only_builders = true;
     while curr.kind() == "call" {
         let inner_callee = curr.child_by_field_name("function")?;
         if inner_callee.kind() != "attribute" {
@@ -338,12 +341,16 @@ fn query_chain_target<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<(ChainRoo
             if attr == "query" {
                 return None;
             }
+            only_builders &= QUERY_BUILDERS.contains(&attr);
             curr = obj;
         } else {
             if !is_dotted_identifier(obj) {
                 return None;
             }
             if attr != "query" {
+                if !only_builders {
+                    return None;
+                }
                 return Some((
                     ChainRoot::Helper {
                         class: obj,
