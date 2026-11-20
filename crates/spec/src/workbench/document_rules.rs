@@ -237,10 +237,19 @@ fn rejection<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Opt
 /// A guarded effect (an assignment or a call statement, #1998) as a row.
 fn effect<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
-    if parsed.effect.exits() {
+    if parsed.effect.exits() || writes_refusal(&parsed) {
         return None;
     }
     guarded(rule, owner, true, constant)
+}
+
+/// A Go call writing an error status before a bare return (#2009): a
+/// rejection, not a change.
+fn writes_refusal(evidence: &GuardedExitEvidence) -> bool {
+    super::statements::is_go(evidence)
+        && matches!(&evidence.effect, LocalExit::Call { value }
+            if super::statements::go_response(value.display.as_str())
+                .is_some_and(|(status, _)| status >= 400))
 }
 
 /// A guarded exit as a row; with `any`, every exit, not only rejections.
@@ -254,7 +263,11 @@ fn guarded<'a>(
     let outcome = match &parsed.effect {
         LocalExit::Throw { value } => format!("throws {}", one_line(value.display.as_str())),
         LocalExit::Return { value: Some(value) }
-            if any || constructs_error(value) || returns_error_status(value) =>
+            if any
+                || constructs_error(value)
+                || returns_error_status(value)
+                || (super::statements::is_go(&parsed)
+                    && super::statements::go_error(value.display.as_str()).is_some()) =>
         {
             format!("returns {}", one_line(value.display.as_str()))
         }
@@ -265,6 +278,9 @@ fn guarded<'a>(
             one_line(target.display.as_str()),
             one_line(value.display.as_str())
         ),
+        LocalExit::Call { value } if writes_refusal(&parsed) => {
+            format!("responds {}", one_line(value.display.as_str()))
+        }
         LocalExit::Call { value } if any => format!("calls {}", one_line(value.display.as_str())),
         LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
     };
@@ -650,7 +666,13 @@ impl<'a> Index<'a> {
 /// `can_create`. Builtins and names shorter than three characters are
 /// skipped; at most [`MAX_PREDICATES`].
 fn called_names(when: &str) -> Vec<&str> {
-    const SKIP: [&str; 12] = [
+    const SKIP: [&str; 17] = [
+        // Go request reads and standard calls (#2009).
+        "FormValue",
+        "PostFormValue",
+        "Get",
+        "Query",
+        "Error",
         "len",
         "isinstance",
         "getattr",
@@ -1002,8 +1024,8 @@ pub(super) fn rules_per_capability(
     writeln!(
         out,
         "\nRejection exits per capability: {total}. Each is a stored `throw` or `raise`, or a \
-         `return` of a constructed error or an error-status response, in a callable the \
-         capability's handlers reach within {CALL_DEPTH} call hops (Deterministic \
+         `return` of a constructed error, an error-status response or a Go error value, or a Go \
+         error-status write before a bare `return`, in a callable the capability's handlers reach within {CALL_DEPTH} call hops (Deterministic \
          observations). The branch conditions are the ones around the exit in its own \
          callable; the complete execution predicate and what the caller does with the outcome \
          are not established. A callable more than {SHARED_AFTER} capabilities reach is listed \
@@ -1517,8 +1539,14 @@ function checkQuantity(qty: number) {
             },
         )
         .unwrap();
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        rows(&facts.nodes, &facts.edges, handler_name)
+    }
+
+    /// The §1.5 rows of one capability whose endpoint `handler_name`
+    /// handles, over adapter facts.
+    fn rows(nodes: &[Node], edges: &[Edge], handler_name: &str) -> (String, usize) {
+        let nodes: Vec<&Node> = nodes.iter().collect();
+        let edges: Vec<&Edge> = edges.iter().collect();
         let handler = nodes
             .iter()
             .copied()
@@ -1599,6 +1627,91 @@ def update_alias(alias_id, user):
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
         assert!(!text.contains("200"), "{text}");
         assert!(!text.contains("returns None"), "{text}");
+    }
+
+    // AC-0923 (#2009): the Go response and error shapes are read in Go
+    // source only; a Python call taking 500 or a returned `ErrNotFound`
+    // is not a refusal.
+    #[test]
+    fn go_shapes_are_not_read_in_other_languages() {
+        let source = r#"
+def update_alias(alias):
+    if alias.busy:
+        backoff(500)
+    if alias.missing:
+        return ErrNotFound
+    return alias
+"#;
+        let (text, printed) = python_rows(source, "update_alias");
+        // The call stays a change, and neither is a rejection.
+        assert_eq!(printed, 1, "{text}");
+        assert!(text.contains("calls backoff(500)"), "{text}");
+        assert!(!text.contains("refused"), "{text}");
+        assert!(!text.contains("ErrNotFound"), "{text}");
+    }
+
+    // AC-0923 (#2009): a Go handler's refusal (`http.Error` before a bare
+    // return) and a guarded Go error return are its rejections, stated in
+    // domain terms; they are not listed as changes.
+    #[test]
+    fn go_refusals_and_error_returns_are_rejections() {
+        let source = r#"package device
+
+import (
+	"errors"
+	"net/http"
+)
+
+var ErrNotFound = errors.New("not found")
+
+func signIn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.FormValue("email") == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := lookup(r.FormValue("email")); err != nil {
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func lookup(id string) error {
+	if id == "" {
+		return ErrNotFound
+	}
+	if id == "admin" {
+		return errors.New("reserved")
+	}
+	return nil
+}
+"#;
+        let facts = adapters_lang_go::extract_source(
+            source.as_bytes(),
+            "pkg/device/web.go",
+            &adapters_lang_go::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let (text, printed) = rows(&facts.nodes, &facts.edges, "signIn");
+        assert_eq!(printed, 4, "{text}");
+        for expected in [
+            "the request is refused with status 405 (“method not allowed”)",
+            "When the email is empty, the request is refused with status 400.",
+            "When the request's method is not “POST”, the request is refused",
+            "it fails with the error “not found”",
+            "it fails with the error “reserved”",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+        assert!(!text.contains("calls http.Error"), "{text}");
+        assert!(!text.contains("200"), "{text}");
+        assert!(!text.contains("“form value”"), "{text}");
     }
 
     // AC-0911 (T-0911): the guarded effects of the callables a capability

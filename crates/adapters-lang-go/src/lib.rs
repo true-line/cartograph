@@ -159,6 +159,9 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
+        if node.label == "BusinessRule" {
+            rule_evidence::retarget(&mut node.props, commit);
+        }
     }
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
@@ -1309,6 +1312,11 @@ fn extract_source_with_module(
         });
     }
     config_read::emit(&cx, &config_reads, &mut out);
+    // Guarded exits and refusal responses (#2009); test code states no
+    // business rules.
+    if !path.ends_with("_test.go") {
+        rule_evidence::extract(&cx, root, &functions_by_start, &mut out);
+    }
     Ok(out)
 }
 
@@ -1662,6 +1670,7 @@ mod client;
 mod config_read;
 mod events;
 mod queries;
+mod rule_evidence;
 mod vercel;
 
 #[cfg(test)]
