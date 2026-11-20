@@ -459,6 +459,27 @@ fn parameter_bindings_follow_python_scopes() {
 }
 
 #[test]
+fn test_code_yields_no_business_rules() {
+    // AC-0922 (#2009): guards in test code are not business rules.
+    let source = "def check(ready):\n    if not ready:\n        raise ValueError('not ready')\n    return 1\n";
+    let at = |path: &str| {
+        extract_source(
+            source.as_bytes(),
+            path,
+            &SourceId {
+                repo: "fixture",
+                commit: "revision-a",
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(rules(&at("app/views.py")).len(), 1);
+    for path in ["tests/helpers.py", "app/test_views.py", "conftest.py"] {
+        assert!(rules(&at(path)).is_empty(), "{path}");
+    }
+}
+
+#[test]
 fn a_predicates_unguarded_answer_is_a_rule() {
     // AC-0915 (T-0915): `return <expr>` with no branch is a rule only in a
     // predicate (`is_`, `has_`, `can_`, `should_`, `must_`), and a constant

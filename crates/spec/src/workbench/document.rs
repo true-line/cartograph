@@ -900,6 +900,15 @@ pub(super) fn d1(
             section.title,
             section.kind.mark()
         )?;
+        // §1.5 states the source no rule evidence was read from, arranged
+        // per capability or not (#2009).
+        if section.subject == Some("BusinessRule")
+            && let Some(unread) = crate::rules::unread_rule_sentence(
+                &crate::rules::unread_rule_languages(nodes.iter().copied()),
+            )
+        {
+            content.push_str(&unread)?;
+        }
         if let Some(source) = section.frame {
             // The knowledge layer's derived Capabilities and Actor caller
             // sets frame 1.2 and 1.3 beside the base facts (#1443).
