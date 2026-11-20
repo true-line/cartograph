@@ -8147,6 +8147,9 @@ TWICE = "a"
 TWICE = "b"
 API_KEY = "sk-live-0123456789abcdef0123456789"
 lower = "not a constant"
+NESTED = "550 old"
+if configured:
+    NESTED = "550 new"
 
 def handle(user):
     res_status = status.E200
