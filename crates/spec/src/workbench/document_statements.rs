@@ -276,6 +276,28 @@ impl Parser {
             {
                 return Some(Expr::Lit(self.literal()?));
             }
+            // A literal list `["a", "b"]` (#2027).
+            Tok::Op(o) if o == "[" => {
+                let close = "]";
+                self.bump();
+                let mut set = Vec::new();
+                loop {
+                    set.push(self.literal()?);
+                    if self.op(",") {
+                        self.bump();
+                        if self.op(close) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                if !self.op(close) {
+                    return None;
+                }
+                self.bump();
+                return Some(Expr::Set(set));
+            }
             Tok::Op(o) if o == "(" => {
                 self.bump();
                 // A literal set `("a", "b")`, or a parenthesised expression.
@@ -476,7 +498,13 @@ fn parse(text: &str) -> Option<Expr> {
 pub(super) struct Context<'a> {
     /// The class of the owning method, for `self`.
     pub class: Option<&'a str>,
+    /// The literal a module string constant holds, by name (#2027).
+    pub constant: Constants<'a>,
 }
+
+/// Looks up the literal of a module string constant by name: `Some` only
+/// when exactly one module binds it.
+pub(super) type Constants<'a> = Option<&'a dyn Fn(&str) -> Option<String>>;
 
 fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
     let names: Vec<&str> = path.iter().map(String::as_str).collect();
@@ -488,6 +516,11 @@ fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
         [one] if predicate_verb(one).is_some() => format!("the “{}” flag", words(one)),
         [one] => format!("the {}", words(one)),
         ["self" | "cls", .., last] => format!("the {}'s {}", words(cx.class?), words(last)),
+        // A header read by a constant naming it: the header's own name.
+        ["request", "headers", key] => match cx.constant.and_then(|c| c(key)) {
+            Some(name) => format!("the “{name}” header"),
+            None => format!("the {}", words(key)),
+        },
         ["request", .., last] => format!("the {}", words(last)),
         // An enum member `UserAliasDeleteAction.DeleteImmediately` (#1998).
         [owner, last]
@@ -1085,21 +1118,19 @@ pub(super) fn with_outcome(
     evidence: &GuardedExitEvidence,
     owner: &str,
     outcome: &str,
+    constant: Constants<'_>,
 ) -> Option<String> {
     let class = owner
         .rsplit_once('.')
         .and_then(|(class, _)| class.rsplit('.').next())
         .filter(|c| c.starts_with(|f: char| f.is_ascii_uppercase()));
-    let cx = Context { class };
+    let cx = Context { class, constant };
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
         .map(|c| condition(c.expression.display.as_str(), c.polarity, &cx))
         .collect();
-    let mut conditions = conditions?;
-    // Nested guards may test the same thing twice; say it once.
-    let mut said = std::collections::BTreeSet::new();
-    conditions.retain(|c| said.insert(c.clone()));
+    let conditions = said_once(conditions?);
     let sentence = if conditions.is_empty() {
         format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
     } else {
@@ -1108,17 +1139,44 @@ pub(super) fn with_outcome(
     Some(sentence).filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
 }
 
+/// Conditions with repeats dropped: nested guards may test the same thing
+/// twice, and a later `A and B` whose `A` is already said keeps only `B`.
+fn said_once(conditions: Vec<String>) -> Vec<String> {
+    let mut said: Vec<String> = Vec::new();
+    for condition in conditions {
+        let mut rest = condition.as_str();
+        while let Some(stripped) = said
+            .iter()
+            .find_map(|s| rest.strip_prefix(s.as_str())?.strip_prefix(" and "))
+        {
+            rest = stripped;
+        }
+        if !said.iter().any(|s| s == rest) {
+            said.push(rest.to_owned());
+        }
+    }
+    said
+}
+
 /// The statement of one guarded exit in domain terms, or `None` when its
 /// condition or outcome is outside the rendering rules. `owner` is the
 /// owning callable's qualified name (`User.can_create_num_aliases`).
-pub(super) fn statement(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
+pub(super) fn statement(
+    evidence: &GuardedExitEvidence,
+    owner: &str,
+    constant: Constants<'_>,
+) -> Option<String> {
     // A rendered statement that would still carry a code-shaped token is not
     // a statement in domain terms: the row states a Gap instead (#1999).
-    rendered(evidence, owner)
+    rendered(evidence, owner, constant)
         .filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
 }
 
-fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
+fn rendered(
+    evidence: &GuardedExitEvidence,
+    owner: &str,
+    constant: Constants<'_>,
+) -> Option<String> {
     let (class, method) = match owner.rsplit_once('.') {
         Some((class, method)) => (
             class
@@ -1129,13 +1187,13 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
         ),
         None => (None, owner),
     };
-    let cx = Context { class };
+    let cx = Context { class, constant };
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
         .map(|c| condition(c.expression.display.as_str(), c.polarity, &cx))
         .collect();
-    let conditions = conditions?;
+    let conditions = said_once(conditions?);
     let when = if conditions.is_empty() {
         "always".to_owned()
     } else {
@@ -1260,7 +1318,55 @@ mod tests {
     use super::*;
 
     fn said(display: &str, polarity: BranchPolarity, class: Option<&str>) -> Option<String> {
-        condition(display, polarity, &Context { class })
+        condition(
+            display,
+            polarity,
+            &Context {
+                class,
+                constant: None,
+            },
+        )
+    }
+
+    // AC-0917: a header read through a module constant is named by the
+    // header the constant holds; a condition already said is not repeated.
+    #[test]
+    fn a_header_constant_is_named_and_a_repeat_is_said_once() {
+        let lookup = |name: &str| {
+            (name == "HEADER_ALLOW_API_COOKIES").then(|| "X-Sl-Allowcookies".to_owned())
+        };
+        let cx = Context {
+            class: None,
+            constant: Some(&lookup),
+        };
+        let t = BranchPolarity::TruthyBranch;
+        assert_eq!(
+            condition(
+                "current_user.is_authenticated and request.headers.get(constants.HEADER_ALLOW_API_COOKIES)",
+                t,
+                &cx,
+            )
+            .as_deref(),
+            Some("the user is authenticated and the “X-Sl-Allowcookies” header is set"),
+        );
+        // Unknown to the lookup: the constant's words, as before.
+        assert_eq!(
+            condition("request.headers.get(OTHER_HEADER)", t, &cx).as_deref(),
+            Some("the other header is set"),
+        );
+        assert_eq!(
+            said_once(vec![
+                "no API key is given".into(),
+                "the user is authenticated".into(),
+                "the user is authenticated and the “X-Sl-Allowcookies” header is set".into(),
+                "no API key is given".into(),
+            ]),
+            vec![
+                "no API key is given".to_owned(),
+                "the user is authenticated".to_owned(),
+                "the “X-Sl-Allowcookies” header is set".to_owned(),
+            ],
+        );
     }
 
     // AC-0912: membership, calls with arguments, type tests, lengths,
@@ -1284,6 +1390,11 @@ mod tests {
                 "not (a.x and (b.y or c.z))",
                 t,
                 "the a's x is not set or both the b's y is not set and the c's z is not set",
+            ),
+            (
+                "alias_generator not in [\"word\", \"uuid\"]",
+                t,
+                "the alias generator is not one of “word”, “uuid”",
             ),
             (
                 "SESSION_STATE_KEY not in session",
@@ -1366,7 +1477,10 @@ mod tests {
     // AC-0911: an assignment and a call statement are restated by rule.
     #[test]
     fn state_changes_and_calls_are_restated_in_domain_terms() {
-        let cx = Context { class: None };
+        let cx = Context {
+            class: None,
+            constant: None,
+        };
         let set = |t: &str, v: &str| assigned(t, v, &cx);
         assert_eq!(
             set("g.user", "api_key.user").unwrap(),
