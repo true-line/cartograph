@@ -1267,13 +1267,17 @@ fn unmatched_decision_costs_one_compile_for_a_revision_and_decision_set() {
     // Nothing kept: the review settles alone, under the locks, as before.
     let alone = |mode| {
         let review = crate::curated::gather(&state).settling_alone();
-        let (bundle, views, curated) = crate::build_spec_with_views_and_curated(
+        let mut inputs = crate::spec_inputs(
             &state.graph.lock().unwrap(),
             &state.decisions.lock().unwrap(),
-            &review,
-            mode,
+            Some(&review),
         )
         .unwrap();
+        // The repository names the desktop export reads beside the graph
+        // (#2049), so `architecture.md` names them the same way.
+        inputs.repo_names = crate::repo_names_of(&state, &inputs.base.graph.0).unwrap();
+        let (bundle, views, curated) =
+            crate::compile_spec_with_views_and_curated(inputs, mode).unwrap();
         serde_json::to_value(crate::SpecWithViewsPreview {
             bundle: crate::preview_spec_bundle(bundle),
             views,

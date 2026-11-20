@@ -6,6 +6,7 @@ pub use accounting::{
     COMPILE_WORKSPACE_MODEL, CapabilityCompileWorkspaceBound, CompileWorkspaceBound,
     logical_capability_compile_bound, logical_compile_bound,
 };
+mod architecture;
 mod capabilities;
 mod catalogue;
 pub use catalogue::{
@@ -743,6 +744,7 @@ pub fn try_compile_spec_with_coverage(
             curated: crate::Curated::NotSupplied,
             graph_content_hash: None,
             source_revisions: None,
+            repo_names: &[],
         },
     )
 }
@@ -1025,13 +1027,13 @@ mod tests {
     /// inventories instead of the graph (#1786), the bundle manifest, which
     /// lists the files, and the two fact-index artifacts, which
     /// list what the others cite (#1785), and the D1 document (#1748), which
-    /// cites the facts its frames list. The fourteen close the official order;
+    /// cites the facts its frames list. The sixteen close the official order;
     /// the fixture has no endpoint, no pipeline, no environment file, no
     /// configuration read, no outbound call, no observed client, no channel,
     /// no Compose file and no documentation file, and a bare compile has no curated projection, so
     /// none carries an assertion here.
     fn graph_artifacts(mut bundle: SpecBundle) -> SpecBundle {
-        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 14);
+        let appended = bundle.artifacts.split_off(bundle.artifacts.len() - 16);
         assert_eq!(
             appended
                 .iter()
@@ -1046,6 +1048,8 @@ mod tests {
                 "documentation-evidence",
                 "endpoint-inventory",
                 "curated",
+                "architecture",
+                "architecture-dsl",
                 "d1-product-specification",
                 "coverage",
                 "coverage-index",
@@ -1054,11 +1058,14 @@ mod tests {
                 "fact-index-json"
             ]
         );
-        // The D1 document cites the facts its frames list (AC-0663).
+        // The D1 document cites the facts its frames list (AC-0663), and
+        // the architecture the facts its boxes and arrows rest on (AC-0940).
         assert!(
             appended
                 .iter()
-                .filter(|artifact| artifact.id != "d1-product-specification")
+                .filter(|artifact| {
+                    !["d1-product-specification", "architecture"].contains(&artifact.id.as_str())
+                })
                 .all(|artifact| artifact.assertions.is_empty())
         );
         // Its assertions are counted apart, so the frozen bytes still prove
@@ -1203,6 +1210,8 @@ mod tests {
                 "documentation-evidence.md",
                 "endpoint-inventory.md",
                 "curated.md",
+                "architecture.md",
+                "architecture.dsl",
                 "product-specification.md",
                 "coverage.md",
                 "coverage.json",
@@ -2913,7 +2922,7 @@ mod tests {
                     .collect(),
             ] {
                 let full = compile_spec(&nodes, &edges, &flows, mode, &rejected);
-                assert_eq!(full.artifacts.len(), 30);
+                assert_eq!(full.artifacts.len(), 32);
                 for artifact in &full.artifacts {
                     let selected = compile_spec_selected(
                         &nodes,

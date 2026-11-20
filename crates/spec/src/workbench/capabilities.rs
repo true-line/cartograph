@@ -67,7 +67,9 @@ impl<'a> KnowledgeStories<'a> {
         mode: ExportMode,
         rejected: &BTreeSet<String>,
     ) -> Self {
-        self.0.areas = areas(&self.0, base, subsystems, mode, rejected);
+        let (arranged, files) = areas(&self.0, base, subsystems, mode, rejected);
+        self.0.areas = arranged;
+        self.0.file_areas = files;
         self
     }
     /// Included Capabilities that were given an area.
@@ -105,7 +107,7 @@ fn areas<'a>(
     subsystems: &'a [core_graph::overlay::OverlayFact],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
-) -> BTreeMap<&'a str, &'a Node> {
+) -> (BTreeMap<&'a str, &'a Node>, BTreeMap<&'a str, &'a Node>) {
     let base_ids: BTreeSet<&str> = base.graph.0.iter().map(|n| n.id.as_str()).collect();
     // File id → the concept Subsystem it is a member of.
     let mut area_of: BTreeMap<&'a str, &'a Node> = BTreeMap::new();
@@ -146,7 +148,7 @@ fn areas<'a>(
         }
     }
     if area_of.is_empty() {
-        return BTreeMap::new();
+        return (BTreeMap::new(), area_of);
     }
     let capabilities = || {
         stories
@@ -221,7 +223,7 @@ fn areas<'a>(
             arranged.insert(story.node.id.as_str(), area);
         }
     }
-    arranged
+    (arranged, area_of)
 }
 
 pub(crate) enum Support<'a> {
@@ -240,6 +242,10 @@ pub(crate) struct Stories<'a> {
     /// Subsystem candidate that holds most of its handler files. Empty when
     /// the host supplied no Subsystems; a Capability with no entry has none.
     pub areas: BTreeMap<&'a str, &'a Node>,
+    /// The concept Subsystem each member file is in, by File id (#2049):
+    /// the same admitted Subsystems `areas` arranges by. Empty when the
+    /// host supplied none.
+    pub file_areas: BTreeMap<&'a str, &'a Node>,
 }
 impl<'a> Stories<'a> {
     /// The included Capabilities with their areas, area by area: areas by

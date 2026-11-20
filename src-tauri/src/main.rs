@@ -6610,6 +6610,9 @@ struct SpecInputs {
     curated: CuratedInput,
     /// `None` only when the projection was not read.
     graph_basis: Option<spec::GraphBasis>,
+    /// Display names of the registered repositories, by registry key
+    /// (#2049). Empty when the registry was not read.
+    repo_names: Vec<(String, String)>,
 }
 
 /// The knowledge-layer facts `user-stories` renders beside the base
@@ -6748,6 +6751,7 @@ impl SpecInputs {
                 .graph_basis
                 .as_ref()
                 .map(|basis| basis.sources.as_slice()),
+            repo_names: &self.repo_names,
         }
     }
 
@@ -6775,6 +6779,9 @@ struct SpecRead {
     assertion_decisions: Vec<agents::AssertionDecisionRecord>,
     /// Read after the graph and decision locks are released (#1443).
     knowledge: KnowledgeInput,
+    /// Read from the source registry after the graph lock is released
+    /// (#2049).
+    repo_names: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -6805,6 +6812,7 @@ fn read_spec(
         coverage,
         assertion_decisions,
         knowledge: KnowledgeInput::default(),
+        repo_names: Vec::new(),
     })
 }
 
@@ -6816,7 +6824,25 @@ fn read_spec_locked(state: &AppState) -> Result<SpecRead, String> {
         let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
         read_spec(&graph, &decisions)?
     };
-    read.with_knowledge(state.knowledge_overlay.as_deref())
+    let mut read = read.with_knowledge(state.knowledge_overlay.as_deref())?;
+    read.repo_names = repo_names_of(state, &read.nodes)?;
+    Ok(read)
+}
+
+/// The display name of each repository the graph holds a `Repo` fact for,
+/// as the source registry records it (#2049).
+fn repo_names_of(state: &AppState, nodes: &[Node]) -> Result<Vec<(String, String)>, String> {
+    let registry = state.sources.lock().map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    for node in nodes.iter().filter(|node| node.label == "Repo") {
+        let Some(repo) = node.id.strip_prefix("repo:") else {
+            continue;
+        };
+        if let Some(source) = registry.get_by_repo(repo)? {
+            names.push((repo.to_string(), source.display_name));
+        }
+    }
+    Ok(names)
 }
 
 impl SpecRead {
@@ -6840,6 +6866,7 @@ impl SpecRead {
             coverage,
             assertion_decisions,
             knowledge,
+            repo_names,
         } = self;
         let flows = flowtracer::trace(&nodes, &edges);
         let rejected_hashes = assertion_decisions
@@ -6881,6 +6908,7 @@ impl SpecRead {
             rejected_hashes,
             curated,
             graph_basis,
+            repo_names,
         }
     }
 }

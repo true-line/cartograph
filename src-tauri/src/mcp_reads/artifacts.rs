@@ -197,7 +197,9 @@ impl ReadSession {
             // D1 frames the derived Capabilities and caller roles beside its
             // base sections (AC-0663); a refused overlay leaves it without
             // them rather than failing the read.
-            let knowledge = (id == D1_ID).then(|| self.framed_knowledge()).flatten();
+            let knowledge = (id == D1_ID || id == "architecture" || id == "architecture-dsl")
+                .then(|| self.framed_knowledge())
+                .flatten();
             spec::compile_spec_selected_supplied(
                 &self.base.graph.0,
                 &self.base.graph.1,
@@ -219,6 +221,7 @@ impl ReadSession {
                     graph_content_hash: (!coverage).then_some(self.graph_content_hash.as_str()),
                     // The bundle manifest states them (AC-0682).
                     source_revisions: (!coverage).then_some(self.source_revisions.as_slice()),
+                    repo_names: &[],
                 },
             )
             .map_err(|_| ReadError::InvalidRequest)?
