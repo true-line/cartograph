@@ -268,6 +268,123 @@ fn propagates_error(cx: &FileCx<'_>, exit: TsNode<'_>, ancestors: &[Branch<'_>])
         && passed[1..].iter().any(|arg| text(*arg) == error)
 }
 
+/// The call whose error a condition tests (#2009): for `err != nil` on an
+/// `if` whose initializer is `err := f(…)`, or whose nearest preceding
+/// statement in its block assigns `err` from a call, the callee's last
+/// two dotted names (`Store.Save`, `strconv.Atoi`; a chained call gives its
+/// method alone). `None` when the condition tests no such error value or
+/// its binding is not that plain.
+fn failed_call(
+    cx: &FileCx<'_>,
+    imports: &HashMap<String, super::ImportBinding>,
+    branch: TsNode<'_>,
+    condition: TsNode<'_>,
+) -> Option<String> {
+    let tested = tested_error(cx, condition)?;
+    let assigns = |statement: TsNode<'_>| -> Option<Option<String>> {
+        if !matches!(
+            statement.kind(),
+            "short_var_declaration" | "assignment_statement"
+        ) {
+            return None;
+        }
+        let left = statement.child_by_field_name("left")?;
+        let mut walk = left.walk();
+        let at = left
+            .named_children(&mut walk)
+            .position(|name| cx.text(&name) == tested)?;
+        // `v, err := f()` binds every name from one call; `a, err := f(), g()`
+        // binds each name from the value at its position.
+        let right = statement.child_by_field_name("right")?;
+        let call = match right.named_child_count() {
+            1 => right.named_child(0),
+            _ => right.named_child(u32::try_from(at).ok()?),
+        }
+        .filter(|v| v.kind() == "call_expression");
+        Some(call.and_then(|call| callee_name(cx, imports, call)))
+    };
+    if let Some(initializer) = branch.child_by_field_name("initializer")
+        && let Some(found) = assigns(initializer)
+    {
+        return found;
+    }
+    // Only the statement just before the test: anything between could have
+    // set `err` again (`if retry { err = again() }`).
+    let mut previous = branch.prev_named_sibling();
+    while let Some(statement) = previous {
+        if statement.kind() != "comment" {
+            return assigns(statement).flatten();
+        }
+        previous = statement.prev_named_sibling();
+    }
+    None
+}
+
+/// The error variable `condition` compares with `nil` (`err != nil`,
+/// `nil == err`), when that is the whole condition.
+fn tested_error<'s>(cx: &'s FileCx<'_>, condition: TsNode<'_>) -> Option<&'s str> {
+    let mut node = condition;
+    while node.kind() == "parenthesized_expression" {
+        node = node.named_child(0)?;
+    }
+    if node.kind() != "binary_expression" {
+        return None;
+    }
+    let operator = node.child_by_field_name("operator")?;
+    if !matches!(cx.text(&operator), "!=" | "==") {
+        return None;
+    }
+    let (left, right) = (
+        node.child_by_field_name("left")?,
+        node.child_by_field_name("right")?,
+    );
+    let name = match (left.kind(), right.kind()) {
+        ("identifier", "nil") => left,
+        ("nil", "identifier") => right,
+        _ => return None,
+    };
+    let text = cx.text(&name);
+    (text == "err" || text.ends_with("Err")).then_some(text)
+}
+
+/// `s.Apps.Store.Save` gives `Store.Save`, `strconv.Atoi` (an imported
+/// package) `strconv.Atoi`, `s.save` (a local receiver) `save`;
+/// `json.NewDecoder(r.Body).Decode` gives `Decode`; `load` gives `load`.
+fn callee_name(
+    cx: &FileCx<'_>,
+    imports: &HashMap<String, super::ImportBinding>,
+    call: TsNode<'_>,
+) -> Option<String> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() == "selector_expression"
+        && callee
+            .child_by_field_name("operand")
+            .is_some_and(|operand| operand.kind() == "call_expression")
+    {
+        return Some(cx.text(&callee.child_by_field_name("field")?).to_owned());
+    }
+    let text = cx.text(&callee);
+    if !text
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return None;
+    }
+    // `strconv.Atoi` and `s.Apps.Store.Save` keep the package or field
+    // that says what is called; a local receiver (`s.save`) does not.
+    match text.rsplitn(3, '.').collect::<Vec<_>>()[..] {
+        [method, owner, ..]
+            if owner.starts_with(|c: char| c.is_ascii_uppercase())
+                || (!text[..text.len() - method.len() - 1].contains('.')
+                    && imports.contains_key(owner)) =>
+        {
+            Some(format!("{owner}.{method}"))
+        }
+        [method, ..] => Some(method.to_owned()),
+        [] => None,
+    }
+}
+
 /// The value a `return` returns: its one expression, or the whole list;
 /// `None` for a bare one.
 fn exit_value(exit: TsNode<'_>) -> Option<TsNode<'_>> {
@@ -394,6 +511,7 @@ pub(super) fn extract(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     functions: &HashMap<usize, String>,
+    imports: &HashMap<String, super::ImportBinding>,
     out: &mut Extraction,
 ) {
     if root.has_error() {
@@ -504,6 +622,10 @@ pub(super) fn extract(
             }
             let mut redactions = Vec::new();
             let mut conditions = Vec::new();
+            let failed: Vec<Option<String>> = ancestors
+                .iter()
+                .map(|(branch, condition, _)| failed_call(cx, imports, *branch, *condition))
+                .collect();
             for (branch, condition, polarity) in ancestors {
                 let expression =
                     builder.captured(condition, DependencyRole::Condition, &mut redactions);
@@ -570,6 +692,9 @@ pub(super) fn extract(
                     "name": format!("{what} at {}:{}", cx.path, at.start_position().row + 1),
                     "observation": observation,
                     "rule": payload,
+                    // The call whose error each condition tests, aligned
+                    // with the conditions (#2009).
+                    "failed_calls": failed,
                     "prov": cx.prov(&at, &canonical),
                 }),
             });
