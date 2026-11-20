@@ -11,6 +11,7 @@ use flowtracer::Flow;
 mod adr;
 mod contract;
 mod documents;
+mod front_doors;
 pub use documents::{
     DOCUMENT_EXTRACTOR_ID, DOCUMENTATION_DRIFT_EXTRACTOR_ID, DocumentCounts, DocumentFacts,
     DocumentReference, DocumentSkip, DocumentationDrift, MAX_DOCUMENT_BYTES,

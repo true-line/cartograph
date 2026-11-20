@@ -566,3 +566,46 @@ fn vercel_functions_are_capabilities_with_their_rewrites() {
         );
     }
 }
+
+// AC-0926 (#2010): a Vercel function that serves a mux whose routes lie
+// under its paths is a front door; the routes are the Capability, not it.
+#[test]
+fn a_vercel_front_door_is_no_capability_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("api/web")).unwrap();
+    std::fs::create_dir_all(dir.path().join("pkg/device")).unwrap();
+    for (name, source) in [
+        ("go.mod", "module example.com/shop\n\ngo 1.22\n"),
+        (
+            "api/web/index.go",
+            "package handler\n\nimport (\n\t\"net/http\"\n\n\t\"example.com/shop/pkg/device\"\n)\n\nfunc Handler(w http.ResponseWriter, r *http.Request) {\n\tdevice.Routes().ServeHTTP(w, r)\n}\n",
+        ),
+        (
+            "pkg/device/routes.go",
+            "package device\n\nimport \"net/http\"\n\nfunc Routes() *http.ServeMux {\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"GET /api/web/devices\", list)\n\treturn mux\n}\n\nfunc list(w http.ResponseWriter, r *http.Request) {}\n",
+        ),
+        (
+            "vercel.json",
+            r#"{"rewrites": [{"source": "/api/web/(.*)", "destination": "/api/web"}]}"#,
+        ),
+    ] {
+        std::fs::write(dir.path().join(name), source).unwrap();
+    }
+    let facts = adapters_lang_go::extract_dir(
+        dir.path(),
+        &adapters_lang_go::SourceId {
+            repo: REPO,
+            commit: COMMIT,
+        },
+    )
+    .unwrap();
+    let report = derive_controller_capabilities(&revisioned(facts.nodes, facts.edges));
+    assert_eq!(titles(&report), ["View devices"]);
+    let cites = &report.facts[0].cites;
+    assert!(cites.contains(&BaseRef::Node(format!("ep:{REPO}@GET:/api/web/devices"))));
+    assert!(
+        !cites
+            .iter()
+            .any(|c| matches!(c, BaseRef::Node(id) if id.contains("ANY:/api/web")))
+    );
+}

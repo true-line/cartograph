@@ -697,10 +697,15 @@ fn uncovered_endpoints(
         .filter(|e| e.label == "HANDLES" && symbols.contains(e.dst.as_str()))
         .map(|e| e.src.as_str())
         .collect();
+    let front_doors =
+        crate::front_doors::vercel_front_doors(endpoints.iter().copied(), edges.iter().copied());
     let mut unresolved = 0usize;
+    let mut fronting = 0usize;
     let mut by_framework: BTreeMap<&str, usize> = BTreeMap::new();
     for endpoint in endpoints.iter().filter(|n| !cited.contains(n.id.as_str())) {
-        if handled.contains(endpoint.id.as_str()) {
+        if front_doors.contains_key(endpoint.id.as_str()) {
+            fronting += 1;
+        } else if handled.contains(endpoint.id.as_str()) {
             *by_framework
                 .entry(endpoint.props["framework"].as_str().unwrap_or("unknown"))
                 .or_default() += 1;
@@ -709,10 +714,29 @@ fn uncovered_endpoints(
         }
     }
     let ungrouped: usize = by_framework.values().sum();
-    if unresolved + ungrouped == 0 {
+    if unresolved + ungrouped + fronting == 0 {
         return None;
     }
     let mut parts = Vec::new();
+    if fronting > 0 {
+        // Each front door's function serves the same routes: count each once.
+        let behind: usize = front_doors
+            .iter()
+            .filter(|(id, _)| !cited.contains(*id))
+            .filter_map(|(id, n)| {
+                endpoints
+                    .iter()
+                    .find(|e| e.id == *id)
+                    .map(|e| (e.props["handler_sym"].as_str(), *n))
+            })
+            .collect::<BTreeMap<_, _>>()
+            .values()
+            .sum();
+        parts.push(format!(
+            "{fronting} are Vercel functions that pass requests on to the {behind} routes \
+             registered behind them, which are the operations"
+        ));
+    }
     if unresolved > 0 {
         parts.push(format!(
             "{unresolved} have no resolved handler (their `HANDLES` target is a Gap or missing), \
@@ -732,7 +756,7 @@ fn uncovered_endpoints(
     Some(format!(
         "\nOperations in no Capability: {} of {} HTTP endpoints. {}. Each is listed in \
          `endpoint-inventory.md`.\n",
-        unresolved + ungrouped,
+        unresolved + ungrouped + fronting,
         endpoints.len(),
         parts.join("; ")
     ))
