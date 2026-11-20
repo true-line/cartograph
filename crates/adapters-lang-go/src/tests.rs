@@ -1106,6 +1106,12 @@ func (s *Service) webAPI(mux *http.ServeMux) {
     mux.HandleFunc("/.well-known/key", s.Dev.ServerKey)
 }
 
+func (s *Service) more(mux *http.ServeMux, fleet http.HandlerFunc) {
+    mux.HandleFunc("GET /other", fleet)
+    opts := 3
+    mux.HandleFunc("GET /opts", options(s.catalog, opts))
+}
+
 func (s *Service) session(w http.ResponseWriter) {}
 func (s *Service) save(w http.ResponseWriter) {}
 func other() {
@@ -1115,6 +1121,7 @@ func other() {
 func newFake() *Fake { return nil }
 func wrap(method string, h func(context.Context) int) http.HandlerFunc { return nil }
 func relayWrite(on bool) http.HandlerFunc { return nil }
+func options(h http.HandlerFunc, n int) http.HandlerFunc { return nil }
 "#,
     )
     .unwrap();
@@ -1149,6 +1156,13 @@ func relayWrite(on bool) http.HandlerFunc { return nil }
         sym("webapi.go", "relayWrite")
     );
     assert!(handles[ep("ANY", "/.well-known/key").as_str()].starts_with("gap:go-handler:"));
+    // A wrapper's trailing non-handler argument does not hide its handler.
+    assert_eq!(
+        handles[ep("GET", "/opts").as_str()],
+        sym("catalog.go", "Service.catalog")
+    );
+    // A parameter named like another function's closure is not that closure.
+    assert!(handles[ep("GET", "/other").as_str()].starts_with("gap:go-handler:"));
     // The literal's own calls are its calls, not the enclosing method's.
     assert!(
         edge_pairs(&extraction, "CALLS")
