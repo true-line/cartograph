@@ -5065,3 +5065,38 @@ details.investigation-section { display: block; }
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.architecture-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.architecture-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 28px;
+  border-top: 2px solid #8b919f;
+}
+
+.legend-line.dotted {
+  border-top-style: dotted;
+}
+
+.legend-line.dashed {
+  border-top-style: dashed;
+}
+
+.legend-line.gap {
+  border-top: 2px dashed #c0392b;
+}

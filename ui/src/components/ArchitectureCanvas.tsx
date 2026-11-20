@@ -1,6 +1,6 @@
 import cytoscape from 'cytoscape';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ArchitectureFact, ArchitectureView, SpecArtifact } from '../store';
+import type { ArchitectureFact, ArchitectureView, SpecArtifact, Tier } from '../store';
 import {
   type ArchitectureLevel,
   type Scene,
@@ -11,7 +11,7 @@ import {
   containersWithComponents,
   contextScene,
 } from '../architectureScene';
-import { TierBadge } from './TierBadge';
+import { TIER_LABELS, TierBadge } from './TierBadge';
 import { shortDiagramContentId } from './SpecDiagramView';
 
 /**
@@ -58,7 +58,11 @@ const C4_STYLE: cytoscape.StylesheetStyle[] = [
       'border-style': 'dashed',
     },
   },
-  { selector: '.c4-drillable', style: { 'border-width': 3, 'border-color': '#f5c518' } },
+  // R-INT-2: inferred boxes and arrows are never drawn like confirmed ones.
+  { selector: 'node.c4-strong', style: { 'border-style': 'dotted', 'border-width': 3 } },
+  { selector: 'node.c4-weak', style: { 'border-style': 'dashed', 'border-width': 3, 'background-opacity': 0.7 } },
+  { selector: '.c4-drillable', style: { 'border-color': '#f5c518' } },
+  { selector: '.c4-drillable.c4-confirmed', style: { 'border-width': 3 } },
   {
     selector: ':parent',
     style: {
@@ -95,6 +99,7 @@ const C4_STYLE: cytoscape.StylesheetStyle[] = [
       'text-background-padding': '2px',
     },
   },
+  { selector: 'edge.c4-strong', style: { 'line-style': 'dotted' } },
   { selector: 'edge.c4-weak', style: { 'line-style': 'dashed' } },
   {
     selector: 'edge.c4-gap',
@@ -138,12 +143,21 @@ function nodeLabel(n: SceneNode): string {
   const kind = n.technology ? `[${KIND_LABEL[n.kind]}: ${n.technology}]` : `[${KIND_LABEL[n.kind]}]`;
   if (n.kind === 'boundary') return n.name;
   const description = n.description.length > 90 ? `${n.description.slice(0, 87)}…` : n.description;
-  return [n.name, kind, description].filter(Boolean).join('\n');
+  const tier = n.confidence === 'Confirmed' ? '' : `· ${TIER_LABELS[n.confidence]} ·`;
+  return [n.name, kind, description, tier].filter(Boolean).join('\n');
 }
 
 function edgeLabel(e: SceneEdge): string {
-  return e.technology ? `${e.label}\n[${e.technology}]` : e.label;
+  const label = e.technology ? `${e.label}\n[${e.technology}]` : e.label;
+  return e.confidence === 'Confirmed' ? label : `${label}\n(${TIER_LABELS[e.confidence]})`;
 }
+
+const TIER_CLASS: Record<Tier, string> = {
+  Confirmed: 'c4-confirmed',
+  InferredStrong: 'c4-strong',
+  InferredWeak: 'c4-weak',
+  Gap: 'c4-gap',
+};
 
 function evidence(fact: ArchitectureFact): string {
   const first = fact.provenance.evidence[0];
@@ -195,7 +209,7 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
         position: { x: n.x, y: n.y },
         classes: [
           `c4-${n.kind}`,
-          n.confidence === 'Gap' && n.kind !== 'boundary' ? 'c4-gap' : '',
+          n.kind === 'boundary' ? '' : TIER_CLASS[n.confidence],
           n.drillable ? 'c4-drillable' : '',
         ]
           .filter(Boolean)
@@ -206,7 +220,7 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
         .map((e) => ({
           data: { id: e.id, source: e.from, target: e.to, label: edgeLabel(e) },
           classes: [
-            e.confidence === 'Gap' ? 'c4-gap' : e.confidence === 'InferredWeak' ? 'c4-weak' : '',
+            TIER_CLASS[e.confidence],
             busy ? 'c4-quiet' : '',
           ]
             .filter(Boolean)
@@ -371,6 +385,13 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
           )}
         </aside>
       </div>
+
+      <ul className="architecture-legend" aria-label="Confidence legend" data-testid="architecture-legend">
+        <li><span className="legend-line solid" /> Confirmed</li>
+        <li><span className="legend-line dotted" /> Inferred (strong): dotted, labelled</li>
+        <li><span className="legend-line dashed" /> Inferred (weak): dashed, faded, labelled</li>
+        <li><span className="legend-line gap" /> Gap: red dashed, not recovered</li>
+      </ul>
 
       {scene && (
         <div className="atlas-entity-index" aria-label="Architecture elements">

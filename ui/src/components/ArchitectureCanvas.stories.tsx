@@ -27,6 +27,8 @@ export const SystemContext: Story = {
       'aria-selected',
       'true',
     );
+    // R-INT-2: the diagram itself says how inferred boxes and arrows are drawn.
+    await expect(canvas.getByTestId('architecture-legend')).toHaveTextContent('Inferred (weak)');
     await userEvent.click(canvas.getByRole('button', { name: 'SimpleLogin' }));
     await expect(canvas.getByRole('button', { name: 'Show containers' })).toBeVisible();
   },
