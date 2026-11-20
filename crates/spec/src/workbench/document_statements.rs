@@ -80,12 +80,24 @@ enum Expr {
     Ref(Vec<String>),
     /// `a.b.m()`: a call without arguments.
     Call(Vec<String>),
+    /// `a.b.m(x, k=y)`: a call with arguments (#2028).
+    Apply(Vec<String>, Vec<Arg>),
+    /// `arrow.now().shift(days=-N)`: a time N units from now, or ago when
+    /// negative (#2028).
+    Shift(String, Box<Expr>, bool),
     Lit(Lit),
     Set(Vec<Lit>),
     Not(Box<Expr>),
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Cmp(Box<Expr>, String, Box<Expr>),
+}
+
+/// One argument of a call: positional, or `name=value`.
+#[derive(Debug, Clone, PartialEq)]
+enum Arg {
+    Pos(Expr),
+    Kw(String, Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +154,7 @@ fn tokenize(text: &str) -> Option<Vec<Tok>> {
             } else if ["==", "!=", ">=", "<=", "&&", "||"].contains(&two.as_str()) {
                 out.push(Tok::Op(two));
                 i += 2;
-            } else if "()<>.,!".contains(c) {
+            } else if "()<>.,!=[]+-".contains(c) {
                 out.push(Tok::Op(c.to_string()));
                 i += 1;
             } else {
@@ -308,22 +320,35 @@ impl Parser {
             return None;
         }
         let mut path = vec![first];
-        let mut call = false;
         loop {
-            if call {
-                return None;
-            }
             if self.op(".") {
                 self.bump();
                 let Some(Tok::Ident(seg)) = self.bump() else {
                     return None;
                 };
-                // `.get("k")` reads member `k`.
+                // `.get("k")` or `.get(KEY)` reads member `k` / `KEY`.
                 if seg == "get" && self.op("(") {
                     self.bump();
-                    let Some(Tok::Str(key)) = self.bump() else {
-                        return None;
+                    let key = match self.bump()? {
+                        Tok::Str(key) => key,
+                        Tok::Ident(first) => {
+                            let mut last = first;
+                            while self.op(".") {
+                                self.bump();
+                                let Some(Tok::Ident(next)) = self.bump() else {
+                                    return None;
+                                };
+                                last = next;
+                            }
+                            last
+                        }
+                        _ => return None,
                     };
+                    // A default argument does not change what is read.
+                    if self.op(",") {
+                        self.bump();
+                        self.operand()?;
+                    }
                     if !self.op(")") {
                         return None;
                     }
@@ -332,26 +357,108 @@ impl Parser {
                     continue;
                 }
                 path.push(seg);
-            } else if self.op("(") {
+            } else if self.op("[") {
+                // `data["k"]` reads member `k`.
                 self.bump();
-                if !self.op(")") {
+                let Some(Tok::Str(key)) = self.bump() else {
+                    return None;
+                };
+                if !self.op("]") {
                     return None;
                 }
                 self.bump();
-                call = true;
-                if !self.op(".") {
-                    break;
+                path.push(key);
+            } else if self.op("(") {
+                self.bump();
+                let args = self.arguments()?;
+                if self.op(".") {
+                    // `arrow.now().shift(days=-N)`, the one member of a
+                    // call's result that is rendered.
+                    return self.shift(&path, &args);
                 }
-                // A member of a call's result is not rendered.
-                return None;
+                return Some(if args.is_empty() {
+                    Expr::Call(path)
+                } else {
+                    Expr::Apply(path, args)
+                });
             } else {
                 break;
             }
         }
-        Some(if call {
-            Expr::Call(path)
-        } else {
-            Expr::Ref(path)
+        Some(Expr::Ref(path))
+    }
+
+    /// The arguments after an opening `(`, through the closing `)`.
+    fn arguments(&mut self) -> Option<Vec<Arg>> {
+        let mut args = Vec::new();
+        while !self.op(")") {
+            let keyword = match (self.peek(), self.toks.get(self.pos + 1)) {
+                (Some(Tok::Ident(name)), Some(Tok::Op(eq))) if eq == "=" => Some(name.clone()),
+                _ => None,
+            };
+            if let Some(name) = keyword {
+                self.pos += 2;
+                args.push(Arg::Kw(name, self.signed()?));
+            } else {
+                args.push(Arg::Pos(self.or()?));
+            }
+            if self.op(",") {
+                self.bump();
+            } else if !self.op(")") {
+                return None;
+            }
+        }
+        self.bump();
+        Some(args)
+    }
+
+    /// An operand with an optional sign: `-15`, `+DAYS`.
+    fn signed(&mut self) -> Option<Expr> {
+        if self.op("-") || self.op("+") {
+            let minus = self.op("-");
+            self.bump();
+            let inner = self.operand()?;
+            return Some(match (minus, inner) {
+                (true, Expr::Lit(Lit::Num(n))) => Expr::Lit(Lit::Num(format!("-{n}"))),
+                (true, _) => return None,
+                (false, inner) => inner,
+            });
+        }
+        self.or()
+    }
+
+    /// `.shift(unit=N)` after `arrow.now()` / `arrow.utcnow()`.
+    fn shift(&mut self, path: &[String], args: &[Arg]) -> Option<Expr> {
+        let names: Vec<&str> = path.iter().map(String::as_str).collect();
+        if !args.is_empty() || !matches!(names[..], ["arrow", "now" | "utcnow"]) {
+            return None;
+        }
+        self.bump();
+        if !self.ident("shift") {
+            return None;
+        }
+        self.bump();
+        if !self.op("(") {
+            return None;
+        }
+        self.bump();
+        let args = self.arguments()?;
+        if self.op(".") {
+            return None;
+        }
+        let [Arg::Kw(unit, amount)] = &args[..] else {
+            return None;
+        };
+        if !["days", "hours", "minutes", "weeks", "seconds"].contains(&unit.as_str()) {
+            return None;
+        }
+        Some(match amount {
+            Expr::Lit(Lit::Num(n)) if n.starts_with('-') => Expr::Shift(
+                unit.clone(),
+                Box::new(Expr::Lit(Lit::Num(n[1..].to_owned()))),
+                true,
+            ),
+            other => Expr::Shift(unit.clone(), Box::new(other.clone()), false),
         })
     }
 }
@@ -431,7 +538,183 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
             subject(path, cx)
         }
         Expr::Lit(lit) => Some(literal(lit)),
+        Expr::Apply(path, args) => {
+            let names: Vec<&str> = path.iter().map(String::as_str).collect();
+            match (&names[..], &args[..]) {
+                (["len"], [Arg::Pos(x)]) => Some(format!("the length of {}", noun(x, cx)?)),
+                ([model, "get_by" | "get" | "first_by"], _) if is_class(model) => {
+                    Some(format!("the {} {}", words(model), with_these(args)?))
+                }
+                ([function], _) if predicate_verb(function).is_none() => Some(format!(
+                    "the “{}” result",
+                    words(function.trim_start_matches('_'))
+                )),
+                _ => None,
+            }
+        }
+        Expr::Shift(unit, amount, ago) => {
+            let amount = noun(amount, cx)?;
+            // `ALIAS_TRASH_DAYS` already names its unit.
+            let amount = if amount.ends_with(unit.as_str()) {
+                amount
+            } else {
+                format!("{amount} {unit}")
+            };
+            Some(if *ago {
+                format!("{amount} ago")
+            } else {
+                format!("{amount} from now")
+            })
+        }
         _ => None,
+    }
+}
+
+/// A CamelCase class name: `Alias`, `DeletedAlias`.
+fn is_class(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name.chars().any(|c| c.is_ascii_lowercase())
+}
+
+/// `email=a, user_id=b` as "with this email and user ID"; `None` for a
+/// positional argument.
+fn with_these(args: &[Arg]) -> Option<String> {
+    let keys: Option<Vec<String>> = args
+        .iter()
+        .map(|a| match a {
+            Arg::Kw(k, _) => Some(words(k)),
+            Arg::Pos(_) => None,
+        })
+        .collect();
+    let keys = keys?;
+    if keys.is_empty() {
+        return None;
+    }
+    Some(format!("with this {}", keys.join(" and ")))
+}
+
+/// The type `isinstance(x, T)` tests, as a phrase.
+fn type_phrase(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "str" => "text",
+        "int" => "a whole number",
+        "float" => "a number",
+        "bool" => "true or false",
+        "dict" => "an object",
+        "list" | "tuple" => "a list",
+        _ => return None,
+    })
+}
+
+/// A call with arguments used as a condition (#2028), or `None`.
+fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Option<String> {
+    let names: Vec<&str> = path.iter().map(String::as_str).collect();
+    let (last, owner) = names.split_last()?;
+    if predicate_verb(last).is_some() {
+        return flag(path, negated, cx);
+    }
+    match (&names[..], args) {
+        (["isinstance"], [Arg::Pos(x), Arg::Pos(Expr::Ref(t))]) if t.len() == 1 => {
+            let what = noun(x, cx)?;
+            let kind = type_phrase(&t[0])?;
+            return Some(if negated {
+                format!("{what} is not {kind}")
+            } else {
+                format!("{what} is {kind}")
+            });
+        }
+        ([model, "get_by" | "get" | "first_by"], _) if is_class(model) => {
+            let thing = words(model);
+            let these = with_these(args)?;
+            return Some(if negated {
+                format!("no {thing} {these} exists")
+            } else {
+                let article = if thing.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                    "an"
+                } else {
+                    "a"
+                };
+                format!("{article} {thing} {these} exists")
+            });
+        }
+        _ => {}
+    }
+    let rest = |prefix: &str| last.strip_prefix(prefix).map(|r| r.trim_start_matches('_'));
+    if let ([_, ..], Some(test), [Arg::Pos(Expr::Lit(Lit::Str(text)))]) = (
+        owner,
+        match *last {
+            "startswith" => Some("start"),
+            "endswith" => Some("end"),
+            _ => None,
+        },
+        args,
+    ) {
+        let what = noun(
+            &Expr::Ref(owner.iter().map(|s| (*s).to_owned()).collect()),
+            cx,
+        )?;
+        return Some(if negated {
+            format!("{what} does not {test} with “{text}”")
+        } else {
+            format!("{what} {test}s with “{text}”")
+        });
+    }
+    if let Some(how) = rest("validate") {
+        let who = subject(&path[..path.len() - 1], cx)?;
+        let how = if how.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", words(how))
+        };
+        return Some(if negated {
+            format!("{who} is not valid{how}")
+        } else {
+            format!("{who} is valid{how}")
+        });
+    }
+    if let Some(what) = rest("check").filter(|r| !r.is_empty()) {
+        let what = words(what.trim_start_matches("if_"));
+        let whose = if owner.is_empty() {
+            "the".to_owned()
+        } else {
+            format!("{}'s", subject(&path[..path.len() - 1], cx)?)
+        };
+        return Some(if negated {
+            format!("{whose} {what} check fails")
+        } else {
+            format!("{whose} {what} check passes")
+        });
+    }
+    if owner.is_empty() && last.trim_start_matches('_').contains('_') {
+        let name = words(last.trim_start_matches('_'));
+        return Some(if negated {
+            format!("the check “{name}” does not hold")
+        } else {
+            format!("the check “{name}” holds")
+        });
+    }
+    None
+}
+
+/// Whether a value names where request input arrives: `data`,
+/// `request.form`, `request.args`, `request.json`.
+fn request_input(path: &[String]) -> bool {
+    // The request's own inputs (`request.form`, `request.json`), or a bare
+    // local holding them (`data`, `payload`); not a response's or a cache's
+    // member of the same name.
+    match path {
+        [one] => matches!(
+            one.as_str(),
+            "data" | "form" | "json" | "payload" | "body" | "args" | "values"
+        ),
+        [root, .., last] => {
+            root == "request"
+                && matches!(
+                    last.as_str(),
+                    "data" | "form" | "args" | "json" | "values" | "files" | "payload" | "body"
+                )
+        }
+        [] => false,
     }
 }
 
@@ -524,16 +807,22 @@ fn state_word(name: &str) -> bool {
         .contains(&last.as_str())
 }
 
+/// The joiner a compound renders with under `negated`, or `None` for a
+/// single term.
+fn joined_by(expr: &Expr, negated: bool) -> Option<&'static str> {
+    match (expr, negated) {
+        (Expr::Not(inner), _) => joined_by(inner, !negated),
+        (Expr::And(_), false) | (Expr::Or(_), true) => Some(" and "),
+        (Expr::And(_), true) | (Expr::Or(_), false) => Some(" or "),
+        _ => None,
+    }
+}
+
 fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
     match expr {
         Expr::Not(inner) => render(inner, !negated, cx),
-        Expr::Ref(path) | Expr::Call(path) => {
-            let last = path.last()?;
-            if matches!(expr, Expr::Call(_)) && predicate_verb(last).is_none() {
-                return None;
-            }
-            flag(path, negated, cx)
-        }
+        Expr::Ref(path) => flag(path, negated, cx),
+        Expr::Call(path) => applied(path, &[], negated, cx),
         Expr::And(terms) | Expr::Or(terms) => {
             // `not (a and b)` is `not a or not b`; `not (a or b)` is `not a
             // and not b`.
@@ -541,7 +830,22 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                 (Expr::And(_), false) | (Expr::Or(_), true) => " and ",
                 _ => " or ",
             };
-            let parts: Option<Vec<String>> = terms.iter().map(|t| render(t, negated, cx)).collect();
+            // A nested group with the other joiner keeps its grouping:
+            // `a and (b or c)` is "a and either b or c", never "(a and b)
+            // or c".
+            let parts: Option<Vec<String>> = terms
+                .iter()
+                .map(|t| {
+                    let part = render(t, negated, cx)?;
+                    Some(match joined_by(t, negated) {
+                        Some(inner) if inner != joiner && inner == " or " => {
+                            format!("either {part}")
+                        }
+                        Some(inner) if inner != joiner => format!("both {part}"),
+                        _ => part,
+                    })
+                })
+                .collect();
             Some(parts?.join(joiner))
         }
         Expr::Cmp(left, op, right) => {
@@ -565,9 +869,51 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     format!("{thing} does not belong to {owner}")
                 });
             }
+            // Membership of a literal key or text (#2028): `"name" in data`
+            // is "a name is given"; `".." in alias` is "the alias contains
+            // “..”".
+            if let (Expr::Lit(Lit::Str(text)), "in" | "not in", Expr::Ref(r)) =
+                (left.as_ref(), op.as_str(), right.as_ref())
+            {
+                let present = (op == "in") != negated;
+                if request_input(r) {
+                    let key = words(text);
+                    return Some(if present {
+                        format!("{key} is given")
+                    } else {
+                        format!("{key} is not given")
+                    });
+                }
+                if r.len() == 1 && r[0] == "session" {
+                    let key = words(text);
+                    return Some(if present {
+                        format!("the session holds {key}")
+                    } else {
+                        format!("the session does not hold {key}")
+                    });
+                }
+                let whole = noun(right, cx)?;
+                return Some(if present {
+                    format!("{whole} contains “{text}”")
+                } else {
+                    format!("{whole} does not contain “{text}”")
+                });
+            }
             let left_np = noun(left, cx)?;
+            let timed = matches!(right.as_ref(), Expr::Shift(..))
+                || noun(right, cx).is_some_and(|r| r == "the current time");
             let positive = |op: &str| -> Option<String> {
                 Some(match (op, right.as_ref()) {
+                    (">", r) if timed => format!("{left_np} is after {}", noun(r, cx)?),
+                    (">=", r) if timed => format!("{left_np} is at or after {}", noun(r, cx)?),
+                    ("<", r) if timed => format!("{left_np} is before {}", noun(r, cx)?),
+                    ("<=", r) if timed => format!("{left_np} is at or before {}", noun(r, cx)?),
+                    ("in", r @ (Expr::Ref(_) | Expr::Apply(..) | Expr::Call(_))) => {
+                        format!("{left_np} is one of {}", noun(r, cx)?)
+                    }
+                    ("not in", r @ (Expr::Ref(_) | Expr::Apply(..) | Expr::Call(_))) => {
+                        format!("{left_np} is not one of {}", noun(r, cx)?)
+                    }
                     ("is" | "==", Expr::Lit(Lit::None)) => format!("{left_np} is not set"),
                     ("is not" | "!=", Expr::Lit(Lit::None)) => format!("{left_np} is set"),
                     ("==" | "is", r) => format!("{left_np} is {}", noun(r, cx)?),
@@ -602,7 +948,8 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
             };
             positive(if negated { flipped } else { op })
         }
-        Expr::Lit(_) | Expr::Set(_) => None,
+        Expr::Apply(path, args) => applied(path, args, negated, cx),
+        Expr::Lit(_) | Expr::Set(_) | Expr::Shift(..) => None,
     }
 }
 
@@ -867,6 +1214,106 @@ mod tests {
         condition(display, polarity, &Context { class })
     }
 
+    // AC-0912: membership, calls with arguments, type tests, lengths,
+    // lookups joined by `or`, times and header reads are restated by rule.
+    #[test]
+    fn common_rule_shapes_are_restated_in_domain_terms() {
+        let t = BranchPolarity::TruthyBranch;
+        let f = BranchPolarity::FalsyBranch;
+        let cases = [
+            ("\"..\" in full_alias", t, "the full alias contains “..”"),
+            ("\"mailbox_id\" in data", t, "mailbox ID is given"),
+            ("\"password\" not in data", t, "password is not given"),
+            ("\"error\" in request.args", f, "error is not given"),
+            // A response's member is not a request input.
+            (
+                "\"error\" in response.json",
+                t,
+                "the response's json contains “error”",
+            ),
+            (
+                "not (a.x and (b.y or c.z))",
+                t,
+                "the a's x is not set or both the b's y is not set and the c's z is not set",
+            ),
+            (
+                "SESSION_STATE_KEY not in session",
+                t,
+                "the configured session state key is not one of the session",
+            ),
+            (
+                "\"mailbox_id\" in data and (not mailbox or mailbox.user_id != user.id or not mailbox.verified)",
+                t,
+                "mailbox ID is given and either no mailbox is given or the mailbox does not belong to the user or the mailbox is not verified",
+            ),
+            (
+                "not user or not user.check_password(password)",
+                t,
+                "no user is given or the user's password check fails",
+            ),
+            (
+                "Alias.get_by(email=a) or DeletedAlias.get_by(email=a) or DomainDeletedAlias.get_by(email=a)",
+                t,
+                "an alias with this email exists or a deleted alias with this email exists or a domain deleted alias with this email exists",
+            ),
+            (
+                "not isinstance(alias_prefix, str) or not alias_prefix",
+                t,
+                "the alias prefix is not text or no alias prefix is given",
+            ),
+            (
+                "new_name and len(new_name) > 128",
+                t,
+                "a new name is given and the length of the new name is more than 128",
+            ),
+            (
+                "activation.created_at < arrow.now().shift(minutes=-15)",
+                t,
+                "the activation's created at is before 15 minutes ago",
+            ),
+            (
+                "request.headers.get(constants.HEADER_ALLOW_API_COOKIES)",
+                t,
+                "the header allow API cookies is set",
+            ),
+            (
+                "not form.validate_on_submit()",
+                t,
+                "the form is not valid on submit",
+            ),
+            (
+                "check_if_abuser_email(email)",
+                t,
+                "the abuser email check passes",
+            ),
+            (
+                "subdomain.endswith(\"-\")",
+                t,
+                "the subdomain ends with “-”",
+            ),
+            (
+                "detect_image_format(raw) == ImageFormat.Unknown",
+                t,
+                "the “detect image format” result is “unknown”",
+            ),
+            (
+                "alias_domain in user_custom_domains",
+                f,
+                "the alias domain is not one of the user custom domains",
+            ),
+        ];
+        for (display, polarity, expected) in cases {
+            assert_eq!(
+                said(display, polarity, None).as_deref(),
+                Some(expected),
+                "{display}"
+            );
+        }
+        // Still outside the rules: a member of a call's result, arithmetic.
+        assert_eq!(said("a.b(c).d", t, None), None);
+        assert_eq!(said("(time() - int(t)) > config.GRACE", t, None), None);
+    }
+
     // AC-0911: an assignment and a call statement are restated by rule.
     #[test]
     fn state_changes_and_calls_are_restated_in_domain_terms() {
@@ -908,7 +1355,11 @@ mod tests {
             set("alias.note", "note").unwrap(),
             "the alias's note is set to the note"
         );
-        assert_eq!(set("alias.note", "compute(alias)"), None);
+        assert_eq!(
+            set("alias.note", "compute(alias)").unwrap(),
+            "the alias's note is set to the “compute” result"
+        );
+        assert_eq!(set("alias.note", "compute(alias) + 1"), None);
         assert_eq!(set("items[0]", "1"), None);
         assert_eq!(
             called("perform_alias_deletion(alias, user)").unwrap(),
@@ -996,13 +1447,12 @@ mod tests {
         );
         assert_eq!(
             said("self.trial_end > arrow.now()", t, Some("User")).unwrap(),
-            "the user's trial end is more than the current time"
+            "the user's trial end is after the current time"
         );
-        // Outside the rules: a call with arguments, arithmetic, a member of
-        // a call's result.
+        // Outside the rules: a one-word call, arithmetic, a member of a
+        // call's result (lookups with arguments are AC-0912).
         assert_eq!(said("check(alias, user)", t, None), None);
         assert_eq!(said("(time() - int(t)) > config.X", t, None), None);
-        assert_eq!(said("Alias.get_by(email=e)", t, None), None);
         assert_eq!(said("foo().bar", t, None), None);
         assert_eq!(words("MAX_NB_EMAIL_FREE_PLAN"), "max nb email free plan");
         assert_eq!(words("apiKeyId"), "API key ID");
