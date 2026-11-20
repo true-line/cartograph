@@ -53,10 +53,14 @@ fn a_section_runs_from_its_heading_to_the_next() {
 fn an_overview_section_is_read_up_to_its_per_capability_detail() {
     let text = "## 1.3 Capabilities (P)\n\n| Area | Capability |\n\n### Orders\n\n#### Place order\n\nrow\n\n### Billing\n\nrow\n";
     let (kept, left_out) = composition_text(text, "1.3");
-    assert_eq!(left_out, 2);
+    // Capabilities are counted by their `####` headings when there are any,
+    // and by `###` headings otherwise.
+    assert_eq!(left_out, 1);
     assert!(kept.starts_with("## 1.3 Capabilities (P)\n\n| Area | Capability |\n"));
     assert!(!kept.contains("### Orders") && !kept.contains("#### Place order"));
-    assert!(kept.contains("Per-capability detail (2 subsections) is left out"));
+    assert!(kept.contains("Per-capability detail (1 subsections) is left out"));
+    let flat_areas = "## 1.3 C (P)\n\nrow\n\n### Orders\n\nrow\n\n### Billing\n\nrow\n";
+    assert_eq!(composition_text(flat_areas, "1.3").1, 2);
     // Other sections, and an overview without subsections, are read whole.
     assert_eq!(composition_text(text, "1.4"), (text.to_owned(), 0));
     let flat = "## 1.3 Capabilities (P)\n\nrow\n";

@@ -94,7 +94,7 @@ pub fn section_text<'a>(document: &'a str, number: &str) -> Option<&'a str> {
 const OVERVIEW_SECTIONS: &[&str] = &["1.3"];
 
 /// The part of section `number`'s compiled `text` a composer reads, and how
-/// many `###` subsections it leaves out. An overview section ends before its
+/// many capability subsections it leaves out. An overview section ends before its
 /// first `###` heading, with a line saying how many subsections are left
 /// out; any other section is read whole.
 pub fn composition_text(text: &str, number: &str) -> (String, usize) {
@@ -104,7 +104,12 @@ pub fn composition_text(text: &str, number: &str) -> (String, usize) {
     let Some(at) = text.find("\n### ") else {
         return (text.to_owned(), 0);
     };
-    let left_out = text[at..].matches("\n### ").count();
+    // With areas (#260) each capability is a `####` under its area's `###`.
+    let rest = &text[at..];
+    let left_out = match rest.matches("\n#### ").count() {
+        0 => rest.matches("\n### ").count(),
+        capabilities => capabilities,
+    };
     let mut kept = text[..=at].to_owned();
     kept.push_str(&format!(
         "\nPer-capability detail ({left_out} subsections) is left out of this composition.\n"
