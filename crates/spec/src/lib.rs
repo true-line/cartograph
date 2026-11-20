@@ -25,11 +25,11 @@ mod knowledge;
 pub use knowledge::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
-    CAPABILITY_CONTROLLER_RULE, CAPABILITY_CONTROLLER_RULE_VERSION, CAPABILITY_GRAPHQL_RULE,
-    CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport, DOMAIN_ENTITY_ORM_RULE,
-    DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport, derive_business_flows,
-    derive_controller_capabilities, derive_graphql_resolver_capabilities,
-    derive_orm_domain_entities, derive_permission_actors,
+    CAPABILITY_CONTROLLER_RULE, CAPABILITY_CONTROLLER_RULE_VERSION, CAPABILITY_ENTRY_POINT_RULE,
+    CAPABILITY_ENTRY_POINT_RULE_VERSION, CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION,
+    CapabilityReport, DOMAIN_ENTITY_ORM_RULE, DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport,
+    derive_business_flows, derive_controller_capabilities, derive_entry_point_capabilities,
+    derive_graphql_resolver_capabilities, derive_orm_domain_entities, derive_permission_actors,
 };
 
 /// Version of the spec compiler's projection rules, recorded with every

@@ -1,0 +1,310 @@
+use super::*;
+
+const REPO: &str = "local/app";
+
+fn extract(files: &[(&str, &str)]) -> EntryPointExtraction {
+    extract_with(files, &BTreeSet::new(), &BTreeSet::new())
+}
+
+fn extract_with(
+    files: &[(&str, &str)],
+    symbols: &BTreeSet<String>,
+    scheduled: &BTreeSet<String>,
+) -> EntryPointExtraction {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, body) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    extract_dir(
+        dir.path(),
+        &SourceId {
+            repo: REPO,
+            commit: "abc",
+        },
+        symbols,
+        scheduled,
+    )
+    .unwrap()
+}
+
+fn entry<'a>(out: &'a EntryPointExtraction, file: &str, key: &str) -> &'a Node {
+    let id = format!("entry:{REPO}@{file}#{key}");
+    out.nodes
+        .iter()
+        .find(|n| n.id == id)
+        .unwrap_or_else(|| panic!("no {id} in {:#?}", out.nodes))
+}
+
+fn entry_edge<'a>(out: &'a EntryPointExtraction, file: &str, key: &str) -> &'a Edge {
+    let src = format!("entry:{REPO}@{file}#{key}");
+    out.edges
+        .iter()
+        .find(|e| e.src == src && e.label == "ENTRY")
+        .unwrap()
+}
+
+fn confidence(props: &serde_json::Value) -> &str {
+    props["prov"]["confidence_tier"].as_str().unwrap()
+}
+
+const MAIL: &str = r#"import argparse
+from aiosmtpd.controller import Controller
+
+class MailHandler:
+    async def handle_DATA(self, server, session, envelope):
+        return forward(envelope)
+
+def forward(envelope):
+    pass
+
+def main(port: int):
+    controller = Controller(MailHandler(), hostname="0.0.0.0", port=port)
+    controller.start()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--port", help="SMTP port", type=int, default=20381)
+    args = parser.parse_args()
+    main(port=args.port)
+"#;
+
+const EVENT_SOURCE: &str = r#"class PostgresEventSource:
+    def listen(self, cursor):
+        cursor.execute(f"LISTEN {CHANNEL};")
+"#;
+
+const LISTENER: &str = r#"from events.event_source import PostgresEventSource
+
+def main():
+    PostgresEventSource().listen(None)
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const RUNNER: &str = r#"import time
+
+def execute():
+    time.sleep(10)
+
+if __name__ == "__main__":
+    while True:
+        execute()
+"#;
+
+const SHELL: &str = r#"from IPython import embed
+
+def change_password(user_id, new_password):
+    pass
+
+if __name__ == "__main__":
+    embed()
+"#;
+
+const UNGUARDED_COMMAND: &str = r#"#!/usr/bin/env python3
+import argparse
+
+parser = argparse.ArgumentParser(prog="Backfill alias")
+args = parser.parse_args()
+for batch in range(0, 10):
+    print(batch)
+"#;
+
+const LIBRARY: &str = r#"import logging
+
+LOG = logging.getLogger(__name__)
+logging.basicConfig()
+
+def helper():
+    pass
+"#;
+
+// AC-0880: every Python module that starts a process is an EntryPoint whose
+// kind is read from what the module imports and runs: an SMTP listener with
+// its default port, a database LISTEN listener whose LISTEN is in an
+// imported repository module, a polling loop, an operator shell, and a
+// script under `commands/` without a `__main__` guard. A library module is
+// none.
+#[test]
+fn python_process_starts_are_entry_points_by_kind() {
+    let out = extract(&[
+        ("email_handler.py", MAIL),
+        ("events/__init__.py", ""),
+        ("events/event_source.py", EVENT_SOURCE),
+        ("event_listener.py", LISTENER),
+        ("job_runner.py", RUNNER),
+        ("shell.py", SHELL),
+        ("commands/backfill.py", UNGUARDED_COMMAND),
+        ("commands/replace.py", RUNNER),
+        ("app/log.py", LIBRARY),
+    ]);
+    let mail = entry(&out, "email_handler.py", "main");
+    assert_eq!(mail.label, "EntryPoint");
+    assert_eq!(mail.props["kind"], "smtp-listener");
+    assert_eq!(mail.props["port"], 20381);
+    assert_eq!(mail.props["started_by"], "a message delivered over SMTP");
+    assert_eq!(
+        mail.props["name"],
+        "Mail received over SMTP (email_handler.py, port 20381)"
+    );
+    assert_eq!(confidence(&mail.props), "Confirmed");
+    let edge = entry_edge(&out, "email_handler.py", "main");
+    assert_eq!(edge.dst, format!("file:{REPO}@email_handler.py"));
+    assert_eq!(confidence(&edge.props), "Confirmed");
+
+    let listener = entry(&out, "event_listener.py", "main");
+    assert_eq!(listener.props["kind"], "database-listener");
+    assert_eq!(listener.props["kind_evidence"], "events/event_source.py");
+    let cited: Vec<&str> = listener.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(cited, ["event_listener.py", "events/event_source.py"]);
+
+    assert_eq!(
+        entry(&out, "job_runner.py", "main").props["kind"],
+        "polling-loop"
+    );
+    assert_eq!(
+        entry(&out, "shell.py", "main").props["kind"],
+        "operator-shell"
+    );
+    let command = entry(&out, "commands/backfill.py", "main");
+    assert_eq!(command.props["kind"], "command");
+    assert_eq!(command.props["how"], "script");
+    // An operator script is a command however it loops.
+    assert_eq!(
+        entry(&out, "commands/replace.py", "main").props["kind"],
+        "command"
+    );
+
+    assert!(!out.nodes.iter().any(|n| n.id.contains("app/log.py")));
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.label == "EntryPoint" && n.id.contains("events/"))
+    );
+}
+
+// AC-0880: a file a schedule job already enters is that job's entry, and
+// tests and packaging scripts are not entry points of the system.
+#[test]
+fn scheduled_test_and_packaging_modules_are_not_entry_points() {
+    let guarded = "if __name__ == \"__main__\":\n    run()\n";
+    let out = extract_with(
+        &[
+            ("cron.py", guarded),
+            ("tests/test_cron.py", guarded),
+            ("tests/helpers.py", guarded),
+            ("conftest.py", guarded),
+            ("setup.py", guarded),
+        ],
+        &BTreeSet::new(),
+        &BTreeSet::from(["cron.py".to_string()]),
+    );
+    assert!(out.nodes.is_empty(), "{:#?}", out.nodes);
+}
+
+// AC-0881: the final Dockerfile stage's command is an entry point. A WSGI
+// server names its application module; an interpreter names its script.
+#[test]
+fn container_command_enters_the_application_module() {
+    let out = extract(&[
+        (
+            "Dockerfile",
+            "FROM node AS assets\nCMD [\"node\", \"build.js\"]\nFROM python:3.12\nWORKDIR /code\nCOPY . .\nCMD [\"gunicorn\",\"wsgi:app\",\"-b\",\"0.0.0.0:7777\"]\n",
+        ),
+        (
+            "wsgi.py",
+            "from server import create_app\napp = create_app()\n",
+        ),
+    ]);
+    let cmd = entry(&out, "Dockerfile", "cmd");
+    assert_eq!(cmd.props["kind"], "http-server");
+    assert_eq!(cmd.props["command"], "gunicorn wsgi:app -b 0.0.0.0:7777");
+    let edge = entry_edge(&out, "Dockerfile", "cmd");
+    assert_eq!(edge.dst, format!("file:{REPO}@wsgi.py"));
+    assert_eq!(confidence(&edge.props), "InferredStrong");
+    assert_eq!(edge.props["entry_module_relative_to_repo_root"], true);
+}
+
+// AC-0882: a start this reader cannot resolve to one repository file is a
+// Gap that names the command and why, never dropped.
+#[test]
+fn unresolved_starts_are_gaps_that_name_them() {
+    let out = extract(&[
+        (
+            "Dockerfile",
+            "FROM alpine\nCMD ./run.sh && tail -f /dev/null\n",
+        ),
+        (
+            "Procfile",
+            "web: gunicorn app:app\nworker: python worker.py\nrelease: ./migrate\n",
+        ),
+        ("worker.py", "print('x')\n"),
+        (
+            "pyproject.toml",
+            "[project]\nname = \"x\"\n[project.scripts]\nsync = \"x.sync:main\"\n",
+        ),
+        (
+            "tools/package.json",
+            "{\"name\":\"cli\",\"bin\":{\"cli\":\"./bin/cli.js\",\"gone\":\"./missing.js\"}}",
+        ),
+        ("tools/bin/cli.js", "#!/usr/bin/env node\n"),
+    ]);
+    let gap = |file: &str, key: &str| {
+        let edge = entry_edge(&out, file, key);
+        let node = out.nodes.iter().find(|n| n.id == edge.dst).unwrap();
+        assert_eq!(node.label, "Gap", "{file}#{key}");
+        assert_eq!(confidence(&node.props), "Gap");
+        node.props["reason"].as_str().unwrap().to_string()
+    };
+    assert_eq!(
+        gap("Dockerfile", "cmd"),
+        "entry point not interpreted: shell-composed command"
+    );
+    assert!(gap("Procfile", "web").contains("module `app`"));
+    assert_eq!(
+        entry_edge(&out, "Procfile", "worker").dst,
+        format!("file:{REPO}@worker.py")
+    );
+    assert!(gap("Procfile", "release").contains("`./migrate` is not a repository file"));
+    assert!(gap("pyproject.toml", "sync").contains("module `x.sync`"));
+    assert_eq!(
+        entry_edge(&out, "tools/package.json", "cli").dst,
+        format!("file:{REPO}@tools/bin/cli.js")
+    );
+    assert!(gap("tools/package.json", "gone").contains("missing.js"));
+    assert_eq!(
+        entry(&out, "pyproject.toml", "sync").props["kind"],
+        "command"
+    );
+}
+
+// AC-0881: a console script enters its function when the Python adapter
+// emitted it, and its module file otherwise.
+#[test]
+fn console_script_enters_its_proven_function() {
+    let files = [
+        (
+            "pyproject.toml",
+            "[tool.poetry.scripts]\nsync = \"app.cli:main\"\nother = \"app.cli:absent\"\n",
+        ),
+        ("app/__init__.py", ""),
+        ("app/cli.py", "def main():\n    pass\n"),
+    ];
+    let symbols = BTreeSet::from([format!("sym:{REPO}@app/cli.py#main")]);
+    let out = extract_with(&files, &symbols, &BTreeSet::new());
+    assert_eq!(
+        entry_edge(&out, "pyproject.toml", "sync").dst,
+        format!("sym:{REPO}@app/cli.py#main")
+    );
+    assert_eq!(
+        entry_edge(&out, "pyproject.toml", "other").dst,
+        format!("file:{REPO}@app/cli.py")
+    );
+}

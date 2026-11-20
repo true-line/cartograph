@@ -237,3 +237,77 @@ fn flow_arrangement_workspace_is_checked() {
     assert!(flows_per_capability_workspace(graph(usize::MAX, 1, 1)).is_none());
     assert!(flows_per_capability_workspace(graph(1, usize::MAX, 1)).is_none());
 }
+
+// AC-0883: a cited process start is an operation of its capability: its
+// flow is placed under it, the callables defined in the file it enters are
+// its handlers, and what they call and write follows (#1997).
+#[test]
+fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
+    const MAIL: &str = "entry:acme/mail@email_handler.py#main";
+    const FILE: &str = "file:acme/mail@email_handler.py";
+    const HANDLE: &str = "sym:acme/mail@email_handler.py#handle";
+    const FORWARD: &str = "sym:acme/mail@app/forward.py#forward_email_to_mailbox";
+    let nodes = vec![
+        node(
+            MAIL,
+            "EntryPoint",
+            json!({"name": "Mail received over SMTP (email_handler.py, port 20381)"}),
+        ),
+        node(FILE, "File", json!({"path": "email_handler.py"})),
+        node(HANDLE, "Symbol", json!({"name": "handle"})),
+        node(
+            FORWARD,
+            "Symbol",
+            json!({"name": "forward_email_to_mailbox"}),
+        ),
+        node(LOG, "DataEntity", json!({"name": "EmailLog"})),
+    ];
+    let edges = vec![
+        edge(MAIL, FILE, "ENTRY", json!({})),
+        edge(HANDLE, FILE, "DEFINED_IN", json!({})),
+        edge(HANDLE, FORWARD, "CALLS", json!({})),
+        edge(FORWARD, LOG, "WRITES", json!({"operations": ["insert"]})),
+    ];
+    let flows = flowtracer::trace(&nodes, &edges);
+    let node_refs: Vec<&Node> = nodes.iter().collect();
+    let edge_refs: Vec<&Edge> = edges.iter().collect();
+    let cite = BaseRef::Node(MAIL.into());
+    let capability = Node {
+        id: "capability:entry-point:mail".into(),
+        label: "Capability".into(),
+        props: json!({ "title": "Receive mail over SMTP" }),
+    };
+    let knowledge = Stories {
+        included: vec![Story {
+            node: &capability,
+            support: vec![(&cite, Support::Node(&nodes[0]))],
+        }],
+        filtered: 0,
+    };
+    let budget = Budget::new(None).unwrap();
+    let mut assertions = Assertions::new(&budget);
+    let mut asserted = BTreeSet::new();
+    let mut out = Text::new(&budget, "").unwrap();
+    flows_per_capability(
+        (&node_refs, &edge_refs),
+        &flows,
+        &knowledge,
+        (&mut assertions, &mut asserted),
+        &mut out,
+    )
+    .unwrap()
+    .expect("the entry point's flow is placed");
+    let text = out.finish();
+    assert!(text.contains("### Receive mail over SMTP"), "{text}");
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("- **Mail received over SMTP"))
+        .expect(&text);
+    assert!(line.contains("handled by handle"), "{line}");
+    assert!(
+        line.contains("; calls forward\\_email\\_to\\_mailbox"),
+        "{line}"
+    );
+    assert!(line.contains("; writes EmailLog (insert)"), "{line}");
+    assert!(!text.contains("Flows outside the capabilities"), "{text}");
+}

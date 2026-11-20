@@ -1,0 +1,196 @@
+//! Capability candidates from the entry points beyond HTTP (#1997): each
+//! process start the entry-point reader recovered, and each schedule file's
+//! jobs, is under a capability, so D1 §1.3 lists the work no HTTP request
+//! starts.
+//!
+//! The rule reads only what the readers proved: an `EntryPoint` from
+//! `t0.entry-point` with exactly one `ENTRY` into a fact that is not a Gap,
+//! and a `Schedule` from `t0.schedule` that is not a scheduled CI workflow.
+//! An entry point whose `ENTRY` is a Gap is under no capability: its Gap is
+//! in the gap register, which names it (R-INT-4).
+//!
+//! Operator commands are grouped by the directory, or the manifest, that
+//! declares them; every other process start is a capability of its own;
+//! the jobs of one schedule file are one capability. The title restates the
+//! kind the reader recorded and the file's name, never what the code does
+//! beyond it.
+use super::*;
+
+/// Deterministic recipe grouping entry points and scheduled jobs.
+pub const CAPABILITY_ENTRY_POINT_RULE: &str = "knowledge.capability.entry-point";
+/// Changed grouping, support or naming semantics require a new recipe version.
+pub const CAPABILITY_ENTRY_POINT_RULE_VERSION: &str = "1";
+
+const ENTRY_EXTRACTOR: &str = "t0.entry-point";
+const SCHEDULE_EXTRACTOR: &str = "t0.schedule";
+
+/// A file's stem in words: `job_runner.py` reads `job runner`.
+fn stem_words(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let stem = if stem == "__main__" {
+        path.rsplit('/').nth(1).unwrap_or(stem)
+    } else {
+        stem
+    };
+    stem.replace(['_', '-'], " ").trim().to_string()
+}
+
+fn title(kind: &str, file: &str) -> String {
+    match kind {
+        "smtp-listener" => "Receive mail over SMTP".into(),
+        "database-listener" => "Handle database notifications".into(),
+        "queue-consumer" => "Consume queue messages".into(),
+        "operator-shell" => "Open the operator shell".into(),
+        "polling-loop" => format!("Run the {} loop", stem_words(file)),
+        "http-server" => "Serve HTTP requests".into(),
+        _ => format!("Run {}", stem_words(file)),
+    }
+}
+
+fn add_evidence(group: &mut Group, prov: &Provenance) {
+    for e in &prov.evidence {
+        group
+            .evidence
+            .entry((
+                e.repo.clone(),
+                e.path.clone(),
+                e.byte_start,
+                e.byte_end,
+                e.commit_sha.clone(),
+            ))
+            .or_insert_with(|| e.clone());
+    }
+}
+
+/// Derive Capability candidates from recovered entry points and schedules.
+/// The borrowed base is unchanged.
+pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityReport {
+    let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
+    for node in &base.graph.0 {
+        nodes
+            .entry(&node.id)
+            .and_modify(|v| *v = None)
+            .or_insert(Some(node));
+    }
+    let mut entries: BTreeMap<&str, Vec<&core_graph::Edge>> = BTreeMap::new();
+    for edge in base.graph.1.iter().filter(|e| e.label == "ENTRY") {
+        entries.entry(&edge.src).or_default().push(edge);
+    }
+    // Group identity → (kind, display file, group).
+    let mut groups: BTreeMap<(String, String), (String, String, Group)> = BTreeMap::new();
+    for node in nodes.values().filter_map(|n| *n) {
+        match node.label.as_str() {
+            "EntryPoint" => {
+                let Some(prov) = support_from(&node.props, ENTRY_EXTRACTOR) else {
+                    continue;
+                };
+                let [edge] = entries.get(node.id.as_str()).map_or(&[][..], Vec::as_slice) else {
+                    continue;
+                };
+                let Some(Some(target)) = nodes.get(edge.dst.as_str()) else {
+                    continue;
+                };
+                if target.label == "Gap" || support_from(&edge.props, ENTRY_EXTRACTOR).is_none() {
+                    continue;
+                }
+                let (Some(kind), Some(file)) =
+                    (node.props["kind"].as_str(), node.props["file"].as_str())
+                else {
+                    continue;
+                };
+                let key = if kind == "command" {
+                    let place = match node.props["how"].as_str() {
+                        Some("declared command") => file.to_owned(),
+                        _ => file.rsplit_once('/').map_or("", |(d, _)| d).to_owned(),
+                    };
+                    ("command".to_owned(), place)
+                } else {
+                    ("entry".to_owned(), node.id.clone())
+                };
+                let place = key.1.clone();
+                let (_, _, group) = groups.entry(key).or_insert_with(|| {
+                    let shown = if kind == "command" {
+                        place
+                    } else {
+                        file.to_owned()
+                    };
+                    (kind.to_owned(), shown, Group::default())
+                });
+                group.cites.insert(BaseRef::Node(node.id.clone()));
+                add_evidence(group, &prov);
+            }
+            "Schedule" => {
+                let Some(prov) = support_from(&node.props, SCHEDULE_EXTRACTOR) else {
+                    continue;
+                };
+                if node.props["format"] == "github-actions" {
+                    continue;
+                }
+                let Some(file) = node.props["file"].as_str() else {
+                    continue;
+                };
+                let (_, _, group) = groups
+                    .entry(("schedule".to_owned(), file.to_owned()))
+                    .or_insert_with(|| ("schedule".to_owned(), file.to_owned(), Group::default()));
+                group.cites.insert(BaseRef::Node(node.id.clone()));
+                add_evidence(group, &prov);
+            }
+            _ => {}
+        }
+    }
+    let named: Vec<(String, String, (String, String), Group)> = groups
+        .into_iter()
+        .map(|(key, (kind, file, group))| {
+            let title = match kind.as_str() {
+                "schedule" => "Run scheduled jobs".to_owned(),
+                "command" => "Run operator commands".to_owned(),
+                _ => title(&kind, &file),
+            };
+            (title, file, key, group)
+        })
+        .collect();
+    let mut by_title: BTreeMap<&str, usize> = BTreeMap::new();
+    for (title, ..) in &named {
+        *by_title.entry(title).or_default() += 1;
+    }
+    let titles: Vec<String> = named
+        .iter()
+        .map(|(title, file, ..)| {
+            if by_title[title.as_str()] > 1 && !file.is_empty() {
+                format!("{title} ({file})")
+            } else {
+                title.clone()
+            }
+        })
+        .collect();
+    let mut report = CapabilityReport::default();
+    for ((_, _, key, group), title) in named.into_iter().zip(titles) {
+        let identity = serde_json::to_vec(&(
+            CAPABILITY_ENTRY_POINT_RULE,
+            CAPABILITY_ENTRY_POINT_RULE_VERSION,
+            &key,
+        ))
+        .expect("string tuple serialization");
+        let kind = if key.0 == "schedule" {
+            "scheduled-jobs"
+        } else {
+            "entry-point"
+        };
+        let fact = capability_fact(
+            (
+                CAPABILITY_ENTRY_POINT_RULE,
+                CAPABILITY_ENTRY_POINT_RULE_VERSION,
+            ),
+            kind,
+            &identity,
+            title,
+            group,
+        );
+        retain_sized_fact(&mut report, fact);
+    }
+    report
+}
+
+#[cfg(test)]
+mod tests;

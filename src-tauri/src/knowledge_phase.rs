@@ -299,6 +299,9 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
     let controllers = spec::derive_controller_capabilities(snapshot);
     derived.facts.extend(controllers.facts);
     derived.oversized += controllers.oversized_groups;
+    let entry_points = spec::derive_entry_point_capabilities(snapshot);
+    derived.facts.extend(entry_points.facts);
+    derived.oversized += entry_points.oversized_groups;
     match spec::derive_business_flows(snapshot, flow_limits) {
         Ok(flows) => {
             derived.facts.extend(flows.facts);
@@ -315,22 +318,40 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
     derived
 }
 
-/// The phase recipe with each producer rule, so a rule version change
-/// changes the overlay identity.
-pub(crate) fn recipe_name() -> String {
-    format!(
-        "{RECIPE};{}@{};{}@{};{}@{};{}@{};{}@{}",
+/// Every producer rule and its version, in phase order.
+pub(crate) const PRODUCER_RULES: [(&str, &str); 6] = [
+    (
         spec::CAPABILITY_GRAPHQL_RULE,
         spec::CAPABILITY_GRAPHQL_RULE_VERSION,
+    ),
+    (
         spec::CAPABILITY_CONTROLLER_RULE,
         spec::CAPABILITY_CONTROLLER_RULE_VERSION,
-        spec::BUSINESS_FLOW_RULE,
-        spec::BUSINESS_FLOW_RULE_VERSION,
+    ),
+    (
+        spec::CAPABILITY_ENTRY_POINT_RULE,
+        spec::CAPABILITY_ENTRY_POINT_RULE_VERSION,
+    ),
+    (spec::BUSINESS_FLOW_RULE, spec::BUSINESS_FLOW_RULE_VERSION),
+    (
         spec::DOMAIN_ENTITY_ORM_RULE,
         spec::DOMAIN_ENTITY_ORM_RULE_VERSION,
-        spec::ACTOR_ALLOW_RULE,
-        spec::ACTOR_ALLOW_RULE_VERSION
-    )
+    ),
+    (spec::ACTOR_ALLOW_RULE, spec::ACTOR_ALLOW_RULE_VERSION),
+];
+
+/// The phase recipe with each producer rule, so a rule version change
+/// changes the overlay identity. Every rule is in the `knowledge.`
+/// namespace, which the recipe names once (`knowledge@2`), so each rule is
+/// listed without it and the name stays within the overlay's name bound as
+/// producers are added (#1997).
+pub(crate) fn recipe_name() -> String {
+    let mut name = RECIPE.to_owned();
+    for (rule, version) in PRODUCER_RULES {
+        let short = rule.strip_prefix("knowledge.").unwrap_or(rule);
+        name.push_str(&format!(";{short}@{version}"));
+    }
+    name
 }
 
 fn recipe(embedding_namespace: Option<String>, provider_ran: bool) -> OverlayRecipe {
