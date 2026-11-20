@@ -1070,6 +1070,9 @@ function installFakeCore(options: {
         return sectionDocumentFixture([]);
       case 'recorded_coverage':
         return [];
+      case 'area_choices':
+        // Ask an area's expert (AC-0932): no knowledge overlay, so no areas.
+        return [];
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }
