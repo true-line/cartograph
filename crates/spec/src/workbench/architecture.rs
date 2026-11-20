@@ -324,12 +324,15 @@ fn router_technology(router: &str) -> Option<&'static str> {
 }
 
 /// How a data store is named from what its fact records.
-fn store_name(node: &Node) -> String {
+/// The store a data-bearing resource is, by its provider; empty for a
+/// resource that holds no data the code reads or writes (a compute
+/// instance, a function, a role, a module).
+fn store_kind(node: &Node) -> &'static str {
     let provider = node.props["provider"]
         .as_str()
         .or(node.props["type"].as_str())
         .unwrap_or_default();
-    let named = match provider {
+    match provider {
         "sql-database" => "SQL database",
         "postgres" | "postgresql" => "PostgreSQL",
         "mysql" => "MySQL",
@@ -345,8 +348,13 @@ fn store_name(node: &Node) -> String {
         "web-storage" => "Browser storage",
         "webextension-storage" => "Extension storage",
         "indexeddb" => "IndexedDB",
+        _ if node.props["kind"] == "browser-storage" => "Browser storage",
         _ => "",
-    };
+    }
+}
+
+fn store_name(node: &Node) -> String {
+    let named = store_kind(node);
     let identity = node.props["identity"].as_str();
     match (named, identity) {
         ("", _) => node.props["logical_id"]
@@ -1055,6 +1063,7 @@ impl<'a> Model<'a> {
 
         // Data stores and providers, from observed and declared resources.
         let mut store_of: BTreeMap<String, usize> = BTreeMap::new();
+        let mut store_repo: Vec<(usize, &'a str)> = Vec::new();
         let mut provider_of: BTreeMap<String, usize> = BTreeMap::new();
         let mut uses: BTreeMap<&str, Vec<&'a Edge>> = BTreeMap::new();
         for edge in index.edges("USES") {
@@ -1071,10 +1080,20 @@ impl<'a> Model<'a> {
             }
             let users = uses.get(node.id.as_str()).cloned().unwrap_or_default();
             if node.label == "Resource" && !is_external_provider(node) {
-                let key = node.props["logical_id"]
-                    .as_str()
-                    .unwrap_or(&node.id)
-                    .to_string();
+                // Only a resource that holds data is a store; other
+                // infrastructure (instances, functions, roles, modules)
+                // belongs to a deployment view, not this one.
+                if store_kind(node).is_empty() {
+                    continue;
+                }
+                // A logical id names a store within its repository: two
+                // repositories reading the same variable name are two
+                // stores unless binding evidence says otherwise.
+                let key = format!(
+                    "{}|{}",
+                    repo_of(&node.id),
+                    node.props["logical_id"].as_str().unwrap_or(&node.id)
+                );
                 let at = if let Some(&at) = store_of.get(&key) {
                     elements[at].facts.push(Fact::Node(node));
                     at
@@ -1105,6 +1124,7 @@ impl<'a> Model<'a> {
                         },
                         &[],
                     );
+                    store_repo.push((at, repo_of(&node.id)));
                     store_of.insert(key, at);
                     at
                 };
@@ -1215,6 +1235,20 @@ impl<'a> Model<'a> {
                         );
                     }
                 }
+            }
+        }
+        // Stores of one name in two repositories are told apart by their
+        // repository.
+        let mut named: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        for (at, repo) in &store_repo {
+            named
+                .entry(elements[*at].name.clone())
+                .or_default()
+                .insert(repo);
+        }
+        for (at, repo) in &store_repo {
+            if named[&elements[*at].name].len() > 1 {
+                elements[*at].name = format!("{} ({})", elements[*at].name, repo_name(repo));
             }
         }
         for (container, entry) in &db_listeners {

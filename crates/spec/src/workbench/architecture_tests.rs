@@ -455,3 +455,39 @@ fn the_dsl_workspace_holds_every_element_and_relationship() {
     let opened = dsl.matches('{').count();
     assert_eq!(opened, dsl.matches('}').count(), "balanced braces");
 }
+
+/// AC-0923: only a resource that holds data is a store, and a store is
+/// scoped to its repository: two repositories reading the same variable
+/// name keep two stores, told apart by repository.
+#[test]
+fn stores_hold_data_and_stay_in_their_repository() {
+    let mut f = system();
+    f.node(
+        &format!("res:{SERVER}@aws_instance.web"),
+        "Resource",
+        json!({"kind": "iac", "type": "aws_instance", "logical_id": "aws_instance.web"}),
+        (SERVER, "main.tf"),
+    );
+    let db = f.node(
+        &format!("res:{CLIENT}@observed:sql-database:env:DB_URI"),
+        "Resource",
+        json!({"kind": "sdk-client", "provider": "sql-database", "module": "sqlalchemy",
+               "observed": true, "env_key": "DB_URI",
+               "logical_id": "observed:sql-database:env:DB_URI"}),
+        (CLIENT, "db.py"),
+    );
+    let file = format!("file:{CLIENT}@db.py");
+    f.node(&file, "File", json!({"path": "db.py"}), (CLIENT, "db.py"));
+    f.edge(&file, "USES", &db, (CLIENT, "db.py"), json!({}));
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    assert!(!md.contains("aws_instance"), "{md}");
+    assert!(
+        md.contains("| SQL database (server) | Data store |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| SQL database (web-client) | Data store |"),
+        "{md}"
+    );
+    assert!(md.contains("Data stores: 2."));
+}
