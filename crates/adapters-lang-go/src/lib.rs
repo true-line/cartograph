@@ -1315,7 +1315,7 @@ fn extract_source_with_module(
     // Guarded exits and refusal responses (#2009); test code states no
     // business rules.
     if !path.ends_with("_test.go") {
-        rule_evidence::extract(&cx, root, &functions_by_start, &mut out);
+        rule_evidence::extract(&cx, root, &functions_by_start, &bindings, &mut out);
     }
     Ok(out)
 }

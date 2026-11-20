@@ -42,9 +42,14 @@ pub(super) fn words(identifier: &str) -> String {
             parts.push(chunk.to_ascii_lowercase());
             continue;
         }
+        // A run of capitals is one word (`ByID`, `HTTPServer`): a capital
+        // starts a word after a lower-case letter, or before one.
+        let chars: Vec<char> = chunk.chars().collect();
         let mut current = String::new();
-        for c in chunk.chars() {
-            if c.is_ascii_uppercase() && !current.is_empty() {
+        for (i, &c) in chars.iter().enumerate() {
+            let after_lower = i > 0 && !chars[i - 1].is_ascii_uppercase();
+            let before_lower = chars.get(i + 1).is_some_and(char::is_ascii_lowercase);
+            if c.is_ascii_uppercase() && !current.is_empty() && (after_lower || before_lower) {
                 parts.push(std::mem::take(&mut current).to_ascii_lowercase());
             }
             current.push(c);
@@ -503,6 +508,9 @@ pub(super) struct Context<'a> {
     pub class: Option<&'a str>,
     /// The literal a module string constant holds, by name (#2027).
     pub constant: Constants<'a>,
+    /// The call whose error this condition tests (`Store.Save`), when the
+    /// adapter recorded it (#2009).
+    pub failed: Option<&'a str>,
 }
 
 /// Looks up the literal of a module string constant by name: `Some` only
@@ -1009,10 +1017,20 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     }
                     // Go `err != nil`: an error occurred (#2009).
                     ("is" | "==", Expr::Lit(Lit::None)) if go_error_value(left) => {
-                        "no error occurred".to_owned()
+                        match cx.failed {
+                            Some(call) => {
+                                format!("the “{}” call succeeds", words(&call.replace('.', "_")))
+                            }
+                            None => "no error occurred".to_owned(),
+                        }
                     }
                     ("is not" | "!=", Expr::Lit(Lit::None)) if go_error_value(left) => {
-                        "an error occurred".to_owned()
+                        match cx.failed {
+                            Some(call) => {
+                                format!("the “{}” call fails", words(&call.replace('.', "_")))
+                            }
+                            None => "an error occurred".to_owned(),
+                        }
                     }
                     ("is" | "==", Expr::Lit(Lit::None)) => format!("{left_np} is not set"),
                     ("is not" | "!=", Expr::Lit(Lit::None)) => format!("{left_np} is set"),
@@ -1314,16 +1332,24 @@ pub(super) fn with_outcome(
     owner: &str,
     outcome: &str,
     constant: Constants<'_>,
+    failed: &[Option<String>],
 ) -> Option<String> {
     let class = owner
         .rsplit_once('.')
         .and_then(|(class, _)| class.rsplit('.').next())
         .filter(|c| c.starts_with(|f: char| f.is_ascii_uppercase()));
-    let cx = Context { class, constant };
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
-        .map(|c| condition(c.expression.display.as_str(), c.polarity, &cx))
+        .enumerate()
+        .map(|(i, c)| {
+            let cx = Context {
+                class,
+                constant,
+                failed: failed.get(i).and_then(Option::as_deref),
+            };
+            condition(c.expression.display.as_str(), c.polarity, &cx)
+        })
         .collect();
     let conditions = said_once(conditions?);
     let sentence = if conditions.is_empty() {
@@ -1360,10 +1386,11 @@ pub(super) fn statement(
     evidence: &GuardedExitEvidence,
     owner: &str,
     constant: Constants<'_>,
+    failed: &[Option<String>],
 ) -> Option<String> {
     // A rendered statement that would still carry a code-shaped token is not
     // a statement in domain terms: the row states a Gap instead (#1999).
-    rendered(evidence, owner, constant)
+    rendered(evidence, owner, constant, failed)
         .filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
 }
 
@@ -1371,6 +1398,7 @@ fn rendered(
     evidence: &GuardedExitEvidence,
     owner: &str,
     constant: Constants<'_>,
+    failed: &[Option<String>],
 ) -> Option<String> {
     let (class, method) = match owner.rsplit_once('.') {
         Some((class, method)) => (
@@ -1382,11 +1410,23 @@ fn rendered(
         ),
         None => (None, owner),
     };
-    let cx = Context { class, constant };
+    let cx = Context {
+        class,
+        constant,
+        failed: None,
+    };
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
-        .map(|c| condition(c.expression.display.as_str(), c.polarity, &cx))
+        .enumerate()
+        .map(|(i, c)| {
+            let cx = Context {
+                class,
+                constant,
+                failed: failed.get(i).and_then(Option::as_deref),
+            };
+            condition(c.expression.display.as_str(), c.polarity, &cx)
+        })
         .collect();
     let conditions = said_once(conditions?);
     let when = if conditions.is_empty() {
@@ -1535,6 +1575,7 @@ mod tests {
             &Context {
                 class,
                 constant: None,
+                failed: None,
             },
         )
     }
@@ -1549,6 +1590,7 @@ mod tests {
         let cx = Context {
             class: None,
             constant: Some(&lookup),
+            failed: None,
         };
         let t = BranchPolarity::TruthyBranch;
         assert_eq!(
@@ -1647,6 +1689,35 @@ mod tests {
             Some("")
         );
         assert_eq!(go_error("nil, err"), None);
+        // The call whose error is tested names the condition.
+        let failed = |display: &str, polarity, call| {
+            condition(
+                display,
+                polarity,
+                &Context {
+                    class: Some("Service"),
+                    constant: None,
+                    failed: Some(call),
+                },
+            )
+        };
+        assert_eq!(
+            failed("err != nil", truthy, "Store.Save").as_deref(),
+            Some("the “store save” call fails")
+        );
+        assert_eq!(
+            failed("err == nil", truthy, "strconv.Atoi").as_deref(),
+            Some("the “strconv atoi” call succeeds")
+        );
+        assert_eq!(
+            failed("err != nil", BranchPolarity::FalsyBranch, "Decode").as_deref(),
+            Some("the “decode” call succeeds")
+        );
+        assert_eq!(
+            failed("err != nil", truthy, "pendingByID").as_deref(),
+            Some("the “pending by ID” call fails")
+        );
+        assert_eq!(words("HTTPServerURL"), "HTTP server URL");
     }
 
     #[test]
@@ -1758,6 +1829,7 @@ mod tests {
         let cx = Context {
             class: None,
             constant: None,
+            failed: None,
         };
         let set = |t: &str, v: &str| assigned(t, v, &cx);
         assert_eq!(

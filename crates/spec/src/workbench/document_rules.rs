@@ -248,6 +248,21 @@ fn effect<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option
 
 /// A Go call writing an error status before a bare return (#2009): a
 /// rejection, not a change.
+/// The call each condition of a Go rule tests the error of (`Store.Save`),
+/// as the adapter recorded it, one per condition (#2009).
+fn failed_calls(rule: &Node) -> Vec<Option<String>> {
+    rule.props
+        .get("failed_calls")
+        .and_then(|v| v.as_array())
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|c| c.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn writes_refusal(evidence: &GuardedExitEvidence) -> bool {
     super::statements::is_go(evidence)
         && matches!(&evidence.effect, LocalExit::Call { value }
@@ -298,7 +313,7 @@ fn guarded<'a>(
             .collect::<Vec<_>>()
             .join(" and ")
     };
-    let statement = super::statements::statement(&parsed, owner, constant);
+    let statement = super::statements::statement(&parsed, owner, constant, &failed_calls(rule));
     Some(Rejection {
         rule,
         owner,
@@ -672,6 +687,7 @@ impl<'a> Index<'a> {
                 owner,
                 &clause,
                 Some(&|k| self.constant(k)),
+                &failed_calls(rule),
             ),
             place: None,
         })
