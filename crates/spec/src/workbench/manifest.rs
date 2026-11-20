@@ -64,6 +64,8 @@ const PARTS: &[Part] = &[
             "documentation-evidence",
             "endpoint-inventory",
             "curated",
+            "architecture",
+            "architecture-dsl",
         ],
     },
     Part {
@@ -266,6 +268,7 @@ mod tests {
 
     fn supplied(sources: Option<&[SourceRevision]>) -> Supplied<'_> {
         Supplied {
+            repo_names: &[],
             coverage: &[],
             stale_coverage: &[],
             curated: Curated::NotComputed(CuratedFailure::ReviewsUnavailable),

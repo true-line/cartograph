@@ -97,6 +97,7 @@ fn compile(mode: ExportMode, curated: Option<&CuratedProjection>) -> SpecBundle 
         mode,
         &BTreeSet::new(),
         Supplied {
+            repo_names: &[],
             knowledge: None,
             coverage: &[],
             stale_coverage: &[],
@@ -303,6 +304,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
             mode,
             &BTreeSet::new(),
             Supplied {
+                repo_names: &[],
                 knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
@@ -328,6 +330,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
             mode,
             &BTreeSet::new(),
             Supplied {
+                repo_names: &[],
                 knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],

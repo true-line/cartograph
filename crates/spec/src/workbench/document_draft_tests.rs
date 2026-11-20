@@ -95,6 +95,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            repo_names: &[],
             knowledge: None,
             coverage: &[],
             stale_coverage: &[],
@@ -378,6 +379,7 @@ fn one_changed_fact_marks_exactly_the_citing_drafts_twice_the_same() {
                     *mode,
                     &BTreeSet::new(),
                     Supplied {
+                        repo_names: &[],
                         knowledge: None,
                         coverage: &[],
                         stale_coverage: &[],

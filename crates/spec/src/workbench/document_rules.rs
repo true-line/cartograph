@@ -1428,6 +1428,7 @@ function checkQuantity(qty: number) {
                 .collect(),
             filtered: 0,
             areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);
@@ -1546,6 +1547,7 @@ function checkQuantity(qty: number) {
             }],
             filtered: 0,
             areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);
@@ -1742,6 +1744,7 @@ def handle_reply(contact):
             }],
             filtered: 0,
             areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);
@@ -2109,6 +2112,7 @@ def create(user):
             }],
             filtered: 0,
             areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);

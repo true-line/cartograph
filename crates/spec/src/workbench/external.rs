@@ -369,7 +369,7 @@ fn rank(confidence: ConfidenceTier) -> u8 {
 
 /// One fact a row rests on.
 #[derive(Clone, Copy)]
-enum Fact<'a> {
+pub(super) enum Fact<'a> {
     Node(&'a Node),
     Edge(&'a Edge),
 }
@@ -402,21 +402,21 @@ fn lowest<'a>(facts: impl Iterator<Item = Fact<'a>>) -> Option<Fact<'a>> {
 }
 
 /// One call or use of an outside origin.
-struct Site<'a> {
+pub(super) struct Site<'a> {
     /// The outbound-call Gap, when the call is one.
-    gap: Option<&'a Node>,
+    pub(super) gap: Option<&'a Node>,
     /// The `FETCHES` relation into that Gap.
-    call: Option<&'a Edge>,
+    pub(super) call: Option<&'a Edge>,
     /// The observed use: of the same call, or on its own.
-    uses: Option<&'a Edge>,
+    pub(super) uses: Option<&'a Edge>,
     /// The observed `http-api` resource of that use.
-    resource: Option<&'a Node>,
+    pub(super) resource: Option<&'a Node>,
     /// Where the site is, for the order of the rows.
     at: Option<Place<'a>>,
 }
 
 impl<'a> Site<'a> {
-    fn facts(&self) -> impl Iterator<Item = Fact<'a>> + use<'a> {
+    pub(super) fn facts(&self) -> impl Iterator<Item = Fact<'a>> + use<'a> {
         [
             self.gap.map(Fact::Node),
             self.call.map(Fact::Edge),
@@ -427,7 +427,7 @@ impl<'a> Site<'a> {
         .flatten()
     }
 
-    fn caller(&self) -> Option<&'a str> {
+    pub(super) fn caller(&self) -> Option<&'a str> {
         self.call
             .or(self.uses)
             .map(|edge| edge.src.as_str())
@@ -460,25 +460,33 @@ impl Kind {
 }
 
 /// One unclassified target.
-struct Row<'a> {
+pub(super) struct Row<'a> {
     kind: Kind,
-    node: &'a Node,
+    pub(super) node: &'a Node,
     reason: Unknown,
     /// The relations that reach it: its call, its uses or its publishers.
-    edges: Vec<&'a Edge>,
+    pub(super) edges: Vec<&'a Edge>,
 }
 
 impl<'a> Row<'a> {
+    /// An outbound HTTP call or HTTP client whose host is not known.
+    pub(super) fn is_http(&self) -> bool {
+        matches!(self.kind, Kind::Call | Kind::HttpClient)
+    }
+    /// Why the row is unclassified, as `external.md` states it.
+    pub(super) fn reason_text(&self) -> &'static str {
+        self.reason.reason()
+    }
     fn facts(&self) -> impl Iterator<Item = Fact<'a>> + '_ {
         std::iter::once(Fact::Node(self.node)).chain(self.edges.iter().copied().map(Fact::Edge))
     }
 }
 
 /// The admitted facts as the document lists them.
-struct Model<'a> {
+pub(super) struct Model<'a> {
     /// Outside targets by origin, each with its sites.
-    outside: BTreeMap<String, Vec<Site<'a>>>,
-    unclassified: Vec<Row<'a>>,
+    pub(super) outside: BTreeMap<String, Vec<Site<'a>>>,
+    pub(super) unclassified: Vec<Row<'a>>,
     /// Calls binding evidence places in a registered repository.
     inside_unresolved: usize,
     /// Unresolved calls to the caller's own origin.
@@ -499,7 +507,7 @@ fn sorted<'a>(edges: Option<&Vec<&'a Edge>>) -> Vec<&'a Edge> {
 }
 
 impl<'a> Model<'a> {
-    fn new(nodes: &[&'a Node], edges: &[&'a Edge]) -> Self {
+    pub(super) fn new(nodes: &[&'a Node], edges: &[&'a Edge]) -> Self {
         // Never the store's or the caller's order, and each fact once.
         let by_id: BTreeMap<&str, &Node> =
             nodes.iter().map(|node| (node.id.as_str(), *node)).collect();
