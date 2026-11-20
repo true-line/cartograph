@@ -1674,8 +1674,9 @@ fn extract_tree_packed(
         };
         let mut ts_progress = |path: &str| on_file(&format!("{ts_phase} — {path}"));
         let (mut extraction, mut facts, stats) = if let Some(capture) = primary {
-            let (mut extraction, produced, stats) =
-                adapters_lang_ts::captured::extract_captured_dir(
+            // The captured walk hands its facts back packed (#1237).
+            let (extraction, facts, produced, stats) =
+                adapters_lang_ts::captured::extract_captured_dir_packed(
                     root,
                     &ts_id,
                     capture,
@@ -1689,11 +1690,6 @@ fn extract_tree_packed(
             reads.omitted_receipt_facts = stats.omitted_receipt_facts.clone();
             reads.omitted_receipt_facts_complete = stats.omitted_receipt_facts_complete;
             reads.captured_ts_ran = true;
-            let facts = FactStore::from_facts(
-                std::mem::take(&mut extraction.nodes),
-                std::mem::take(&mut extraction.edges),
-            )
-            .map_err(pack_err)?;
             (extraction, facts, stats)
         } else {
             adapters_lang_ts::extract_dir_incremental_packed(
