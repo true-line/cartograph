@@ -15,13 +15,18 @@
 //!    file touching many is about none (TF-IDF), the facts it references (calls,
 //!    imports, writes; TF-IDF over the targets) and direct calls and imports
 //!    between two files.
-//! 3. **Shared files**, referenced from many files, are set aside as one
-//!    `shared` group: they belong to every concept and would glue the others.
+//! 3. **Shared files**, referenced from many files and named for no subject
+//!    (`config`, `utils`), are set aside as one `shared` group: they belong
+//!    to every concept and would glue the others. A widely used file whose
+//!    name carries a subject (`alias_utils`) is that subject's core and stays.
 //! 4. **Clusters** are modularity communities of the nearest-neighbour
 //!    similarity graph (Louvain, best of a fixed set of visiting orders),
 //!    then each file moves to the group it is most similar to until stable.
 //! 5. **Names** are the terms most of a group's files carry and few other
-//!    groups do.
+//!    groups do; the subject is the leading term the most files carry.
+//! 6. **Groups follow their names**: files no term holds together are not a
+//!    group, a group named for two subjects is two groups, two groups with
+//!    one name are one, and a leftover file joins the group it is named for.
 //!
 //! Every step orders its work by file path, so the same base gives the same
 //! subsystems under any input order and under any local registry key. A
@@ -33,7 +38,7 @@ use core_graph::Edge;
 /// Deterministic recipe grouping source files into named subsystems.
 pub const SUBSYSTEM_RULE: &str = "knowledge.subsystems";
 /// Changed units, signals, clustering or naming require a new recipe version.
-pub const SUBSYSTEM_RULE_VERSION: &str = "1";
+pub const SUBSYSTEM_RULE_VERSION: &str = "2";
 /// Files clustered per run. Similarity is computed per pair of files that
 /// share a signal, so the bound keeps one run's work and memory fixed.
 pub const MAX_SUBSYSTEM_FILES: usize = 8192;
@@ -62,6 +67,22 @@ const SHARED_SHARE: f64 = 0.06;
 const SIZE_EXPONENT: f64 = 0.7;
 /// Evidence spans carried on a group node; every member is still cited.
 const MAX_NODE_EVIDENCE: usize = 256;
+
+/// Terms a name is chosen among: at most this many, each scoring at least
+/// this share of the first.
+const NAME_TERMS: usize = 5;
+const NAME_SCORE_SHARE: f64 = 0.6;
+/// A group is one subject when a leading term is carried by at least this
+/// share of its files. Below it the group is leftovers that only resemble
+/// each other weakly, and naming it would claim a subject it does not have.
+const MIN_COHERENCE: f64 = 0.3;
+/// A second subject names at least this share of a group's files.
+const SECOND_SUBJECT_SHARE: f64 = 0.25;
+/// Rounds of dropping, splitting and merging groups by their names.
+const REGROUP_ROUNDS: usize = 6;
+/// A file carries a subject when the word has at least a directory's weight
+/// in it: a symbol that merely mentions the word is not enough.
+const SUBJECT_WEIGHT: f64 = 1.0;
 
 const W_STEM: f64 = 3.0;
 const W_DIRECTORY: f64 = 1.0;
@@ -146,6 +167,9 @@ struct Unit<'a> {
     evidence: EvidenceRef,
     /// Words of the file name, folded: what a name is built from.
     stem: Vec<String>,
+    /// The folded words of the file name and of each directory, in order:
+    /// where two terms stand side by side.
+    phrases: Vec<Vec<String>>,
 }
 
 /// The lowercase subject words of a name: mechanism words, numbers and
@@ -453,6 +477,14 @@ fn capitalized(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// One ranked term of a group.
+struct Term {
+    word: String,
+    score: f64,
+    /// Member files that carry the word.
+    cover: usize,
+}
+
 /// A group's ranked terms: the share of its files that carry the term, times
 /// the weight the term has in them, times how few other groups carry it.
 fn ranked_terms(
@@ -461,7 +493,7 @@ fn ranked_terms(
     vectors: &[BTreeMap<String, f64>],
     groups_with: &BTreeMap<&str, usize>,
     groups: usize,
-) -> Vec<(String, f64)> {
+) -> Vec<Term> {
     let mut mass: BTreeMap<&str, f64> = BTreeMap::new();
     let mut cover: BTreeMap<&str, usize> = BTreeMap::new();
     for &file in members {
@@ -473,56 +505,152 @@ fn ranked_terms(
         }
     }
     let size = members.len() as f64;
-    let mut ranked: Vec<(String, f64)> = mass
+    let mut ranked: Vec<Term> = mass
         .into_iter()
         .map(|(term, mass)| {
             let spread = groups_with.get(term).copied().unwrap_or(1).max(1) as f64;
-            let score = (cover.get(term).copied().unwrap_or(0) as f64 / size)
-                * (mass / size).sqrt()
-                * (1.0 + groups as f64 / spread).ln();
-            (term.to_owned(), score)
+            let cover = cover.get(term).copied().unwrap_or(0);
+            let score =
+                (cover as f64 / size) * (mass / size).sqrt() * (1.0 + groups as f64 / spread).ln();
+            Term {
+                word: term.to_owned(),
+                score,
+                cover,
+            }
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.word.cmp(&b.word))
+    });
     ranked
 }
 
-/// The group's name: its first term, joined by the second when that is
-/// nearly as strong. Two terms that stand side by side in the members' file
-/// names are one phrase in that order (`custom domain`).
-fn title(terms: &[(String, f64)], members: &[usize], units: &[Unit<'_>]) -> Option<String> {
-    let (first, score) = terms.first()?;
-    let second = terms
-        .get(1)
-        .filter(|(_, other)| *other >= 0.6 * score)
-        .map(|(term, _)| term);
-    let Some(second) = second else {
-        return Some(capitalized(&spelled(first)));
+/// The terms a name may be built from: those scoring near the first.
+fn leading(terms: &[Term]) -> &[Term] {
+    let Some(first) = terms.first() else {
+        return terms;
     };
-    let (mut either, mut forward, mut backward) = (0usize, 0usize, 0usize);
-    for &file in members {
-        let stem = &units[file].stem;
-        either += usize::from(stem.iter().any(|w| w == first || w == second));
-        for pair in stem.windows(2) {
-            forward += usize::from(&pair[0] == first && &pair[1] == second);
-            backward += usize::from(&pair[0] == second && &pair[1] == first);
+    let end = terms
+        .iter()
+        .position(|term| term.score < NAME_SCORE_SHARE * first.score)
+        .unwrap_or(terms.len());
+    &terms[..end.min(NAME_TERMS)]
+}
+
+/// The share of a group's files that carry its widest leading term: how
+/// much of the group is about one thing.
+fn coherence(terms: &[Term], size: usize) -> f64 {
+    leading(terms)
+        .iter()
+        .map(|term| term.cover)
+        .max()
+        .unwrap_or(0) as f64
+        / size.max(1) as f64
+}
+
+/// What a group is called.
+struct Name {
+    title: String,
+    /// The words a file must carry to be about this group's subject.
+    subject: Vec<String>,
+    /// A second subject, in files the first does not name: `A and B`.
+    second: Option<String>,
+}
+
+/// The group's name. Its subject is the leading term most of its files
+/// carry, so a word a few files share does not name the many. A second
+/// leading term joins it when the two stand side by side in the members'
+/// paths, as one phrase in that order (`custom domain`), or when it names
+/// files the first does not, as `A and B`: that group holds two subjects.
+fn title(
+    terms: &[Term],
+    members: &[usize],
+    units: &[Unit<'_>],
+    raw: &[BTreeMap<String, f64>],
+) -> Option<Name> {
+    let one = |word: &str| Name {
+        title: capitalized(&spelled(word)),
+        subject: vec![word.to_owned()],
+        second: None,
+    };
+    let leading = leading(terms);
+    let first = leading
+        .iter()
+        .enumerate()
+        .max_by(|(i, a), (j, b)| a.cover.cmp(&b.cover).then_with(|| j.cmp(i)))
+        .map(|(_, term)| term)?;
+    let first = &first.word;
+    // Side by side in the members' paths: one phrase.
+    if let Some(second) = leading.iter().find(|term| &term.word != first) {
+        let second = &second.word;
+        let (mut either, mut forward, mut backward) = (0usize, 0usize, 0usize);
+        for &file in members {
+            let mut seen = (
+                raw[file].contains_key(first) || raw[file].contains_key(second),
+                false,
+                false,
+            );
+            for phrase in &units[file].phrases {
+                for pair in phrase.windows(2) {
+                    seen.1 |= &pair[0] == first && &pair[1] == second;
+                    seen.2 |= &pair[0] == second && &pair[1] == first;
+                }
+            }
+            either += usize::from(seen.0);
+            forward += usize::from(seen.1);
+            backward += usize::from(seen.2);
+        }
+        if either > 0 && (forward + backward) * 10 >= either * 3 {
+            let (a, b) = if backward > forward {
+                (second, first)
+            } else {
+                (first, second)
+            };
+            if spelled(a) == spelled(b) {
+                return Some(one(a));
+            }
+            return Some(Name {
+                title: capitalized(&format!("{} {}", spelled(a), spelled(b))),
+                subject: vec![a.clone(), b.clone()],
+                second: None,
+            });
         }
     }
-    let phrase = either > 0 && (forward + backward) * 10 >= either * 3;
-    let (a, b) = if phrase && backward > forward {
-        (second, first)
-    } else {
-        (first, second)
-    };
-    if spelled(a) == spelled(b) {
-        return Some(capitalized(&spelled(a)));
+    // A second subject: the ranked term in the names of the most files the
+    // first is absent from, when those are a real part of the group.
+    let second = terms
+        .iter()
+        .take(NAME_TERMS)
+        .filter(|term| &term.word != first)
+        .filter_map(|term| {
+            let (mut both, mut only) = (0usize, 0usize);
+            for &file in members {
+                if units[file].stem.contains(&term.word) {
+                    if raw[file].contains_key(first) {
+                        both += 1;
+                    } else {
+                        only += 1;
+                    }
+                }
+            }
+            (only >= MIN_FILES
+                && only * 2 >= both + only
+                && only as f64 >= SECOND_SUBJECT_SHARE * members.len() as f64)
+                .then_some((only, &term.word))
+        })
+        .enumerate()
+        .max_by(|(i, a), (j, b)| a.0.cmp(&b.0).then_with(|| j.cmp(i)))
+        .map(|(_, (_, word))| word);
+    match second {
+        Some(second) if spelled(second) != spelled(first) => Some(Name {
+            title: capitalized(&format!("{} and {}", spelled(first), spelled(second))),
+            subject: vec![first.clone()],
+            second: Some(second.clone()),
+        }),
+        _ => Some(one(first)),
     }
-    let joined = if phrase {
-        format!("{} {}", spelled(a), spelled(b))
-    } else {
-        format!("{} and {}", spelled(a), spelled(b))
-    };
-    Some(capitalized(&joined))
 }
 
 /// The directory most of the group's files are in, for a name no term gives
@@ -630,11 +758,49 @@ fn group_facts(
     Some(facts)
 }
 
-/// Derive `Subsystem` candidates and their `MEMBER_OF` edges from the base.
-/// The borrowed base is unchanged. A base with too few files to separate
-/// yields nothing; one past [`MAX_SUBSYSTEM_FILES`] is a named omission.
-pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
-    let mut report = SubsystemReport::default();
+/// What the rule reads of a base: its unit files in path order, each file's
+/// words raw and weighted, the two similarity graphs and the shared files.
+struct Signals<'a> {
+    units: Vec<Unit<'a>>,
+    words: Vec<BTreeMap<String, f64>>,
+    word_vectors: Vec<BTreeMap<String, f64>>,
+    /// Each file's nearest neighbours: what the communities are found in.
+    graph: Rows,
+    /// A wider neighbourhood: what a single file is placed by.
+    refine_graph: Rows,
+    shared: Vec<bool>,
+}
+
+/// Each group's ranked terms and name, ranked against the other groups.
+fn named(groups: &[Vec<usize>], signals: &Signals<'_>) -> Vec<(Vec<Term>, Option<Name>)> {
+    let mut groups_with: BTreeMap<&str, usize> = BTreeMap::new();
+    for members in groups {
+        let terms: BTreeSet<&str> = members
+            .iter()
+            .flat_map(|&file| signals.word_vectors[file].keys().map(String::as_str))
+            .collect();
+        for term in terms {
+            *groups_with.entry(term).or_default() += 1;
+        }
+    }
+    groups
+        .iter()
+        .map(|members| {
+            let ranked = ranked_terms(
+                members,
+                &signals.words,
+                &signals.word_vectors,
+                &groups_with,
+                groups.len(),
+            );
+            let name = title(&ranked, members, &signals.units, &signals.words);
+            (ranked, name)
+        })
+        .collect()
+}
+
+/// The unit files of a base and what the rule reads of them.
+fn signals<'a>(base: &'a RevisionedSnapshot, report: &mut SubsystemReport) -> Option<Signals<'a>> {
     let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
     for node in &base.graph.0 {
         nodes
@@ -678,6 +844,7 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
                 path,
                 evidence: file_evidence(node)?,
                 stem: Vec::new(),
+                phrases: Vec::new(),
             })
         })
         .collect();
@@ -687,7 +854,7 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
     report.files = units.len();
     if units.len() > MAX_SUBSYSTEM_FILES {
         report.omission = Some(SUBSYSTEM_FILE_CAP);
-        return report;
+        return None;
     }
     let n = units.len();
     let index: BTreeMap<&str, usize> = units
@@ -806,19 +973,34 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
         *file = merged;
     }
     for unit in &mut units {
-        unit.stem = subject_words(file_stem(unit.path))
-            .iter()
-            .map(|word| folded(word))
+        let segments = unit.path.rsplit_once('/').map_or("", |(dirs, _)| dirs);
+        unit.phrases = segments
+            .split('/')
+            .chain([file_stem(unit.path)])
+            .map(|text| {
+                subject_words(text)
+                    .iter()
+                    .map(|word| folded(word))
+                    .collect::<Vec<String>>()
+            })
             .collect();
+        unit.stem = unit.phrases.pop().unwrap_or_default();
+        unit.phrases.retain(|words| !words.is_empty());
+        unit.phrases.push(unit.stem.clone());
     }
 
-    // Shared files: called or imported from many files.
+    // Shared files: called or imported from many files, and named for no
+    // subject. A widely used file that names one is that subject's core.
     let mut callers = vec![0usize; n];
     for (_, to) in direct.keys() {
         callers[*to] += 1;
     }
     let shared_at = SHARED_MIN_FILES.max((n as f64 * SHARED_SHARE).ceil() as usize);
-    let shared: Vec<bool> = callers.iter().map(|&count| count >= shared_at).collect();
+    let shared: Vec<bool> = callers
+        .iter()
+        .zip(&units)
+        .map(|(&count, unit)| count >= shared_at && unit.stem.is_empty())
+        .collect();
 
     // Similarity rows: word cosine, use cosine and direct coupling.
     let word_vectors = weighted(&words);
@@ -882,6 +1064,28 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
     let graph = symmetric(NEIGHBOURS, MIN_SIMILARITY);
     let refine_graph = symmetric(REFINE_NEIGHBOURS, 0.0);
 
+    Some(Signals {
+        units,
+        words,
+        word_vectors,
+        graph,
+        refine_graph,
+        shared,
+    })
+}
+
+/// Modularity communities of the similarity graph, each file then moved to
+/// the group it is most similar to; groups below the published size are
+/// dropped.
+fn communities(signals: &Signals<'_>) -> Vec<Vec<usize>> {
+    let Signals {
+        units,
+        graph,
+        refine_graph,
+        shared,
+        ..
+    } = signals;
+    let n = units.len();
     // Best modularity over a fixed set of visiting orders.
     let natural: Vec<usize> = (0..n).collect();
     let mut best: Option<(Vec<usize>, f64)> = None;
@@ -894,14 +1098,14 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
                 core_prov::content_hash(format!("{attempt}\u{0}{}", units[file].path).as_bytes())
             });
         }
-        let part = louvain(&order, &graph, RESOLUTION);
-        let quality = modularity(&graph, &part, RESOLUTION);
+        let part = louvain(&order, graph, RESOLUTION);
+        let quality = modularity(graph, &part, RESOLUTION);
         if best.as_ref().is_none_or(|(_, kept)| quality > kept + 1e-12) {
             best = Some((part, quality));
         }
     }
     let Some((communities, _)) = best else {
-        return report;
+        return Vec::new();
     };
     // Number groups by their first file so ids do not depend on the order.
     let mut renumber: BTreeMap<usize, usize> = BTreeMap::new();
@@ -912,7 +1116,7 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
             part[file] = Some(*renumber.entry(communities[file]).or_insert(next));
         }
     }
-    refine(&mut part, &refine_graph);
+    refine(&mut part, refine_graph);
 
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (file, group) in part.iter().enumerate() {
@@ -926,22 +1130,179 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
         .collect();
     groups.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 
-    let mut groups_with: BTreeMap<&str, usize> = BTreeMap::new();
-    for members in &groups {
-        let terms: BTreeSet<&str> = members
-            .iter()
-            .flat_map(|&file| word_vectors[file].keys().map(String::as_str))
-            .collect();
-        for term in terms {
-            *groups_with.entry(term).or_default() += 1;
+    groups
+}
+
+/// Groups made to follow their names. A group no term holds together is
+/// dropped, a group named for two subjects becomes two, two groups with one
+/// name become one, and a file left over joins the group whose subject it
+/// carries. Each is the same reading a person makes of the group's name.
+fn regroup(mut groups: Vec<Vec<usize>>, signals: &Signals<'_>) -> Vec<Vec<usize>> {
+    let Signals {
+        units,
+        words,
+        refine_graph,
+        shared,
+        ..
+    } = signals;
+    let n = units.len();
+    groups.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    // Terms are ranked against the other groups, so a change to one group
+    // can change the names of the rest: every step names the groups again.
+    let carries = |file: usize, word: &str| words[file].contains_key(word);
+    for _ in 0..REGROUP_ROUNDS {
+        let mut changed = false;
+        // Leftovers that share no subject are not a group.
+        let terms = named(&groups, signals);
+        let mut kept = Vec::with_capacity(groups.len());
+        for (members, (ranked, _)) in groups.into_iter().zip(&terms) {
+            if coherence(ranked, members.len()) >= MIN_COHERENCE {
+                kept.push(members);
+            } else {
+                changed = true;
+            }
+        }
+        groups = kept;
+        // A group named for two subjects is two groups: each file goes with
+        // the subject it carries, the rest with the side they resemble more.
+        let terms = named(&groups, signals);
+        let mut next: Vec<Vec<usize>> = Vec::with_capacity(groups.len());
+        for (members, (_, name)) in groups.into_iter().zip(&terms) {
+            let split = name.as_ref().and_then(|name| {
+                let (first, second) = (name.subject.first()?, name.second.as_ref()?);
+                let side: BTreeMap<usize, bool> = members
+                    .iter()
+                    .filter_map(|&file| {
+                        match (carries(file, first), units[file].stem.contains(second)) {
+                            (true, false) => Some((file, false)),
+                            (false, true) => Some((file, true)),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                let (mut one, mut two) = (Vec::new(), Vec::new());
+                for &file in &members {
+                    let to_second = side.get(&file).copied().unwrap_or_else(|| {
+                        let (mut a, mut b) = (0.0f64, 0.0f64);
+                        for &(other, weight) in &refine_graph[file] {
+                            match side.get(&other) {
+                                Some(false) => a += weight,
+                                Some(true) => b += weight,
+                                None => {}
+                            }
+                        }
+                        b > a + 1e-12
+                    });
+                    if to_second {
+                        two.push(file)
+                    } else {
+                        one.push(file)
+                    }
+                }
+                (one.len() >= MIN_FILES && two.len() >= MIN_FILES).then_some((one, two))
+            });
+            match split {
+                Some((one, two)) => {
+                    changed = true;
+                    next.push(one);
+                    next.push(two);
+                }
+                _ => next.push(members),
+            }
+        }
+        groups = next;
+        // Two groups with one name are one subject.
+        let terms = named(&groups, signals);
+        let mut by_title: BTreeMap<String, usize> = BTreeMap::new();
+        let mut merged: Vec<Vec<usize>> = Vec::with_capacity(groups.len());
+        for (members, (_, name)) in groups.into_iter().zip(&terms) {
+            let slot = name
+                .as_ref()
+                .and_then(|name| by_title.get(&name.title).copied());
+            match slot {
+                Some(slot) => {
+                    changed = true;
+                    merged[slot].extend(members);
+                    merged[slot].sort_unstable();
+                }
+                None => {
+                    if let Some(name) = name {
+                        by_title.insert(name.title.clone(), merged.len());
+                    }
+                    merged.push(members);
+                }
+            }
+        }
+        groups = merged;
+        groups.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        if !changed {
+            break;
         }
     }
+    // A file left without a group joins the group whose subject it carries
+    // in its own name, path, route or entity, the most similar one first.
+    {
+        let terms = named(&groups, signals);
+        let mut group_of: Vec<Option<usize>> = vec![None; n];
+        for (group, members) in groups.iter().enumerate() {
+            for &file in members {
+                group_of[file] = Some(group);
+            }
+        }
+        let mut joins: Vec<(usize, usize)> = Vec::new();
+        for file in 0..n {
+            if shared[file] || group_of[file].is_some() {
+                continue;
+            }
+            let mut similarity: BTreeMap<usize, f64> = BTreeMap::new();
+            for &(other, weight) in &refine_graph[file] {
+                if let Some(group) = group_of[other] {
+                    *similarity.entry(group).or_default() += weight;
+                }
+            }
+            let mut best: Option<(usize, f64)> = None;
+            for (group, (_, name)) in terms.iter().enumerate() {
+                let about = name.as_ref().is_some_and(|name| {
+                    name.subject
+                        .iter()
+                        .all(|word| words[file].get(word).is_some_and(|&w| w >= SUBJECT_WEIGHT))
+                });
+                let score = similarity.get(&group).copied().unwrap_or(0.0)
+                    / (groups[group].len() as f64).powf(SIZE_EXPONENT);
+                if about && best.is_none_or(|(_, kept)| score > kept + 1e-12) {
+                    best = Some((group, score));
+                }
+            }
+            if let Some((group, _)) = best {
+                joins.push((file, group));
+            }
+        }
+        for (file, group) in joins {
+            groups[group].push(file);
+        }
+        for members in &mut groups {
+            members.sort_unstable();
+        }
+    }
+    groups
+}
+
+/// Derive `Subsystem` candidates and their `MEMBER_OF` edges from the base.
+/// The borrowed base is unchanged. A base with too few files to separate
+/// yields nothing; one past [`MAX_SUBSYSTEM_FILES`] is a named omission.
+pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
+    let mut report = SubsystemReport::default();
+    let Some(signals) = signals(base, &mut report) else {
+        return report;
+    };
+    let groups = regroup(communities(&signals), &signals);
+    let Signals { units, shared, .. } = &signals;
+    let n = units.len();
+    let terms = named(&groups, &signals);
     let mut names: BTreeSet<String> = BTreeSet::new();
-    for members in &groups {
-        let ranked = ranked_terms(members, &words, &word_vectors, &groups_with, groups.len());
-        let directory = common_directory(members, &units);
-        let mut name =
-            title(&ranked, members, &units).unwrap_or_else(|| format!("Files in {directory}"));
+    for (members, (ranked, name)) in groups.iter().zip(terms) {
+        let directory = common_directory(members, units);
+        let mut name = name.map_or_else(|| format!("Files in {directory}"), |name| name.title);
         if names.contains(&name) {
             name = format!("{name} ({directory})");
         }
@@ -951,8 +1312,8 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
             name = format!("{base_name} ({suffix})");
             suffix += 1;
         }
-        let terms: Vec<String> = ranked.into_iter().take(6).map(|(term, _)| term).collect();
-        match group_facts("cluster", &name, &terms, members, &units) {
+        let terms: Vec<String> = ranked.into_iter().take(6).map(|term| term.word).collect();
+        match group_facts("cluster", &name, &terms, members, units) {
             Some(facts) => {
                 report.grouped += members.len();
                 report.facts.extend(facts);
@@ -962,7 +1323,7 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
     }
     let shared_files: Vec<usize> = (0..n).filter(|&file| shared[file]).collect();
     if !shared_files.is_empty() {
-        match group_facts("shared", "Shared code", &[], &shared_files, &units) {
+        match group_facts("shared", "Shared code", &[], &shared_files, units) {
             Some(facts) => {
                 report.shared = shared_files.len();
                 report.facts.extend(facts);
