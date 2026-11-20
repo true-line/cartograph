@@ -76,10 +76,13 @@ const GUIDANCE: &[(&str, &str)] = &[
     ),
     (
         "1.3",
-        "Describe the system's capabilities as a product owner would: group them into \
-         areas, and for each area state its purpose, who uses it (an end user, an API \
-         client, an administrator, a developer, an external provider) and the outcome it \
-         delivers, including notable conditions and limits. A route is evidence, not \
+        "Describe the system's capabilities as a product owner would, area by area. When \
+         the section lists capability areas, follow them: describe each area it prints \
+         rather than inventing another grouping, and in prose you may merge or rename an \
+         area whose name is weak or misleading. Otherwise group the capabilities into \
+         areas yourself. For each area state its purpose, who uses it (an end user, an \
+         API client, an administrator, a developer, an external provider) and the outcome \
+         it delivers, including notable conditions and limits. A route is evidence, not \
          content: name at most two representative routes in a statement and never \
          enumerate routes, methods or versions.",
     ),
