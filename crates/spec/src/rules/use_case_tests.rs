@@ -488,3 +488,38 @@ fn duplicate_owners_collapse_and_unknown_case_rule_labels_unknown() {
             .any(|m| m == "R-ghost has no recovered row")
     );
 }
+
+#[test]
+fn a_guarded_effect_is_no_decision_row() {
+    // AC-0910: an effect in a declared owner changes state; it is not an
+    // exit that may block the goal, so it adds no row or guard candidate.
+    let nodes = vendure_nodes();
+    let before = project_use_case(
+        &nodes,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+        &scope(),
+    );
+    let mut with_effect = nodes.clone();
+    let mut rule = nodes[0].props["rule"].clone();
+    let value = rule["effect"]["value"].clone();
+    rule["kind"] = json!("guarded_effect");
+    rule["effect"] = json!({"kind": "call", "value": value});
+    assert!(GuardedExitEvidence::from_value(rule.clone()).is_ok());
+    with_effect.push(observation_node(
+        "rule:effect-in-entry",
+        rule,
+        Tier::Deterministic,
+        ConfidenceTier::Confirmed,
+    ));
+    let after = project_use_case(
+        &with_effect,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+        &scope(),
+    );
+    assert_eq!(before.rows.len(), after.rows.len());
+    assert!(after.rows.iter().all(|r| !r.id.contains("effect-in-entry")));
+}

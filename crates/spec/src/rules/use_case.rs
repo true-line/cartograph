@@ -277,6 +277,11 @@ pub fn project_use_case(
         let Ok(rule) = GuardedExitEvidence::from_value(node.props["rule"].clone()) else {
             continue;
         };
+        // A guarded effect (#1998) changes state; it is not an exit that may
+        // block the goal, so it is no decision row or guard candidate.
+        if !rule.effect.exits() {
+            continue;
+        }
         let Some(&role) = roles.get(rule.owner_id.as_str()) else {
             continue;
         };
