@@ -107,7 +107,9 @@ pub fn definition_fingerprint() -> String {
 }
 
 /// The response schema: up to [`COMPOSER_CLAIMS`] claims, each citing
-/// citable ids only.
+/// citable ids only. At least one claim and one citation per claim is part
+/// of the schema itself, so constrained decoding cannot emit an uncited
+/// placeholder (hosted structured output keeps `minItems` 0 and 1).
 pub fn response_schema(citable: &BTreeSet<String>) -> String {
     serde_json::json!({
         "type": "object",
@@ -116,6 +118,7 @@ pub fn response_schema(citable: &BTreeSet<String>) -> String {
         "properties": {
             "claims": {
                 "type": "array",
+                "minItems": 1,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -129,6 +132,7 @@ pub fn response_schema(citable: &BTreeSet<String>) -> String {
                         ]},
                         "citation_ids": {
                             "type": "array",
+                            "minItems": 1,
                             "items": {"enum": citable.iter().collect::<Vec<_>>()}
                         }
                     }

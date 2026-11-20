@@ -61,6 +61,12 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
     let ids =
         &schema["properties"]["claims"]["items"]["properties"]["citation_ids"]["items"]["enum"];
     assert_eq!(ids, &serde_json::json!([id(1), id(2)]));
+    // An uncited or empty reply is outside the schema, not only the decoder.
+    assert_eq!(schema["properties"]["claims"]["minItems"], 1);
+    assert_eq!(
+        schema["properties"]["claims"]["items"]["properties"]["citation_ids"]["minItems"],
+        1
+    );
     // Hosted structured output can carry it.
     let text = action.payload.response_schema.unwrap();
     assert!(llm::bounded::anthropic_wire_schema(&text).is_some());
