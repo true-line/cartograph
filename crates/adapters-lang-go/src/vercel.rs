@@ -104,6 +104,9 @@ fn source_paths(source: &str) -> Option<Vec<String>> {
     if !source.starts_with('/') {
         return None;
     }
+    if source == "/" {
+        return Some(vec!["/".to_owned()]);
+    }
     let mut paths = vec![String::new()];
     // Split on `/` outside parentheses: `(revoke|admin/migrate)` is one.
     let mut segments: Vec<&str> = Vec::new();
@@ -227,6 +230,22 @@ fn endpoint(
     )
 }
 
+/// The root `vercel.json`, read only when it is a regular, non-ignored file
+/// of the captured source: an ignored or symlinked one is absent, so a file
+/// outside the commit can't change its facts (ADR-0030, ADR-0034).
+fn read_config(root: &Path) -> Option<Vec<u8>> {
+    if super::root_gitignore(root).ok()?.is_ignored(CONFIG, false) {
+        return None;
+    }
+    let path = root.join(CONFIG);
+    if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
+const CONFIG: &str = "vercel.json";
+
 /// The functions' and rewrites' Endpoints, when `root` is a Vercel project.
 pub(super) fn routes(
     root: &Path,
@@ -235,7 +254,7 @@ pub(super) fn routes(
     functions: &[HandlerFunction],
     out: &mut Extraction,
 ) {
-    let Ok(config) = std::fs::read(root.join("vercel.json")) else {
+    let Some(config) = read_config(root) else {
         return;
     };
     // One exported handler per function file is the function Vercel serves.
@@ -287,7 +306,7 @@ pub(super) fn routes(
         searched_from = start + needle.len();
         let evidence = EvidenceRef {
             repo: repo.into(),
-            path: "vercel.json".into(),
+            path: CONFIG.into(),
             byte_start: start as u64,
             byte_end: (start + needle.len().max(1)) as u64,
             commit_sha: commit.into(),
@@ -390,6 +409,7 @@ func helper(x int) int { return x }
         write(
             "vercel.json",
             r#"{"rewrites": [
+  {"source": "/", "destination": "/api/docs"},
   {"source": "/docs", "destination": "/api/docs"},
   {"source": "/docs/(.*)", "destination": "/api/docs?x=1"},
   {"source": "/devices/(revoke|admin/migrate)", "destination": "/api/devices"},
@@ -428,6 +448,7 @@ func helper(x int) int { return x }
         assert_eq!(
             routes,
             [
+                "ANY / -> Docs (rewrites to /api/docs)",
                 "ANY /api/auth/login -> Handler",
                 "ANY /api/docs -> Docs",
                 "ANY /docs -> Docs (rewrites to /api/docs)",
@@ -466,10 +487,35 @@ func helper(x int) int { return x }
             .expect("the reused function routes");
         assert_eq!(login.props["prov"]["evidence"][0]["commit_sha"], "beef");
 
+        // An ignored or symlinked vercel.json is not read: only the
+        // captured source's own file makes a Vercel project.
+        let vercel = |root: &Path| {
+            extract_dir(root, &id)
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|n| n.props["framework"] == "vercel")
+        };
+        write(".gitignore", "vercel.json\n");
+        assert!(!vercel(dir.path()));
+        std::fs::remove_file(dir.path().join(".gitignore")).unwrap();
+        #[cfg(unix)]
+        {
+            let config = std::fs::read(dir.path().join("vercel.json")).unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("vercel.json"), &config).unwrap();
+            std::fs::remove_file(dir.path().join("vercel.json")).unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("vercel.json"),
+                dir.path().join("vercel.json"),
+            )
+            .unwrap();
+            assert!(!vercel(dir.path()));
+        }
+
         // Without vercel.json there are no Vercel routes.
         std::fs::remove_file(dir.path().join("vercel.json")).unwrap();
-        let plain = extract_dir(dir.path(), &id).unwrap();
-        assert!(!plain.nodes.iter().any(|n| n.props["framework"] == "vercel"));
+        assert!(!vercel(dir.path()));
     }
 
     #[test]
