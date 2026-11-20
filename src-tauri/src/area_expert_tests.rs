@@ -24,6 +24,11 @@ fn a_question_is_answered_from_the_areas_briefing() {
             .collect::<Vec<_>>(),
         [("Alias", 1), ("Mailbox", 1)]
     );
+    // The digest names the briefing's text: the same read gives the same
+    // one, and two areas' briefings differ.
+    let (first, again) = (areas(&state).unwrap(), areas(&state).unwrap());
+    assert_eq!(first, again);
+    assert_ne!(first[0].briefing_digest, first[1].briefing_digest);
     let turns = [ExpertTurn {
         question: "What is this area?".into(),
         answer: "It manages aliases.".into(),

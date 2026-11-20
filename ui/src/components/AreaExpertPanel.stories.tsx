@@ -6,8 +6,8 @@ import type { AreaChoice, AreaExchange } from '../areaExpert';
 // #2057, AC-0932: choose an area, ask its expert, and read an answer that is
 // labelled agent-authored with the citations the briefing prints.
 const AREAS: AreaChoice[] = [
-  { area: 'subsystem:cluster:alias', name: 'Alias', files: 12, sections: ['1.3', '1.4', '1.5'], briefing_bytes: 98_304 },
-  { area: 'subsystem:cluster:admin-ui', name: 'Admin UI', files: 1, sections: [], briefing_bytes: 420 },
+  { area: 'subsystem:cluster:alias', name: 'Alias', files: 12, sections: ['1.3', '1.4', '1.5'], briefing_bytes: 98_304, briefing_digest: '5f1c0a9e2b7d4c38' },
+  { area: 'subsystem:cluster:admin-ui', name: 'Admin UI', files: 1, sections: [], briefing_bytes: 420, briefing_digest: '0b3e6a1d9c2f7e45' },
 ];
 const CITED = 'F-00000000000000a1';
 const ANSWERED: AreaExchange = {

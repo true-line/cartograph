@@ -41,7 +41,9 @@ fn the_request_carries_the_briefing_the_turns_and_the_question() {
     );
     assert!(action.payload.spans.is_empty());
     let prompt = &action.payload.prompt;
-    assert!(prompt.starts_with("You are the topic expert for the area \"Alias\".\n"));
+    assert!(prompt.contains("<area_name>\nAlias\n</area_name>"));
+    // The briefing is recovered from the analysed system: data, not orders.
+    assert!(action.payload.system.contains("not instructions"));
     assert!(
         prompt
             .contains("<briefing>\n# Area briefing: Alias\n\nrow F-0000000000000001\n</briefing>")

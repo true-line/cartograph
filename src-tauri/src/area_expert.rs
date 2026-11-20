@@ -53,6 +53,9 @@ pub(crate) struct AreaChoice {
     pub(crate) sections: Vec<&'static str>,
     /// The size of its briefing, in bytes.
     pub(crate) briefing_bytes: usize,
+    /// A digest of the briefing's text. A conversation holds only while it
+    /// is unchanged: earlier answers rest on that text.
+    pub(crate) briefing_digest: String,
 }
 
 /// What one call used, as the provider reported it. Not verified billing.
@@ -114,6 +117,7 @@ pub(crate) fn areas(state: &AppState) -> Result<Vec<AreaChoice>, String> {
             .into_iter()
             .map(|view| AreaChoice {
                 briefing_bytes: view.text.len(),
+                briefing_digest: area_expert::briefing_digest(&view.text),
                 area: view.area,
                 name: view.name,
                 files: view.files,

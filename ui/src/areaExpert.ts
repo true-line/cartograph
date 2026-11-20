@@ -13,6 +13,8 @@ export interface AreaChoice {
   files: number;
   sections: string[];
   briefing_bytes: number;
+  /** A digest of the briefing's text; a conversation holds while it is unchanged. */
+  briefing_digest: string;
 }
 
 export interface ExpertStatement {
@@ -124,6 +126,17 @@ function words(error: unknown): string {
   return refusalText(text);
 }
 
+/** Whether a conversation with `selected` still holds after the areas were
+ *  read again: the area is still there and its briefing is the same text.
+ *  Earlier answers rest on the briefing they were given. */
+export function conversationHolds(
+  before: AreaChoice[], after: AreaChoice[], selected: string | null,
+): boolean {
+  const was = before.find((choice) => choice.area === selected);
+  const now = after.find((choice) => choice.area === selected);
+  return Boolean(now) && (!was || was.briefing_digest === now?.briefing_digest);
+}
+
 export interface AreaExpertState {
   areas: AreaChoice[];
   selected: string | null;
@@ -149,6 +162,7 @@ export function useAreaExpert(active: boolean): AreaExpertState {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<AreaExpertState['pending']>(null);
   const generation = useRef(0);
+  const known = useRef<AreaChoice[]>([]);
 
   // A newer read wins over one still in flight.
   const load = useCallback(() => {
@@ -156,12 +170,14 @@ export function useAreaExpert(active: boolean): AreaExpertState {
     loadAreaChoices()
       .then((loaded) => {
         if (mine !== generation.current) return;
+        const before = known.current;
+        known.current = loaded;
         setAreas(loaded);
         setError(null);
         setSelected((current) => {
-          if (loaded.some((choice) => choice.area === current)) return current;
-          setExchanges([]);
-          return null;
+          const there = loaded.some((choice) => choice.area === current);
+          if (!conversationHolds(before, loaded, current)) setExchanges([]);
+          return there ? current : null;
         });
       })
       .catch((caught: unknown) => {

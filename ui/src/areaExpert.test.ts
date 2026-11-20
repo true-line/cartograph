@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import {
-  answerText, areaAskPreview, loadAreaChoices, refusalText, runAreaAsk, turnsOf, usageText,
+  answerText, areaAskPreview, conversationHolds, loadAreaChoices, refusalText, runAreaAsk, turnsOf, usageText,
 } from './areaExpert';
 import type { AskOutcome } from './areaExpert';
 
@@ -32,7 +32,7 @@ describe('area expert', () => {
     const commands: [string, unknown][] = [];
     mockIPC((command, args) => {
       commands.push([command, args]);
-      if (command === 'area_choices') return [{ area: ANSWER.area, name: 'Alias', files: 12, sections: ['1.3'], briefing_bytes: 900 }];
+      if (command === 'area_choices') return [{ area: ANSWER.area, name: 'Alias', files: 12, sections: ['1.3'], briefing_bytes: 900, briefing_digest: 'd1' }];
       if (command === 'area_ask_preview') return PREVIEW;
       return ANSWER;
     });
@@ -53,6 +53,14 @@ describe('area expert', () => {
         area: ANSWER.area, question: 'Who may delete?', turns, mode: 'cloud', approvedPayloadHash: 'hash-1',
       }],
     ]);
+  });
+
+  it('keeps a conversation only while the area and its briefing are unchanged', () => {
+    const alias = { area: 'a', name: 'Alias', files: 1, sections: ['1.3'], briefing_bytes: 900, briefing_digest: 'd1' };
+    expect(conversationHolds([alias], [alias], 'a')).toBe(true);
+    expect(conversationHolds([alias], [{ ...alias, briefing_digest: 'd2' }], 'a')).toBe(false);
+    expect(conversationHolds([alias], [], 'a')).toBe(false);
+    expect(conversationHolds([], [alias], 'a')).toBe(true);
   });
 
   it('puts a closed refusal into words and keeps an unknown one as sent', () => {
