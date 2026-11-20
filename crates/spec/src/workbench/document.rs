@@ -697,7 +697,8 @@ fn uncovered_endpoints(
         .filter(|e| e.label == "HANDLES" && symbols.contains(e.dst.as_str()))
         .map(|e| e.src.as_str())
         .collect();
-    let front_doors = crate::front_doors::vercel_front_doors(endpoints.iter().copied());
+    let front_doors =
+        crate::front_doors::vercel_front_doors(endpoints.iter().copied(), edges.iter().copied());
     let mut unresolved = 0usize;
     let mut fronting = 0usize;
     let mut by_framework: BTreeMap<&str, usize> = BTreeMap::new();

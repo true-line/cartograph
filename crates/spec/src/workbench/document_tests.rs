@@ -451,6 +451,8 @@ fn capability_frame_states_a_vercel_front_door_and_the_routes_behind_it() {
         n.props["path"] = json!(path);
         n.props["framework"] = json!(framework);
         n.props["handler_sym"] = json!(handler);
+        // Registered beside the function, so in a package it reaches.
+        n.props["prov"]["evidence"][0]["path"] = json!("api/web/routes.go");
         n
     };
     let nodes = [

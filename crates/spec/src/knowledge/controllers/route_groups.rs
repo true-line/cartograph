@@ -175,13 +175,15 @@ fn group_name(
 pub(super) fn derive(
     nodes: &BTreeMap<&str, Option<&Node>>,
     handles: &BTreeMap<&str, Vec<&core_graph::Edge>>,
+    edges: &[core_graph::Edge],
     pending: &mut Vec<super::Pending>,
 ) {
     type Key = (&'static str, String, String, String);
     let mut groups: BTreeMap<Key, (Naming, Group)> = BTreeMap::new();
     // A Vercel function that only passes requests on to the routes behind
     // it is not an operation of its own (AC-0926).
-    let front_doors = crate::front_doors::vercel_front_doors(nodes.values().filter_map(|n| *n));
+    let front_doors =
+        crate::front_doors::vercel_front_doors(nodes.values().filter_map(|n| *n), edges);
     for endpoint in nodes.values().filter_map(|n| *n) {
         let props = &endpoint.props;
         if endpoint.label != "Endpoint" || front_doors.contains_key(endpoint.id.as_str()) {

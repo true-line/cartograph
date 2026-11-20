@@ -205,7 +205,7 @@ pub fn derive_controller_capabilities(base: &RevisionedSnapshot) -> CapabilityRe
             group,
         });
     }
-    route_groups::derive(&nodes, &handles, &mut pending);
+    route_groups::derive(&nodes, &handles, &base.graph.1, &mut pending);
     let mut report = CapabilityReport::default();
     for (title, key, group) in disambiguated(pending) {
         let fact = capability_fact(
