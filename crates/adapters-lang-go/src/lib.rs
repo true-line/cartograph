@@ -642,7 +642,11 @@ fn handler_target<'t>(
         "identifier" => {
             if let Some(symbol) = scope.locals.get(text) {
                 (HandlerTarget::Resolved(symbol.clone()), None)
-            } else if let Some(literal) = scope.closures.get(text) {
+            } else if let Some(literal) = scope
+                .closures
+                .get(text)
+                .filter(|literal| closure_visible(cx, **literal, handler, text))
+            {
                 (HandlerTarget::Resolved(String::new()), Some(*literal))
             } else {
                 gap()
@@ -681,17 +685,19 @@ fn handler_target<'t>(
         }
         "call_expression" if depth == 0 => {
             // A wrapper: the handler it takes, else the wrapper itself.
+            // The last argument that resolves: `wrap(h, opts)` skips an
+            // `opts` that names no handler and takes `h`.
             let taken = call_arguments(handler)
                 .into_iter()
                 .rev()
-                .find(|a| {
+                .filter(|a| {
                     matches!(
                         a.kind(),
                         "func_literal" | "identifier" | "selector_expression"
                     )
                 })
                 .map(|a| handler_target(cx, a, scope, depth + 1))
-                .filter(|(t, _)| !matches!(t, HandlerTarget::Gap { .. }));
+                .find(|(t, _)| !matches!(t, HandlerTarget::Gap { .. }));
             if let Some(found) = taken {
                 return found;
             }
@@ -749,6 +755,58 @@ fn literal_symbol(
 }
 
 /// Locals bound exactly once in the file to a func literal.
+/// Whether the local `name`, bound once to `literal` by `name := func…`,
+/// is the binding visible at `usage`: the usage follows the declaration
+/// inside the block that declares it, and no function between them takes a
+/// parameter of that name. A same-named binding in another function is not
+/// visible (#2007).
+fn closure_visible(cx: &FileCx<'_>, literal: TsNode<'_>, usage: TsNode<'_>, name: &str) -> bool {
+    let mut declaration = literal;
+    while declaration.kind() != "short_var_declaration" {
+        let Some(parent) = declaration.parent() else {
+            return false;
+        };
+        declaration = parent;
+    }
+    let Some(block) = declaration.parent() else {
+        return false;
+    };
+    if declaration.end_byte() > usage.start_byte()
+        || usage.start_byte() < block.start_byte()
+        || usage.end_byte() > block.end_byte()
+    {
+        return false;
+    }
+    let mut node = usage;
+    while let Some(parent) = node.parent() {
+        if parent.id() == block.id() {
+            return true;
+        }
+        if matches!(
+            parent.kind(),
+            "func_literal" | "function_declaration" | "method_declaration"
+        ) && parent
+            .child_by_field_name("parameters")
+            .is_some_and(|parameters| declares(cx, parameters, name))
+        {
+            return false;
+        }
+        node = parent;
+    }
+    false
+}
+
+/// Whether a parameter list declares `name`.
+fn declares(cx: &FileCx<'_>, parameters: TsNode<'_>, name: &str) -> bool {
+    let mut walk = parameters.walk();
+    parameters.named_children(&mut walk).any(|parameter| {
+        let mut walk = parameter.walk();
+        parameter
+            .children_by_field_name("name", &mut walk)
+            .any(|n| cx.text(&n) == name)
+    })
+}
+
 fn closures<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> HashMap<String, TsNode<'t>> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut found = HashMap::new();
