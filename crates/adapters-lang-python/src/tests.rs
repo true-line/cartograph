@@ -8133,3 +8133,48 @@ def via_first(alias_id):
         );
     }
 }
+
+// AC-0916: a module's plain string constants are kept on its File node,
+// except a rebound name or a secret-shaped value; a function's locals bound
+// to module constants are kept on its Symbol.
+#[test]
+fn reply_constants_and_the_locals_bound_to_them_are_kept() {
+    let facts = extract_source(
+        br#"
+E200 = "250 Message accepted for delivery"
+E502 = "550 SL E502 Email not exist"
+TWICE = "a"
+TWICE = "b"
+API_KEY = "sk-live-0123456789abcdef0123456789"
+lower = "not a constant"
+
+def handle(user):
+    res_status = status.E200
+    if user.reject:
+        res_status = status.E502
+    def inner():
+        hidden = status.E999
+    return res_status
+"#,
+        "app/email/status.py",
+        &id(),
+    )
+    .unwrap();
+    let file = facts.nodes.iter().find(|n| n.label == "File").unwrap();
+    assert_eq!(
+        file.props["string_constants"],
+        serde_json::json!({
+            "E200": "250 Message accepted for delivery",
+            "E502": "550 SL E502 Email not exist",
+        })
+    );
+    let handle = facts
+        .nodes
+        .iter()
+        .find(|n| n.label == "Symbol" && n.props["name"] == "handle")
+        .unwrap();
+    assert_eq!(
+        handle.props["constant_locals"],
+        serde_json::json!({ "res_status": ["status.E200", "status.E502"] })
+    );
+}
