@@ -224,6 +224,19 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not pending", http.StatusNotFound)
 		return
 	}
+	first, err := s.load(), s.Apps.Store.Check(d)
+	if err != nil {
+		http.Error(w, "check failed", http.StatusConflict)
+		return
+	}
+	err = s.Apps.Store.Save(first)
+	if retry(d) {
+		err = again()
+	}
+	if err != nil {
+		http.Error(w, "retry failed", http.StatusConflict)
+		return
+	}
 	if d.Name == "" {
 		http.Error(w, "name required", http.StatusBadRequest)
 		return
@@ -256,6 +269,8 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) {
             serde_json::json!(["Store.Save"]),
             serde_json::json!(["strconv.Atoi"]),
             serde_json::json!(["pendingByID"]),
+            serde_json::json!(["Store.Check"]),
+            serde_json::json!([null]),
             serde_json::json!([null]),
         ]
     );

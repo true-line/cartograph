@@ -290,16 +290,17 @@ fn failed_call(
         }
         let left = statement.child_by_field_name("left")?;
         let mut walk = left.walk();
-        if !left
+        let at = left
             .named_children(&mut walk)
-            .any(|name| cx.text(&name) == tested)
-        {
-            return None;
-        }
+            .position(|name| cx.text(&name) == tested)?;
+        // `v, err := f()` binds every name from one call; `a, err := f(), g()`
+        // binds each name from the value at its position.
         let right = statement.child_by_field_name("right")?;
-        let call = right
-            .named_child(0)
-            .filter(|v| v.kind() == "call_expression");
+        let call = match right.named_child_count() {
+            1 => right.named_child(0),
+            _ => right.named_child(u32::try_from(at).ok()?),
+        }
+        .filter(|v| v.kind() == "call_expression");
         Some(call.and_then(|call| callee_name(cx, imports, call)))
     };
     if let Some(initializer) = branch.child_by_field_name("initializer")
@@ -307,12 +308,12 @@ fn failed_call(
     {
         return found;
     }
+    // Only the statement just before the test: anything between could have
+    // set `err` again (`if retry { err = again() }`).
     let mut previous = branch.prev_named_sibling();
     while let Some(statement) = previous {
-        if statement.kind() != "comment"
-            && let Some(found) = assigns(statement)
-        {
-            return found;
+        if statement.kind() != "comment" {
+            return assigns(statement).flatten();
         }
         previous = statement.prev_named_sibling();
     }
