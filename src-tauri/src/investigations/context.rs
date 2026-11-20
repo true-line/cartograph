@@ -637,6 +637,8 @@ impl FrozenContext {
         Ok(prepared)
     }
 
+    /// A graph with no area scope, for tests that freeze one directly.
+    #[cfg(test)]
     fn from_graph(
         graph: (Vec<Node>, Vec<Edge>),
         request: impl TryInto<AcquisitionRequest, Error = HostError>,
