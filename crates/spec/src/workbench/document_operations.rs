@@ -6,8 +6,8 @@
 //! row states, from facts already recovered and nothing read from source:
 //!
 //! - **Takes**: the literal input names its handler reads (`request_inputs`);
-//! - **On success**: the 2xx statuses and body kinds of `responses`. The
-//!   recorded JSON keys are not split by status, so they are left to
+//! - **On success**: the 2xx statuses of `responses`. The recorded body
+//!   kinds and JSON keys are not tied to a status, so they are left to
 //!   `endpoint-inventory.md` rather than stated as the success body;
 //! - **Changes**: the entities written, with the operation (insert, update,
 //!   delete), by the handler and the Symbols it reaches along `CALLS` within
@@ -201,7 +201,7 @@ pub(super) fn operations_per_capability(
         out,
         "\nWhat each operation takes, returns on success and changes: {total} operations. \
          \"Takes\" is the literal input names the handler reads; \"On success\" the 2xx \
-         statuses and body kinds its returns prove (`endpoint-inventory.md` lists the JSON keys \
+         statuses its returns prove (`endpoint-inventory.md` lists the body kinds and JSON keys \
          across all its responses); \"Changes\" the entities the handler, and what it calls within {CALL_DEPTH} \
          hops, inserts, updates or deletes. When each write happens is not established here. \
          \"Not recovered\" names each of these the graph holds nothing for, which is not \
@@ -248,15 +248,13 @@ pub(super) fn operations_per_capability(
                         .filter(|status| (200..300).contains(status))
                         .map(|status| status.to_string())
                         .collect();
-                    let kinds = strings(&raw["kinds"]);
                     if ok.is_empty() {
                         missing.push("success response");
                         "—".into()
                     } else {
+                        // Body kinds are not tied to statuses in the fact, so a
+                        // kind could belong to an error return: not stated here.
                         let mut text = ok.join(", ");
-                        if !kinds.is_empty() {
-                            text.push_str(&format!(" ({})", kinds.join(", ")));
-                        }
                         if strings(&raw["partial"]).contains(&"response_built_elsewhere") {
                             text.push_str("; body built outside the handler");
                         }
@@ -572,14 +570,12 @@ def ping():
         };
         let created = row("POST /api/alias/new");
         assert!(
-            created.starts_with(
-                "| POST /api/alias/new | body note | 201 (json) | inserts Alias | — | "
-            ),
+            created.starts_with("| POST /api/alias/new | body note | 201 | inserts Alias | — | "),
             "{created}"
         );
         let ping = row("GET /api/ping");
         assert!(
-            ping.starts_with("| GET /api/ping | — | 200 (text) | none traced | inputs, writes | "),
+            ping.starts_with("| GET /api/ping | — | 200 | none traced | inputs, writes | "),
             "{ping}"
         );
     }
