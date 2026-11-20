@@ -384,3 +384,54 @@ fn document_is_deterministic_selected_alone_and_bounded() {
         ));
     }
 }
+
+#[test]
+fn capability_frame_states_the_endpoints_no_capability_groups_and_why() {
+    let tier = (Tier::Deterministic, ConfidenceTier::Confirmed);
+    let mut gapped = node("ep:local/shop@GET:/a", "Endpoint", tier.0, tier.1);
+    gapped.props["framework"] = json!("vercel");
+    let mut handled = node("ep:local/shop@POST:/b", "Endpoint", tier.0, tier.1);
+    handled.props["framework"] = json!("express");
+    let gap = node("gap:handler", "Gap", tier.0, tier.1);
+    let handler = node("sym:local/shop@src/app.ts#b", "Symbol", tier.0, tier.1);
+    let handles = |src: &Node, dst: &Node| {
+        let mut edge = node(
+            &format!("{} HANDLES {}", src.id, dst.id),
+            "",
+            tier.0,
+            tier.1,
+        );
+        edge.props.as_object_mut().unwrap().remove("name");
+        Edge {
+            src: src.id.clone(),
+            dst: dst.id.clone(),
+            label: "HANDLES".into(),
+            props: edge.props,
+        }
+    };
+    // A Gap-confidence endpoint is in the gap register, not counted here.
+    let unproven = node(
+        "ep:local/shop@GET:/c",
+        "Endpoint",
+        tier.0,
+        ConfidenceTier::Gap,
+    );
+    let edges = [handles(&gapped, &gap), handles(&handled, &handler)];
+    let nodes = [gapped, handled, gap, handler, unproven];
+    let bundle = compile_spec(
+        &nodes,
+        &edges,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    );
+    let frame = section(&d1(&bundle).content, "## 1.3 ");
+    assert!(
+        frame.contains(
+            "Operations in no Capability: 2 of 2 HTTP endpoints. 1 have no resolved handler \
+             (their `HANDLES` target is a Gap or missing), so no rule can group them; 1 have a \
+             handler that no capability rule groups (by framework: express 1)."
+        ),
+        "{frame}"
+    );
+}
