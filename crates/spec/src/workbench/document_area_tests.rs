@@ -293,6 +293,57 @@ fn only_admissible_subsystems_arrange_capabilities() {
     );
 }
 
+// AC-0913: work no request starts takes the area of the code its cited
+// schedule or entry point enters.
+#[test]
+fn a_capability_started_by_a_schedule_takes_the_area_of_what_it_enters() {
+    let mut fixture = fixture();
+    let schedule = format!("sched:{REPO}@crontab.yml#0");
+    let entered = format!("sym:{REPO}@app/mailbox.py#purge");
+    let (nodes, edges) = &mut fixture.base.graph;
+    nodes.push(node(
+        &schedule,
+        "Schedule",
+        json!({ "file": "crontab.yml", "name": "purge mailboxes" }),
+    ));
+    nodes.push(node(&entered, "Symbol", json!({ "name": "purge" })));
+    edges.push(edge(&schedule, &entered, "ENTRY"));
+    edges.push(edge(&entered, &file_id("app/mailbox.py"), "DEFINED_IN"));
+    // A second schedule enters a file directly, in no Subsystem.
+    let loose = format!("sched:{REPO}@crontab.yml#1");
+    nodes.push(node(
+        &loose,
+        "Schedule",
+        json!({ "file": "crontab.yml", "name": "check health" }),
+    ));
+    edges.push(edge(&loose, &file_id("app/health.py"), "ENTRY"));
+    for (key, title, cite) in [
+        ("jobs", "Run scheduled jobs", &schedule),
+        ("loose", "Run health checks", &loose),
+    ] {
+        let id = format!("capability:entry-point:{key}");
+        fixture.capabilities.push((
+            Node {
+                id: id.clone(),
+                label: "Capability".into(),
+                props: json!({ "title": title, "prov": derived_prov(&id, Tier::Semantic) }),
+            },
+            BTreeSet::from([BaseRef::Node(cite.clone())]),
+        ));
+    }
+    let stories = fixture.stories(ExportMode::BestEffort, &BTreeSet::new());
+    assert_eq!((stories.included(), stories.arranged()), (8, 5));
+    let arranged = arrangement(&stories.0);
+    assert!(
+        arranged.contains(&(Some("Mailbox".to_owned()), "Run scheduled jobs".to_owned())),
+        "{arranged:?}"
+    );
+    assert!(
+        arranged.contains(&(None, "Run health checks".to_owned())),
+        "{arranged:?}"
+    );
+}
+
 fn frames(stories: &Stories<'_>, base: &RevisionedSnapshot) -> (String, String, usize, usize) {
     let budget = Budget::new(None).unwrap();
     let mut assertions = Assertions::new(&budget);
