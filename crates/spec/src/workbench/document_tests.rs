@@ -482,3 +482,42 @@ fn capability_frame_states_a_vercel_front_door_and_the_routes_behind_it() {
         "{frame}"
     );
 }
+
+/// AC-0945: §1.1 points to the drawn system in every export, before and
+/// whatever the drafted prose.
+#[test]
+fn purpose_and_scope_points_to_the_architecture_diagrams() {
+    for mode in MODES {
+        let bundle = compile(mode, None);
+        let content = &d1(&bundle).content;
+        let text = section(content, "## 1.1 ");
+        assert!(
+            text.contains("[`architecture.md`](architecture.md)"),
+            "{mode:?}"
+        );
+        assert!(
+            text.contains("[`architecture.dsl`](architecture.dsl)"),
+            "{mode:?}"
+        );
+        assert!(text.contains(NOT_DRAFTED), "{mode:?}");
+        // The files it names are in the same export.
+        for file in ["architecture.md", "architecture.dsl"] {
+            assert!(
+                bundle.artifacts.iter().any(|a| a.file_name == file),
+                "{file} in {mode:?}"
+            );
+        }
+        assert!(!section(content, "## 1.2 ").contains("architecture.md"));
+        // The bundle manifest lists both under Documents.
+        let manifest = &bundle
+            .artifacts
+            .iter()
+            .find(|a| a.file_name == "bundle-manifest.md")
+            .expect("manifest")
+            .content;
+        let documents = &manifest[manifest.find("1. Documents").expect("part 1")
+            ..manifest.find("2. Requirements").expect("part 2")];
+        assert!(documents.contains("architecture.md"), "{documents}");
+        assert!(documents.contains("architecture.dsl"), "{documents}");
+    }
+}

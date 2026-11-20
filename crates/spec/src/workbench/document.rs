@@ -66,6 +66,14 @@ pub const SYSTEM_SCOPE: &str = "system";
 /// Artifact id of `product-specification.md`.
 pub(super) const D1_ARTIFACT_ID: &str = "d1-product-specification";
 
+/// §1.1 points to the drawn system (#2049): the diagrams are compiled in
+/// every export, whether or not the section's prose is drafted.
+const AT_A_GLANCE: &str = "The system at a glance is drawn in [`architecture.md`](architecture.md): \
+who uses it and what it depends on (C4 level 1), the parts that run on their own with their \
+data stores (level 2) and each part's components (level 3), every box and arrow citing the \
+facts it rests on. [`architecture.dsl`](architecture.dsl) holds the same model as a \
+Structurizr workspace.\n\n";
+
 const NOT_DRAFTED: &str = "_Not drafted._ No accepted draft is recorded for this section.\n";
 
 const NO_ELIGIBLE_DRAFT: &str = "_Not drafted._ No eligible draft is recorded for this section.\n";
@@ -1127,6 +1135,7 @@ pub(super) fn d1(
         match section.kind {
             SectionKind::Projected => {}
             SectionKind::Framed => content.push_str("\n")?,
+            SectionKind::Authored if section.number == "1.1" => content.push_str(AT_A_GLANCE)?,
             SectionKind::Authored => {}
             SectionKind::Human => content.push_str(HUMAN_BLANK)?,
         }
