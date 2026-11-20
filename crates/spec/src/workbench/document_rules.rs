@@ -236,7 +236,7 @@ fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
 /// A guarded effect (an assignment or a call statement, #1998) as a row.
 fn effect<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
-    if parsed.effect.exits() || writes_refusal(&parsed.effect) {
+    if parsed.effect.exits() || writes_refusal(&parsed) {
         return None;
     }
     guarded(rule, owner, true)
@@ -244,10 +244,11 @@ fn effect<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
 
 /// A Go call writing an error status before a bare return (#2009): a
 /// rejection, not a change.
-fn writes_refusal(effect: &LocalExit) -> bool {
-    matches!(effect, LocalExit::Call { value }
-        if super::statements::go_response(value.display.as_str())
-            .is_some_and(|(status, _)| status >= 400))
+fn writes_refusal(evidence: &GuardedExitEvidence) -> bool {
+    super::statements::is_go(evidence)
+        && matches!(&evidence.effect, LocalExit::Call { value }
+            if super::statements::go_response(value.display.as_str())
+                .is_some_and(|(status, _)| status >= 400))
 }
 
 /// A guarded exit as a row; with `any`, every exit, not only rejections.
@@ -259,7 +260,8 @@ fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a
             if any
                 || constructs_error(value)
                 || returns_error_status(value)
-                || super::statements::go_error(value.display.as_str()).is_some() =>
+                || (super::statements::is_go(&parsed)
+                    && super::statements::go_error(value.display.as_str()).is_some()) =>
         {
             format!("returns {}", one_line(value.display.as_str()))
         }
@@ -270,7 +272,7 @@ fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a
             one_line(target.display.as_str()),
             one_line(value.display.as_str())
         ),
-        LocalExit::Call { value } if writes_refusal(&parsed.effect) => {
+        LocalExit::Call { value } if writes_refusal(&parsed) => {
             format!("responds {}", one_line(value.display.as_str()))
         }
         LocalExit::Call { value } if any => format!("calls {}", one_line(value.display.as_str())),
@@ -1346,6 +1348,27 @@ def update_alias(alias_id, user):
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
         assert!(!text.contains("200"), "{text}");
         assert!(!text.contains("returns None"), "{text}");
+    }
+
+    // AC-0923 (#2009): the Go response and error shapes are read in Go
+    // source only; a Python call taking 500 or a returned `ErrNotFound`
+    // is not a refusal.
+    #[test]
+    fn go_shapes_are_not_read_in_other_languages() {
+        let source = r#"
+def update_alias(alias):
+    if alias.busy:
+        backoff(500)
+    if alias.missing:
+        return ErrNotFound
+    return alias
+"#;
+        let (text, printed) = python_rows(source, "update_alias");
+        // The call stays a change, and neither is a rejection.
+        assert_eq!(printed, 1, "{text}");
+        assert!(text.contains("calls backoff(500)"), "{text}");
+        assert!(!text.contains("refused"), "{text}");
+        assert!(!text.contains("ErrNotFound"), "{text}");
     }
 
     // AC-0923 (#2009): a Go handler's refusal (`http.Error` before a bare

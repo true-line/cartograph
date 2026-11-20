@@ -1106,6 +1106,12 @@ fn plain_message(arg: &str) -> Option<String> {
     (!inner.is_empty() && !inner.contains(['"', '\'', '{', '\\'])).then(|| inner.to_owned())
 }
 
+/// Whether a rule was recovered from Go source: the Go response and error
+/// shapes are read only there, never in another language's display text.
+pub(super) fn is_go(evidence: &GuardedExitEvidence) -> bool {
+    evidence.exit_source.path.ends_with(".go")
+}
+
 /// The status a Go response call writes and its literal message (#2009):
 /// `http.Error(w, "forbidden", http.StatusForbidden)` gives `(403,
 /// Some("forbidden"))`; `w.WriteHeader(400)` gives `(400, None)`. `None`
@@ -1316,12 +1322,14 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
     };
     // A Go response written before a bare return (#2009).
     if let LocalExit::Call { value } = &evidence.effect
+        && is_go(evidence)
         && let Some((status, message)) = go_response(value.display.as_str())
     {
         return Some(sentence(refused(status, message)));
     }
     // A Go error passed back (#2009).
     if let LocalExit::Return { value: Some(value) } = &evidence.effect
+        && is_go(evidence)
         && let Some(message) = go_error(value.display.as_str())
     {
         return Some(sentence(if message.is_empty() {
