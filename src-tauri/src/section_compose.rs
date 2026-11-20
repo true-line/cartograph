@@ -118,8 +118,11 @@ pub(crate) fn prepare(
         spec::ExportMode::BestEffort,
         D1_ARTIFACT_ID,
     )?;
-    let text =
+    let whole =
         spec::section_text(&artifact.content, &address.section).ok_or("section_not_compiled")?;
+    // An overview section is read up to its per-capability detail (#1991).
+    let (text, _) = spec::composition_text(whole, &address.section);
+    let text = text.as_str();
     let derived: Vec<_> = derived_facts
         .iter()
         .filter_map(|fact| match &fact.item {

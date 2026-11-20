@@ -119,7 +119,7 @@ pub use workbench::{
 pub use workbench::{
     CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,
     DerivedGroup, SYSTEM_SCOPE, SectionFrame, SectionKind, SectionScopeError, SourceIdentifiers,
-    catalogue_section, catalogue_sections, composition_facts, drafted_section,
+    catalogue_section, catalogue_sections, composition_facts, composition_text, drafted_section,
     section_citation_set, section_text,
 };
 

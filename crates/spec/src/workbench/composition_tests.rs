@@ -50,6 +50,20 @@ fn a_section_runs_from_its_heading_to_the_next() {
 }
 
 #[test]
+fn an_overview_section_is_read_up_to_its_per_capability_detail() {
+    let text = "## 1.3 Capabilities (P)\n\n| Area | Capability |\n\n### Orders\n\n#### Place order\n\nrow\n\n### Billing\n\nrow\n";
+    let (kept, left_out) = composition_text(text, "1.3");
+    assert_eq!(left_out, 2);
+    assert!(kept.starts_with("## 1.3 Capabilities (P)\n\n| Area | Capability |\n"));
+    assert!(!kept.contains("### Orders") && !kept.contains("#### Place order"));
+    assert!(kept.contains("Per-capability detail (2 subsections) is left out"));
+    // Other sections, and an overview without subsections, are read whole.
+    assert_eq!(composition_text(text, "1.4"), (text.to_owned(), 0));
+    let flat = "## 1.3 Capabilities (P)\n\nrow\n";
+    assert_eq!(composition_text(flat, "1.3"), (flat.to_owned(), 0));
+}
+
+#[test]
 fn printed_ids_are_whole_citation_ids() {
     let id = cite("endpoint:a");
     let text = format!("| {id} | x{id} | {id}0 | F-12 |");

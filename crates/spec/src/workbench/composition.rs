@@ -86,6 +86,32 @@ pub fn section_text<'a>(document: &'a str, number: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+/// Sections a composer reads as an overview: up to the first `###`
+/// heading. D1 1.3 prints the capability and area tables first, then one
+/// operation table per capability (#2012); those tables are detail an
+/// overview does not need, and on a large system they push the request past
+/// its cap (#1991).
+const OVERVIEW_SECTIONS: &[&str] = &["1.3"];
+
+/// The part of section `number`'s compiled `text` a composer reads, and how
+/// many `###` subsections it leaves out. An overview section ends before its
+/// first `###` heading, with a line saying how many subsections are left
+/// out; any other section is read whole.
+pub fn composition_text(text: &str, number: &str) -> (String, usize) {
+    if !OVERVIEW_SECTIONS.contains(&number) {
+        return (text.to_owned(), 0);
+    }
+    let Some(at) = text.find("\n### ") else {
+        return (text.to_owned(), 0);
+    };
+    let left_out = text[at..].matches("\n### ").count();
+    let mut kept = text[..=at].to_owned();
+    kept.push_str(&format!(
+        "\nPer-capability detail ({left_out} subsections) is left out of this composition.\n"
+    ));
+    (kept, left_out)
+}
+
 /// Every `F-` citation id `text` prints.
 fn printed_ids(text: &str) -> BTreeSet<String> {
     let bytes = text.as_bytes();
