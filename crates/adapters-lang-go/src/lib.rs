@@ -754,7 +754,6 @@ fn literal_symbol(
     symbol
 }
 
-/// Locals bound exactly once in the file to a func literal.
 /// Whether the local `name`, bound once to `literal` by `name := func…`,
 /// is the binding visible at `usage`: the usage follows the declaration
 /// inside the block that declares it, and no function between them takes a
@@ -807,6 +806,7 @@ fn declares(cx: &FileCx<'_>, parameters: TsNode<'_>, name: &str) -> bool {
     })
 }
 
+/// Locals bound exactly once in the file to a func literal.
 fn closures<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> HashMap<String, TsNode<'t>> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut found = HashMap::new();
