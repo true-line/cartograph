@@ -190,3 +190,61 @@ func routes(mux *http.ServeMux) {
     assert!(rule.owner_id.contains("#routes/func@"), "{}", rule.owner_id);
     assert!(shown(&rule.conditions[0].expression).contains("FormValue"));
 }
+
+#[test]
+fn a_tested_error_names_the_call_that_failed() {
+    // AC-0923 (#2009): `err != nil` names the call whose error it tests,
+    // bound in the `if` initializer or the statement just before it.
+    let source = r#"package device
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func (s *Service) save(w http.ResponseWriter, r *http.Request) {
+	var d Device
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	err := s.Apps.Store.Save(d)
+	// stored
+	if err != nil {
+		http.Error(w, "save failed", http.StatusInternalServerError)
+		return
+	}
+	if d.Name == "" {
+		http.Error(w, "name required", http.StatusBadRequest)
+		return
+	}
+}
+"#;
+    let id = SourceId {
+        repo: "example/bot",
+        commit: "c0ffee",
+    };
+    let out = extract_source(source.as_bytes(), "pkg/device/save.go", &id).expect("extracts");
+    let mut failed: Vec<(u64, serde_json::Value)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "BusinessRule")
+        .map(|node| {
+            let rule = GuardedExitEvidence::from_value(node.props["rule"].clone()).unwrap();
+            (
+                rule.exit_source.byte_start,
+                node.props["failed_calls"].clone(),
+            )
+        })
+        .collect();
+    failed.sort_by_key(|(at, _)| *at);
+    let failed: Vec<_> = failed.into_iter().map(|(_, f)| f).collect();
+    assert_eq!(
+        failed,
+        vec![
+            serde_json::json!(["Decode"]),
+            serde_json::json!(["Store.Save"]),
+            serde_json::json!([null]),
+        ]
+    );
+}
