@@ -505,6 +505,44 @@ fn called_names(when: &str) -> Vec<&str> {
     out
 }
 
+/// The dotted receiver of the first `receiver.name(` call in `when`:
+/// `g.user` in `not g.user.is_active()`.
+fn receiver<'w>(when: &'w str, name: &str) -> Option<&'w str> {
+    let at = when.find(&format!(".{name}("))?;
+    let before = &when[..at];
+    let start = before
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .map_or(0, |p| p + 1);
+    Some(&before[start..]).filter(|r| !r.is_empty())
+}
+
+/// The class a receiver names (#2029): `self`/`cls` the owner's class,
+/// `g.user` and `current_user` the `User` login model, otherwise the
+/// receiver's last segment in CamelCase (`api_key` → `ApiKey`).
+fn receiver_class(receiver: &str, owner: &str) -> Option<String> {
+    let last = receiver.rsplit('.').next()?;
+    match (receiver, last) {
+        (_, "self" | "cls") => {
+            let (class, _) = owner.rsplit_once('.')?;
+            Some(class.rsplit('.').next()?.to_owned())
+        }
+        ("g.user" | "current_user", _) => Some("User".to_owned()),
+        _ => {
+            let class: String = last
+                .split('_')
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let mut c = p.chars();
+                    c.next()
+                        .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                        .unwrap_or_default()
+                })
+                .collect();
+            Some(class).filter(|c| !c.is_empty())
+        }
+    }
+}
+
 /// Predicates followed per rejection row.
 pub(super) const MAX_PREDICATES: usize = 3;
 /// Call hops followed past a predicate.
@@ -526,14 +564,52 @@ impl<'a> Index<'a> {
         out: &mut Text,
     ) -> Result<(), RenderLimit> {
         for name in called_names(&row.when) {
-            if !followed.insert(name.to_owned()) {
-                continue;
-            }
-            let targets = self
+            let named = self
                 .by_name
                 .get(name)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            // Several functions of this name: the one on the receiver's
+            // class, when the receiver names one (#2029).
+            let narrowed: Vec<&str>;
+            let mut matched = "matched by name, inferred".to_owned();
+            let targets = if named.len() > 1
+                && let Some(class) =
+                    receiver(&row.when, name).and_then(|r| receiver_class(r, row.owner))
+            {
+                narrowed = named
+                    .iter()
+                    .copied()
+                    .filter(|t| {
+                        self.by_id
+                            .get(t)
+                            .and_then(|n| n.props["name"].as_str())
+                            .is_some_and(|q| {
+                                q.strip_suffix(name)
+                                    .and_then(|c| c.strip_suffix('.'))
+                                    .is_some_and(|c| {
+                                        c == class || c.ends_with(&format!(".{class}"))
+                                    })
+                            })
+                    })
+                    .collect();
+                if narrowed.len() == 1 {
+                    matched = format!("matched by name on the receiver's class {class}, inferred");
+                    &narrowed[..]
+                } else {
+                    named
+                }
+            } else {
+                named
+            };
+            // Followed once per table, per function followed.
+            let key = match targets {
+                [one] => (*one).to_owned(),
+                _ => name.to_owned(),
+            };
+            if !followed.insert(key) {
+                continue;
+            }
             let [target] = targets else {
                 let why = if targets.is_empty() {
                     "no repository function of this name was recovered".to_owned()
@@ -555,7 +631,7 @@ impl<'a> Index<'a> {
                 .unwrap_or(target);
             writeln!(
                 out,
-                "| ↳ | The check “{}” decides as follows (matched by name, inferred, \
+                "| ↳ | The check “{}” decides as follows ({matched}, \
                  {PREDICATE_DEPTH} call hops): | {}() in {} | — |",
                 Literal(super::statements::words(name)),
                 Literal(name),
@@ -1424,6 +1500,77 @@ def update_alias(alias_id, user):
             ),
             "{text}"
         );
+    }
+
+    // AC-0915 (T-0915): a check several functions share a name with is
+    // followed to the one on the receiver's class (`g.user` the User
+    // model, a variable by its CamelCase name); with no such class it is
+    // still named as not followed.
+    #[test]
+    fn a_shared_check_name_is_followed_on_the_receivers_class() {
+        let source = r#"
+from flask import jsonify, g
+
+class User:
+    def is_active(self):
+        return self.delete_on is None
+
+class Mailbox:
+    def is_active(self):
+        if self.disabled:
+            return False
+        return True
+
+class Job:
+    def is_active(self):
+        return True
+
+def update_alias(alias_id, mailbox, thing):
+    if not g.user.is_active():
+        return jsonify(error="Account does not exist"), 401
+    if not mailbox.is_active():
+        return jsonify(error="mailbox"), 400
+    if not thing.is_active():
+        return jsonify(error="thing"), 400
+    return jsonify(ok=True)
+"#;
+        let (text, _) = python_rows(source, "update_alias");
+        assert!(
+            text.contains(
+                "| ↳ | The check “is active” decides as follows (matched by name on the receiver's class User, inferred, 2 call hops): | is\\_active() in User.is\\_active | — |"
+            ),
+            "{text}"
+        );
+        // A predicate's unguarded answer is stated as its rule.
+        assert!(
+            text.contains(
+                "| ↳ User.is\\_active | A user is active when the user's delete on is not set. | always: returns self.delete\\_on is None |"
+            ),
+            "{text}"
+        );
+        // Another receiver's class is followed too; a receiver no class
+        // names keeps the not-followed row.
+        assert!(
+            text.contains("is\\_active() in Mailbox.is\\_active"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "The check “is active” is not followed: 3 repository functions have this name."
+            ),
+            "{text}"
+        );
+        assert_eq!(receiver_class("mailbox", "f"), Some("Mailbox".to_owned()));
+        assert_eq!(receiver_class("api_key", "f"), Some("ApiKey".to_owned()));
+        assert_eq!(
+            receiver_class("self", "User.can_x"),
+            Some("User".to_owned())
+        );
+        assert_eq!(
+            receiver("not g.user.is_active()", "is_active"),
+            Some("g.user")
+        );
+        assert_eq!(receiver("is_active()", "is_active"), None);
     }
 
     // AC-0849: a When cell states what holds at the exit. An `else` or

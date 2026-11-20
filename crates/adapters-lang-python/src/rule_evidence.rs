@@ -600,10 +600,17 @@ pub(super) fn extract(
         };
         for (order, exit) in owner_exits.iter().copied().enumerate() {
             let (ancestors, limited) = branches(exit);
-            if ancestors.is_empty() && !limited {
+            let value = exit_value(exit);
+            // An unguarded exit is a rule only as the answer of a predicate
+            // (`def is_active(self): return self.delete_on is None`, #2029).
+            if ancestors.is_empty()
+                && !limited
+                && !(exit.kind() == "return_statement"
+                    && value.is_some()
+                    && predicate_name(&owner_id))
+            {
                 continue;
             }
-            let value = exit_value(exit);
             // A bare `raise` re-raises what is being handled: not a guard's
             // own outcome.
             if exit.kind() == "raise_statement" && value.is_none() {
@@ -843,6 +850,15 @@ pub(super) fn extract(
             );
         }
     }
+}
+
+/// Whether a function id names a predicate: its last name segment starts
+/// with `is_`, `has_`, `can_`, `should_` or `must_`.
+fn predicate_name(owner_id: &str) -> bool {
+    let name = owner_id.rsplit(['#', '.']).next().unwrap_or(owner_id);
+    ["is_", "has_", "can_", "should_", "must_"]
+        .iter()
+        .any(|p| name.strip_prefix(p).is_some_and(|r| !r.is_empty()))
 }
 
 /// One captured effect expression, its redactions and capture Gap.
