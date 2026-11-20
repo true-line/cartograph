@@ -34,8 +34,8 @@ pub(super) fn worker_start(
     let main = doc["main"].as_str();
     let target = match main {
         Some(main) => {
-            let joined = format!("{dir}{}", main.trim_start_matches("./"));
-            if files.contains(&joined) {
+            let joined = normalize(&format!("{dir}{main}"));
+            if let Some(joined) = joined.filter(|joined| files.contains(joined)) {
                 Target::File {
                     rel: joined,
                     function: None,
@@ -125,6 +125,22 @@ pub(super) fn webhook_sender(start: &mut Start, module: &str, code: &str) {
             .extra_spans
             .push((module.to_string(), (at as u64, (at + len) as u64)));
     }
+}
+
+/// A repository-relative path with `.` and `..` segments resolved; `None`
+/// when it leaves the repository.
+fn normalize(path: &str) -> Option<String> {
+    let mut out: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                out.pop()?;
+            }
+            segment => out.push(segment),
+        }
+    }
+    Some(out.join("/"))
 }
 
 /// JSON with comments and trailing commas as plain JSON. Strings are kept

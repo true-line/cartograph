@@ -8,10 +8,12 @@
 //! `x.F`, `x.F + rest`, `NAME` or `NAME + rest` is held until every file of
 //! the package is read, then joined to the base when every binding of that
 //! field (or constant) in the package is the same literal. A field is
-//! matched by type when the operand is the enclosing method's receiver and
-//! the literal names that type; an assignment, whose operand type is not
-//! known, always counts. Any other binding, or two literals, leave the call
-//! as the computed URL it was. Test files bind nothing.
+//! matched by type: the operand must be the enclosing method's receiver
+//! and the literal must name that type. An assignment, whose operand type
+//! is not known, can contradict a value but not supply it. A binding to a
+//! parameter or local that hides a constant is not that constant. Any other
+//! binding, or two literals, leave the call as the computed URL it was.
+//! Test files bind nothing.
 
 use super::*;
 use adapters_fw::client::{BaseJoin, FetchBase, FetchSite};
@@ -71,7 +73,18 @@ fn value(cx: &FileCx<'_>, node: TsNode<'_>) -> Value {
         return Value::Literal(text);
     }
     match node.kind() {
-        "identifier" => Value::Const(cx.text(&node).to_string()),
+        "identifier" => {
+            let name = cx.text(&node);
+            // A parameter or local of the name hides the package constant.
+            let scope = client::top_level(node);
+            let local = matches!(scope.kind(), "function_declaration" | "method_declaration")
+                && declared_locally(cx, scope, name);
+            if local {
+                Value::Other
+            } else {
+                Value::Const(name.to_string())
+            }
+        }
         "parenthesized_expression" => node
             .named_child(0)
             .map_or(Value::Other, |inner| value(cx, inner)),
@@ -250,12 +263,15 @@ fn key(cx: &FileCx<'_>, node: TsNode<'_>, at: TsNode<'_>) -> Option<Key> {
         "selector_expression" => {
             let operand = node.child_by_field_name("operand")?;
             let field = cx.text(&node.child_by_field_name("field")?).to_string();
-            let ty = receiver(cx, at)
-                .filter(|(name, _)| {
-                    operand.kind() == "identifier" && cx.text(&operand) == name.as_str()
-                })
-                .map(|(_, ty)| ty);
-            Some(Key::Field { ty, field })
+            // Only the enclosing method's receiver ties the operand to a
+            // type; any other operand's field is not proven.
+            let (_, ty) = receiver(cx, at).filter(|(name, _)| {
+                operand.kind() == "identifier" && cx.text(&operand) == name.as_str()
+            })?;
+            Some(Key::Field {
+                ty: Some(ty),
+                field,
+            })
         }
         _ => None,
     }
@@ -322,9 +338,13 @@ fn resolve(
         _ => false,
     });
     let mut found: Option<String> = None;
+    // A binding whose type is unknown (`x.F = …`) can contradict the value
+    // but never supply it alone.
     let mut any = false;
-    for (_, value) in matching {
-        any = true;
+    for (bound, value) in matching {
+        if !matches!(bound, Key::Field { ty: None, .. }) {
+            any = true;
+        }
         let text = match value {
             Value::Literal(text) => text.clone(),
             Value::Const(name) if depth < 4 => {

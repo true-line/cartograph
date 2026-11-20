@@ -486,7 +486,25 @@ fn a_wrangler_config_enters_its_worker_module() {
             "other/wrangler.toml",
             "name = \"cron\"\nmain = \"missing.ts\"\n",
         ),
+        (
+            "deploy/wrangler.toml",
+            "name = \"up\"\nmain = \"../edge/src/index.ts\"\n",
+        ),
+        (
+            "escape/wrangler.toml",
+            "name = \"out\"\nmain = \"../../x.ts\"\n",
+        ),
     ]);
+    // A parent-relative module resolves; one leaving the repository is a Gap.
+    assert_eq!(
+        entry_edge(&out, "deploy/wrangler.toml", "worker").dst,
+        format!("file:{REPO}@edge/src/index.ts")
+    );
+    assert!(
+        entry_edge(&out, "escape/wrangler.toml", "worker")
+            .dst
+            .starts_with("gap:")
+    );
     let worker = entry(&out, "edge/wrangler.jsonc", "worker");
     assert_eq!(worker.props["kind"], "edge-worker");
     assert_eq!(worker.props["how"], "Cloudflare Worker");

@@ -1231,6 +1231,13 @@ func (c *Client) Ping() { http.Get(Status + "/ping") }
 func (c *Client) Hooked() { http.NewRequest(http.MethodPost, c.Hook, nil) }
 func (c *Client) Mixed() { http.NewRequest(http.MethodPost, c.Other, nil) }
 func (c *Client) Local(Status string) { http.Get(Status + "/x") }
+func Plain(o *Client) { http.NewRequest(http.MethodGet, o.API, nil) }
+type Shadow struct{ URL string }
+func NewShadow(Status string) *Shadow { return &Shadow{URL: Status} }
+func (s *Shadow) Fetch() { http.Get(s.URL) }
+type Assigned struct{ Base string }
+func (a *Assigned) Fetch() { http.Get(a.Base) }
+func setup(x *Assigned) { x.Base = "https://assigned.example" }
 "#,
     )
     .unwrap();
@@ -1291,6 +1298,18 @@ func hookURL() string { return "" }
     assert_eq!(row("Mixed"), "Literal(\"https://one.example\")");
     // A parameter shadows the package constant.
     assert_eq!(row("Local"), "Computed(\"Status + \\\"/x\\\"\")");
+    let symbol_row = |suffix: &str| {
+        rows.iter()
+            .find(|(symbol, _)| symbol.ends_with(suffix))
+            .map(|(_, url)| url.as_str())
+            .unwrap()
+    };
+    // An operand that is not the method receiver has no proven type.
+    assert_eq!(symbol_row("#Plain"), "Computed(\"o.API\")");
+    // A parameter that shadows the constant is not the constant.
+    assert_eq!(symbol_row("Shadow.Fetch"), "Computed(\"s.URL\")");
+    // An assignment of unknown type cannot supply the value alone.
+    assert_eq!(symbol_row("Assigned.Fetch"), "Computed(\"a.Base\")");
 }
 
 /// AC-0947 (#2065): a read of a store's conventional URL key is an observed
