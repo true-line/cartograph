@@ -1817,6 +1817,27 @@ const MAX_STRING_CONSTANT_BYTES: usize = 160;
 fn string_constants(cx: &FileCx<'_>, root: tree_sitter::Node<'_>) -> BTreeMap<String, String> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut found: Vec<(String, String)> = Vec::new();
+    // Every module-scope binding counts toward a name being bound once,
+    // including one under module-level `if`/`try`/`for`/`with`; nested
+    // functions and classes are their own scopes.
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        if node.kind() == "assignment"
+            && node.parent().is_some_and(|p| p.parent() != Some(root))
+            && let Some(left) = node.child_by_field_name("left")
+            && left.kind() == "identifier"
+        {
+            *seen.entry(cx.text(&left).to_string()).or_default() += 1;
+        }
+    }
     let mut cursor = root.walk();
     for statement in root.named_children(&mut cursor) {
         let Some(assignment) = (statement.kind() == "expression_statement")
