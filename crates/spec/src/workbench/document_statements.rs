@@ -382,6 +382,15 @@ fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
         [one] => format!("the {}", words(one)),
         ["self" | "cls", .., last] => format!("the {}'s {}", words(cx.class?), words(last)),
         ["request", .., last] => format!("the {}", words(last)),
+        // An enum member `UserAliasDeleteAction.DeleteImmediately` (#1998).
+        [owner, last]
+            if owner.starts_with(|c: char| c.is_ascii_uppercase())
+                && owner.chars().any(|c| c.is_ascii_lowercase())
+                && last.starts_with(|c: char| c.is_ascii_uppercase())
+                && last.chars().any(|c| c.is_ascii_lowercase()) =>
+        {
+            format!("“{}”", words(last))
+        }
         [.., owner, last] => format!("the {}'s {}", words(owner), words(last)),
         [] => return None,
     };
@@ -634,6 +643,93 @@ fn response(display: &str) -> Option<(u16, Option<String>)> {
     Some((status, message))
 }
 
+/// `x.field = value` as a clause (#1998): `g.user = api_key.user` is "the
+/// request acts as the API key's user"; `alias.enabled = False` is "the
+/// alias is no longer enabled"; `alias.delete_on = arrow.now().shift(days=+N)`
+/// is "the alias's delete on is set to N days from now"; otherwise "the
+/// alias's note is set to the note". `None` outside these rules.
+fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
+    let Expr::Ref(path) = parse(target.trim())? else {
+        return None;
+    };
+    let names: Vec<&str> = path.iter().map(String::as_str).collect();
+    let value = value.trim();
+    // The acting user of a request (Flask `g.user`, Django `request.user`).
+    if matches!(names[..], ["g", "user"] | ["request", "user"]) {
+        if value == "current_user" {
+            return Some("the request acts as the signed-in user".to_owned());
+        }
+        return Some(format!("the request acts as {}", noun(&parse(value)?, cx)?));
+    }
+    let place = match names[..] {
+        ["g", ref rest @ ..] if !rest.is_empty() => {
+            format!("the request's {}", words(&rest.join("_")))
+        }
+        _ => subject(&path, cx)?,
+    };
+    // `arrow.now().shift(days=+N)`: N days from now.
+    if let Some(rest) = value
+        .strip_prefix("arrow.now().shift(")
+        .or_else(|| value.strip_prefix("arrow.utcnow().shift("))
+        .and_then(|r| r.strip_suffix(')'))
+        && let Some((unit, amount)) = rest.split_once('=')
+        && matches!(
+            unit.trim(),
+            "days" | "hours" | "minutes" | "weeks" | "seconds"
+        )
+    {
+        let unit = unit.trim();
+        let amount = noun(&parse(amount.trim().trim_start_matches('+'))?, cx)?;
+        // `ALIAS_TRASH_DAYS` already names its unit.
+        return Some(if amount.ends_with(unit) {
+            format!("{place} is set to {amount} from now")
+        } else {
+            format!("{place} is set to {amount} {unit} from now")
+        });
+    }
+    let parsed = parse(value)?;
+    if let (Expr::Lit(Lit::Bool(on)), [owner @ .., last]) = (&parsed, &path[..])
+        && !owner.is_empty()
+    {
+        let owner = subject(owner, cx)?;
+        let state = words(last);
+        return Some(if *on {
+            format!("{owner} is now {state}")
+        } else {
+            format!("{owner} is no longer {state}")
+        });
+    }
+    Some(format!("{place} is set to {}", noun(&parsed, cx)?))
+}
+
+/// A call statement as a clause (#1998): `perform_alias_deletion(alias)` is
+/// "it runs “perform alias deletion”". `None` unless the callee is a dotted
+/// name.
+fn called(value: &str) -> Option<String> {
+    let value = value.trim().strip_prefix("await ").unwrap_or(value.trim());
+    let callee = &value[..value.find('(')?];
+    let mut segments = callee.split('.');
+    if !segments
+        .clone()
+        .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    {
+        return None;
+    }
+    let last = segments.next_back()?;
+    // Flask `flash("Alias not found", "error")`: the message the user sees.
+    if last == "flash"
+        && let Some(message) = value[callee.len() + 1..]
+            .trim_start()
+            .strip_prefix('"')
+            .and_then(|rest| rest.split_once('"'))
+            .map(|(m, _)| m)
+            .filter(|m| !m.is_empty() && !m.contains(['\\', '{', '\'']))
+    {
+        return Some(format!("the user is shown “{message}”"));
+    }
+    Some(format!("it runs “{}”", words(last.trim_start_matches('_'))))
+}
+
 /// The statement of one guarded exit in domain terms, or `None` when its
 /// condition or outcome is outside the rendering rules. `owner` is the
 /// owning callable's qualified name (`User.can_create_num_aliases`).
@@ -667,7 +763,25 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
     } else {
         conditions.join(", and ")
     };
+    // A state change or a call (#1998, AC-0910).
+    let changed = match &evidence.effect {
+        LocalExit::Assign { target, value } => Some(assigned(
+            target.display.as_str(),
+            value.display.as_str(),
+            &cx,
+        )?),
+        LocalExit::Call { value } => Some(called(value.display.as_str())?),
+        LocalExit::Return { .. } | LocalExit::Throw { .. } => None,
+    };
+    if let Some(outcome) = changed {
+        return Some(if conditions.is_empty() {
+            format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
+        } else {
+            format!("When {when}, {outcome}.")
+        });
+    }
     let value = match &evidence.effect {
+        LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
         LocalExit::Throw { .. } => {
             return Some(if conditions.is_empty() {
                 "It fails with an error.".to_owned()
@@ -751,6 +865,77 @@ mod tests {
 
     fn said(display: &str, polarity: BranchPolarity, class: Option<&str>) -> Option<String> {
         condition(display, polarity, &Context { class })
+    }
+
+    // AC-0911: an assignment and a call statement are restated by rule.
+    #[test]
+    fn state_changes_and_calls_are_restated_in_domain_terms() {
+        let cx = Context { class: None };
+        let set = |t: &str, v: &str| assigned(t, v, &cx);
+        assert_eq!(
+            set("g.user", "api_key.user").unwrap(),
+            "the request acts as the API key's user"
+        );
+        assert_eq!(
+            set("g.user", "current_user").unwrap(),
+            "the request acts as the signed-in user"
+        );
+        assert_eq!(
+            set("g.api_key", "api_key").unwrap(),
+            "the request's API key is set to the API key"
+        );
+        assert_eq!(
+            set("alias.enabled", "False").unwrap(),
+            "the alias is no longer enabled"
+        );
+        assert_eq!(
+            set("user.verified", "True").unwrap(),
+            "the user is now verified"
+        );
+        assert_eq!(
+            set(
+                "alias.delete_on",
+                "arrow.now().shift(days=+ALIAS_TRASH_DAYS)"
+            )
+            .unwrap(),
+            "the alias's delete on is set to the configured alias trash days from now"
+        );
+        assert_eq!(
+            set("user.expires", "arrow.now().shift(hours=1)").unwrap(),
+            "the user's expires is set to 1 hours from now"
+        );
+        assert_eq!(
+            set("alias.note", "note").unwrap(),
+            "the alias's note is set to the note"
+        );
+        assert_eq!(set("alias.note", "compute(alias)"), None);
+        assert_eq!(set("items[0]", "1"), None);
+        assert_eq!(
+            called("perform_alias_deletion(alias, user)").unwrap(),
+            "it runs “perform alias deletion”"
+        );
+        assert_eq!(
+            called("await alias_utils.delete_alias(alias, user)").unwrap(),
+            "it runs “delete alias”"
+        );
+        assert_eq!(called("handlers[0](x)"), None);
+        assert_eq!(
+            called("flash(\"Alias not found\", \"error\")").unwrap(),
+            "the user is shown “Alias not found”"
+        );
+        assert_eq!(
+            called("flash(f\"{n} deleted\", \"success\")").unwrap(),
+            "it runs “flash”"
+        );
+        assert_eq!(
+            condition(
+                "user.alias_delete_action == UserAliasDeleteAction.DeleteImmediately",
+                BranchPolarity::TruthyBranch,
+                &cx
+            )
+            .unwrap(),
+            "the user's alias delete action is “delete immediately”"
+        );
     }
 
     // AC-0905: simple conditions are restated by rule; anything else is not.

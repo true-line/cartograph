@@ -441,11 +441,8 @@ pub(super) fn validate(rule: &GuardedExitEvidence) -> Result<(), RuleValidationE
             return Err(invalid("condition_span"));
         }
     }
-    match &rule.effect {
-        LocalExit::Return { value: Some(value) } | LocalExit::Throw { value } => {
-            checked_expression(value, &rule.exit_source)?
-        }
-        LocalExit::Return { value: None } => {}
+    for value in rule.effect.expressions() {
+        checked_expression(value, &rule.exit_source)?;
     }
     for dependency in &rule.dependencies {
         checked_source(&dependency.source, &rule.exit_source)?;

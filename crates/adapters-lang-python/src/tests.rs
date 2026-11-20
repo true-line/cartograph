@@ -121,7 +121,14 @@ def handler():
         handler,
         "sym:local/python-service@pkg/helper.py#imported_helper"
     )));
-    assert!(extraction.nodes.iter().all(|node| node.label != "Gap"));
+    // The calls are guarded effects (#1998); their interpretation Gaps are
+    // rule evidence, not unresolved calls.
+    assert!(
+        extraction
+            .nodes
+            .iter()
+            .all(|node| node.label != "Gap" || node.props["rule_evidence_gap"] == true)
+    );
 }
 
 #[test]
