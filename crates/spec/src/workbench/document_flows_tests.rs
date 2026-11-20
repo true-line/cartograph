@@ -250,6 +250,7 @@ fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
     const FORWARD: &str = "sym:acme/mail@app/forward.py#forward_email_to_mailbox";
     const PINS: &str = "decl:acme/mail@email_handler.py#PINS";
     const ANON: &str = "sym:acme/mail@email_handler.py#anon@120";
+    const TYPE: &str = "sym:acme/mail@email_handler.py#Envelope";
     let nodes = vec![
         node(
             MAIL,
@@ -266,12 +267,18 @@ fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
         node(LOG, "DataEntity", json!({"name": "EmailLog"})),
         node(PINS, "Declaration", json!({"name": "PINS"})),
         node(ANON, "Symbol", json!({"name": "anon@120"})),
+        node(
+            TYPE,
+            "Symbol",
+            json!({"name": "Envelope", "kind": "struct"}),
+        ),
     ];
     let edges = vec![
         edge(MAIL, FILE, "ENTRY", json!({})),
         edge(HANDLE, FILE, "DEFINED_IN", json!({})),
         edge(PINS, FILE, "DEFINED_IN", json!({})),
         edge(ANON, FILE, "DEFINED_IN", json!({})),
+        edge(TYPE, FILE, "DEFINED_IN", json!({})),
         edge(HANDLE, FORWARD, "CALLS", json!({})),
         edge(FORWARD, LOG, "WRITES", json!({"operations": ["insert"]})),
     ];
@@ -312,7 +319,7 @@ fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
         .find(|l| l.starts_with("- **Mail received over SMTP"))
         .expect(&text);
     // Only the file's named callables handle it (AC-0893): not its
-    // constants, and not its anonymous functions.
+    // constants, its types, or its anonymous functions.
     assert!(line.contains("handled by handle;"), "{line}");
     assert!(
         line.contains("; calls forward\\_email\\_to\\_mailbox"),

@@ -89,10 +89,32 @@ struct Reading<'a> {
     gaps: usize,
 }
 
-/// A `Symbol` with a name of its own: not a declaration, and not an
-/// anonymous function (`anon@…`, Go `…/func@…`).
+/// A callable `Symbol` with a name of its own: not a declaration, not a
+/// type (a Rust struct/enum/trait, a Java or Kotlin class, interface,
+/// enum, record or object), and not an anonymous function (`anon@…`, Go
+/// `…/func@…`).
 fn named_callable(index: &Index<'_>, id: &str, name: &str) -> bool {
-    index.by_id.get(id).is_some_and(|n| n.label == "Symbol")
+    let callable = |node: &Node| {
+        let kind = node.props["kind"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        node.label == "Symbol"
+            && !kind.contains("class")
+            && !matches!(
+                kind.as_str(),
+                "struct"
+                    | "enum"
+                    | "trait"
+                    | "interface"
+                    | "record"
+                    | "object"
+                    | "annotation_type"
+                    | "type"
+                    | "type_alias"
+            )
+    };
+    index.by_id.get(id).is_some_and(|n| callable(n))
         && !name.starts_with("anon@")
         && !name.contains("func@")
 }
