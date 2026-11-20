@@ -56,6 +56,13 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
         id(1)
     )));
     assert!(action.payload.spans.is_empty());
+    // Section 1.5 is told how to read code-shaped rule rows; it comes first.
+    let guide = prompt
+        .find("<guidance>\nThis section lists rules as code")
+        .unwrap();
+    assert!(guide < prompt.find("<section>").unwrap());
+    assert!(guidance("1.3").unwrap().contains("never enumerate routes"));
+    assert_eq!(guidance("9.9"), None);
     let schema: serde_json::Value =
         serde_json::from_str(action.payload.response_schema.as_deref().unwrap()).unwrap();
     let ids =
@@ -136,6 +143,16 @@ fn a_reply_that_is_not_the_schema_or_keeps_no_claim_is_refused() {
     ]));
     assert_eq!(
         decode(&address(), &none, &citable),
+        Err(ComposeRefusal::NoClaims)
+    );
+    // A cited placeholder states nothing: it is not staged as a draft.
+    let placeholder = reply(serde_json::json!([
+        {"statement": "placeholder", "claim_kind": "implemented_behavior", "citation_ids": [id(1)]},
+        {"statement": "To be determined later.", "claim_kind": "implemented_behavior",
+         "citation_ids": [id(1)]}
+    ]));
+    assert_eq!(
+        decode(&address(), &placeholder, &citable),
         Err(ComposeRefusal::NoClaims)
     );
 }
