@@ -129,6 +129,15 @@ fn areas<'a>(
         {
             continue;
         }
+        // The file count the document prints must be the cited membership.
+        let members = fact
+            .cites
+            .iter()
+            .filter(|cite| matches!(cite, BaseRef::Node(_)))
+            .count();
+        if members != fact.cites.len() || node.props["files"].as_u64() != Some(members as u64) {
+            continue;
+        }
         for cite in &fact.cites {
             if let BaseRef::Node(file) = cite {
                 area_of.entry(file.as_str()).or_insert(node);

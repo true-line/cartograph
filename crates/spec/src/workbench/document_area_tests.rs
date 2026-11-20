@@ -262,10 +262,21 @@ fn only_admissible_subsystems_arrange_capabilities() {
     if let OverlayItem::Node(node) = &mut shadowing.item {
         node.id = file_id("app/health.py");
     }
+    // A file count that is not the cited membership.
+    let mut miscounted = subsystem("Mailbox", "cluster", Tier::Semantic, &["app/mailbox.py"]);
+    if let OverlayItem::Node(node) = &mut miscounted.item {
+        node.props["files"] = json!(7);
+    }
+    let mut uncounted = subsystem("Db", "cluster", Tier::Semantic, &["app/db.py"]);
+    if let OverlayItem::Node(node) = &mut uncounted.item {
+        node.props["files"] = json!("one");
+    }
     fixture.subsystems = vec![
         subsystem("Alias", "cluster", Tier::Agentic, &["app/api/alias.py"]),
         unnamed,
         shadowing,
+        miscounted,
+        uncounted,
     ];
     let stories = fixture.stories(ExportMode::BestEffort, &BTreeSet::new());
     assert_eq!((stories.included(), stories.arranged()), (6, 0));
