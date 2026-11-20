@@ -5,8 +5,11 @@ sufficiency checklist of [SPEC-16](../../SPEC-16_rebuild-handoff-bundle.md).
 
 ## Status
 
-No bundle has been reviewed. The definition of done of #1752 is met only
-when a completed `review.md` is committed here, whatever its result.
+[`review.md`](review.md) is review 1 (2026-11-20): a `best-effort` export
+with no drafted section, found **not sufficient**. It skipped step 2 below
+because no draft has been accepted. The review of a bundle made after
+drafting is still owed, and is committed here as `review-2.md`, whatever
+its result.
 
 ## Producing the bundle
 
@@ -28,8 +31,22 @@ drafts. They copy the table below into `review.md` and fill it in.
 - **Where**: the file and section that answers, or that states the unknown.
 - **Note**: for `silent`, what was looked for and not found.
 
+An answer the reviewer could not act on without reading the source (a list
+of code names, a condition printed as a source expression) is recorded as
+`silent`, with what was there. A section that reads "Not drafted" is
+`silent`.
+
 For question 14 the reviewer picks five statements before opening the fact
 index, writes them down, then follows each citation.
+
+For question 17 the reviewer lists every entry point the bundle shows
+(requests, scheduled jobs, messages and mail received, commands, webhooks)
+and says for each whether a capability or a gap row covers it.
+
+Question 18 is the rebuild probe. Only after the rest is answered, the
+reviewer opens `../w13/expected.json` and marks each item `stated`,
+`partly` or `absent` from the bundle alone, and for each absent item
+whether a gap row accounts for it.
 
 ```markdown
 # Sufficiency review
@@ -58,12 +75,27 @@ index, writes them down, then follows each citation.
 | 14 | | | |
 | 15 | | | |
 | 16 | | | |
+| 17 | | | |
+| 18 | | | |
 
 ## Question 14: the five statements
 
 | Statement | Citation id | Resolves to a span that shows it? |
 |-----------|-------------|-----------------------------------|
+
+## Question 17: entry points
+
+| Entry point | Under a capability? | In the gap register? |
+|-------------|---------------------|----------------------|
+
+## Question 18: rebuild probe
+
+| Section | Items | Stated | Partly | Absent | Absent with no gap row |
+|---------|-------|--------|--------|--------|------------------------|
 ```
 
-A bundle is sufficient when no answer is `silent`, all five statements of
-question 14 resolve, and questions 15 and 16 are answered no.
+A bundle is sufficient when no answer is `silent`; questions 3, 4 and 5 are
+`answered` for the sample; all five statements of question 14 resolve;
+questions 15 and 16 are answered no; question 17 leaves no entry point
+outside both the capabilities and the gap register; and the probe meets the
+pass values of SPEC-16.
