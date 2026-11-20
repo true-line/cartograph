@@ -185,9 +185,10 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 - **AC-0011** Given a channel id from a present config/env file, when resolved, then the edge is Confirmed via the config resolver.
 - **AC-0012** Given a runtime-computed channel id, when unresolved at T0, then the hop escalates and, if still unresolved, emits a Gap with reason.
 - **AC-0256** Given an EventBridge `PutEvents` site whose detail type is unresolved at T0, when an OTel trace is applied, then the Gap is filled only by observations attributed to that site that establish bus and detail type (with literal static components) as exactly one distinct scoped identity; a bus-only, contradicting, unattributed, multi-identity or batched case keeps the Gap with a reason naming the shortfall, and an observed bus is preserved as its own fact.
-- **Security:** —
+- **AC-0890** Given env files (`.env`, `.env.*`) that hold a secret-shaped value (a recognized secret pattern, a token-shaped value, a URL with a password, or a value under a credential key name that is not a template placeholder), when the config resolver indexes them, then the ingest is refused with every file, line and key named, no value disclosed, and the way to proceed (remove the values or files; declare non-secret values in `cartograph.system.toml` `[env]`) (#933).
+- **Security:** AC-0890: an env file holding a secret refuses the ingest; the resolver never keeps a secret-shaped value.
 - **Performance:** Channel index keyed by identity for O(1) match.
-- **Trace:** M3,M5,M6 · `events`, `dynamic`, `adapters-fw`, `adapters-lang-ts`, `flowtracer`, `app` · — · T-0010..0012, T-0256
+- **Trace:** M3,M5,M6 · `events`, `dynamic`, `adapters-fw`, `adapters-lang-ts`, `flowtracer`, `app` · — · T-0010..0012, T-0256, T-0890
 
 ### US-0005 — Client-side interaction graph (React first)
 - **Actor:** Engine

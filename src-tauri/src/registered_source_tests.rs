@@ -3362,7 +3362,7 @@ fn export_projects_ingested_configuration_keys() {
     let root = directory(dir.path(), "project");
     std::fs::write(
         root.join(".env.example"),
-        "DATABASE_URL=postgres://shop:hunter2@localhost/shop\nUNUSED_FLAG=1\n",
+        "DATABASE_URL=postgres://localhost/hunter2\nUNUSED_FLAG=1\n",
     )
     .unwrap();
     let config = "export function load(name: string) {\n  \

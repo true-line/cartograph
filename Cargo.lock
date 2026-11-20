@@ -1532,6 +1532,7 @@ dependencies = [
  "adapters-lang-ts",
  "core-graph",
  "core-prov",
+ "core-redact",
  "dynamic",
  "serde_json",
  "source-walk",

@@ -226,6 +226,89 @@ fn config_index_parses_env_files_deterministically() {
     assert_eq!(cfg.resolve("MISSING"), None);
 }
 
+// AC-0890 (#933): env files holding secret-shaped values refuse the
+// ingest. The refusal names every file, line and key, never a value, and
+// says how to proceed.
+#[test]
+fn env_file_secrets_refuse_the_ingest_by_file_line_and_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        concat!(
+            "ORDERS_TOPIC=orders\n",
+            "BROKER_URL=amqp://app:s3cr3t-pass@mq.internal:5672/vhost\n",
+            "DB_PASSWORD=hunter2-real\n",
+            "SIGNING=AKIAIOSFODNN7EXAMPLE\n",
+            "SESSION_BLOB=QWxhZGRpbjpvcGVuIHNlc2FtZQQWxhZGRpbjpvcGVuIHNlc2FtZQ\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".env.local"), "# c\nAPI_KEY=k-12345678\n").unwrap();
+
+    let error = ConfigIndex::from_dir(dir.path()).unwrap_err();
+    let StitchError::SecretsInEnvFiles(found) = &error else {
+        panic!("not a refusal: {error}");
+    };
+    let named: Vec<_> = found
+        .iter()
+        .map(|s| (s.file.as_str(), s.line, s.key.as_str(), s.why))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (".env", 2, "BROKER_URL", "URL with a password"),
+            (".env", 3, "DB_PASSWORD", "value under a credential key"),
+            (".env", 4, "SIGNING", "recognized secret pattern"),
+            (".env", 5, "SESSION_BLOB", "token-shaped value"),
+            (".env.local", 2, "API_KEY", "value under a credential key"),
+        ]
+    );
+    let message = error.to_string();
+    assert!(message.starts_with("ingest refused: 5 env-file values look like secrets."));
+    assert!(message.contains("- .env:3 DB_PASSWORD (value under a credential key)"));
+    assert!(message.contains("To proceed: remove these values"));
+    for value in [
+        "s3cr3t",
+        "hunter2",
+        "AKIAIOSFODNN7EXAMPLE",
+        "QWxhZGRp",
+        "k-12345678",
+    ] {
+        assert!(!message.contains(value), "refusal discloses {value}");
+    }
+}
+
+// AC-0890: values that are not secrets still resolve: plain URLs, URLs
+// with a user and no password, empty values and template placeholders under
+// credential keys.
+#[test]
+fn env_files_without_secrets_still_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env.example"),
+        concat!(
+            "API_URL=https://api.example.com/v1?x=a@b\n",
+            "AMQP=amqp://guest@mq:5672\n",
+            "SECRET_KEY=changeme\n",
+            "DB_PASSWORD=\n",
+            "API_KEY=<your-api-key>\n",
+            "AUTH_TOKEN=${AUTH_TOKEN}\n",
+            "PASSWORD=xxxxxxxx\n",
+        ),
+    )
+    .unwrap();
+
+    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    assert_eq!(
+        cfg.resolve("API_URL"),
+        Some(("https://api.example.com/v1?x=a@b", ".env.example"))
+    );
+    assert_eq!(
+        cfg.resolve("AMQP"),
+        Some(("amqp://guest@mq:5672", ".env.example"))
+    );
+}
+
 // Kafka topics stitch across files: producer and consumer in different
 // modules, both literal, one channel.
 #[test]
