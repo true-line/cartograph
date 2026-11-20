@@ -23,6 +23,7 @@ pub use decision_selection::{
     MAX_SELECTED_ASSERTION_BYTES, MAX_SELECTED_ASSERTION_KEYS, MAX_SELECTED_ASSERTION_ROW_BYTES,
     SelectedAssertionDecision,
 };
+pub mod area_expert;
 pub mod curated;
 pub mod draft_store;
 pub mod finding_curation;

@@ -37,9 +37,9 @@ fn id(node: &str) -> String {
 }
 
 /// A local provider that records the prompt and answers with `reply`.
-struct Scripted {
-    reply: String,
-    prompts: Mutex<Vec<String>>,
+pub(crate) struct Scripted {
+    pub(crate) reply: String,
+    pub(crate) prompts: Mutex<Vec<String>>,
 }
 
 impl LlmProvider for Scripted {

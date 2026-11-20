@@ -45,6 +45,7 @@ import {
 } from './sectionDocument';
 import { EgressConsentDialog, type EgressPreview } from './components/EgressConsentDialog';
 import type { SectionAddress, StoredSectionDraft } from './sectionDocument';
+import { useAreaExpert } from './areaExpert';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { SavedResultNotices } from './components/SavedResultNotices';
@@ -550,6 +551,9 @@ export default function App() {
     }
   }, [composing]);
 
+  // Ask an area's expert (#2057, AC-0932): the same one-action consent.
+  const areaExpert = useAreaExpert(view === 'spec' && backend === 'up');
+
   // ⌘K / Ctrl+K toggles the palette; ⌘1–⌘8 jump straight to a surface;
   // '?' or F1 opens Help on the current surface's topic (#154).
   useEffect(() => {
@@ -805,6 +809,17 @@ export default function App() {
                 onDraft: (address) => void draftSection(address),
                 onRedraft: (draft) => void draftSection(draft),
                 onCompose: (address) => void composeSection(address),
+              }}
+              expert={{
+                areas: areaExpert.areas,
+                selected: areaExpert.selected,
+                exchanges: areaExpert.exchanges,
+                busy: areaExpert.busy,
+                error: areaExpert.error,
+                canAsk: backend === 'up',
+                onReload: areaExpert.reload,
+                onSelect: areaExpert.select,
+                onAsk: areaExpert.ask,
               }}
               mode={specMode}
               decisions={curation}
@@ -1097,6 +1112,15 @@ export default function App() {
           cancelLabel="Cancel"
           onCancel={() => setComposing(null)}
           onConsent={(preview) => void consentCompose(preview)}
+        />
+      )}
+      {areaExpert.pending && (
+        <EgressConsentDialog
+          preview={areaExpert.pending.preview}
+          busy={areaExpert.busy}
+          cancelLabel="Cancel"
+          onCancel={areaExpert.cancel}
+          onConsent={areaExpert.consent}
         />
       )}
       {escalation && (

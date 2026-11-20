@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod area_briefing;
+mod area_expert;
 #[cfg(test)]
 mod conformance_tests;
 mod context;
@@ -7856,6 +7857,9 @@ fn main() {
             investigations::section_drafts::section_draft_question,
             investigations::section_drafts::section_draft_outcome,
             area_briefing::area_briefing,
+            area_expert::area_choices,
+            area_expert::area_ask_preview,
+            area_expert::run_area_ask,
             section_compose::section_compose_preview,
             section_compose::run_section_compose,
             section_review::section_document,

@@ -32,6 +32,8 @@ pub(crate) struct AreaBriefingView {
     pub(crate) sections: Vec<&'static str>,
     /// Capability subsections left out to keep the bound.
     pub(crate) left_out: usize,
+    /// The names of the areas it calls or is called from.
+    pub(crate) neighbours: Vec<String>,
 }
 
 /// The briefing of the Subsystem `only`, or of every named Subsystem in id
@@ -83,6 +85,10 @@ pub(crate) fn compile(
                 &neighbours,
                 spec::AREA_BRIEFING_BYTES,
             );
+            let mut near = neighbours.calls;
+            near.extend(neighbours.called_by);
+            near.sort();
+            near.dedup();
             AreaBriefingView {
                 area,
                 name,
@@ -90,6 +96,7 @@ pub(crate) fn compile(
                 text: briefing.text,
                 sections: briefing.sections,
                 left_out: briefing.left_out,
+                neighbours: near,
             }
         })
         .collect())
@@ -112,4 +119,4 @@ pub(crate) async fn area_briefing(
 
 #[cfg(test)]
 #[path = "area_briefing_tests.rs"]
-mod tests;
+pub(crate) mod tests;

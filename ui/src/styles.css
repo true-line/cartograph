@@ -4968,3 +4968,28 @@ details.investigation-section { display: block; }
   margin: 0;
   font-size: 0.85rem;
 }
+
+/* Ask an area's expert (#2057, AC-0932). */
+.area-expert select,
+.area-expert textarea {
+  width: min(100%, 32rem);
+  font: inherit;
+}
+
+.area-exchange {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+  padding: 0.6rem 0 0.2rem;
+  border-top: 1px solid var(--border);
+}
+
+.area-question {
+  font-weight: 600;
+}
+
+.area-answer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+}

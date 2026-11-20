@@ -33,7 +33,7 @@ fn subsystem(id: &str, name: &str, file: &str) -> OverlayFact {
 
 /// Two files with one symbol each and a call from the first to the second,
 /// and an overlay current for them with one area per file.
-fn state() -> (tempfile::TempDir, AppState) {
+pub(crate) fn state() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let mut state = crate::registered_source_tests::app_state(dir.path());
     let base = {

@@ -93,7 +93,7 @@ pub use views::{
 };
 pub use workbench::{
     AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
-    area_neighbours,
+    area_neighbours, briefing_citation_ids,
 };
 pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,

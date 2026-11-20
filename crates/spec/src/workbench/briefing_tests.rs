@@ -47,6 +47,15 @@ fn a_briefing_holds_the_areas_block_of_each_area_section_as_printed() {
     let briefing = area_briefing(DOCUMENT, "Alias", 12, &neighbours, AREA_BRIEFING_BYTES);
     assert_eq!(briefing.sections, ["1.3", "1.5"]);
     assert_eq!(briefing.left_out, 0);
+    // What an answer from this briefing may cite (#2057).
+    assert_eq!(
+        briefing_citation_ids(&briefing.text),
+        [
+            "F-00000000000000a1".to_owned(),
+            "F-00000000000000a2".to_owned()
+        ]
+        .into()
+    );
     let text = &briefing.text;
     assert!(text.starts_with("# Area briefing: Alias\n"));
     assert!(text.contains("a candidate grouping of 12 files, inferred by rule"));
