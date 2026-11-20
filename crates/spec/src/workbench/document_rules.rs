@@ -13,7 +13,7 @@
 //! rejections are listed once, after the capabilities.
 //!
 //! A function a rejection's condition calls (`user.can_create_new_alias()`)
-//! is followed by its name (#1998, AC-0896): when exactly one recovered
+//! is followed by its name (#1998, AC-0886): when exactly one recovered
 //! Symbol has that last name segment, its guarded exits and those of what it
 //! calls within [`PREDICATE_DEPTH`] hops are listed under the row, marked
 //! `↳` and as matched by name; otherwise a `↳` row names the predicate and
@@ -938,7 +938,7 @@ def update_alias(alias_id, user):
         assert!(!text.contains("returns None"), "{text}");
     }
 
-    // AC-0896: a function a rejection's condition calls is followed by name
+    // AC-0886: a function a rejection's condition calls is followed by name
     // into its guarded exits and those of the method it calls on `self`; a
     // name no repository function has is named as not followed.
     #[test]

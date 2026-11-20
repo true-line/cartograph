@@ -7774,7 +7774,7 @@ fn rate_limits_at(extraction: &Extraction, path: &str) -> serde_json::Value {
 
 #[test]
 fn rate_limits_are_recovered_from_literals_and_config_defaults() {
-    // AC-0891 (T-0891): a proven flask-limiter limit decorator on a route
+    // AC-0881 (T-0881): a proven flask-limiter limit decorator on a route
     // handler is recorded on its endpoint, its value read from a literal
     // (Confirmed) or from a module constant whose environment default is a
     // literal (InferredStrong, with the key), and the `/me` literal too.
@@ -7883,7 +7883,7 @@ def above():
 
 #[test]
 fn a_limit_on_something_not_a_limiter_records_nothing() {
-    // AC-0891 (T-0891): `.limit` on a name that is not a proven
+    // AC-0881 (T-0881): `.limit` on a name that is not a proven
     // flask-limiter `Limiter` is not a rate limit.
     let extraction = decorated_route(
         "@limiter.limit(\"5/minute\")",
@@ -7896,7 +7896,7 @@ fn a_limit_on_something_not_a_limiter_records_nothing() {
 
 #[test]
 fn a_call_through_an_imported_submodule_is_an_inferred_call() {
-    // AC-0893 (T-0893): `from pkg import sub; sub.f()` reaches `f` of
+    // AC-0883 (T-0883): `from pkg import sub; sub.f()` reaches `f` of
     // `pkg/sub.py` when that file defines it, as an InferredStrong edge;
     // a member that file does not define stays without an edge.
     let dir = tempfile::tempdir().unwrap();
@@ -7925,7 +7925,7 @@ fn a_call_through_an_imported_submodule_is_an_inferred_call() {
 
 #[test]
 fn column_assignments_on_an_annotated_model_instance_are_inferred_updates() {
-    // AC-0894 (T-0894): `x.col = v` on a parameter annotated with a model
+    // AC-0884 (T-0884): `x.col = v` on a parameter annotated with a model
     // class, or a local bound once as `x: Model = …`, is an InferredStrong
     // update of that model (resolution "attribute-assignment"); an
     // unannotated or rebound name, or an attribute the model does not
@@ -7999,7 +7999,7 @@ def not_a_column(alias: Alias):
 
 #[test]
 fn a_self_call_in_a_method_reaches_the_class_method() {
-    // AC-0895 (T-0895): `self.m()` in method `C.f` reaches `C.m` defined in
+    // AC-0885 (T-0885): `self.m()` in method `C.f` reaches `C.m` defined in
     // the same file, InferredStrong with resolution "self-method"; a member
     // the class does not define yields no edge.
     let dir = tempfile::tempdir().unwrap();

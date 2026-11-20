@@ -363,7 +363,7 @@ fn contract_row<'a>(content: &'a str, id: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{id} has a contract row"))
 }
 
-// AC-0890: each endpoint's recorded request inputs and responses are
+// AC-0880: each endpoint's recorded request inputs and responses are
 // printed in D4 §4.2 terms, with the reasons the adapter gave for not
 // proving more, and an endpoint with neither reads "not recovered".
 #[test]
@@ -398,7 +398,7 @@ fn request_inputs_and_responses_are_printed_per_endpoint() {
     );
 }
 
-// AC-0890 (ADR-0058): each printed shape is its own assertion and resolves
+// AC-0880 (ADR-0058): each printed shape is its own assertion and resolves
 // in the fact index under the id the row prints; a weak shape is left out
 // of verified-only.
 #[test]
