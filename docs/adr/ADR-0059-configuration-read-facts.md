@@ -41,6 +41,13 @@ shape has to be decided.
    global symbol. A shadowed look-alike yields nothing. Where an adapter
    cannot prove it, it emits nothing and the limit is stated.
 5. **Names only.** No default value, fallback or resolved value is stored.
+   *Amended for #1998 (AC-0903):* a numeric or boolean literal default of a
+   module constant bound to the read is stored on the node as
+   `defaults: [{constant, value, byte_start, byte_end}]`, so business rules
+   can state limits such as "5 aliases unless MAX_NB_EMAIL_FREE_PLAN is set".
+   A number or boolean cannot carry a credential or a hostname. String
+   defaults, fallbacks and resolved values are still never stored. Python
+   records them today; other adapters store none.
 6. **Every compiled-in adapter emits the same shape,** assembled by one
    function in `adapters-fw`, including Python and TypeScript. Their existing
    `env_key` resources and `CONFIGURED_IN` edges are unchanged; a read that is

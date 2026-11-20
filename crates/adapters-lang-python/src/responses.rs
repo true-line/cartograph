@@ -65,6 +65,9 @@ pub(crate) struct Responses {
     pub kinds: BTreeSet<&'static str>,
     pub statuses: BTreeSet<u16>,
     pub keys: BTreeSet<String>,
+    /// The top-level JSON keys each literal or default status returns
+    /// (#1998, AC-0902); a key whose status is computed is in `keys` only.
+    pub keys_by_status: BTreeMap<u16, BTreeSet<String>>,
     pub partial: BTreeSet<&'static str>,
     /// Symbols of the repository functions followed.
     pub followed: BTreeSet<String>,
@@ -90,6 +93,14 @@ impl Responses {
         }
         if !self.keys.is_empty() {
             props.insert("keys".into(), serde_json::json!(self.keys));
+        }
+        if !self.keys_by_status.is_empty() {
+            let by_status: serde_json::Map<String, serde_json::Value> = self
+                .keys_by_status
+                .iter()
+                .map(|(status, keys)| (status.to_string(), serde_json::json!(keys)))
+                .collect();
+            props.insert("keys_by_status".into(), by_status.into());
         }
         if !self.partial.is_empty() {
             props.insert("partial".into(), serde_json::json!(self.partial));
@@ -134,6 +145,9 @@ impl Responses {
         self.kinds.extend(other.kinds);
         self.statuses.extend(other.statuses);
         self.keys.extend(other.keys);
+        for (status, keys) in other.keys_by_status {
+            self.keys_by_status.entry(status).or_default().extend(keys);
+        }
         self.partial.extend(other.partial);
         self.followed.extend(other.followed);
         for evidence in other.evidence {
@@ -157,8 +171,9 @@ pub(crate) enum Follow {
     Decorator(FnKey),
     /// `x = check(…); … return x` in a wrapper: `check`'s responses.
     Delegate(FnKey),
-    /// `jsonify(helper(…))`: the keys of the dict `helper` builds.
-    Built(FnKey),
+    /// `jsonify(helper(…))`: the keys of the dict `helper` builds, with the
+    /// literal or default status of the `return` that builds it.
+    Built(FnKey, Option<u16>),
     /// `return helper(…)` in a handler: `helper`'s responses, when it
     /// cannot return `None`.
     Returned(FnKey),
@@ -525,9 +540,12 @@ impl<'t> Reader<'_, '_, 't> {
             None => (body, status),
         };
         let mut recorded = false;
+        let mut json_keys = None;
+        let mut built = None;
         let default = match self.classify(body) {
             Body::Json(keys, evidence) => {
-                responses.keys.extend(keys);
+                responses.keys.extend(keys.iter().cloned());
+                json_keys = Some(keys);
                 for evidence in evidence {
                     responses.cite(evidence);
                 }
@@ -538,7 +556,7 @@ impl<'t> Reader<'_, '_, 't> {
                 Some(("json", Some(200)))
             }
             Body::Built(helper) => {
-                facts.follows.push(Follow::Built(helper));
+                built = Some(helper);
                 Some(("json", Some(200)))
             }
             Body::Html => Some(("html", Some(200))),
@@ -558,21 +576,35 @@ impl<'t> Reader<'_, '_, 't> {
             responses.kinds.insert(kind);
             recorded = true;
         }
-        match status {
+        let code = match status {
             Some(status) => match literal_status(cx, status) {
                 Some(code) => {
                     responses.statuses.insert(code);
                     recorded = true;
+                    Some(code)
                 }
                 None => {
                     responses.partial.insert("status_computed");
+                    None
                 }
             },
             None => {
-                if let Some((_, Some(code))) = default {
+                let code = default.and_then(|(_, code)| code);
+                if let Some(code) = code {
                     responses.statuses.insert(code);
                 }
+                code
             }
+        };
+        if let (Some(keys), Some(code)) = (json_keys, code) {
+            responses
+                .keys_by_status
+                .entry(code)
+                .or_default()
+                .extend(keys);
+        }
+        if let Some(helper) = built {
+            facts.follows.push(Follow::Built(helper, code));
         }
         if recorded {
             responses.cite(cx.evidence(&statement));
@@ -1081,10 +1113,17 @@ fn merge(
                     }),
                 "response_not_proven",
             ),
-            Follow::Built(key) => {
+            Follow::Built(key, code) => {
                 match lookup(functions, key).and_then(|f| f.built.as_ref()) {
                     Some((keys, evidence)) => {
                         responses.keys.extend(keys.iter().cloned());
+                        if let Some(code) = code {
+                            responses
+                                .keys_by_status
+                                .entry(*code)
+                                .or_default()
+                                .extend(keys.iter().cloned());
+                        }
                         for evidence in evidence {
                             responses.cite(evidence.clone());
                         }
@@ -1119,7 +1158,7 @@ fn nullable(facts: &Facts, functions: &HashMap<FnKey, FunctionFacts>, depth: usi
             Follow::Delegate(key) | Follow::Returned(key) => lookup(functions, key)
                 .and_then(|f| f.returns.as_ref())
                 .is_some_and(|found| depth >= MAX_DEPTH || nullable(found, functions, depth + 1)),
-            Follow::Decorator(_) | Follow::Built(_) => false,
+            Follow::Decorator(_) | Follow::Built(..) => false,
         })
 }
 

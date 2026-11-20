@@ -903,7 +903,20 @@ fn python_callers_are_named_by_their_recovered_guards() {
         ),
         "{actors}"
     );
-    let rows: Vec<&str> = actors
+    let (callers, checks) = actors
+        .split_once("### What each guard checks")
+        .expect("the repository guard's checks follow the callers (AC-0901)");
+    // AC-0901: the repository guard's wrapper exit and the exit of what it
+    // calls are listed under it; the library guard is not.
+    assert!(checks.contains("#### require\\_api\\_auth\n"), "{checks}");
+    assert!(
+        checks.contains(
+            "| require\\_api\\_auth.decorated | error\\_return | returns error\\_return |"
+        ),
+        "{checks}"
+    );
+    assert!(!checks.contains("login\\_required"), "{checks}");
+    let rows: Vec<&str> = callers
         .lines()
         .filter(|l| l.starts_with("| ") && !l.starts_with("| Caller |"))
         .collect();
@@ -996,7 +1009,8 @@ fn python_callers_are_named_by_their_recovered_guards() {
     // Every operation a caller row counts is a statement of D1, with its tier.
     let statements = &d1[d1.find("## Statements in this document").unwrap()..];
     assert!(
-        statements.contains("Cited facts printed in the frames above: 4."),
+        // Four operations and the guard's two exit rows (AC-0901).
+        statements.contains("Cited facts printed in the frames above: 6."),
         "{statements}"
     );
     for operation in ["GET /api/health", "GET /api/coupon", "POST /api/coupon"] {

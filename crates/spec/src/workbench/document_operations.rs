@@ -6,9 +6,9 @@
 //! row states, from facts already recovered and nothing read from source:
 //!
 //! - **Takes**: the literal input names its handler reads (`request_inputs`);
-//! - **On success**: the 2xx statuses of `responses`. The recorded body
-//!   kinds and JSON keys are not tied to a status, so they are left to
-//!   `endpoint-inventory.md` rather than stated as the success body;
+//! - **On success**: the 2xx statuses of `responses`, each with the JSON
+//!   keys the adapter tied to it (#1998, AC-0902). The recorded body kinds
+//!   are not tied to a status, so they are left to `endpoint-inventory.md`;
 //! - **Changes**: the entities written, with the operation (insert, update,
 //!   delete), by the handler and the Symbols it reaches along `CALLS` within
 //!   [`rules::CALL_DEPTH`] hops, from `WRITES` edges;
@@ -26,7 +26,7 @@
 use super::rules::CALL_DEPTH;
 use crate::workbench::capabilities::{Stories, Story, Support};
 use crate::workbench::endpoint_inventory::{INPUTS_KIND, LIMITS_KIND, RESPONSES_KIND};
-use crate::workbench::endpoint_inventory::{rate_limits, reads, shape, strings};
+use crate::workbench::endpoint_inventory::{rate_limits, reads, shape, status_keys, strings};
 use crate::workbench::render::{Assertions, Literal, NodeName, RenderLimit, Text};
 use crate::workbench::{ExportMode, citation_id};
 use core_graph::{Edge, FactKey, Node};
@@ -246,7 +246,10 @@ pub(super) fn operations_per_capability(
                         .flatten()
                         .filter_map(serde_json::Value::as_u64)
                         .filter(|status| (200..300).contains(status))
-                        .map(|status| status.to_string())
+                        .map(|status| match status_keys(raw, status)[..] {
+                            [] => status.to_string(),
+                            ref keys => format!("{status} with JSON keys {}", keys.join(", ")),
+                        })
                         .collect();
                     if ok.is_empty() {
                         missing.push("success response");
@@ -254,7 +257,8 @@ pub(super) fn operations_per_capability(
                     } else {
                         // Body kinds are not tied to statuses in the fact, so a
                         // kind could belong to an error return: not stated here.
-                        let mut text = ok.join(", ");
+                        // Keys are, when the adapter recorded them per status.
+                        let mut text = ok.join("; ");
                         if strings(&raw["partial"]).contains(&"response_built_elsewhere") {
                             text.push_str("; body built outside the handler");
                         }
@@ -570,7 +574,10 @@ def ping():
         };
         let created = row("POST /api/alias/new");
         assert!(
-            created.starts_with("| POST /api/alias/new | body note | 201 | inserts Alias | — | "),
+            // AC-0902: the success status carries the JSON keys tied to it.
+            created.starts_with(
+                "| POST /api/alias/new | body note | 201 with JSON keys alias | inserts Alias | — | "
+            ),
             "{created}"
         );
         let ping = row("GET /api/ping");

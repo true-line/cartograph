@@ -450,3 +450,22 @@ fn printed_shapes_resolve_in_the_fact_index_and_follow_the_mode() {
     let best = artifact(&nodes, &edges, ExportMode::BestEffort).content;
     assert!(contract_row(&best, "ep:acme/shop@POST:/refunds").contains("| 201 (json) |"));
 }
+
+// AC-0902 (T-0902): JSON keys tied to their statuses are printed per status,
+// with keys whose status is computed after them; a fact recorded before keys
+// were tied to statuses prints its keys alone.
+#[test]
+fn json_keys_are_printed_per_status() {
+    assert_eq!(
+        json_keys(&json!({
+            "keys": ["alias", "error", "extra"],
+            "keys_by_status": { "400": ["error"], "201": ["alias"] },
+        })),
+        "201: alias; 400: error; status computed: extra"
+    );
+    assert_eq!(json_keys(&json!({ "keys": ["a", "b"] })), "a, b");
+    assert_eq!(json_keys(&json!({})), "—");
+    let raw = json!({ "keys_by_status": { "200": ["enabled"] } });
+    assert_eq!(status_keys(&raw, 200), ["enabled"]);
+    assert!(status_keys(&raw, 201).is_empty());
+}

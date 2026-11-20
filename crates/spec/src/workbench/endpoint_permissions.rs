@@ -559,10 +559,14 @@ fn caller_reading(
 /// carries an admitted Python guard reading. Each operation a row counts is
 /// asserted once, so its tier and citation are in the document's statements;
 /// returns how many it asserted.
+///
+/// Each repository guard (a `sym:` id) of a counted reading is added to
+/// `guards`, for what each guard checks (#1998, AC-0901).
 pub(super) fn callers_frame(
     nodes: &[&Node],
     (mode, rejected): (ExportMode, &BTreeSet<String>),
     (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    guards: &mut BTreeSet<String>,
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
     let mut by_caller: BTreeMap<Caller, Vec<String>> = BTreeMap::new();
@@ -570,6 +574,14 @@ pub(super) fn callers_frame(
     let mut cited = 0;
     for endpoint in nodes.iter().filter(|n| n.label == "Endpoint") {
         if let Some((caller, tier)) = caller_reading(endpoint, mode, rejected) {
+            if matches!(caller, Caller::Guarded { .. }) {
+                guards.extend(
+                    strings(&endpoint.props["auth"]["guards"])
+                        .into_iter()
+                        .filter(|g| g.starts_with("sym:"))
+                        .map(str::to_owned),
+                );
+            }
             let id = citation_id(&FactKey::Node {
                 id: endpoint.id.clone(),
             });
