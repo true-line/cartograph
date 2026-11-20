@@ -663,6 +663,81 @@ fn cited_endpoints<'s, 'a>(story: &'s Story<'a>) -> impl Iterator<Item = &'a Nod
     })
 }
 
+/// The sentence stating how many HTTP endpoints no Capability cites, and
+/// why (#2007): an endpoint whose `HANDLES` edge reaches no Symbol has no
+/// resolved handler, so no rule can group it; one with a handler is in no
+/// capability rule's scope, counted by framework. `None` when every
+/// endpoint is cited, or there is none.
+fn uncovered_endpoints(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    knowledge: Option<&Stories<'_>>,
+) -> Option<String> {
+    // A Gap endpoint is in the gap register, not the inventory: not counted.
+    let endpoints: Vec<&Node> = framed(nodes, "Endpoint")
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect();
+    if endpoints.is_empty() {
+        return None;
+    }
+    let cited: BTreeSet<&str> = knowledge
+        .into_iter()
+        .flat_map(|k| k.included.iter())
+        .filter(|story| story.node.label == "Capability")
+        .flat_map(cited_endpoints)
+        .map(|n| n.id.as_str())
+        .collect();
+    let symbols: BTreeSet<&str> = nodes
+        .iter()
+        .filter(|n| n.label == "Symbol")
+        .map(|n| n.id.as_str())
+        .collect();
+    let handled: BTreeSet<&str> = edges
+        .iter()
+        .filter(|e| e.label == "HANDLES" && symbols.contains(e.dst.as_str()))
+        .map(|e| e.src.as_str())
+        .collect();
+    let mut unresolved = 0usize;
+    let mut by_framework: BTreeMap<&str, usize> = BTreeMap::new();
+    for endpoint in endpoints.iter().filter(|n| !cited.contains(n.id.as_str())) {
+        if handled.contains(endpoint.id.as_str()) {
+            *by_framework
+                .entry(endpoint.props["framework"].as_str().unwrap_or("unknown"))
+                .or_default() += 1;
+        } else {
+            unresolved += 1;
+        }
+    }
+    let ungrouped: usize = by_framework.values().sum();
+    if unresolved + ungrouped == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if unresolved > 0 {
+        parts.push(format!(
+            "{unresolved} have no resolved handler (their `HANDLES` target is a Gap or missing), \
+             so no rule can group them"
+        ));
+    }
+    if ungrouped > 0 {
+        let frameworks: Vec<String> = by_framework
+            .iter()
+            .map(|(framework, n)| format!("{} {n}", Literal(framework)))
+            .collect();
+        parts.push(format!(
+            "{ungrouped} have a handler that no capability rule groups (by framework: {})",
+            frameworks.join(", ")
+        ));
+    }
+    Some(format!(
+        "\nOperations in no Capability: {} of {} HTTP endpoints. {}. Each is listed in \
+         `endpoint-inventory.md`.\n",
+        unresolved + ungrouped,
+        endpoints.len(),
+        parts.join("; ")
+    ))
+}
+
 /// The knowledge layer's derived facts of `label` (#1443): Capabilities as
 /// one row each with the operations they group, Actor caller sets grouped
 /// by the permissions they list. Each printed fact is cited once. They are
@@ -1000,6 +1075,12 @@ pub(super) fn d1(
                         &mut content,
                     )?;
                 }
+            }
+            // §1.3 states the operations no Capability groups, and why (#2007).
+            if matches!(source, SectionFrame::Nodes("Capability"))
+                && let Some(sentence) = uncovered_endpoints((nodes, edges), knowledge)
+            {
+                content.push_str(&sentence)?;
             }
             // Python callers by their recovered guards frame 1.2 (#1979).
             if matches!(source, SectionFrame::Nodes("Actor")) {
