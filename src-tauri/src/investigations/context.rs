@@ -500,13 +500,14 @@ impl FrozenContext {
         if request.specialist_id.uses_coverage_qualification() {
             return Err(HostError::InvalidInput);
         }
-        let graph = state
+        let base = state
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
-            .read_snapshot_bounded(graph_limits)
+            .read_snapshot_with_revision_bounded(graph_limits)
             .map_err(graph_error)?;
-        let mut prepared = Self::from_graph(graph, &request, history)?;
+        let area = super::area::files(state, &base.revision, &request.scope)?;
+        let mut prepared = Self::from_graph_in(base.graph, &request, history, area.as_ref())?;
         prepared.graph_limits = graph_limits;
         Ok(prepared)
     }

@@ -30,8 +30,12 @@ pub(super) fn files(
         .map_err(|_| HostError::Operational)?
         .read_story_nodes_bounded(revision, MAX_FACTS, MAX_BYTES)
         .map_err(|_| HostError::Operational)?;
-    let OverlayRead::Current { facts, .. } = read else {
-        return Err(HostError::InputChanged);
+    let facts = match read {
+        OverlayRead::Current { facts, .. } => facts,
+        // Derived from another graph revision.
+        OverlayRead::Stale { .. } => return Err(HostError::InputChanged),
+        // Nothing published: there is no such area.
+        OverlayRead::Absent => return Err(HostError::InvalidInput),
     };
     let files = facts
         .into_iter()

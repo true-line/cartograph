@@ -1086,9 +1086,50 @@ fn an_unknown_or_stale_area_refuses_the_task() {
         fixture.prepare(&requested),
         Err(HostError::InputChanged)
     ));
+    // An overlay store nothing was published to holds no such area.
+    fixture
+        .state
+        .knowledge_overlay
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .invalidate()
+        .unwrap();
+    assert!(matches!(
+        fixture.prepare(&requested),
+        Err(HostError::InvalidInput)
+    ));
     fixture.state.knowledge_overlay = None;
     assert!(matches!(
         fixture.prepare(&requested),
+        Err(HostError::InvalidInput)
+    ));
+}
+
+// AC-0930 (#2044): a role prepared without coverage qualification resolves an area the
+// same way.
+#[test]
+fn an_area_scope_is_resolved_for_a_role_without_coverage_qualification() {
+    let (fixture, area) = area_fixture();
+    let mut legacy = request();
+    legacy.schema_version = 1;
+    legacy.specialist_id = SpecialistId::DomainAnalystV1;
+    legacy.scope = InvestigationScope::Area { id: area };
+    let prepared = FrozenContext::prepare(&fixture.state, &legacy, &[]).unwrap();
+    assert_eq!(
+        prepared
+            .snapshot
+            .references_in_scope(QueryScope::All)
+            .unwrap()
+            .len(),
+        3
+    );
+    legacy.scope = InvestigationScope::Area {
+        id: "subsystem:cluster:missing".into(),
+    };
+    assert!(matches!(
+        FrozenContext::prepare(&fixture.state, &legacy, &[]),
         Err(HostError::InvalidInput)
     ));
 }
