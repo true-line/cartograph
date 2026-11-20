@@ -406,8 +406,15 @@ fn capability_frame_states_the_endpoints_no_capability_groups_and_why() {
             props: edge.props,
         }
     };
+    // A Gap-confidence endpoint is in the gap register, not counted here.
+    let unproven = node(
+        "ep:local/shop@GET:/c",
+        "Endpoint",
+        tier.0,
+        ConfidenceTier::Gap,
+    );
     let edges = [handles(&gapped, &gap), handles(&handled, &handler)];
-    let nodes = [gapped, handled, gap, handler];
+    let nodes = [gapped, handled, gap, handler, unproven];
     let bundle = compile_spec(
         &nodes,
         &edges,

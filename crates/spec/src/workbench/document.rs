@@ -672,10 +672,10 @@ fn uncovered_endpoints(
     (nodes, edges): (&[&Node], &[&Edge]),
     knowledge: Option<&Stories<'_>>,
 ) -> Option<String> {
-    let endpoints: Vec<&Node> = nodes
-        .iter()
-        .copied()
-        .filter(|n| n.label == "Endpoint")
+    // A Gap endpoint is in the gap register, not the inventory: not counted.
+    let endpoints: Vec<&Node> = framed(nodes, "Endpoint")
+        .into_iter()
+        .map(|(node, _)| node)
         .collect();
     if endpoints.is_empty() {
         return None;
