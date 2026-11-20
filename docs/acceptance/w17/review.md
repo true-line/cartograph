@@ -63,6 +63,24 @@ Chosen from D1 before the fact index was opened.
 | §1.3: capability "Manage new random alias (API)" serves POST /api/alias/random/new | F-e6766f8201160f9c | Yes: bytes 578..630 is the route declaration |
 | §1.4: scenario "out of quota" requests POST /api/alias/random/new | F-dbe8123f31c73370 | Yes: `tests/api/test_new_random_alias.py` bytes 3034..3124 is the request. The statement is only that the test issues the request; what the test establishes is not stated |
 
+## Question 17: entry points
+
+Question 17 was added to SPEC-16 because of this review and answered
+afterwards, against [`entry-points.md`](entry-points.md).
+
+| Entry point | In a bundle document? | In the gap register? |
+|-------------|-----------------------|----------------------|
+| E1 Web and API server | Yes: 426 endpoints, 96 capabilities | n/a |
+| E2 Mail handler | No | No |
+| E3 Scheduled jobs | Yes: 18 schedule flows in `flow_dossiers.md`. Under no capability | n/a |
+| E4 Job runner | No | No |
+| E5 Event listener | No | No |
+| E6 Monitoring loop | No | No |
+| E7 Operator commands | No | No. One command appears only as the caller of an outbound call in `external.md` |
+| E8 Operator shell | No | No |
+
+Two of eight are in the bundle. Six are in no document and no gap row.
+
 ## Findings
 
 1. **The checklist passes a hollow answer.** Questions 2, 3, 5 and 6 are
@@ -76,7 +94,8 @@ Chosen from D1 before the fact index was opened.
    HTTP controllers only, so the mail handler is no capability, and no gap
    row says a non-HTTP entry point was left out. `flow_dossiers.md` names
    `email_handler` only inside the names of test files. Question 3 is
-   still `answered`.
+   still `answered`. The job runner, the event listener, the monitoring
+   loop and the operator commands are missing the same way (table above).
 3. **"Not drafted" is a fourth answer the definition does not have.** It is
    not an answer and not a gap row. Read loosely it counts as stated
    unknown, and then a bundle exported before any drafting passes
@@ -93,26 +112,33 @@ Chosen from D1 before the fact index was opened.
 
 After the checklist was answered, the bundle was compared with the expected
 set of the W13 pilot (`../w13/expected.json`): 26 statements about the
-alias lifecycle, written by hand from the source before any run. An item is
-**stated** when the bundle says it, in any form; **partly** when it gives
-some of it; **absent** otherwise.
+alias lifecycle, written by hand from the source before any run. The
+scoring is the SPEC-16 rubric: an item is **stated** when the bundle says
+it in domain terms with a citation; **partly** when it gives some of it, or
+gives it only as a source expression; **absent** otherwise.
 
-| Section | Items | Stated | Partly | Absent |
-|---|---|---|---|---|
-| 1.2 Actors and roles | 4 | 0 | 0 | 4 |
-| 1.3 Capabilities | 6 | 1 | 4 | 1 |
-| 1.5 Business rules | 16 | 5 | 5 | 6 |
-| Total | 26 | 6 | 9 | 11 |
+| Section | Items | Stated | Partly | Absent | Absent with no gap row |
+|---|---|---|---|---|---|
+| 1.2 Actors and roles | 4 | 0 | 0 | 4 | 4 |
+| 1.3 Capabilities | 6 | 1 | 4 | 1 | 1 |
+| 1.5 Business rules | 16 | 0 | 10 | 6 | 6 |
+| Total | 26 | 1 | 14 | 11 | 11 |
 
-- Stated: C4, R1, R8, R9, R12, R15. All but C4 are stated as a Python
-  condition.
+Against the proposed pass values: 1 of 6 capabilities stated (pass: all),
+0 of 20 actor and rule items stated (pass: 14), 11 absent with no gap row
+(pass: 0).
+
+- Stated: C4.
+- Partly, complete but only as a Python condition: R1, R8, R9, R12, R15.
 - Partly: C1, C2, C3 and C5 (the operation, not its inputs or result); R2
   (refused with 400, the limit is not given); R6 and R7 (the refusals, not
   the 600 seconds or the domain rule); R13 (128 characters, not the removed
   line breaks); R16 (update writes the audit log, toggle has no flow).
 - Absent: A1 to A4 (how a caller is identified, disabled and deleted
   accounts, plans); C6; R3 (no limit for paying users); R4 and R5 (rate
-  limits); R10 and R11 (what deleting an alias does); R14.
+  limits); R10 and R11 (what deleting an alias does); R14. No gap row names
+  any of them: the gap classes describe steps of the analysis, not
+  behaviour of the system.
 
 A team rebuilding the alias lifecycle from this bundle would get the error
 responses right and would not learn how a caller authenticates, what the

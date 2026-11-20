@@ -39,9 +39,13 @@ of code names, a condition printed as a source expression) is recorded as
 For question 14 the reviewer picks five statements before opening the fact
 index, writes them down, then follows each citation.
 
-For question 17 the reviewer lists every entry point the bundle shows
-(requests, scheduled jobs, messages and mail received, commands, webhooks)
-and says for each whether a capability or a gap row covers it.
+For question 17 the reviewer first lists every entry point the bundle
+shows (requests, scheduled jobs, messages and mail received, queue and job
+workers, commands, webhooks). Only after the rest is answered, the reviewer
+opens the held-out list [`entry-points.md`](entry-points.md), written from
+the source, and marks for each of its rows whether a bundle document or a
+gap row covers it. The list is given to the reviewer with the expected set
+of question 18, not with the bundle.
 
 Question 18 is the rebuild probe. Only after the rest is answered, the
 reviewer opens `../w13/expected.json` and marks each item `stated`,
@@ -85,8 +89,8 @@ whether a gap row accounts for it.
 
 ## Question 17: entry points
 
-| Entry point | Under a capability? | In the gap register? |
-|-------------|---------------------|----------------------|
+| Entry point | In a bundle document? | In the gap register? |
+|-------------|-----------------------|----------------------|
 
 ## Question 18: rebuild probe
 
@@ -94,8 +98,11 @@ whether a gap row accounts for it.
 |---------|-------|--------|--------|--------|------------------------|
 ```
 
+`stated` means in domain terms with a citation. A rule given only as a
+source expression is `partly`.
+
 A bundle is sufficient when no answer is `silent`; questions 3, 4 and 5 are
 `answered` for the sample; all five statements of question 14 resolve;
-questions 15 and 16 are answered no; question 17 leaves no entry point
-outside both the capabilities and the gap register; and the probe meets the
+questions 15 and 16 are answered no; every entry point of the held-out list
+is in a bundle document or in the gap register; and the probe meets the
 pass values of SPEC-16.

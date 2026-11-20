@@ -140,7 +140,7 @@ about behaviour; the reviewer records it as silent and says what was there.
 | 14 | For five statements chosen by the reviewer: does each citation resolve to a source span that shows it? | D11 §11.7 |
 | 15 | Does any requirement or rule depend on knowing the source language or framework to be understood? | Rule 3 |
 | 16 | Does the bundle contain code for the new system, or an instruction to write to the source? | NG1, NG2: it must not |
-| 17 | Through which entry points does work reach the system (requests, scheduled jobs, messages and mail received, commands, webhooks), and is each one either under a capability or in the gap register? | D1 §1.3, D2, D7 §7.4, D11 §11.2, §11.6 |
+| 17 | Through which entry points does work reach the system (requests, scheduled jobs, messages and mail received, queue and job workers, commands, webhooks), and is each entry point of the held-out list either in a bundle document or in the gap register? | D1 §1.3, D2, D7 §7.4, D11 §11.2, §11.6, scored against the held-out list |
 | 18 | Of the expected statements written from the source for the sample, how many does the bundle state? | The rebuild probe below |
 
 A bundle is **sufficient** when all of these hold:
@@ -151,13 +151,22 @@ A bundle is **sufficient** when all of these hold:
    does and under which rules is honest and is not a handoff.
 3. Question 14 resolves for all five statements.
 4. Questions 15 and 16 are answered no.
-5. Question 17 names every entry point, with none left outside both the
-   capabilities and the gap register.
+5. Every entry point of the held-out list is in a bundle document or in
+   the gap register.
 6. The rebuild probe meets its pass values.
 
 Elsewhere "stated unknown" does not fail a bundle; it is the bundle doing
 its job. The review records how many answers were stated unknown, so a
 reader sees how much of the system the bundle actually carries.
+
+Question 17 cannot be answered from the bundle alone: an entry point the
+bundle leaves out of every document and of the gap register is not there
+to be listed. It is scored against a held-out list of entry points,
+written by hand from the source before the run and kept from the reviewer
+until the rest of the checklist is answered, as the expected set of the
+probe is. The reviewer first lists the entry points the bundle shows,
+then opens the list and marks each of its rows. The pilot's list is
+[`docs/acceptance/w17/entry-points.md`](acceptance/w17/entry-points.md).
 
 ### Rebuild probe
 
@@ -203,17 +212,21 @@ set.
 **Review 1** ([`review.md`](acceptance/w17/review.md), 2026-11-20) took a
 `best-effort` export with no drafted section, the state of `main` before
 any draft is accepted. Result: not sufficient. Questions 1, 4 and 8 were
-silent and question 15 was yes. The probe found 6 of 26 expected statements
-stated, 9 partly and 11 absent. Mail forwarding, the system's main job, is
-in no capability and no gap row. Questions 17 and 18, the floor on
+silent and question 15 was yes. The probe found 1 of 26 expected statements
+stated, 14 partly (5 of them complete but printed as a source expression)
+and 11 absent, none of the absent in a gap row. Two of eight entry points
+are in the bundle. Mail forwarding, the system's main job, is in no
+capability and no gap row. Questions 17 and 18, the floor on
 questions 3 to 5 and the reading of "Not drafted" as silent were added
 because of that review. The review after drafting is still owed.
 
 ## Open items
 
 - Capabilities are derived from HTTP controllers. Work that enters another
-  way (mail received, a queue consumer, a command) is under no capability,
-  and nothing records the omission as a gap (review 1, finding 2).
+  way (mail received, a job or queue worker, an event listener, a command)
+  is under no capability, and nothing records the omission as a gap
+  (review 1, finding 2). Scheduled jobs are recovered as flows and are
+  under no capability either.
 - A recovered rule is a rejection exit. What a successful operation
   returns and changes, limits set by a decorator or by configuration, and
   defaults are not recovered as rules and have no gap row (review 1,
