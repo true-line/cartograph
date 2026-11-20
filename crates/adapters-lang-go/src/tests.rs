@@ -79,9 +79,11 @@ func routes() {
         .edges
         .iter()
         .find(|edge| edge.src == "ep:local/go-service@GET:/wrapped" && edge.label == "HANDLES")
-        .expect("unresolved handler stays explicit");
-    assert!(wrapped.dst.starts_with("gap:go-handler:"));
-    assert_eq!(wrapped.props["prov"]["confidence_tier"], "Gap");
+        .expect("a wrapped handler is recorded");
+    // #2007: a wrapper call's handler argument is the handler, with the
+    // wrapper kept on the edge.
+    assert_eq!(wrapped.dst, "sym:local/go-service@main.go#create");
+    assert_eq!(wrapped.props["via"], "middleware.Wrap(create)");
 }
 
 #[test]
@@ -1065,4 +1067,146 @@ func a() string { return os.Getenv(key) }
         .map(|n| n.id.as_str())
         .collect();
     assert_eq!(ids, ["cfgread:local/go-service@constant.go:env:?"]);
+}
+
+#[test]
+fn routes_on_a_mux_parameter_and_their_handler_forms_resolve() {
+    // AC-0918 (#2006, #2007): a parameter typed `*http.ServeMux` is a
+    // router; a func literal handler is its own callable, a local closure
+    // resolves to its literal, a method value on the receiver resolves to
+    // the method, and a wrapper resolves to the handler it takes or, when
+    // it takes none, to itself. A method value on a field chain stays a Gap.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("pkg/device")).unwrap();
+    std::fs::write(dir.path().join("go.mod"), "module example.com/bot\n").unwrap();
+    std::fs::write(
+        dir.path().join("pkg/device/webapi.go"),
+        r#"package device
+
+import (
+    "context"
+    "net/http"
+)
+
+type Service struct{ Dev *Dev }
+
+func (s *Service) webAPI(mux *http.ServeMux) {
+    mux.HandleFunc("GET /api/web/session", func(w http.ResponseWriter, r *http.Request) {
+        s.session(w)
+    })
+    fleet := func(w http.ResponseWriter, r *http.Request) { s.save(w) }
+    mux.HandleFunc("GET /devices", fleet)
+    {
+        mux := newFake()
+        mux.HandleFunc("/shadowed", fleet)
+    }
+    mux.HandleFunc("GET /api/web/catalog", s.catalog)
+    mux.HandleFunc("POST /api/daemon/pull", wrap("POST", s.pull))
+    mux.HandleFunc("POST /api/web/relay-rules", relayWrite(true))
+    mux.HandleFunc("/.well-known/key", s.Dev.ServerKey)
+}
+
+func (s *Service) more(mux *http.ServeMux, fleet http.HandlerFunc) {
+    mux.HandleFunc("GET /other", fleet)
+    opts := 3
+    mux.HandleFunc("GET /opts", options(s.catalog, opts))
+}
+
+func (s *Service) session(w http.ResponseWriter) {}
+func (s *Service) save(w http.ResponseWriter) {}
+func other() {
+    mux := newFake()
+    mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {})
+}
+func newFake() *Fake { return nil }
+func wrap(method string, h func(context.Context) int) http.HandlerFunc { return nil }
+func relayWrite(on bool) http.HandlerFunc { return nil }
+func options(h http.HandlerFunc, n int) http.HandlerFunc { return nil }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("pkg/device/catalog.go"),
+        "package device\n\nimport \"net/http\"\n\nfunc (s *Service) catalog(w http.ResponseWriter, r *http.Request) {}\nfunc (s *Service) pull() int { return 0 }\n",
+    )
+    .unwrap();
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let handles: BTreeMap<&str, &str> = edge_pairs(&extraction, "HANDLES").into_iter().collect();
+    let ep = |m: &str, p: &str| format!("ep:local/go-service@{m}:{p}");
+    let sym = |path: &str, name: &str| format!("sym:local/go-service@pkg/device/{path}#{name}");
+    let literal = handles[ep("GET", "/api/web/session").as_str()];
+    assert!(
+        literal.starts_with(&sym("webapi.go", "Service.webAPI/func@")),
+        "{literal}"
+    );
+    assert!(
+        handles[ep("GET", "/devices").as_str()]
+            .starts_with(&sym("webapi.go", "Service.webAPI/func@"))
+    );
+    assert_eq!(
+        handles[ep("GET", "/api/web/catalog").as_str()],
+        sym("catalog.go", "Service.catalog")
+    );
+    assert_eq!(
+        handles[ep("POST", "/api/daemon/pull").as_str()],
+        sym("catalog.go", "Service.pull")
+    );
+    assert_eq!(
+        handles[ep("POST", "/api/web/relay-rules").as_str()],
+        sym("webapi.go", "relayWrite")
+    );
+    assert!(handles[ep("ANY", "/.well-known/key").as_str()].starts_with("gap:go-handler:"));
+    // A wrapper's trailing non-handler argument does not hide its handler.
+    assert_eq!(
+        handles[ep("GET", "/opts").as_str()],
+        sym("catalog.go", "Service.catalog")
+    );
+    // A parameter named like another function's closure is not that closure.
+    assert!(handles[ep("GET", "/other").as_str()].starts_with("gap:go-handler:"));
+    // The literal's own calls are its calls, not the enclosing method's.
+    assert!(
+        edge_pairs(&extraction, "CALLS")
+            .contains(&(literal, sym("webapi.go", "Service.session").as_str()))
+    );
+    // So are a bound closure's, though its body precedes its registration.
+    let closure = handles[ep("GET", "/devices").as_str()];
+    assert!(
+        edge_pairs(&extraction, "CALLS")
+            .contains(&(closure, sym("webapi.go", "Service.save").as_str()))
+    );
+    let node = extraction.nodes.iter().find(|n| n.id == literal).unwrap();
+    assert_eq!(node.props["package_dir"], "pkg/device");
+    // A receiver is proven lexically: a shadowing local or a same-named
+    // local in another function is not the router.
+    assert!(!handles.contains_key(ep("ANY", "/shadowed").as_str()));
+    assert!(!handles.contains_key(ep("ANY", "/elsewhere").as_str()));
+}
+
+#[test]
+fn a_reused_files_unresolved_handler_fallback_carries_the_new_commit() {
+    // AC-0918: the Gap fallback kept for a package handler is retargeted
+    // with the rest of a reused file's facts.
+    let source = br#"package main
+
+import (
+    "net/http"
+    "example.com/bot/handlers"
+)
+
+func routes(mux *http.ServeMux) {
+    mux.HandleFunc("/x", handlers.Missing)
+}
+"#;
+    let mut extraction =
+        extract_source_with_module(source, "main.go", &id(), Some("example.com/bot")).unwrap();
+    assert_eq!(extraction.pending_endpoints.len(), 1);
+    retarget_commit(&mut extraction, "def456");
+    let (endpoint, gap, handles) = &extraction.pending_endpoints[0].gap;
+    for props in [&endpoint.props, &gap.props, &handles.props] {
+        let text = props.to_string();
+        assert!(
+            text.contains("def456") && !text.contains("abc123"),
+            "{text}"
+        );
+    }
 }

@@ -66,6 +66,9 @@ struct PendingCall {
 struct PendingEndpoint {
     node: Node,
     edge: Edge,
+    /// The endpoint, its Gap and the HANDLES edge to it, kept when no
+    /// Symbol answers the package handler (#2007): the route stays listed.
+    gap: (Node, Node, Edge),
     package_dir: String,
     exported: String,
 }
@@ -168,6 +171,10 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for pending in &mut extraction.pending_endpoints {
         retarget_props_commit(&mut pending.node.props, commit);
         retarget_props_commit(&mut pending.edge.props, commit);
+        let (endpoint, gap, handles) = &mut pending.gap;
+        retarget_props_commit(&mut endpoint.props, commit);
+        retarget_props_commit(&mut gap.props, commit);
+        retarget_props_commit(&mut handles.props, commit);
     }
 }
 
@@ -275,8 +282,10 @@ fn function_name(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<(String, Strin
 
 fn enclosing_function(mut node: TsNode<'_>, functions: &HashMap<usize, String>) -> Option<String> {
     while let Some(parent) = node.parent() {
-        if matches!(parent.kind(), "function_declaration" | "method_declaration")
-            && let Some(id) = functions.get(&parent.start_byte())
+        if matches!(
+            parent.kind(),
+            "function_declaration" | "method_declaration" | "func_literal"
+        ) && let Some(id) = functions.get(&parent.start_byte())
         {
             return Some(id.clone());
         }
@@ -337,29 +346,190 @@ fn framework_factory(callee: &str, bindings: &HashMap<String, ImportBinding>) ->
     }
 }
 
+/// The router a declared type proves (#2006): `*http.ServeMux`,
+/// `chi.Router`/`*chi.Mux`, `*gin.Engine`/`*gin.RouterGroup`, each through
+/// its import binding.
+fn framework_type(text: &str, bindings: &HashMap<String, ImportBinding>) -> Option<Framework> {
+    let (base, name) = text.trim().trim_start_matches('*').split_once('.')?;
+    let path = &bindings.get(base)?.path;
+    match (path.as_str(), name) {
+        ("net/http", "ServeMux") => Some(Framework::HttpMux),
+        ("github.com/go-chi/chi" | "github.com/go-chi/chi/v5", "Router" | "Mux") => {
+            Some(Framework::Chi)
+        }
+        ("github.com/gin-gonic/gin", "Engine" | "RouterGroup" | "IRouter" | "IRoutes") => {
+            Some(Framework::Gin)
+        }
+        _ => None,
+    }
+}
+
+/// One declaration of a local name: the scope it is visible in, where it
+/// is declared, and the router its type or factory proves, if any.
+#[derive(Debug, Clone, Copy)]
+struct Declaration {
+    scope: (usize, usize),
+    at: usize,
+    file_scope: bool,
+    framework: Option<Framework>,
+}
+
+/// Router receivers, resolved lexically (#2006): a name proves a router only
+/// where its innermost visible declaration does, so a same-named local of
+/// another type in another function, or a shadowing one, proves nothing.
+#[derive(Debug, Default)]
+struct Receivers {
+    declarations: HashMap<String, Vec<Declaration>>,
+}
+
+impl Receivers {
+    fn visible(&self, name: &str, at: usize) -> Option<(usize, &Declaration)> {
+        self.declarations
+            .get(name)?
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.scope.0 <= at && at < d.scope.1 && (d.file_scope || d.at <= at))
+            .min_by_key(|(_, d)| (d.scope.1 - d.scope.0, std::cmp::Reverse(d.at)))
+    }
+
+    fn get(&self, name: &str, at: usize) -> Option<Framework> {
+        self.visible(name, at)?.1.framework
+    }
+}
+
+/// The scope a declaration at `node` is visible in: its function for a
+/// parameter, else the nearest enclosing block, statement header or case.
+fn declaration_scope(node: TsNode<'_>, parameter: bool) -> (usize, usize, bool) {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        let found = if parameter {
+            matches!(
+                parent.kind(),
+                "function_declaration" | "method_declaration" | "func_literal"
+            )
+        } else {
+            matches!(
+                parent.kind(),
+                "block"
+                    | "if_statement"
+                    | "for_statement"
+                    | "expression_switch_statement"
+                    | "type_switch_statement"
+                    | "expression_case"
+                    | "type_case"
+                    | "default_case"
+                    | "communication_case"
+                    | "source_file"
+            )
+        };
+        if found {
+            return (
+                parent.start_byte(),
+                parent.end_byte(),
+                parent.kind() == "source_file",
+            );
+        }
+        current = parent;
+    }
+    (node.start_byte(), node.end_byte(), true)
+}
+
+/// Router receivers proven by a parameter's or variable's declared type
+/// (`func routes(mux *http.ServeMux)`, `var mux *http.ServeMux`, #2006), by a
+/// `mux := http.NewServeMux()` / `var mux = …` binding, or by a later
+/// `mux = http.NewServeMux()` assignment to an untyped declaration. Every
+/// other declaration is recorded too, so it shadows.
 fn assignment_receivers(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     bindings: &HashMap<String, ImportBinding>,
-) -> HashMap<String, Framework> {
-    let query = crate::queries::query("(short_var_declaration) @assignment");
-    let mut receivers = HashMap::new();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, root, cx.source);
-    while let Some(found) = matches.next() {
-        let assignment = found.captures()[0].node;
-        let raw = cx.text(&assignment);
-        let Some((left, right)) = raw.split_once(":=") else {
+) -> Receivers {
+    let factory_of = |value: Option<TsNode<'_>>| {
+        value
+            .filter(|v| v.kind() == "call_expression")
+            .and_then(|v| v.child_by_field_name("function"))
+            .and_then(|f| framework_factory(cx.text(&f), bindings))
+    };
+    let mut receivers = Receivers::default();
+    let mut assignments = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        let mut declare = |name: TsNode<'_>, parameter: bool, framework: Option<Framework>| {
+            let (start, end, file_scope) = declaration_scope(node, parameter);
+            receivers
+                .declarations
+                .entry(cx.text(&name).to_string())
+                .or_default()
+                .push(Declaration {
+                    scope: (start, end),
+                    at: name.start_byte(),
+                    file_scope,
+                    framework,
+                });
+        };
+        match node.kind() {
+            "parameter_declaration" | "var_spec" => {
+                let typed = node
+                    .child_by_field_name("type")
+                    .and_then(|t| framework_type(cx.text(&t), bindings));
+                let values = node.child_by_field_name("value");
+                let single = values.filter(|v| v.named_child_count() == 1);
+                let framework = typed.or_else(|| factory_of(single.and_then(|v| v.named_child(0))));
+                let mut walk = node.walk();
+                let names: Vec<_> = node.children_by_field_name("name", &mut walk).collect();
+                let framework = if names.len() == 1 || typed.is_some() {
+                    framework
+                } else {
+                    None
+                };
+                for name in names {
+                    declare(name, node.kind() == "parameter_declaration", framework);
+                }
+            }
+            "short_var_declaration" => {
+                let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                ) else {
+                    continue;
+                };
+                let framework = (left.named_child_count() == 1 && right.named_child_count() == 1)
+                    .then(|| factory_of(right.named_child(0)))
+                    .flatten();
+                let mut walk = left.walk();
+                for name in left.named_children(&mut walk) {
+                    if name.kind() == "identifier" {
+                        declare(name, false, framework);
+                    }
+                }
+            }
+            "assignment_statement" => {
+                let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left")
+                        .and_then(|l| l.named_child(0)),
+                    node.child_by_field_name("right")
+                        .and_then(|r| r.named_child(0)),
+                ) else {
+                    continue;
+                };
+                if left.kind() == "identifier"
+                    && let Some(framework) = factory_of(Some(right))
+                {
+                    assignments.push((cx.text(&left).to_string(), left.start_byte(), framework));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (name, at, framework) in assignments {
+        let Some((index, declaration)) = receivers.visible(&name, at) else {
             continue;
         };
-        let variable = left.trim();
-        let callee = right.trim().split('(').next().unwrap_or("").trim();
-        if variable
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-            && let Some(framework) = framework_factory(callee, bindings)
-        {
-            receivers.insert(variable.to_string(), framework);
+        if declaration.framework.is_none() {
+            receivers.declarations.get_mut(&name).expect("visible")[index].framework =
+                Some(framework);
         }
     }
     receivers
@@ -378,45 +548,28 @@ fn route_pattern(pattern: String) -> (String, String) {
     ("ANY".into(), pattern)
 }
 
-fn endpoint_registration(
+fn endpoint_registration<'t>(
     cx: &FileCx<'_>,
-    call: TsNode<'_>,
+    call: TsNode<'t>,
     callee: &str,
     bindings: &HashMap<String, ImportBinding>,
-    receivers: &HashMap<String, Framework>,
-    locals: &HashMap<String, String>,
-) -> Option<(String, String, HandlerTarget, &'static str)> {
+    receivers: &Receivers,
+) -> Option<(String, String, TsNode<'t>, &'static str)> {
     let (base, member) = callee.split_once('.')?;
     let arguments = call_arguments(call);
     let route = arguments
         .first()
         .copied()
         .and_then(|argument| literal_string(cx, argument))?;
-    let handler_name = arguments.get(1).map(|argument| cx.text(argument))?;
-    let handler = if let Some(handler) = locals.get(handler_name) {
-        HandlerTarget::Resolved(handler.clone())
-    } else if let Some((base, exported)) = handler_name.split_once('.')
-        && let Some(package_dir) = bindings
-            .get(base)
-            .and_then(|binding| binding.package_dir.clone())
-    {
-        HandlerTarget::Package {
-            package_dir,
-            exported: exported.to_string(),
-        }
-    } else {
-        HandlerTarget::Gap {
-            expression: handler_name.to_string(),
-        }
-    };
+    let handler = arguments.get(1).copied()?;
     if bindings.get(base).map(|binding| binding.path.as_str()) == Some("net/http")
         && matches!(member, "Handle" | "HandleFunc")
     {
         let (method, path) = route_pattern(route);
         return Some((method, path, handler, "net/http"));
     }
-    let framework = receivers.get(base)?;
-    match framework {
+    let framework = receivers.get(base, call.start_byte())?;
+    match &framework {
         Framework::HttpMux if matches!(member, "Handle" | "HandleFunc") => {
             let (method, path) = route_pattern(route);
             Some((method, path, handler, "net/http"))
@@ -435,6 +588,258 @@ fn endpoint_registration(
         }
         _ => None,
     }
+}
+
+/// What resolves a route's handler expression within one file (#2007).
+struct HandlerScope<'a, 't> {
+    bindings: &'a HashMap<String, ImportBinding>,
+    locals: &'a HashMap<String, String>,
+    /// Local variables bound once in the file to a func literal
+    /// (`fleet := func(w, r) {…}`).
+    closures: &'a HashMap<String, TsNode<'t>>,
+}
+
+/// The receiver variable and type of the method enclosing `node`
+/// (`func (s *Service) routes()` gives `("s", "Service")`).
+fn enclosing_receiver(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<(String, String)> {
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "method_declaration" => {
+                let receiver = parent.child_by_field_name("receiver")?;
+                let declaration = receiver.named_child(0)?;
+                let name = cx
+                    .text(&declaration.child_by_field_name("name")?)
+                    .to_string();
+                return Some((name, receiver_type(cx, parent)?));
+            }
+            "function_declaration" => return None,
+            _ => node = parent,
+        }
+    }
+    None
+}
+
+/// The handler a route registers (#2007): a function name, an imported
+/// package's function, a func literal (its own callable), a local bound
+/// once to a func literal, a method value on the enclosing method's
+/// receiver, or the handler a wrapper call takes (`wrap("GET", s.list)`)
+/// or returns (`relayWrite(true)`, the wrapper itself). Anything else is a
+/// Gap.
+fn handler_target<'t>(
+    cx: &FileCx<'_>,
+    handler: TsNode<'t>,
+    scope: &HandlerScope<'_, 't>,
+    depth: usize,
+) -> (HandlerTarget, Option<TsNode<'t>>) {
+    let text = cx.text(&handler);
+    let gap = || {
+        (
+            HandlerTarget::Gap {
+                expression: text.to_string(),
+            },
+            None,
+        )
+    };
+    match handler.kind() {
+        "func_literal" => (HandlerTarget::Resolved(String::new()), Some(handler)),
+        "identifier" => {
+            if let Some(symbol) = scope.locals.get(text) {
+                (HandlerTarget::Resolved(symbol.clone()), None)
+            } else if let Some(literal) = scope
+                .closures
+                .get(text)
+                .filter(|literal| closure_visible(cx, **literal, handler, text))
+            {
+                (HandlerTarget::Resolved(String::new()), Some(*literal))
+            } else {
+                gap()
+            }
+        }
+        "selector_expression" => {
+            let Some((base, member)) = text.split_once('.') else {
+                return gap();
+            };
+            if member.contains('.') {
+                return gap();
+            }
+            if let Some(package_dir) = scope
+                .bindings
+                .get(base)
+                .and_then(|binding| binding.package_dir.clone())
+            {
+                return (
+                    HandlerTarget::Package {
+                        package_dir,
+                        exported: member.to_string(),
+                    },
+                    None,
+                );
+            }
+            match enclosing_receiver(cx, handler) {
+                Some((receiver, ty)) if receiver == base => (
+                    HandlerTarget::Package {
+                        package_dir: package_dir(cx.path),
+                        exported: format!("{ty}.{member}"),
+                    },
+                    None,
+                ),
+                _ => gap(),
+            }
+        }
+        "call_expression" if depth == 0 => {
+            // A wrapper: the handler it takes, else the wrapper itself.
+            // The last argument that resolves: `wrap(h, opts)` skips an
+            // `opts` that names no handler and takes `h`.
+            let taken = call_arguments(handler)
+                .into_iter()
+                .rev()
+                .filter(|a| {
+                    matches!(
+                        a.kind(),
+                        "func_literal" | "identifier" | "selector_expression"
+                    )
+                })
+                .map(|a| handler_target(cx, a, scope, depth + 1))
+                .find(|(t, _)| !matches!(t, HandlerTarget::Gap { .. }));
+            if let Some(found) = taken {
+                return found;
+            }
+            match handler.child_by_field_name("function") {
+                Some(callee) => {
+                    let found = handler_target(cx, callee, scope, depth + 1);
+                    if matches!(found.0, HandlerTarget::Gap { .. }) {
+                        gap()
+                    } else {
+                        found
+                    }
+                }
+                None => gap(),
+            }
+        }
+        _ => gap(),
+    }
+}
+
+/// A func literal registered as a route handler is its own callable
+/// (#2007): `routes/func@1234` inside `routes`, in the same package.
+fn literal_symbol(
+    cx: &FileCx<'_>,
+    literal: TsNode<'_>,
+    functions: &HashMap<usize, String>,
+    out: &mut Extraction,
+) -> String {
+    let enclosing = enclosing_function(literal, functions)
+        .and_then(|id| id.rsplit_once('#').map(|(_, name)| name.to_string()))
+        .unwrap_or_else(|| "file".to_string());
+    let qualified = format!("{enclosing}/func@{}", literal.start_byte());
+    let symbol = symbol_id(cx.id.repo, cx.path, &qualified);
+    out.nodes.push(Node {
+        id: symbol.clone(),
+        label: "Symbol".into(),
+        props: serde_json::json!({
+            "name": qualified,
+            "simple_name": qualified,
+            "package_dir": package_dir(cx.path),
+            "kind": "function",
+            "language": "go",
+            "func_literal": true,
+            "prov": cx.prov(&literal, &format!("Symbol {symbol}")),
+        }),
+    });
+    out.edges.push(Edge {
+        src: symbol.clone(),
+        dst: file_id(cx.id.repo, cx.path),
+        label: "DEFINED_IN".into(),
+        props: serde_json::json!({
+            "prov": cx.prov(&literal, &format!("DEFINED_IN {symbol}")),
+        }),
+    });
+    symbol
+}
+
+/// Whether the local `name`, bound once to `literal` by `name := func…`,
+/// is the binding visible at `usage`: the usage follows the declaration
+/// inside the block that declares it, and no function between them takes a
+/// parameter of that name. A same-named binding in another function is not
+/// visible (#2007).
+fn closure_visible(cx: &FileCx<'_>, literal: TsNode<'_>, usage: TsNode<'_>, name: &str) -> bool {
+    let mut declaration = literal;
+    while declaration.kind() != "short_var_declaration" {
+        let Some(parent) = declaration.parent() else {
+            return false;
+        };
+        declaration = parent;
+    }
+    let Some(block) = declaration.parent() else {
+        return false;
+    };
+    if declaration.end_byte() > usage.start_byte()
+        || usage.start_byte() < block.start_byte()
+        || usage.end_byte() > block.end_byte()
+    {
+        return false;
+    }
+    let mut node = usage;
+    while let Some(parent) = node.parent() {
+        if parent.id() == block.id() {
+            return true;
+        }
+        if matches!(
+            parent.kind(),
+            "func_literal" | "function_declaration" | "method_declaration"
+        ) && parent
+            .child_by_field_name("parameters")
+            .is_some_and(|parameters| declares(cx, parameters, name))
+        {
+            return false;
+        }
+        node = parent;
+    }
+    false
+}
+
+/// Whether a parameter list declares `name`.
+fn declares(cx: &FileCx<'_>, parameters: TsNode<'_>, name: &str) -> bool {
+    let mut walk = parameters.walk();
+    parameters.named_children(&mut walk).any(|parameter| {
+        let mut walk = parameter.walk();
+        parameter
+            .children_by_field_name("name", &mut walk)
+            .any(|n| cx.text(&n) == name)
+    })
+}
+
+/// Locals bound exactly once in the file to a func literal.
+fn closures<'t>(cx: &FileCx<'_>, root: TsNode<'t>) -> HashMap<String, TsNode<'t>> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut found = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        if node.kind() != "short_var_declaration" {
+            continue;
+        }
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.named_child_count() != 1 || right.named_child_count() != 1 {
+            continue;
+        }
+        let (Some(name), Some(value)) = (left.named_child(0), right.named_child(0)) else {
+            continue;
+        };
+        let name = cx.text(&name).to_string();
+        *seen.entry(name.clone()).or_default() += 1;
+        if value.kind() == "func_literal" {
+            found.insert(name, value);
+        }
+    }
+    found.retain(|name, _| seen.get(name) == Some(&1));
+    found
 }
 
 /// The repo-relative directory a local `replace` target names, resolved
@@ -644,6 +1049,7 @@ fn extract_source_with_module(
     });
     let bindings = parse_imports(&cx, root, module_path, &mut out);
     let receivers = assignment_receivers(&cx, root, &bindings);
+    let closures = closures(&cx, root);
     let client = client::Proof::new(&cx, &bindings);
 
     let function_query =
@@ -684,6 +1090,40 @@ fn extract_source_with_module(
         });
     }
 
+    // Func literals that route handlers resolve to are callables of their
+    // own (#2007). Register them before any call or literal is attributed,
+    // so the calls inside a closure are owned by it, not by its encloser.
+    {
+        let scope = HandlerScope {
+            bindings: &bindings,
+            locals: &locals,
+            closures: &closures,
+        };
+        let call_query = crate::queries::query("(call_expression) @call");
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(call_query, root, source);
+        let mut literals = Vec::new();
+        while let Some(found) = matches.next() {
+            let call = found.captures()[0].node;
+            let Some(function) = call.child_by_field_name("function") else {
+                continue;
+            };
+            if let Some((_, _, handler_node, _)) =
+                endpoint_registration(&cx, call, cx.text(&function), &bindings, &receivers)
+                && let (_, Some(literal)) = handler_target(&cx, handler_node, &scope, 0)
+            {
+                literals.push(literal);
+            }
+        }
+        // Outer literals first, so a nested one is named inside its encloser.
+        literals.sort_by_key(|literal| literal.start_byte());
+        literals.dedup_by_key(|literal| literal.start_byte());
+        for literal in literals {
+            let symbol = literal_symbol(&cx, literal, &functions_by_start, &mut out);
+            functions_by_start.insert(literal.start_byte(), symbol);
+        }
+    }
+
     // SDK request and config structs (AC-0462).
     let literal_query = crate::queries::query("(composite_literal) @literal");
     let mut cursor = QueryCursor::new();
@@ -705,9 +1145,22 @@ fn extract_source_with_module(
             continue;
         };
         let callee = cx.text(&function);
-        if let Some((method, route, handler, framework)) =
-            endpoint_registration(&cx, call, callee, &bindings, &receivers, &locals)
+        if let Some((method, route, handler_node, framework)) =
+            endpoint_registration(&cx, call, callee, &bindings, &receivers)
         {
+            let scope = HandlerScope {
+                bindings: &bindings,
+                locals: &locals,
+                closures: &closures,
+            };
+            let (mut handler, literal) = handler_target(&cx, handler_node, &scope, 0);
+            if let Some(literal) = literal {
+                let symbol = functions_by_start
+                    .get(&literal.start_byte())
+                    .expect("handler literals are registered before calls")
+                    .clone();
+                handler = HandlerTarget::Resolved(symbol);
+            }
             let endpoint = format!("ep:{}@{method}:{route}", id.repo);
             let mut endpoint_node = Node {
                 id: endpoint.clone(),
@@ -728,10 +1181,44 @@ fn extract_source_with_module(
                     "prov": cx.prov(&call, &format!("HANDLES {endpoint}")),
                 }),
             };
+            // The Gap form of this registration: what an unresolved handler,
+            // or a package handler no Symbol answers, is recorded as.
+            let gap_form = |mut endpoint_node: Node, mut handles: Edge, expression: &str| {
+                let gap_id = format!("gap:go-handler:{}@{}@{}", id.repo, path, call.start_byte());
+                endpoint_node.props["handler_sym"] = gap_id.clone().into();
+                let gap = Node {
+                    id: gap_id.clone(),
+                    label: "Gap".into(),
+                    props: serde_json::json!({
+                        "handler_expression": expression,
+                        "reason": "unresolved Go route handler expression",
+                        "attempted_tiers": ["T0"],
+                        "prov": cx.prov_with_confidence(
+                            &call,
+                            ConfidenceTier::Gap,
+                            &format!("Gap {gap_id}"),
+                        ),
+                    }),
+                };
+                handles.dst = gap_id;
+                handles.props = serde_json::json!({
+                    "reason": "unresolved Go route handler expression",
+                    "attempted_resolution": "go-handler-expression",
+                    "prov": cx.prov_with_confidence(
+                        &call,
+                        ConfidenceTier::Gap,
+                        &format!("HANDLES {} -> {}", endpoint, handles.dst),
+                    ),
+                });
+                (endpoint_node, gap, handles)
+            };
             match handler {
                 HandlerTarget::Resolved(handler) => {
                     endpoint_node.props["handler_sym"] = handler.clone().into();
                     handles.dst = handler;
+                    if handler_node.kind() == "call_expression" {
+                        handles.props["via"] = cx.text(&handler_node).into();
+                    }
                     out.nodes.push(endpoint_node);
                     out.edges.push(handles);
                 }
@@ -739,39 +1226,24 @@ fn extract_source_with_module(
                     package_dir,
                     exported,
                 } => out.pending_endpoints.push(PendingEndpoint {
+                    edge: {
+                        if handler_node.kind() == "call_expression" {
+                            handles.props["via"] = cx.text(&handler_node).into();
+                        }
+                        handles.clone()
+                    },
+                    gap: gap_form(
+                        endpoint_node.clone(),
+                        handles.clone(),
+                        cx.text(&handler_node),
+                    ),
                     node: endpoint_node,
-                    edge: handles,
                     package_dir,
                     exported,
                 }),
                 HandlerTarget::Gap { expression } => {
-                    let gap_id =
-                        format!("gap:go-handler:{}@{}@{}", id.repo, path, call.start_byte());
-                    endpoint_node.props["handler_sym"] = gap_id.clone().into();
-                    let gap = Node {
-                        id: gap_id.clone(),
-                        label: "Gap".into(),
-                        props: serde_json::json!({
-                            "handler_expression": expression,
-                            "reason": "unresolved Go route handler expression",
-                            "attempted_tiers": ["T0"],
-                            "prov": cx.prov_with_confidence(
-                                &call,
-                                ConfidenceTier::Gap,
-                                &format!("Gap {gap_id}"),
-                            ),
-                        }),
-                    };
-                    handles.dst = gap_id;
-                    handles.props = serde_json::json!({
-                        "reason": "unresolved Go route handler expression",
-                        "attempted_resolution": "go-handler-expression",
-                        "prov": cx.prov_with_confidence(
-                            &call,
-                            ConfidenceTier::Gap,
-                            &format!("HANDLES {} -> {}", endpoint, handles.dst),
-                        ),
-                    });
+                    let (endpoint_node, gap, handles) =
+                        gap_form(endpoint_node, handles, &expression);
                     out.nodes.push(endpoint_node);
                     out.nodes.push(gap);
                     out.edges.push(handles);
@@ -806,16 +1278,24 @@ fn extract_source_with_module(
         let Some((base, exported)) = callee.split_once('.') else {
             continue;
         };
-        let Some(package_dir) = bindings
+        // An imported package's function, or a method on the enclosing
+        // method's receiver (`s.save()` in `func (s *Service)`, #2007).
+        let (package_dir, exported) = match bindings
             .get(base)
             .and_then(|binding| binding.package_dir.clone())
-        else {
-            continue;
+        {
+            Some(package_dir) => (package_dir, exported.to_string()),
+            None => match enclosing_receiver(&cx, call) {
+                Some((receiver, ty)) if receiver == base && !exported.contains('.') => {
+                    (package_dir(path), format!("{ty}.{exported}"))
+                }
+                _ => continue,
+            },
         };
         out.pending_calls.push(PendingCall {
             src,
             package_dir,
-            exported: exported.to_string(),
+            exported,
             props: serde_json::json!({
                 "resolution": "go-module-directory-proven",
                 "prov": cx.prov(&call, &format!("CALLS {callee}")),
@@ -1109,18 +1589,20 @@ pub fn extract_dir_incremental_with_progress(
         },
     );
     merged?;
+    // By simple name (`pkg.Func`) and by qualified name (`Type.Method`, a
+    // method value on a receiver, #2007).
     let symbol_index = out
         .nodes
         .iter()
         .filter(|node| node.label == "Symbol")
-        .filter_map(|node| {
-            Some((
-                (
-                    node.props.get("package_dir")?.as_str()?.to_string(),
-                    node.props.get("simple_name")?.as_str()?.to_string(),
-                ),
-                node.id.clone(),
-            ))
+        .flat_map(|node| {
+            let dir = node.props.get("package_dir").and_then(|d| d.as_str());
+            ["simple_name", "name"].into_iter().filter_map(move |key| {
+                Some((
+                    (dir?.to_string(), node.props.get(key)?.as_str()?.to_string()),
+                    node.id.clone(),
+                ))
+            })
         })
         .collect::<BTreeMap<_, _>>();
     for pending in std::mem::take(&mut out.pending_calls) {
@@ -1139,6 +1621,11 @@ pub fn extract_dir_incremental_with_progress(
             pending.edge.dst = dst.clone();
             out.nodes.push(pending.node);
             out.edges.push(pending.edge);
+        } else {
+            let (endpoint, gap, handles) = pending.gap;
+            out.nodes.push(endpoint);
+            out.nodes.push(gap);
+            out.edges.push(handles);
         }
     }
     let modules = repo_modules(root)?;
