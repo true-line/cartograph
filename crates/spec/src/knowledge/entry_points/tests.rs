@@ -246,3 +246,34 @@ fn colliding_titles_in_one_file_name_their_entry() {
         "{caps:?}"
     );
 }
+
+// AC-0921: a Node script's subcommands are one operator-command capability
+// of that script, apart from an operator directory's commands.
+#[test]
+fn a_scripts_subcommands_are_one_capability() {
+    let mut base = snapshot();
+    for key in ["run", "status"] {
+        let path = "hq/main.mjs";
+        let (node, edge) = entry(
+            path,
+            key,
+            "command",
+            "subcommand",
+            &format!("file:{REPO}@{path}"),
+        );
+        base.graph.0.push(node);
+        base.graph.1.push(edge);
+    }
+    base.graph.0.push(file("hq/main.mjs"));
+    let caps = capabilities(&derive_entry_point_capabilities(&base));
+    let groups: Vec<(&String, &BTreeSet<String>)> = caps
+        .iter()
+        .filter(|(title, _)| title.starts_with("Run operator commands"))
+        .collect();
+    assert_eq!(groups.len(), 2, "{caps:#?}");
+    assert!(groups.iter().any(|(_, ids)| ids
+        == &&BTreeSet::from([
+            "entry:repo@hq/main.mjs#run".to_string(),
+            "entry:repo@hq/main.mjs#status".to_string()
+        ])));
+}
