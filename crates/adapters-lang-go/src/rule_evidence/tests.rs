@@ -166,3 +166,27 @@ func check(w http.ResponseWriter, token string) {
     assert_eq!(shown(condition), "token != [REDACTED]");
     assert_eq!(condition.capture, ExpressionCapture::Redacted);
 }
+
+#[test]
+fn an_inline_route_handlers_refusals_are_its_rules() {
+    // AC-0923 (#2009): a func literal registered as a route handler is its
+    // own Symbol, and its guarded refusals are governed by it.
+    let source = r#"package device
+
+import "net/http"
+
+func routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /sign-in", func(w http.ResponseWriter, r *http.Request) {
+		if r.FormValue("email") == "" {
+			http.Error(w, "email required", http.StatusBadRequest)
+			return
+		}
+	})
+}
+"#;
+    let found = rules(source, "pkg/device/routes.go");
+    assert_eq!(found.len(), 1, "{found:?}");
+    let (_, rule) = &found[0];
+    assert!(rule.owner_id.contains("#routes/func@"), "{}", rule.owner_id);
+    assert!(shown(&rule.conditions[0].expression).contains("FormValue"));
+}
