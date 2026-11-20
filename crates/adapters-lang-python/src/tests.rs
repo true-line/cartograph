@@ -8173,8 +8173,14 @@ def handle(user):
         .iter()
         .find(|n| n.label == "Symbol" && n.props["name"] == "handle")
         .unwrap();
+    let bound = handle.props["constant_locals"]["res_status"]
+        .as_array()
+        .unwrap();
+    let values: Vec<&str> = bound.iter().map(|b| b["value"].as_str().unwrap()).collect();
+    assert_eq!(values, ["status.E200", "status.E502"]);
+    assert!(bound[0]["at"].as_u64() < bound[1]["at"].as_u64());
     assert_eq!(
-        handle.props["constant_locals"],
-        serde_json::json!({ "res_status": ["status.E200", "status.E502"] })
+        handle.props["constant_locals"].as_object().unwrap().len(),
+        1
     );
 }

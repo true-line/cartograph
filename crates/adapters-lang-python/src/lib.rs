@@ -1876,13 +1876,13 @@ fn string_constants(cx: &FileCx<'_>, root: tree_sitter::Node<'_>) -> BTreeMap<St
 }
 
 /// Local names a function binds to a module constant (`res_status =
-/// status.E502`), with every constant bound to each, in source order
-/// (#2027): what a `return res_status` may answer. Nested functions and
-/// classes are not entered.
+/// status.E502`), with every constant bound to each and the byte where it
+/// is first bound, in source order (#2027): what a later `return
+/// res_status` may answer. Nested functions and classes are not entered.
 fn constant_locals(
     cx: &FileCx<'_>,
     function: tree_sitter::Node<'_>,
-) -> BTreeMap<String, Vec<String>> {
+) -> BTreeMap<String, Vec<serde_json::Value>> {
     fn constant(text: &str) -> bool {
         let name = text.rsplit('.').next().unwrap_or(text);
         text.split('.').all(|part| {
@@ -1893,7 +1893,7 @@ fn constant_locals(
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
     }
-    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut found: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     let Some(body) = function.child_by_field_name("body") else {
         return found;
     };
@@ -1917,8 +1917,8 @@ fn constant_locals(
             let value = cx.text(&right);
             if name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && constant(value) {
                 let values = found.entry(name.to_string()).or_default();
-                if !values.iter().any(|v| v == value) && values.len() < 8 {
-                    values.push(value.to_string());
+                if !values.iter().any(|v| v["value"] == value) && values.len() < 8 {
+                    values.push(serde_json::json!({ "value": value, "at": node.start_byte() }));
                 }
             }
         }
