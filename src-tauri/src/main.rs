@@ -4,6 +4,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod area_briefing;
 #[cfg(test)]
 mod conformance_tests;
 mod context;
@@ -7826,6 +7827,7 @@ fn main() {
             investigations::section_drafts::section_redraft_question,
             investigations::section_drafts::section_draft_question,
             investigations::section_drafts::section_draft_outcome,
+            area_briefing::area_briefing,
             section_compose::section_compose_preview,
             section_compose::run_section_compose,
             section_review::section_document,
