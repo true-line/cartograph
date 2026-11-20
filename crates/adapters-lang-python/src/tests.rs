@@ -7761,3 +7761,164 @@ fn a_pass_through_repository_decorator_does_not_authenticate() {
         "required"
     );
 }
+
+fn rate_limits_at(extraction: &Extraction, path: &str) -> serde_json::Value {
+    extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Endpoint" && node.props["path"] == path)
+        .unwrap_or_else(|| panic!("endpoint {path}"))
+        .props["rate_limits"]
+        .clone()
+}
+
+#[test]
+fn rate_limits_are_recovered_from_literals_and_config_defaults() {
+    // AC-0881 (T-0881): a proven flask-limiter limit decorator on a route
+    // handler is recorded on its endpoint, its value read from a literal
+    // (Confirmed) or from a module constant whose environment default is a
+    // literal (InferredStrong, with the key), and the `/me` literal too.
+    let config = (
+        "config.py",
+        "import os\n\nALIAS_LIMIT = os.environ.get(\"ALIAS_LIMIT\") or \"100/day;50/hour;5/minute\"\n\
+         PLAIN = \"10 per minute\"\nTWICE = \"1/hour\"\nTWICE = \"2/hour\"\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "extensions.py",
+        "from flask_limiter import Limiter\n\nlimiter = Limiter(key_func=lambda: \"k\")\n",
+    );
+    write(dir.path(), config.0, config.1);
+    write(
+        dir.path(),
+        "views.py",
+        r#"from flask import Flask, g
+from extensions import limiter
+from config import ALIAS_LIMIT, PLAIN, TWICE
+
+app = Flask(__name__)
+LOCAL = "3/second"
+
+@app.route("/env", methods=["POST"])
+@limiter.limit(ALIAS_LIMIT)
+def env():
+    return "ok"
+
+@app.route("/plain")
+@limiter.limit(PLAIN, key_func=lambda: g.user.id)
+def plain():
+    return "ok"
+
+@app.route("/literal")
+@limiter.limit("100/hour", deduct_when=lambda r: True)
+@limiter.shared_limit(LOCAL, scope="s")
+def literal():
+    return "ok"
+
+@app.route("/unresolved")
+@limiter.limit(TWICE)
+def unresolved():
+    return "ok"
+
+@limiter.limit("1/day")
+@app.route("/above")
+def above():
+    return "ok"
+"#,
+    );
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+
+    let env = rate_limits_at(&extraction, "/env");
+    assert_eq!(
+        env["entries"][0]["value"], "100/day;50/hour;5/minute",
+        "{env}"
+    );
+    assert_eq!(env["entries"][0]["source"], "environment_default");
+    assert_eq!(env["entries"][0]["environment_key"], "ALIAS_LIMIT");
+    assert_eq!(
+        env["entries"][0]["limits"],
+        serde_json::json!([
+            {"count": 100, "per": 1, "unit": "day"},
+            {"count": 50, "per": 1, "unit": "hour"},
+            {"count": 5, "per": 1, "unit": "minute"},
+        ])
+    );
+    assert_eq!(env["prov"]["confidence_tier"], "InferredStrong");
+    let paths: Vec<&str> = env["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["config.py", "views.py"]);
+
+    let plain = rate_limits_at(&extraction, "/plain");
+    assert_eq!(plain["entries"][0]["source"], "literal", "{plain}");
+    assert_eq!(plain["entries"][0]["keyed_by"], "custom");
+    assert_eq!(plain["prov"]["confidence_tier"], "Confirmed");
+
+    let literal = rate_limits_at(&extraction, "/literal");
+    assert_eq!(literal["entries"].as_array().unwrap().len(), 2, "{literal}");
+    assert_eq!(literal["entries"][0]["value"], "100/hour");
+    assert_eq!(literal["entries"][0]["conditional"], true);
+    assert_eq!(literal["entries"][1]["value"], "3/second");
+    assert_eq!(literal["entries"][1]["shared"], true);
+
+    // A constant bound twice is not proven: a Gap naming the decorator.
+    let unresolved = rate_limits_at(&extraction, "/unresolved");
+    assert_eq!(
+        unresolved["entries"][0]["unresolved"], "limit_value_not_a_proven_constant",
+        "{unresolved}"
+    );
+    assert_eq!(unresolved["prov"]["confidence_tier"], "Gap");
+    assert_eq!(
+        unresolved["partial"],
+        serde_json::json!(["limit_value_unresolved"])
+    );
+
+    // Above the route decorator it never wraps the registered view.
+    assert!(rate_limits_at(&extraction, "/above").is_null());
+}
+
+#[test]
+fn a_limit_on_something_not_a_limiter_records_nothing() {
+    // AC-0881 (T-0881): `.limit` on a name that is not a proven
+    // flask-limiter `Limiter` is not a rate limit.
+    let extraction = decorated_route(
+        "@limiter.limit(\"5/minute\")",
+        Some("from flask_limiter import Limiter\n\nlimiter = Limiter()\nlimiter = wrap(limiter)\n"),
+        &[],
+    );
+    assert!(rate_limits_at(&extraction, "/x").is_null());
+    assert!(rate_limits_at(&extraction, "/me").is_null());
+}
+
+#[test]
+fn a_call_through_an_imported_submodule_is_an_inferred_call() {
+    // AC-0883 (T-0883): `from pkg import sub; sub.f()` reaches `f` of
+    // `pkg/sub.py` when that file defines it, as an InferredStrong edge;
+    // a member that file does not define stays without an edge.
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app/__init__.py", "");
+    write(
+        dir.path(),
+        "app/alias_delete.py",
+        "def delete_alias(alias):\n    return alias\n",
+    );
+    write(
+        dir.path(),
+        "app/views.py",
+        "from app import alias_delete\n\n\ndef remove(alias):\n    alias_delete.delete_alias(alias)\n    alias_delete.missing(alias)\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let calls: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "CALLS" && edge.src.ends_with("app/views.py#remove"))
+        .collect();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].dst.ends_with("app/alias_delete.py#delete_alias"));
+    assert_eq!(calls[0].props["resolution"], "submodule-attribute");
+    assert_eq!(calls[0].props["prov"]["confidence_tier"], "InferredStrong");
+}
