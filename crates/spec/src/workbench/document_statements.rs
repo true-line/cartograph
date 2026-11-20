@@ -1077,6 +1077,37 @@ fn called(value: &str) -> Option<String> {
     Some(format!("it runs “{}”", words(last.trim_start_matches('_'))))
 }
 
+/// A guarded exit's conditions with a given outcome clause (#2027): "When
+/// the alias is not enabled, the mail is accepted with “250 …”". `None`
+/// when a condition is outside the rendering rules or the sentence would
+/// carry a code token.
+pub(super) fn with_outcome(
+    evidence: &GuardedExitEvidence,
+    owner: &str,
+    outcome: &str,
+) -> Option<String> {
+    let class = owner
+        .rsplit_once('.')
+        .and_then(|(class, _)| class.rsplit('.').next())
+        .filter(|c| c.starts_with(|f: char| f.is_ascii_uppercase()));
+    let cx = Context { class };
+    let conditions: Option<Vec<String>> = evidence
+        .conditions
+        .iter()
+        .map(|c| condition(c.expression.display.as_str(), c.polarity, &cx))
+        .collect();
+    let mut conditions = conditions?;
+    // Nested guards may test the same thing twice; say it once.
+    let mut said = std::collections::BTreeSet::new();
+    conditions.retain(|c| said.insert(c.clone()));
+    let sentence = if conditions.is_empty() {
+        format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
+    } else {
+        format!("When {}, {outcome}.", conditions.join(", and "))
+    };
+    Some(sentence).filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
+}
+
 /// The statement of one guarded exit in domain terms, or `None` when its
 /// condition or outcome is outside the rendering rules. `owner` is the
 /// owning callable's qualified name (`User.can_create_num_aliases`).
