@@ -386,6 +386,81 @@ fn groups_do_not_depend_on_the_registry_key() {
     );
 }
 
+const CLIENT: &str = "local/client";
+const CLIENT_ROOT: &str = "app/src/main/java/io/simplelogin/android";
+
+/// The layered server beside a client repository that names the same three
+/// concepts under its own package root.
+fn server_and_client() -> RevisionedSnapshot {
+    let mut client = Fixture::default();
+    for noun in ["alias", "mailbox", "domain"] {
+        let paths = [
+            format!("{CLIENT_ROOT}/module/{noun}/{noun}_list_fragment.kt"),
+            format!("{CLIENT_ROOT}/module/{noun}/{noun}_view_model.kt"),
+            format!("{CLIENT_ROOT}/utils/model/{noun}.kt"),
+            format!("{CLIENT_ROOT}/utils/network/{noun}_api.kt"),
+        ];
+        for path in &paths {
+            client.file(path, &[&format!("get_{noun}"), &format!("delete_{noun}")]);
+        }
+        for path in [&paths[0], &paths[1], &paths[3]] {
+            client.imports(path, &paths[2]);
+        }
+    }
+    let client: (Vec<Node>, Vec<Edge>) = serde_json::from_str(
+        &serde_json::to_string(&client.snapshot().graph)
+            .unwrap()
+            .replace(REPO, CLIENT),
+    )
+    .unwrap();
+    let mut base = layered().snapshot();
+    base.graph.0.extend(client.0);
+    base.graph.1.extend(client.1);
+    base
+}
+
+// AC-0919: files of two repositories are never one group, and a word every
+// group of a repository carries (its package root) names none of them.
+#[test]
+fn a_group_holds_files_of_one_repository() {
+    let report = derive_subsystems(&server_and_client());
+    let groups = groups(&report);
+    assert_eq!((report.files, report.grouped), (24, 24), "{groups:?}");
+    assert_eq!(groups.len(), 6, "{groups:?}");
+    for (name, _, members) in &groups {
+        let client = members
+            .iter()
+            .filter(|p| p.starts_with(CLIENT_ROOT))
+            .count();
+        assert!(
+            client == 0 || client == members.len(),
+            "{name}: {members:?}"
+        );
+        let lower = name.to_lowercase();
+        let title = lower.split(" (").next().unwrap();
+        assert!(
+            !title.contains("simplelogin") && !title.contains("android"),
+            "{name}"
+        );
+    }
+    // The server's groups are what they are without the client; a subject
+    // both repositories have is named with where its files are.
+    let alone = self::groups(&derive_subsystems(&layered().snapshot()));
+    for (name, kind, members) in &alone {
+        let found = groups.iter().find(|group| &group.2 == members);
+        let (found, found_kind, _) = found.unwrap_or_else(|| panic!("{name} in {groups:?}"));
+        assert_eq!(found_kind, kind);
+        assert_eq!(found.split(" (").next(), Some(name.as_str()), "{groups:?}");
+    }
+    let names: Vec<&str> = groups.iter().map(|group| group.0.as_str()).collect();
+    assert!(names.contains(&"Custom domain"), "{names:?}");
+    assert!(names.contains(&"Domain"), "{names:?}");
+    // Of two groups the same size, both are named with their place.
+    for name in ["Alias (app)", "Alias (app/src)"] {
+        assert!(names.contains(&name), "{names:?}");
+    }
+}
+
 const ABUSER: [&str; 4] = [
     "app/abuser.py",
     "app/abuser_utils.py",
@@ -471,7 +546,7 @@ fn paths(group: &[&str]) -> Vec<String> {
 #[test]
 fn a_group_of_two_subjects_is_two_groups() {
     let (base, mut report) = read(&mixed());
-    let signals = signals(&base, &mut report).unwrap();
+    let signals = signals(&base, REPO, &mut report).unwrap();
     let both: Vec<&str> = ABUSER.iter().chain(&MAILBOX).copied().collect();
     let name = named(&[files(&signals, &both)], &signals)
         .remove(0)
@@ -497,7 +572,7 @@ fn a_group_of_two_subjects_is_two_groups() {
 #[test]
 fn files_no_term_holds_together_are_not_a_group() {
     let (base, mut report) = read(&mixed());
-    let signals = signals(&base, &mut report).unwrap();
+    let signals = signals(&base, REPO, &mut report).unwrap();
     assert_eq!(
         regrouped(&signals, &[&LEFTOVER, &ALIAS, &MAILBOX]),
         vec![
@@ -521,7 +596,7 @@ fn files_no_term_holds_together_are_not_a_group() {
 #[test]
 fn groups_with_one_name_are_one_group() {
     let (base, mut report) = read(&mixed());
-    let signals = signals(&base, &mut report).unwrap();
+    let signals = signals(&base, REPO, &mut report).unwrap();
     assert_eq!(
         regrouped(&signals, &[&EVENT[..3], &EVENT[3..], &ALIAS, &MAILBOX]),
         vec![
@@ -536,7 +611,7 @@ fn groups_with_one_name_are_one_group() {
 #[test]
 fn a_leftover_file_joins_the_group_it_is_named_for() {
     let (base, mut report) = read(&mixed());
-    let signals = signals(&base, &mut report).unwrap();
+    let signals = signals(&base, REPO, &mut report).unwrap();
     assert_eq!(
         regrouped(&signals, &[&ALIAS[..3], &MAILBOX, &DOMAIN]),
         vec![
@@ -552,7 +627,7 @@ fn a_leftover_file_joins_the_group_it_is_named_for() {
 #[test]
 fn a_name_is_the_term_most_of_the_group_carries() {
     let (base, mut report) = read(&mixed());
-    let signals = signals(&base, &mut report).unwrap();
+    let signals = signals(&base, REPO, &mut report).unwrap();
     let members = files(&signals, &ABUSER);
     let term = |word: &str, score: f64, cover: usize| Term {
         word: word.into(),
