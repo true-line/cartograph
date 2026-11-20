@@ -1806,6 +1806,150 @@ pub fn extract_source(
     Ok(out)
 }
 
+/// Constants recorded per file, and the longest value recorded (#2027).
+const MAX_STRING_CONSTANTS: usize = 256;
+const MAX_STRING_CONSTANT_BYTES: usize = 160;
+
+/// Top-level `UPPER_NAME = "plain literal"` bound once in the module, by
+/// name (#2027). A sensitive name, a secret-shaped or token-shaped value, an
+/// f-string, a prefixed or escaped literal and a long value are not
+/// recorded; at most [`MAX_STRING_CONSTANTS`] per file.
+fn string_constants(cx: &FileCx<'_>, root: tree_sitter::Node<'_>) -> BTreeMap<String, String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut found: Vec<(String, String)> = Vec::new();
+    // Every module-scope binding counts toward a name being bound once,
+    // including one under module-level `if`/`try`/`for`/`with`; nested
+    // functions and classes are their own scopes.
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        if node.kind() == "assignment"
+            && node.parent().is_some_and(|p| p.parent() != Some(root))
+            && let Some(left) = node.child_by_field_name("left")
+            && left.kind() == "identifier"
+        {
+            *seen.entry(cx.text(&left).to_string()).or_default() += 1;
+        }
+    }
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        let Some(assignment) = (statement.kind() == "expression_statement")
+            .then(|| statement.named_child(0))
+            .flatten()
+            .filter(|n| n.kind() == "assignment")
+        else {
+            continue;
+        };
+        let (Some(left), Some(right)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.kind() != "identifier" {
+            continue;
+        }
+        let name = cx.text(&left).to_string();
+        *seen.entry(name.clone()).or_default() += 1;
+        if !name.starts_with(|c: char| c.is_ascii_uppercase())
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            || right.kind() != "string"
+        {
+            continue;
+        }
+        let text = cx.text(&right);
+        let Some(q) = text.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+            continue;
+        };
+        if text.len() < 2
+            || !text.ends_with(q)
+            || text.starts_with("\"\"\"")
+            || text.starts_with("'''")
+        {
+            continue;
+        }
+        let value = &text[1..text.len() - 1];
+        if value.is_empty()
+            || value.len() > MAX_STRING_CONSTANT_BYTES
+            || value.contains(['\\', '\n', q])
+            || core_redact::is_sensitive_name(&name)
+            || core_redact::is_token_shaped(value)
+            || !core_redact::recognized_secrets(value).is_empty()
+        {
+            continue;
+        }
+        found.push((name, value.to_owned()));
+    }
+    found
+        .into_iter()
+        .filter(|(name, _)| seen.get(name) == Some(&1))
+        .take(MAX_STRING_CONSTANTS)
+        .collect()
+}
+
+/// Local names a function binds to a module constant (`res_status =
+/// status.E502`), with every constant bound to each and the byte where it
+/// is first bound, in source order (#2027): what a later `return
+/// res_status` may answer. Nested functions and classes are not entered.
+fn constant_locals(
+    cx: &FileCx<'_>,
+    function: tree_sitter::Node<'_>,
+) -> BTreeMap<String, Vec<serde_json::Value>> {
+    fn constant(text: &str) -> bool {
+        let name = text.rsplit('.').next().unwrap_or(text);
+        text.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }) && name.len() > 1
+            && name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    }
+    let mut found: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    let Some(body) = function.child_by_field_name("body") else {
+        return found;
+    };
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        if node.kind() == "assignment"
+            && let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            )
+            && left.kind() == "identifier"
+            && matches!(right.kind(), "attribute" | "identifier")
+        {
+            let name = cx.text(&left);
+            let value = cx.text(&right);
+            if name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && constant(value) {
+                let values = found.entry(name.to_string()).or_default();
+                if !values.iter().any(|v| v["value"] == value) && values.len() < 8 {
+                    values.push(serde_json::json!({ "value": value, "at": node.start_byte() }));
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    found
+}
+
 fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extraction, ExtractError> {
     let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     let mut parser = Parser::new();
@@ -1825,6 +1969,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             "prov": cx.prov(&root, &format!("File {path}")),
         }),
     });
+    // Module string constants a rule can name (#2027): `E502 = "550 …"`.
+    let constants = string_constants(&cx, root);
+    if !constants.is_empty() {
+        out.nodes[0].props["string_constants"] = serde_json::json!(constants);
+    }
 
     let bindings = parse_imports(&cx, root, &mut out);
     let receivers = assignment_receivers(&cx, root, &bindings, &mut out);
@@ -1862,15 +2011,20 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         if qualified_name == simple_name {
             locals.insert(simple_name.clone(), symbol.clone());
         }
+        let mut props = serde_json::json!({
+            "name": qualified_name,
+            "kind": "function",
+            "language": "python",
+            "prov": cx.prov(&function, &format!("Symbol {symbol}")),
+        });
+        let bound = constant_locals(&cx, function);
+        if !bound.is_empty() {
+            props["constant_locals"] = serde_json::json!(bound);
+        }
         out.nodes.push(Node {
             id: symbol.clone(),
             label: "Symbol".into(),
-            props: serde_json::json!({
-                "name": qualified_name,
-                "kind": "function",
-                "language": "python",
-                "prov": cx.prov(&function, &format!("Symbol {symbol}")),
-            }),
+            props,
         });
         out.edges.push(Edge {
             src: symbol.clone(),

@@ -902,6 +902,9 @@ fn signals<'a>(
     for (member, file) in &file_of {
         if let (Some(&i), Some(member)) = (index.get(file), node(member))
             && matches!(member.label.as_str(), "Symbol" | "Component")
+            // An anonymous function's generated name (`webAPI/func@120`,
+            // #2007) names nothing; its enclosing function already counts.
+            && member.props["func_literal"] != true
         {
             add(
                 &mut words[i],

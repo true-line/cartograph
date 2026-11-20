@@ -294,6 +294,14 @@ struct Index<'a> {
     /// Configuration reads with a recorded literal default, by the module
     /// constant bound to them (#1998, AC-0904).
     constants: BTreeMap<&'a str, Vec<(&'a Node, &'a serde_json::Value)>>,
+    /// Module string constants by name, with their file and module stem
+    /// (#2027).
+    strings: BTreeMap<&'a str, Vec<(&'a Node, &'a str, &'a str)>>,
+    /// What each process start or scheduled job enters: a callable, or a
+    /// file standing for the callables defined in it (#2027).
+    entries: BTreeMap<&'a str, Vec<&'a str>>,
+    /// Callables by the file that defines them.
+    defined: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
 impl<'a> Index<'a> {
@@ -301,6 +309,8 @@ impl<'a> Index<'a> {
         let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), *n)).collect();
         let mut calls: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut governs: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
+        let mut entries: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut defined: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for edge in edges {
             let (Some(src), Some(dst)) =
                 (by_id.get(edge.src.as_str()), by_id.get(edge.dst.as_str()))
@@ -314,6 +324,10 @@ impl<'a> Index<'a> {
                 "GOVERNS" if src.label == "BusinessRule" => {
                     governs.entry(&dst.id).or_default().push(src)
                 }
+                "ENTRY" => entries.entry(&src.id).or_default().push(&dst.id),
+                "DEFINED_IN" if src.label == "Symbol" && dst.label == "File" => {
+                    defined.entry(&dst.id).or_default().push(&src.id)
+                }
                 _ => {}
             }
         }
@@ -325,6 +339,23 @@ impl<'a> Index<'a> {
                         .entry(name)
                         .or_default()
                         .push((node, &default["value"]));
+                }
+            }
+        }
+        let mut strings: BTreeMap<&str, Vec<(&Node, &str, &str)>> = BTreeMap::new();
+        for node in nodes.iter().filter(|n| n.label == "File") {
+            let stem = node.props["path"]
+                .as_str()
+                .and_then(|p| p.rsplit('/').next())
+                .and_then(|f| f.strip_suffix(".py"))
+                .unwrap_or_default();
+            for (name, value) in node.props["string_constants"]
+                .as_object()
+                .into_iter()
+                .flatten()
+            {
+                if let Some(value) = value.as_str() {
+                    strings.entry(name).or_default().push((node, value, stem));
                 }
             }
         }
@@ -341,6 +372,9 @@ impl<'a> Index<'a> {
             governs,
             by_name,
             constants,
+            strings,
+            entries,
+            defined,
         }
     }
 
@@ -399,16 +433,31 @@ impl<'a> Index<'a> {
     }
 
     /// The governed callables a capability's handlers reach, nearest first.
-    /// Handlers are the destinations of the `HANDLES` edges it cites.
+    /// Handlers are the destinations of the `HANDLES` edges it cites, and
+    /// what a cited process start or scheduled job enters: a callable, or
+    /// each callable defined in an entered file (#2027).
     fn reached(&self, story: &Story<'a>) -> Vec<&'a str> {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         let mut order: Vec<&str> = Vec::new();
         let mut front: Vec<&str> = story
             .support
             .iter()
-            .filter_map(|(_, fact)| match fact {
-                Support::Edge(e) if e.label == "HANDLES" => Some(e.dst.as_str()),
-                _ => None,
+            .flat_map(|(_, fact)| -> Vec<&'a str> {
+                match fact {
+                    Support::Edge(e) if e.label == "HANDLES" => vec![e.dst.as_str()],
+                    Support::Node(n) if matches!(n.label.as_str(), "EntryPoint" | "Schedule") => {
+                        self.entries
+                            .get(n.id.as_str())
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|dst| match self.defined.get(dst) {
+                                Some(inside) => inside.clone(),
+                                None => vec![*dst],
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                }
             })
             .filter(|id| self.by_id.get(id).is_some_and(|n| n.label == "Symbol"))
             .filter(|id| seen.insert(id))
@@ -434,9 +483,122 @@ impl<'a> Index<'a> {
     fn each(
         &self,
         owners: impl Iterator<Item = &'a str>,
-        row: impl FnMut(Rejection<'a>) -> Result<(), RenderLimit>,
+        mut row: impl FnMut(Rejection<'a>) -> Result<(), RenderLimit>,
     ) -> Result<usize, RenderLimit> {
-        self.each_picked(owners, rejection, row)
+        let mut n = 0;
+        for owner in owners {
+            let name = self
+                .by_id
+                .get(owner)
+                .and_then(|n| n.props["name"].as_str())
+                .unwrap_or(owner);
+            for rule in self.governs.get(owner).into_iter().flatten() {
+                if let Some(found) =
+                    rejection(rule, name).or_else(|| self.mail_reply(rule, owner, name))
+                {
+                    n += 1;
+                    row(found)?;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// A `return` naming a module string constant that holds an SMTP reply
+    /// (`status.E502` = “550 …”, matched by name and module stem,
+    /// inferred) as the mail's reply (#2027, AC-0916).
+    fn mail_reply(&self, rule: &'a Node, owner_id: &str, owner: &'a str) -> Option<Rejection<'a>> {
+        let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+        let LocalExit::Return { value: Some(value) } = &parsed.effect else {
+            return None;
+        };
+        let display = value.display.as_str();
+        let reply = |module: Option<&str>, name: &str| -> Option<(u16, &'a str)> {
+            let found = self.strings.get(name)?;
+            let picked: Vec<&(&Node, &str, &str)> = found
+                .iter()
+                .filter(|(_, _, stem)| module.is_none_or(|m| m == *stem))
+                .collect();
+            let [(_, literal, _)] = picked[..] else {
+                return None;
+            };
+            let code: u16 = literal.get(..3)?.parse().ok()?;
+            // 2xx, 4xx and 5xx end the mail's handling; a 3xx reply is an
+            // intermediate step, not a decision.
+            (matches!(code, 200..=299 | 400..=599) && literal.as_bytes().get(3) == Some(&b' '))
+                .then_some((code, *literal))
+        };
+        let mut replies: Vec<(u16, &str)> = smtp_constants(display)
+            .filter_map(|(module, name)| reply(module, name))
+            .collect();
+        // A returned local bound to reply constants in the function
+        // (`res_status = status.E502`): each reply it may hold.
+        let mut bound = false;
+        if replies.is_empty() {
+            let locals = self
+                .by_id
+                .get(owner_id)
+                .map(|n| &n.props["constant_locals"]);
+            for token in display.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                // Only a binding before this return can be what it answers.
+                let before = parsed.exit_source.byte_start;
+                for value in locals
+                    .and_then(|l| l[token].as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter(|v| v["at"].as_u64().is_some_and(|at| at < before))
+                    .filter_map(|v| v["value"].as_str())
+                {
+                    let (module, name) = match value.rsplit_once('.') {
+                        Some((m, n)) => (Some(m.rsplit('.').next().unwrap_or(m)), n),
+                        None => (None, value),
+                    };
+                    if let Some(found) = reply(module, name)
+                        && !replies.contains(&found)
+                    {
+                        replies.push(found);
+                        bound = true;
+                    }
+                }
+            }
+        }
+        let (&(code, _), _) = replies.split_first()?;
+        if !bound && replies.len() > 1 {
+            return None;
+        }
+        let literal = replies
+            .iter()
+            .map(|(_, l)| format!("“{l}”"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let clause = if bound && replies.len() > 1 {
+            format!("the mail is answered {literal}, as the function sets it")
+        } else {
+            match code {
+                200..=299 => format!("the mail is accepted with the reply {literal}"),
+                400..=499 => format!("the mail is deferred with the reply {literal}"),
+                _ => format!("the mail is refused with the reply {literal}"),
+            }
+        };
+        let literal = literal.replace(['“', '”'], "");
+        let when = if parsed.conditions.is_empty() {
+            "always".to_owned()
+        } else {
+            let alone = parsed.conditions.len() == 1;
+            parsed
+                .conditions
+                .iter()
+                .map(|c| holds(&one_line(c.expression.display.as_str()), c.polarity, alone))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        };
+        Some(Rejection {
+            rule,
+            owner,
+            when,
+            outcome: format!("returns {} ({literal})", one_line(display)),
+            statement: super::statements::with_outcome(&parsed, owner, &clause),
+        })
     }
 
     /// Each rule of `owners` that `pick` makes a row of, in order.
@@ -541,6 +703,25 @@ fn receiver_class(receiver: &str, owner: &str) -> Option<String> {
             Some(class).filter(|c| !c.is_empty())
         }
     }
+}
+
+/// `module.NAME` and bare `NAME` tokens of upper-case constants in a
+/// display: `[(True, status.E502)]` gives `(Some("status"), "E502")`.
+fn smtp_constants(display: &str) -> impl Iterator<Item = (Option<&str>, &str)> {
+    display
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .filter_map(|token| {
+            let (module, name) = match token.rsplit_once('.') {
+                Some((module, name)) => (Some(module.rsplit('.').next()?), name),
+                None => (None, token),
+            };
+            (name.len() > 1
+                && name.starts_with(|c: char| c.is_ascii_uppercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .then_some((module, name))
+        })
 }
 
 /// Predicates followed per rejection row.
@@ -1453,6 +1634,124 @@ def perform_alias_deletion(alias, user):
             "{text}"
         );
         assert_eq!(printed, 1 + 6, "{text}");
+    }
+
+    // AC-0916: a mail handler's guarded returns of module reply constants
+    // are its decisions, stated with the reply text, under the capability
+    // whose entry point enters the handler's file; a returned local bound to
+    // reply constants names each reply it may hold.
+    #[test]
+    fn a_mail_handlers_replies_are_its_decisions() {
+        let id = adapters_lang_python::SourceId {
+            repo: "repo",
+            commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+        };
+        let status = adapters_lang_python::extract_source(
+            br#"
+E200 = "250 Message accepted for delivery"
+E502 = "550 SL E502 Email not exist"
+E407 = "421 SL E407 Retry later"
+E354 = "354 Start mail input"
+"#,
+            "app/email/status.py",
+            &id,
+        )
+        .unwrap();
+        let handler = adapters_lang_python::extract_source(
+            br#"
+from app.email import status
+
+def handle_forward(alias, contact, user):
+    if not alias.enabled or contact.block_forward:
+        res_status = status.E200
+        if user.reject_blocked:
+            res_status = status.E502
+        return [(True, res_status)]
+    if alias.over_quota:
+        return [(False, status.E407)]
+    if not user.active:
+        return [(False, status.E502)]
+    if alias.streaming:
+        return [(True, status.E354)]
+    return [(True, status.E200)]
+
+def handle_reply(contact):
+    reply = status.E502
+    if contact.blocked:
+        return [(False, reply)]
+    reply = status.E200
+    return [(True, reply)]
+"#,
+            "email_handler.py",
+            &id,
+        )
+        .unwrap();
+        let entry = Node {
+            id: "entry:repo@email_handler.py#main".into(),
+            label: "EntryPoint".into(),
+            props: serde_json::json!({ "kind": "smtp-listener" }),
+        };
+        let enters = Edge {
+            src: entry.id.clone(),
+            dst: "file:repo@email_handler.py".into(),
+            label: "ENTRY".into(),
+            props: serde_json::json!({}),
+        };
+        let nodes: Vec<&Node> = status
+            .nodes
+            .iter()
+            .chain(&handler.nodes)
+            .chain([&entry])
+            .collect();
+        let edges: Vec<&Edge> = status
+            .edges
+            .iter()
+            .chain(&handler.edges)
+            .chain([&enters])
+            .collect();
+        let cite = BaseRef::Node(entry.id.clone());
+        let cap = Node {
+            id: "capability:test:mail".into(),
+            label: "Capability".into(),
+            props: serde_json::json!({ "title": "Receive mail over SMTP" }),
+        };
+        let knowledge = Stories {
+            included: vec![crate::workbench::capabilities::Story {
+                node: &cap,
+                support: vec![(&cite, Support::Node(&entry))],
+            }],
+            filtered: 0,
+            areas: BTreeMap::new(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        let printed = rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        for line in [
+            "| handle\\_forward | When the alias is not enabled or the contact's block forward is set, \
+             the mail is answered “250 Message accepted for delivery” or “550 SL E502 Email not exist”, \
+             as the function sets it. |",
+            "| handle\\_forward | When the alias's over quota is set, the mail is deferred with the reply \
+             “421 SL E407 Retry later”. |",
+            "| handle\\_forward | When the user is not active, the mail is refused with the reply \
+             “550 SL E502 Email not exist”. |",
+            // Only the binding before the return is what it answers.
+            "| handle\\_reply | When the contact is blocked, the mail is refused with the reply \
+             “550 SL E502 Email not exist”. |",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        // The unguarded success answer and a 3xx step are not decisions.
+        assert!(!text.contains("354"), "{text}");
+        assert_eq!(printed, 4, "{text}");
     }
 
     // AC-0886: a function a rejection's condition calls is followed by name

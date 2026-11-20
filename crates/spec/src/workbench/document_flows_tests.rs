@@ -240,14 +240,17 @@ fn flow_arrangement_workspace_is_checked() {
 }
 
 // AC-0893: a cited process start is an operation of its capability: its
-// flow is placed under it, the callables defined in the file it enters are
-// its handlers, and what they call and write follows (#1997).
+// flow is placed under it, the named callables defined in the file it
+// enters are its handlers, and what they call and write follows (#1997).
 #[test]
 fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
     const MAIL: &str = "entry:acme/mail@email_handler.py#main";
     const FILE: &str = "file:acme/mail@email_handler.py";
     const HANDLE: &str = "sym:acme/mail@email_handler.py#handle";
     const FORWARD: &str = "sym:acme/mail@app/forward.py#forward_email_to_mailbox";
+    const PINS: &str = "decl:acme/mail@email_handler.py#PINS";
+    const ANON: &str = "sym:acme/mail@email_handler.py#anon@120";
+    const TYPE: &str = "sym:acme/mail@email_handler.py#Envelope";
     let nodes = vec![
         node(
             MAIL,
@@ -262,10 +265,20 @@ fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
             json!({"name": "forward_email_to_mailbox"}),
         ),
         node(LOG, "DataEntity", json!({"name": "EmailLog"})),
+        node(PINS, "Declaration", json!({"name": "PINS"})),
+        node(ANON, "Symbol", json!({"name": "anon@120"})),
+        node(
+            TYPE,
+            "Symbol",
+            json!({"name": "Envelope", "kind": "struct"}),
+        ),
     ];
     let edges = vec![
         edge(MAIL, FILE, "ENTRY", json!({})),
         edge(HANDLE, FILE, "DEFINED_IN", json!({})),
+        edge(PINS, FILE, "DEFINED_IN", json!({})),
+        edge(ANON, FILE, "DEFINED_IN", json!({})),
+        edge(TYPE, FILE, "DEFINED_IN", json!({})),
         edge(HANDLE, FORWARD, "CALLS", json!({})),
         edge(FORWARD, LOG, "WRITES", json!({"operations": ["insert"]})),
     ];
@@ -305,7 +318,9 @@ fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
         .lines()
         .find(|l| l.starts_with("- **Mail received over SMTP"))
         .expect(&text);
-    assert!(line.contains("handled by handle"), "{line}");
+    // Only the file's named callables handle it (AC-0893): not its
+    // constants, its types, or its anonymous functions.
+    assert!(line.contains("handled by handle;"), "{line}");
     assert!(
         line.contains("; calls forward\\_email\\_to\\_mailbox"),
         "{line}"
