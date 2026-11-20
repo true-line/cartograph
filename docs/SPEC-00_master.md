@@ -148,7 +148,7 @@ Two layers in one store. The **Code layer** holds T0/T1 facts. The **Domain laye
 ### 4.2 Domain layer
 **Nodes:** `Capability, BusinessFlow, BusinessRule, DomainEntity, Actor, ADR`.
 **Edges:** `REALIZES(flow→capability), STEP_OF(code-edge→flow), GOVERNS(rule→symbol|endpoint), MAPS_TO(DomainEntity→DataEntity), DECIDES(ADR→target), TRIGGERED_BY(flow→Screen|Channel|Schedule), PERFORMED_BY(flow→Actor)`.
-*Amended for #260 (AC-0894):* the knowledge overlay also carries `Subsystem` nodes, the named groups of source files that belong to one concept, with `MEMBER_OF(File→Subsystem)`. They are Semantic/InferredWeak candidates derived from base facts by the versioned rule `knowledge.subsystems`, never base facts (ADR-0051).
+*Amended for #260 (AC-0863):* the knowledge overlay also carries `Subsystem` nodes, the named groups of source files that belong to one concept, with `MEMBER_OF(File→Subsystem)`. They are Semantic/InferredWeak candidates derived from base facts by the versioned rule `knowledge.subsystems`, never base facts (ADR-0051).
 
 ### 4.3 Provenance (on every node and edge)
 ```
