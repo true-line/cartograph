@@ -12,6 +12,14 @@
 //! more than [`SHARED_AFTER`] capabilities reach is shared plumbing: its
 //! rejections are listed once, after the capabilities.
 //!
+//! With areas (#260), each area's capabilities are followed by the rules in
+//! the area's own code that none of them reach (#2066): the rejections and
+//! changes of every callable defined in one of the area's member files that
+//! no capability of the area reaches and that is not shared plumbing, at
+//! most [`MAX_AREA_OWN_ROWS`] rejections per area. Code reached only from
+//! another area, a command or a job, or through injected configuration, is
+//! then still stated where an area's reader, or its topic expert, looks.
+//!
 //! A function a rejection's condition calls (`user.can_create_new_alias()`)
 //! is followed by its name (#1998, AC-0886): when exactly one recovered
 //! Symbol has that last name segment, its guarded exits and those of what it
@@ -30,7 +38,7 @@
 //! and `rule-evidence.md` keeps every observation with its dependencies.
 
 use super::statements::Constants;
-use crate::workbench::capabilities::{Stories, Story, Support};
+use crate::workbench::capabilities::{Stories, Story, Support, area_name};
 use crate::workbench::citation_id;
 use crate::workbench::render::{Assertions, Literal, RenderLimit, Text};
 use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit, SourceExpression};
@@ -1075,6 +1083,12 @@ pub(super) fn rules_per_capability(
                 Ok(())
             })?;
     }
+    // Each area's own callables no capability of it reaches (#2066).
+    let own_code = index.area_own_code(knowledge, &listed, &reach_count);
+    for (_, owners) in &own_code {
+        total += index.each(owners.iter().copied(), |_| Ok(()))?;
+        changes += index.each_picked(owners.iter().copied(), effect, |_| Ok(()))?;
+    }
     if total + changes == 0 {
         return Ok(0);
     }
@@ -1099,9 +1113,57 @@ pub(super) fn rules_per_capability(
          what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
          capability, nearest callable first.\n"
     )?;
+    if !own_code.is_empty() {
+        writeln!(
+            out,
+            "Rules in an area's own code (#2066): after an area's capabilities, the \
+             rejections and changes of the callables defined in the area's member files that \
+             none of its capabilities reach, and that are not shared, at most \
+             {MAX_AREA_OWN_ROWS} rejections per area. They may be reached from another \
+             area's capability, a command or a job, through injected configuration, or not at \
+             all; who calls them is not established here.\n"
+        )?;
+    }
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
-    for &(area, story) in &listed {
+    // Areas in name order, each one's capabilities then its own code; the
+    // capabilities with no area last, as `capabilities()` lists them.
+    let mut named: Vec<&Node> = listed
+        .iter()
+        .filter_map(|(area, _)| *area)
+        .chain(own_code.iter().map(|(area, _)| *area))
+        .collect();
+    named.sort_by(|a, b| area_order(a).cmp(&area_order(b)));
+    named.dedup_by(|a, b| a.id == b.id);
+    let mut units: Vec<(Option<&Node>, Option<&Story<'_>>)> = Vec::new();
+    for area in named {
+        units.extend(
+            listed
+                .iter()
+                .filter(|(a, _)| a.is_some_and(|a| a.id == area.id))
+                .map(|(a, story)| (*a, Some(*story))),
+        );
+        if own_code.iter().any(|(a, _)| a.id == area.id) {
+            units.push((Some(area), None));
+        }
+    }
+    units.extend(
+        listed
+            .iter()
+            .filter(|(a, _)| a.is_none())
+            .map(|(a, story)| (*a, Some(*story))),
+    );
+    for (area, story) in units {
+        let Some(story) = story else {
+            let area = area.expect("an own-code unit names its area");
+            let owners = &own_code
+                .iter()
+                .find(|(a, _)| a.id == area.id)
+                .expect("listed above")
+                .1;
+            printed += index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
+            continue;
+        };
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
         let rejections = index.each(reached.iter().copied(), |_| Ok(()))?;
         let changed = index.each_picked(reached.iter().copied(), effect, |_| Ok(()))?;
@@ -1161,6 +1223,120 @@ pub(super) fn rules_per_capability(
 
 /// Change rows printed per capability (#1998).
 pub(super) const MAX_EFFECT_ROWS: usize = 16;
+
+/// Rejection rows printed for one area's own code (#2066).
+pub(super) const MAX_AREA_OWN_ROWS: usize = 32;
+
+/// The order areas are listed in: by name, then id.
+fn area_order(area: &Node) -> (&str, &str) {
+    (area_name(area), area.id.as_str())
+}
+
+impl<'a> Index<'a> {
+    /// Each area, in [`area_order`], with the callables defined in its
+    /// member files that hold a rule row, that none of its capabilities
+    /// reach and that are not shared (more than [`SHARED_AFTER`]
+    /// capabilities reach them), in file then definition order (#2066).
+    /// An area with none is left out.
+    fn area_own_code(
+        &self,
+        knowledge: &Stories<'a>,
+        listed: &[(Option<&'a Node>, &Story<'a>)],
+        reach_count: &BTreeMap<&'a str, usize>,
+    ) -> Vec<(&'a Node, Vec<&'a str>)> {
+        if knowledge.file_areas.is_empty() {
+            return Vec::new();
+        }
+        let mut reached: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (area, story) in listed {
+            if let Some(area) = area {
+                reached
+                    .entry(area.id.as_str())
+                    .or_default()
+                    .extend(self.reached(story));
+            }
+        }
+        let mut by_area: BTreeMap<(&str, &str), (&'a Node, Vec<&'a str>)> = BTreeMap::new();
+        for (file, area) in &knowledge.file_areas {
+            let mine = reached.get(area.id.as_str());
+            for callable in self.defined.get(file).into_iter().flatten().copied() {
+                if reach_count.get(callable).is_some_and(|n| *n > SHARED_AFTER)
+                    || mine.is_some_and(|r| r.contains(callable))
+                    || !self.governs.contains_key(callable)
+                {
+                    continue;
+                }
+                by_area
+                    .entry(area_order(area))
+                    .or_insert_with(|| (*area, Vec::new()))
+                    .1
+                    .push(callable);
+            }
+        }
+        by_area
+            .into_values()
+            .filter(|(_, owners)| {
+                let rows = self.each(owners.iter().copied(), |_| Ok(())).unwrap_or(0);
+                let changes = self
+                    .each_picked(owners.iter().copied(), effect, |_| Ok(()))
+                    .unwrap_or(0);
+                rows + changes > 0
+            })
+            .collect()
+    }
+
+    /// The rules of one area's own code (#2066), under the area's heading:
+    /// its rejections, at most [`MAX_AREA_OWN_ROWS`], then its changes.
+    #[allow(clippy::too_many_arguments)]
+    fn own_code(
+        &self,
+        owners: &[&'a str],
+        area: &'a Node,
+        headings: &mut crate::workbench::document::AreaHeadings<'a>,
+        assertions: &mut Assertions,
+        asserted: &mut BTreeSet<String>,
+        out: &mut Text,
+    ) -> Result<usize, RenderLimit> {
+        let marks = headings.before(Some(area), out)?;
+        writeln!(
+            out,
+            "{marks} Rules in the {} area's own code\n",
+            Literal(area_name(area))
+        )?;
+        let mut followed = BTreeSet::new();
+        let mut explained = BTreeSet::new();
+        let mut shown = 0usize;
+        if self.each(owners.iter().copied(), |_| Ok(()))? > 0 {
+            out.push_str(HEADER)?;
+            let mut omitted = 0usize;
+            self.each(owners.iter().copied(), |row| {
+                if shown == MAX_AREA_OWN_ROWS {
+                    omitted += 1;
+                    return Ok(());
+                }
+                shown += 1;
+                write_row(&row, assertions, asserted, out)?;
+                self.explain_constants(&row, &mut explained, assertions, asserted, out)?;
+                self.follow(
+                    &row,
+                    &mut (&mut followed, &mut explained),
+                    assertions,
+                    asserted,
+                    out,
+                )
+            })?;
+            if omitted > 0 {
+                writeln!(
+                    out,
+                    "| — | {omitted} more rejections in this area's code are not listed; \
+                     `rule-evidence.md` has them. | — | — |"
+                )?;
+            }
+            out.push_str("\n")?;
+        }
+        Ok(shown + self.changes(owners, &mut explained, assertions, asserted, out)?)
+    }
+}
 
 impl<'a> Index<'a> {
     /// The “Changes” table of `owners`: their guarded effects (#1998,
@@ -1421,7 +1597,16 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         set_slots::<&str>(rows)?,
         graph.bytes,
     ])?;
-    sum(&[index, reach_count, traversal, row, guards])
+    // Each area's own code (#2066): the callables its capabilities reach,
+    // by area, the area-ordered owners, and the arranged units.
+    let own_code = sum(&[
+        map_slots::<&str, BTreeSet<&str>>(rows)?,
+        set_slots::<&str>(rows)?,
+        map_slots::<(&str, &str), (&Node, Vec<&str>)>(rows)?,
+        slots::<&str>(rows)?,
+        slots::<(Option<&Node>, Option<&Story<'_>>)>(rows)?.checked_mul(2)?,
+    ])?;
+    sum(&[index, reach_count, traversal, row, guards, own_code])
 }
 
 #[cfg(test)]
@@ -2360,5 +2545,132 @@ def create(user):
             assert!(text.contains(row), "missing {row}\n{text}");
         }
         assert_eq!(text.matches("| MAX\\_FREE |").count(), 1, "{text}");
+    }
+
+    // AC-0945: with areas, each area's own code that none of its
+    // capabilities reach is stated after them: an area with no reaching
+    // capability gets its rejections and changes; a rule a capability of
+    // the area already lists is not repeated.
+    #[test]
+    fn an_areas_own_code_is_stated_after_its_capabilities() {
+        let id = adapters_lang_python::SourceId {
+            repo: "repo",
+            commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+        };
+        let alias = adapters_lang_python::extract_source(
+            b"def update_alias(alias_id):\n    if not alias_id:\n        raise ValueError('no alias')\n    return 'ok'\n\n\
+def rename_alias(alias, name):\n    if not name:\n        raise ValueError('no name')\n    alias.name = name\n",
+            "app/api/alias.py",
+            &id,
+        )
+        .unwrap();
+        let abuser = adapters_lang_python::extract_source(
+            b"def mark_user_as_abuser(user, note):\n    user.disabled = True\n\n\
+def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('no primary email')\n    return user\n",
+            "app/abuser.py",
+            &id,
+        )
+        .unwrap();
+        let nodes: Vec<Node> = alias.nodes.iter().chain(&abuser.nodes).cloned().collect();
+        let edges: Vec<Edge> = alias.edges.iter().chain(&abuser.edges).cloned().collect();
+        let nodes: Vec<&Node> = nodes.iter().collect();
+        let edges: Vec<&Edge> = edges.iter().collect();
+        let file = |path: &str| {
+            edges
+                .iter()
+                .find(|e| e.label == "DEFINED_IN" && e.dst.ends_with(path))
+                .map(|e| e.dst.clone())
+                .unwrap()
+        };
+        let (alias_file, abuser_file) = (file("app/api/alias.py"), file("app/abuser.py"));
+        let handler = nodes
+            .iter()
+            .copied()
+            .find(|n| n.label == "Symbol" && n.props["name"] == "update_alias")
+            .unwrap();
+        let handles = Edge {
+            src: "ep:repo@PUT:/api/aliases/<int:alias_id>".into(),
+            dst: handler.id.clone(),
+            label: "HANDLES".into(),
+            props: serde_json::json!({}),
+        };
+        let cite = BaseRef::Edge(
+            handles.src.clone(),
+            handles.dst.clone(),
+            handles.label.clone(),
+        );
+        let cap = Node {
+            id: "capability:test:alias".into(),
+            label: "Capability".into(),
+            props: serde_json::json!({ "title": "Manage alias (API)" }),
+        };
+        let area = |id: &str, name: &str| Node {
+            id: id.into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": name }),
+        };
+        let (alias_area, abuser_area) =
+            (area("subsystem:1", "Alias"), area("subsystem:2", "Abuser"));
+        let knowledge = Stories {
+            included: vec![crate::workbench::capabilities::Story {
+                node: &cap,
+                support: vec![(&cite, Support::Edge(&handles))],
+            }],
+            filtered: 0,
+            areas: [(cap.id.as_str(), &alias_area)].into_iter().collect(),
+            file_areas: [
+                (alias_file.as_str(), &alias_area),
+                (abuser_file.as_str(), &abuser_area),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        let printed = rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}\n{text}"))
+        };
+        // Abuser sorts first; its own code is stated though no capability
+        // reaches it, rejection and change alike.
+        assert!(at("### Abuser\n") < at("#### Rules in the Abuser area's own code"));
+        assert!(at("#### Rules in the Abuser area's own code") < at("| store\\_abuse\\_data |"));
+        assert!(at("| store\\_abuse\\_data |") < at("### Alias\n"));
+        assert!(
+            at("sets user.disabled to True") < at("### Alias\n"),
+            "{text}"
+        );
+        // Alias: the capability, then the function it does not reach.
+        assert!(at("#### Manage alias (API)") < at("#### Rules in the Alias area's own code"));
+        assert!(at("#### Rules in the Alias area's own code") < at("| rename\\_alias |"));
+        assert_eq!(text.matches("| update\\_alias |").count(), 1, "{text}");
+        assert!(text.contains("Rules in an area's own code (#2066)"));
+        assert!(printed >= 4, "{printed}\n{text}");
+
+        // Without areas, nothing beyond the capabilities is stated.
+        let plain = Stories {
+            areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
+            ..knowledge
+        };
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &plain,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        assert!(!out.finish().contains("own code"));
     }
 }
