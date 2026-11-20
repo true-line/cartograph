@@ -17,7 +17,8 @@
 //! A reply that is not the schema's object refuses with a closed reason. A
 //! claim that breaks a rule the admission rule checks per claim (a blank,
 //! oversized, non-plain or secret-bearing statement, no citation, too many,
-//! an id that is not citable, a proposed design) is left out and counted,
+//! an id that is not citable, a proposed design), or whose statement has
+//! fewer than [`MIN_STATEMENT_WORDS`] words, is left out and counted,
 //! rather than refusing every other claim with it. A line break or tab in a
 //! statement is read as a space first: it is layout, not content. The
 //! caller then applies [`crate::section_draft::admit`] and the neutrality
@@ -37,6 +38,19 @@ pub const SECTION_COMPOSER_ROLE: &str = "section-composer@1";
 
 /// Most claims a composer is asked for.
 pub const COMPOSER_CLAIMS: usize = 16;
+
+/// Fewest words a composed statement has. A composer is asked for dense
+/// statements; a shorter one ("placeholder", "TBD") states nothing.
+pub const MIN_STATEMENT_WORDS: usize = 5;
+
+/// Whether `statement` has at least [`MIN_STATEMENT_WORDS`] words.
+fn substantive(statement: &str) -> bool {
+    statement
+        .split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .count()
+        >= MIN_STATEMENT_WORDS
+}
 
 const SYSTEM: &str = "You are Cartograph's section composer. You write one section of a \
 product specification for a legacy system, so that a team that has never seen the code \
@@ -342,7 +356,10 @@ pub fn decode(
             && citations.iter().all(|id| citable.contains(id));
         match kind {
             Some(kind)
-                if cites_ok && statement_admissible(&statement) && claims.len() < MAX_CLAIMS =>
+                if cites_ok
+                    && statement_admissible(&statement)
+                    && substantive(&statement)
+                    && claims.len() < MAX_CLAIMS =>
             {
                 claims.push(Claim {
                     statement,

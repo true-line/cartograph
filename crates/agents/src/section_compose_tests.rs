@@ -145,4 +145,14 @@ fn a_reply_that_is_not_the_schema_or_keeps_no_claim_is_refused() {
         decode(&address(), &none, &citable),
         Err(ComposeRefusal::NoClaims)
     );
+    // A cited placeholder states nothing: it is not staged as a draft.
+    let placeholder = reply(serde_json::json!([
+        {"statement": "placeholder", "claim_kind": "implemented_behavior", "citation_ids": [id(1)]},
+        {"statement": "To be determined later.", "claim_kind": "implemented_behavior",
+         "citation_ids": [id(1)]}
+    ]));
+    assert_eq!(
+        decode(&address(), &placeholder, &citable),
+        Err(ComposeRefusal::NoClaims)
+    );
 }

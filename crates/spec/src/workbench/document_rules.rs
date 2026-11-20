@@ -157,6 +157,63 @@ fn returns_error_status(value: &SourceExpression) -> bool {
         .is_ok_and(|status| (400..600).contains(&status))
 }
 
+/// Whether `text` reads as one operand: nothing but brackets and quoted
+/// literals separates its parts, or one pair of parentheses wraps it all.
+fn atomic(text: &str) -> bool {
+    if text.starts_with('(') && closing(text) == Some(text.len() - 1) {
+        return true;
+    }
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in text.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// One branch condition as it holds at the exit. A falsy branch negates
+/// the whole condition, so a compound one is parenthesized (`not (a or b)`,
+/// never `not a or b`), and `not` over a negation is dropped. When `alone`
+/// is false the condition is joined to others with `and`, so a compound
+/// truthy one is parenthesized too.
+fn holds(shown: &str, polarity: BranchPolarity, alone: bool) -> String {
+    match polarity {
+        BranchPolarity::FalsyBranch => match shown.strip_prefix("not ") {
+            Some(inner) if atomic(inner.trim_start()) => inner.trim_start().to_owned(),
+            _ if atomic(shown) => format!("not {shown}"),
+            _ => format!("not ({shown})"),
+        },
+        // `not` binds tighter than `and`: `not x and y` keeps its reading.
+        BranchPolarity::TruthyBranch
+            if alone
+                || atomic(shown)
+                || shown
+                    .strip_prefix("not ")
+                    .is_some_and(|inner| atomic(inner.trim_start())) =>
+        {
+            shown.to_owned()
+        }
+        BranchPolarity::TruthyBranch => format!("({shown})"),
+    }
+}
+
 fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
     let outcome = match &parsed.effect {
@@ -171,16 +228,11 @@ fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
     let when = if parsed.conditions.is_empty() {
         "always".to_owned()
     } else {
+        let alone = parsed.conditions.len() == 1;
         parsed
             .conditions
             .iter()
-            .map(|c| {
-                let shown = one_line(c.expression.display.as_str());
-                match c.polarity {
-                    BranchPolarity::TruthyBranch => shown,
-                    BranchPolarity::FalsyBranch => format!("not {shown}"),
-                }
-            })
+            .map(|c| holds(&one_line(c.expression.display.as_str()), c.polarity, alone))
             .collect::<Vec<_>>()
             .join(" and ")
     };
@@ -589,27 +641,8 @@ function checkQuantity(qty: number) {
         assert_eq!(printed, 0);
     }
 
-    // AC-0852: a Flask handler's guarded `raise` and error-status returns are
-    // its rejections; a success tuple and a plain return are not.
-    #[test]
-    fn python_raises_and_error_status_returns_are_rejections() {
-        let source = r#"
-from flask import jsonify
-
-def update_alias(alias_id, user):
-    alias = Alias.get(alias_id)
-    if not alias or alias.user_id != user.id:
-        return jsonify(error="Forbidden, really"), 403
-    if alias.disabled:
-        raise AliasDisabled("disabled")
-    if alias.pending:
-        return ("pending", 409,)
-    if alias.ok:
-        return jsonify(alias=alias.email), 200
-    if alias.empty:
-        return None
-    return jsonify(ok=True)
-"#;
+    /// The rows one Python source's `handler_name` reaches, as one capability.
+    fn python_rows(source: &str, handler_name: &str) -> (String, usize) {
         let facts = adapters_lang_python::extract_source(
             source.as_bytes(),
             "app/api/alias.py",
@@ -624,7 +657,7 @@ def update_alias(alias_id, user):
         let handler = nodes
             .iter()
             .copied()
-            .find(|n| n.label == "Symbol" && n.props["name"] == "update_alias")
+            .find(|n| n.label == "Symbol" && n.props["name"] == handler_name)
             .unwrap();
         let handles = Edge {
             src: "ep:repo@PUT:/api/aliases/<int:alias_id>".into(),
@@ -660,7 +693,31 @@ def update_alias(alias_id, user):
             &mut out,
         )
         .unwrap();
-        let text = out.finish();
+        (out.finish(), printed)
+    }
+
+    // AC-0852: a Flask handler's guarded `raise` and error-status returns are
+    // its rejections; a success tuple and a plain return are not.
+    #[test]
+    fn python_raises_and_error_status_returns_are_rejections() {
+        let source = r#"
+from flask import jsonify
+
+def update_alias(alias_id, user):
+    alias = Alias.get(alias_id)
+    if not alias or alias.user_id != user.id:
+        return jsonify(error="Forbidden, really"), 403
+    if alias.disabled:
+        raise AliasDisabled("disabled")
+    if alias.pending:
+        return ("pending", 409,)
+    if alias.ok:
+        return jsonify(alias=alias.email), 200
+    if alias.empty:
+        return None
+    return jsonify(ok=True)
+"#;
+        let (text, printed) = python_rows(source, "update_alias");
         assert_eq!(printed, 3, "{text}");
         assert!(
             text.contains(
@@ -677,5 +734,49 @@ def update_alias(alias_id, user):
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
         assert!(!text.contains("200"), "{text}");
         assert!(!text.contains("returns None"), "{text}");
+    }
+
+    // AC-0849: a When cell states what holds at the exit. An `else` or
+    // `elif` negates a compound condition whole, `not` over a negation is
+    // dropped, and conditions joined by `and` keep their own grouping.
+    #[test]
+    fn a_negated_compound_condition_keeps_its_grouping() {
+        let shown = |text: &str, polarity| holds(text, polarity, false);
+        let (t, f) = (BranchPolarity::TruthyBranch, BranchPolarity::FalsyBranch);
+        assert_eq!(
+            shown("not user or not user.check_password(password)", f),
+            "not (not user or not user.check_password(password))"
+        );
+        assert_eq!(shown("not user.activated", f), "user.activated");
+        assert_eq!(shown("not (a or b)", f), "(a or b)");
+        assert_eq!(
+            shown("output.error is not None", f),
+            "not (output.error is not None)"
+        );
+        assert_eq!(shown("user.disabled", f), "not user.disabled");
+        assert_eq!(shown("a or b", t), "(a or b)");
+        assert_eq!(shown("not user.activated", t), "not user.activated");
+        assert_eq!(holds("a or b", t, true), "a or b");
+        assert_eq!(shown("f(a, b)", t), "f(a, b)");
+        assert_eq!(shown("x == \"a b\"", t), "(x == \"a b\")");
+        assert!(atomic("data.get(\"a b\")"));
+
+        let (text, printed) = python_rows(
+            r#"
+def login(user, password):
+    if not user or not user.check_password(password):
+        raise LoginError("Email or password incorrect")
+    elif not user.activated:
+        raise LoginError("Account not activated")
+"#,
+            "login",
+        );
+        assert_eq!(printed, 2, "{text}");
+        assert!(
+            text.contains(
+                "| login | not (not user or not user.check\\_password(password)) and not user.activated |"
+            ),
+            "{text}"
+        );
     }
 }
