@@ -157,8 +157,9 @@ fn group_name(
 ///   before the route's own endpoint name. A route registered on the
 ///   application itself, whatever its endpoint name, or under a Blueprint
 ///   whose name is not a literal, belongs to no group.
-/// - Go (`net/http`, chi, gin): the group is the package directory of the
-///   handler function. These frameworks give a group of routes a path prefix
+/// - Go (`net/http`, chi, gin, Vercel functions): the group is the package
+///   directory of the handler function; a Vercel function that fronts the
+///   routes behind it is left out (`front_doors`). These frameworks give a group of routes a path prefix
 ///   and no name, so the package is the nearest named unit the adapter proves.
 /// - Rust (axum, actix-web): the group is the crate and module of
 ///   the handler function, for the same reason. A method on a type and a
@@ -178,9 +179,12 @@ pub(super) fn derive(
 ) {
     type Key = (&'static str, String, String, String);
     let mut groups: BTreeMap<Key, (Naming, Group)> = BTreeMap::new();
+    // A Vercel function that only passes requests on to the routes behind
+    // it is not an operation of its own (AC-0926).
+    let front_doors = crate::front_doors::vercel_front_doors(nodes.values().filter_map(|n| *n));
     for endpoint in nodes.values().filter_map(|n| *n) {
         let props = &endpoint.props;
-        if endpoint.label != "Endpoint" {
+        if endpoint.label != "Endpoint" || front_doors.contains_key(endpoint.id.as_str()) {
             continue;
         }
         let Some((extractor, by)) = group_shape(props) else {

@@ -435,3 +435,48 @@ fn capability_frame_states_the_endpoints_no_capability_groups_and_why() {
         "{frame}"
     );
 }
+
+#[test]
+fn capability_frame_states_a_vercel_front_door_and_the_routes_behind_it() {
+    // AC-0926 (#2010): a Vercel function's endpoints that only pass requests
+    // on to mux routes under its paths are stated as such, counted once.
+    let tier = (Tier::Deterministic, ConfidenceTier::Confirmed);
+    let endpoint = |method: &str, path: &str, framework: &str, handler: &str| {
+        let mut n = node(
+            &format!("ep:local/bot@{method}:{path}"),
+            "Endpoint",
+            tier.0,
+            tier.1,
+        );
+        n.props["path"] = json!(path);
+        n.props["framework"] = json!(framework);
+        n.props["handler_sym"] = json!(handler);
+        n
+    };
+    let nodes = [
+        endpoint(
+            "ANY",
+            "/api/web",
+            "vercel",
+            "sym:local/bot@api/web/index.go#Handler",
+        ),
+        endpoint(
+            "ANY",
+            "/api/web/{path...}",
+            "vercel",
+            "sym:local/bot@api/web/index.go#Handler",
+        ),
+        endpoint("GET", "/api/web/session", "net/http", "gap:a"),
+        endpoint("POST", "/api/web/devices", "net/http", "gap:b"),
+    ];
+    let bundle = compile_spec(&nodes, &[], &[], ExportMode::BestEffort, &BTreeSet::new());
+    let frame = section(&d1(&bundle).content, "## 1.3 ");
+    assert!(
+        frame.contains(
+            "Operations in no Capability: 4 of 4 HTTP endpoints. 2 are Vercel functions that \
+             pass requests on to the 2 routes registered behind them, which are the operations; \
+             2 have no resolved handler"
+        ),
+        "{frame}"
+    );
+}
