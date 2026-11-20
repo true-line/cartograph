@@ -19,7 +19,7 @@ use super::*;
 /// Deterministic recipe grouping entry points and scheduled jobs.
 pub const CAPABILITY_ENTRY_POINT_RULE: &str = "knowledge.capability.entry-point";
 /// Changed grouping, support or naming semantics require a new recipe version.
-pub const CAPABILITY_ENTRY_POINT_RULE_VERSION: &str = "1";
+pub const CAPABILITY_ENTRY_POINT_RULE_VERSION: &str = "2";
 
 const ENTRY_EXTRACTOR: &str = "t0.entry-point";
 const SCHEDULE_EXTRACTOR: &str = "t0.schedule";
