@@ -141,6 +141,7 @@ fn render(cited_handles: bool) -> (String, usize, usize, usize) {
             support,
         }],
         filtered: 0,
+        areas: BTreeMap::new(),
     };
     let budget = Budget::new(None).unwrap();
     let mut assertions = Assertions::new(&budget);
