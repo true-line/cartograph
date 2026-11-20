@@ -359,6 +359,8 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 - **Trace:** R2 · `spec`, `app` · — · T-0943
 - **AC-0944** Given the Spec Workbench with `architecture.md` selected, then the Architecture view draws C4 level 1 (people, the system as one box, outside systems), level 2 (containers and stores inside the system boundary) and level 3 (one container's components with what calls in and what they call), opens a level by tab or by double-clicking the system or a container with components, shows for a selected box or arrow its kind, technology, confidence and the facts it rests on with their tier and source span, draws a Gap box or arrow apart, and refuses to draw a model whose identity does not match the artifact (#2049).
 - **Trace:** R2 · `ui` · — · T-0944
+- **AC-0945** Given a spec export, then D1 §1.1 of `product-specification.md` links `architecture.md` and `architecture.dsl`, which the same export holds, whether or not the section's prose is drafted, and the bundle manifest lists both under Documents (#2049).
+- **Trace:** R2 · `spec` · — · T-0945
 
 ### US-0013 — ADR recovery and drift detection
 - **Actor:** Engine

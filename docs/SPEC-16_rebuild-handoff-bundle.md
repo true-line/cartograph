@@ -45,7 +45,7 @@ has a floor that honesty alone does not meet.
 
 | Part | Content | Today |
 |---|---|---|
-| 1. Documents | The catalogue's D1 to D10, arranged by section, each section marked P, A, P+A or H | D1 is compiled as `product-specification.md`. D2 to D10 are not compiled yet; their content is exported under the current artifact names, mapped in catalogue §3 |
+| 1. Documents | The catalogue's D1 to D10, arranged by section, each section marked P, A, P+A or H | D1 is compiled as `product-specification.md`; its §1.1 links the system at a glance, drawn in `architecture.md` (C4 levels 1 to 3) and `architecture.dsl` (#2049). D2 to D10 are not compiled yet; their content is exported under the current artifact names, mapped in catalogue §3 |
 | 2. Requirements | D1 §1.3 capabilities and §1.4 acceptance criteria: each criterion as Given/When/Then, each clause cited | The frames exist. The prose is drafted by `section-writer@1` and printed once accepted (SPEC-15) |
 | 3. Rules | D1 §1.5, with `rule-evidence.md` as the evidence | Exported |
 | 4. Traceability matrix | D11 §11.1, `US-TM.md` and `US-TM.json` | Exported |
@@ -129,10 +129,10 @@ about behaviour; the reviewer records it as silent and says what was there.
 | 3 | What can each actor do? List the capabilities. | D1 §1.3 |
 | 4 | For each capability in the sample: what must be true for it to succeed, what does success return and change, and what happens when it is refused? | D1 §1.4, §1.5 |
 | 5 | Which business rules apply, and what evidence supports each? | D1 §1.5, D11 §11.4 |
-| 6 | Which steps make up each main flow, and across which components? | D1 §1.6, D9, D11 §11.5 |
+| 6 | Which steps make up each main flow, and across which components? | D1 §1.6, D9, D11 §11.5, `architecture.md` level 3 |
 | 7 | Which data does it hold, with which fields and relations? | D5 |
 | 8 | Which interfaces does it expose, with their requests and responses? | D4 |
-| 9 | Which external systems, queues and stores does it depend on? | D7 §7.6, D2 |
+| 9 | Which external systems, queues and stores does it depend on? | D7 §7.6, D2, `architecture.md` levels 1 and 2 |
 | 10 | How is it configured, built and deployed, in which environments? | D7 |
 | 11 | Which tests exist, and what do they cover? | D8 |
 | 12 | What is not known, and what would close each gap? | D11 §11.2, §11.6 |
