@@ -115,9 +115,10 @@ pub use workbench::{
     try_compile_spec_with_coverage, validate_knowledge_stories,
 };
 pub use workbench::{
-    CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, SYSTEM_SCOPE, SectionFrame, SectionKind,
-    SectionScopeError, SourceIdentifiers, catalogue_section, catalogue_sections, drafted_section,
-    section_citation_set,
+    CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,
+    DerivedGroup, SYSTEM_SCOPE, SectionFrame, SectionKind, SectionScopeError, SourceIdentifiers,
+    catalogue_section, catalogue_sections, composition_facts, drafted_section,
+    section_citation_set, section_text,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query
