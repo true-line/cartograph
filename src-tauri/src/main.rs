@@ -6621,6 +6621,8 @@ struct SpecInputs {
 struct KnowledgeInput {
     capabilities: Vec<core_graph::overlay::OverlayFact>,
     actors: Vec<core_graph::overlay::OverlayFact>,
+    /// Subsystem candidates the document set arranges Capabilities by (#260).
+    subsystems: Vec<core_graph::overlay::OverlayFact>,
 }
 
 impl KnowledgeInput {
@@ -6637,11 +6639,17 @@ impl KnowledgeInput {
         let read = overlay
             .lock()
             .map_err(|error| error.to_string())?
-            .read_capabilities_and_actors_bounded(revision, MAX_FACTS, MAX_BYTES)
+            .read_story_nodes_bounded(revision, MAX_FACTS, MAX_BYTES)
             .map_err(|error| format!("The knowledge overlay could not be read: {error}"))?;
         let OverlayRead::Current { mut facts, .. } = read else {
             return Ok(Self::default());
         };
+        let subsystems = facts
+            .extract_if(
+                ..,
+                |f| matches!(&f.item, OverlayItem::Node(n) if n.label == "Subsystem"),
+            )
+            .collect();
         let actors = facts
             .extract_if(
                 ..,
@@ -6651,6 +6659,7 @@ impl KnowledgeInput {
         Ok(Self {
             capabilities: facts,
             actors,
+            subsystems,
         })
     }
 }
@@ -6703,7 +6712,15 @@ impl SpecInputs {
             mode,
             &self.rejected_hashes,
         )
-        .map(Some)
+        .map(|stories| {
+            // Arranged by subsystem area where the overlay holds them (#260).
+            Some(stories.with_areas(
+                &self.base,
+                &self.knowledge.subsystems,
+                mode,
+                &self.rejected_hashes,
+            ))
+        })
         .map_err(|error| format!("The knowledge overlay was refused: {error}"))
     }
 

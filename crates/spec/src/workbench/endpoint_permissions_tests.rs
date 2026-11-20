@@ -673,6 +673,7 @@ fn security_with_capability(fixture: &Fixture, mode: ExportMode) -> String {
                 .collect(),
         }],
         filtered: 0,
+        areas: BTreeMap::new(),
     };
     let nodes: Vec<&Node> = fixture.nodes.iter().collect();
     let edges: Vec<&Edge> = fixture.edges.iter().collect();
@@ -949,6 +950,7 @@ fn python_callers_are_named_by_their_recovered_guards() {
                 .collect(),
         }],
         filtered: 0,
+        areas: BTreeMap::new(),
     };
     let refs: Vec<&Node> = nodes.iter().collect();
     let stories = crate::workbench::producers::stories_with_support(

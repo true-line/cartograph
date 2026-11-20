@@ -208,12 +208,14 @@ pub(super) fn operations_per_capability(
          evidence that the operation has none.\n"
     )?;
     let mut cited = 0usize;
-    for story in capabilities(knowledge) {
+    let mut headings = super::AreaHeadings::new(knowledge);
+    for (area, story) in knowledge.capabilities() {
         let ops = operations(story);
         if ops.is_empty() {
             continue;
         }
-        writeln!(out, "### {}\n", Literal(NodeName(story.node)))?;
+        let marks = headings.before(area, out)?;
+        writeln!(out, "{marks} {}\n", Literal(NodeName(story.node)))?;
         out.push_str(
             "| Operation | Takes | On success | Changes | Not recovered | Citation |\n\
              |---|---|---|---|---|---|\n",
@@ -476,6 +478,7 @@ mod tests {
                 support,
             }],
             filtered: 0,
+            areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);

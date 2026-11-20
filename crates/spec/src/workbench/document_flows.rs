@@ -244,12 +244,8 @@ pub(super) fn flows_per_capability(
         }
         operations
     };
-    let capabilities = || {
-        knowledge
-            .included
-            .iter()
-            .filter(|s| s.node.label == "Capability")
-    };
+    let listed = knowledge.capabilities();
+    let capabilities = || listed.iter().map(|(_, story)| *story);
     let mut placed: BTreeSet<&str> = BTreeSet::new();
     let mut sections = 0usize;
     for story in capabilities() {
@@ -274,12 +270,14 @@ pub(super) fn flows_per_capability(
         sections
     )?;
     let mut cited = 0usize;
-    for story in capabilities() {
+    let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
+    for &(area, story) in &listed {
         let operations = operations_of(story);
         if operations.is_empty() {
             continue;
         }
-        writeln!(out, "### {}\n", Literal(NodeName(story.node)))?;
+        let marks = headings.before(area, out)?;
+        writeln!(out, "{marks} {}\n", Literal(NodeName(story.node)))?;
         let mut handled_only: Vec<String> = Vec::new();
         for flow in operations {
             let reading = read(&index, flow);
