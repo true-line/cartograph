@@ -652,6 +652,102 @@ fn captured_extraction_is_byte_identical_to_serial() {
 }
 
 #[test]
+fn captured_walk_returns_its_facts_packed_and_matches_the_list_form() {
+    // AC-0863 (#1237): the captured walk packs each file's facts as it merges
+    // and completes the directory over the packed store. Its facts, receipts
+    // and statistics equal the list form's: every file decoded together,
+    // completed over plain lists, receipts matched against the decoded facts.
+    let directory = tempfile::tempdir().unwrap();
+    for (path, source) in [
+        (
+            "a.ts",
+            "import { b } from './b';\nimport { gone } from './missing';\n\
+             export function a(ok: boolean) { if (!ok) throw new Error('no'); gone(); return b(); }\n",
+        ),
+        (
+            "b.ts",
+            "export function b(n: number) { for (;;) { if (n > 1) return n; } }\n",
+        ),
+    ] {
+        fs::write(directory.path().join(path), source).unwrap();
+    }
+    let paths = enumerate_paths(directory.path()).unwrap();
+    let capture = capture(directory.path(), &paths);
+    let id = parser_id();
+    let (decoded, receipts, stats) = extract_captured_dir(
+        directory.path(),
+        &id,
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let (rest, store, packed_receipts, packed_stats) = extract_captured_dir_packed(
+        directory.path(),
+        &id,
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(rest.nodes.is_empty() && rest.edges.is_empty());
+    assert_eq!(rest.default_exports, decoded.default_exports);
+    assert_eq!(packed_receipts, receipts);
+    assert_eq!(packed_stats, stats);
+    let packed = store.into_facts().unwrap();
+    assert_eq!(packed, (decoded.nodes.clone(), decoded.edges.clone()));
+
+    let mut reference = Extraction::default();
+    for path in &paths {
+        let (facts, _) = extract_file_with(
+            capture.file(path).unwrap(),
+            &id,
+            Registries::builtin(),
+            FILE_DECLARATIONS,
+        )
+        .unwrap();
+        crate::append_extraction(&mut reference, facts);
+    }
+    let (mut nodes, mut edges) = (
+        std::mem::take(&mut reference.nodes),
+        std::mem::take(&mut reference.edges),
+    );
+    crate::complete_directory(
+        &mut reference,
+        &mut core_graph::facts::FactLists {
+            nodes: &mut nodes,
+            edges: &mut edges,
+        },
+        directory.path(),
+        &id,
+    )
+    .unwrap();
+    assert_eq!(packed, (nodes.clone(), edges.clone()));
+    (reference.nodes, reference.edges) = (nodes, edges);
+    let matching = matcher(&reference);
+    assert!(!receipts.is_empty() && receipts.iter().all(&matching));
+    drop(matching);
+
+    // The fixture exercises the rule path and both pending-call outcomes.
+    let labeled = |label: &str| reference.nodes.iter().filter(|n| n.label == label).count();
+    assert_eq!(labeled("BusinessRule"), 2);
+    assert!(
+        reference
+            .nodes
+            .iter()
+            .any(|node| node.props["rule_evidence_gap"] == true)
+    );
+    let calls = |dst: &str| {
+        reference
+            .edges
+            .iter()
+            .any(|edge| edge.label == "CALLS" && edge.dst.starts_with(dst))
+    };
+    assert!(calls(&format!("sym:{REPO}@b.ts#b")));
+    assert!(calls(&format!("gap:call:{REPO}@a.ts@")));
+}
+
+#[test]
 fn captured_parser_emits_the_same_const_unproven_eval_gap() {
     // AC-0201: the captured production lane parses the retained bytes with the
     // same extractor, so the explicit eval Gap and its owner edge are emitted
@@ -845,7 +941,8 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
         BTreeMap::from([("a.ts".to_string(), 1)])
     );
     let lost = rules.iter().find(|rule| !admitted.contains(rule)).unwrap();
-    assert!(surviving_facts(&extraction)(lost.fact_key()));
+    let held = FactStore::from_facts(extraction.nodes.clone(), extraction.edges.clone()).unwrap();
+    assert!(surviving_facts(&held)(lost.fact_key()));
     assert!(stats.omitted_receipt_facts_complete);
     let omitted_rule_keys: Vec<_> = stats
         .omitted_receipt_facts
