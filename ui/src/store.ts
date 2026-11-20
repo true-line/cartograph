@@ -623,6 +623,62 @@ export interface SpecViewBundle {
   topology: SpecDiagramView;
   flows: SpecDiagramView;
   data_model: SpecDiagramView;
+  /** The C4 model of `architecture.md` (#2049); absent from a host that
+   *  predates it. */
+  architecture?: ArchitectureView;
+}
+
+/** One fact a C4 element or relationship rests on (#2049). */
+export interface ArchitectureFact {
+  /** Node id, or the `src LABEL dst` identity of an edge. */
+  id: string;
+  /** Node label or edge label. */
+  kind: string;
+  label: string;
+  provenance: Provenance;
+}
+
+export interface ArchitectureElement {
+  /** `e{n}`, or `e{n}c{m}` for a component; the ids `architecture.dsl` uses. */
+  id: string;
+  kind: 'person' | 'container' | 'store' | 'external' | 'component';
+  name: string;
+  technology: string;
+  description: string;
+  confidence: Tier;
+  /** At most twelve; `facts_total` counts them all. */
+  facts: ArchitectureFact[];
+  facts_total: number;
+}
+
+export interface ArchitectureRelation {
+  from: string;
+  to: string;
+  label: string;
+  technology: string;
+  confidence: Tier;
+  facts: ArchitectureFact[];
+  facts_total: number;
+}
+
+export interface ArchitectureComponents {
+  container: string;
+  elements: ArchitectureElement[];
+  relations: ArchitectureRelation[];
+  unassigned_files: number;
+}
+
+/** The C4 model behind `architecture.md`, bound to its content identity. */
+export interface ArchitectureView {
+  artifact_id: string;
+  schema: string;
+  content_id: string;
+  mode: SpecExportMode;
+  system: string;
+  elements: ArchitectureElement[];
+  relations: ArchitectureRelation[];
+  components: ArchitectureComponents[];
+  areas_supplied: boolean;
 }
 
 export interface SpecWithViews {

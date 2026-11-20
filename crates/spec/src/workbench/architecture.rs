@@ -204,7 +204,7 @@ struct Components<'a> {
 const OFFSET: usize = 1 << 20;
 
 /// The C4 model of the admitted facts.
-pub(super) struct Model<'a> {
+pub(crate) struct Model<'a> {
     system: String,
     elements: Vec<Element<'a>>,
     relations: Vec<Relation<'a>>,
@@ -462,16 +462,16 @@ impl<'a> Owners<'a> {
 }
 
 /// What the host supplies beside the facts.
-pub(super) struct Supplied<'s, 'a> {
-    pub(super) knowledge: Option<&'s Stories<'a>>,
-    pub(super) repo_names: &'s [(String, String)],
+pub(crate) struct Supplied<'s, 'a> {
+    pub(crate) knowledge: Option<&'s Stories<'a>>,
+    pub(crate) repo_names: &'s [(String, String)],
     /// The export mode: `verified-only` draws nothing InferredWeak.
-    pub(super) mode: ExportMode,
+    pub(crate) mode: ExportMode,
 }
 
 impl<'a> Model<'a> {
     #[allow(clippy::too_many_lines)]
-    pub(super) fn new(
+    pub(crate) fn new(
         nodes: &[&'a Node],
         edges: &[&'a Edge],
         flows: &'a [Flow],
@@ -2431,6 +2431,132 @@ pub(super) fn dsl(model: &Model<'_>, max: Option<usize>) -> Result<Output, Rende
         assertions: Vec::new(),
         subjects: Vec::new(),
     })
+}
+
+/// The model as the app's Architecture view reads it (#2049 slice 2):
+/// every element and relation with its confidence and the facts it rests
+/// on, at most [`MAX_CITED`] of them each with its provenance, bound to the
+/// `architecture.md` artifact it was compiled beside.
+pub(crate) fn view(
+    model: &Model<'_>,
+    artifact: &crate::SpecArtifact,
+    mode: ExportMode,
+) -> crate::views::ArchitectureView {
+    use crate::views::{ArchitectureComponents, ArchitectureView};
+    let id = |i: usize| format!("e{i}");
+    ArchitectureView {
+        artifact_id: artifact.id.clone(),
+        schema: artifact.schema.clone(),
+        content_id: artifact.content_id.clone(),
+        mode,
+        system: model.system.clone(),
+        elements: model
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| element_view(id(i), e))
+            .collect(),
+        relations: model
+            .relations
+            .iter()
+            .map(|r| relation_view(id(r.from), id(r.to), r))
+            .collect(),
+        components: model
+            .components
+            .iter()
+            .map(|parts| {
+                let end = |i: usize| {
+                    if i >= OFFSET {
+                        format!("e{}c{}", parts.container, i - OFFSET)
+                    } else {
+                        id(i)
+                    }
+                };
+                ArchitectureComponents {
+                    container: id(parts.container),
+                    elements: parts
+                        .elements
+                        .iter()
+                        .enumerate()
+                        .map(|(j, e)| element_view(format!("e{}c{j}", parts.container), e))
+                        .collect(),
+                    relations: parts
+                        .relations
+                        .iter()
+                        .map(|r| relation_view(end(r.from), end(r.to), r))
+                        .collect(),
+                    unassigned_files: parts.unassigned,
+                }
+            })
+            .collect(),
+        areas_supplied: model.areas_supplied,
+    }
+}
+
+fn kind_key(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Person => "person",
+        Kind::Container => "container",
+        Kind::Store => "store",
+        Kind::External => "external",
+        Kind::Component => "component",
+    }
+}
+
+fn fact_views(facts: &[Fact<'_>]) -> Vec<crate::views::ArchitectureFact> {
+    facts
+        .iter()
+        .take(MAX_CITED)
+        .map(|fact| match fact {
+            Fact::Node(n) => {
+                let name = render::NodeName(n).to_string();
+                crate::views::ArchitectureFact {
+                    id: n.id.clone(),
+                    kind: n.label.clone(),
+                    label: if name == n.id {
+                        short(&n.id).to_string()
+                    } else {
+                        name
+                    },
+                    provenance: provenance(&n.props, &n.id),
+                }
+            }
+            Fact::Edge(e) => {
+                let identity = super::edge_identity(e);
+                crate::views::ArchitectureFact {
+                    label: format!("{} {} {}", short(&e.src), e.label, short(&e.dst)),
+                    kind: e.label.clone(),
+                    provenance: provenance(&e.props, &identity),
+                    id: identity,
+                }
+            }
+        })
+        .collect()
+}
+
+fn element_view(id: String, e: &Element<'_>) -> crate::views::ArchitectureElement {
+    crate::views::ArchitectureElement {
+        id,
+        kind: kind_key(e.kind).into(),
+        name: e.name.clone(),
+        technology: e.technology.clone(),
+        description: e.description.clone(),
+        confidence: e.confidence(),
+        facts: fact_views(&e.facts),
+        facts_total: e.facts.len(),
+    }
+}
+
+fn relation_view(from: String, to: String, r: &Relation<'_>) -> crate::views::ArchitectureRelation {
+    crate::views::ArchitectureRelation {
+        from,
+        to,
+        label: r.label(),
+        technology: r.technology.clone(),
+        confidence: r.confidence(),
+        facts: fact_views(&r.facts),
+        facts_total: r.facts.len(),
+    }
 }
 
 #[cfg(test)]
