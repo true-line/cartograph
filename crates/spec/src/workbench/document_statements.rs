@@ -377,6 +377,8 @@ fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
         ["self"] | ["cls"] => format!("the {}", words(cx.class?)),
         ["current_user"] | ["g", "user"] => "the user".to_owned(),
         ["request"] => "the request".to_owned(),
+        // A flag named as a question (`is_sl_domain`) is a flag, not a thing.
+        [one] if predicate_verb(one).is_some() => format!("the “{}” flag", words(one)),
         [one] => format!("the {}", words(one)),
         ["self" | "cls", .., last] => format!("the {}'s {}", words(cx.class?), words(last)),
         ["request", .., last] => format!("the {}", words(last)),
@@ -797,7 +799,11 @@ mod tests {
             said("data.get(\"mode\") == \"word\"", t, None).unwrap(),
             "the data's mode is “word”"
         );
-        // AC-0906: a value tested for presence is "set"; the current time
+        assert_eq!(
+            said("is_sl_domain is None", t, None).unwrap(),
+            "the “is sl domain” flag is not set"
+        );
+        // AC-0908: a value tested for presence is "set"; the current time
         // is named as such.
         assert_eq!(
             said("self.trial_end", t, Some("User")).unwrap(),
