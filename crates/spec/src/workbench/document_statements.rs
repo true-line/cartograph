@@ -732,10 +732,23 @@ fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Op
 /// Whether a value names where request input arrives: `data`,
 /// `request.form`, `request.args`, `request.json`.
 fn request_input(path: &[String]) -> bool {
-    matches!(
-        path.last().map(String::as_str),
-        Some("data" | "form" | "args" | "json" | "values" | "files" | "payload" | "body")
-    )
+    // The request's own inputs (`request.form`, `request.json`), or a bare
+    // local holding them (`data`, `payload`); not a response's or a cache's
+    // member of the same name.
+    match path {
+        [one] => matches!(
+            one.as_str(),
+            "data" | "form" | "json" | "payload" | "body" | "args" | "values"
+        ),
+        [root, .., last] => {
+            root == "request"
+                && matches!(
+                    last.as_str(),
+                    "data" | "form" | "args" | "json" | "values" | "files" | "payload" | "body"
+                )
+        }
+        [] => false,
+    }
 }
 
 fn literal(lit: &Lit) -> String {
@@ -827,6 +840,17 @@ fn state_word(name: &str) -> bool {
         .contains(&last.as_str())
 }
 
+/// The joiner a compound renders with under `negated`, or `None` for a
+/// single term.
+fn joined_by(expr: &Expr, negated: bool) -> Option<&'static str> {
+    match (expr, negated) {
+        (Expr::Not(inner), _) => joined_by(inner, !negated),
+        (Expr::And(_), false) | (Expr::Or(_), true) => Some(" and "),
+        (Expr::And(_), true) | (Expr::Or(_), false) => Some(" or "),
+        _ => None,
+    }
+}
+
 fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
     match expr {
         Expr::Not(inner) => render(inner, !negated, cx),
@@ -839,7 +863,22 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                 (Expr::And(_), false) | (Expr::Or(_), true) => " and ",
                 _ => " or ",
             };
-            let parts: Option<Vec<String>> = terms.iter().map(|t| render(t, negated, cx)).collect();
+            // A nested group with the other joiner keeps its grouping:
+            // `a and (b or c)` is "a and either b or c", never "(a and b)
+            // or c".
+            let parts: Option<Vec<String>> = terms
+                .iter()
+                .map(|t| {
+                    let part = render(t, negated, cx)?;
+                    Some(match joined_by(t, negated) {
+                        Some(inner) if inner != joiner && inner == " or " => {
+                            format!("either {part}")
+                        }
+                        Some(inner) if inner != joiner => format!("both {part}"),
+                        _ => part,
+                    })
+                })
+                .collect();
             Some(parts?.join(joiner))
         }
         Expr::Cmp(left, op, right) => {
@@ -1341,6 +1380,17 @@ mod tests {
             ("\"mailbox_id\" in data", t, "mailbox ID is given"),
             ("\"password\" not in data", t, "password is not given"),
             ("\"error\" in request.args", f, "error is not given"),
+            // A response's member is not a request input.
+            (
+                "\"error\" in response.json",
+                t,
+                "the response's json contains “error”",
+            ),
+            (
+                "not (a.x and (b.y or c.z))",
+                t,
+                "the a's x is not set or both the b's y is not set and the c's z is not set",
+            ),
             (
                 "alias_generator not in [\"word\", \"uuid\"]",
                 t,
@@ -1354,7 +1404,7 @@ mod tests {
             (
                 "\"mailbox_id\" in data and (not mailbox or mailbox.user_id != user.id or not mailbox.verified)",
                 t,
-                "mailbox ID is given and no mailbox is given or the mailbox does not belong to the user or the mailbox is not verified",
+                "mailbox ID is given and either no mailbox is given or the mailbox does not belong to the user or the mailbox is not verified",
             ),
             (
                 "not user or not user.check_password(password)",

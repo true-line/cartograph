@@ -538,7 +538,9 @@ impl<'a> Index<'a> {
                 return None;
             };
             let code: u16 = literal.get(..3)?.parse().ok()?;
-            ((200..600).contains(&code) && literal.as_bytes().get(3) == Some(&b' '))
+            // 2xx, 4xx and 5xx end the mail's handling; a 3xx reply is an
+            // intermediate step, not a decision.
+            (matches!(code, 200..=299 | 400..=599) && literal.as_bytes().get(3) == Some(&b' '))
                 .then_some((code, *literal))
         };
         let mut replies: Vec<(u16, &str)> = smtp_constants(display)
@@ -553,11 +555,14 @@ impl<'a> Index<'a> {
                 .get(owner_id)
                 .map(|n| &n.props["constant_locals"]);
             for token in display.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                // Only a binding before this return can be what it answers.
+                let before = parsed.exit_source.byte_start;
                 for value in locals
                     .and_then(|l| l[token].as_array())
                     .into_iter()
                     .flatten()
-                    .filter_map(|v| v.as_str())
+                    .filter(|v| v["at"].as_u64().is_some_and(|at| at < before))
+                    .filter_map(|v| v["value"].as_str())
                 {
                     let (module, name) = match value.rsplit_once('.') {
                         Some((m, n)) => (Some(m.rsplit('.').next().unwrap_or(m)), n),
@@ -1666,6 +1671,7 @@ def perform_alias_deletion(alias, user):
 E200 = "250 Message accepted for delivery"
 E502 = "550 SL E502 Email not exist"
 E407 = "421 SL E407 Retry later"
+E354 = "354 Start mail input"
 "#,
             "app/email/status.py",
             &id,
@@ -1685,7 +1691,16 @@ def handle_forward(alias, contact, user):
         return [(False, status.E407)]
     if not user.active:
         return [(False, status.E502)]
+    if alias.streaming:
+        return [(True, status.E354)]
     return [(True, status.E200)]
+
+def handle_reply(contact):
+    reply = status.E502
+    if contact.blocked:
+        return [(False, reply)]
+    reply = status.E200
+    return [(True, reply)]
 "#,
             "email_handler.py",
             &id,
@@ -1748,11 +1763,15 @@ def handle_forward(alias, contact, user):
              “421 SL E407 Retry later”. |",
             "| handle\\_forward | When the user is not active, the mail is refused with the reply \
              “550 SL E502 Email not exist”. |",
+            // Only the binding before the return is what it answers.
+            "| handle\\_reply | When the contact is blocked, the mail is refused with the reply \
+             “550 SL E502 Email not exist”. |",
         ] {
             assert!(text.contains(line), "{line}\n{text}");
         }
-        // The unguarded success answer is not a decision.
-        assert_eq!(printed, 3, "{text}");
+        // The unguarded success answer and a 3xx step are not decisions.
+        assert!(!text.contains("354"), "{text}");
+        assert_eq!(printed, 4, "{text}");
     }
 
     // AC-0886: a function a rejection's condition calls is followed by name
