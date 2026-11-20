@@ -52,6 +52,7 @@ pub struct Extraction {
     pub event_sites: Vec<adapters_fw::events::EventSite>,
     pending_calls: Vec<PendingCall>,
     pending_endpoints: Vec<PendingEndpoint>,
+    handler_functions: Vec<vercel::HandlerFunction>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +165,11 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     for pending in &mut extraction.pending_calls {
         retarget_props_commit(&mut pending.props, commit);
+    }
+    for function in &mut extraction.handler_functions {
+        let mut props = serde_json::json!({ "prov": function.prov.take() });
+        retarget_props_commit(&mut props, commit);
+        function.prov = props["prov"].take();
     }
     for pending in &mut extraction.pending_endpoints {
         retarget_props_commit(&mut pending.node.props, commit);
@@ -1062,6 +1068,9 @@ fn extract_source_with_module(
         };
         let symbol = symbol_id(id.repo, path, &qualified);
         functions_by_start.insert(function.start_byte(), symbol.clone());
+        out.handler_functions.extend(vercel::handler_function(
+            &cx, function, &symbol, &simple, &bindings,
+        ));
         if qualified == simple {
             locals.insert(simple.clone(), symbol.clone());
         }
@@ -1577,6 +1586,7 @@ pub fn extract_dir_incremental_with_progress(
             out.event_sites.extend(extraction.event_sites);
             out.pending_calls.extend(extraction.pending_calls);
             out.pending_endpoints.extend(extraction.pending_endpoints);
+            out.handler_functions.extend(extraction.handler_functions);
             Ok(())
         },
     );
@@ -1620,6 +1630,8 @@ pub fn extract_dir_incremental_with_progress(
             out.edges.push(handles);
         }
     }
+    let functions = std::mem::take(&mut out.handler_functions);
+    vercel::routes(root, id.repo, id.commit, &functions, &mut out);
     let modules = repo_modules(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
@@ -1650,6 +1662,7 @@ mod client;
 mod config_read;
 mod events;
 mod queries;
+mod vercel;
 
 #[cfg(test)]
 mod tests;
