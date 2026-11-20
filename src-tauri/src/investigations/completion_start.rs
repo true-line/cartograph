@@ -288,7 +288,7 @@ mod tests {
             hops: 1,
         };
         let scoped = crate::investigations::context::FrozenContext::scoped_snapshot(
-            &graph, &scope, complete,
+            &graph, &scope, None, complete,
         )
         .unwrap();
         let context_id = scoped

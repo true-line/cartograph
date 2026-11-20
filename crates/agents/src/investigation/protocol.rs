@@ -25,6 +25,10 @@ pub enum InvestigationScope {
         anchor: String,
         hops: u32,
     },
+    /// The files of one overlay `Subsystem` and what they define (#2044).
+    Area {
+        id: String,
+    },
 }
 
 impl InvestigationScope {
@@ -34,6 +38,7 @@ impl InvestigationScope {
             Self::Neighborhood { anchor, hops } if text(anchor, 1024) && (1..=3).contains(hops) => {
                 Ok(())
             }
+            Self::Area { id } if text(id, 1024) => Ok(()),
             _ => Err(InvestigationError::InvalidRequest),
         }
     }
@@ -86,6 +91,8 @@ impl InvestigationQuery {
     pub(super) fn validate_retained(&self) -> Result<(), InvestigationError> {
         match &self.scope {
             InvestigationScope::Node { id } if text(id, 1024) => {}
+            // An area scopes a task, never a query inside one.
+            InvestigationScope::Area { .. } => return Err(InvestigationError::InvalidRequest),
             scope => scope.validate()?,
         }
         if !(1..=MAX_QUERY_FACTS).contains(&self.max_facts)

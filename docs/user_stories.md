@@ -1077,6 +1077,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **AC-0860** Given an investigation query whose selector matches more facts than a cursor can page through (SimpleLogin: 84,625 for a whole-system query), when its manifest is admitted into the input ledger, then it is accepted with that full match count under both investigation policies, while a manifest that returns more facts than it matched is still refused, and the query-history transport bound sizes the count at its widest decimal (#1987).
 - **Trace:** H4 · `agents` · — · T-0860
 
+- **AC-0930** Given a knowledge overlay that is current for the graph and holds a `Subsystem`, when an investigation is started with the scope `{"type":"area","id":<Subsystem id>}`, then the task's frozen context holds exactly the area's member files, the facts defined in those files and the edges whose two ends are both among them, read from the graph revision the overlay was derived from, and its scope snapshot identity differs from the whole graph's. A start that names an unknown area, or runs with no overlay, is refused as invalid input, and one whose overlay was derived from another graph revision is refused as changed input; none widens to the whole graph. An area scopes a task only: a query inside a task that names an area is refused, and the `all` and `neighborhood` scopes, their wire forms and their frozen contexts are unchanged.
+- **Trace:** P1 (#260, #2044) · `agents`, `app` · — · T-0930
+
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer
 - **As a** engineer **I want** to drop one repo, a set of repos or an application folder into Cartograph and see what every deterministic producer covered before any interpretation **so that** I know the limits of what it recovered.

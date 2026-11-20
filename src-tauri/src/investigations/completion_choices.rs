@@ -57,6 +57,7 @@ fn choices(
     graph: (Vec<core_graph::Node>, Vec<core_graph::Edge>),
     coverage: CoverageQualification,
     scope: &InvestigationScope,
+    area: Option<&BTreeSet<String>>,
 ) -> Result<ObligationChoices, String> {
     scope.validate().map_err(|error| error.to_string())?;
     let complete = ContextSnapshot::new(graph.0.clone(), graph.1.clone())
@@ -64,7 +65,7 @@ fn choices(
     // Source targets bind the full graph; context identity binds the requested
     // scope under the exact same qualified projection used at task preparation.
     let graph_snapshot_id = complete.id().to_owned();
-    let scoped = FrozenContext::scoped_snapshot(&graph, scope, complete)
+    let scoped = FrozenContext::scoped_snapshot(&graph, scope, area, complete)
         .map_err(|error| error.to_string())?;
     // Keep membership from this exact authorized projection, not merely its
     // full-graph identity. This metadata never enters the selection wire.
@@ -73,7 +74,7 @@ fn choices(
         // Full-graph source existence is already checked by inspection::resolve
         // before start. Only a narrower scope needs its own membership index.
         InvestigationScope::All => None,
-        InvestigationScope::Neighborhood { .. } => {
+        InvestigationScope::Neighborhood { .. } | InvestigationScope::Area { .. } => {
             let mut facts = BTreeSet::new();
             let mut cursor = None;
             loop {
@@ -208,19 +209,22 @@ fn current_choices_with_scope<R: tauri::Runtime>(
         None => crate::context::coverage_scope(app, state).map_err(SelectionError::from),
     };
     let before = read_scope()?;
-    let (graph, recorded) = state
+    let (base, recorded) = state
         .graph
         .lock()
         .map_err(|_| "Graph store is unavailable.".to_owned())?
-        .read_snapshot_with_coverage_bounded(
+        .read_snapshot_with_coverage_and_revision_bounded(
             super::context::task_graph_limits(limits.is_some()),
             CoverageReadLimits::default(),
         )
         .map_err(|error| error.to_string())?;
+    let area =
+        super::area::files(state, &base.revision, scope).map_err(|error| error.to_string())?;
+    let graph = base.graph;
     let stable = crate::context::stable_scope(&before, read_scope()?);
     let coverage =
         CoverageQualification::new(&stable, &recorded).map_err(|error| error.to_string())?;
-    choices(graph, coverage, scope).map_err(SelectionError::from)
+    choices(graph, coverage, scope, area.as_ref()).map_err(SelectionError::from)
 }
 
 /// Acceptance preparation reuses the production qualified selection, requiring
@@ -336,7 +340,7 @@ mod tests {
             layer_hints: None,
         }];
         let coverage = CoverageQualification::new(&scope, &[]).unwrap();
-        let result = choices((vec![], vec![]), coverage, &InvestigationScope::All).unwrap();
+        let result = choices((vec![], vec![]), coverage, &InvestigationScope::All, None).unwrap();
         assert_eq!(result.inventories.len(), 1);
         assert_eq!(result.inventories[0].status, CoverageStatus::Unrecorded);
         assert!(result.inventories[0].obligation.is_none());
@@ -381,11 +385,17 @@ mod tests {
             graph.clone(),
             CoverageQualification::new(&[], &[]).unwrap(),
             &InvestigationScope::All,
+            None,
         )
         .unwrap();
         assert!(all.scoped_facts.is_none());
-        let current =
-            choices(graph, CoverageQualification::new(&[], &[]).unwrap(), &scope).unwrap();
+        let current = choices(
+            graph,
+            CoverageQualification::new(&[], &[]).unwrap(),
+            &scope,
+            None,
+        )
+        .unwrap();
         assert!(current.scoped_facts.is_some());
         assert!(
             serde_json::to_value(&current)

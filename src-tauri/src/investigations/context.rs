@@ -588,16 +588,18 @@ impl FrozenContext {
         }
         let coverage_limits = coverage_preparation_limits(archive_capacity)?;
         let before = scope()?;
-        let (graph, recorded) = state
+        let (base, recorded) = state
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
-            .read_snapshot_with_coverage_bounded(graph_limits, coverage_limits)
+            .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
             .map_err(graph_error)?;
+        let area = super::area::files(state, &base.revision, &request.scope)?;
+        let graph = base.graph;
         let stable = crate::context::stable_scope(&before, scope()?);
         let qualification =
             CoverageQualification::new(&stable, &recorded).map_err(context_error)?;
-        let mut prepared = Self::from_graph(graph, &request, history)?;
+        let mut prepared = Self::from_graph_in(graph, &request, history, area.as_ref())?;
         prepared.graph_limits = graph_limits;
         // Both paths retain the one already-authorized immutable scoped
         // projection from this same bounded graph read.
@@ -639,6 +641,17 @@ impl FrozenContext {
         request: impl TryInto<AcquisitionRequest, Error = HostError>,
         history: &[String],
     ) -> Result<Self, HostError> {
+        Self::from_graph_in(graph, request, history, None)
+    }
+
+    /// [`Self::from_graph`] with the member files of the area the request is
+    /// scoped to, when it is scoped to one.
+    fn from_graph_in(
+        graph: (Vec<Node>, Vec<Edge>),
+        request: impl TryInto<AcquisitionRequest, Error = HostError>,
+        history: &[String],
+        area: Option<&BTreeSet<String>>,
+    ) -> Result<Self, HostError> {
         let request = request.try_into()?;
         let complete = projection(graph.0.clone(), graph.1.clone())?;
         let graph_id = complete.id().to_owned();
@@ -649,7 +662,12 @@ impl FrozenContext {
         {
             return Err(HostError::InputChanged);
         }
-        let snapshot = Arc::new(Self::scoped_snapshot(&graph, &request.scope, complete)?);
+        let snapshot = Arc::new(Self::scoped_snapshot(
+            &graph,
+            &request.scope,
+            area,
+            complete,
+        )?);
         let history_bytes = if history.is_empty() {
             Vec::new()
         } else {
@@ -689,11 +707,19 @@ impl FrozenContext {
     pub(super) fn scoped_snapshot(
         graph: &(Vec<Node>, Vec<Edge>),
         requested: &InvestigationScope,
+        area: Option<&BTreeSet<String>>,
         complete: ContextSnapshot,
     ) -> Result<ContextSnapshot, HostError> {
         Ok(match requested {
             InvestigationScope::Node { .. } => return Err(HostError::InvalidInput),
             InvestigationScope::All => complete,
+            InvestigationScope::Area { .. } => {
+                // The caller resolved the area against the overlay at this
+                // graph's revision; without that there is no membership.
+                let (nodes, edges) =
+                    super::area::members(graph, area.ok_or(HostError::InvalidInput)?);
+                projection(nodes, edges)?
+            }
             InvestigationScope::Neighborhood { .. } => {
                 // Reuse the service's actual scope selection rather than a
                 // subtly different application-specific graph traversal.
@@ -1254,6 +1280,9 @@ fn scope(value: &InvestigationScope) -> QueryScope {
     match value {
         InvestigationScope::Node { id } => QueryScope::Node { id: id.clone() },
         InvestigationScope::All => QueryScope::All,
+        // An area scopes a task, never a query: a query that names one is
+        // refused at validation, and this selects nothing if one arrives.
+        InvestigationScope::Area { id } => QueryScope::Node { id: id.clone() },
         InvestigationScope::Neighborhood { anchor, hops } => QueryScope::Neighborhood {
             anchor: anchor.clone(),
             hops: *hops as usize,
