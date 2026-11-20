@@ -2077,6 +2077,33 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             continue;
         }
 
+        // `self.m()` in a method `C.f` is taken as a call of `C.m` when this
+        // file defines that method. A subclass may
+        // override `m`, so the edge is InferredStrong (#1998).
+        if let Some(member) = callee.strip_prefix("self.")
+            && !member.contains('.')
+            && let Some((_, qualified)) = src.rsplit_once('#')
+            && let Some((class, _)) = qualified.split_once('.')
+            && !qualified[class.len() + 1..].contains('.')
+        {
+            let dst = symbol_id(id.repo, path, &format!("{class}.{member}"));
+            if dst != src && functions_by_start.values().any(|symbol| *symbol == dst) {
+                out.edges.push(Edge {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                    label: "CALLS".into(),
+                    props: serde_json::json!({
+                        "resolution": "self-method",
+                        "prov": cx.prov_with_confidence(
+                            &call,
+                            ConfidenceTier::InferredStrong,
+                            &format!("CALLS {src} -> {dst}"),
+                        ),
+                    }),
+                });
+            }
+            continue;
+        }
         // `from pkg import sub; sub.f()` is taken as a call of `f` in the
         // submodule `pkg/sub.py` when that file defines `f` (the edge is
         // kept only for a recovered Symbol). Whether the package binds a

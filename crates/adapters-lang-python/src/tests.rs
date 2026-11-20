@@ -7922,3 +7922,100 @@ fn a_call_through_an_imported_submodule_is_an_inferred_call() {
     assert_eq!(calls[0].props["resolution"], "submodule-attribute");
     assert_eq!(calls[0].props["prov"]["confidence_tier"], "InferredStrong");
 }
+
+#[test]
+fn column_assignments_on_an_annotated_model_instance_are_inferred_updates() {
+    // AC-0884 (T-0884): `x.col = v` on a parameter annotated with a model
+    // class, or a local bound once as `x: Model = …`, is an InferredStrong
+    // update of that model (resolution "attribute-assignment"); an
+    // unannotated or rebound name, or an attribute the model does not
+    // declare as a column, is not.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/models.py",
+        r#"
+from sqlalchemy import Column, Integer, Boolean
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class Alias(Base):
+    __tablename__ = "alias"
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean)
+    delete_on = Column(Integer)
+"#,
+    );
+    write(
+        dir.path(),
+        "app/utils.py",
+        r#"
+from app.models import Alias
+
+def trash(alias: Alias, days: int = 30):
+    alias.delete_on = days
+    alias.enabled = False
+
+def toggle(alias_id):
+    alias: Alias = Alias.get(alias_id)
+    alias.enabled = not alias.enabled
+
+def untyped(alias):
+    alias.enabled = False
+
+def rebound(alias: Alias):
+    alias = other()
+    alias.enabled = False
+
+def not_a_column(alias: Alias):
+    alias.cache = 1
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let writes = |function: &str| -> Vec<&Edge> {
+        out.edges
+            .iter()
+            .filter(|e| e.label == "WRITES" && e.src.ends_with(&format!("app/utils.py#{function}")))
+            .collect()
+    };
+    for function in ["trash", "toggle"] {
+        let found = writes(function);
+        assert_eq!(found.len(), 1, "{function}: {found:?}");
+        assert_eq!(found[0].props["operation"], "update");
+        assert_eq!(found[0].props["resolution"], "attribute-assignment");
+        assert_eq!(found[0].props["prov"]["confidence_tier"], "InferredStrong");
+        assert!(
+            found[0].props["via"]
+                .as_str()
+                .unwrap()
+                .starts_with("Alias.")
+        );
+    }
+    for function in ["untyped", "rebound", "not_a_column"] {
+        assert!(writes(function).is_empty(), "{function}");
+    }
+}
+
+#[test]
+fn a_self_call_in_a_method_reaches_the_class_method() {
+    // AC-0885 (T-0885): `self.m()` in method `C.f` reaches `C.m` defined in
+    // the same file, InferredStrong with resolution "self-method"; a member
+    // the class does not define yields no edge.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/models.py",
+        "class User:\n    def can_create(self):\n        return self.can_create_num(1) and self.missing()\n\n    def can_create_num(self, n):\n        return n < 5\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let calls: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "CALLS" && e.src.ends_with("app/models.py#User.can_create"))
+        .collect();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].dst.ends_with("app/models.py#User.can_create_num"));
+    assert_eq!(calls[0].props["resolution"], "self-method");
+    assert_eq!(calls[0].props["prov"]["confidence_tier"], "InferredStrong");
+}

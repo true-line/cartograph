@@ -3,6 +3,14 @@
 //! `DataEntity` nodes via import-proven sessions (`scoped_session`,
 //! `sessionmaker`, Flask-SQLAlchemy `<db>.session`) and `@classmethod`
 //! model-helper methods resolved along class MRO.
+//!
+//! An assignment to a mapped column of a model instance (`alias.enabled =
+//! False`) is an update of that model (#1998, AC-0884) when the instance is
+//! a parameter annotated with the model class (`alias: Alias`) or a local
+//! bound once by an annotated assignment (`alias: Alias = …`), the name is
+//! not otherwise rebound in the function, and the attribute is a column the
+//! model class itself declares. The session flush is not proven, so the edge
+//! is InferredStrong with resolution `attribute-assignment`.
 
 use super::sqlalchemy::{
     BaseExpr, OrmClassDecl, OrmFile, call_arguments, is_dotted_identifier, resolve_imported_symbol,
@@ -57,6 +65,12 @@ pub(crate) enum WriteCandidate {
         method: String,
         evidence: EvidenceRef,
     },
+    /// Column assignment on an instance annotated as model `class_expr`.
+    Attribute {
+        class_expr: String,
+        attribute: String,
+        evidence: EvidenceRef,
+    },
 }
 
 /// Per-function pending write candidates collected during the file pass.
@@ -76,6 +90,8 @@ struct LocalVarBinding {
 struct ResolvedWrite {
     op: WriteOp,
     via: Option<String>,
+    /// An instance column assignment, not a session or helper call.
+    attribute: bool,
     evidence: EvidenceRef,
 }
 
@@ -144,7 +160,8 @@ pub(crate) fn retarget_file(file: &mut OrmFile, commit: &str) {
         for candidate in &mut func.candidates {
             match candidate {
                 WriteCandidate::Session { evidence, .. }
-                | WriteCandidate::ModelHelper { evidence, .. } => {
+                | WriteCandidate::ModelHelper { evidence, .. }
+                | WriteCandidate::Attribute { evidence, .. } => {
                     evidence.commit_sha = commit.into();
                 }
             }
@@ -586,7 +603,90 @@ fn analyze_function_body(
         });
     }
 
+    candidates.extend(attribute_writes(cx, function, &nodes));
     (candidates, classmethod_writes)
+}
+
+/// The model class an instance name is annotated with in `function`: a
+/// parameter `name: Model` the body never rebinds, or a local whose only
+/// binding is `name: Model = …`.
+fn annotated_model(cx: &FileCx<'_>, function: TsNode<'_>, name: &str) -> Option<String> {
+    let annotation = |node: TsNode<'_>| {
+        node.child_by_field_name("type")
+            .map(|t| t.named_child(0).unwrap_or(t))
+            .filter(|t| is_dotted_identifier(*t))
+            .map(|t| cx.text(&t).trim().to_string())
+    };
+    let writes = scope_binding(cx, function, name).writes;
+    if let Some(parameters) = function.child_by_field_name("parameters") {
+        let mut walk = parameters.walk();
+        for param in parameters.named_children(&mut walk) {
+            if parameter_name(cx, param) != Some(name) {
+                continue;
+            }
+            if !writes.is_empty()
+                || !matches!(param.kind(), "typed_parameter" | "typed_default_parameter")
+            {
+                return None;
+            }
+            return annotation(param);
+        }
+    }
+    match writes.as_slice() {
+        [only]
+            if only.kind() == "assignment"
+                && only
+                    .child_by_field_name("left")
+                    .is_some_and(|left| left.kind() == "identifier" && cx.text(&left) == name) =>
+        {
+            annotation(*only)
+        }
+        _ => None,
+    }
+}
+
+/// `x.col = …` where `x` is annotated with a model class (see the module
+/// docs); the column is checked at resolve time.
+fn attribute_writes(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    nodes: &[TsNode<'_>],
+) -> Vec<WriteCandidate> {
+    let mut out = Vec::new();
+    let mut models: HashMap<String, Option<String>> = HashMap::new();
+    for node in nodes {
+        if !matches!(node.kind(), "assignment" | "augmented_assignment") {
+            continue;
+        }
+        let Some(left) = node.child_by_field_name("left") else {
+            continue;
+        };
+        if left.kind() != "attribute" {
+            continue;
+        }
+        let (Some(object), Some(attribute)) = (
+            left.child_by_field_name("object"),
+            left.child_by_field_name("attribute"),
+        ) else {
+            continue;
+        };
+        if object.kind() != "identifier" {
+            continue;
+        }
+        let name = cx.text(&object).to_string();
+        let model = models
+            .entry(name.clone())
+            .or_insert_with(|| annotated_model(cx, function, &name))
+            .clone();
+        if let Some(class_expr) = model {
+            out.push(WriteCandidate::Attribute {
+                class_expr,
+                attribute: cx.text(&attribute).to_string(),
+                evidence: cx.evidence(node),
+            });
+        }
+    }
+    out
 }
 
 fn has_classmethod_decorator(
@@ -953,6 +1053,7 @@ pub(crate) fn resolve_writes(
                             .push(ResolvedWrite {
                                 op,
                                 via: None,
+                                attribute: false,
                                 evidence,
                             });
                     }
@@ -985,10 +1086,40 @@ pub(crate) fn resolve_writes(
                                 entry.push(ResolvedWrite {
                                     op,
                                     via: Some(via.clone()),
+                                    attribute: false,
                                     evidence: evidence.clone(),
                                 });
                             }
                         }
+                    }
+                    WriteCandidate::Attribute {
+                        class_expr,
+                        attribute,
+                        evidence,
+                    } => {
+                        let Some(model_key) =
+                            resolve_symbol(&file_path, &class_expr, imports_by_file, known_files)
+                        else {
+                            continue;
+                        };
+                        let Some(entity_id) = by_class_key.get(&model_key) else {
+                            continue;
+                        };
+                        let Some(model_class) = classes_by_key.get(&model_key).copied() else {
+                            continue;
+                        };
+                        if !model_class.declares_column(&attribute) {
+                            continue;
+                        }
+                        resolved_by_pair
+                            .entry((src.clone(), entity_id.clone()))
+                            .or_default()
+                            .push(ResolvedWrite {
+                                op: WriteOp::Update,
+                                via: Some(format!("{}.{attribute}", model_class.name)),
+                                attribute: true,
+                                evidence,
+                            });
                     }
                 }
             }
@@ -1007,11 +1138,18 @@ pub(crate) fn resolve_writes(
             .collect();
         // The strongest write decides confidence and cites its own site.
         let session = writes.iter().find(|w| w.via.is_none());
-        let (confidence, resolution, via, cited) = match session {
-            Some(direct) => (ConfidenceTier::Confirmed, "session", None, direct),
-            None => (
+        let helper = writes.iter().find(|w| !w.attribute);
+        let (confidence, resolution, via, cited) = match (session, helper) {
+            (Some(direct), _) => (ConfidenceTier::Confirmed, "session", None, direct),
+            (None, Some(helper)) => (
                 ConfidenceTier::InferredStrong,
                 "model-helper",
+                helper.via.as_deref(),
+                helper,
+            ),
+            (None, None) => (
+                ConfidenceTier::InferredStrong,
+                "attribute-assignment",
                 first.via.as_deref(),
                 first,
             ),
