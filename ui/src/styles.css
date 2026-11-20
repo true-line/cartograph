@@ -4941,6 +4941,7 @@ details.investigation-section { display: block; }
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
 
 /* System manifest preview (#1655): one section per declared repository. */
 .preflight-system {
@@ -5012,18 +5013,24 @@ details.investigation-section { display: block; }
   font-size: 0.78rem;
 }
 
+.architecture-view {
+  /* The canvas must not widen the card past its column. */
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .architecture-body {
+  min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
   gap: 0.75rem;
 }
 
 .spec-diagram-canvas.architecture-canvas {
-  height: 560px;
+  min-height: 420px;
 }
 
 .architecture-evidence {
-  max-height: 560px;
+  max-height: 900px;
   overflow-y: auto;
   font-size: 0.8rem;
 }

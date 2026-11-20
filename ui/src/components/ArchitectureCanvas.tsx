@@ -100,8 +100,29 @@ const C4_STYLE: cytoscape.StylesheetStyle[] = [
     selector: 'edge.c4-gap',
     style: { 'line-style': 'dashed', 'line-color': '#c0392b', 'target-arrow-color': '#c0392b' },
   },
+  // A busy level hides arrow labels until a box is selected, and a
+  // selection brings its own arrows and neighbours forward.
+  { selector: 'edge.c4-quiet', style: { 'text-opacity': 0, opacity: 0.45 } },
+  { selector: 'edge.c4-focus', style: { 'text-opacity': 1, opacity: 1, width: 2.5, 'z-index': 10 } },
+  { selector: 'edge.c4-faded', style: { opacity: 0.08, 'text-opacity': 0 } },
+  { selector: 'node.c4-faded', style: { opacity: 0.3 } },
   { selector: ':selected', style: { 'border-width': 4, 'border-color': '#f5c518', 'line-color': '#f5c518' } },
 ];
+
+/** Past this many arrows a level hides their labels until a box is selected. */
+const BUSY_EDGES = 16;
+
+/** The smallest zoom at which a box's 11px text stays legible. */
+const READABLE_ZOOM = 0.75;
+
+/** Canvas height for a scene: tall enough to show it at a readable zoom,
+ *  within the window. */
+export function canvasHeight(scene: Scene | null): number {
+  if (!scene || scene.nodes.length === 0) return 420;
+  const ys = scene.nodes.map((n) => n.y);
+  const span = Math.max(...ys) - Math.min(...ys) + 200;
+  return Math.round(Math.min(900, Math.max(420, span * READABLE_ZOOM + 80)));
+}
 
 const KIND_LABEL: Record<SceneNode['kind'], string> = {
   person: 'Person',
@@ -143,6 +164,7 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
   const [container, setContainer] = useState<string | null>(drillable[0]?.id ?? null);
   const [selected, setSelected] = useState<Selected>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const cyRef = useRef<cytoscape.Core | null>(null);
   const identityMatches = Boolean(
     artifact &&
       view.artifact_id === artifact.id &&
@@ -166,6 +188,7 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
     if (!containerRef.current || !scene || !identityMatches) return;
     const byId = new Map(scene.nodes.map((n) => [n.id, n]));
     const edgeById = new Map(scene.edges.map((e) => [e.id, e]));
+    const busy = scene.edges.length > BUSY_EDGES;
     const elements: cytoscape.ElementDefinition[] = [
       ...scene.nodes.map((n) => ({
         data: { id: n.id, label: nodeLabel(n), ...(n.parent ? { parent: n.parent } : {}) },
@@ -182,8 +205,12 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
         .filter((e) => byId.has(e.from) && byId.has(e.to))
         .map((e) => ({
           data: { id: e.id, source: e.from, target: e.to, label: edgeLabel(e) },
-          classes:
+          classes: [
             e.confidence === 'Gap' ? 'c4-gap' : e.confidence === 'InferredWeak' ? 'c4-weak' : '',
+            busy ? 'c4-quiet' : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
         })),
     ];
     const cy = cytoscape({
@@ -192,11 +219,37 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
       style: C4_STYLE,
       layout: { name: 'preset', fit: true, padding: 36 },
       maxZoom: 1.6,
+      minZoom: 0.2,
       autoungrabify: true,
     });
+    // A large system fits only at a zoom too small to read: keep the text
+    // readable, start at the top and let the user pan.
+    if (cy.zoom() < READABLE_ZOOM) {
+      const box = cy.elements().boundingBox();
+      cy.zoom(READABLE_ZOOM);
+      cy.pan({
+        x: (cy.width() - box.w * READABLE_ZOOM) / 2 - box.x1 * READABLE_ZOOM,
+        y: 24 - box.y1 * READABLE_ZOOM,
+      });
+    }
+    const clearFocus = () => cy.elements().removeClass('c4-focus c4-faded');
     cy.on('tap', 'node', (event) => {
       const found = byId.get(event.target.id());
-      if (found) setSelected({ kind: 'node', node: found });
+      if (!found) return;
+      setSelected({ kind: 'node', node: found });
+      if (found.kind === 'boundary') return;
+      clearFocus();
+      const own = event.target.connectedEdges();
+      const near = own.connectedNodes().union(own.connectedNodes().ancestors());
+      own.addClass('c4-focus');
+      cy.edges().difference(own).addClass('c4-faded');
+      cy.nodes().difference(near).difference(event.target.ancestors()).addClass('c4-faded');
+    });
+    cy.on('tap', (event) => {
+      if (event.target === cy) {
+        clearFocus();
+        setSelected(null);
+      }
     });
     cy.on('dbltap', 'node', (event) => {
       const found = byId.get(event.target.id());
@@ -208,7 +261,11 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
       const found = edgeById.get(event.target.id());
       if (found) setSelected({ kind: 'edge', edge: found });
     });
-    return () => cy.destroy();
+    cyRef.current = cy;
+    return () => {
+      cyRef.current = null;
+      cy.destroy();
+    };
   }, [scene, identityMatches, open]);
 
   if (!identityMatches) {
@@ -282,7 +339,7 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
         {level === 'context' &&
           'Who uses the system and what it depends on. Double-click the system to see its containers.'}
         {level === 'containers' &&
-          'The parts that run on their own, their stores and what they call. Outlined containers have components: double-click to open one.'}
+          'The parts that run on their own, their stores and what they call. Select a box to bring its arrows forward; double-click a yellow-outlined container to open its components.'}
         {level === 'components' &&
           (containerName
             ? `The subsystem areas of ${containerName} and the calls between them. Areas are inferred (InferredWeak).`
@@ -302,6 +359,7 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
         <div
           ref={containerRef}
           className="atlas-cytoscape spec-diagram-canvas architecture-canvas"
+          style={{ height: canvasHeight(scene) }}
           data-testid="architecture-canvas"
           aria-label={`Architecture ${level} diagram`}
         />
@@ -325,7 +383,11 @@ export function ArchitectureCanvas({ view, artifact }: ArchitectureCanvasProps) 
                   key={n.id}
                   type="button"
                   className={`diagram-node-chip${n.confidence === 'Gap' ? ' unresolved' : ''}`}
-                  onClick={() => setSelected({ kind: 'node', node: n })}
+                  onClick={() => {
+                    const shown = cyRef.current?.getElementById(n.id);
+                    if (shown && shown.nonempty()) shown.emit('tap');
+                    else setSelected({ kind: 'node', node: n });
+                  }}
                 >
                   {n.name}
                 </button>

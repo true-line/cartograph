@@ -1565,8 +1565,16 @@ impl<'a> Model<'a> {
         }
         if let Some(folded) = parts.get_mut(MAX_COMPONENTS) {
             let areas = folded.facts.len();
-            folded.name = format!("{areas} more areas");
-            folded.description = format!("{} files", folded.weight);
+            folded.name = if areas == 1 {
+                "1 more area".to_string()
+            } else {
+                format!("{areas} more areas")
+            };
+            folded.description = if folded.weight == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{} files", folded.weight)
+            };
         }
         let area_of = |id: &'a str| -> Option<usize> {
             index
