@@ -133,11 +133,30 @@ fn descendants(root: TsNode) -> Vec<TsNode> {
     out
 }
 
-/// What the file declares: names per owning function, and the parameters
-/// of each named function.
+/// What the file declares: names per owning function (program = 0), and
+/// the same-file functions by the owner that declares their name.
 struct Scopes<'t> {
     declared: HashSet<(usize, String)>,
-    functions: HashMap<String, TsNode<'t>>,
+    functions: HashMap<(usize, String), TsNode<'t>>,
+}
+
+/// The identifiers a binding pattern binds: `x`, `[, , cmd]`, `{ a, b: c }`.
+fn bound_names(pattern: TsNode<'_>) -> Vec<TsNode<'_>> {
+    descendants(pattern)
+        .into_iter()
+        .filter(|n| {
+            matches!(
+                n.kind(),
+                "identifier" | "shorthand_property_identifier_pattern"
+            )
+        })
+        // A key in `{ key: value }` names the property, not a binding.
+        .filter(|n| {
+            n.parent().is_none_or(|p| {
+                !(p.kind() == "pair_pattern" && p.child_by_field_name("key") == Some(*n))
+            })
+        })
+        .collect()
 }
 
 impl<'t> Scopes<'t> {
@@ -147,28 +166,33 @@ impl<'t> Scopes<'t> {
         for node in nodes {
             match node.kind() {
                 "variable_declarator" => {
-                    if let Some(name) = node.child_by_field_name("name")
-                        && name.kind() == "identifier"
+                    let Some(pattern) = node.child_by_field_name("name") else {
+                        continue;
+                    };
+                    for name in bound_names(pattern) {
+                        declared.insert((owner(*node), text[name.byte_range()].to_string()));
+                    }
+                    if pattern.kind() == "identifier"
+                        && let Some(value) = node.child_by_field_name("value")
+                        && is_function(value)
                     {
-                        let name_text = &text[name.byte_range()];
-                        declared.insert((owner(*node), name_text.to_string()));
-                        if let Some(value) = node.child_by_field_name("value")
-                            && is_function(value)
-                        {
-                            functions.insert(name_text.to_string(), value);
-                        }
+                        functions.insert(
+                            (owner(*node), text[pattern.byte_range()].to_string()),
+                            value,
+                        );
                     }
                 }
                 "function_declaration" | "generator_function_declaration" => {
                     if let Some(name) = node.child_by_field_name("name") {
-                        functions.insert(text[name.byte_range()].to_string(), *node);
+                        functions
+                            .insert((owner(*node), text[name.byte_range()].to_string()), *node);
                     }
                 }
                 "required_parameter" | "optional_parameter" => {
-                    if let Some(name) = node.child_by_field_name("pattern")
-                        && name.kind() == "identifier"
-                    {
-                        declared.insert((owner(*node), text[name.byte_range()].to_string()));
+                    if let Some(pattern) = node.child_by_field_name("pattern") {
+                        for name in bound_names(pattern) {
+                            declared.insert((owner(*node), text[name.byte_range()].to_string()));
+                        }
                     }
                 }
                 _ => {}
@@ -190,6 +214,21 @@ impl<'t> Scopes<'t> {
             current = parent;
         }
         self.declared.contains(&(0, name.into())).then_some(0)
+    }
+
+    /// The same-file function `name` refers to at `at`: the one declared in
+    /// the nearest enclosing function (or the program) that declares it.
+    fn function(&self, name: &str, at: TsNode) -> Option<TsNode<'t>> {
+        let mut current = at;
+        while let Some(parent) = current.parent() {
+            if is_function(parent)
+                && let Some(function) = self.functions.get(&(parent.start_byte(), name.into()))
+            {
+                return Some(*function);
+            }
+            current = parent;
+        }
+        self.functions.get(&(0, name.into())).copied()
     }
 }
 
@@ -254,8 +293,7 @@ fn derived(text: &str, expr: TsNode, scopes: &Scopes, flow: &Flow) -> bool {
             };
             match callee.kind() {
                 "identifier" => scopes
-                    .functions
-                    .get(&text[callee.byte_range()])
+                    .function(&text[callee.byte_range()], callee)
                     .is_some_and(|function| flow.returning.contains(&function.start_byte())),
                 "member_expression" => derived(text, callee, scopes, flow),
                 _ => false,
@@ -276,29 +314,45 @@ fn subcommands(text: &str, root: TsNode) -> BTreeMap<String, (u64, u64)> {
     let nodes = descendants(root);
     let scopes = Scopes::read(text, &nodes);
     let mut flow = Flow::default();
-    // Fixpoint over bindings and same-file calls; bounded, as each pass
-    // only adds names.
-    for _ in 0..16 {
+    // Fixpoint over bindings and same-file calls: each pass only adds to
+    // finite sets, so it ends when a pass adds nothing.
+    loop {
         let before = (flow.names.len(), flow.returning.len());
         for node in &nodes {
             match node.kind() {
                 "variable_declarator" => {
-                    if let (Some(name), Some(value)) = (
+                    if let (Some(pattern), Some(value)) = (
                         node.child_by_field_name("name"),
                         node.child_by_field_name("value"),
-                    ) && name.kind() == "identifier"
-                        && !is_function(value)
+                    ) && !is_function(value)
                         && derived(text, value, &scopes, &flow)
                     {
-                        flow.names
-                            .insert((owner(*node), text[name.byte_range()].to_string()));
+                        for name in bound_names(pattern) {
+                            flow.names
+                                .insert((owner(*node), text[name.byte_range()].to_string()));
+                        }
+                    }
+                }
+                // `args = process.argv.slice(2)`, `[, , cmd] = process.argv`.
+                "assignment_expression" => {
+                    if let (Some(left), Some(value)) = (
+                        node.child_by_field_name("left"),
+                        node.child_by_field_name("right"),
+                    ) && derived(text, value, &scopes, &flow)
+                    {
+                        for name in bound_names(left) {
+                            let name_text = &text[name.byte_range()];
+                            if let Some(owner) = scopes.resolve(name_text, name) {
+                                flow.names.insert((owner, name_text.to_string()));
+                            }
+                        }
                     }
                 }
                 "call_expression" => {
                     let Some(callee) = node.child_by_field_name("function") else {
                         continue;
                     };
-                    let Some(function) = scopes.functions.get(&text[callee.byte_range()]) else {
+                    let Some(function) = scopes.function(&text[callee.byte_range()], callee) else {
                         continue;
                     };
                     let Some(arguments) = node.child_by_field_name("arguments") else {
@@ -309,7 +363,7 @@ fn subcommands(text: &str, root: TsNode) -> BTreeMap<String, (u64, u64)> {
                         .named_children(&mut walk)
                         .filter(|a| a.kind() != "comment")
                         .collect();
-                    for (argument, parameter) in arguments.iter().zip(parameters(text, *function)) {
+                    for (argument, parameter) in arguments.iter().zip(parameters(text, function)) {
                         if let Some(parameter) = parameter
                             && derived(text, *argument, &scopes, &flow)
                         {

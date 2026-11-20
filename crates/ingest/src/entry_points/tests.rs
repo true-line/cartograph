@@ -434,5 +434,32 @@ fn a_node_scripts_subcommands_are_commands() {
         "command"
     );
     assert!(!out.nodes.iter().any(|n| n.id.contains("tests/fixture.mjs")));
+    // Assignment and destructuring carry the command line; a helper
+    // resolves in its own scope.
+    let other = extract(&[(
+        "bin/tool.mjs",
+        r#"#!/usr/bin/env node
+let args;
+args = process.argv.slice(2);
+if (args[0] === 'deploy') {}
+const [, , command] = process.argv;
+if (command === 'build') {}
+function a() {
+  function pick(v) { return v; }
+  if (pick(process.argv)[2] === 'lint') {}
+}
+function b() {
+  function pick(v) { return 'fixed'; }
+  if (pick(process.argv) === 'nope') {}
+}
+"#,
+    )]);
+    let commands: BTreeSet<&str> = other
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.props["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(commands, BTreeSet::from(["build", "deploy", "lint"]));
     assert!(!out.nodes.iter().any(|n| n.id.contains("lib/plain.mjs")));
 }
