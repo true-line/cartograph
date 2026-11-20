@@ -26,7 +26,7 @@
 //! camel case split, known acronyms upper-cased); no expression text is
 //! copied into a statement.
 
-use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit};
+use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit, go_http_status};
 
 /// Words of an identifier: `can_create_new_alias` → `can create new alias`,
 /// `apiKey` → `API key`, `MAX_NB_EMAIL_FREE_PLAN` → `max nb email free plan`.
@@ -255,7 +255,9 @@ impl Parser {
             Tok::Num(n) => Some(Lit::Num(n)),
             Tok::Ident(w) if w == "True" || w == "true" => Some(Lit::Bool(true)),
             Tok::Ident(w) if w == "False" || w == "false" => Some(Lit::Bool(false)),
-            Tok::Ident(w) if w == "None" || w == "null" || w == "undefined" => Some(Lit::None),
+            Tok::Ident(w) if w == "None" || w == "null" || w == "undefined" || w == "nil" => {
+                Some(Lit::None)
+            }
             _ => None,
         }
     }
@@ -271,6 +273,7 @@ impl Parser {
                     "false",
                     "null",
                     "undefined",
+                    "nil",
                 ]
                 .contains(&w.as_str()) =>
             {
@@ -327,7 +330,7 @@ impl Parser {
                     return None;
                 };
                 // `.get("k")` or `.get(KEY)` reads member `k` / `KEY`.
-                if seg == "get" && self.op("(") {
+                if (seg == "get" || seg == "Get") && self.op("(") {
                     self.bump();
                     let key = match self.bump()? {
                         Tok::Str(key) => key,
@@ -482,6 +485,10 @@ fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
     let names: Vec<&str> = path.iter().map(String::as_str).collect();
     let noun = match names[..] {
         ["self"] | ["cls"] => format!("the {}", words(cx.class?)),
+        [receiver] if go_receiver(receiver, cx) => format!("the {}", words(cx.class?)),
+        [receiver, .., last] if go_receiver(receiver, cx) => {
+            format!("the {}'s {}", words(cx.class?), words(last))
+        }
         ["current_user"] | ["g", "user"] => "the user".to_owned(),
         ["request"] => "the request".to_owned(),
         // A flag named as a question (`is_sl_domain`) is a flag, not a thing.
@@ -489,6 +496,12 @@ fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
         [one] => format!("the {}", words(one)),
         ["self" | "cls", .., last] => format!("the {}'s {}", words(cx.class?), words(last)),
         ["request", .., last] => format!("the {}", words(last)),
+        // Go: `http.MethodPost` is “POST”; `r.Method` the request's method
+        // (#2009).
+        ["http", method] if method.len() > 6 && method.starts_with("Method") => {
+            format!("“{}”", method[6..].to_uppercase())
+        }
+        ["r" | "req", .., last] => format!("the request's {}", words(last)),
         // An enum member `UserAliasDeleteAction.DeleteImmediately` (#1998).
         [owner, last]
             if owner.starts_with(|c: char| c.is_ascii_uppercase())
@@ -545,6 +558,11 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                 ([model, "get_by" | "get" | "first_by"], _) if is_class(model) => {
                     Some(format!("the {} {}", words(model), with_these(args)?))
                 }
+                // Go request input: `r.FormValue("email")` is the email.
+                (
+                    ["r" | "req" | "request", "FormValue" | "PostFormValue"],
+                    [Arg::Pos(Expr::Lit(Lit::Str(key)))],
+                ) => Some(format!("the {}", words(key))),
                 ([function], _) if predicate_verb(function).is_none() => Some(format!(
                     "the “{}” result",
                     words(function.trim_start_matches('_'))
@@ -610,10 +628,28 @@ fn type_phrase(name: &str) -> Option<&'static str> {
 fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Option<String> {
     let names: Vec<&str> = path.iter().map(String::as_str).collect();
     let (last, owner) = names.split_last()?;
+    // A receiver's predicate of one value is said of that value:
+    // `s.isCatalogOwner(u)` is "the u is catalog owner" (#2009).
+    if let (Some((verb, rest)), [receiver], [Arg::Pos(value)]) = (predicate_verb(last), owner, args)
+        && (go_receiver(receiver, cx) || matches!(*receiver, "self" | "cls"))
+    {
+        let verb = if negated { negated_verb(verb) } else { verb };
+        return Some(format!("{} {verb} {}", noun(value, cx)?, words(rest)));
+    }
     if predicate_verb(last).is_some() {
         return flag(path, negated, cx);
     }
     match (&names[..], args) {
+        // Go `errors.Is(err, store.ErrNotFound)`: the error is “not found”.
+        (["errors", "Is"], [Arg::Pos(_), Arg::Pos(Expr::Ref(target))]) => {
+            let name = target.last()?.strip_prefix("Err")?;
+            let what = words(name);
+            return Some(if negated {
+                format!("the error is not “{what}”")
+            } else {
+                format!("the error is “{what}”")
+            });
+        }
         (["isinstance"], [Arg::Pos(x), Arg::Pos(Expr::Ref(t))]) if t.len() == 1 => {
             let what = noun(x, cx)?;
             let kind = type_phrase(&t[0])?;
@@ -741,8 +777,26 @@ fn predicate_verb(name: &str) -> Option<(&'static str, &str)> {
         if let Some(rest) = name.strip_prefix(prefix).filter(|r| !r.is_empty()) {
             return Some((verb, rest));
         }
+        // Go and JavaScript camel case: `isCatalogOwner` (#2009).
+        if let Some(rest) = name
+            .strip_prefix(&prefix[..prefix.len() - 1])
+            .filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))
+        {
+            return Some((verb, rest));
+        }
     }
     None
+}
+
+/// Whether `name` is a Go method's receiver: one or two lower-case letters
+/// that start the owner's type name (`s` in a `Service` method), read as
+/// that type the way `self` is (#2009).
+fn go_receiver(name: &str, cx: &Context<'_>) -> bool {
+    cx.class.is_some_and(|class| {
+        (1..=2).contains(&name.len())
+            && name.chars().all(|c| c.is_ascii_lowercase())
+            && class.to_ascii_lowercase().starts_with(name)
+    })
 }
 
 fn negated_verb(verb: &str) -> &'static str {
@@ -914,6 +968,19 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     ("not in", r @ (Expr::Ref(_) | Expr::Apply(..) | Expr::Call(_))) => {
                         format!("{left_np} is not one of {}", noun(r, cx)?)
                     }
+                    ("==", Expr::Lit(Lit::Str(empty))) if empty.is_empty() => {
+                        format!("{left_np} is empty")
+                    }
+                    ("!=", Expr::Lit(Lit::Str(empty))) if empty.is_empty() => {
+                        format!("{left_np} is not empty")
+                    }
+                    // Go `err != nil`: an error occurred (#2009).
+                    ("is" | "==", Expr::Lit(Lit::None)) if go_error_value(left) => {
+                        "no error occurred".to_owned()
+                    }
+                    ("is not" | "!=", Expr::Lit(Lit::None)) if go_error_value(left) => {
+                        "an error occurred".to_owned()
+                    }
                     ("is" | "==", Expr::Lit(Lit::None)) => format!("{left_np} is not set"),
                     ("is not" | "!=", Expr::Lit(Lit::None)) => format!("{left_np} is set"),
                     ("==" | "is", r) => format!("{left_np} is {}", noun(r, cx)?),
@@ -988,6 +1055,128 @@ fn response(display: &str) -> Option<(u16, Option<String>)> {
         })
         .filter(|m| !m.contains(['"', '\'', '{', '\\']));
     Some((status, message))
+}
+
+/// A Go error variable: `err`, `readErr`.
+fn go_error_value(expr: &Expr) -> bool {
+    matches!(expr, Expr::Ref(path) if path.len() == 1
+        && (path[0] == "err" || path[0].ends_with("Err")))
+}
+
+/// The top-level comma-separated parts of `text`; brackets and quoted
+/// literals keep their commas. `None` for an unterminated literal.
+fn top_level_parts(text: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' && q != '`' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(text[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    parts.push(text[start..].trim());
+    Some(parts)
+}
+
+/// A plain double-quoted literal's text, without escapes or nested quotes.
+fn plain_message(arg: &str) -> Option<String> {
+    let inner = arg.strip_prefix('"')?.strip_suffix('"')?;
+    (!inner.is_empty() && !inner.contains(['"', '\'', '{', '\\'])).then(|| inner.to_owned())
+}
+
+/// The status a Go response call writes and its literal message (#2009):
+/// `http.Error(w, "forbidden", http.StatusForbidden)` gives `(403,
+/// Some("forbidden"))`; `w.WriteHeader(400)` gives `(400, None)`. `None`
+/// unless an argument is a `net/http` status constant or a status number.
+pub(super) fn go_response(display: &str) -> Option<(u16, Option<String>)> {
+    let display = display.trim();
+    let open = display.find('(')?;
+    let callee = &display[..open];
+    if callee.is_empty()
+        || !callee
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return None;
+    }
+    let inner = display[open + 1..].strip_suffix(')')?;
+    let parts = top_level_parts(inner)?;
+    let status = parts.iter().find_map(|arg| {
+        arg.strip_prefix("http.")
+            .and_then(go_http_status)
+            .or_else(|| arg.parse::<u16>().ok().filter(|s| (100..600).contains(s)))
+    })?;
+    // An error code (`"vault_locked"`) reads as words.
+    let messages: Vec<String> = parts
+        .iter()
+        .filter_map(|arg| plain_message(arg))
+        .map(|m| {
+            if m.contains('_')
+                && m.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                words(&m)
+            } else {
+                m
+            }
+        })
+        .collect();
+    let message = match &messages[..] {
+        [one] => Some(one.clone()),
+        _ => None,
+    };
+    Some((status, message))
+}
+
+/// A Go error value a guarded return passes back as its last result
+/// (#2009): `errors.New("reserved")` or `fmt.Errorf("…")` gives its
+/// message when plain, `ErrNotFound` or `store.ErrNotFound` its name in
+/// words ("not found"). `None` for any other value, `err` included.
+pub(super) fn go_error(display: &str) -> Option<String> {
+    let parts = top_level_parts(display.trim())?;
+    let last = *parts.last()?;
+    for constructor in ["errors.New(", "fmt.Errorf("] {
+        if let Some(args) = last
+            .strip_prefix(constructor)
+            .and_then(|a| a.strip_suffix(')'))
+        {
+            let first = top_level_parts(args)?.first().copied()?;
+            // A formatted message (`"load %s: %w"`) is not stated.
+            return Some(
+                plain_message(first)
+                    .filter(|m| !m.contains('%'))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    let name = last.rsplit('.').next()?;
+    let all_ident = last
+        .split('.')
+        .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    let rest = name.strip_prefix("Err")?;
+    (all_ident && rest.starts_with(|c: char| c.is_ascii_uppercase())).then(|| words(rest))
 }
 
 /// `x.field = value` as a clause (#1998): `g.user = api_key.user` is "the
@@ -1110,6 +1299,37 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
     } else {
         conditions.join(", and ")
     };
+    let sentence = |outcome: String| {
+        if conditions.is_empty() {
+            format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
+        } else {
+            format!("When {when}, {outcome}.")
+        }
+    };
+    let refused = |status: u16, message: Option<String>| {
+        let tail = message.map(|m| format!(" (“{m}”)")).unwrap_or_default();
+        if (400..600).contains(&status) {
+            format!("the request is refused with status {status}{tail}")
+        } else {
+            format!("it responds with status {status}{tail}")
+        }
+    };
+    // A Go response written before a bare return (#2009).
+    if let LocalExit::Call { value } = &evidence.effect
+        && let Some((status, message)) = go_response(value.display.as_str())
+    {
+        return Some(sentence(refused(status, message)));
+    }
+    // A Go error passed back (#2009).
+    if let LocalExit::Return { value: Some(value) } = &evidence.effect
+        && let Some(message) = go_error(value.display.as_str())
+    {
+        return Some(sentence(if message.is_empty() {
+            "it fails with an error".to_owned()
+        } else {
+            format!("it fails with the error “{message}”")
+        }));
+    }
     // A state change or a call (#1998, AC-0910).
     let changed = match &evidence.effect {
         LocalExit::Assign { target, value } => Some(assigned(
@@ -1121,11 +1341,7 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
         LocalExit::Return { .. } | LocalExit::Throw { .. } => None,
     };
     if let Some(outcome) = changed {
-        return Some(if conditions.is_empty() {
-            format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
-        } else {
-            format!("When {when}, {outcome}.")
-        });
+        return Some(sentence(outcome));
     }
     let value = match &evidence.effect {
         LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
@@ -1146,21 +1362,8 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
         }
         LocalExit::Return { value: Some(value) } => value.display.as_str().trim().to_owned(),
     };
-    let sentence = |outcome: String| {
-        if conditions.is_empty() {
-            format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
-        } else {
-            format!("When {when}, {outcome}.")
-        }
-    };
     if let Some((status, message)) = response(&value) {
-        let tail = message.map(|m| format!(" (“{m}”)")).unwrap_or_default();
-        let outcome = if (400..600).contains(&status) {
-            format!("the request is refused with status {status}{tail}")
-        } else {
-            format!("it responds with status {status}{tail}")
-        };
-        return Some(sentence(outcome));
+        return Some(sentence(refused(status, message)));
     }
     if value.starts_with("redirect(") {
         return Some(sentence("the caller is redirected".to_owned()));
@@ -1216,6 +1419,73 @@ mod tests {
 
     // AC-0912: membership, calls with arguments, type tests, lengths,
     // lookups joined by `or`, times and header reads are restated by rule.
+    // AC-0923 (#2009): Go conditions, responses and errors in domain terms.
+    #[test]
+    fn go_rule_shapes_are_restated_in_domain_terms() {
+        let truthy = BranchPolarity::TruthyBranch;
+        for (display, class, expected) in [
+            ("err != nil", Some("Service"), "an error occurred"),
+            (
+                "s.Store == nil",
+                Some("Service"),
+                "the service's store is not set",
+            ),
+            (
+                "!s.isCatalogOwner(u)",
+                Some("Service"),
+                "the u is not catalog owner",
+            ),
+            (
+                "errors.Is(err, vault.ErrLocked)",
+                None,
+                "the error is “locked”",
+            ),
+            (
+                "r.Method != http.MethodPost",
+                None,
+                "the request's method is not “POST”",
+            ),
+            ("r.FormValue(\"email\") == \"\"", None, "the email is empty"),
+        ] {
+            assert_eq!(
+                said(display, truthy, class).as_deref(),
+                Some(expected),
+                "{display}"
+            );
+        }
+        assert_eq!(
+            said(
+                "s.Store == nil",
+                BranchPolarity::FalsyBranch,
+                Some("Service")
+            )
+            .as_deref(),
+            Some("the service's store is set")
+        );
+        assert_eq!(
+            go_response("jsonErr(w, 423, \"vault_locked\")"),
+            Some((423, Some("vault locked".to_owned())))
+        );
+        assert_eq!(
+            go_response("http.Error(w, \"forbidden\", http.StatusForbidden)"),
+            Some((403, Some("forbidden".to_owned())))
+        );
+        assert_eq!(go_response("w.Write(body)"), None);
+        assert_eq!(
+            go_error("nil, store.ErrNotFound").as_deref(),
+            Some("not found")
+        );
+        assert_eq!(
+            go_error("errors.New(\"too long\")").as_deref(),
+            Some("too long")
+        );
+        assert_eq!(
+            go_error("fmt.Errorf(\"load %s: %w\", id, e)").as_deref(),
+            Some("")
+        );
+        assert_eq!(go_error("nil, err"), None);
+    }
+
     #[test]
     fn common_rule_shapes_are_restated_in_domain_terms() {
         let t = BranchPolarity::TruthyBranch;
