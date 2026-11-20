@@ -941,6 +941,12 @@ pub(super) fn d1(
                     "Every rule observation, with its tier, confidence, citation and \
                      dependencies, is in `rule-evidence.md` of this export.\n",
                 )?;
+                if let Some(unread) = crate::rules::unread_rule_sentence(
+                    &crate::rules::unread_rule_languages(nodes.iter().copied()),
+                ) {
+                    content.push_str("\n")?;
+                    content.push_str(&unread)?;
+                }
                 cited += rules::rules_per_capability(
                     (nodes, edges),
                     knowledge,

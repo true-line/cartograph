@@ -443,3 +443,24 @@ fn parameter_bindings_follow_python_scopes() {
         assert!(!binds(&source), "{rebinding}");
     }
 }
+
+#[test]
+fn test_code_yields_no_business_rules() {
+    // AC-0922 (#2009): guards in test code are not business rules.
+    let source = "def check(ready):\n    if not ready:\n        raise ValueError('not ready')\n    return 1\n";
+    let at = |path: &str| {
+        extract_source(
+            source.as_bytes(),
+            path,
+            &SourceId {
+                repo: "fixture",
+                commit: "revision-a",
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(rules(&at("app/views.py")).len(), 1);
+    for path in ["tests/helpers.py", "app/test_views.py", "conftest.py"] {
+        assert!(rules(&at(path)).is_empty(), "{path}");
+    }
+}
