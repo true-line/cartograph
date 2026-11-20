@@ -29,7 +29,7 @@ use agents::section_compose::{
 use agents::section_draft::{SectionAddress, admit};
 use core_graph::{Edge, Node};
 use llm::bounded::{
-    CallDirective, CompletionControl, CompletionLimitValues, CompletionLimits,
+    BoundedCompletion, CallDirective, CompletionControl, CompletionLimitValues, CompletionLimits,
     HOSTED_OUTPUT_TOKENS, MAX_REQUEST_TIMEOUT_MS,
 };
 use llm::{CompletionAction, ConsentGrant, EgressFirewall, EgressPreview, LlmProvider, Locality};
@@ -179,7 +179,7 @@ pub(crate) fn prepare(
 
 /// One call's limits: the general ceilings, with the hosted lane's output
 /// allowance and the longest permitted timeout.
-fn limits() -> Result<CompletionLimits, String> {
+pub(crate) fn limits() -> Result<CompletionLimits, String> {
     CompletionLimits::for_investigation(CompletionLimitValues {
         max_output_tokens: HOSTED_OUTPUT_TOKENS,
         request_timeout_ms: MAX_REQUEST_TIMEOUT_MS,
@@ -188,7 +188,7 @@ fn limits() -> Result<CompletionLimits, String> {
     .map_err(|error| error.to_string())
 }
 
-fn firewall(state: &AppState) -> Result<EgressFirewall, String> {
+pub(crate) fn firewall(state: &AppState) -> Result<EgressFirewall, String> {
     let policy = state
         .settings
         .lock()
@@ -207,10 +207,36 @@ pub(crate) fn compose(
     approved_payload_hash: Option<String>,
     check: &dyn Fn() -> CallDirective,
 ) -> Result<Result<Composed, &'static str>, String> {
+    let text = complete(
+        state,
+        provider,
+        &prepared.action,
+        approved_payload_hash,
+        check,
+    )?
+    .text;
+    Ok(
+        section_compose::decode(&prepared.address, &text, &prepared.citable)
+            .map_err(|refusal| refusal.code()),
+    )
+}
+
+/// One bounded call of `action` through the egress firewall, and its reply
+/// text. A cloud provider needs `approved_payload_hash` to be the hash of
+/// this exact payload; the payload is recorded when it is handed to the
+/// transport. `check` stops the call. Shared with the topic expert (#2057),
+/// which also reports the provider's usage.
+pub(crate) fn complete(
+    state: &AppState,
+    provider: &dyn LlmProvider,
+    action: &CompletionAction,
+    approved_payload_hash: Option<String>,
+    check: &dyn Fn() -> CallDirective,
+) -> Result<BoundedCompletion, String> {
     let limits = limits()?;
     let firewall = firewall(state)?;
     let bounded = firewall
-        .prepare_bounded(provider, &prepared.action, &limits)
+        .prepare_bounded(provider, action, &limits)
         .map_err(|error| error.to_string())?;
     let consent: Option<ConsentGrant> = if provider.locality() == Locality::Cloud {
         Some(crate::egress::consent_grant_for_approved_payload(
@@ -239,7 +265,7 @@ pub(crate) fn compose(
     let cloud = provider.locality() == Locality::Cloud;
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_millis(limits.values().request_timeout_ms);
-    let completion = provider
+    provider
         .complete_bounded(
             &authorized,
             &CompletionControl {
@@ -248,11 +274,7 @@ pub(crate) fn compose(
                 dispatching: cloud.then_some(&record),
             },
         )
-        .map_err(|error| error.to_string())?;
-    Ok(
-        section_compose::decode(&prepared.address, &completion.text, &prepared.citable)
-            .map_err(|refusal| refusal.code()),
-    )
+        .map_err(|error| error.to_string())
 }
 
 /// Stage a decoded composition as a draft of job `job_id`.
@@ -439,4 +461,4 @@ pub(crate) async fn run_section_compose(
 
 #[cfg(test)]
 #[path = "section_compose_tests.rs"]
-mod tests;
+pub(crate) mod tests;

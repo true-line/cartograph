@@ -118,7 +118,7 @@ pub fn composition_text(text: &str, number: &str) -> (String, usize) {
 }
 
 /// Every `F-` citation id `text` prints.
-fn printed_ids(text: &str) -> BTreeSet<String> {
+pub(super) fn printed_ids(text: &str) -> BTreeSet<String> {
     let bytes = text.as_bytes();
     let mut ids = BTreeSet::new();
     let mut at = 0;

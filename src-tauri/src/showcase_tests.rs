@@ -4,7 +4,8 @@
 //! through the desktop export path plus the recovered endpoint inventory and
 //! the Subsystem candidates the phase published (#260) with the briefing of
 //! each (#2055). No T2
-//! embeddings, no provider calls, no network.
+//! embeddings, no provider calls, no network. A second, separate run asks
+//! the topic experts fixed questions and does call a provider (#2057).
 use crate::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -157,13 +158,17 @@ fn write_briefings(state: &AppState, output: &Path) {
     .unwrap();
 }
 
-#[test]
-#[ignore = "manual showcase run over local checkouts; no provider calls"]
-fn showcase_recover_and_export() {
+/// A new output directory and the isolated app that writes into it.
+fn showcase_output() -> (PathBuf, tauri::App<tauri::test::MockRuntime>) {
     let output = PathBuf::from(required("CARTOGRAPH_SHOWCASE_OUTPUT"));
     assert!(output.is_absolute(), "output must be absolute");
     std::fs::create_dir(&output).expect("output directory must be new");
     let app = showcase_app(&output.join("profile"));
+    (output, app)
+}
+
+/// Ingest the sources and run the knowledge phase's deterministic producers.
+fn recover(app: &tauri::App<tauri::test::MockRuntime>, output: &Path) {
     let state = app.state::<AppState>();
 
     // A system manifest ingests every repo it declares through the
@@ -213,6 +218,14 @@ fn showcase_recover_and_export() {
         serde_json::to_vec_pretty(&knowledge).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+#[ignore = "manual showcase run over local checkouts; no provider calls"]
+fn showcase_recover_and_export() {
+    let (output, app) = showcase_output();
+    recover(&app, &output);
+    let state = app.state::<AppState>();
 
     write_subsystems(&state, &output);
     write_briefings(&state, &output);
@@ -286,4 +299,137 @@ fn showcase_recover_and_export() {
         serde_json::to_vec_pretty(&labels).unwrap(),
     )
     .unwrap();
+}
+
+/// One fixed question for the topic expert of the area named `area`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AreaQuestion {
+    area: String,
+    question: String,
+}
+
+/// Manual topic expert run (#2057): recover the checkouts as the showcase
+/// does, then ask `topic-expert@1` each question of the JSON file
+/// `CARTOGRAPH_SHOWCASE_QUESTIONS` (`[{"area": "<name>", "question": ...}]`)
+/// through the production ask path, and write every answer as it is, with
+/// the usage the provider reported, to `answers.json` and `answers.md`.
+///
+/// This run calls a provider: `CARTOGRAPH_SHOWCASE_ASK_MODE` is `cloud`
+/// (default; needs the Anthropic key) or `local`. Setting the questions
+/// file is the operator's consent to send each payload: the run approves
+/// the exact payload hash the preview shows, as the consent dialog would.
+#[test]
+#[ignore = "manual topic expert run over local checkouts; calls a provider"]
+fn showcase_ask_areas() {
+    use crate::area_expert::{Asked, areas, ask, prepare};
+    use llm::bounded::CallDirective;
+    use std::fmt::Write as _;
+
+    let questions: Vec<AreaQuestion> = serde_json::from_slice(
+        &std::fs::read(required("CARTOGRAPH_SHOWCASE_QUESTIONS")).expect("questions file"),
+    )
+    .expect("questions are [{area, question}]");
+    let mode = std::env::var("CARTOGRAPH_SHOWCASE_ASK_MODE").unwrap_or_else(|_| "cloud".into());
+    let (output, app) = showcase_output();
+    recover(&app, &output);
+    let state = app.state::<AppState>();
+    write_briefings(&state, &output);
+    if mode == "cloud" {
+        let mut settings = state.settings.lock().unwrap();
+        settings.set_enabled("T3", true).unwrap();
+        settings.set_provider("T3", "cloud").unwrap();
+        settings
+            .grant_consent("T3", r#"{"provider":"showcase-ask","network":true}"#)
+            .unwrap();
+    }
+    let provider = crate::egress::escalation_provider(&mode).unwrap();
+    let choices = areas(&state).unwrap();
+    let mut records = Vec::new();
+    let mut report = String::from("# Topic expert answers\n");
+    for AreaQuestion { area, question } in &questions {
+        let _ = write!(report, "\n## {area}: {question}\n\n");
+        let Some(choice) = choices.iter().find(|choice| &choice.name == area) else {
+            report.push_str("No such area in this run.\n");
+            records.push(serde_json::json!({
+                "area": area, "question": question, "error": "area_not_found",
+            }));
+            continue;
+        };
+        let asked = prepare(&state, &choice.area, question, &[]).and_then(|prepared| {
+            let hash = crate::section_compose::firewall(&state)?
+                .prepare_bounded(
+                    provider.as_ref(),
+                    prepared.action(),
+                    &crate::section_compose::limits()?,
+                )
+                .map_err(|error| error.to_string())?
+                .preview()
+                .egress
+                .payload_hash
+                .clone();
+            ask(&state, provider.as_ref(), &prepared, Some(hash), &|| {
+                CallDirective::Continue
+            })
+        });
+        match asked {
+            Err(error) => {
+                let _ = writeln!(report, "The call failed: {error}");
+                records.push(serde_json::json!({
+                    "area": area, "question": question, "error": error,
+                }));
+            }
+            Ok(Asked { answer, usage }) => {
+                match &answer {
+                    Err(reason) => {
+                        let _ = writeln!(report, "No answer: `{reason}`.");
+                    }
+                    Ok(answer) => {
+                        for item in &answer.statements {
+                            let _ = writeln!(
+                                report,
+                                "- {} ({:?}; {})",
+                                item.statement,
+                                item.basis,
+                                item.citations.join(", ")
+                            );
+                        }
+                        for item in &answer.not_known {
+                            let _ = writeln!(report, "- Not in the briefing: {item}");
+                        }
+                        if !answer.ask_instead.is_empty() {
+                            let _ = writeln!(
+                                report,
+                                "- Ask instead: {}",
+                                answer.ask_instead.join(", ")
+                            );
+                        }
+                        if answer.left_out > 0 {
+                            let _ = writeln!(
+                                report,
+                                "- {} statements left out: no citation the briefing prints.",
+                                answer.left_out
+                            );
+                        }
+                    }
+                }
+                let _ = writeln!(
+                    report,
+                    "\nUsage ({}): {:?} input and {:?} output tokens, {} request bytes.",
+                    usage.model, usage.input_tokens, usage.output_tokens, usage.request_bytes
+                );
+                records.push(serde_json::json!({
+                    "area": area, "question": question, "briefing_bytes": choice.briefing_bytes,
+                    "answer": answer.as_ref().ok(), "no_answer": answer.as_ref().err(),
+                    "usage": usage,
+                }));
+            }
+        }
+    }
+    std::fs::write(
+        output.join("answers.json"),
+        serde_json::to_vec_pretty(&records).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(output.join("answers.md"), report).unwrap();
 }

@@ -235,6 +235,12 @@ pub fn area_briefing(
     }
 }
 
+/// The citation ids a briefing prints: what an answer from it may cite
+/// (#2057).
+pub fn briefing_citation_ids(briefing: &str) -> BTreeSet<String> {
+    super::composition::printed_ids(briefing)
+}
+
 #[cfg(test)]
 #[path = "briefing_tests.rs"]
 mod tests;
