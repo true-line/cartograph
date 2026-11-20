@@ -24,6 +24,7 @@ const meta = {
     onReload: fn(),
     onDraft: fn(),
     onRedraft: fn(),
+    onCompose: fn(),
     onReview: fn(),
     onOpenCitation: fn(),
   },
@@ -277,6 +278,24 @@ export const DraftRequestNamesTheSectionAndScope: Story = {
     await expect(args.onDraft).toHaveBeenLastCalledWith({
       catalogue_version: '1.0', document: 'D1', section: '1.5', scope: SUBJECT_SCOPE,
     });
+  },
+};
+
+export const ComposeRequestsTheWholeSystem: Story = {
+  // #1991, AC-0862: a D1 section is composed for the whole system only; a
+  // typed subject disables the request.
+  args: { notice: 'Section 1.5: Composed 12 claims for review.' },
+  play: async ({ canvasElement, args }) => {
+    const canvas = await open(canvasElement);
+    await expect(canvas.getByRole('status')).toHaveTextContent('Composed 12 claims for review.');
+    const rules = within(canvas.getByRole('region', { name: /1\.5 Business rules/ }));
+    const compose = rules.getByRole('button', { name: 'Compose from the knowledge graph' });
+    await userEvent.click(compose);
+    await expect(args.onCompose).toHaveBeenLastCalledWith({
+      catalogue_version: '1.0', document: 'D1', section: '1.5', scope: 'system',
+    });
+    await userEvent.type(rules.getByRole('textbox', { name: /One BusinessRule by citation id/ }), SUBJECT_SCOPE);
+    await expect(compose).toBeDisabled();
   },
 };
 

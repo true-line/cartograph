@@ -166,6 +166,16 @@ impl DraftRefusal {
     }
 }
 
+/// Whether `statement` keeps every per-statement rule of [`admit`]: at
+/// most [`MAX_STATEMENT_BYTES`], not blank, plain text and free of
+/// recognized secrets.
+pub fn statement_admissible(statement: &str) -> bool {
+    statement.len() <= MAX_STATEMENT_BYTES
+        && statement.chars().any(char::is_alphanumeric)
+        && !statement.chars().any(char::is_control)
+        && core_redact::recognized_secrets(statement).is_empty()
+}
+
 /// Admit `finish` as a draft for `requested`, or refuse it whole.
 ///
 /// `citation_set` is the run's admitted facts: citation id to the content

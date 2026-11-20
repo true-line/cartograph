@@ -85,11 +85,16 @@ fn a_reply_decodes_to_a_finish_and_out_of_bound_claims_are_left_out() {
          "citation_ids": (1..=17).map(id).collect::<Vec<_>>()},
         {"statement": "Cites nothing.", "claim_kind": "documented_intent", "citation_ids": []},
         {"statement": "A design.", "claim_kind": "proposed_design", "citation_ids": [id(3)]},
-        {"statement": "Tests name the checkout as intended.",
+        {"statement": "Tests name the checkout\nas intended.",
          "claim_kind": "documented_intent", "citation_ids": [id(4)]},
+        {"statement": " - ", "claim_kind": "implemented_behavior", "citation_ids": [id(5)]},
+        {"statement": "x".repeat(2049), "claim_kind": "implemented_behavior",
+         "citation_ids": [id(5)]},
+        {"statement": "Bell \u{7} inside.", "claim_kind": "implemented_behavior",
+         "citation_ids": [id(5)]},
     ]));
     let composed = decode(&address(), &text, &citable).unwrap();
-    assert_eq!(composed.left_out, 4);
+    assert_eq!(composed.left_out, 7);
     assert_eq!(composed.finish.address, address());
     assert_eq!(
         composed.finish.claims,

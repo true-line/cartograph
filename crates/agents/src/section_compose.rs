@@ -15,14 +15,17 @@
 //!
 //! **The reply.** [`decode`] reads the reply into a [`SectionDraftFinish`].
 //! A reply that is not the schema's object refuses with a closed reason. A
-//! claim that breaks a bound the admission rule checks per claim (no
-//! citation, too many, an id that is not citable, a proposed design) is left
-//! out and counted, rather than refusing every other claim with it. The
+//! claim that breaks a rule the admission rule checks per claim (a blank,
+//! oversized, non-plain or secret-bearing statement, no citation, too many,
+//! an id that is not citable, a proposed design) is left out and counted,
+//! rather than refusing every other claim with it. A line break or tab in a
+//! statement is read as a space first: it is layout, not content. The
 //! caller then applies [`crate::section_draft::admit`] and the neutrality
 //! rule as for any draft.
 
 use crate::section_draft::{
     Claim, ClaimKind, MAX_CITATIONS, MAX_CLAIMS, SectionAddress, SectionDraftFinish,
+    statement_admissible,
 };
 use llm::{AnalysisTier, CompletionAction, CompletionPayload};
 use serde::{Deserialize, Serialize};
@@ -271,15 +274,32 @@ pub fn decode(
                 citations.push(id);
             }
         }
+        // Layout whitespace is not content; any other control character is.
+        let statement: String = claim
+            .statement
+            .chars()
+            .map(|c| {
+                if matches!(c, '\n' | '\r' | '\t') {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let statement = statement.trim().to_owned();
         let cites_ok = !citations.is_empty()
             && citations.len() <= MAX_CITATIONS
             && citations.iter().all(|id| citable.contains(id));
         match kind {
-            Some(kind) if cites_ok && claims.len() < MAX_CLAIMS => claims.push(Claim {
-                statement: claim.statement,
-                kind,
-                citations,
-            }),
+            Some(kind)
+                if cites_ok && statement_admissible(&statement) && claims.len() < MAX_CLAIMS =>
+            {
+                claims.push(Claim {
+                    statement,
+                    kind,
+                    citations,
+                })
+            }
             _ => left_out += 1,
         }
     }

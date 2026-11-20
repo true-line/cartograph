@@ -39,7 +39,11 @@ import { hasRecordedExecution, selectRecoveryJob } from './jobPresentation';
 import { TopologyCard } from './components/TopologyCard';
 import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
-import { sectionDraftQuestion, sectionRedraftQuestion, useSectionDocumentStore } from './sectionDocument';
+import {
+  composeOutcomeText, runSectionCompose, sectionComposePreview, sectionDraftQuestion,
+  sectionRedraftQuestion, useSectionDocumentStore,
+} from './sectionDocument';
+import { EgressConsentDialog, type EgressPreview } from './components/EgressConsentDialog';
 import type { SectionAddress, StoredSectionDraft } from './sectionDocument';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
@@ -511,6 +515,41 @@ export default function App() {
     }
   }, [navigate]);
 
+  // "Compose from the knowledge graph" (#1991, AC-0862): the exact payload
+  // is shown for one-action consent; only that payload is sent. The staged
+  // draft then waits for review like any other.
+  const [composing, setComposing] = useState<{ address: SectionAddress; preview: EgressPreview } | null>(null);
+  const [composeBusy, setComposeBusy] = useState(false);
+  const [composeNotice, setComposeNotice] = useState<string | null>(null);
+  const composeSection = useCallback(async (address: SectionAddress) => {
+    setComposeNotice(null);
+    setComposeBusy(true);
+    try {
+      setComposing({ address, preview: await sectionComposePreview(address) });
+    } catch (error) {
+      reportSpecError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setComposeBusy(false);
+    }
+  }, []);
+  const consentCompose = useCallback(async (preview: EgressPreview) => {
+    if (!composing) return;
+    const { address } = composing;
+    setComposing(null);
+    setComposeBusy(true);
+    setComposeNotice(`Composing section ${address.section}…`);
+    try {
+      const outcome = await runSectionCompose(address, preview);
+      setComposeNotice(`Section ${address.section}: ${composeOutcomeText(outcome)}`);
+      await useSectionDocumentStore.getState().load();
+    } catch (error) {
+      setComposeNotice(null);
+      reportSpecError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setComposeBusy(false);
+    }
+  }, [composing]);
+
   // ⌘K / Ctrl+K toggles the palette; ⌘1–⌘8 jump straight to a surface;
   // '?' or F1 opens Help on the current surface's topic (#154).
   useEffect(() => {
@@ -754,7 +793,8 @@ export default function App() {
               onRefreshCurated={() => void reloadSpec()}
               sections={{
                 document: sectionDocument.document,
-                busy: sectionDocument.busy || specBusy,
+                busy: sectionDocument.busy || specBusy || composeBusy,
+                notice: composeNotice,
                 error: sectionDocument.error,
                 canReview: backend === 'up',
                 onReload: () => void sectionDocument.load(),
@@ -764,6 +804,7 @@ export default function App() {
                   }),
                 onDraft: (address) => void draftSection(address),
                 onRedraft: (draft) => void draftSection(draft),
+                onCompose: (address) => void composeSection(address),
               }}
               mode={specMode}
               decisions={curation}
@@ -1048,6 +1089,15 @@ export default function App() {
             }
           />
         </div>
+      )}
+      {composing && (
+        <EgressConsentDialog
+          preview={composing.preview}
+          busy={composeBusy}
+          cancelLabel="Cancel"
+          onCancel={() => setComposing(null)}
+          onConsent={(preview) => void consentCompose(preview)}
+        />
       )}
       {escalation && (
         <ResolutionStrategyModal

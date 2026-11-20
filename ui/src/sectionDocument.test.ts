@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { NOT_COMPUTED_READ, curatedReadFixture } from './curatedFixtures';
 import {
-  curatedDraftStates, curatedReadStatesDrafts, scopeLabel, sectionDraftQuestion,
-  sectionRedraftQuestion,
+  composeOutcomeText, curatedDraftStates, curatedReadStatesDrafts, runSectionCompose, scopeLabel,
+  sectionComposePreview, sectionDraftQuestion, sectionRedraftQuestion,
   useSectionDocumentStore,
 } from './sectionDocument';
 import {
@@ -154,5 +154,42 @@ describe('document view store (AC-0669)', () => {
     await expect(sectionRedraftQuestion(STALE_DRAFT)).rejects.toThrow('nothing to re-draft');
     mockIPC(() => { throw 'store is locked'; });
     await expect(sectionRedraftQuestion(STALE_DRAFT)).rejects.toThrow('store is locked');
+  });
+});
+
+// #1991, AC-0862: a composition shows the exact payload first and runs only
+// for the payload hash the user approved.
+describe('section composition (AC-0862)', () => {
+  const address = { catalogue_version: '1.0', document: 'D1', section: '1.5', scope: 'system' };
+  const preview = {
+    provider_id: 'anthropic', locality: 'Cloud' as const, tier: 'Agentic' as const,
+    action_id: 'section-compose:D1:1.5:system',
+    payload: { system: 's', prompt: 'p', spans: [] }, payload_hash: 'hash-1', redaction_count: 0,
+  };
+
+  it('previews and then runs the approved payload for the address', async () => {
+    const commands: [string, unknown][] = [];
+    mockIPC((command, args) => {
+      commands.push([command, args]);
+      if (command === 'section_compose_preview') return preview;
+      return { outcome: 'staged', draft_id: 'draft-1', claims: 12, left_out: 1 };
+    });
+    expect(await sectionComposePreview(address)).toEqual(preview);
+    const outcome = await runSectionCompose(address, preview);
+    expect(composeOutcomeText(outcome)).toBe('Composed 12 claims for review. 1 claim was left out.');
+    expect(commands).toEqual([
+      ['section_compose_preview', { catalogueVersion: '1.0', document: 'D1', section: '1.5', scope: 'system' }],
+      ['run_section_compose', {
+        catalogueVersion: '1.0', document: 'D1', section: '1.5', scope: 'system',
+        mode: 'cloud', approvedPayloadHash: 'hash-1',
+      }],
+    ]);
+  });
+
+  it('puts a closed refusal into words and keeps an unknown one as sent', () => {
+    expect(composeOutcomeText({ outcome: 'no_draft', reason: 'graph_changed', claims: 0, left_out: 0 }))
+      .toBe('The graph changed while the section was being composed. Compose it again.');
+    expect(composeOutcomeText({ outcome: 'no_draft', reason: 'citation_not_admitted', claims: 0, left_out: 2 }))
+      .toBe('citation_not_admitted 2 claims were left out.');
   });
 });
