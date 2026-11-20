@@ -99,6 +99,9 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
     };
     let mut participants: Vec<&str> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
+    // Files a process start or scheduled job enters (#1997): the callables
+    // defined in them are what handles it.
+    let mut entered: BTreeSet<&str> = BTreeSet::new();
     for hop in &flow.hops {
         // A Gap destination or a Gap-confidence edge is unresolved: its
         // destination is not named as a reached callable.
@@ -107,7 +110,24 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
             continue;
         }
         let (src, label, dst) = hop.stored_edge();
-        if hop.label == "HANDLES" && hop.src == flow.trigger {
+        let entry = hop.label == "ENTRY" && hop.src == flow.trigger;
+        if entry {
+            if let Some(edge) = index.edges.get(&(src, label, dst)) {
+                reading.cites.push(edge);
+            }
+            match index.by_id.get(hop.dst.as_str()).map(|n| n.label.as_str()) {
+                Some("File") => {
+                    entered.insert(hop.dst.as_str());
+                }
+                _ => reading
+                    .handlers
+                    .push((hop.dst.as_str(), hop.dst_name.as_str())),
+            }
+        } else if hop.label == "DEFINED_IN" && entered.contains(hop.src.as_str()) {
+            reading
+                .handlers
+                .push((hop.dst.as_str(), hop.dst_name.as_str()));
+        } else if hop.label == "HANDLES" && hop.src == flow.trigger {
             reading
                 .handlers
                 .push((hop.dst.as_str(), hop.dst_name.as_str()));
@@ -206,9 +226,17 @@ pub(super) fn flows_per_capability(
     let operations_of = |story: &Story<'_>| -> Vec<&Flow> {
         let mut operations: Vec<&Flow> = Vec::new();
         for (_, fact) in &story.support {
-            if let Support::Edge(e) = fact
-                && e.label == "HANDLES"
-                && let Some(flow) = by_trigger.get(e.src.as_str())
+            // An operation is the source of a cited `HANDLES` edge, or a
+            // cited process start or scheduled job that triggers a flow
+            // itself (#1997).
+            let trigger = match fact {
+                Support::Edge(e) if e.label == "HANDLES" => e.src.as_str(),
+                Support::Node(n) if matches!(n.label.as_str(), "EntryPoint" | "Schedule") => {
+                    n.id.as_str()
+                }
+                _ => continue,
+            };
+            if let Some(flow) = by_trigger.get(trigger)
                 && !operations.iter().any(|f| f.trigger == flow.trigger)
             {
                 operations.push(flow);
