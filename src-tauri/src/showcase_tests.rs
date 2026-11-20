@@ -1,7 +1,8 @@
 //! Manual deterministic showcase run (#721): recover local checkouts through the
 //! production ingest path, run the knowledge phase's deterministic producers as
 //! the desktop does after an ingest (#1443), and write the official spec bundle
-//! through the desktop export path plus the recovered endpoint inventory. No T2
+//! through the desktop export path plus the recovered endpoint inventory and
+//! the Subsystem candidates the phase published (#260). No T2
 //! embeddings, no provider calls, no network.
 use crate::*;
 use std::io::Write;
@@ -51,6 +52,77 @@ fn showcase_app(profile: &Path) -> tauri::App<tauri::test::MockRuntime> {
     app
 }
 
+/// The Subsystem candidates the knowledge phase published (#260), as JSON
+/// and as a list a reader can judge: each group's name, its terms and the
+/// files it holds, largest first.
+fn write_subsystems(state: &AppState, output: &Path) {
+    use core_graph::overlay::{BaseRef, OverlayItem, OverlayRead};
+    let revision = state.graph.lock().unwrap().read_revision().unwrap();
+    let overlay = state.knowledge_overlay.as_ref().unwrap().lock().unwrap();
+    let OverlayRead::Current { facts, .. } = overlay.read(&revision).unwrap() else {
+        panic!("the knowledge phase published no overlay for this base");
+    };
+    let mut groups: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            OverlayItem::Node(node) if node.label == "Subsystem" => {
+                let files: Vec<&str> = fact
+                    .cites
+                    .iter()
+                    .filter_map(|cite| match cite {
+                        BaseRef::Node(id) => id.split_once('@').map(|(_, path)| path),
+                        BaseRef::Edge(..) => None,
+                    })
+                    .collect();
+                Some((node, files))
+            }
+            _ => None,
+        })
+        .collect();
+    groups.sort_by(|a, b| {
+        (a.0.props["kind"] == "shared")
+            .cmp(&(b.0.props["kind"] == "shared"))
+            .then_with(|| b.1.len().cmp(&a.1.len()))
+            .then_with(|| a.0.id.cmp(&b.0.id))
+    });
+    let json: Vec<_> = groups
+        .iter()
+        .map(|(node, files)| {
+            serde_json::json!({
+                "id": node.id, "name": node.props["name"], "kind": node.props["kind"],
+                "terms": node.props["terms"], "files": files,
+            })
+        })
+        .collect();
+    std::fs::write(
+        output.join("subsystems.json"),
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    let mut text = String::from("# Subsystems\n");
+    for (node, files) in &groups {
+        let terms: Vec<&str> = node.props["terms"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|term| term.as_str())
+            .collect();
+        text.push_str(&format!(
+            "\n## {} ({} files)\n",
+            node.props["name"].as_str().unwrap_or_default(),
+            files.len()
+        ));
+        if !terms.is_empty() {
+            text.push_str(&format!("\nTerms: {}\n", terms.join(", ")));
+        }
+        text.push('\n');
+        for file in files {
+            text.push_str(&format!("- `{file}`\n"));
+        }
+    }
+    std::fs::write(output.join("subsystems.md"), text).unwrap();
+}
+
 #[test]
 #[ignore = "manual showcase run over local checkouts; no provider calls"]
 fn showcase_recover_and_export() {
@@ -92,7 +164,8 @@ fn showcase_recover_and_export() {
 
     // The knowledge phase the desktop starts after every ingest, run inline
     // with T2 off: the deterministic producers publish Capabilities, Actors,
-    // BusinessFlows and DomainEntities into the overlay; nothing is embedded.
+    // BusinessFlows, DomainEntities and Subsystems into the overlay; nothing
+    // is embedded.
     let knowledge = crate::knowledge_phase::run_for_setting(
         &state.graph,
         state.embedding_cache.as_ref().unwrap(),
@@ -106,6 +179,8 @@ fn showcase_recover_and_export() {
         serde_json::to_vec_pretty(&knowledge).unwrap(),
     )
     .unwrap();
+
+    write_subsystems(&state, &output);
 
     for (mode, dir) in [
         (spec::ExportMode::VerifiedOnly, "verified-only"),
