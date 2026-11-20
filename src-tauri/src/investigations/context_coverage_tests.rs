@@ -1,6 +1,7 @@
 use super::*;
-use core_graph::{GraphPatch, coverage::CoverageRecord};
+use core_graph::{GraphPatch, GraphStore, coverage::CoverageRecord};
 use serde_json::{Value, json};
+use std::sync::Mutex;
 use tauri::Manager;
 
 const TEST_ARCHIVE_CAPACITY: usize = 1024 * 1024;
@@ -682,7 +683,8 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         let mut previous = FrozenContext::from_graph(graph, &requested, &[]).unwrap();
         let complete = projection(previous.graph.0.clone(), previous.graph.1.clone()).unwrap();
         let scoped =
-            FrozenContext::scoped_snapshot(&previous.graph, &requested.scope, complete).unwrap();
+            FrozenContext::scoped_snapshot(&previous.graph, &requested.scope, None, complete)
+                .unwrap();
         let previous_qualified = scoped.with_coverage(qualification).unwrap();
         let before = take_projection_work();
         assert!(!previous_qualified.shares_snapshot(&previous.snapshot));
@@ -940,4 +942,215 @@ fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
         ));
         assert_eq!(frozen.ledger, before);
     }
+}
+
+/// A fixture graph with two files, one symbol in each and a call between
+/// them, and an overlay current for it whose one area holds the first file.
+fn area_fixture() -> (Fixture, String) {
+    use core_graph::overlay::{BaseRef, OverlayFact, OverlayItem, OverlayRecipe, OverlayStore};
+    let mut fixture = Fixture::new(3);
+    let area = "subsystem:cluster:alias".to_owned();
+    let base = {
+        let mut graph = fixture.state.graph.lock().unwrap();
+        for (id, label) in [
+            ("file:alias", "File"),
+            ("sym:alias", "Symbol"),
+            ("file:mailbox", "File"),
+            ("sym:mailbox", "Symbol"),
+        ] {
+            graph
+                .put_node(&Node {
+                    id: id.into(),
+                    label: label.into(),
+                    props: json!({}),
+                })
+                .unwrap();
+        }
+        for (src, label, dst) in [
+            ("sym:alias", "DEFINED_IN", "file:alias"),
+            ("sym:mailbox", "DEFINED_IN", "file:mailbox"),
+            ("sym:alias", "CALLS", "sym:mailbox"),
+        ] {
+            graph
+                .put_edge(&Edge {
+                    src: src.into(),
+                    dst: dst.into(),
+                    label: label.into(),
+                    props: json!({}),
+                })
+                .unwrap();
+        }
+        graph
+            .read_snapshot_with_revision_bounded(SnapshotReadLimits::investigation())
+            .unwrap()
+    };
+    let mut overlay = OverlayStore::open_in_memory().unwrap();
+    overlay
+        .bind_instance(&base.revision.graph_instance)
+        .unwrap();
+    overlay
+        .publish(
+            &base,
+            OverlayRecipe {
+                recipe: "host-fixture@1".into(),
+                embedding_namespace: None,
+                provider_ran: false,
+            },
+            vec![OverlayFact {
+                item: OverlayItem::Node(Node {
+                    id: area.clone(),
+                    label: "Subsystem".into(),
+                    props: json!({"name":"Alias","kind":"cluster","files":1,
+                        "prov": core_prov::Provenance::new(
+                            core_prov::Tier::Semantic,
+                            core_prov::ConfidenceTier::InferredWeak,
+                            vec![core_prov::EvidenceRef {
+                                repo: "local/fixture".into(),
+                                path: "app/alias.py".into(),
+                                byte_start: 0,
+                                byte_end: 1,
+                                commit_sha: "fixed".into(),
+                            }],
+                            "t2.knowledge.subsystems",
+                            b"alias",
+                        )
+                        .unwrap()}),
+                }),
+                cites: [BaseRef::Node("file:alias".into())].into(),
+            }],
+        )
+        .unwrap();
+    fixture.state.knowledge_overlay = Some(Arc::new(Mutex::new(overlay)));
+    (fixture, area)
+}
+
+// AC-0930 (#2044): a task scoped to an area freezes the area's files, what they define
+// and the edges between them, and nothing else of the graph.
+#[test]
+fn an_area_scope_freezes_the_areas_files_and_what_they_define() {
+    let (fixture, area) = area_fixture();
+    let mut requested = request();
+    requested.scope = InvestigationScope::Area { id: area };
+    let prepared = fixture.prepare(&requested).unwrap();
+    let references = prepared
+        .snapshot
+        .references_in_scope(QueryScope::All)
+        .unwrap();
+    let node = |id: &str| FactReference::Node { id: id.into() };
+    assert_eq!(
+        references,
+        [
+            node("file:alias"),
+            node("sym:alias"),
+            FactReference::Edge {
+                source: "sym:alias".into(),
+                label: "DEFINED_IN".into(),
+                destination: "file:alias".into(),
+            },
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_ne!(
+        prepared.ledger.graph_snapshot_id,
+        prepared.ledger.scope_snapshot_id
+    );
+}
+
+// AC-0930 (#2044): an area that is unknown, has no overlay, or was derived from another
+// graph revision refuses the task; it never widens to the whole graph.
+#[test]
+fn an_unknown_or_stale_area_refuses_the_task() {
+    let (mut fixture, area) = area_fixture();
+    let mut requested = request();
+    requested.scope = InvestigationScope::Area {
+        id: "subsystem:cluster:missing".into(),
+    };
+    assert!(matches!(
+        fixture.prepare(&requested),
+        Err(HostError::InvalidInput)
+    ));
+    requested.scope = InvestigationScope::Area { id: area };
+    fixture
+        .state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "file:later".into(),
+            label: "File".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert!(matches!(
+        fixture.prepare(&requested),
+        Err(HostError::InputChanged)
+    ));
+    // An overlay store nothing was published to holds no such area.
+    fixture
+        .state
+        .knowledge_overlay
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .invalidate()
+        .unwrap();
+    assert!(matches!(
+        fixture.prepare(&requested),
+        Err(HostError::InvalidInput)
+    ));
+    fixture.state.knowledge_overlay = None;
+    assert!(matches!(
+        fixture.prepare(&requested),
+        Err(HostError::InvalidInput)
+    ));
+}
+
+// AC-0930 (#2044): a role prepared without coverage qualification resolves an area the
+// same way.
+#[test]
+fn an_area_scope_is_resolved_for_a_role_without_coverage_qualification() {
+    let (fixture, area) = area_fixture();
+    let mut legacy = request();
+    legacy.schema_version = 1;
+    legacy.specialist_id = SpecialistId::DomainAnalystV1;
+    legacy.scope = InvestigationScope::Area { id: area };
+    let prepared = FrozenContext::prepare(&fixture.state, &legacy, &[]).unwrap();
+    assert_eq!(
+        prepared
+            .snapshot
+            .references_in_scope(QueryScope::All)
+            .unwrap()
+            .len(),
+        3
+    );
+    legacy.scope = InvestigationScope::Area {
+        id: "subsystem:cluster:missing".into(),
+    };
+    assert!(matches!(
+        FrozenContext::prepare(&fixture.state, &legacy, &[]),
+        Err(HostError::InvalidInput)
+    ));
+}
+
+// AC-0930 (#2044): an area scopes a task; a query inside a task cannot name one.
+#[test]
+fn a_query_cannot_name_an_area() {
+    let mut query = query();
+    query.scope = InvestigationScope::Area {
+        id: "subsystem:cluster:alias".into(),
+    };
+    assert!(query.validate().is_err());
+    assert!(
+        InvestigationScope::Area {
+            id: "subsystem:cluster:alias".into()
+        }
+        .validate()
+        .is_ok()
+    );
+    assert_eq!(
+        serde_json::to_value(InvestigationScope::Area { id: "a".into() }).unwrap(),
+        json!({"type":"area","id":"a"})
+    );
 }
