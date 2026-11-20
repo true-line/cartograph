@@ -13,6 +13,11 @@ pub use catalogue::{
     CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
     catalogue_sections,
 };
+mod briefing;
+pub use briefing::{
+    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
+    area_neighbours,
+};
 mod configuration;
 pub use configuration::CONFIG_READ_COVERAGE;
 mod coverage;

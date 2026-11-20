@@ -2,7 +2,8 @@
 //! production ingest path, run the knowledge phase's deterministic producers as
 //! the desktop does after an ingest (#1443), and write the official spec bundle
 //! through the desktop export path plus the recovered endpoint inventory and
-//! the Subsystem candidates the phase published (#260). No T2
+//! the Subsystem candidates the phase published (#260) with the briefing of
+//! each (#2055). No T2
 //! embeddings, no provider calls, no network.
 use crate::*;
 use std::io::Write;
@@ -123,6 +124,39 @@ fn write_subsystems(state: &AppState, output: &Path) {
     std::fs::write(output.join("subsystems.md"), text).unwrap();
 }
 
+/// The briefing a topic expert would start from for each area (#2055), one
+/// file per area under `briefings/`, and their sizes in `briefings.json`.
+fn write_briefings(state: &AppState, output: &Path) {
+    let briefings = crate::area_briefing::compile(state, None).unwrap_or_default();
+    let dir = output.join("briefings");
+    std::fs::create_dir(&dir).unwrap();
+    let mut index = Vec::new();
+    for (at, view) in briefings.iter().enumerate() {
+        let slug: String = view
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let file = format!("{at:02}-{slug}.md");
+        std::fs::write(dir.join(&file), &view.text).unwrap();
+        index.push(serde_json::json!({
+            "area": view.area, "name": view.name, "files": view.files, "file": file,
+            "bytes": view.text.len(), "sections": view.sections, "left_out": view.left_out,
+        }));
+    }
+    std::fs::write(
+        output.join("briefings.json"),
+        serde_json::to_vec_pretty(&index).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 #[ignore = "manual showcase run over local checkouts; no provider calls"]
 fn showcase_recover_and_export() {
@@ -181,6 +215,7 @@ fn showcase_recover_and_export() {
     .unwrap();
 
     write_subsystems(&state, &output);
+    write_briefings(&state, &output);
 
     for (mode, dir) in [
         (spec::ExportMode::VerifiedOnly, "verified-only"),

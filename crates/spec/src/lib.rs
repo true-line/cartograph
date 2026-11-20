@@ -92,6 +92,10 @@ pub use views::{
     try_compile_spec_with_views_supplied,
 };
 pub use workbench::{
+    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
+    area_neighbours,
+};
+pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,
     CONFIG_READ_COVERAGE, COVERAGE_DETAIL_REPO_LIMIT, CapabilityCompileWorkspaceBound,
     CapabilityStory, CapabilityStoryInputError, CompileWorkspaceBound, Curated, CuratedBasis,
