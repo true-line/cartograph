@@ -4234,3 +4234,41 @@ fn determinism_failure_names_the_first_differing_fact() {
         Some("first differing fact: node a differs: first 2 second 3")
     );
 }
+
+#[test]
+fn relinked_documentation_references_resolve_against_the_whole_graph() {
+    // AC-0678, AC-0864 (#2003, #2004): the relink pass reads the graph packed
+    // and reads documents only for the published repository, while a
+    // reference still resolves against every fact of the system.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "shop");
+    std::fs::write(root.join("app.ts"), "export function handle() {}\n").unwrap();
+    std::fs::write(root.join("README.md"), "# Shop\n\nSee `app.ts`.\n").unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let state = app_state(&app_data);
+    crate::preflight_uncancelled(root.to_str().unwrap(), app.handle(), &state).unwrap();
+    let source = state
+        .sources
+        .lock()
+        .unwrap()
+        .get_by_root(&root)
+        .unwrap()
+        .unwrap();
+    recover(&state, &source);
+    let first = state.graph.lock().unwrap().read_snapshot().unwrap();
+    let file = format!("file:{}@app.ts", source.repo_key);
+    let mentions: Vec<_> = first
+        .1
+        .iter()
+        .filter(|edge| edge.label == "MENTIONS")
+        .collect();
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].dst, file);
+    assert!(first.0.iter().any(|node| node.label == "Document"));
+    // The pass is stable: relinking an unchanged tree changes nothing.
+    recover(&state, &source);
+    assert_eq!(state.graph.lock().unwrap().read_snapshot().unwrap(), first);
+}

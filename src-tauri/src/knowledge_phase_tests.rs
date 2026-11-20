@@ -648,7 +648,7 @@ fn the_recipe_names_every_producer_rule_within_the_name_bound() {
         "entry-point@{}",
         spec::CAPABILITY_ENTRY_POINT_RULE_VERSION
     )));
-    // AC-0863: the subsystem rule is part of the identity too.
+    // AC-0870: the subsystem rule is part of the identity too.
     assert!(name.contains(&format!(";subsystems@{}", spec::SUBSYSTEM_RULE_VERSION)));
     assert!(format!("{name};{DERIVED_REJECTED}").len() <= MAX_NAME_BYTES);
 }

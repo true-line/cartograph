@@ -1120,3 +1120,64 @@ fn a_subject_draft_may_cite_the_sections_that_mention_a_fact_in_its_set() {
     }
     assert_eq!(set.len(), 6);
 }
+
+#[test]
+fn an_index_built_from_keys_and_detailed_nodes_equals_the_whole_graph_index() {
+    // AC-0864 (#2003): a caller holding the graph packed passes every node's
+    // id and label, and decodes only the labels whose props the index reads.
+    let node = |id: &str, label: &str, props: serde_json::Value| Node {
+        id: id.into(),
+        label: label.into(),
+        props,
+    };
+    let nodes = vec![
+        node("file:r@a.ts", "File", serde_json::json!({"path": "a.ts"})),
+        node(
+            "ep:r@GET /users",
+            "Endpoint",
+            serde_json::json!({"method": "GET", "path": "/users"}),
+        ),
+        node(
+            "ep:r@gql",
+            "Endpoint",
+            serde_json::json!({"method": "POST", "path": "/graphql", "protocol": "graphql"}),
+        ),
+        node("gap:r@1", "Gap", serde_json::json!({"name": "orders"})),
+        node(
+            "res:r@orders",
+            "Resource",
+            serde_json::json!({"name": "orders"}),
+        ),
+        node(
+            "sym:r@a.ts#orders",
+            "Symbol",
+            serde_json::json!({"name": "orders"}),
+        ),
+        node(
+            "ep:r@GET /users/",
+            "Endpoint",
+            serde_json::json!({"method": "get", "path": "/users/"}),
+        ),
+        node(
+            "chan:r@orders",
+            "Channel",
+            serde_json::json!({"name": "orders"}),
+        ),
+    ];
+    let detailed: Vec<Node> = nodes
+        .iter()
+        .filter(|node| ReferenceIndex::reads_props(&node.label))
+        .cloned()
+        .collect();
+    assert_eq!(detailed.len(), 5, "endpoints and named kinds only");
+    let whole = ReferenceIndex::new(&nodes);
+    let parts = ReferenceIndex::from_parts(
+        nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.label.as_str())),
+        &detailed,
+    );
+    assert_eq!(format!("{parts:?}"), format!("{whole:?}"));
+    assert_eq!(whole.endpoints, 2);
+    assert!(!whole.labels.contains_key("gap:r@1"));
+}

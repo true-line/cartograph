@@ -3143,38 +3143,93 @@ fn relink_found_adrs(
     documented: &std::collections::BTreeSet<String>,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
+    // The graph is read packed and each step decodes only the labels it
+    // reads, so a large graph never exists as one props tree here (#2003).
     let snapshot = state
         .graph
         .lock()
         .map_err(|e| e.to_string())?
-        .read_snapshot()
+        .read_packed_snapshot()
         .map_err(|e| e.to_string())?;
+    let nodes_where = |select: &dyn Fn(&str) -> bool| {
+        snapshot
+            .nodes
+            .iter()
+            .filter(|node| select(&node.label))
+            .map(PackedNode::unpack)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    };
+    let edges_where = |select: &dyn Fn(&str) -> bool| {
+        snapshot
+            .edges
+            .iter()
+            .filter(|edge| select(&edge.label))
+            .map(PackedEdge::unpack)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    };
+    let repos = nodes_where(&|label| label == "Repo")?;
     // Source guards were acquired before recovery. Root-dependent reads run
     // without a graph mutex and cannot recursively lock an exclusive owner.
-    let updates = collect_found_adrs(&snapshot.0, |repo| {
-        ensure_running_job(state, execution)?;
-        operation.root(repo)
-    })?;
-    let (mut patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
+    let candidates: std::collections::BTreeSet<&str> = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.label != "ADR")
+        .map(|node| node.id.as_str())
+        .collect();
+    let updates = collect_found_adrs_among(
+        &repos,
+        |id| candidates.contains(id),
+        |repo| {
+            ensure_running_job(state, execution)?;
+            operation.root(repo)
+        },
+    )?;
+    drop(candidates);
+    let (mut patch, linked) = found_adr_patch(
+        &nodes_where(&|label| label == "ADR")?,
+        &edges_where(&|label| label == "DECIDES")?,
+        updates,
+    );
     // The same pass reads each repository's documentation files as
-    // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1).
-    let published_repos = snapshot
-        .0
+    // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1). A
+    // reference may name any fact of the system, so the index covers the
+    // whole graph while documents are read only for the published
+    // repositories (#2004).
+    let published_repos = repos
         .iter()
         .filter(|node| {
-            node.label == "Repo"
-                && node
-                    .id
-                    .strip_prefix("repo:")
-                    .is_some_and(|repo| documented.contains(repo))
+            node.id
+                .strip_prefix("repo:")
+                .is_some_and(|repo| documented.contains(repo))
         })
         .cloned()
         .collect::<Vec<_>>();
-    let documents = collect_documents(&published_repos, |repo| {
+    let detailed = nodes_where(&spec::ReferenceIndex::reads_props)?;
+    let index = spec::ReferenceIndex::from_parts(
+        snapshot
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.label.as_str())),
+        &detailed,
+    );
+    let documents = collect_documents_indexed(&index, &published_repos, |repo| {
         ensure_running_job(state, execution)?;
         operation.root(repo)
     })?;
-    document_patch(&snapshot.0, &snapshot.1, documents, &mut patch);
+    drop(index);
+    document_patch(
+        &nodes_where(&|label| matches!(label, "Document" | "DocSection" | "Drift"))?,
+        &edges_where(&|label| {
+            matches!(
+                label,
+                "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
+            )
+        })?,
+        documents,
+        &mut patch,
+    );
     let mut restated = Vec::new();
     for (repo, entry) in recorded.iter_mut() {
         if let Some(&edges) = linked.get(repo)
@@ -3220,15 +3275,27 @@ fn restate_adr_edges(coverage: &mut ingest::coverage::RepoCoverage, edges: u64) 
     }
 }
 
+#[cfg(test)]
 fn collect_found_adrs<'a>(
     nodes: &[Node],
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::AdrFacts)>, String> {
-    let candidates = nodes
+    let candidates: std::collections::BTreeSet<&str> = nodes
         .iter()
         .filter(|node| node.label != "ADR")
-        .cloned()
-        .collect::<Vec<_>>();
+        .map(|node| node.id.as_str())
+        .collect();
+    collect_found_adrs_among(nodes, |id| candidates.contains(id), root_for)
+}
+
+/// Found ADRs of every `Repo` node in `nodes`. A governed target is matched
+/// by id alone, so `is_candidate` answers for the graph's non-ADR facts and
+/// no fact is decoded for it (#2003).
+fn collect_found_adrs_among<'a>(
+    nodes: &[Node],
+    is_candidate: impl Fn(&str) -> bool,
+    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
+) -> Result<Vec<(String, spec::AdrFacts)>, String> {
     nodes
         .iter()
         .filter(|node| node.label == "Repo")
@@ -3239,7 +3306,7 @@ fn collect_found_adrs<'a>(
                 .ok_or("invalid repository fact identity")?;
             let root = root_for(repo)?;
             let commit = node.props["commit"].as_str().unwrap_or("workdir");
-            let facts = spec::extract_found_adrs(root, repo, commit, &candidates)
+            let facts = spec::extract_found_adrs_among(root, repo, commit, &is_candidate)
                 .map_err(|e| e.to_string())?;
             Ok((repo.to_owned(), facts))
         })
@@ -3315,12 +3382,23 @@ fn document_coverage(
 
 /// Read the documentation files of every repository in the graph, and link
 /// each exact reference to the one fact of the system it names (AC-0678).
+#[cfg(test)]
 fn collect_documents<'a>(
     nodes: &[Node],
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
-    let index = spec::ReferenceIndex::new(nodes);
-    nodes
+    collect_documents_indexed(&spec::ReferenceIndex::new(nodes), nodes, root_for)
+}
+
+/// [`collect_documents`] for the `Repo` nodes in `repos`, resolving references
+/// against `index`, which covers the whole system whichever repositories are
+/// read (#2004).
+fn collect_documents_indexed<'a>(
+    index: &spec::ReferenceIndex<'_>,
+    repos: &[Node],
+    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
+) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
+    repos
         .iter()
         .filter(|node| node.label == "Repo")
         .map(|node| {
@@ -3332,13 +3410,13 @@ fn collect_documents<'a>(
             let root = root_for(repo)?;
             let mut facts =
                 spec::extract_documents(root, repo, commit).map_err(|e| e.to_string())?;
-            let mentions = spec::link_references(repo, commit, &facts.references, &index);
+            let mentions = spec::link_references(repo, commit, &facts.references, index);
             facts.edges.extend(mentions);
             // Whether a repo-relative path is in the tree: an existence
             // check only, and a link is never followed out of it.
             let exists = |path: &str| tree_has_path(root, path);
             let (drift, compared) =
-                spec::documentation_drift(repo, commit, &facts.references, &index, &exists);
+                spec::documentation_drift(repo, commit, &facts.references, index, &exists);
             facts.nodes.extend(drift);
             facts.edges.extend(compared);
             Ok((repo.to_owned(), facts))

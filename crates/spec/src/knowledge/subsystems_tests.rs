@@ -1,4 +1,4 @@
-// AC-0863: subsystem candidates group files by concept across directories.
+// AC-0870: subsystem candidates group files by concept across directories.
 use super::*;
 use core_graph::StoreRevision;
 use core_graph::overlay::OverlayStore;
@@ -158,7 +158,7 @@ fn sorted(paths: [&str; 4]) -> Vec<String> {
     paths
 }
 
-// AC-0863: one group per concept, whatever directory its files are in, named
+// AC-0870: one group per concept, whatever directory its files are in, named
 // by the term its files share.
 #[test]
 fn files_of_one_concept_are_one_subsystem_across_directories() {
@@ -184,7 +184,7 @@ fn files_of_one_concept_are_one_subsystem_across_directories() {
     );
 }
 
-// AC-0863: every group and membership is a weak semantic candidate naming
+// AC-0870: every group and membership is a weak semantic candidate naming
 // its rule, and each member file has one MEMBER_OF edge citing that file.
 #[test]
 fn groups_are_weak_candidates_with_one_membership_per_file() {
@@ -225,7 +225,7 @@ fn groups_are_weak_candidates_with_one_membership_per_file() {
     assert_eq!(members, 12);
 }
 
-// AC-0863: the overlay admits the candidates as published (R-INT-1, R-INT-2).
+// AC-0870: the overlay admits the candidates as published (R-INT-1, R-INT-2).
 #[test]
 fn the_overlay_admits_the_candidates() {
     let base = layered().snapshot();
@@ -245,7 +245,7 @@ fn the_overlay_admits_the_candidates() {
         .unwrap();
 }
 
-// AC-0863: the same base gives the same candidates in any input order, and
+// AC-0870: the same base gives the same candidates in any input order, and
 // the base is not changed.
 #[test]
 fn candidates_do_not_depend_on_input_order() {
@@ -259,7 +259,7 @@ fn candidates_do_not_depend_on_input_order() {
     assert_eq!(derive_subsystems(&reversed), report);
 }
 
-// AC-0863: tests, vendored code and versioned third-party trees are not units.
+// AC-0870: tests, vendored code and versioned third-party trees are not units.
 #[test]
 fn test_and_vendored_files_are_not_grouped() {
     let mut fixture = layered();
@@ -276,7 +276,7 @@ fn test_and_vendored_files_are_not_grouped() {
     assert!(!excluded("app/testing_tools/latest.py") && !excluded("app/contest/a-b.py"));
 }
 
-// AC-0863: a file most other files call or import is set aside as shared
+// AC-0870: a file most other files call or import is set aside as shared
 // instead of joining, and gluing, the concept groups.
 #[test]
 fn a_file_used_from_everywhere_is_shared() {
@@ -301,7 +301,7 @@ fn a_file_used_from_everywhere_is_shared() {
     );
 }
 
-// AC-0863: a base past the file bound derives nothing and says why; a base
+// AC-0870: a base past the file bound derives nothing and says why; a base
 // with nothing to separate derives nothing.
 #[test]
 fn a_base_past_the_file_bound_is_a_named_omission() {
@@ -329,7 +329,7 @@ fn a_base_past_the_file_bound_is_a_named_omission() {
     );
 }
 
-// AC-0863: a plural folds onto its singular only when the corpus has both.
+// AC-0870: a plural folds onto its singular only when the corpus has both.
 #[test]
 fn plurals_fold_onto_a_singular_the_corpus_uses() {
     let vocabulary: BTreeSet<String> = ["domain", "alias", "policy", "box"]
@@ -346,7 +346,7 @@ fn plurals_fold_onto_a_singular_the_corpus_uses() {
     );
 }
 
-// AC-0863: a local source's registry key is random per registration; the
+// AC-0870: a local source's registry key is random per registration; the
 // groups follow file paths, not that key.
 #[test]
 fn groups_do_not_depend_on_the_registry_key() {
