@@ -1171,6 +1171,24 @@ fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
         _ => None,
     };
     let predicate = predicate_verb(method.trim_start_matches('_'));
+    // A predicate answering with a condition (#2029): `return
+    // self.delete_on is None` in `User.is_active` reads "A user is active
+    // when the user's delete on is not set".
+    if answer.is_none()
+        && let Some((verb, rest)) = predicate
+        && let Some(test) = parse(&value).and_then(|e| render(&e, false, &cx))
+    {
+        let who = match class {
+            Some(class) => format!("a {}", words(class)),
+            None => "the caller".to_owned(),
+        };
+        let s = if conditions.is_empty() {
+            format!("{who} {verb} {} when {test}.", words(rest))
+        } else {
+            format!("{who} {verb} {} when {when}, and {test}.", words(rest))
+        };
+        return Some(format!("{}{}", s[..1].to_uppercase(), &s[1..]));
+    }
     let (Some(answer), Some((verb, rest))) = (answer, predicate) else {
         // A value the method gives: `return config.MAX_OLD` in
         // `User.max_alias` reads "the user's max alias is the configured

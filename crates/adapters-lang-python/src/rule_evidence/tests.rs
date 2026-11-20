@@ -457,3 +457,52 @@ fn parameter_bindings_follow_python_scopes() {
         assert!(!binds(&source), "{rebinding}");
     }
 }
+
+#[test]
+fn a_predicates_unguarded_answer_is_a_rule() {
+    // AC-0915 (T-0915): `return <expr>` with no branch is a rule only in a
+    // predicate (`is_`, `has_`, `can_`, `should_`, `must_`), and a constant
+    // answer only after an earlier exit (its "otherwise").
+    let out = recover(
+        r#"
+class User:
+    def is_active(self):
+        return self.delete_on is None
+
+    def name(self):
+        return self.first
+
+def has_quota(user):
+    return user.count < 5
+
+def can_always(user):
+    return True
+
+def must_pay(user):
+    if user.premium:
+        return False
+    return True
+"#,
+    );
+    let found: Vec<(String, String)> = rules(&out)
+        .into_iter()
+        .map(|(_, r)| {
+            (
+                r.owner_id.rsplit('#').next().unwrap().to_owned(),
+                value(&r).1,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "User.is_active".to_owned(),
+                "self.delete_on is None".to_owned()
+            ),
+            ("has_quota".to_owned(), "user.count < 5".to_owned()),
+            ("must_pay".to_owned(), "False".to_owned()),
+            ("must_pay".to_owned(), "True".to_owned()),
+        ]
+    );
+}
