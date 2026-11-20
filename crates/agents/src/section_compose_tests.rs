@@ -1,0 +1,130 @@
+//! AC-0862 (T-0862): the composer's request and reply.
+use super::*;
+
+fn address() -> SectionAddress {
+    SectionAddress {
+        catalogue_version: "1".into(),
+        document: "D1".into(),
+        section: "1.5".into(),
+        scope: "system".into(),
+    }
+}
+
+fn id(n: usize) -> String {
+    format!("F-{n:016x}")
+}
+
+fn fact(n: usize) -> ComposeFact {
+    ComposeFact {
+        citation_id: id(n),
+        label: "BusinessRule".into(),
+        name: Some(format!("rule {n}")),
+        tier: "Deterministic".into(),
+        confidence: "Verified".into(),
+    }
+}
+
+#[test]
+fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
+    let address = address();
+    let facts = vec![fact(1), fact(2)];
+    let groups = vec![ComposeGroup {
+        citation_id: id(9),
+        label: "Capability".into(),
+        name: "Orders".into(),
+        rests_on: vec![id(1)],
+    }];
+    let action = action(
+        &ComposeInput {
+            address: &address,
+            title: "Business rules",
+            section: "## 1.5 Business rules (P+A)\n\nrows\n",
+            facts: &facts,
+            groups: &groups,
+        },
+        "compose:1".into(),
+    );
+    let prompt = &action.payload.prompt;
+    assert!(prompt.contains("## 1.5 Business rules (P+A)\n\nrows\n</section>"));
+    assert!(prompt.contains(&format!(
+        "{} | BusinessRule | rule 1 | Deterministic",
+        id(1)
+    )));
+    assert!(prompt.contains(&format!(
+        "Capability {} \"Orders\" rests on: {}",
+        id(9),
+        id(1)
+    )));
+    assert!(action.payload.spans.is_empty());
+    let schema: serde_json::Value =
+        serde_json::from_str(action.payload.response_schema.as_deref().unwrap()).unwrap();
+    let ids =
+        &schema["properties"]["claims"]["items"]["properties"]["citation_ids"]["items"]["enum"];
+    assert_eq!(ids, &serde_json::json!([id(1), id(2)]));
+    // Hosted structured output can carry it.
+    let text = action.payload.response_schema.unwrap();
+    assert!(llm::bounded::anthropic_wire_schema(&text).is_some());
+    assert!(llm::bounded::openai_cloud_wire_schema(&text).is_some());
+    // The definition is stable and independent of the citable ids.
+    assert_eq!(definition_fingerprint(), definition_fingerprint());
+}
+
+fn reply(claims: serde_json::Value) -> String {
+    serde_json::json!({ "claims": claims }).to_string()
+}
+
+#[test]
+fn a_reply_decodes_to_a_finish_and_out_of_bound_claims_are_left_out() {
+    let citable: BTreeSet<String> = (1..=20).map(id).collect();
+    let text = reply(serde_json::json!([
+        {"statement": "Orders over the limit are refused with 400.",
+         "claim_kind": "implemented_behavior", "citation_ids": [id(1), id(2), id(1)]},
+        {"statement": "Cites an id that is not citable.",
+         "claim_kind": "implemented_behavior", "citation_ids": [id(99)]},
+        {"statement": "Cites too many.", "claim_kind": "inferred_interpretation",
+         "citation_ids": (1..=17).map(id).collect::<Vec<_>>()},
+        {"statement": "Cites nothing.", "claim_kind": "documented_intent", "citation_ids": []},
+        {"statement": "A design.", "claim_kind": "proposed_design", "citation_ids": [id(3)]},
+        {"statement": "Tests name the checkout as intended.",
+         "claim_kind": "documented_intent", "citation_ids": [id(4)]},
+    ]));
+    let composed = decode(&address(), &text, &citable).unwrap();
+    assert_eq!(composed.left_out, 4);
+    assert_eq!(composed.finish.address, address());
+    assert_eq!(
+        composed.finish.claims,
+        vec![
+            Claim {
+                statement: "Orders over the limit are refused with 400.".into(),
+                kind: ClaimKind::Implemented,
+                citations: vec![id(1), id(2)],
+            },
+            Claim {
+                statement: "Tests name the checkout as intended.".into(),
+                kind: ClaimKind::DocumentedIntent,
+                citations: vec![id(4)],
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_reply_that_is_not_the_schema_or_keeps_no_claim_is_refused() {
+    let citable: BTreeSet<String> = [id(1)].into();
+    for text in [
+        "Here is the section: {}".to_owned(),
+        r#"{"claims": [], "extra": 1}"#.to_owned(),
+    ] {
+        assert_eq!(
+            decode(&address(), &text, &citable),
+            Err(ComposeRefusal::NotTheSchema)
+        );
+    }
+    let none = reply(serde_json::json!([
+        {"statement": "x", "claim_kind": "implemented_behavior", "citation_ids": [id(2)]}
+    ]));
+    assert_eq!(
+        decode(&address(), &none, &citable),
+        Err(ComposeRefusal::NoClaims)
+    );
+}
