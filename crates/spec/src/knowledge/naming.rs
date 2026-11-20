@@ -103,7 +103,7 @@ const SPELLED: &[(&str, &str)] = &[
 
 /// Lowercase words of an identifier: camelCase, PascalCase with acronyms,
 /// snake_case, kebab-case, dotted and path names.
-fn words(name: &str) -> Vec<String> {
+pub(super) fn words(name: &str) -> Vec<String> {
     let chars: Vec<char> = name.chars().collect();
     let mut out = Vec::new();
     let mut word = String::new();
@@ -148,7 +148,7 @@ fn plural(word: &str) -> String {
     format!("{word}s")
 }
 
-fn spelled(word: &str) -> &str {
+pub(super) fn spelled(word: &str) -> &str {
     SPELLED
         .iter()
         .find(|(short, _)| *short == word)
