@@ -6,16 +6,16 @@ pub use accounting::{
     COMPILE_WORKSPACE_MODEL, CapabilityCompileWorkspaceBound, CompileWorkspaceBound,
     logical_capability_compile_bound, logical_compile_bound,
 };
-mod briefing;
-pub use briefing::{
-    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
-    area_neighbours,
-};
 mod capabilities;
 mod catalogue;
 pub use catalogue::{
     CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
     catalogue_sections,
+};
+mod briefing;
+pub use briefing::{
+    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
+    area_neighbours,
 };
 mod configuration;
 pub use configuration::CONFIG_READ_COVERAGE;

@@ -105,8 +105,10 @@ fn an_area_the_specification_lists_nothing_under_says_so() {
 
 #[test]
 fn a_briefing_over_its_bound_leaves_out_whole_subsections_and_counts_them() {
-    // Room for the short rules block and the first capability only.
-    let bounded = area_briefing(DOCUMENT, "Alias", 12, &AreaNeighbours::default(), 150);
+    // Room for the short rules block and the first capability only. The
+    // blocks' own `### Alias` headings do not count: with them the rules
+    // block would not fit its half.
+    let bounded = area_briefing(DOCUMENT, "Alias", 12, &AreaNeighbours::default(), 120);
     assert_eq!(bounded.sections, ["1.3", "1.5"]);
     assert_eq!(bounded.left_out, 1);
     assert!(

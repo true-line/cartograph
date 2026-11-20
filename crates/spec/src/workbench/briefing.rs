@@ -131,11 +131,17 @@ fn area_block<'a>(section: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// `block` within `budget` bytes, and how many capability subsections that
-/// leaves out. A block over budget keeps its heading and its leading
-/// subsections that fit.
+/// The length of a block's own heading line, which is outside the bound.
+fn heading_len(block: &str) -> usize {
+    block.find('\n').map_or(block.len(), |at| at + 1)
+}
+
+/// `block` with at most `budget` bytes after its heading, and how many
+/// capability subsections that leaves out. A block over budget keeps its
+/// heading and its leading subsections that fit.
 fn fitted(block: &str, budget: usize) -> (&str, usize) {
-    if block.len() <= budget {
+    let head = heading_len(block);
+    if block.len() - head <= budget {
         return (block, 0);
     }
     let mut starts: Vec<usize> = block
@@ -144,15 +150,12 @@ fn fitted(block: &str, budget: usize) -> (&str, usize) {
         .collect();
     if starts.is_empty() {
         // One undivided block: keep the heading line and count it as one.
-        return (
-            &block[..block.find('\n').map_or(block.len(), |at| at + 1)],
-            1,
-        );
+        return (&block[..head], 1);
     }
     starts.push(block.len());
     let kept = starts
         .iter()
-        .rposition(|end| *end <= budget)
+        .rposition(|end| end.saturating_sub(head) <= budget)
         .unwrap_or_default();
     (&block[..starts[kept]], starts.len() - 1 - kept)
 }
@@ -183,8 +186,9 @@ pub fn area_briefing(
     for (done, at) in order.iter().enumerate() {
         let share = remaining / (blocks.len() - done);
         kept[*at] = fitted(blocks[*at].2, share);
-        // A block's own heading is kept even when it has no share left.
-        remaining = remaining.saturating_sub(kept[*at].0.len());
+        // A block's own heading is outside the bound.
+        let used = kept[*at].0.len() - heading_len(kept[*at].0);
+        remaining = remaining.saturating_sub(used);
     }
     let list = |names: &[String]| {
         names
