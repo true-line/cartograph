@@ -131,6 +131,7 @@ fn render_with((nodes, edges): (Vec<Node>, Vec<Edge>)) -> (String, usize, usize)
             ],
         }],
         filtered: 0,
+        areas: BTreeMap::new(),
     };
     let budget = Budget::new(None).unwrap();
     let mut assertions = Assertions::new(&budget);

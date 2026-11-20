@@ -373,12 +373,8 @@ pub(super) fn rules_per_capability(
     if index.governs.is_empty() {
         return Ok(0);
     }
-    let capabilities = || {
-        knowledge
-            .included
-            .iter()
-            .filter(|s| s.node.label == "Capability")
-    };
+    let listed = knowledge.capabilities();
+    let capabilities = || listed.iter().map(|(_, story)| *story);
     let mut reach_count: BTreeMap<&str, usize> = BTreeMap::new();
     for story in capabilities() {
         for id in index.reached(story) {
@@ -411,14 +407,16 @@ pub(super) fn rules_per_capability(
          once under shared rejections.\n"
     )?;
     let mut printed = 0;
-    for story in capabilities() {
+    let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
+    for &(area, story) in &listed {
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
         if index.each(reached.iter().copied(), |_| Ok(()))? == 0 {
             continue;
         }
+        let marks = headings.before(area, out)?;
         writeln!(
             out,
-            "### {}\n",
+            "{marks} {}\n",
             Literal(crate::workbench::render::NodeName(story.node))
         )?;
         out.push_str(HEADER)?;
@@ -560,6 +558,7 @@ function checkQuantity(qty: number) {
                 })
                 .collect(),
             filtered: 0,
+            areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);
@@ -681,6 +680,7 @@ function checkQuantity(qty: number) {
                 support: vec![(&cite, Support::Edge(&handles))],
             }],
             filtered: 0,
+            areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);

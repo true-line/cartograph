@@ -14,6 +14,7 @@
 
 use crate::workbench::capabilities::{Stories, Story, Support};
 use crate::workbench::citation_id;
+use crate::workbench::document::AreaHeadings;
 use crate::workbench::render::{Assertions, Literal, NodeName, RenderLimit, Text};
 use core_graph::{Edge, FactKey, Node};
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,14 +170,12 @@ pub(super) fn acceptance_per_capability(
     if index.requests.is_empty() {
         return Ok((0, 0));
     }
-    let capabilities = || {
-        knowledge
-            .included
-            .iter()
-            .filter(|s| s.node.label == "Capability")
-    };
+    let capabilities = knowledge.capabilities();
     // Counted first so the lead states the total before any row.
-    let total: usize = capabilities().map(|s| index.scenarios(s).len()).sum();
+    let total: usize = capabilities
+        .iter()
+        .map(|(_, s)| index.scenarios(s).len())
+        .sum();
     if total == 0 {
         return Ok((0, 0));
     }
@@ -190,12 +189,14 @@ pub(super) fn acceptance_per_capability(
          assertions are not restated here.\n"
     )?;
     let (mut printed, mut cited) = (0, 0);
-    for story in capabilities() {
+    let mut headings = AreaHeadings::new(knowledge);
+    for (area, story) in capabilities {
         let scenarios = index.scenarios(story);
         if scenarios.is_empty() {
             continue;
         }
-        writeln!(out, "### {}\n", Literal(NodeName(story.node)))?;
+        let marks = headings.before(area, out)?;
+        writeln!(out, "{marks} {}\n", Literal(NodeName(story.node)))?;
         out.push_str(HEADER)?;
         for (test, references) in &scenarios {
             cited += write_row(

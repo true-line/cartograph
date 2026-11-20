@@ -44,7 +44,7 @@
 //! nodes and edges finds the cited facts; with no such draft nothing is
 //! indexed or walked.
 
-use super::capabilities::{Stories, Story, Support};
+use super::capabilities::{NO_AREA, Stories, Story, Support, area_name};
 use super::catalogue::{
     CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
     catalogue_sections,
@@ -614,6 +614,42 @@ impl Drafted<'_, '_> {
     }
 }
 
+/// The headings of a frame arranged per capability. With areas (#260) each
+/// area is one `###` heading over its Capabilities' `####` headings;
+/// without, every Capability keeps its own `###` heading.
+pub(super) struct AreaHeadings<'a> {
+    arranged: bool,
+    last: Option<Option<&'a str>>,
+}
+impl<'a> AreaHeadings<'a> {
+    pub(super) fn new(knowledge: &Stories<'a>) -> Self {
+        Self {
+            arranged: !knowledge.areas.is_empty(),
+            last: None,
+        }
+    }
+    /// Write the area heading when `area` differs from the previous
+    /// Capability's, and return the marks of the Capability's own heading.
+    pub(super) fn before(
+        &mut self,
+        area: Option<&'a Node>,
+        out: &mut Text,
+    ) -> Result<&'static str, RenderLimit> {
+        if !self.arranged {
+            return Ok("###");
+        }
+        let id = area.map(|node| node.id.as_str());
+        if self.last != Some(id) {
+            self.last = Some(id);
+            match area {
+                Some(node) => writeln!(out, "### {}\n", Literal(area_name(node)))?,
+                None => writeln!(out, "### {NO_AREA}\n")?,
+            }
+        }
+        Ok("####")
+    }
+}
+
 /// The Endpoints a derived story cites, in citation order.
 fn cited_endpoints<'s, 'a>(story: &'s Story<'a>) -> impl Iterator<Item = &'a Node> + 's {
     story.support.iter().filter_map(|(_, fact)| match fact {
@@ -637,6 +673,8 @@ fn derived_frame(
         .iter()
         .filter(|s| s.node.label == label)
         .collect();
+    // Area facts cited beside the stories (#260).
+    let mut extra = 0usize;
     for story in &stories {
         let id = citation_id(&FactKey::Node {
             id: story.node.id.clone(),
@@ -704,13 +742,62 @@ fn derived_frame(
              `user_stories.md` states them as stories.\n",
             stories.len()
         )?;
-        out.push_str("| Capability | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
-        for story in &stories {
+        let listed = knowledge.capabilities();
+        let arranged = !knowledge.areas.is_empty();
+        if arranged {
+            // Each area once, with its citation, before the rows it heads.
+            let mut areas: Vec<(&Node, usize)> = Vec::new();
+            for (area, _) in &listed {
+                if let Some(area) = area {
+                    match areas.last_mut() {
+                        Some((last, count)) if last.id == area.id => *count += 1,
+                        _ => areas.push((area, 1)),
+                    }
+                }
+            }
+            writeln!(
+                out,
+                "Capability areas: {}. Each is a Subsystem candidate: source files grouped \
+                 by the concept they are named for and what they use, across directories \
+                 (Semantic / InferredWeak, derived by rule from the files it cites). A \
+                 capability is listed under the area that holds most of its handler files. \
+                 Capabilities with no area: {}.\n",
+                areas.len(),
+                listed.iter().filter(|(area, _)| area.is_none()).count()
+            )?;
+            out.push_str("| Area | Capabilities | Files | Citation |\n|---|---|---|---|\n")?;
+            for (area, count) in &areas {
+                let id = citation_id(&FactKey::Node {
+                    id: area.id.clone(),
+                });
+                writeln!(
+                    out,
+                    "| {} | {count} | {} | {id} |",
+                    Literal(area_name(area)),
+                    area.props["files"].as_u64().unwrap_or_default(),
+                )?;
+                if asserted.insert(id) {
+                    assertions.node(area, None)?;
+                    extra += 1;
+                }
+            }
+            out.push_str("\n| Area | Capability | Operations | Examples | Citation |\n|---|---|---|---|---|\n")?;
+        } else {
+            out.push_str("| Capability | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
+        }
+        for (area, story) in &listed {
             let operations: Vec<String> = cited_endpoints(story)
                 .map(|n| NodeName(n).to_string())
                 .collect();
             let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
             let more = operations.len() - shown.len();
+            if arranged {
+                write!(
+                    out,
+                    "| {} ",
+                    Literal(area.map_or(NO_AREA, |node| area_name(node)))
+                )?;
+            }
             writeln!(
                 out,
                 "| {} | {} | {}{} | {} |",
@@ -728,7 +815,7 @@ fn derived_frame(
             )?;
         }
     }
-    Ok(stories.len())
+    Ok(stories.len() + extra)
 }
 
 pub(super) fn d1(
@@ -951,3 +1038,7 @@ mod tests;
 #[cfg(test)]
 #[path = "document_draft_tests.rs"]
 mod draft_tests;
+
+#[cfg(test)]
+#[path = "document_area_tests.rs"]
+mod area_tests;
