@@ -67,6 +67,7 @@ pub(super) fn node_starts(rel: &str, text: &str) -> Vec<Start> {
             },
             port: None,
             extra: Vec::new(),
+            extra_spans: Vec::new(),
             target: file,
         }];
     }
@@ -84,6 +85,7 @@ pub(super) fn node_starts(rel: &str, text: &str) -> Vec<Start> {
             },
             port: None,
             extra: Vec::new(),
+            extra_spans: Vec::new(),
             target: file.clone(),
         })
         .collect()

@@ -83,7 +83,9 @@ struct Start {
     /// Default listening port, when the start declares one.
     port: Option<u64>,
     /// Further facts the declaration states, set on the entry point as is.
-    extra: Vec<(&'static str, String)>,
+    extra: Vec<(&'static str, serde_json::Value)>,
+    /// Further spans that show what `extra` states.
+    extra_spans: Vec<(String, (u64, u64))>,
     target: Target,
 }
 
@@ -157,7 +159,14 @@ pub fn extract_dir(
             starts.extend(procfile_starts(rel, &text, &files));
         } else if wrangler::config(&file.name) && !rel.contains("node_modules/") {
             let Some(text) = read(rel) else { continue };
-            starts.extend(wrangler::worker_start(rel, &file.name, &text, &files));
+            if let Some(mut start) = wrangler::worker_start(rel, &file.name, &text, &files) {
+                if let Target::File { rel: module, .. } = start.target.clone()
+                    && let Some(code) = read(&module)
+                {
+                    wrangler::webhook_sender(&mut start, &module, &code);
+                }
+                starts.push(start);
+            }
         } else if file.name == "pyproject.toml" {
             let Some(text) = read(rel) else { continue };
             starts.extend(console_scripts(rel, &text, &files, id, symbols));
@@ -259,6 +268,7 @@ fn python_start(
         kind,
         port,
         extra: Vec::new(),
+        extra_spans: Vec::new(),
         target: Target::File {
             rel: rel.to_string(),
             function: None,
@@ -718,6 +728,7 @@ fn command_start(
         },
         port: None,
         extra: Vec::new(),
+        extra_spans: Vec::new(),
         target,
     }
 }
@@ -1009,6 +1020,7 @@ fn declared(
         },
         port: None,
         extra: Vec::new(),
+        extra_spans: Vec::new(),
         target,
     }
 }
@@ -1097,7 +1109,7 @@ fn emit(
         };
     let entry_id = format!("entry:{}@{}#{}", id.repo, start.declared_in, start.key);
     let mut spans = vec![evidence(&start.declared_in, start.span)];
-    if let Some((path, span)) = &start.kind.evidence {
+    for (path, span) in start.kind.evidence.iter().chain(&start.extra_spans) {
         let extra = evidence(path, *span);
         if !spans.contains(&extra) {
             spans.push(extra);
@@ -1117,7 +1129,7 @@ fn emit(
         props["port"] = port.into();
     }
     for (key, value) in &start.extra {
-        props[*key] = value.clone().into();
+        props[*key] = value.clone();
     }
     if let Some((path, _)) = &start.kind.evidence {
         props["kind_evidence"] = path.clone().into();

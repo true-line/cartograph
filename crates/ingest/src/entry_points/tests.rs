@@ -474,11 +474,14 @@ fn a_wrangler_config_enters_its_worker_module() {
   "main": "src/index.ts", // the module Cloudflare runs
   /* routes */
   "routes": [{ "pattern": "events.example.com", "custom_domain": true }],
-  "vars": { "URL": "https://example.com/x" },
+  "vars": { "URL": "https://example.com/x", "MODE": "strict" },
 }"#;
     let out = extract(&[
         ("edge/wrangler.jsonc", JSONC),
-        ("edge/src/index.ts", "export default {};\n"),
+        (
+            "edge/src/index.ts",
+            "const sig = req.headers.get(\"X-Hub-Signature-256\");\n",
+        ),
         (
             "other/wrangler.toml",
             "name = \"cron\"\nmain = \"missing.ts\"\n",
@@ -489,6 +492,19 @@ fn a_wrangler_config_enters_its_worker_module() {
     assert_eq!(worker.props["how"], "Cloudflare Worker");
     assert_eq!(worker.props["worker"], "events");
     assert_eq!(worker.props["route"], "events.example.com");
+    assert_eq!(
+        worker.props["configured_urls"],
+        serde_json::json!({"URL": "https://example.com/x"})
+    );
+    // The signature header names the webhook sender, cited at its span.
+    assert_eq!(worker.props["webhook_from"], "GitHub");
+    let spans = worker.props["prov"]["evidence"].as_array().unwrap();
+    assert!(
+        spans
+            .iter()
+            .any(|s| s["path"] == "edge/src/index.ts" && s["byte_start"] == 29),
+        "{spans:?}"
+    );
     let edge = entry_edge(&out, "edge/wrangler.jsonc", "worker");
     assert_eq!(edge.dst, format!("file:{REPO}@edge/src/index.ts"));
     assert_eq!(confidence(&edge.props), "Confirmed");

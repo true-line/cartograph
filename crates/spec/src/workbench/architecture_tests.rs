@@ -594,7 +594,11 @@ fn an_edge_worker_is_a_container_named_for_the_worker() {
         "EntryPoint",
         json!({"kind": "edge-worker", "name": "Edge worker (edge/wrangler.jsonc)",
                "how": "Cloudflare Worker", "file": "edge/wrangler.jsonc",
-               "worker": "agent-events", "route": "events.example.com"}),
+               "worker": "agent-events", "route": "events.example.com",
+               "webhook_from": "GitHub",
+               "configured_urls": {"SERVER_URL": "https://api.example.com",
+                                   "LIST_URL": "https://api.example.com/api/aliases?x=1",
+                                   "OTHER": "https://elsewhere.example.com/nothing"}}),
         (TOOLS, "edge/wrangler.jsonc"),
     );
     let module = format!("file:{TOOLS}@edge/src/index.ts");
@@ -622,6 +626,35 @@ fn an_edge_worker_is_a_container_named_for_the_worker() {
         l2.contains("Runs `edge/src/index.ts` on Cloudflare's edge; serves `events.example.com`"),
         "{l2}"
     );
+    // GitHub sends it webhooks; the configured URL naming the web app's
+    // endpoint is an inferred call, the bare origin and the unknown path
+    // draw nothing.
+    assert!(l2.contains("<b>GitHub</b>"), "{l2}");
+    assert!(
+        md.contains("| GitHub | Sends webhooks to | Agent events | HTTPS | Confirmed |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| Agent events | Calls | Web application | HTTPS | InferredWeak |"),
+        "{md}"
+    );
+    assert_eq!(md.matches("| Agent events | Calls |").count(), 1, "{md}");
+    let (strict, _) = render(&f, ExportMode::VerifiedOnly, None);
+    assert!(!strict.contains("| Agent events | Calls |"), "{strict}");
+}
+
+/// AC-0948: a configured URL matches an endpoint route by its segments.
+#[test]
+fn a_configured_url_matches_an_endpoint_route() {
+    assert_eq!(url_path("https://a.example/x/y?q=1"), Some("/x/y"));
+    assert_eq!(url_path("https://a.example"), None);
+    assert_eq!(url_path("https://a.example/"), None);
+    assert!(path_matches("/api/hooks/{path...}", "/api/hooks/batch"));
+    assert!(path_matches("/api/hooks/{path...}", "/api/hooks/a/b"));
+    assert!(!path_matches("/api/hooks/{path...}", "/api/hooks"));
+    assert!(path_matches("/users/:id", "/users/7"));
+    assert!(!path_matches("/users/:id", "/users/7/x"));
+    assert!(path_matches("/.well-known/k.json", "/.well-known/k.json"));
 }
 
 /// AC-0947: a store known only by its URL variable, read in one place with
