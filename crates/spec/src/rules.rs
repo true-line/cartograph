@@ -237,6 +237,60 @@ const PREAMBLE: &str = "# Source rule evidence\n\nThese are guarded local exit o
         A complete execution predicate and the consumer effect are not established. \
         Source order is lexical, not runtime order. Coverage is limited to the facts in this export.\n\n";
 
+/// Languages whose adapter has a rule-evidence producer (#2009).
+const RULE_LANGUAGES: &[&str] = &["python", "typescript", "javascript", "tsx", "jsx"];
+
+/// Source files of each language in `nodes` that no rule-evidence producer
+/// reads, by language: `File` nodes whose `language` has none (#2009).
+pub fn unread_rule_languages<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
+) -> BTreeMap<&'a str, usize> {
+    let mut counts = BTreeMap::new();
+    for node in nodes {
+        if node.label != "File" {
+            continue;
+        }
+        if let Some(language) = node.props["language"].as_str()
+            && !RULE_LANGUAGES.contains(&language)
+        {
+            *counts.entry(language).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// The sentence that states which source no rule evidence was read from,
+/// or `None` when every language in the export has a producer (#2009).
+pub fn unread_rule_sentence(unread: &BTreeMap<&str, usize>) -> Option<String> {
+    if unread.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = unread
+        .iter()
+        .map(|(language, files)| {
+            let name = match *language {
+                "go" => "Go".to_owned(),
+                "rust" => "Rust".to_owned(),
+                "java" => "Java".to_owned(),
+                "kotlin" => "Kotlin".to_owned(),
+                other => other.to_owned(),
+            };
+            let noun = if *files == 1 { "file" } else { "files" };
+            format!("{files} {name} {noun}")
+        })
+        .collect();
+    let listed = match named.as_slice() {
+        [one] => one.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+        [] => unreachable!(),
+    };
+    Some(format!(
+        "Rule evidence is recovered from Python and TypeScript/JavaScript source only. \
+         It is not extracted from the {listed} in this export, so the guards in them are \
+         not listed here and these rules do not cover them.\n\n"
+    ))
+}
+
 /// Structured index of every observation (`rule-evidence.json`).
 #[derive(Serialize)]
 struct RuleEvidenceIndex<'a> {
@@ -884,6 +938,9 @@ fn render_markdown(
     #[cfg(test)]
     MARKDOWN_RENDERS.with(|counter| counter.set(counter.get() + 1));
     output.write_str(PREAMBLE)?;
+    if let Some(unread) = unread_rule_sentence(&unread_rule_languages(visible.values().copied())) {
+        output.write_str(&unread)?;
+    }
     if observations.is_empty() {
         output.write_str("No source-rule observations are available in this export.\n")?;
     }
@@ -1360,6 +1417,72 @@ mod tests {
                 ExportMode::VerifiedOnly,
                 &BTreeSet::new()
             )
+        );
+    }
+
+    #[test]
+    fn rule_inventory_states_the_source_it_reads_no_rules_from() {
+        // AC-0922 (#2009): Go files in the export are named as source no
+        // rule evidence was read from, so the rules are not taken to cover
+        // them; Python files are not.
+        let mut nodes = base();
+        nodes.push(rule_node(
+            "rule:guard",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        ));
+        for (id, language) in [
+            ("file:a.go", "go"),
+            ("file:b.go", "go"),
+            ("file:c.py", "python"),
+        ] {
+            let mut file = node(id, "File", Tier::Deterministic, ConfidenceTier::Confirmed);
+            file.props["language"] = language.into();
+            nodes.push(file);
+        }
+        let bundle = compile_spec(&nodes, &[], &[], ExportMode::BestEffort, &BTreeSet::new());
+        let output = artifact(&bundle);
+        assert!(
+            output.content.contains(
+                "It is not extracted from the 2 Go files in this export, so the guards in \
+                 them are not listed here"
+            ),
+            "{}",
+            output.content
+        );
+        assert!(!output.content.contains("python"), "{}", output.content);
+        // D1 §1.5 states it too, whether or not rules are arranged per
+        // capability.
+        let d1 = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.file_name == "product-specification.md")
+            .expect("D1 is in the bundle");
+        let rules_section = d1
+            .content
+            .split("## 1.5 ")
+            .nth(1)
+            .and_then(|rest| rest.split("## 1.6 ").next())
+            .expect("D1 has §1.5");
+        assert!(
+            rules_section.contains("not extracted from the 2 Go files"),
+            "{rules_section}"
+        );
+        let only_python: Vec<Node> = nodes
+            .into_iter()
+            .filter(|n| n.props["language"] != "go")
+            .collect();
+        let bundle = compile_spec(
+            &only_python,
+            &[],
+            &[],
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+        );
+        assert!(
+            !artifact(&bundle)
+                .content
+                .contains("Rule evidence is recovered from")
         );
     }
 

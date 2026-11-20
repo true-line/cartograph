@@ -3144,7 +3144,10 @@ fn extract_source_recording(
     };
     client_routes::extract(&cx, root, &route_proofs, &mut out.client_routes);
     client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
-    rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
+    // Guards in test code are not business rules (#2009).
+    if !target_tests::in_test_tree(cx.path) {
+        rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
+    }
     if let Some(evidence) = service_worker {
         service_worker::mark(
             &BTreeMap::from([(file_id(id.repo, path), vec![evidence])]),

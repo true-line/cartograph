@@ -105,6 +105,14 @@ pub(crate) fn is_test_file(path: &str) -> bool {
     name.ends_with(".py") && (name.starts_with("test_") || name.ends_with("_test.py"))
 }
 
+/// Whether `path` is test code: a pytest module, a `conftest.py`, or a
+/// file under a `tests`/`test` directory.
+pub(crate) fn in_test_tree(path: &str) -> bool {
+    let mut dirs: Vec<&str> = path.split(['/', '\\']).collect();
+    dirs.pop();
+    is_test_file(path) || is_conftest(path) || dirs.iter().any(|d| matches!(*d, "tests" | "test"))
+}
+
 pub(crate) fn is_conftest(path: &str) -> bool {
     base_name(path) == "conftest.py"
 }

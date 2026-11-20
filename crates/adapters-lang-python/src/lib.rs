@@ -2189,7 +2189,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         }
     }
 
-    rule_evidence::extract(&cx, root, &locals, &mut out);
+    // Guards in test code are not business rules (#2009).
+    if !target_tests::in_test_tree(cx.path) {
+        rule_evidence::extract(&cx, root, &locals, &mut out);
+    }
 
     let call_query =
         crate::queries::query("(call function: [(identifier) (attribute)] @callee) @call");

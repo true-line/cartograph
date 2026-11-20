@@ -555,3 +555,28 @@ function classFactory(ok: boolean) {
         }
     }
 }
+
+#[test]
+fn test_code_yields_no_business_rules() {
+    // AC-0922 (#2009): guards in test code are not business rules.
+    let source = "export function check(ready: boolean) { if (!ready) throw new Error('not ready'); return 1; }\n";
+    let at = |path: &str| {
+        extract_source(
+            source.as_bytes(),
+            path,
+            &SourceId {
+                repo: "fixture",
+                commit: "revision-a",
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(rules(&at("src/rules.ts")).len(), 1);
+    for path in [
+        "edge/test/edge.spec.ts",
+        "tests/hq-harness.mjs",
+        "src/rules.test.ts",
+    ] {
+        assert!(rules(&at(path)).is_empty(), "{path}");
+    }
+}
