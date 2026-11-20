@@ -624,7 +624,9 @@ pub(super) struct AreaHeadings<'a> {
 impl<'a> AreaHeadings<'a> {
     pub(super) fn new(knowledge: &Stories<'a>) -> Self {
         Self {
-            arranged: !knowledge.areas.is_empty(),
+            // Areas exist when the host supplied Subsystems, whether or not
+            // a Capability is in one (#2066).
+            arranged: !knowledge.areas.is_empty() || !knowledge.file_areas.is_empty(),
             last: None,
         }
     }
