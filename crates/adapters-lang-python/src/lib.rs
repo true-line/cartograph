@@ -24,6 +24,7 @@ mod flask_admin_library;
 mod flask_pages;
 pub mod observed_infra;
 mod queries;
+mod rate_limits;
 mod request_inputs;
 mod responses;
 mod rule_evidence;
@@ -87,6 +88,9 @@ pub struct Extraction {
     module_attr_writes: BTreeSet<String>,
     /// Module-level flask-limiter `Limiter` instances (#1157).
     limiter_defs: Vec<(String, String)>,
+    /// Limit decorators on route handlers and module limit constants (#1998).
+    pending_limits: Vec<rate_limits::PendingLimit>,
+    limit_constants: Vec<rate_limits::LimitConstant>,
     /// Names an attribute write or `setattr` / `delattr` goes through.
     attribute_write_objects: BTreeSet<String>,
     /// Attribute names written anywhere, through any object or a literal
@@ -308,7 +312,7 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 }
 
 /// Endpoint props whose objects carry a nested `prov`.
-const NESTED_PROV: &[&str] = &["request_inputs", "responses", "auth"];
+const NESTED_PROV: &[&str] = &["request_inputs", "responses", "auth", "rate_limits"];
 
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
@@ -342,6 +346,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     sqlalchemy::retarget(extraction, commit);
     responses::retarget(extraction, commit);
     auth_guards::retarget(extraction, commit);
+    rate_limits::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
     flask_admin::retarget(extraction, commit);
     flask_pages::retarget(extraction, commit);
@@ -1793,6 +1798,7 @@ pub fn extract_source(
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
     let functions = responses::resolve(&mut out, id.repo);
+    rate_limits::resolve_proven(&mut out);
     auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
@@ -1897,6 +1903,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     auth_guards::collect(
         &cx, root, &bindings, &resolver, &locals, &functions, &mut out,
     );
+    rate_limits::collect(&cx, root, &bindings, &functions, &mut out);
     flask_pages::collect(&cx, root, &functions, &mut out);
     for (function, handler) in &functions {
         let Some(parent) = function
@@ -2070,10 +2077,55 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             continue;
         }
 
+        // `self.m()` in a method `C.f` is taken as a call of `C.m` when this
+        // file defines that method. A subclass may
+        // override `m`, so the edge is InferredStrong (#1998).
+        if let Some(member) = callee.strip_prefix("self.")
+            && !member.contains('.')
+            && let Some((_, qualified)) = src.rsplit_once('#')
+            && let Some((class, _)) = qualified.split_once('.')
+            && !qualified[class.len() + 1..].contains('.')
+        {
+            let dst = symbol_id(id.repo, path, &format!("{class}.{member}"));
+            if dst != src && functions_by_start.values().any(|symbol| *symbol == dst) {
+                out.edges.push(Edge {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                    label: "CALLS".into(),
+                    props: serde_json::json!({
+                        "resolution": "self-method",
+                        "prov": cx.prov_with_confidence(
+                            &call,
+                            ConfidenceTier::InferredStrong,
+                            &format!("CALLS {src} -> {dst}"),
+                        ),
+                    }),
+                });
+            }
+            continue;
+        }
+        // `from pkg import sub; sub.f()` is taken as a call of `f` in the
+        // submodule `pkg/sub.py` when that file defines `f` (the edge is
+        // kept only for a recovered Symbol). Whether the package binds a
+        // `sub` of its own is not checked, so the edge is InferredStrong
+        // (#1998).
+        let mut submodule = false;
         let imported = if let Some((base, member)) = callee.split_once('.') {
             match bindings.get(base) {
                 Some(ImportBinding::Module { module }) => module_file(path, module)
                     .map(|target| (target, member.to_string(), module.starts_with('.'))),
+                Some(ImportBinding::Symbol {
+                    module, exported, ..
+                }) if !member.contains('.') && !module.is_empty() => {
+                    let joined = if module.ends_with('.') {
+                        format!("{module}{exported}")
+                    } else {
+                        format!("{module}.{exported}")
+                    };
+                    submodule = true;
+                    module_file(path, &joined)
+                        .map(|target| (target, member.to_string(), module.starts_with('.')))
+                }
                 _ => None,
             }
         } else {
@@ -2097,12 +2149,23 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             src: src.clone(),
             dst: dst.clone(),
             label: "CALLS".into(),
-            props: serde_json::json!({
-                "resolution": "directory-proven",
-                "prov": cx.prov(&call, &format!("CALLS {src} -> {dst}")),
-            }),
+            props: if submodule {
+                serde_json::json!({
+                    "resolution": "submodule-attribute",
+                    "prov": cx.prov_with_confidence(
+                        &call,
+                        ConfidenceTier::InferredStrong,
+                        &format!("CALLS {src} -> {dst}"),
+                    ),
+                })
+            } else {
+                serde_json::json!({
+                    "resolution": "directory-proven",
+                    "prov": cx.prov(&call, &format!("CALLS {src} -> {dst}")),
+                })
+            },
         };
-        let gap = relative.then(|| {
+        let gap = (relative && !submodule).then(|| {
             let gap_id = format!("gap:call:{}@{}@{}", id.repo, path, call.start_byte());
             let node = Node {
                 id: gap_id.clone(),
@@ -2258,6 +2321,8 @@ pub fn extract_dir_incremental_with_progress(
             out.wild_mounts.extend(extraction.wild_mounts);
             out.module_attr_writes.extend(extraction.module_attr_writes);
             out.limiter_defs.extend(extraction.limiter_defs);
+            out.pending_limits.extend(extraction.pending_limits);
+            out.limit_constants.extend(extraction.limit_constants);
             out.attribute_write_objects
                 .extend(extraction.attribute_write_objects);
             // A pytest module runs under pytest unless the product imports
@@ -2308,6 +2373,7 @@ pub fn extract_dir_incremental_with_progress(
     flask_admin::resolve(&mut out, id.repo, root, id.commit);
     resolve_routes(&mut out, id.repo);
     let functions = responses::resolve(&mut out, id.repo);
+    rate_limits::resolve_proven(&mut out);
     auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);

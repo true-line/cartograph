@@ -221,6 +221,13 @@ pub(crate) struct OrmClassDecl {
     evidence: EvidenceRef,
 }
 
+impl OrmClassDecl {
+    /// Whether the class body itself declares a column named `name`.
+    pub(crate) fn declares_column(&self, name: &str) -> bool {
+        self.columns.iter().any(|column| column.name == name)
+    }
+}
+
 pub(crate) fn retarget(extraction: &mut Extraction, commit: &str) {
     for file in &mut extraction.orm_files {
         for class in &mut file.classes {

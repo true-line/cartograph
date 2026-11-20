@@ -587,7 +587,7 @@ fn lambda_bindings(cx: &FileCx<'_>, lambda: TsNode<'_>) -> HashSet<String> {
 /// Whether `decorator` is a route decorator: `route_decorator` also
 /// matches a call such as `@limiter.limit("2/minute")`, whose verb no
 /// framework routes on (`methods_for` in the crate root).
-fn is_route_decorator(cx: &FileCx<'_>, decorator: TsNode<'_>) -> bool {
+pub(crate) fn is_route_decorator(cx: &FileCx<'_>, decorator: TsNode<'_>) -> bool {
     route_decorator(cx, decorator).is_some_and(|route| {
         matches!(
             route.verb.as_str(),
@@ -1272,6 +1272,25 @@ fn limiter_def(
     (writes.len() == 1 && writes[0] == assignment).then(|| name.to_string())
 }
 
+/// The module-level flask-limiter `Limiter` definitions that stay one.
+/// A limiter assigned through an imported module, or with an attribute
+/// written anywhere, may be anything; so may every limiter once
+/// flask-limiter's own `Limiter` is replaced.
+pub(crate) fn proven_limiters(
+    out: &Extraction,
+    patched: &BTreeSet<String>,
+) -> HashSet<(String, String)> {
+    out.limiter_defs
+        .iter()
+        .filter(|(_, name)| {
+            !patched.contains(LIMITER)
+                && !out.module_attr_writes.contains(name)
+                && !out.attribute_write_objects.contains(name)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Effects by key, with the package fallback `responses` uses.
 fn lookup_effects<'a>(
     effects: &'a HashMap<FnKey, FnEffects>,
@@ -1386,17 +1405,8 @@ pub(crate) fn resolve(
     let patched = std::mem::take(&mut out.patched_guards)
         .into_iter()
         .collect::<BTreeSet<_>>();
-    // A limiter assigned through an imported module, or with an attribute
-    // written anywhere, may be anything; so may every limiter once
-    // flask-limiter's own `Limiter` is replaced.
-    let limiters = std::mem::take(&mut out.limiter_defs)
-        .into_iter()
-        .filter(|(_, name)| {
-            !patched.contains(LIMITER)
-                && !out.module_attr_writes.contains(name)
-                && !out.attribute_write_objects.contains(name)
-        })
-        .collect::<HashSet<_>>();
+    let limiters = proven_limiters(out, &patched);
+    out.limiter_defs.clear();
     let mut handler_apps: HashMap<String, Apps> = HashMap::new();
     for (handler, app) in std::mem::take(&mut out.endpoint_apps) {
         let apps = scope.apps(&app);
