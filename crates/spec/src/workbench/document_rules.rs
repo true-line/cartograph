@@ -54,6 +54,9 @@ struct Rejection<'a> {
     /// The rule in domain terms, when its condition and outcome are within
     /// the rendering rules (#1999, AC-0905).
     statement: Option<String>,
+    /// Where the rule is, in a reader's terms, when its owner's name is not
+    /// (an inline function: the route it handles, #2009).
+    place: Option<String>,
 }
 
 fn one_line(text: &str) -> String {
@@ -302,6 +305,7 @@ fn guarded<'a>(
         when,
         outcome,
         statement,
+        place: None,
     })
 }
 
@@ -324,6 +328,8 @@ struct Index<'a> {
     entries: BTreeMap<&'a str, Vec<&'a str>>,
     /// Callables by the file that defines them.
     defined: BTreeMap<&'a str, Vec<&'a str>>,
+    /// The Endpoints each Symbol handles.
+    handled: BTreeMap<&'a str, Vec<&'a Node>>,
 }
 
 impl<'a> Index<'a> {
@@ -333,6 +339,7 @@ impl<'a> Index<'a> {
         let mut governs: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         let mut entries: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut defined: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut handled: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         for edge in edges {
             let (Some(src), Some(dst)) =
                 (by_id.get(edge.src.as_str()), by_id.get(edge.dst.as_str()))
@@ -347,6 +354,9 @@ impl<'a> Index<'a> {
                     governs.entry(&dst.id).or_default().push(src)
                 }
                 "ENTRY" => entries.entry(&src.id).or_default().push(&dst.id),
+                "HANDLES" if src.label == "Endpoint" && dst.label == "Symbol" => {
+                    handled.entry(&dst.id).or_default().push(src)
+                }
                 "DEFINED_IN" if src.label == "Symbol" && dst.label == "File" => {
                     defined.entry(&dst.id).or_default().push(&src.id)
                 }
@@ -397,6 +407,7 @@ impl<'a> Index<'a> {
             strings,
             entries,
             defined,
+            handled,
         }
     }
 
@@ -510,6 +521,33 @@ impl<'a> Index<'a> {
         order
     }
 
+    /// Where an inline function's rule is, for a reader (#2009): the route
+    /// it handles (`handler of GET /devices`), or the function it is
+    /// written in. `None` for a named callable, whose name says it.
+    fn place(&self, owner: &str, name: &str) -> Option<String> {
+        let (enclosing, _) = name.split_once("/func@")?;
+        let mut routes: Vec<String> = self
+            .handled
+            .get(owner)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                Some(format!(
+                    "{} {}",
+                    e.props["method"].as_str()?,
+                    e.props["path"].as_str()?
+                ))
+            })
+            .collect();
+        routes.sort();
+        routes.dedup();
+        Some(match routes.as_slice() {
+            [] => format!("inline function in {enclosing}"),
+            [one] => format!("handler of {one}"),
+            [first, rest @ ..] => format!("handler of {first} and {} more", rest.len()),
+        })
+    }
+
     /// Each rejection exit of `owners`, in order, one at a time.
     fn each(
         &self,
@@ -524,9 +562,10 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(found) = rejection(rule, name, Some(&|k| self.constant(k)))
+                if let Some(mut found) = rejection(rule, name, Some(&|k| self.constant(k)))
                     .or_else(|| self.mail_reply(rule, owner, name))
                 {
+                    found.place = self.place(owner, name);
                     n += 1;
                     row(found)?;
                 }
@@ -634,6 +673,7 @@ impl<'a> Index<'a> {
                 &clause,
                 Some(&|k| self.constant(k)),
             ),
+            place: None,
         })
     }
 
@@ -652,7 +692,8 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(found) = pick(rule, name, Some(&|k| self.constant(k))) {
+                if let Some(mut found) = pick(rule, name, Some(&|k| self.constant(k))) {
+                    found.place = self.place(owner, name);
                     n += 1;
                     row(found)?;
                 }
@@ -953,7 +994,7 @@ fn write_row_prefixed(
     writeln!(
         out,
         "| {prefix}{} | {} | {}: {} | {id} |",
-        Literal(row.owner),
+        Literal(row.place.as_deref().unwrap_or(row.owner)),
         Literal(rule),
         Literal(&when),
         Literal(&row.outcome),
@@ -1329,6 +1370,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         set_slots::<&str>(rows)?,
         slots::<&str>(rows)?.checked_mul(3)?,
         set_slots::<String>(rows)?,
+        // The endpoints each handler handles, by handler id (#2009).
+        map_slots::<&str, Vec<&Node>>(rows)?,
+        slots::<&Node>(rows)?,
     ])?;
     let reach_count = map_slots::<&str, usize>(rows)?;
     // One capability's seen set and order/front/next (or retained reach).
@@ -1338,7 +1382,8 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
     ])?;
     // One row: the cloned payload and its typed decode, the whitespace
     // split, and the condition and outcome text (each at most the payload
-    // plus a four-byte `not ` or ` and ` per value), then its citation id.
+    // plus a four-byte `not ` or ` and ` per value), then its citation id
+    // and the place it names (#2009).
     let text = graph.bytes.checked_add(graph.values.checked_mul(5)?)?;
     let row = sum(&[
         json(graph.bytes, graph.values)?.checked_mul(2)?,
@@ -1346,6 +1391,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         slots::<String>(graph.values)?,
         text.checked_mul(2)?,
         graph.bytes,
+        // `place`: the handled routes' names, sorted, and the place itself.
+        slots::<String>(rows)?,
+        graph.bytes.checked_mul(2)?.checked_add(64)?,
     ])?;
     // What each guard checks (#1998): the guard ids, each guard's owners
     // and one guard's traversal and nested-name prefix, held with the index.
@@ -1627,6 +1675,53 @@ def update_alias(alias_id, user):
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
         assert!(!text.contains("200"), "{text}");
         assert!(!text.contains("returns None"), "{text}");
+    }
+
+    // AC-0923 (#2009): a rule in an inline route handler says where it is
+    // by the route the handler serves, not by the literal's offset.
+    #[test]
+    fn an_inline_handlers_rules_are_placed_by_its_route() {
+        let source = r#"package device
+
+import "net/http"
+
+func routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /sign-in", func(w http.ResponseWriter, r *http.Request) {
+		if r.FormValue("email") == "" {
+			http.Error(w, "email required", http.StatusBadRequest)
+			return
+		}
+	})
+	go func() {
+		if ready() {
+			http.Error(nil, "late", http.StatusConflict)
+			return
+		}
+	}()
+}
+
+func ready() bool { return true }
+"#;
+        let facts = adapters_lang_go::extract_source(
+            source.as_bytes(),
+            "pkg/device/routes.go",
+            &adapters_lang_go::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let literals: Vec<&str> = facts
+            .nodes
+            .iter()
+            .filter_map(|n| n.props["name"].as_str())
+            .filter(|n| n.starts_with("routes/func@"))
+            .collect();
+        assert_eq!(literals.len(), 1, "{literals:?}");
+        let (text, printed) = rows(&facts.nodes, &facts.edges, literals[0]);
+        assert_eq!(printed, 1, "{text}");
+        assert!(text.contains("| handler of POST /sign-in | "), "{text}");
+        assert!(!text.contains("func@"), "{text}");
     }
 
     // AC-0923 (#2009): the Go response and error shapes are read in Go
