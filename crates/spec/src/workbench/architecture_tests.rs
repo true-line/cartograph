@@ -1,4 +1,4 @@
-//! `architecture.md` and `architecture.dsl` (#2049, AC-0923..AC-0925).
+//! `architecture.md` and `architecture.dsl` (#2049, AC-0940..AC-0942).
 use super::*;
 use crate::{FactIndex, check_citations, compile_spec};
 use core_prov::{EvidenceRef, Provenance, Tier};
@@ -253,7 +253,7 @@ fn level<'t>(markdown: &'t str, heading: &str) -> &'t str {
     &rest[..end]
 }
 
-/// AC-0923: containers come from endpoints, entry points, schedules and
+/// AC-0940: containers come from endpoints, entry points, schedules and
 /// client screens; stores, outside systems and people are drawn with what
 /// relates them, and a client's flow into the server does not make the
 /// server's stores the client's.
@@ -305,7 +305,7 @@ fn containers_come_from_entry_points_endpoints_schedules_and_clients() {
     assert!(l1.contains("sys -->|\"Calls"));
 }
 
-/// AC-0923: a repository with code and no endpoint, entry point or screen
+/// AC-0940: a repository with code and no endpoint, entry point or screen
 /// is drawn as a Gap container, never left out.
 #[test]
 fn a_repository_with_no_way_in_is_a_gap_container() {
@@ -320,7 +320,7 @@ fn a_repository_with_no_way_in_is_a_gap_container() {
     ));
 }
 
-/// AC-0923: `verified-only` draws no InferredWeak person or relation, and
+/// AC-0940: `verified-only` draws no InferredWeak person or relation, and
 /// says why it draws no component.
 #[test]
 fn verified_only_draws_nothing_inferred_weak() {
@@ -332,7 +332,7 @@ fn verified_only_draws_nothing_inferred_weak() {
     assert!(best.contains("<b>User</b>"));
 }
 
-/// AC-0923: the same facts in any order, handed over twice, give the same
+/// AC-0940: the same facts in any order, handed over twice, give the same
 /// bytes, and every assertion resolves in the fact index.
 #[test]
 fn two_exports_are_byte_identical_whatever_the_input_order() {
@@ -384,7 +384,7 @@ fn two_exports_are_byte_identical_whatever_the_input_order() {
     check_citations(&index, cited.iter().map(String::as_str)).expect("every id resolves");
 }
 
-/// AC-0924: components are the areas of the files a container owns, with
+/// AC-0941: components are the areas of the files a container owns, with
 /// calls between them and a client's call entering at its handler's area.
 #[test]
 fn components_are_the_areas_of_the_files_a_container_owns() {
@@ -425,7 +425,7 @@ fn components_are_the_areas_of_the_files_a_container_owns() {
     assert!(dsl.contains("component e0 \"Components-0\""), "{dsl}");
 }
 
-/// AC-0925: the DSL workspace holds the system, every container with its
+/// AC-0942: the DSL workspace holds the system, every container with its
 /// technology, the people and outside systems, every relationship and a
 /// view per level, each string quoted.
 #[test]
@@ -456,7 +456,7 @@ fn the_dsl_workspace_holds_every_element_and_relationship() {
     assert_eq!(opened, dsl.matches('}').count(), "balanced braces");
 }
 
-/// AC-0923: only a resource that holds data is a store, and a store is
+/// AC-0940: only a resource that holds data is a store, and a store is
 /// scoped to its repository: two repositories reading the same variable
 /// name keep two stores, told apart by repository.
 #[test]

@@ -1059,7 +1059,7 @@ mod tests {
             ]
         );
         // The D1 document cites the facts its frames list (AC-0663), and
-        // the architecture the facts its boxes and arrows rest on (AC-0923).
+        // the architecture the facts its boxes and arrows rest on (AC-0940).
         assert!(
             appended
                 .iter()
