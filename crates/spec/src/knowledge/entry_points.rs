@@ -9,8 +9,8 @@
 //! An entry point whose `ENTRY` is a Gap is under no capability: its Gap is
 //! in the gap register, which names it (R-INT-4).
 //!
-//! Operator commands are grouped by the directory, or the manifest, that
-//! declares them; every other process start is a capability of its own;
+//! Operator commands are grouped by the directory, or the manifest or
+//! script that declares them (a Node script's subcommands are one group); every other process start is a capability of its own;
 //! the jobs of one schedule file are one capability. The title restates the
 //! kind the reader recorded and the file's name, never what the code does
 //! beyond it.
@@ -101,7 +101,7 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
                 };
                 let key = if kind == "command" {
                     let place = match node.props["how"].as_str() {
-                        Some("declared command") => file.to_owned(),
+                        Some("declared command" | "subcommand") => file.to_owned(),
                         _ => file.rsplit_once('/').map_or("", |(d, _)| d).to_owned(),
                     };
                     ("command".to_owned(), place)

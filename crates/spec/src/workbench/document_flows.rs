@@ -89,6 +89,36 @@ struct Reading<'a> {
     gaps: usize,
 }
 
+/// A callable `Symbol` with a name of its own: not a declaration, not a
+/// type (a Rust struct/enum/trait, a Java or Kotlin class, interface,
+/// enum, record or object), and not an anonymous function (`anon@…`, Go
+/// `…/func@…`).
+fn named_callable(index: &Index<'_>, id: &str, name: &str) -> bool {
+    let callable = |node: &Node| {
+        let kind = node.props["kind"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        node.label == "Symbol"
+            && !kind.contains("class")
+            && !matches!(
+                kind.as_str(),
+                "struct"
+                    | "enum"
+                    | "trait"
+                    | "interface"
+                    | "record"
+                    | "object"
+                    | "annotation_type"
+                    | "type"
+                    | "type_alias"
+            )
+    };
+    index.by_id.get(id).is_some_and(|n| callable(n))
+        && !name.starts_with("anon@")
+        && !name.contains("func@")
+}
+
 fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
     let mut reading = Reading {
         handlers: Vec::new(),
@@ -124,9 +154,13 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
                     .push((hop.dst.as_str(), hop.dst_name.as_str())),
             }
         } else if hop.label == "DEFINED_IN" && entered.contains(hop.src.as_str()) {
-            reading
-                .handlers
-                .push((hop.dst.as_str(), hop.dst_name.as_str()));
+            // A named callable of the entered file handles it; a constant
+            // or an anonymous function is not named as a handler.
+            if named_callable(index, hop.dst.as_str(), hop.dst_name.as_str()) {
+                reading
+                    .handlers
+                    .push((hop.dst.as_str(), hop.dst_name.as_str()));
+            }
         } else if hop.label == "HANDLES" && hop.src == flow.trigger {
             reading
                 .handlers
