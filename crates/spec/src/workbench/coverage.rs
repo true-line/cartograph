@@ -1398,6 +1398,7 @@ mod tests {
                     },
                 },
                 crate::Supplied {
+                    repo_names: &[],
                     knowledge: None,
                     coverage: &records,
                     stale_coverage: stale,

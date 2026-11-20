@@ -348,6 +348,12 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 - **Trace:** R2 · `spec` · ADR-0058 · T-0761
 - **AC-0762** Given a spec export, then a `verified-only` `pipelines.md` prints no citation of an InferredWeak pipeline fact, placing relation or need, and its fact index has no row for one; a `best-effort` one prints each with its confidence (R-INT-5); in both modes every printed id resolves, and the same graph yields the same bytes.
 - **Trace:** R2 · `spec` · ADR-0058 · T-0762
+- **AC-0940** Given a spec export, then `architecture.md` draws C4 levels 1 and 2 from the recovered facts with no model call: one container per repository web application (its endpoints and HTTP server entry point), per process an entry point starts (by kind: SMTP listener, database listener, queue consumer, polling loop, process), for a repository's operator commands, for its scheduled jobs and per client application (screens or an extension); a repository with code and none of these is a Gap container. Data stores are the resources that hold data, each scoped to its repository; external systems are the outside origins of `external.md`, the providers the code calls, and one Gap box for calls with a host unknown from source; people are inferred from how the system is entered. Each relationship rests on the traced flows of its container, a flow that enters another repository's endpoint is that endpoint's container's past the endpoint, and each box and arrow carries the lowest confidence of the facts it rests on with those facts cited; `verified-only` draws no InferredWeak element or relationship; the same facts in any order yield the same bytes (#2049).
+- **Trace:** R2 · `spec`, `app` · — · T-0940
+- **AC-0941** Given a spec export with the knowledge phase's subsystem areas, then `architecture.md` draws C4 level 3 per container: its components are the areas holding the files its flows pass through, at most 14 with the rest folded, with the calls between them and the relationships of the container placed at the component holding the code; the diagram draws the strongest calls and its table lists every one. Without areas, or in `verified-only` (areas are InferredWeak), no component is drawn and the document says why (#2049).
+- **Trace:** R2 · `spec`, `app` · — · T-0941
+- **AC-0942** Given a spec export, then `architecture.dsl` is a Structurizr DSL workspace of the same model: the people, the external systems, the software system with its containers, stores and components, every relationship with its technology, a confidence property on each element, and a system context, container and component view per level (#2049).
+- **Trace:** R2 · `spec` · — · T-0942
 
 ### US-0013 — ADR recovery and drift detection
 - **Actor:** Engine
@@ -1078,6 +1084,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 
 - **AC-0860** Given an investigation query whose selector matches more facts than a cursor can page through (SimpleLogin: 84,625 for a whole-system query), when its manifest is admitted into the input ledger, then it is accepted with that full match count under both investigation policies, while a manifest that returns more facts than it matched is still refused, and the query-history transport bound sizes the count at its widest decimal (#1987).
 - **Trace:** H4 · `agents` · — · T-0860
+
+- **AC-0930** Given a knowledge overlay that is current for the graph and holds a `Subsystem`, when an investigation is started with the scope `{"type":"area","id":<Subsystem id>}`, then the task's frozen context holds exactly the area's member files, the facts defined in those files and the edges whose two ends are both among them, read from the graph revision the overlay was derived from, and its scope snapshot identity differs from the whole graph's. A start that names an unknown area, or runs with no overlay, is refused as invalid input, and one whose overlay was derived from another graph revision is refused as changed input; none widens to the whole graph. An area scopes a task only: a query inside a task that names an area is refused, and the `all` and `neighborhood` scopes, their wire forms and their frozen contexts are unchanged.
+- **Trace:** P1 (#260, #2044) · `agents`, `app` · — · T-0930
 
 ### US-0033 — Drop an application or repo set and see what was and was not covered
 - **Actor:** Engineer

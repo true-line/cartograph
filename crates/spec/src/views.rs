@@ -432,6 +432,7 @@ pub fn try_compile_spec_with_views_and_coverage(
             curated: crate::Curated::NotSupplied,
             graph_content_hash: None,
             source_revisions: None,
+            repo_names: &[],
         },
     )
 }
