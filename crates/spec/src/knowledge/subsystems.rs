@@ -27,6 +27,11 @@
 //! 6. **Groups follow their names**: files no term holds together are not a
 //!    group, a group named for two subjects is two groups, two groups with
 //!    one name are one, and a leftover file joins the group it is named for.
+//! 7. **A group stays in one repository.** Each repository's files are
+//!    grouped and named on their own, as if it were the only one. A server
+//!    and its clients name the same concepts (`alias`, `mailbox`), which
+//!    would otherwise pull them into one group named for a word only the
+//!    client carries: its package root.
 //!
 //! Every step orders its work by file path, so the same base gives the same
 //! subsystems under any input order and under any local registry key. A
@@ -38,9 +43,9 @@ use core_graph::Edge;
 /// Deterministic recipe grouping source files into named subsystems.
 pub const SUBSYSTEM_RULE: &str = "knowledge.subsystems";
 /// Changed units, signals, clustering or naming require a new recipe version.
-pub const SUBSYSTEM_RULE_VERSION: &str = "2";
-/// Files clustered per run. Similarity is computed per pair of files that
-/// share a signal, so the bound keeps one run's work and memory fixed.
+pub const SUBSYSTEM_RULE_VERSION: &str = "3";
+/// Files clustered per repository. Similarity is computed per pair of files
+/// that share a signal, so the bound keeps one run's work and memory fixed.
 pub const MAX_SUBSYSTEM_FILES: usize = 8192;
 /// Omission when the base has more than [`MAX_SUBSYSTEM_FILES`] unit files.
 pub const SUBSYSTEM_FILE_CAP: &str = "subsystem-file-cap";
@@ -800,7 +805,11 @@ fn named(groups: &[Vec<usize>], signals: &Signals<'_>) -> Vec<(Vec<Term>, Option
 }
 
 /// The unit files of a base and what the rule reads of them.
-fn signals<'a>(base: &'a RevisionedSnapshot, report: &mut SubsystemReport) -> Option<Signals<'a>> {
+fn signals<'a>(
+    base: &'a RevisionedSnapshot,
+    repo: &str,
+    report: &mut SubsystemReport,
+) -> Option<Signals<'a>> {
     let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
     for node in &base.graph.0 {
         nodes
@@ -839,10 +848,12 @@ fn signals<'a>(base: &'a RevisionedSnapshot, report: &mut SubsystemReport) -> Op
             let node = node(id)?;
             let path = node.props["path"].as_str()?;
             (!excluded(path)).then_some(())?;
+            let evidence = file_evidence(node)?;
+            (evidence.repo == repo).then_some(())?;
             Some(Unit {
                 node,
                 path,
-                evidence: file_evidence(node)?,
+                evidence,
                 stem: Vec::new(),
                 phrases: Vec::new(),
             })
@@ -851,7 +862,7 @@ fn signals<'a>(base: &'a RevisionedSnapshot, report: &mut SubsystemReport) -> Op
     // File order is by path, then id: a local source's registry key is
     // random per registration (ADR-0023), and the groups must not follow it.
     units.sort_by(|a, b| a.path.cmp(b.path).then_with(|| a.node.id.cmp(&b.node.id)));
-    report.files = units.len();
+    report.files += units.len();
     if units.len() > MAX_SUBSYSTEM_FILES {
         report.omission = Some(SUBSYSTEM_FILE_CAP);
         return None;
@@ -1287,48 +1298,134 @@ fn regroup(mut groups: Vec<Vec<usize>>, signals: &Signals<'_>) -> Vec<Vec<usize>
     groups
 }
 
+/// The repositories the base holds source files of, in order.
+fn repositories(base: &RevisionedSnapshot) -> BTreeSet<String> {
+    base.graph
+        .0
+        .iter()
+        .filter(|node| node.label == "File")
+        .filter_map(file_evidence)
+        .map(|evidence| evidence.repo)
+        .collect()
+}
+
 /// Derive `Subsystem` candidates and their `MEMBER_OF` edges from the base.
-/// The borrowed base is unchanged. A base with too few files to separate
-/// yields nothing; one past [`MAX_SUBSYSTEM_FILES`] is a named omission.
+/// The borrowed base is unchanged. Each repository is grouped on its own; one
+/// with too few files to separate yields nothing, and one past
+/// [`MAX_SUBSYSTEM_FILES`] is a named omission.
 pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
+    /// One repository's groups: its files, each group's title, terms and
+    /// members, and its shared files.
+    struct Grouped<'a> {
+        units: Vec<Unit<'a>>,
+        groups: Vec<(Option<String>, Vec<String>, Vec<usize>)>,
+        shared: Vec<usize>,
+    }
     let mut report = SubsystemReport::default();
-    let Some(signals) = signals(base, &mut report) else {
-        return report;
-    };
-    let groups = regroup(communities(&signals), &signals);
-    let Signals { units, shared, .. } = &signals;
-    let n = units.len();
-    let terms = named(&groups, &signals);
-    let mut names: BTreeSet<String> = BTreeSet::new();
-    for (members, (ranked, name)) in groups.iter().zip(terms) {
-        let directory = common_directory(members, units);
-        let mut name = name.map_or_else(|| format!("Files in {directory}"), |name| name.title);
-        if names.contains(&name) {
-            name = format!("{name} ({directory})");
-        }
-        let base_name = name.clone();
-        let mut suffix = 2;
-        while !names.insert(name.clone()) {
-            name = format!("{base_name} ({suffix})");
-            suffix += 1;
-        }
-        let terms: Vec<String> = ranked.into_iter().take(6).map(|term| term.word).collect();
-        match group_facts("cluster", &name, &terms, members, units) {
-            Some(facts) => {
-                report.grouped += members.len();
-                report.facts.extend(facts);
+    let mut grouped: Vec<Grouped<'_>> = Vec::new();
+    for repo in repositories(base) {
+        let Some(signals) = signals(base, &repo, &mut report) else {
+            continue;
+        };
+        let groups = regroup(communities(&signals), &signals);
+        let terms = named(&groups, &signals);
+        let groups = groups
+            .into_iter()
+            .zip(terms)
+            .map(|(members, (ranked, name))| {
+                let terms = ranked.into_iter().take(6).map(|term| term.word).collect();
+                (name.map(|name| name.title), terms, members)
+            })
+            .collect();
+        let shared = (0..signals.units.len())
+            .filter(|&file| signals.shared[file])
+            .collect();
+        grouped.push(Grouped {
+            units: signals.units,
+            groups,
+            shared,
+        });
+    }
+    // A repository's key is random per registration (ADR-0023): the names
+    // follow the files, never the order of the repositories.
+    grouped.sort_by(|a, b| {
+        let paths = |g: &Grouped<'_>| {
+            g.units
+                .iter()
+                .map(|unit| unit.path.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let commit = |g: &Grouped<'_>| g.units.first().map(|unit| unit.evidence.commit_sha.clone());
+        paths(a)
+            .cmp(&paths(b))
+            .then_with(|| commit(a).cmp(&commit(b)))
+    });
+    // A subject two repositories both have is one group in each. The one
+    // with the most files keeps the name, and the others are named with
+    // where their files are; of two the same size, both are.
+    let mut titled: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for repo in &grouped {
+        let mut sizes: BTreeMap<&str, usize> = BTreeMap::new();
+        for (title, _, members) in &repo.groups {
+            if let Some(title) = title {
+                let size = sizes.entry(title).or_default();
+                *size = (*size).max(members.len());
             }
-            None => report.oversized_groups += 1,
+        }
+        for (title, size) in sizes {
+            titled.entry(title).or_default().push(size);
         }
     }
-    let shared_files: Vec<usize> = (0..n).filter(|&file| shared[file]).collect();
-    if !shared_files.is_empty() {
-        match group_facts("shared", "Shared code", &[], &shared_files, units) {
-            Some(facts) => {
-                report.shared = shared_files.len();
-                report.facts.extend(facts);
+    let keeps_name = |title: &str, files: usize| {
+        let sizes = &titled[title];
+        sizes.len() == 1 || sizes.iter().filter(|&&size| size >= files).count() == 1
+    };
+    let place = |directory: &str| directory.split('/').take(2).collect::<Vec<_>>().join("/");
+    let several = grouped.len() > 1;
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for Grouped {
+        units,
+        groups,
+        shared,
+    } in &grouped
+    {
+        for (title, terms, members) in groups {
+            let directory = common_directory(members, units);
+            let mut name = match title {
+                Some(title) if keeps_name(title, members.len()) => title.clone(),
+                Some(title) => format!("{title} ({})", place(&directory)),
+                None => format!("Files in {directory}"),
+            };
+            if names.contains(&name) {
+                name = format!("{name} ({directory})");
             }
-            None => report.oversized_groups += 1,
+            let base_name = name.clone();
+            let mut suffix = 2;
+            while !names.insert(name.clone()) {
+                name = format!("{base_name} ({suffix})");
+                suffix += 1;
+            }
+            match group_facts("cluster", &name, terms, members, units) {
+                Some(facts) => {
+                    report.grouped += members.len();
+                    report.facts.extend(facts);
+                }
+                None => report.oversized_groups += 1,
+            }
+        }
+        if !shared.is_empty() {
+            let name = if several {
+                format!("Shared code ({})", place(&common_directory(shared, units)))
+            } else {
+                "Shared code".to_owned()
+            };
+            match group_facts("shared", &name, &[], shared, units) {
+                Some(facts) => {
+                    report.shared += shared.len();
+                    report.facts.extend(facts);
+                }
+                None => report.oversized_groups += 1,
+            }
         }
     }
     report
