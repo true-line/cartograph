@@ -1063,6 +1063,9 @@ pub(super) mod flows;
 #[path = "document_operations.rs"]
 pub(super) mod operations;
 
+#[path = "document_statements.rs"]
+pub(super) mod statements;
+
 #[cfg(test)]
 #[path = "document_tests.rs"]
 mod tests;

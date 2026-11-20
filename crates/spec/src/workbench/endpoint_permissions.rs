@@ -481,7 +481,15 @@ impl Caller {
     /// The caller as a story's subject: "a signed-in user".
     pub(super) fn subject(&self) -> String {
         match self {
-            Self::Guarded { role, .. } => format!("a {role}"),
+            Self::Guarded { role, .. } => {
+                let article =
+                    if role.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
+                        "an"
+                    } else {
+                        "a"
+                    };
+                format!("{article} {role}")
+            }
             Self::Unguarded => "any caller (no guard recovered)".into(),
         }
     }
@@ -499,16 +507,80 @@ fn role(endpoint: &Node, guards: &[&str]) -> String {
         "flask_jwt_extended.jwt_required" => Some("caller with a valid JWT"),
         _ => None,
     };
-    let names: Vec<&str> = guards.iter().map(|g| guard_name(g)).collect();
     if endpoint.props["framework"] == "flask_admin" || endpoint.props["mount"] == "flask_admin" {
-        return format!("signed-in user admitted by {}", names.join(" and "));
+        return "administrator".to_owned();
     }
-    match guards.iter().map(|g| named(g)).collect::<Option<Vec<_>>>() {
-        Some(roles) if roles.windows(2).all(|w| w[0] == w[1]) && !roles.is_empty() => {
-            roles[0].to_owned()
-        }
-        _ => format!("caller passing {}", names.join(" and ")),
+    let roles: Vec<String> = guards
+        .iter()
+        .map(|g| named(g).map_or_else(|| guard_role(guard_name(g)), str::to_owned))
+        .collect();
+    match &roles[..] {
+        [first, rest @ ..] if rest.iter().all(|r| r == first) => first.clone(),
+        _ => roles.join(" who is also "),
     }
+}
+
+/// The role a repository guard admits, read from the words of its name
+/// (#1999): `require_api_auth` admits an API client, `validate_twilio_request`
+/// a Twilio webhook. The guard stays the evidence; a name with no role word
+/// reads as the check it is, in words, never as the identifier.
+fn guard_role(guard: &str) -> String {
+    let words: Vec<String> = guard
+        .split(['.', '_'])
+        .filter(|w| !w.is_empty())
+        .flat_map(|w| {
+            // `isAdmin` and `RequireApiKey` split at their capitals.
+            let mut out = Vec::new();
+            let mut word = String::new();
+            for c in w.chars() {
+                if c.is_uppercase() && !word.is_empty() {
+                    out.push(std::mem::take(&mut word));
+                }
+                word.extend(c.to_lowercase());
+            }
+            out.push(word);
+            out
+        })
+        .collect();
+    let has = |w: &str| words.iter().any(|x| x == w);
+    let sudo = has("sudo") || has("fresh") || has("reauth");
+    if has("admin") || has("superuser") || has("staff") {
+        return "administrator".to_owned();
+    }
+    if has("api") || has("token") || has("key") {
+        return if sudo {
+            "API client in sudo mode".to_owned()
+        } else {
+            "API client".to_owned()
+        };
+    }
+    if sudo {
+        return "signed-in user in sudo mode".to_owned();
+    }
+    // `validate_twilio_request`, `verify_stripe_signature`: a third party
+    // calling back.
+    let check = ["validate", "verify", "check"];
+    let proof = ["request", "signature", "webhook", "callback", "hmac"];
+    if let [first, middle @ .., last] = &words[..]
+        && check.contains(&first.as_str())
+        && proof.contains(&last.as_str())
+        && !middle.is_empty()
+    {
+        let vendor: Vec<String> = middle
+            .iter()
+            .map(|w| {
+                let mut c = w.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().chain(c).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+        return format!("{} webhook", vendor.join(" "));
+    }
+    if has("login") || has("auth") || has("authenticated") || has("user") || has("session") {
+        return "signed-in user".to_owned();
+    }
+    format!("caller the “{}” check admits", words.join(" "))
 }
 
 /// The caller of `endpoint` as its guard reading states, when it is a

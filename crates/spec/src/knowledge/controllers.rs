@@ -276,9 +276,9 @@ fn route_prefix(group: &Group) -> Option<String> {
 /// Titles that would collide across every controller and route group name
 /// the URL route prefix their routes share after the title when that tells
 /// each of them apart (`View orders (/admin/orders)`): a route is the
-/// observable contract, a file path is not. Otherwise they name their file,
-/// and their class or group too when the file does not tell them apart
-/// (AC-0851).
+/// observable contract, a file path is not. Otherwise they name their file
+/// in words, and their class or group too when the file does not tell them
+/// apart (AC-0851, #1999).
 fn disambiguated(pending: Vec<Pending>) -> Vec<(String, Vec<u8>, Group)> {
     let mut by_title: BTreeMap<&str, usize> = BTreeMap::new();
     let mut by_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
@@ -299,6 +299,15 @@ fn disambiguated(pending: Vec<Pending>) -> Vec<(String, Vec<u8>, Group)> {
         }
     }
     let routes_tell_apart = |title: &str| !routes_fail.contains(title);
+    // A file is named in words, never by its path (#1999).
+    let mut files_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for p in &pending {
+        files_of.entry(&p.title).or_default().push(&p.places[0]);
+    }
+    let places: BTreeMap<&str, BTreeMap<&str, String>> = files_of
+        .into_iter()
+        .map(|(title, files)| (title, naming::places_apart(files)))
+        .collect();
     let titles: Vec<String> = pending
         .iter()
         .zip(&prefixes)
@@ -308,9 +317,18 @@ fn disambiguated(pending: Vec<Pending>) -> Vec<(String, Vec<u8>, Group)> {
             } else if let Some(prefix) = prefix.as_deref().filter(|_| routes_tell_apart(&p.title)) {
                 format!("{} ({prefix})", p.title)
             } else if by_file[&(p.title.as_str(), p.places[0].as_str())] < 2 {
-                format!("{} ({})", p.title, p.places[0])
+                format!(
+                    "{} ({})",
+                    p.title,
+                    places[p.title.as_str()][p.places[0].as_str()]
+                )
             } else {
-                format!("{} ({}, {})", p.title, p.places[0], p.places[1])
+                format!(
+                    "{} ({}, {})",
+                    p.title,
+                    places[p.title.as_str()][p.places[0].as_str()],
+                    naming::spelled_words(&p.places[1])
+                )
             }
         })
         .collect();

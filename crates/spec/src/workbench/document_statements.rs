@@ -1,0 +1,825 @@
+//! Business statements for D1 rule rows (#1999, AC-0905): a stored guarded
+//! exit restated as a sentence in domain terms, by rule, with the source
+//! condition and outcome kept as evidence rather than as the statement.
+//!
+//! Only simple shapes are rendered, each by a fixed rule, so the statement
+//! keeps the fact's tier (SPEC-16 rule 3):
+//!
+//! - a presence test (`api_key`, `not api_key`): "an API key is given";
+//! - a flag or predicate on a subject (`user.disabled`, `g.user.is_active()`,
+//!   `not user.can_create_new_alias()`): "the user is disabled", "the user
+//!   cannot create new alias";
+//! - a comparison with a literal, a configured constant or another simple
+//!   value (`mode == "word"`, `count > config.MAX_FREE`): "the mode is
+//!   “word”", "the count is more than the configured max free";
+//! - a test for no value (`x is None`), membership of a literal set
+//!   (`mode in ("word", "uuid")`) and an ownership test
+//!   (`alias.user_id != user.id`: "the alias does not belong to the user");
+//! - `and` / `or` of these, and `not` over one of them.
+//!
+//! The outcome is rendered from the exit: an error-status response ("the
+//! request is refused with status 403 (“Forbidden”)"), another status, a
+//! redirect, a raised error, or the answer of a predicate method (`return
+//! False` in `User.can_create_num_aliases`: "a user cannot create num
+//! aliases when …"). Anything else is not rendered: the caller states a Gap
+//! and the source stays in the evidence. Identifiers become words (snake and
+//! camel case split, known acronyms upper-cased); no expression text is
+//! copied into a statement.
+
+use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit};
+
+/// Words of an identifier: `can_create_new_alias` → `can create new alias`,
+/// `apiKey` → `API key`, `MAX_NB_EMAIL_FREE_PLAN` → `max nb email free plan`.
+pub(super) fn words(identifier: &str) -> String {
+    const ACRONYMS: [&str; 14] = [
+        "api", "id", "url", "mfa", "otp", "pgp", "jwt", "sso", "oidc", "fido", "dns", "smtp",
+        "http", "ip",
+    ];
+    let mut parts: Vec<String> = Vec::new();
+    for chunk in identifier.split(['_', '-']).filter(|c| !c.is_empty()) {
+        let all_upper = chunk.chars().all(|c| !c.is_ascii_lowercase());
+        if all_upper {
+            parts.push(chunk.to_ascii_lowercase());
+            continue;
+        }
+        let mut current = String::new();
+        for c in chunk.chars() {
+            if c.is_ascii_uppercase() && !current.is_empty() {
+                parts.push(std::mem::take(&mut current).to_ascii_lowercase());
+            }
+            current.push(c);
+        }
+        if !current.is_empty() {
+            parts.push(current.to_ascii_lowercase());
+        }
+    }
+    parts
+        .into_iter()
+        .map(|p| {
+            if ACRONYMS.contains(&p.as_str()) {
+                p.to_ascii_uppercase()
+            } else {
+                p
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Lit {
+    Str(String),
+    Num(String),
+    Bool(bool),
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Expr {
+    /// `a.b.c`, with `.get("k")` read as a member `k`.
+    Ref(Vec<String>),
+    /// `a.b.m()`: a call without arguments.
+    Call(Vec<String>),
+    Lit(Lit),
+    Set(Vec<Lit>),
+    Not(Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
+    Cmp(Box<Expr>, String, Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Tok {
+    Ident(String),
+    Str(String),
+    Num(String),
+    Op(String),
+}
+
+fn tokenize(text: &str) -> Option<Vec<Tok>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            out.push(Tok::Ident(chars[start..i].iter().collect()));
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == '_')
+            {
+                i += 1;
+            }
+            out.push(Tok::Num(chars[start..i].iter().collect()));
+        } else if c == '"' || c == '\'' {
+            let quote = c;
+            let start = i + 1;
+            i += 1;
+            while i < chars.len() && chars[i] != quote {
+                if chars[i] == '\\' {
+                    return None;
+                }
+                i += 1;
+            }
+            if i >= chars.len() {
+                return None;
+            }
+            out.push(Tok::Str(chars[start..i].iter().collect()));
+            i += 1;
+        } else {
+            let two: String = chars[i..(i + 2).min(chars.len())].iter().collect();
+            let three: String = chars[i..(i + 3).min(chars.len())].iter().collect();
+            if three == "===" || three == "!==" {
+                out.push(Tok::Op(three[..2].to_owned()));
+                i += 3;
+            } else if ["==", "!=", ">=", "<=", "&&", "||"].contains(&two.as_str()) {
+                out.push(Tok::Op(two));
+                i += 2;
+            } else if "()<>.,!".contains(c) {
+                out.push(Tok::Op(c.to_string()));
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+struct Parser {
+    toks: Vec<Tok>,
+    pos: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> Option<&Tok> {
+        self.toks.get(self.pos)
+    }
+    fn ident(&self, word: &str) -> bool {
+        matches!(self.peek(), Some(Tok::Ident(w)) if w == word)
+    }
+    fn op(&self, op: &str) -> bool {
+        matches!(self.peek(), Some(Tok::Op(o)) if o == op)
+    }
+    fn bump(&mut self) -> Option<Tok> {
+        let t = self.toks.get(self.pos).cloned();
+        self.pos += 1;
+        t
+    }
+    fn or(&mut self) -> Option<Expr> {
+        let mut terms = vec![self.and()?];
+        while self.ident("or") || self.op("||") {
+            self.bump();
+            terms.push(self.and()?);
+        }
+        Some(if terms.len() == 1 {
+            terms.remove(0)
+        } else {
+            Expr::Or(terms)
+        })
+    }
+    fn and(&mut self) -> Option<Expr> {
+        let mut terms = vec![self.not()?];
+        while self.ident("and") || self.op("&&") {
+            self.bump();
+            terms.push(self.not()?);
+        }
+        Some(if terms.len() == 1 {
+            terms.remove(0)
+        } else {
+            Expr::And(terms)
+        })
+    }
+    fn not(&mut self) -> Option<Expr> {
+        if self.ident("not") || self.op("!") {
+            self.bump();
+            return Some(Expr::Not(Box::new(self.not()?)));
+        }
+        self.cmp()
+    }
+    fn cmp(&mut self) -> Option<Expr> {
+        let left = self.operand()?;
+        let op = match self.peek() {
+            Some(Tok::Op(o)) if ["==", "!=", ">", ">=", "<", "<="].contains(&o.as_str()) => {
+                let o = o.clone();
+                self.bump();
+                o
+            }
+            Some(Tok::Ident(w)) if w == "is" => {
+                self.bump();
+                if self.ident("not") {
+                    self.bump();
+                    "is not".to_owned()
+                } else {
+                    "is".to_owned()
+                }
+            }
+            Some(Tok::Ident(w)) if w == "in" => {
+                self.bump();
+                "in".to_owned()
+            }
+            Some(Tok::Ident(w))
+                if w == "not"
+                    && matches!(self.toks.get(self.pos + 1), Some(Tok::Ident(n)) if n == "in") =>
+            {
+                self.pos += 2;
+                "not in".to_owned()
+            }
+            _ => return Some(left),
+        };
+        let right = self.operand()?;
+        Some(Expr::Cmp(Box::new(left), op, Box::new(right)))
+    }
+    fn literal(&mut self) -> Option<Lit> {
+        match self.bump()? {
+            Tok::Str(s) => Some(Lit::Str(s)),
+            Tok::Num(n) => Some(Lit::Num(n)),
+            Tok::Ident(w) if w == "True" || w == "true" => Some(Lit::Bool(true)),
+            Tok::Ident(w) if w == "False" || w == "false" => Some(Lit::Bool(false)),
+            Tok::Ident(w) if w == "None" || w == "null" || w == "undefined" => Some(Lit::None),
+            _ => None,
+        }
+    }
+    fn operand(&mut self) -> Option<Expr> {
+        match self.peek()? {
+            Tok::Str(_) | Tok::Num(_) => return Some(Expr::Lit(self.literal()?)),
+            Tok::Ident(w)
+                if [
+                    "True",
+                    "False",
+                    "None",
+                    "true",
+                    "false",
+                    "null",
+                    "undefined",
+                ]
+                .contains(&w.as_str()) =>
+            {
+                return Some(Expr::Lit(self.literal()?));
+            }
+            Tok::Op(o) if o == "(" => {
+                self.bump();
+                // A literal set `("a", "b")`, or a parenthesised expression.
+                let save = self.pos;
+                let mut set = Vec::new();
+                loop {
+                    match self.literal() {
+                        Some(l) => set.push(l),
+                        None => {
+                            set.clear();
+                            break;
+                        }
+                    }
+                    if self.op(",") {
+                        self.bump();
+                        if self.op(")") {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                if set.len() > 1 && self.op(")") {
+                    self.bump();
+                    return Some(Expr::Set(set));
+                }
+                self.pos = save;
+                let inner = self.or()?;
+                if !self.op(")") {
+                    return None;
+                }
+                self.bump();
+                return Some(inner);
+            }
+            Tok::Ident(_) => {}
+            _ => return None,
+        }
+        let Some(Tok::Ident(first)) = self.bump() else {
+            return None;
+        };
+        if ["and", "or", "not", "is", "in"].contains(&first.as_str()) {
+            return None;
+        }
+        let mut path = vec![first];
+        let mut call = false;
+        loop {
+            if call {
+                return None;
+            }
+            if self.op(".") {
+                self.bump();
+                let Some(Tok::Ident(seg)) = self.bump() else {
+                    return None;
+                };
+                // `.get("k")` reads member `k`.
+                if seg == "get" && self.op("(") {
+                    self.bump();
+                    let Some(Tok::Str(key)) = self.bump() else {
+                        return None;
+                    };
+                    if !self.op(")") {
+                        return None;
+                    }
+                    self.bump();
+                    path.push(key);
+                    continue;
+                }
+                path.push(seg);
+            } else if self.op("(") {
+                self.bump();
+                if !self.op(")") {
+                    return None;
+                }
+                self.bump();
+                call = true;
+                if !self.op(".") {
+                    break;
+                }
+                // A member of a call's result is not rendered.
+                return None;
+            } else {
+                break;
+            }
+        }
+        Some(if call {
+            Expr::Call(path)
+        } else {
+            Expr::Ref(path)
+        })
+    }
+}
+
+fn parse(text: &str) -> Option<Expr> {
+    let mut parser = Parser {
+        toks: tokenize(text)?,
+        pos: 0,
+    };
+    let expr = parser.or()?;
+    (parser.pos == parser.toks.len()).then_some(expr)
+}
+
+/// The renderer's view of whom `self` and bare names refer to.
+pub(super) struct Context<'a> {
+    /// The class of the owning method, for `self`.
+    pub class: Option<&'a str>,
+}
+
+fn subject(path: &[String], cx: &Context<'_>) -> Option<String> {
+    let names: Vec<&str> = path.iter().map(String::as_str).collect();
+    let noun = match names[..] {
+        ["self"] | ["cls"] => format!("the {}", words(cx.class?)),
+        ["current_user"] | ["g", "user"] => "the user".to_owned(),
+        ["request"] => "the request".to_owned(),
+        // A flag named as a question (`is_sl_domain`) is a flag, not a thing.
+        [one] if predicate_verb(one).is_some() => format!("the “{}” flag", words(one)),
+        [one] => format!("the {}", words(one)),
+        ["self" | "cls", .., last] => format!("the {}'s {}", words(cx.class?), words(last)),
+        ["request", .., last] => format!("the {}", words(last)),
+        [.., owner, last] => format!("the {}'s {}", words(owner), words(last)),
+        [] => return None,
+    };
+    Some(noun)
+}
+
+/// A value as a noun phrase.
+fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
+    match expr {
+        Expr::Ref(path) => {
+            let last = path.last()?;
+            // A configured constant: `config.MAX_FREE`, `MAX_FREE`.
+            if last.len() > 1
+                && last
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            {
+                return Some(format!("the configured {}", words(last)));
+            }
+            subject(path, cx)
+        }
+        Expr::Call(path) => {
+            let last = path.last()?;
+            if predicate_verb(last).is_some() {
+                return None;
+            }
+            let names: Vec<&str> = path.iter().map(String::as_str).collect();
+            if matches!(
+                names[..],
+                ["arrow", "now" | "utcnow"]
+                    | ["datetime", "now" | "utcnow" | "today"]
+                    | ["datetime", "datetime", "now" | "utcnow"]
+                    | ["time", "time"]
+                    | ["timezone", "now"]
+            ) {
+                return Some("the current time".to_owned());
+            }
+            subject(path, cx)
+        }
+        Expr::Lit(lit) => Some(literal(lit)),
+        _ => None,
+    }
+}
+
+fn literal(lit: &Lit) -> String {
+    match lit {
+        Lit::Str(s) => format!("“{s}”"),
+        Lit::Num(n) => n.clone(),
+        Lit::Bool(true) => "true".into(),
+        Lit::Bool(false) => "false".into(),
+        Lit::None => "empty".into(),
+    }
+}
+
+/// `is_x` / `has_x` / `can_x` / `should_x`: the verb and the rest.
+fn predicate_verb(name: &str) -> Option<(&'static str, &str)> {
+    for (prefix, verb) in [
+        ("is_", "is"),
+        ("has_", "has"),
+        ("can_", "can"),
+        ("should_", "should"),
+        ("must_", "must"),
+        ("needs_", "needs"),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix).filter(|r| !r.is_empty()) {
+            return Some((verb, rest));
+        }
+    }
+    None
+}
+
+fn negated_verb(verb: &str) -> &'static str {
+    match verb {
+        "is" => "is not",
+        "has" => "has no",
+        "can" => "cannot",
+        "should" => "should not",
+        "must" => "must not",
+        _ => "does not need",
+    }
+}
+
+/// A flag on a subject: `user.disabled`, `user.is_active()`.
+fn flag(path: &[String], negated: bool, cx: &Context<'_>) -> Option<String> {
+    let (last, owner) = path.split_last()?;
+    if owner.is_empty() {
+        // A bare name: a presence test, or a predicate function.
+        if let Some((verb, rest)) = predicate_verb(last) {
+            let verb = if negated { negated_verb(verb) } else { verb };
+            return Some(format!("the check “{verb} {}” holds", words(rest)));
+        }
+        let phrase = words(last);
+        let article = if phrase.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
+            "an"
+        } else {
+            "a"
+        };
+        return Some(if negated {
+            format!("no {phrase} is given")
+        } else {
+            format!("{article} {phrase} is given")
+        });
+    }
+    let who = subject(owner, cx)?;
+    if predicate_verb(last).is_none() && !state_word(last) {
+        // A value tested for presence: `user.trial_end` reads "the user's
+        // trial end is set".
+        let what = subject(path, cx)?;
+        return Some(if negated {
+            format!("{what} is not set")
+        } else {
+            format!("{what} is set")
+        });
+    }
+    let (verb, rest) = predicate_verb(last).unwrap_or(("is", last));
+    let verb = if negated { negated_verb(verb) } else { verb };
+    Some(format!("{who} {verb} {}", words(rest)))
+}
+
+/// Whether an attribute name reads as a state its owner is in
+/// (`verified`, `admin_disabled`, `active`), not a value it holds.
+fn state_word(name: &str) -> bool {
+    let last = name.rsplit('_').next().unwrap_or(name).to_ascii_lowercase();
+    last.ends_with("ed")
+        || [
+            "active", "valid", "invalid", "premium", "open", "closed", "pending", "lifetime",
+            "free", "paid", "public", "private", "on", "off", "enabled", "online", "offline",
+            "unique", "dirty", "new", "old", "trial", "admin", "partner", "spam", "deleted",
+            "hidden", "visible", "required", "optional",
+        ]
+        .contains(&last.as_str())
+}
+
+fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
+    match expr {
+        Expr::Not(inner) => render(inner, !negated, cx),
+        Expr::Ref(path) | Expr::Call(path) => {
+            let last = path.last()?;
+            if matches!(expr, Expr::Call(_)) && predicate_verb(last).is_none() {
+                return None;
+            }
+            flag(path, negated, cx)
+        }
+        Expr::And(terms) | Expr::Or(terms) => {
+            // `not (a and b)` is `not a or not b`; `not (a or b)` is `not a
+            // and not b`.
+            let joiner = match (expr, negated) {
+                (Expr::And(_), false) | (Expr::Or(_), true) => " and ",
+                _ => " or ",
+            };
+            let parts: Option<Vec<String>> = terms.iter().map(|t| render(t, negated, cx)).collect();
+            Some(parts?.join(joiner))
+        }
+        Expr::Cmp(left, op, right) => {
+            // Ownership: `x.user_id != user.id`.
+            if let (Expr::Ref(l), Expr::Ref(r)) = (left.as_ref(), right.as_ref())
+                && l.len() >= 2
+                && r.last().is_some_and(|s| s == "id")
+                && let Some(owner_field) = l.last().and_then(|s| s.strip_suffix("_id"))
+                && (r.len() == 1
+                    || r[r.len() - 2] == owner_field
+                    || r[..r.len() - 1] == ["g", "user"] && owner_field == "user"
+                    || r[..r.len() - 1] == ["current_user"] && owner_field == "user")
+                && (op == "==" || op == "!=")
+            {
+                let thing = subject(&l[..l.len() - 1], cx)?;
+                let owner = format!("the {}", words(owner_field));
+                let belongs = (op == "==") != negated;
+                return Some(if belongs {
+                    format!("{thing} belongs to {owner}")
+                } else {
+                    format!("{thing} does not belong to {owner}")
+                });
+            }
+            let left_np = noun(left, cx)?;
+            let positive = |op: &str| -> Option<String> {
+                Some(match (op, right.as_ref()) {
+                    ("is" | "==", Expr::Lit(Lit::None)) => format!("{left_np} is not set"),
+                    ("is not" | "!=", Expr::Lit(Lit::None)) => format!("{left_np} is set"),
+                    ("==" | "is", r) => format!("{left_np} is {}", noun(r, cx)?),
+                    ("!=" | "is not", r) => format!("{left_np} is not {}", noun(r, cx)?),
+                    (">", r) => format!("{left_np} is more than {}", noun(r, cx)?),
+                    (">=", r) => format!("{left_np} is at least {}", noun(r, cx)?),
+                    ("<", r) => format!("{left_np} is less than {}", noun(r, cx)?),
+                    ("<=", r) => format!("{left_np} is at most {}", noun(r, cx)?),
+                    ("in", Expr::Set(set)) => format!(
+                        "{left_np} is one of {}",
+                        set.iter().map(literal).collect::<Vec<_>>().join(", ")
+                    ),
+                    ("not in", Expr::Set(set)) => format!(
+                        "{left_np} is not one of {}",
+                        set.iter().map(literal).collect::<Vec<_>>().join(", ")
+                    ),
+                    _ => return None,
+                })
+            };
+            let flipped = match op.as_str() {
+                "==" => "!=",
+                "!=" => "==",
+                "is" => "is not",
+                "is not" => "is",
+                ">" => "<=",
+                ">=" => "<",
+                "<" => ">=",
+                "<=" => ">",
+                "in" => "not in",
+                "not in" => "in",
+                _ => return None,
+            };
+            positive(if negated { flipped } else { op })
+        }
+        Expr::Lit(_) | Expr::Set(_) => None,
+    }
+}
+
+/// One stored condition in domain terms, with its branch polarity.
+pub(super) fn condition(
+    display: &str,
+    polarity: BranchPolarity,
+    cx: &Context<'_>,
+) -> Option<String> {
+    let expr = parse(display)?;
+    render(&expr, polarity == BranchPolarity::FalsyBranch, cx)
+}
+
+/// An HTTP status and a literal message from a response display:
+/// `jsonify(error="Forbidden"), 403` gives `(403, Some("Forbidden"))`.
+fn response(display: &str) -> Option<(u16, Option<String>)> {
+    let display = display.trim();
+    let display = display
+        .strip_prefix('(')
+        .and_then(|d| d.strip_suffix(')'))
+        .unwrap_or(display)
+        .trim()
+        .trim_end_matches(',');
+    let (body, status) = display.rsplit_once(',')?;
+    let status: u16 = status.trim().trim_end_matches(')').trim().parse().ok()?;
+    let body = body.trim().trim_start_matches('(').trim();
+    let message = body
+        .strip_prefix("jsonify(error=")
+        .or_else(|| body.strip_prefix("jsonify(message="))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .and_then(|lit| {
+            let lit = lit.trim();
+            let q = lit.chars().next()?;
+            (matches!(q, '"' | '\'') && lit.ends_with(q) && lit.len() >= 2)
+                .then(|| lit[1..lit.len() - 1].to_owned())
+        })
+        .filter(|m| !m.contains(['"', '\'', '{', '\\']));
+    Some((status, message))
+}
+
+/// The statement of one guarded exit in domain terms, or `None` when its
+/// condition or outcome is outside the rendering rules. `owner` is the
+/// owning callable's qualified name (`User.can_create_num_aliases`).
+pub(super) fn statement(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
+    // A rendered statement that would still carry a code-shaped token is not
+    // a statement in domain terms: the row states a Gap instead (#1999).
+    rendered(evidence, owner)
+        .filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
+}
+
+fn rendered(evidence: &GuardedExitEvidence, owner: &str) -> Option<String> {
+    let (class, method) = match owner.rsplit_once('.') {
+        Some((class, method)) => (
+            class
+                .rsplit('.')
+                .next()
+                .filter(|c| c.starts_with(|f: char| f.is_ascii_uppercase())),
+            method,
+        ),
+        None => (None, owner),
+    };
+    let cx = Context { class };
+    let conditions: Option<Vec<String>> = evidence
+        .conditions
+        .iter()
+        .map(|c| condition(c.expression.display.as_str(), c.polarity, &cx))
+        .collect();
+    let conditions = conditions?;
+    let when = if conditions.is_empty() {
+        "always".to_owned()
+    } else {
+        conditions.join(", and ")
+    };
+    let value = match &evidence.effect {
+        LocalExit::Throw { .. } => {
+            return Some(if conditions.is_empty() {
+                "It fails with an error.".to_owned()
+            } else {
+                format!("When {when}, it fails with an error.")
+            });
+        }
+        LocalExit::Return { value: None } => return None,
+        LocalExit::Return { value: Some(value) } if super::rules::constructs_error(value) => {
+            return Some(if conditions.is_empty() {
+                "It fails with an error.".to_owned()
+            } else {
+                format!("When {when}, it fails with an error.")
+            });
+        }
+        LocalExit::Return { value: Some(value) } => value.display.as_str().trim().to_owned(),
+    };
+    let sentence = |outcome: String| {
+        if conditions.is_empty() {
+            format!("{}{}.", outcome[..1].to_uppercase(), &outcome[1..])
+        } else {
+            format!("When {when}, {outcome}.")
+        }
+    };
+    if let Some((status, message)) = response(&value) {
+        let tail = message.map(|m| format!(" (“{m}”)")).unwrap_or_default();
+        let outcome = if (400..600).contains(&status) {
+            format!("the request is refused with status {status}{tail}")
+        } else {
+            format!("it responds with status {status}{tail}")
+        };
+        return Some(sentence(outcome));
+    }
+    if value.starts_with("redirect(") {
+        return Some(sentence("the caller is redirected".to_owned()));
+    }
+    let answer = match value.as_str() {
+        "True" | "true" => Some(true),
+        "False" | "false" => Some(false),
+        _ => None,
+    };
+    let predicate = predicate_verb(method.trim_start_matches('_'));
+    let (Some(answer), Some((verb, rest))) = (answer, predicate) else {
+        // A value the method gives: `return config.MAX_OLD` in
+        // `User.max_alias` reads "the user's max alias is the configured
+        // max old"; a wrapper passing a value on returns it.
+        let parsed = parse(&value)?;
+        if class.is_none()
+            && let Expr::Ref(path) = &parsed
+            && let [one] = &path[..]
+        {
+            return Some(sentence(format!("it returns the {}", words(one))));
+        }
+        let given = noun(&parsed, &cx)?;
+        // An accessor reads as what it gives: `get_active_subscription`
+        // is "active subscription".
+        let named = method.trim_start_matches('_');
+        let named = named.strip_prefix("get_").unwrap_or(named);
+        let what = match class {
+            Some(class) => format!("the {}'s {}", words(class), words(named)),
+            None => format!("the {}", words(named)),
+        };
+        return Some(sentence(format!("{what} is {given}")));
+    };
+    let verb = if answer { verb } else { negated_verb(verb) };
+    let who = match class {
+        Some(class) => format!("a {}", words(class)),
+        None => "the caller".to_owned(),
+    };
+    Some(if conditions.is_empty() {
+        format!("Otherwise {who} {verb} {}.", words(rest))
+    } else {
+        let s = format!("{who} {verb} {} when {when}.", words(rest));
+        format!("{}{}", s[..1].to_uppercase(), &s[1..])
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn said(display: &str, polarity: BranchPolarity, class: Option<&str>) -> Option<String> {
+        condition(display, polarity, &Context { class })
+    }
+
+    // AC-0905: simple conditions are restated by rule; anything else is not.
+    #[test]
+    fn simple_conditions_are_restated_in_domain_terms() {
+        let t = BranchPolarity::TruthyBranch;
+        let f = BranchPolarity::FalsyBranch;
+        assert_eq!(said("not api_key", t, None).unwrap(), "no API key is given");
+        assert_eq!(
+            said("g.user.disabled", t, None).unwrap(),
+            "the user is disabled"
+        );
+        assert_eq!(
+            said("not g.user.is_active()", t, None).unwrap(),
+            "the user is not active"
+        );
+        assert_eq!(
+            said("not user.can_create_new_alias()", t, None).unwrap(),
+            "the user cannot create new alias"
+        );
+        assert_eq!(
+            said("not alias or alias.user_id != user.id", t, None).unwrap(),
+            "no alias is given or the alias does not belong to the user"
+        );
+        assert_eq!(
+            said("mode not in (\"word\", \"uuid\")", t, None).unwrap(),
+            "the mode is not one of “word”, “uuid”"
+        );
+        assert_eq!(
+            said("self.delete_on is not None", t, Some("User")).unwrap(),
+            "the user's delete on is set"
+        );
+        assert_eq!(
+            said("count > config.MAX_NB_EMAIL_FREE_PLAN", t, None).unwrap(),
+            "the count is more than the configured max nb email free plan"
+        );
+        assert_eq!(
+            said("current_user.is_authenticated", f, None).unwrap(),
+            "the user is not authenticated"
+        );
+        assert_eq!(
+            said("not api_key and not current_user.is_authenticated", t, None).unwrap(),
+            "no API key is given and the user is not authenticated"
+        );
+        assert_eq!(
+            said("data.get(\"mode\") == \"word\"", t, None).unwrap(),
+            "the data's mode is “word”"
+        );
+        assert_eq!(
+            said("is_sl_domain is None", t, None).unwrap(),
+            "the “is sl domain” flag is not set"
+        );
+        // AC-0908: a value tested for presence is "set"; the current time
+        // is named as such.
+        assert_eq!(
+            said("self.trial_end", t, Some("User")).unwrap(),
+            "the user's trial end is set"
+        );
+        assert_eq!(
+            said("self.trial_end > arrow.now()", t, Some("User")).unwrap(),
+            "the user's trial end is more than the current time"
+        );
+        // Outside the rules: a call with arguments, arithmetic, a member of
+        // a call's result.
+        assert_eq!(said("check(alias, user)", t, None), None);
+        assert_eq!(said("(time() - int(t)) > config.X", t, None), None);
+        assert_eq!(said("Alias.get_by(email=e)", t, None), None);
+        assert_eq!(said("foo().bar", t, None), None);
+        assert_eq!(words("MAX_NB_EMAIL_FREE_PLAN"), "max nb email free plan");
+        assert_eq!(words("apiKeyId"), "API key ID");
+    }
+}
