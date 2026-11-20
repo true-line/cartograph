@@ -810,6 +810,7 @@ fn anchor_probes_count_every_kind_sought() {
             ("extension contexts (popup, background, content scripts)", 1),
             ("extension commands (keyboard shortcuts)", 0),
             ("scheduled jobs", 0),
+            ("process entry points (listeners, workers, commands)", 0),
             ("HTTP endpoints", 0),
             // SAVE_SNAPSHOT is published locally — not an external channel.
             ("externally published event channels", 0),
@@ -818,7 +819,7 @@ fn anchor_probes_count_every_kind_sought() {
 
     // An empty slice still names every kind, all zero.
     let none = anchor_probes(&[], &[]);
-    assert_eq!(none.len(), 6);
+    assert_eq!(none.len(), 7);
     assert!(none.iter().all(|p| p.found == 0));
 
     // A consumed-but-never-published channel counts as external.
@@ -1307,4 +1308,71 @@ fn bounded_trace_rejects_large_method_labels_before_owning_output() {
         );
         assert_no_materialization();
     }
+}
+
+// AC-0893: a process start beyond HTTP is a flow trigger of its own: the
+// trace enters its file and the callables defined there, named by the
+// entry point's own name (#1997).
+#[test]
+fn entry_points_are_traced_from_their_file() {
+    let nodes = vec![
+        node(
+            "entry:app@email_handler.py#main",
+            "EntryPoint",
+            serde_json::json!({"name": "Mail received over SMTP (email_handler.py)"}),
+        ),
+        node(
+            "file:app@email_handler.py",
+            "File",
+            serde_json::json!({"path": "email_handler.py"}),
+        ),
+        node(
+            "sym:app@email_handler.py#handle",
+            "Symbol",
+            serde_json::json!({"name": "handle"}),
+        ),
+        node(
+            "sym:app@email_handler.py#forward_email_to_mailbox",
+            "Symbol",
+            serde_json::json!({"name": "forward_email_to_mailbox"}),
+        ),
+    ];
+    let edges = vec![
+        edge(
+            "entry:app@email_handler.py#main",
+            "file:app@email_handler.py",
+            "ENTRY",
+            "Confirmed",
+        ),
+        edge(
+            "sym:app@email_handler.py#handle",
+            "file:app@email_handler.py",
+            "DEFINED_IN",
+            "Confirmed",
+        ),
+        edge(
+            "sym:app@email_handler.py#handle",
+            "sym:app@email_handler.py#forward_email_to_mailbox",
+            "CALLS",
+            "Confirmed",
+        ),
+    ];
+    let flows = trace(&nodes, &edges);
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].trigger_kind, "EntryPoint");
+    assert_eq!(
+        flows[0].trigger_name,
+        "Mail received over SMTP (email_handler.py)"
+    );
+    let labels: Vec<&str> = flows[0].hops.iter().map(|h| h.label.as_str()).collect();
+    assert_eq!(labels, ["ENTRY", "DEFINED_IN", "CALLS"]);
+    let probes = anchor_probes(&nodes, &edges);
+    assert_eq!(
+        probes
+            .iter()
+            .find(|p| p.kind.starts_with("process entry points"))
+            .unwrap()
+            .found,
+        1
+    );
 }

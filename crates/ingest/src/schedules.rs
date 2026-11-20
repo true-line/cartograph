@@ -521,7 +521,7 @@ fn resolve_entry(
 /// searched from the script's directory as Python's `sys.path[0]` is:
 /// `<module>.py` or `<module>/__init__.py`, with no package on the way
 /// shadowed by a same-named module file.
-fn module_file(rel: &str, module: &str, files: &BTreeSet<String>) -> Option<String> {
+pub(crate) fn module_file(rel: &str, module: &str, files: &BTreeSet<String>) -> Option<String> {
     let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
     let join = |path: &str| {
         if dir.is_empty() {
