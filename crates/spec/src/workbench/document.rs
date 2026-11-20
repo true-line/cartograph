@@ -947,6 +947,12 @@ pub(super) fn d1(
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;
+                cited += operations::limits_per_capability(
+                    knowledge,
+                    mode,
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
             } else if let (SectionFrame::Flows, Some(knowledge)) = (source, knowledge)
                 && let Some(flow_facts) = flows::flows_per_capability(
                     (nodes, edges),
@@ -976,6 +982,15 @@ pub(super) fn d1(
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;
+                if label == "Capability" {
+                    cited += operations::operations_per_capability(
+                        (nodes, edges),
+                        knowledge,
+                        mode,
+                        (&mut assertions, &mut drafted.asserted),
+                        &mut content,
+                    )?;
+                }
             }
             // Python callers by their recovered guards frame 1.2 (#1979).
             if matches!(source, SectionFrame::Nodes("Actor")) {
@@ -1036,6 +1051,9 @@ pub(super) mod acceptance;
 
 #[path = "document_flows.rs"]
 pub(super) mod flows;
+
+#[path = "document_operations.rs"]
+pub(super) mod operations;
 
 #[cfg(test)]
 #[path = "document_tests.rs"]

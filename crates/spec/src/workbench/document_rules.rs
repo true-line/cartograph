@@ -12,6 +12,13 @@
 //! more than [`SHARED_AFTER`] capabilities reach is shared plumbing: its
 //! rejections are listed once, after the capabilities.
 //!
+//! A function a rejection's condition calls (`user.can_create_new_alias()`)
+//! is followed by its name (#1998, AC-0886): when exactly one recovered
+//! Symbol has that last name segment, its guarded exits and those of what it
+//! calls within [`PREDICATE_DEPTH`] hops are listed under the row, marked
+//! `↳` and as matched by name; otherwise a `↳` row names the predicate and
+//! why it was not followed, so the condition is never left unexplained.
+//!
 //! Only the stored, sanitized displays the rule inventory renders are shown
 //! (SPEC-02); nothing is read from source. The rows are observations: the
 //! complete execution predicate and the consumer effect stay unestablished,
@@ -215,14 +222,20 @@ fn holds(shown: &str, polarity: BranchPolarity, alone: bool) -> String {
 }
 
 fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
+    guarded(rule, owner, false)
+}
+
+/// A guarded exit as a row; with `any`, every exit, not only rejections.
+fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
     let outcome = match &parsed.effect {
         LocalExit::Throw { value } => format!("throws {}", one_line(value.display.as_str())),
         LocalExit::Return { value: Some(value) }
-            if constructs_error(value) || returns_error_status(value) =>
+            if any || constructs_error(value) || returns_error_status(value) =>
         {
             format!("returns {}", one_line(value.display.as_str()))
         }
+        LocalExit::Return { value: None } if any => "returns nothing".to_owned(),
         LocalExit::Return { .. } => return None,
     };
     let when = if parsed.conditions.is_empty() {
@@ -249,6 +262,9 @@ struct Index<'a> {
     by_id: BTreeMap<&'a str, &'a Node>,
     calls: BTreeMap<&'a str, Vec<&'a str>>,
     governs: BTreeMap<&'a str, Vec<&'a Node>>,
+    /// Symbols by the last segment of their name, for following a
+    /// predicate a condition calls (#1998).
+    by_name: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
 impl<'a> Index<'a> {
@@ -272,10 +288,18 @@ impl<'a> Index<'a> {
                 _ => {}
             }
         }
+        let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for node in nodes.iter().filter(|n| n.label == "Symbol") {
+            if let Some(name) = node.props["name"].as_str() {
+                let last = name.rsplit('.').next().unwrap_or(name);
+                by_name.entry(last).or_default().push(&node.id);
+            }
+        }
         Self {
             by_id,
             calls,
             governs,
+            by_name,
         }
     }
 
@@ -335,8 +359,172 @@ impl<'a> Index<'a> {
     }
 }
 
+/// Calls a condition makes, by name: `user.can_create()` gives
+/// `can_create`. Builtins and names shorter than three characters are
+/// skipped; at most [`MAX_PREDICATES`].
+fn called_names(when: &str) -> Vec<&str> {
+    const SKIP: [&str; 12] = [
+        "len",
+        "isinstance",
+        "getattr",
+        "hasattr",
+        "str",
+        "int",
+        "bool",
+        "any",
+        "all",
+        "get",
+        "jsonify",
+        "not",
+    ];
+    let mut out: Vec<&str> = Vec::new();
+    let bytes = when.as_bytes();
+    for (i, _) in when.match_indices('(') {
+        let start = when[..i]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |p| p + 1);
+        let name = &when[start..i];
+        if name.len() < 3
+            || name.as_bytes()[0].is_ascii_digit()
+            || SKIP.contains(&name)
+            || (start > 0 && bytes[start - 1] == b'"')
+            || out.contains(&name)
+        {
+            continue;
+        }
+        out.push(name);
+        if out.len() == MAX_PREDICATES {
+            break;
+        }
+    }
+    out
+}
+
+/// Predicates followed per rejection row.
+pub(super) const MAX_PREDICATES: usize = 3;
+/// Call hops followed past a predicate.
+pub(super) const PREDICATE_DEPTH: usize = 2;
+/// Rows printed for one followed predicate.
+pub(super) const MAX_FOLLOWED_ROWS: usize = 12;
+
+impl<'a> Index<'a> {
+    /// The rows of each predicate `row`'s condition calls: the guarded
+    /// exits of the one repository function of that name and of what it
+    /// calls within [`PREDICATE_DEPTH`] hops, or a row saying why it is not
+    /// followed. Each predicate is followed once per `followed` set.
+    fn follow(
+        &self,
+        row: &Rejection<'_>,
+        followed: &mut BTreeSet<String>,
+        assertions: &mut Assertions,
+        asserted: &mut BTreeSet<String>,
+        out: &mut Text,
+    ) -> Result<(), RenderLimit> {
+        for name in called_names(&row.when) {
+            if !followed.insert(name.to_owned()) {
+                continue;
+            }
+            let targets = self
+                .by_name
+                .get(name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let [target] = targets else {
+                let why = if targets.is_empty() {
+                    "no repository function of this name was recovered".to_owned()
+                } else {
+                    format!("{} repository functions have this name", targets.len())
+                };
+                writeln!(
+                    out,
+                    "| ↳ {}() | not followed: {why} | — | — |",
+                    Literal(name)
+                )?;
+                continue;
+            };
+            let qualified = self
+                .by_id
+                .get(target)
+                .and_then(|n| n.props["name"].as_str())
+                .unwrap_or(target);
+            writeln!(
+                out,
+                "| ↳ {}() | followed into {} (matched by name, inferred), {PREDICATE_DEPTH} \
+                 call hops | its guarded exits: | — |",
+                Literal(name),
+                Literal(qualified),
+            )?;
+            let mut seen: BTreeSet<&str> = BTreeSet::from([*target]);
+            let mut order = vec![*target];
+            let mut front = vec![*target];
+            for _ in 0..PREDICATE_DEPTH {
+                let mut next = Vec::new();
+                for id in &front {
+                    for callee in self.calls.get(id).into_iter().flatten() {
+                        if seen.insert(callee) {
+                            next.push(*callee);
+                        }
+                    }
+                }
+                order.extend(&next);
+                front = next;
+            }
+            let mut printed = 0usize;
+            let mut omitted = 0usize;
+            for id in order {
+                let owner = self
+                    .by_id
+                    .get(id)
+                    .and_then(|n| n.props["name"].as_str())
+                    .unwrap_or(id);
+                for rule in self.governs.get(id).into_iter().flatten() {
+                    let Some(exit) = guarded(rule, owner, true) else {
+                        continue;
+                    };
+                    if printed == MAX_FOLLOWED_ROWS {
+                        omitted += 1;
+                        continue;
+                    }
+                    printed += 1;
+                    let indented = Rejection {
+                        owner: exit.owner,
+                        ..exit
+                    };
+                    write_row_prefixed(&indented, "↳ ", assertions, asserted, out)?;
+                }
+            }
+            if printed == 0 {
+                writeln!(
+                    out,
+                    "| ↳ {}() | no guarded exit recovered in it or what it calls | — | — |",
+                    Literal(name)
+                )?;
+            }
+            if omitted > 0 {
+                writeln!(
+                    out,
+                    "| ↳ {}() | {omitted} more guarded exits not listed; `rule-evidence.md` \
+                     has them | — | — |",
+                    Literal(name)
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn write_row(
     row: &Rejection<'_>,
+    assertions: &mut Assertions,
+    asserted: &mut BTreeSet<String>,
+    out: &mut Text,
+) -> Result<(), RenderLimit> {
+    write_row_prefixed(row, "", assertions, asserted, out)
+}
+
+fn write_row_prefixed(
+    row: &Rejection<'_>,
+    prefix: &str,
     assertions: &mut Assertions,
     asserted: &mut BTreeSet<String>,
     out: &mut Text,
@@ -346,7 +534,7 @@ fn write_row(
     });
     writeln!(
         out,
-        "| {} | {} | {} | {id} |",
+        "| {prefix}{} | {} | {} | {id} |",
         Literal(row.owner),
         Literal(&row.when),
         Literal(&row.outcome),
@@ -404,7 +592,9 @@ pub(super) fn rules_per_capability(
          observations). The branch conditions are the ones around the exit in its own \
          callable; the complete execution predicate and what the caller does with the outcome \
          are not established. A callable more than {SHARED_AFTER} capabilities reach is listed \
-         once under shared rejections.\n"
+         once under shared rejections. A function a condition calls is followed by name \
+         (`↳` rows, inferred): the guarded exits of the one repository function of that name \
+         and of what it calls within {PREDICATE_DEPTH} hops, or why it was not followed.\n"
     )?;
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
@@ -420,15 +610,21 @@ pub(super) fn rules_per_capability(
             Literal(crate::workbench::render::NodeName(story.node))
         )?;
         out.push_str(HEADER)?;
+        let mut followed = BTreeSet::new();
         printed += index.each(reached.into_iter(), |row| {
-            write_row(&row, assertions, asserted, out)
+            write_row(&row, assertions, asserted, out)?;
+            index.follow(&row, &mut followed, assertions, asserted, out)
         })?;
         out.push_str("\n")?;
     }
     if index.each(shared(), |_| Ok(()))? > 0 {
         out.push_str("### Shared rejections\n\n")?;
         out.push_str(HEADER)?;
-        printed += index.each(shared(), |row| write_row(&row, assertions, asserted, out))?;
+        let mut followed = BTreeSet::new();
+        printed += index.each(shared(), |row| {
+            write_row(&row, assertions, asserted, out)?;
+            index.follow(&row, &mut followed, assertions, asserted, out)
+        })?;
         out.push_str("\n")?;
     }
     Ok(printed)
@@ -448,6 +644,12 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         slots::<&str>(rows)?,
         map_slots::<&str, Vec<&Node>>(rows)?,
         slots::<&Node>(rows)?,
+        // Symbols by name, and one followed predicate's traversal (#1998).
+        map_slots::<&str, Vec<&str>>(rows)?,
+        slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?,
+        slots::<&str>(rows)?.checked_mul(3)?,
+        set_slots::<String>(rows)?,
     ])?;
     let reach_count = map_slots::<&str, usize>(rows)?;
     // One capability's seen set and order/front/next (or retained reach).
@@ -734,6 +936,60 @@ def update_alias(alias_id, user):
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
         assert!(!text.contains("200"), "{text}");
         assert!(!text.contains("returns None"), "{text}");
+    }
+
+    // AC-0886: a function a rejection's condition calls is followed by name
+    // into its guarded exits and those of the method it calls on `self`; a
+    // name no repository function has is named as not followed.
+    #[test]
+    fn a_predicate_in_a_condition_is_followed_into_its_exits() {
+        let source = r#"
+from flask import jsonify
+
+class User:
+    def can_create_new_alias(self):
+        return self.can_create_num_aliases(1)
+
+    def can_create_num_aliases(self, n):
+        if self.disabled:
+            return False
+        if self.premium:
+            return True
+        return n <= 5
+
+def update_alias(alias_id, user):
+    if not user.can_create_new_alias():
+        return jsonify(error="quota"), 400
+    if not outside_check(alias_id):
+        return jsonify(error="no"), 403
+    return jsonify(ok=True)
+"#;
+        let (text, printed) = python_rows(source, "update_alias");
+        assert_eq!(printed, 2, "{text}");
+        assert!(
+            text.contains(
+                "| ↳ can\\_create\\_new\\_alias() | followed into User.can\\_create\\_new\\_alias \
+                 (matched by name, inferred), 2 call hops | its guarded exits: | — |"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "| ↳ User.can\\_create\\_num\\_aliases | self.disabled | returns False |"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("| ↳ User.can\\_create\\_num\\_aliases | self.premium | returns True |"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "| ↳ outside\\_check() | not followed: no repository function of this name was \
+                 recovered | — | — |"
+            ),
+            "{text}"
+        );
     }
 
     // AC-0849: a When cell states what holds at the exit. An `else` or
