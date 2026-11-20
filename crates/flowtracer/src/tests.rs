@@ -1310,7 +1310,7 @@ fn bounded_trace_rejects_large_method_labels_before_owning_output() {
     }
 }
 
-// AC-0883: a process start beyond HTTP is a flow trigger of its own: the
+// AC-0893: a process start beyond HTTP is a flow trigger of its own: the
 // trace enters its file and the callables defined there, named by the
 // entry point's own name (#1997).
 #[test]

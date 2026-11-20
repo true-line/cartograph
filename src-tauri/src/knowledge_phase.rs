@@ -315,11 +315,15 @@ fn derive_within(snapshot: &RevisionedSnapshot, flow_limits: flowtracer::TraceLi
     let actors = spec::derive_permission_actors(snapshot);
     derived.facts.extend(actors.facts);
     derived.oversized += actors.oversized_endpoints;
+    let subsystems = spec::derive_subsystems(snapshot);
+    derived.facts.extend(subsystems.facts);
+    derived.oversized += subsystems.oversized_groups;
+    derived.omissions.extend(subsystems.omission);
     derived
 }
 
 /// Every producer rule and its version, in phase order.
-pub(crate) const PRODUCER_RULES: [(&str, &str); 6] = [
+pub(crate) const PRODUCER_RULES: [(&str, &str); 7] = [
     (
         spec::CAPABILITY_GRAPHQL_RULE,
         spec::CAPABILITY_GRAPHQL_RULE_VERSION,
@@ -338,6 +342,7 @@ pub(crate) const PRODUCER_RULES: [(&str, &str); 6] = [
         spec::DOMAIN_ENTITY_ORM_RULE_VERSION,
     ),
     (spec::ACTOR_ALLOW_RULE, spec::ACTOR_ALLOW_RULE_VERSION),
+    (spec::SUBSYSTEM_RULE, spec::SUBSYSTEM_RULE_VERSION),
 ];
 
 /// The phase recipe with each producer rule, so a rule version change

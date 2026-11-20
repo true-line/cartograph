@@ -637,7 +637,7 @@ fn a_refused_derived_set_publishes_the_phase_without_it() {
 fn the_recipe_names_every_producer_rule_within_the_name_bound() {
     let name = recipe_name();
     assert!(name.starts_with(RECIPE));
-    assert_eq!(PRODUCER_RULES.len(), 6);
+    assert_eq!(PRODUCER_RULES.len(), 7);
     for (rule, version) in PRODUCER_RULES {
         let short = rule
             .strip_prefix("knowledge.")
@@ -648,6 +648,8 @@ fn the_recipe_names_every_producer_rule_within_the_name_bound() {
         "entry-point@{}",
         spec::CAPABILITY_ENTRY_POINT_RULE_VERSION
     )));
+    // AC-0894: the subsystem rule is part of the identity too.
+    assert!(name.contains(&format!(";subsystems@{}", spec::SUBSYSTEM_RULE_VERSION)));
     assert!(format!("{name};{DERIVED_REJECTED}").len() <= MAX_NAME_BYTES);
 }
 

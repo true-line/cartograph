@@ -148,7 +148,7 @@ fn capabilities(report: &CapabilityReport) -> BTreeMap<String, BTreeSet<String>>
         .collect()
 }
 
-// AC-0883: every recovered entry point is under a capability: one per
+// AC-0893: every recovered entry point is under a capability: one per
 // process start, operator commands grouped by their directory, and each
 // schedule file's jobs together. An entry point whose ENTRY is a Gap and a
 // scheduled CI workflow are under none; the Gap is in the gap register.
@@ -193,7 +193,7 @@ fn entry_points_and_schedules_are_capabilities() {
     assert_eq!(report, derive_entry_point_capabilities(&snapshot()));
 }
 
-// AC-0883: support from another extractor, or a second ENTRY, proves no
+// AC-0893: support from another extractor, or a second ENTRY, proves no
 // capability.
 #[test]
 fn unproven_entry_points_are_not_capabilities() {
@@ -220,7 +220,7 @@ fn unproven_entry_points_are_not_capabilities() {
     assert!(caps.contains_key("Receive mail over SMTP"));
 }
 
-// AC-0883 review (#2011): two processes of one Procfile with the same kind
+// AC-0893 review (#2011): two processes of one Procfile with the same kind
 // are told apart by their key.
 #[test]
 fn colliding_titles_in_one_file_name_their_entry() {

@@ -238,7 +238,7 @@ fn flow_arrangement_workspace_is_checked() {
     assert!(flows_per_capability_workspace(graph(1, usize::MAX, 1)).is_none());
 }
 
-// AC-0883: a cited process start is an operation of its capability: its
+// AC-0893: a cited process start is an operation of its capability: its
 // flow is placed under it, the callables defined in the file it enters are
 // its handlers, and what they call and write follows (#1997).
 #[test]

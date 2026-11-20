@@ -121,7 +121,7 @@ def helper():
     pass
 "#;
 
-// AC-0880: every Python module that starts a process is an EntryPoint whose
+// AC-0890: every Python module that starts a process is an EntryPoint whose
 // kind is read from what the module imports and runs: an SMTP listener with
 // its default port, a database LISTEN listener whose LISTEN is in an
 // imported repository module, a polling loop, an operator shell, and a
@@ -190,7 +190,7 @@ fn python_process_starts_are_entry_points_by_kind() {
     );
 }
 
-// AC-0880: a file a schedule job already enters is that job's entry, and
+// AC-0890: a file a schedule job already enters is that job's entry, and
 // tests and packaging scripts are not entry points of the system.
 #[test]
 fn scheduled_test_and_packaging_modules_are_not_entry_points() {
@@ -209,7 +209,7 @@ fn scheduled_test_and_packaging_modules_are_not_entry_points() {
     assert!(out.nodes.is_empty(), "{:#?}", out.nodes);
 }
 
-// AC-0881: the final Dockerfile stage's command is an entry point. A WSGI
+// AC-0891: the final Dockerfile stage's command is an entry point. A WSGI
 // server names its application module; an interpreter names its script.
 #[test]
 fn container_command_enters_the_application_module() {
@@ -232,7 +232,7 @@ fn container_command_enters_the_application_module() {
     assert_eq!(edge.props["entry_module_relative_to_repo_root"], true);
 }
 
-// AC-0882: a start this reader cannot resolve to one repository file is a
+// AC-0892: a start this reader cannot resolve to one repository file is a
 // Gap that names the command and why, never dropped.
 #[test]
 fn unresolved_starts_are_gaps_that_name_them() {
@@ -285,7 +285,7 @@ fn unresolved_starts_are_gaps_that_name_them() {
     );
 }
 
-// AC-0881: a console script enters its function when the Python adapter
+// AC-0891: a console script enters its function when the Python adapter
 // emitted it, and its module file otherwise.
 #[test]
 fn console_script_enters_its_proven_function() {
@@ -309,7 +309,7 @@ fn console_script_enters_its_proven_function() {
     );
 }
 
-// AC-0881 review (#2011): option values are not the application or the
+// AC-0891 review (#2011): option values are not the application or the
 // script, and a non-ASCII string beside a LISTEN is read safely.
 #[test]
 fn option_values_are_skipped_and_strings_are_read_by_character() {

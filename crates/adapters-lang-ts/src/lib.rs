@@ -25,6 +25,7 @@ use adapters_fw::events::{
 };
 use adapters_fw::{HTTP_FACTORIES, NEST};
 use core_graph::facts::{FactAccess, FactLists};
+use core_graph::packed::{PackedEdge, PackedNode};
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -128,12 +129,41 @@ enum EvalArg {
     Dynamic,
 }
 
+/// A call awaiting directory-wide proof. Its three candidate facts are held
+/// packed: a large walk keeps one per unproven call until completion, and
+/// only the outcome that completion selects is decoded (#1237).
 #[derive(Debug, Clone)]
 struct PendingCall {
-    resolved_edge: Edge,
-    gap_node: Node,
-    gap_edge: Edge,
+    resolved_edge: PackedEdge,
+    gap_node: PackedNode,
+    gap_edge: PackedEdge,
     requires_instance_method: bool,
+}
+
+impl PendingCall {
+    fn new(resolved_edge: Edge, gap_node: Node, gap_edge: Edge) -> Self {
+        // Every producer builds these props a fixed few levels deep.
+        Self {
+            resolved_edge: PackedEdge::pack(resolved_edge).expect("call props are shallow"),
+            gap_node: PackedNode::pack(gap_node).expect("gap props are shallow"),
+            gap_edge: PackedEdge::pack(gap_edge).expect("gap props are shallow"),
+            requires_instance_method: false,
+        }
+    }
+
+    /// Cached unchanged source still belongs to the revision ingested now.
+    fn retarget(&mut self, commit: &str) -> Result<(), core_graph::GraphError> {
+        let mut resolved = self.resolved_edge.unpack()?;
+        let mut gap_node = self.gap_node.unpack()?;
+        let mut gap_edge = self.gap_edge.unpack()?;
+        retarget_props_commit(&mut resolved.props, commit);
+        retarget_props_commit(&mut gap_node.props, commit);
+        retarget_props_commit(&mut gap_edge.props, commit);
+        self.resolved_edge = PackedEdge::pack(resolved)?;
+        self.gap_node = PackedNode::pack(gap_node)?;
+        self.gap_edge = PackedEdge::pack(gap_edge)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -255,7 +285,10 @@ fn retarget_props_span(props: &mut serde_json::Value, byte_start: u64, byte_end:
     props["prov"] = serde_json::to_value(provenance).expect("provenance serializes");
 }
 
-fn retarget_commit(extraction: &mut Extraction, commit: &str) {
+fn retarget_commit(
+    extraction: &mut Extraction,
+    commit: &str,
+) -> Result<(), core_graph::GraphError> {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
     }
@@ -263,9 +296,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut edge.props, commit);
     }
     for pending in &mut extraction.pending_calls {
-        retarget_props_commit(&mut pending.resolved_edge.props, commit);
-        retarget_props_commit(&mut pending.gap_node.props, commit);
-        retarget_props_commit(&mut pending.gap_edge.props, commit);
+        pending.retarget(commit)?;
     }
     for pending in &mut extraction.pending_pulumi_edges {
         retarget_props_commit(&mut pending.props, commit);
@@ -279,6 +310,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for site in &mut extraction.next_routes {
         site.retarget(commit);
     }
+    Ok(())
 }
 
 impl Extraction {
@@ -436,9 +468,8 @@ fn pending_call(
 ) -> PendingCall {
     let gap_id = format!("gap:call:{}@{}@{}", cx.id.repo, cx.path, call.start_byte());
     let reason = "unresolved call target after import/type resolution";
-    PendingCall {
-        requires_instance_method: false,
-        resolved_edge: Edge {
+    PendingCall::new(
+        Edge {
             src: src.clone(),
             dst,
             label: "CALLS".into(),
@@ -447,7 +478,7 @@ fn pending_call(
                 "prov": cx.prov(&call, &format!("CALLS {callee} at {}", call.start_byte())),
             }),
         },
-        gap_node: Node {
+        Node {
             id: gap_id.clone(),
             label: "Gap".into(),
             props: serde_json::json!({
@@ -461,7 +492,7 @@ fn pending_call(
                 ),
             }),
         },
-        gap_edge: Edge {
+        Edge {
             src,
             dst: gap_id.clone(),
             label: "CALLS".into(),
@@ -475,7 +506,7 @@ fn pending_call(
                 ),
             }),
         },
-    }
+    )
 }
 
 /// Parse a compile-time-proven `eval()` / `new Function()` code string with
@@ -3246,7 +3277,7 @@ pub fn extract_dir_incremental_packed(
                     let cached = &cache.files[rel];
                     let mut extraction = cached.extraction.clone();
                     (extraction.nodes, extraction.edges) = cached.facts.clone().into_facts()?;
-                    retarget_commit(&mut extraction, id.commit);
+                    retarget_commit(&mut extraction, id.commit)?;
                     extraction
                 }
             };
@@ -3321,10 +3352,10 @@ fn complete_pending_calls(
             && (!call.requires_instance_method
                 || instance_methods.contains(&call.resolved_edge.dst))
         {
-            edges.push(call.resolved_edge);
+            edges.push(call.resolved_edge.unpack()?);
         } else {
-            nodes.push(call.gap_node);
-            edges.push(call.gap_edge);
+            nodes.push(call.gap_node.unpack()?);
+            edges.push(call.gap_edge.unpack()?);
         }
     }
     facts.append(nodes, edges)
