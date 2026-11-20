@@ -985,28 +985,142 @@ const LOG_VERBS: &[&str] = &[
     "e",
 ];
 
-/// Python builtins a call statement to is not an effect of interest.
+/// Python builtins: a call statement to one is not an effect of interest.
 const BUILTINS: &[&str] = &[
-    "print",
-    "len",
-    "isinstance",
-    "setattr",
-    "getattr",
-    "delattr",
-    "super",
-    "next",
-    "iter",
-    "sorted",
-    "list",
-    "dict",
-    "set",
-    "tuple",
-    "str",
-    "int",
-    "float",
+    "abs",
+    "aiter",
+    "all",
+    "anext",
+    "any",
+    "ascii",
+    "bin",
     "bool",
     "breakpoint",
+    "bytearray",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "compile",
+    "complex",
+    "delattr",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "exit",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "help",
+    "hex",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "quit",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
 ];
+
+/// Whether `name` is bound in `function` itself, as a parameter or by an
+/// assignment, loop or `with` target, so it is not the module of that name.
+fn bound_locally(cx: &FileCx<'_>, function: TsNode<'_>, name: &str) -> bool {
+    let mut stack = vec![function];
+    while let Some(node) = stack.pop() {
+        if node != function
+            && matches!(
+                node.kind(),
+                "function_definition" | "class_definition" | "lambda"
+            )
+        {
+            continue;
+        }
+        let bound = match node.kind() {
+            "identifier" => node.parent().is_some_and(|p| {
+                matches!(
+                    p.kind(),
+                    "parameters"
+                        | "default_parameter"
+                        | "typed_parameter"
+                        | "typed_default_parameter"
+                ) || (matches!(
+                    p.kind(),
+                    "assignment" | "augmented_assignment" | "for_statement"
+                ) && p.child_by_field_name("left") == Some(node))
+                    || p.kind() == "as_pattern_target"
+            }),
+            _ => false,
+        };
+        if bound && cx.text(&node) == name {
+            return true;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    false
+}
+
+/// Names bound by the imports inside `function` itself.
+fn function_imports(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut stack = vec![function];
+    while let Some(node) = stack.pop() {
+        if node != function
+            && matches!(
+                node.kind(),
+                "function_definition" | "class_definition" | "lambda"
+            )
+        {
+            continue;
+        }
+        if matches!(node.kind(), "import_statement" | "import_from_statement") {
+            found.extend(imported(node).iter().map(|n| cx.text(n).to_owned()));
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    found
+}
 
 /// A statement that is a guarded effect (#1998): `x.attr = value` (one
 /// attribute target), or a call statement (optionally awaited) to a
@@ -1047,17 +1161,31 @@ fn effect_statement<'t>(
     if let EffectKind::Call { call } = kind {
         let callee = call.child_by_field_name("function")?;
         let admitted = match callee.kind() {
-            "identifier" => !BUILTINS.contains(&cx.text(&callee)),
+            // A bare function: not a builtin, a class (a constructor) or a
+            // logging verb imported directly (`from logging import info`).
+            "identifier" => {
+                let name = cx.text(&callee);
+                !BUILTINS.contains(&name)
+                    && !LOG_VERBS.contains(&name)
+                    && name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+            }
             "attribute" => {
                 let object = callee.child_by_field_name("object")?;
                 let verb = cx.text(&callee.child_by_field_name("attribute")?);
                 let receiver = cx.text(&object);
+                let function = owner_function(node);
+                // A module imported at the top or in the function itself,
+                // and not rebound there (`def run(service): service.save()`).
+                let module = || {
+                    receiver.starts_with(|c: char| c.is_ascii_lowercase())
+                        && function.is_none_or(|f| !bound_locally(cx, f, receiver))
+                        && (modules.contains(receiver)
+                            || function.is_some_and(|f| function_imports(cx, f).contains(receiver)))
+                };
                 object.kind() == "identifier"
                     && !LOGGING.contains(&receiver)
                     && !LOG_VERBS.contains(&verb)
-                    && (matches!(receiver, "self" | "cls")
-                        || (modules.contains(receiver)
-                            && receiver.starts_with(|c: char| c.is_ascii_lowercase())))
+                    && (matches!(receiver, "self" | "cls") || module())
             }
             _ => false,
         };
