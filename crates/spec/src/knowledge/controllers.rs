@@ -234,21 +234,77 @@ struct Pending {
     group: Group,
 }
 
+/// The URL route prefix every cited HTTP endpoint of `group` shares, up to
+/// its first parameter segment (`/admin/orders`), or none when the group
+/// cites no HTTP route or its routes share no literal segment. Endpoint ids
+/// read `ep:<repo>@<method>:<path>`.
+fn route_prefix(group: &Group) -> Option<String> {
+    let mut common: Option<Vec<&str>> = None;
+    for cite in &group.cites {
+        let BaseRef::Node(id) = cite else { continue };
+        let Some(route) = id
+            .strip_prefix("ep:")
+            .and_then(|rest| rest.split_once('@'))
+            .and_then(|(_, rest)| rest.split_once(':'))
+            .map(|(_, path)| path)
+        else {
+            continue;
+        };
+        if !route.starts_with('/') {
+            return None;
+        }
+        let segments: Vec<&str> = route
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .take_while(|s| !s.contains(['<', '{', ':', '*']))
+            .collect();
+        common = Some(match common {
+            None => segments,
+            Some(prior) => prior
+                .into_iter()
+                .zip(segments)
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect(),
+        });
+    }
+    common
+        .filter(|segments| !segments.is_empty())
+        .map(|segments| format!("/{}", segments.join("/")))
+}
+
 /// Titles that would collide across every controller and route group name
-/// their file after the title, and their class or group too when the file
-/// does not tell them apart (AC-0851).
+/// the URL route prefix their routes share after the title when that tells
+/// each of them apart (`View orders (/admin/orders)`): a route is the
+/// observable contract, a file path is not. Otherwise they name their file,
+/// and their class or group too when the file does not tell them apart
+/// (AC-0851).
 fn disambiguated(pending: Vec<Pending>) -> Vec<(String, Vec<u8>, Group)> {
     let mut by_title: BTreeMap<&str, usize> = BTreeMap::new();
     let mut by_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-    for p in &pending {
+    let prefixes: Vec<Option<String>> = pending.iter().map(|p| route_prefix(&p.group)).collect();
+    // Per colliding title, how many candidates name each route prefix, and
+    // whether every one has a prefix.
+    let mut by_prefix: BTreeMap<(&str, Option<&str>), usize> = BTreeMap::new();
+    for (p, prefix) in pending.iter().zip(&prefixes) {
         *by_title.entry(&p.title).or_default() += 1;
         *by_file.entry((&p.title, &p.places[0])).or_default() += 1;
+        *by_prefix.entry((&p.title, prefix.as_deref())).or_default() += 1;
     }
+    let routes_tell_apart = |title: &str| {
+        by_prefix
+            .iter()
+            .filter(|((t, _), _)| *t == title)
+            .all(|((_, prefix), n)| prefix.is_some() && *n == 1)
+    };
     let titles: Vec<String> = pending
         .iter()
-        .map(|p| {
+        .zip(&prefixes)
+        .map(|(p, prefix)| {
             if by_title[p.title.as_str()] < 2 {
                 p.title.clone()
+            } else if let Some(prefix) = prefix.as_deref().filter(|_| routes_tell_apart(&p.title)) {
+                format!("{} ({prefix})", p.title)
             } else if by_file[&(p.title.as_str(), p.places[0].as_str())] < 2 {
                 format!("{} ({})", p.title, p.places[0])
             } else {

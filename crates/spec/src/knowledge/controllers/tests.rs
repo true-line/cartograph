@@ -437,8 +437,9 @@ fn controller_capability_groups_real_jaxrs_routes_by_class() {
     );
 }
 
-// AC-0851: two controllers whose titles would collide each name their file,
-// whatever framework words told their classes apart.
+// AC-0851: two controllers whose titles would collide each name the route
+// prefix their routes share, whatever framework words told their classes
+// apart; never their file when the routes tell them apart.
 #[test]
 fn colliding_controller_titles_name_their_files() {
     let source = |class: &str, prefix: &str| {
@@ -482,9 +483,53 @@ public class {class} {{
     };
     assert_eq!(
         controller_titles(&snapshot),
+        ["View orders (/admin/orders)", "View orders (/shop/orders)"]
+    );
+}
+
+// AC-0851: colliding titles name their route prefix only when it tells each
+// one apart; otherwise they keep naming their files.
+#[test]
+fn colliding_titles_fall_back_to_files_when_routes_do_not_tell_them_apart() {
+    let pending = |file: &str, routes: &[&str]| Pending {
+        title: "Manage dashboard".into(),
+        places: [file.into(), "dashboard".into()],
+        key: file.as_bytes().to_vec(),
+        group: Group {
+            cites: routes
+                .iter()
+                .map(|route| BaseRef::Node(format!("ep:repo@GET:{route}")))
+                .collect(),
+            ..Group::default()
+        },
+    };
+    let titles = |pending: Vec<Pending>| {
+        disambiguated(pending)
+            .into_iter()
+            .map(|(title, _, _)| title)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        titles(vec![
+            pending(
+                "app/dashboard/views/index.py",
+                &["/dashboard/", "/dashboard/<int:id>"]
+            ),
+            pending(
+                "app/dashboard/views/domain.py",
+                &["/dashboard/domains", "/dashboard/domains/<int:id>/dns"]
+            ),
+        ]),
         [
-            "View orders (src/main/java/com/demo/AdminOrderController.java)",
-            "View orders (src/main/java/com/demo/ShopOrderController.java)"
+            "Manage dashboard (/dashboard)",
+            "Manage dashboard (/dashboard/domains)"
         ]
+    );
+    assert_eq!(
+        titles(vec![
+            pending("app/a.py", &["/dashboard/x", "/dashboard/y"]),
+            pending("app/b.py", &["/dashboard/z", "/dashboard/w"]),
+        ]),
+        ["Manage dashboard (app/a.py)", "Manage dashboard (app/b.py)"]
     );
 }
