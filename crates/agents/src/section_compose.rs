@@ -53,6 +53,47 @@ code does, documented_intent only for what the target's own documentation or tes
 scenario names say is intended, inferred_interpretation for a reading across facts. \
 Reply with the JSON object the response schema describes and nothing else.";
 
+/// How each D1 section is written, beyond [`SYSTEM`]: what a reader of
+/// that section needs from it. A section without an entry gets none.
+const GUIDANCE: &[(&str, &str)] = &[
+    (
+        "1.2",
+        "Describe each actor or role by what it is, what it may do and what it may not.",
+    ),
+    (
+        "1.3",
+        "Describe the system's capabilities as a product owner would: group them into \
+         areas, and for each area state its purpose, who uses it (an end user, an API \
+         client, an administrator, a developer, an external provider) and the outcome it \
+         delivers, including notable conditions and limits. A route is evidence, not \
+         content: name at most two representative routes in a statement and never \
+         enumerate routes, methods or versions.",
+    ),
+    (
+        "1.4",
+        "State each acceptance criterion as a condition and its expected outcome, grouped \
+         by capability. Prefer the criteria that constrain behaviour (refusals, limits, \
+         security guarantees) over the ones that only say an operation works.",
+    ),
+    (
+        "1.5",
+        "This section lists rules as code: where (a callable), when (branch conditions) \
+         and outcome (a raise or an error response), grouped under the capability whose \
+         handlers reach them. Translate each into domain terms: who is refused, under \
+         which condition, with which user-facing message and status. Quote messages and \
+         statuses exactly; never repeat a callable, variable or class name. Do not state \
+         an order between checks unless the facts establish it.",
+    ),
+];
+
+/// The guidance for D1 section `number`, if it has any.
+pub fn guidance(number: &str) -> Option<&'static str> {
+    GUIDANCE
+        .iter()
+        .find(|(section, _)| *section == number)
+        .map(|(_, text)| *text)
+}
+
 /// One fact the composer may cite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComposeFact {
@@ -96,13 +137,13 @@ pub struct ComposeInput<'a> {
     pub groups: &'a [ComposeGroup],
 }
 
-/// The fingerprint of this role's definition: its instructions and its
-/// schema template.
+/// The fingerprint of this role's definition: its instructions, its
+/// per-section guidance and its schema template.
 pub fn definition_fingerprint() -> String {
     let schema = response_schema(&BTreeSet::new());
     crate::source_basis::domain_hash(
         b"cartograph:section-composer-definition:v1\0",
-        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{schema}").as_bytes(),
+        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{schema}").as_bytes(),
     )
 }
 
@@ -160,6 +201,11 @@ fn prompt(input: &ComposeInput<'_>) -> String {
         address.scope,
         input.section.trim_end(),
     );
+    if let Some(text) = guidance(&address.section) {
+        // Before the facts, so it frames how they are read.
+        let at = out.find("<section>").unwrap_or(out.len());
+        out.insert_str(at, &format!("<guidance>\n{text}\n</guidance>\n\n"));
+    }
     for fact in input.facts {
         let _ = writeln!(
             out,
