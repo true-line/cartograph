@@ -301,6 +301,25 @@ fn a_file_used_from_everywhere_is_shared() {
     );
 }
 
+// AC-0914: a file used from everywhere that is named for a subject is that
+// subject's core, not shared code: it stays in the group it names.
+#[test]
+fn a_widely_used_file_named_for_a_subject_stays_with_it() {
+    let mut fixture = layered();
+    fixture.file("app/alias_suffix.py", &["get_alias"]);
+    for path in ALIAS.iter().chain(&MAILBOX).chain(&DOMAIN) {
+        fixture.imports(path, "app/alias_suffix.py");
+    }
+    let report = derive_subsystems(&fixture.snapshot());
+    assert_eq!((report.files, report.grouped, report.shared), (13, 13, 0));
+    let alias = groups(&report)
+        .into_iter()
+        .find(|(name, _, _)| name == "Alias")
+        .unwrap();
+    assert!(alias.2.contains(&"app/alias_suffix.py".to_owned()));
+    assert_eq!(alias.2.len(), 5);
+}
+
 // AC-0870: a base past the file bound derives nothing and says why; a base
 // with nothing to separate derives nothing.
 #[test]
@@ -365,4 +384,186 @@ fn groups_do_not_depend_on_the_registry_key() {
         groups(&derive_subsystems(&other)),
         groups(&derive_subsystems(&base))
     );
+}
+
+const ABUSER: [&str; 4] = [
+    "app/abuser.py",
+    "app/abuser_utils.py",
+    "app/admin/abuser_lookup.py",
+    "app/jobs/mark_abuser_job.py",
+];
+const EVENT: [&str; 6] = [
+    "packages/core/src/event-bus/events/order-event.ts",
+    "packages/core/src/event-bus/events/login-event.ts",
+    "packages/core/src/event-bus/events/refund-event.ts",
+    "packages/core/src/event-bus/event-bus.ts",
+    "packages/core/src/event-bus/event-bus.module.ts",
+    "packages/core/src/event-bus/event-bus-utils.ts",
+];
+const LEFTOVER: [&str; 4] = [
+    "app/dns_utils.py",
+    "app/pgp_utils.py",
+    "app/jose_utils.py",
+    "shell.py",
+];
+
+/// The layered concepts beside an abuse concept, an event bus under its own
+/// directory and four files that share nothing.
+fn mixed() -> Fixture {
+    let mut fixture = layered();
+    for path in ABUSER {
+        fixture.file(path, &["get_abuser", "mark_abuser"]);
+    }
+    for path in EVENT {
+        fixture.file(path, &["publish"]);
+    }
+    for (path, symbol) in LEFTOVER.iter().zip(["resolve", "encrypt", "sign", "open"]) {
+        fixture.file(path, &[symbol]);
+    }
+    fixture
+}
+
+/// The rule's reading of a fixture, and the index of each path in it.
+fn read(fixture: &Fixture) -> (RevisionedSnapshot, SubsystemReport) {
+    (fixture.snapshot(), SubsystemReport::default())
+}
+
+fn files(signals: &Signals<'_>, paths: &[&str]) -> Vec<usize> {
+    paths
+        .iter()
+        .map(|path| {
+            signals
+                .units
+                .iter()
+                .position(|unit| unit.path == *path)
+                .unwrap()
+        })
+        .collect()
+}
+
+fn regrouped(signals: &Signals<'_>, groups: &[&[&str]]) -> Vec<(String, Vec<String>)> {
+    let groups: Vec<Vec<usize>> = groups.iter().map(|paths| files(signals, paths)).collect();
+    let groups = regroup(groups, signals);
+    let mut found: Vec<(String, Vec<String>)> = named(&groups, signals)
+        .into_iter()
+        .zip(&groups)
+        .map(|((_, name), members)| {
+            (
+                name.unwrap().title,
+                members
+                    .iter()
+                    .map(|&file| signals.units[file].path.to_owned())
+                    .collect(),
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn paths(group: &[&str]) -> Vec<String> {
+    let mut paths: Vec<String> = group.iter().map(|p| (*p).to_owned()).collect();
+    paths.sort();
+    paths
+}
+
+// AC-0914: a group named for two subjects becomes one group per subject.
+#[test]
+fn a_group_of_two_subjects_is_two_groups() {
+    let (base, mut report) = read(&mixed());
+    let signals = signals(&base, &mut report).unwrap();
+    let both: Vec<&str> = ABUSER.iter().chain(&MAILBOX).copied().collect();
+    let name = named(&[files(&signals, &both)], &signals)
+        .remove(0)
+        .1
+        .unwrap();
+    assert!(
+        name.second.is_some() && name.title.contains(" and "),
+        "{}",
+        name.title
+    );
+    assert_eq!(
+        regrouped(&signals, &[&both, &ALIAS, &DOMAIN]),
+        vec![
+            ("Abuser".to_owned(), paths(&ABUSER)),
+            ("Alias".to_owned(), paths(&ALIAS)),
+            ("Custom domain".to_owned(), paths(&DOMAIN)),
+            ("Mailbox".to_owned(), paths(&MAILBOX)),
+        ]
+    );
+}
+
+// AC-0914: files that share no term are not a group, and are in none.
+#[test]
+fn files_no_term_holds_together_are_not_a_group() {
+    let (base, mut report) = read(&mixed());
+    let signals = signals(&base, &mut report).unwrap();
+    assert_eq!(
+        regrouped(&signals, &[&LEFTOVER, &ALIAS, &MAILBOX]),
+        vec![
+            ("Alias".to_owned(), paths(&ALIAS)),
+            ("Mailbox".to_owned(), paths(&MAILBOX)),
+        ]
+    );
+    // The whole rule publishes no group for them either.
+    let report = derive_subsystems(&base);
+    assert!(
+        groups(&report).iter().all(|(_, _, members)| LEFTOVER
+            .iter()
+            .all(|path| !members.contains(&(*path).to_owned()))),
+        "{:?}",
+        groups(&report)
+    );
+}
+
+// AC-0914: two groups with one name are one group, and words that stand
+// side by side in a directory name are one phrase.
+#[test]
+fn groups_with_one_name_are_one_group() {
+    let (base, mut report) = read(&mixed());
+    let signals = signals(&base, &mut report).unwrap();
+    assert_eq!(
+        regrouped(&signals, &[&EVENT[..3], &EVENT[3..], &ALIAS, &MAILBOX]),
+        vec![
+            ("Alias".to_owned(), paths(&ALIAS)),
+            ("Event bus".to_owned(), paths(&EVENT)),
+            ("Mailbox".to_owned(), paths(&MAILBOX)),
+        ]
+    );
+}
+
+// AC-0914: a file left in no group joins the group whose subject it carries.
+#[test]
+fn a_leftover_file_joins_the_group_it_is_named_for() {
+    let (base, mut report) = read(&mixed());
+    let signals = signals(&base, &mut report).unwrap();
+    assert_eq!(
+        regrouped(&signals, &[&ALIAS[..3], &MAILBOX, &DOMAIN]),
+        vec![
+            ("Alias".to_owned(), paths(&ALIAS)),
+            ("Custom domain".to_owned(), paths(&DOMAIN)),
+            ("Mailbox".to_owned(), paths(&MAILBOX)),
+        ]
+    );
+}
+
+// AC-0914: the subject is the leading term most files carry, not a rarer
+// word that outranks it.
+#[test]
+fn a_name_is_the_term_most_of_the_group_carries() {
+    let (base, mut report) = read(&mixed());
+    let signals = signals(&base, &mut report).unwrap();
+    let members = files(&signals, &ABUSER);
+    let term = |word: &str, score: f64, cover: usize| Term {
+        word: word.into(),
+        score,
+        cover,
+    };
+    let name = |terms: &[Term]| title(terms, &members, &signals.units, &signals.words).unwrap();
+    let terms = [term("lookup", 0.73, 1), term("abuser", 0.64, 4)];
+    assert_eq!(name(&terms).title, "Abuser");
+    assert!(coherence(&terms, 4) >= MIN_COHERENCE);
+    // A term scoring far below the first does not hold the group together.
+    let terms = [term("lookup", 0.73, 1), term("abuser", 0.2, 4)];
+    assert!(coherence(&terms, 4) < MIN_COHERENCE);
 }

@@ -52,8 +52,9 @@ impl<'a> KnowledgeStories<'a> {
     /// Arrange the included Capabilities by area (#260, AC-0871). Each
     /// `subsystems` fact is an overlay Subsystem node citing its member
     /// files, current for `base`. A Capability's area is the concept
-    /// Subsystem that holds most of the files its cited handlers are
-    /// defined in; a tie goes to the name that sorts first. A Subsystem that
+    /// Subsystem that holds most of the files its cited handlers, or what
+    /// its cited entry points and schedules enter (AC-0913), are defined
+    /// in; a tie goes to the name that sorts first. A Subsystem that
     /// is malformed, shadows a base fact, is the `shared` group or is
     /// filtered by the export policy arranges nothing, and a Capability
     /// whose handler files are in no Subsystem has no area. The stories
@@ -147,22 +148,43 @@ fn areas<'a>(
     if area_of.is_empty() {
         return BTreeMap::new();
     }
-    // The handlers each Capability cites, then the file each is defined in.
-    let handlers_of = |story: &Story<'a>| -> Vec<&'a str> {
-        story
-            .support
-            .iter()
-            .filter_map(|(_, fact)| match fact {
-                Support::Edge(edge) if edge.label == "HANDLES" => Some(edge.dst.as_str()),
-                _ => None,
-            })
-            .collect()
-    };
     let capabilities = || {
         stories
             .included
             .iter()
             .filter(|story| story.node.label == "Capability")
+    };
+    // What each Capability's code starts at: the handlers of its cited
+    // `HANDLES` edges and, for work no request starts, what its cited entry
+    // points and schedules enter. Then the file each is defined in.
+    let starts: BTreeSet<&str> = capabilities()
+        .flat_map(|story| &story.support)
+        .filter_map(|(_, fact)| match fact {
+            Support::Node(node) if matches!(node.label.as_str(), "EntryPoint" | "Schedule") => {
+                Some(node.id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut entered: BTreeMap<&str, Vec<&'a str>> = BTreeMap::new();
+    for edge in &base.graph.1 {
+        if edge.label == "ENTRY" && starts.contains(edge.src.as_str()) {
+            entered
+                .entry(edge.src.as_str())
+                .or_default()
+                .push(edge.dst.as_str());
+        }
+    }
+    let handlers_of = |story: &Story<'a>| -> Vec<&'a str> {
+        story
+            .support
+            .iter()
+            .flat_map(|(_, fact)| match fact {
+                Support::Edge(edge) if edge.label == "HANDLES" => vec![edge.dst.as_str()],
+                Support::Node(node) => entered.get(node.id.as_str()).cloned().unwrap_or_default(),
+                Support::Edge(_) => Vec::new(),
+            })
+            .collect()
     };
     let handlers: BTreeSet<&str> = capabilities().flat_map(handlers_of).collect();
     let mut file_of: BTreeMap<&str, &'a str> = BTreeMap::new();
@@ -178,8 +200,9 @@ fn areas<'a>(
         let mut files: BTreeSet<&str> = BTreeSet::new();
         let mut held: BTreeMap<(&str, &str), (usize, &'a Node)> = BTreeMap::new();
         for handler in handlers_of(story) {
-            if let Some(file) = file_of.get(handler)
-                && files.insert(file)
+            // An entry may be the file itself.
+            let file = file_of.get(handler).copied().unwrap_or(handler);
+            if files.insert(file)
                 && let Some(area) = area_of.get(file)
             {
                 held.entry((area_name(area), area.id.as_str()))
