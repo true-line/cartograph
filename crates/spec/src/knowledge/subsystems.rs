@@ -814,7 +814,7 @@ pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
     for (_, to) in direct.keys() {
         callers[*to] += 1;
     }
-    let shared_at = SHARED_MIN_FILES.max((n as f64 * SHARED_SHARE) as usize);
+    let shared_at = SHARED_MIN_FILES.max((n as f64 * SHARED_SHARE).ceil() as usize);
     let shared: Vec<bool> = callers.iter().map(|&count| count >= shared_at).collect();
 
     // Similarity rows: word cosine, use cosine and direct coupling.
