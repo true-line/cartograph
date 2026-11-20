@@ -1451,6 +1451,23 @@ mod tests {
             output.content
         );
         assert!(!output.content.contains("python"), "{}", output.content);
+        // D1 §1.5 states it too, whether or not rules are arranged per
+        // capability.
+        let d1 = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.file_name == "product-specification.md")
+            .expect("D1 is in the bundle");
+        let rules_section = d1
+            .content
+            .split("## 1.5 ")
+            .nth(1)
+            .and_then(|rest| rest.split("## 1.6 ").next())
+            .expect("D1 has §1.5");
+        assert!(
+            rules_section.contains("not extracted from the 2 Go files"),
+            "{rules_section}"
+        );
         let only_python: Vec<Node> = nodes
             .into_iter()
             .filter(|n| n.props["language"] != "go")

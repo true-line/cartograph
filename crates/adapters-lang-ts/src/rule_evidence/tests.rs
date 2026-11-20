@@ -572,7 +572,11 @@ fn test_code_yields_no_business_rules() {
         .unwrap()
     };
     assert_eq!(rules(&at("src/rules.ts")).len(), 1);
-    for path in ["edge/test/edge.spec.ts", "tests/hq-harness.mjs", "src/rules.test.ts"] {
+    for path in [
+        "edge/test/edge.spec.ts",
+        "tests/hq-harness.mjs",
+        "src/rules.test.ts",
+    ] {
         assert!(rules(&at(path)).is_empty(), "{path}");
     }
 }
