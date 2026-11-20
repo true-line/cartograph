@@ -2610,7 +2610,9 @@ fn directory_closure_is_identical_over_lists_and_store() {
 
 // AC-0546: the directory walk packs each file's facts as it merges and the
 // incremental cache holds them packed; a re-ingest under a new commit that
-// reuses one file and reparses another equals a fresh walk.
+// reuses one file and reparses another equals a fresh walk. AC-0863: the
+// reused file's pending call is held packed and is retargeted to the new
+// commit before it links.
 #[test]
 fn packed_walk_and_cache_reuse_match_a_fresh_walk() {
     let dir = tempfile::tempdir().unwrap();
@@ -5567,7 +5569,8 @@ fn worker_proofs_reused_at_a_new_commit_match_a_fresh_extraction() {
 // links, a guessed `.ts` target is reconciled, an instance call links only
 // to a method marked for instance dispatch, an unknown target records its
 // Gap, and only Pulumi relationships whose endpoints resolve are appended
-// with their content hash recomputed.
+// with their content hash recomputed. AC-0863: each call's candidates are
+// held packed and only the selected outcome is decoded.
 #[test]
 fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
     use core_graph::facts::{FactLists, FactStore};
@@ -5583,15 +5586,18 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         label: label.into(),
         props: serde_json::json!({}),
     };
-    let call = |dst: &str, instance: bool, gap: &str| PendingCall {
-        resolved_edge: edge("sym:caller", dst, "CALLS"),
-        gap_node: Node {
-            id: gap.into(),
-            label: "Gap".into(),
-            props: serde_json::json!({}),
-        },
-        gap_edge: edge("sym:caller", gap, "CALLS"),
-        requires_instance_method: instance,
+    let call = |dst: &str, instance: bool, gap: &str| {
+        let mut call = PendingCall::new(
+            edge("sym:caller", dst, "CALLS"),
+            Node {
+                id: gap.into(),
+                label: "Gap".into(),
+                props: serde_json::json!({}),
+            },
+            edge("sym:caller", gap, "CALLS"),
+        );
+        call.requires_instance_method = instance;
+        call
     };
     let nodes = vec![
         node("sym:caller", serde_json::json!({})),

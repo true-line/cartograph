@@ -9,6 +9,8 @@ use super::{ExtractError, Extraction, IncrementalStats, SourceId};
 use adapters_fw::events::Registries;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
+use core_graph::facts::FactStore;
+use core_graph::packed::{PackedEdge, PackedNode};
 use core_graph::source::FactKey;
 use core_graph::{Edge, Node};
 use source_capture::{Capture, CapturedFile};
@@ -456,6 +458,41 @@ pub fn extract_captured_dir(
     )
 }
 
+/// A packed captured extraction: the extraction's sites (its `nodes` and
+/// `edges` empty), the facts packed in manifest order, the admitted receipts
+/// and the walk's statistics.
+pub type PackedCapturedExtraction = (Extraction, FactStore, Vec<MintedReceipt>, IncrementalStats);
+
+/// [`extract_captured_dir`] without the final decode. Each file's facts are
+/// packed as its parse is merged, directory completion and receipt matching
+/// decode only the facts they read, and the result comes back packed. No
+/// whole-repository props tree is ever held, which is what bounds the
+/// rule-evidence peak on large sources (#1237, #725). Facts, receipts and
+/// omissions are identical to [`extract_captured_dir`].
+pub fn extract_captured_dir_packed(
+    root: &Path,
+    id: &SourceId,
+    capture: &Capture,
+    registries: &Registries,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<PackedCapturedExtraction, CapturedError> {
+    extract_captured_dir_packed_with_policy(
+        root,
+        id,
+        capture,
+        registries,
+        on_file,
+        DirectoryReceiptPolicy {
+            budget: ReceiptBudget {
+                bytes: MAX_EXTRACTION_RECEIPT_BYTES,
+                receipts: MAX_EXTRACTION_RECEIPTS,
+            },
+            file_declarations: FILE_DECLARATIONS,
+            measure_source: true,
+        },
+    )
+}
+
 /// Extraction receipt ceilings; tests narrow them to exercise admission order.
 #[derive(Clone, Copy)]
 struct ReceiptBudget {
@@ -535,6 +572,20 @@ fn extract_captured_dir_with_policy(
     on_file: &mut dyn FnMut(&str),
     policy: DirectoryReceiptPolicy,
 ) -> Result<(Extraction, Vec<MintedReceipt>, IncrementalStats), CapturedError> {
+    let (mut extraction, facts, receipts, stats) =
+        extract_captured_dir_packed_with_policy(root, id, capture, registries, on_file, policy)?;
+    (extraction.nodes, extraction.edges) = facts.into_facts().map_err(ExtractError::from)?;
+    Ok((extraction, receipts, stats))
+}
+
+fn extract_captured_dir_packed_with_policy(
+    root: &Path,
+    id: &SourceId,
+    capture: &Capture,
+    registries: &Registries,
+    on_file: &mut dyn FnMut(&str),
+    policy: DirectoryReceiptPolicy,
+) -> Result<PackedCapturedExtraction, CapturedError> {
     let DirectoryReceiptPolicy {
         budget,
         file_declarations,
@@ -548,6 +599,9 @@ fn extract_captured_dir_with_policy(
         .map(|entry| entry.path.clone())
         .collect();
     let mut extraction = Extraction::default();
+    // Facts are packed file by file (#1237): the walk never holds more decoded
+    // props than the ordered worker window produces.
+    let mut store = FactStore::default();
     let mut receipts = Vec::new();
     let mut charge = Charge::default();
     // Declarations are admitted after every rule receipt, so they can never
@@ -569,7 +623,7 @@ fn extract_captured_dir_with_policy(
                 measure_source,
             )
         },
-        |path, (facts, file_receipts)| {
+        |path, (mut facts, file_receipts)| {
             on_file(path);
             // Rule receipts are admitted greedily in manifest order (#722). One
             // that does not fit is omitted by fact key, never retained, so a
@@ -610,30 +664,24 @@ fn extract_captured_dir_with_policy(
                         });
                 }
             }
+            store.extend_packed(
+                FactStore::from_facts(
+                    std::mem::take(&mut facts.nodes),
+                    std::mem::take(&mut facts.edges),
+                )
+                .map_err(ExtractError::from)?,
+            );
             super::append_extraction(&mut extraction, facts);
             stats.recomputed_files += 1;
             Ok(())
         },
     )?;
-    let (mut nodes, mut edges) = (
-        std::mem::take(&mut extraction.nodes),
-        std::mem::take(&mut extraction.edges),
-    );
-    super::complete_directory(
-        &mut extraction,
-        &mut core_graph::facts::FactLists {
-            nodes: &mut nodes,
-            edges: &mut edges,
-        },
-        root,
-        id,
-    )?;
-    (extraction.nodes, extraction.edges) = (nodes, edges);
-    let matching = matcher(&extraction);
+    super::complete_directory(&mut extraction, &mut store, root, id)?;
+    let matching = packed_matcher(&store);
     receipts.retain(|receipt| matching(receipt));
     // Count an omitted rule only when its fact survived directory completion,
     // so the named omissions describe facts the graph actually holds.
-    let surviving = surviving_facts(&extraction);
+    let surviving = surviving_facts(&store);
     for (path, key, digest) in omitted_rules {
         if surviving(&key) {
             *stats.omitted_rule_receipts.entry(path).or_default() += 1;
@@ -672,7 +720,7 @@ fn extract_captured_dir_with_policy(
         }
     }
     drop(matching);
-    Ok((extraction, receipts, stats))
+    Ok((extraction, store, receipts, stats))
 }
 
 fn retain_matching(receipts: &mut Vec<impl Citable>, extraction: &Extraction) {
@@ -680,15 +728,12 @@ fn retain_matching(receipts: &mut Vec<impl Citable>, extraction: &Extraction) {
     receipts.retain(|receipt| matching(receipt));
 }
 
-/// Complete-fact equality against the final extraction, never id-only lookup.
-fn surviving_facts(extraction: &Extraction) -> impl Fn(&FactKey) -> bool + '_ {
-    let nodes: std::collections::BTreeSet<&str> = extraction
-        .nodes
-        .iter()
-        .map(|node| node.id.as_str())
-        .collect();
-    let edges: std::collections::BTreeSet<(&str, &str, &str)> = extraction
-        .edges
+/// Fact identities the final packed extraction holds.
+fn surviving_facts(facts: &FactStore) -> impl Fn(&FactKey) -> bool + '_ {
+    let nodes: std::collections::BTreeSet<&str> =
+        facts.nodes().iter().map(|node| node.id.as_str()).collect();
+    let edges: std::collections::BTreeSet<(&str, &str, &str)> = facts
+        .edges()
         .iter()
         .map(|edge| (edge.src.as_str(), edge.label.as_str(), edge.dst.as_str()))
         .collect();
@@ -702,6 +747,42 @@ fn surviving_facts(extraction: &Extraction) -> impl Fn(&FactKey) -> bool + '_ {
     }
 }
 
+/// [`matcher`] over the packed final extraction: complete-fact equality, never
+/// id-only lookup. Only the one fact a receipt names is decoded, and the last
+/// occurrence of an identity decides, as in the list form.
+fn packed_matcher<R: Citable>(facts: &FactStore) -> impl Fn(&R) -> bool + '_ {
+    let nodes: BTreeMap<&str, &PackedNode> = facts
+        .nodes()
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let edges: BTreeMap<(&str, &str, &str), &PackedEdge> = facts
+        .edges()
+        .iter()
+        .map(|edge| {
+            (
+                (edge.src.as_str(), edge.label.as_str(), edge.dst.as_str()),
+                edge,
+            )
+        })
+        .collect();
+    move |receipt| match receipt.fact_key() {
+        FactKey::Node { id } => nodes
+            .get(id.as_str())
+            .and_then(|node| node.unpack().ok())
+            .is_some_and(|node| receipt.matches_node(&node)),
+        FactKey::Edge {
+            source,
+            label,
+            destination,
+        } => edges
+            .get(&(source.as_str(), label.as_str(), destination.as_str()))
+            .and_then(|edge| edge.unpack().ok())
+            .is_some_and(|edge| receipt.matches_edge(&edge)),
+    }
+}
+
+/// Complete-fact equality against one file's own extraction.
 fn matcher<R: Citable>(extraction: &Extraction) -> impl Fn(&R) -> bool + '_ {
     let nodes: BTreeMap<_, _> = extraction
         .nodes
