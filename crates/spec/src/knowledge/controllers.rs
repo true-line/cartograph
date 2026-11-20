@@ -291,12 +291,14 @@ fn disambiguated(pending: Vec<Pending>) -> Vec<(String, Vec<u8>, Group)> {
         *by_file.entry((&p.title, &p.places[0])).or_default() += 1;
         *by_prefix.entry((&p.title, prefix.as_deref())).or_default() += 1;
     }
-    let routes_tell_apart = |title: &str| {
-        by_prefix
-            .iter()
-            .filter(|((t, _), _)| *t == title)
-            .all(|((_, prefix), n)| prefix.is_some() && *n == 1)
-    };
+    // Titles whose candidates each have a route prefix no other shares.
+    let mut routes_fail: BTreeSet<&str> = BTreeSet::new();
+    for ((title, prefix), n) in &by_prefix {
+        if prefix.is_none() || *n > 1 {
+            routes_fail.insert(title);
+        }
+    }
+    let routes_tell_apart = |title: &str| !routes_fail.contains(title);
     let titles: Vec<String> = pending
         .iter()
         .zip(&prefixes)
