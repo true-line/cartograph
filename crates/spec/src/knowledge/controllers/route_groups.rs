@@ -21,7 +21,9 @@ fn group_shape(endpoint: &serde_json::Value) -> Option<(&'static str, GroupBy)> 
         endpoint["framework"].as_str()?,
     ) {
         ("python", "flask") => Some(("t0.adapter-python", GroupBy::FlaskBlueprint)),
-        ("go", "net/http" | "chi" | "gin") => Some(("t0.adapter-go", GroupBy::GoPackage)),
+        ("go", "net/http" | "chi" | "gin" | "vercel") => {
+            Some(("t0.adapter-go", GroupBy::GoPackage))
+        }
         ("rust", "axum" | "actix-web") => Some(("t0.adapter-rust", GroupBy::RustModule)),
         _ => None,
     }

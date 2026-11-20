@@ -528,3 +528,41 @@ def show():
         ["View alias (foalias)", "View domain check (admin)"]
     );
 }
+
+// AC-0924 (#2010): a Vercel Go function and the rewrites onto it are one
+// Capability per function package.
+#[test]
+fn vercel_functions_are_capabilities_with_their_rewrites() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("api/docs")).unwrap();
+    for (name, source) in [
+        ("go.mod", "module example.com/shop\n\ngo 1.22\n"),
+        (
+            "api/docs/index.go",
+            "package handler\n\nimport \"net/http\"\n\nfunc Handler(w http.ResponseWriter, r *http.Request) {}\n",
+        ),
+        (
+            "vercel.json",
+            r#"{"rewrites": [{"source": "/docs/(.*)", "destination": "/api/docs"}]}"#,
+        ),
+    ] {
+        std::fs::write(dir.path().join(name), source).unwrap();
+    }
+    let facts = adapters_lang_go::extract_dir(
+        dir.path(),
+        &adapters_lang_go::SourceId {
+            repo: REPO,
+            commit: COMMIT,
+        },
+    )
+    .unwrap();
+    let report = derive_controller_capabilities(&revisioned(facts.nodes, facts.edges));
+    assert_eq!(titles(&report), ["Manage docs"]);
+    let cites = &report.facts[0].cites;
+    for endpoint in ["/api/docs", "/docs/{path...}"] {
+        assert!(
+            cites.contains(&BaseRef::Node(format!("ep:{REPO}@ANY:{endpoint}"))),
+            "{endpoint}: {cites:?}"
+        );
+    }
+}

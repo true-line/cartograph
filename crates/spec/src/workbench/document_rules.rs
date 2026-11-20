@@ -29,6 +29,7 @@
 //! complete execution predicate and the consumer effect stay unestablished,
 //! and `rule-evidence.md` keeps every observation with its dependencies.
 
+use super::statements::Constants;
 use crate::workbench::capabilities::{Stories, Story, Support};
 use crate::workbench::citation_id;
 use crate::workbench::render::{Assertions, Literal, RenderLimit, Text};
@@ -229,17 +230,17 @@ fn holds(shown: &str, polarity: BranchPolarity, alone: bool) -> String {
     }
 }
 
-fn rejection<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
-    guarded(rule, owner, false)
+fn rejection<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
+    guarded(rule, owner, false, constant)
 }
 
 /// A guarded effect (an assignment or a call statement, #1998) as a row.
-fn effect<'a>(rule: &'a Node, owner: &'a str) -> Option<Rejection<'a>> {
+fn effect<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
     if parsed.effect.exits() || writes_refusal(&parsed) {
         return None;
     }
-    guarded(rule, owner, true)
+    guarded(rule, owner, true, constant)
 }
 
 /// A Go call writing an error status before a bare return (#2009): a
@@ -252,7 +253,12 @@ fn writes_refusal(evidence: &GuardedExitEvidence) -> bool {
 }
 
 /// A guarded exit as a row; with `any`, every exit, not only rejections.
-fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a>> {
+fn guarded<'a>(
+    rule: &'a Node,
+    owner: &'a str,
+    any: bool,
+    constant: Constants<'_>,
+) -> Option<Rejection<'a>> {
     let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
     let outcome = match &parsed.effect {
         LocalExit::Throw { value } => format!("throws {}", one_line(value.display.as_str())),
@@ -289,7 +295,7 @@ fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a
             .collect::<Vec<_>>()
             .join(" and ")
     };
-    let statement = super::statements::statement(&parsed, owner);
+    let statement = super::statements::statement(&parsed, owner, constant);
     Some(Rejection {
         rule,
         owner,
@@ -391,6 +397,15 @@ impl<'a> Index<'a> {
             strings,
             entries,
             defined,
+        }
+    }
+
+    /// The literal of the module string constant `name`, when exactly one
+    /// module binds that name (#2027, matched by name, inferred).
+    fn constant(&self, name: &str) -> Option<String> {
+        match self.strings.get(name).map(Vec::as_slice) {
+            Some([(_, value, _)]) => Some((*value).to_owned()),
+            _ => None,
         }
     }
 
@@ -509,8 +524,8 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(found) =
-                    rejection(rule, name).or_else(|| self.mail_reply(rule, owner, name))
+                if let Some(found) = rejection(rule, name, Some(&|k| self.constant(k)))
+                    .or_else(|| self.mail_reply(rule, owner, name))
                 {
                     n += 1;
                     row(found)?;
@@ -613,7 +628,12 @@ impl<'a> Index<'a> {
             owner,
             when,
             outcome: format!("returns {} ({literal})", one_line(display)),
-            statement: super::statements::with_outcome(&parsed, owner, &clause),
+            statement: super::statements::with_outcome(
+                &parsed,
+                owner,
+                &clause,
+                Some(&|k| self.constant(k)),
+            ),
         })
     }
 
@@ -621,7 +641,7 @@ impl<'a> Index<'a> {
     fn each_picked(
         &self,
         owners: impl Iterator<Item = &'a str>,
-        pick: fn(&'a Node, &'a str) -> Option<Rejection<'a>>,
+        pick: fn(&'a Node, &'a str, Constants<'_>) -> Option<Rejection<'a>>,
         mut row: impl FnMut(Rejection<'a>) -> Result<(), RenderLimit>,
     ) -> Result<usize, RenderLimit> {
         let mut n = 0;
@@ -632,7 +652,7 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(found) = pick(rule, name) {
+                if let Some(found) = pick(rule, name, Some(&|k| self.constant(k))) {
                     n += 1;
                     row(found)?;
                 }
@@ -864,7 +884,7 @@ impl<'a> Index<'a> {
                     .and_then(|n| n.props["name"].as_str())
                     .unwrap_or(id);
                 for rule in self.governs.get(id).into_iter().flatten() {
-                    let Some(exit) = guarded(rule, owner, true) else {
+                    let Some(exit) = guarded(rule, owner, true, Some(&|k| self.constant(k))) else {
                         continue;
                     };
                     if printed == MAX_FOLLOWED_ROWS {
@@ -1180,7 +1200,7 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(found) = guarded(rule, name, true) {
+                if let Some(found) = guarded(rule, name, true, Some(&|k| self.constant(k))) {
                     n += 1;
                     row(found)?;
                 }
